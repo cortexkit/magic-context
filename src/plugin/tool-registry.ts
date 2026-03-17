@@ -1,6 +1,14 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
+import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "../config/schema/magic-context";
 import type { MagicContextPluginConfig } from "../config";
 import { DEFAULT_PROTECTED_TAGS } from "../features/magic-context/defaults";
+import {
+    clearAllEmbeddings,
+    getStoredModelId,
+    initializeEmbedding,
+    loadAllEmbeddings,
+} from "../features/magic-context/memory";
+import { getEmbeddingModelId } from "../features/magic-context/memory/embedding";
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
 import {
     getDatabasePersistenceError,
@@ -18,6 +26,10 @@ export function createToolRegistry(args: {
     pluginConfig: MagicContextPluginConfig;
 }): Record<string, ToolDefinition> {
     const { ctx, pluginConfig } = args;
+    const embeddingConfig = pluginConfig.embedding ?? {
+        provider: "local" as const,
+        model: DEFAULT_LOCAL_EMBEDDING_MODEL,
+    };
 
     if (pluginConfig.enabled !== true) {
         return {};
@@ -33,7 +45,21 @@ export function createToolRegistry(args: {
     }
 
     const memoryEnabled = pluginConfig.memory?.enabled === true;
+    initializeEmbedding(embeddingConfig);
     const projectPath = resolveProjectIdentity(ctx.directory);
+
+    if (memoryEnabled) {
+        const currentModelId = getEmbeddingModelId();
+        const storedModelId = getStoredModelId(db);
+        const hasEmbeddings = loadAllEmbeddings(db, projectPath).size > 0;
+
+        if (hasEmbeddings && storedModelId !== currentModelId) {
+            clearAllEmbeddings(db);
+            console.warn(
+                `[magic-context] embedding model changed from ${storedModelId} to ${currentModelId}; cleared stored embeddings for lazy re-generation`,
+            );
+        }
+    }
 
     return {
         ...createCtxReduceTools({
@@ -47,7 +73,7 @@ export function createToolRegistry(args: {
                       db,
                       projectPath,
                       memoryEnabled: true,
-                      embeddingProvider: pluginConfig.memory?.embedding_provider ?? "transformers",
+                      embeddingEnabled: embeddingConfig.provider !== "off",
                   }),
                   ...createCtxMemoryTools({
                       db,

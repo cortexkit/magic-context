@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { log } from "../../../shared/logger";
-import { cosineSimilarity, embed } from "../memory/embedding";
+import { cosineSimilarity } from "../memory/cosine-similarity";
+import { embed } from "../memory/embedding";
 import { loadAllEmbeddings } from "../memory/storage-memory-embeddings";
 import { searchMemoriesFTS } from "../memory/storage-memory-fts";
 import { getMemoryById, updateMemoryRetrievalCount } from "../memory/storage-memory";

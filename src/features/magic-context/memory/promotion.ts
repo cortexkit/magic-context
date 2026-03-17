@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { log } from "../../../shared/logger";
 import { CATEGORY_DEFAULT_SCOPE, CATEGORY_DEFAULT_TTL, PROMOTABLE_CATEGORIES } from "./constants";
-import { embedText } from "./embedding";
+import { embedText, getEmbeddingModelId } from "./embedding";
 import { computeNormalizedHash } from "./normalize-hash";
 import { getMemoryByHash, insertMemory, updateMemorySeenCount } from "./storage-memory";
 import { saveEmbedding } from "./storage-memory-embeddings";
@@ -79,7 +79,7 @@ async function embedAndStoreMemory(db: Database, memoryId: number, content: stri
     try {
         const embedding = await embedText(content);
         if (embedding) {
-            saveEmbedding(db, memoryId, embedding);
+            saveEmbedding(db, memoryId, embedding, getEmbeddingModelId());
         }
     } catch (error) {
         log(`[magic-context] memory embedding failed for memory ${memoryId}:`, error);

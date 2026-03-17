@@ -10,6 +10,7 @@ const mockLog = mock(() => {});
 
 mock.module("./embedding", () => ({
     embedText: mockEmbedText,
+    getEmbeddingModelId: () => "mock:model",
 }));
 
 mock.module("../../../shared/logger", () => ({
@@ -54,7 +55,8 @@ function makeMemoryDatabase(): Database {
 
     CREATE TABLE IF NOT EXISTS memory_embeddings (
       memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
-      embedding BLOB NOT NULL
+      embedding BLOB NOT NULL,
+      model_id TEXT
     );
 
     CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(

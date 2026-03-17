@@ -10,7 +10,7 @@ import {
     saveEmbedding,
     updateMemoryStatus,
 } from "../../features/magic-context/memory";
-import { embedText } from "../../features/magic-context/memory/embedding";
+import { embedText, getEmbeddingModelId } from "../../features/magic-context/memory/embedding";
 import { log } from "../../shared/logger";
 import { CTX_MEMORY_DESCRIPTION, CTX_MEMORY_TOOL_NAME } from "./constants";
 import type { CtxMemoryArgs, CtxMemoryToolDeps } from "./types";
@@ -78,7 +78,7 @@ function queueMemoryEmbedding(deps: CtxMemoryToolDeps, memoryId: number, content
             return;
         }
 
-        saveEmbedding(deps.db, memoryId, embedding);
+        saveEmbedding(deps.db, memoryId, embedding, getEmbeddingModelId());
     })().catch((error: unknown) => {
         log("[ctx-memory] failed to save memory embedding:", error);
     });

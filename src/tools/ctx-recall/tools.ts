@@ -1,12 +1,14 @@
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import type { Memory } from "../../features/magic-context/memory";
 import {
+    ensureMemoryEmbeddings,
     getMemoriesByProject,
     loadAllEmbeddings,
     searchMemoriesFTS,
     updateMemoryRetrievalCount,
 } from "../../features/magic-context/memory";
-import { cosineSimilarity, embedText } from "../../features/magic-context/memory/embedding";
+import { embedText, isEmbeddingEnabled } from "../../features/magic-context/memory/embedding";
+import { cosineSimilarity } from "../../features/magic-context/memory/cosine-similarity";
 import { CTX_RECALL_DESCRIPTION, CTX_RECALL_TOOL_NAME, DEFAULT_RECALL_LIMIT } from "./constants";
 import type { CtxRecallArgs, CtxRecallResult, CtxRecallToolDeps } from "./types";
 
@@ -66,16 +68,20 @@ async function getSemanticScores(
 ): Promise<Map<number, number>> {
     const semanticScores = new Map<number, number>();
 
-    if (deps.embeddingProvider === "off" || memories.length === 0) {
+    if (!deps.embeddingEnabled || !isEmbeddingEnabled() || memories.length === 0) {
         return semanticScores;
     }
 
-    const queryEmbedding = await embedText(query, { embedding_provider: deps.embeddingProvider });
+    const queryEmbedding = await embedText(query);
     if (!queryEmbedding) {
         return semanticScores;
     }
 
-    const embeddings = loadAllEmbeddings(deps.db, deps.projectPath);
+    const embeddings = await ensureMemoryEmbeddings({
+        db: deps.db,
+        memories,
+        existingEmbeddings: loadAllEmbeddings(deps.db, deps.projectPath),
+    });
 
     for (const memory of memories) {
         const memoryEmbedding = embeddings.get(memory.id);

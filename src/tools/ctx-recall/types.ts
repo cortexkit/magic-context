@@ -10,7 +10,7 @@ export interface CtxRecallToolDeps {
     db: Database;
     projectPath: string;
     memoryEnabled: boolean;
-    embeddingProvider: string;
+    embeddingEnabled: boolean;
 }
 
 export interface CtxRecallResult {

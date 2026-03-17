@@ -10,24 +10,7 @@ mock.module("../../features/magic-context/memory/embedding", () => ({
         embeddingQueries.push(text);
         return queryEmbedding ? new Float32Array(queryEmbedding) : null;
     },
-    cosineSimilarity: (a: Float32Array, b: Float32Array) => {
-        if (a.length !== b.length) {
-            return 0;
-        }
-
-        let dotProduct = 0;
-        let normA = 0;
-        let normB = 0;
-
-        for (let index = 0; index < a.length; index++) {
-            dotProduct += a[index]! * b[index]!;
-            normA += a[index]! * a[index]!;
-            normB += b[index]! * b[index]!;
-        }
-
-        const denominator = Math.sqrt(normA) * Math.sqrt(normB);
-        return denominator === 0 ? 0 : dotProduct / denominator;
-    },
+    isEmbeddingEnabled: () => true,
 }));
 
 const { createCtxRecallTools } = await import("./tools");
@@ -62,7 +45,8 @@ function createTestDb(): Database {
 
     CREATE TABLE memory_embeddings (
       memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
-      embedding BLOB NOT NULL
+      embedding BLOB NOT NULL,
+      model_id TEXT
     );
 
     CREATE VIRTUAL TABLE memories_fts USING fts5(
@@ -117,14 +101,14 @@ describe("createCtxRecallTools", () => {
                     category: "CONSTRAINTS",
                     content: "Never use npm in this repository.",
                 });
-                saveEmbedding(db, semanticMatch.id, new Float32Array([1, 0]));
+                saveEmbedding(db, semanticMatch.id, new Float32Array([1, 0]), "mock:model");
 
                 queryEmbedding = new Float32Array([1, 0]);
                 const tools = createCtxRecallTools({
                     db,
                     projectPath: "/repo/project",
                     memoryEnabled: true,
-                    embeddingProvider: "mock",
+                    embeddingEnabled: true,
                 });
 
                 const result = await tools.ctx_recall.execute(
@@ -158,7 +142,7 @@ describe("createCtxRecallTools", () => {
                     db,
                     projectPath: "/repo/project",
                     memoryEnabled: true,
-                    embeddingProvider: "off",
+                    embeddingEnabled: false,
                 });
 
                 const result = await tools.ctx_recall.execute(
@@ -194,15 +178,15 @@ describe("createCtxRecallTools", () => {
                     content: "Run bun checks before release.",
                 });
 
-                saveEmbedding(db, semanticOnly.id, new Float32Array([0.95, 0.31]));
-                saveEmbedding(db, hybridWinner.id, new Float32Array([1, 0]));
+                saveEmbedding(db, semanticOnly.id, new Float32Array([0.95, 0.31]), "mock:model");
+                saveEmbedding(db, hybridWinner.id, new Float32Array([1, 0]), "mock:model");
                 queryEmbedding = new Float32Array([1, 0]);
 
                 const tools = createCtxRecallTools({
                     db,
                     projectPath: "/repo/project",
                     memoryEnabled: true,
-                    embeddingProvider: "mock",
+                    embeddingEnabled: true,
                 });
 
                 const result = await tools.ctx_recall.execute({ query: "run bun" }, toolContext());
@@ -211,13 +195,13 @@ describe("createCtxRecallTools", () => {
                 const ftsOnlyIndex = result.indexOf(ftsOnly.content);
 
                 expect(result).toContain("score: 0.85");
-                expect(result).toContain("score: 0.80");
                 expect(result).toContain("score: 0.76");
+                expect(result).toContain("score: 0.30");
                 expect(semanticIndex).toBeGreaterThan(-1);
                 expect(winnerIndex).toBeGreaterThan(-1);
                 expect(ftsOnlyIndex).toBeGreaterThan(-1);
                 expect(winnerIndex).toBeLessThan(semanticIndex);
-                expect(ftsOnlyIndex).toBeLessThan(semanticIndex);
+                expect(ftsOnlyIndex).toBeGreaterThan(semanticIndex);
             } finally {
                 db.close(false);
             }
@@ -236,7 +220,7 @@ describe("createCtxRecallTools", () => {
                     db,
                     projectPath: "/repo/project",
                     memoryEnabled: true,
-                    embeddingProvider: "off",
+                    embeddingEnabled: false,
                 });
 
                 await tools.ctx_recall.execute({ query: "cache TTL" }, toolContext());
@@ -260,15 +244,15 @@ describe("createCtxRecallTools", () => {
                     category: "USER_DIRECTIVES",
                     content: "Memory ranking stores release guidance.",
                 });
-                saveEmbedding(db, first.id, new Float32Array([1, 0]));
-                saveEmbedding(db, second.id, new Float32Array([0.6, 0.8]));
+                saveEmbedding(db, first.id, new Float32Array([1, 0]), "mock:model");
+                saveEmbedding(db, second.id, new Float32Array([0.6, 0.8]), "mock:model");
                 queryEmbedding = new Float32Array([1, 0]);
 
                 const tools = createCtxRecallTools({
                     db,
                     projectPath: "/repo/project",
                     memoryEnabled: true,
-                    embeddingProvider: "mock",
+                    embeddingEnabled: true,
                 });
 
                 const result = await tools.ctx_recall.execute(
@@ -306,7 +290,7 @@ describe("createCtxRecallTools", () => {
                     db,
                     projectPath: "/repo/project",
                     memoryEnabled: true,
-                    embeddingProvider: "off",
+                    embeddingEnabled: false,
                 });
 
                 const result = await tools.ctx_recall.execute(
@@ -340,7 +324,7 @@ describe("createCtxRecallTools", () => {
                     db,
                     projectPath: "/repo/project",
                     memoryEnabled: true,
-                    embeddingProvider: "off",
+                    embeddingEnabled: false,
                 });
 
                 const result = await tools.ctx_recall.execute(
@@ -363,7 +347,7 @@ describe("createCtxRecallTools", () => {
                     db,
                     projectPath: "/repo/project",
                     memoryEnabled: false,
-                    embeddingProvider: "mock",
+                    embeddingEnabled: true,
                 });
 
                 const result = await tools.ctx_recall.execute(
