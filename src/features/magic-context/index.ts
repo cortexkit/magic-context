@@ -4,6 +4,7 @@ export * from "./memory";
 export * from "./memory";
 export * from "./range-parser";
 export * from "./scheduler";
+export * from "./sidekick";
 export * from "./storage";
 export * from "./tagger";
 export * from "./types";

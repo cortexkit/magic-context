@@ -3,6 +3,7 @@ import {
     DEFAULT_COMPARTMENT_TOKEN_BUDGET,
     DEFAULT_HISTORIAN_TIMEOUT_MS,
     DEFAULT_NUDGE_INTERVAL_TOKENS,
+    type MagicContextConfig,
     MagicContextConfigSchema,
 } from "./magic-context";
 
@@ -29,6 +30,14 @@ describe("MagicContextConfigSchema", () => {
                     auto_promote: true,
                     retrieval_count_promotion_threshold: 3,
                 },
+                sidekick: {
+                    enabled: false,
+                    endpoint: "http://localhost:1234/v1",
+                    model: "qwen3.5-9b",
+                    api_key: "",
+                    max_tool_calls: 3,
+                    timeout_ms: 30000,
+                },
             });
         });
     });
@@ -53,7 +62,16 @@ describe("MagicContextConfigSchema", () => {
                     auto_promote: true,
                     retrieval_count_promotion_threshold: 3,
                 },
-            };
+                sidekick: {
+                    enabled: true,
+                    endpoint: "http://localhost:9999/v1",
+                    model: "qwen-test",
+                    api_key: "secret",
+                    max_tool_calls: 4,
+                    timeout_ms: 12_000,
+                    system_prompt: "Custom prompt",
+                },
+            } satisfies MagicContextConfig;
 
             const result = MagicContextConfigSchema.parse(input);
 

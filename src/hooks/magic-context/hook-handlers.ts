@@ -24,6 +24,7 @@ export type ToolUsageSinceUserTurn = Map<string, number>;
 export type FlushedSessions = Set<string>;
 export type LastHeuristicsTurnId = Map<string, string>;
 export type EmergencyNudgeFired = Set<string>;
+export type SidekickRanSessions = Set<string>;
 
 export function getLiveNotificationParams(
     sessionId: string,
@@ -91,6 +92,7 @@ export function createEventHook(args: {
     emergencyNudgeFired: EmergencyNudgeFired;
     flushedSessions: FlushedSessions;
     lastHeuristicsTurnId: LastHeuristicsTurnId;
+    sidekickRanSessions: SidekickRanSessions;
     client: PluginContext["client"];
     protectedTags: number;
 }) {
@@ -119,6 +121,7 @@ export function createEventHook(args: {
             args.emergencyNudgeFired.delete(sessionId);
             args.flushedSessions.delete(sessionId);
             args.lastHeuristicsTurnId.delete(sessionId);
+            args.sidekickRanSessions.delete(sessionId);
         }
 
         const entry = args.contextUsageMap.get(sessionId);

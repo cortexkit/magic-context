@@ -2,6 +2,7 @@ import { DEFAULT_COMPARTMENT_TOKEN_BUDGET } from "../../config/schema/magic-cont
 import { buildMemoryInjectionBlock } from "../../features/magic-context/memory";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import type { Scheduler } from "../../features/magic-context/scheduler";
+import type { SidekickConfig, SidekickRunState } from "../../features/magic-context/sidekick";
 import {
     type ContextDatabase,
     getOrCreateSessionMeta,
@@ -60,6 +61,8 @@ export interface TransformDeps {
         enabled: boolean;
         injectionBudgetTokens: number;
     };
+    sidekickConfig?: SidekickConfig;
+    sidekickState?: SidekickRunState;
     compartmentTokenBudget?: number;
     historianTimeoutMs?: number;
     getNotificationParams?: (
@@ -74,6 +77,18 @@ function findFirstTextPart(parts: unknown[]): { type: string; text: string } | n
         if (candidate.type === "text" && typeof candidate.text === "string") {
             return candidate as { type: string; text: string };
         }
+    }
+
+    return null;
+}
+
+function findFirstUserText(messages: MessageLike[]): string | null {
+    for (const message of messages) {
+        if (message.info.role !== "user") {
+            continue;
+        }
+
+        return findFirstTextPart(message.parts)?.text ?? null;
     }
 
     return null;
@@ -134,16 +149,19 @@ export function createTransform(deps: TransformDeps) {
             fullFeatureMode && deps.client !== undefined && compartmentDirectory.length > 0;
 
         if (fullFeatureMode && deps.memoryConfig?.enabled && sessionMeta.counter === 0) {
-            const injectionBlock = buildMemoryInjectionBlock(
+            const firstUserText = findFirstUserText(messages);
+            const injectionBlock = await buildMemoryInjectionBlock(
                 db,
                 resolveProjectIdentity(deps.directory ?? process.cwd()),
                 deps.memoryConfig.injectionBudgetTokens,
+                deps.sidekickConfig,
+                deps.sidekickState,
+                sessionId,
+                firstUserText ?? undefined,
             );
             if (injectionBlock) {
                 renderMemoryInjection(sessionId, messages, injectionBlock);
-                log(
-                    `[magic-context] injected project-memory block (${injectionBlock.length} chars)`,
-                );
+                log(`[magic-context] injected memory block (${injectionBlock.length} chars)`);
             }
         }
 

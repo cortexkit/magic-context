@@ -118,6 +118,22 @@ const ATHENA_SECTION = `
 - User's original question and constraints.
 - Final decisions and action items from previous councils.`;
 
+const GENERIC_SECTION = `
+### Reduction Triggers
+- After reading files or search results you already acted on — drop raw outputs.
+- After completing a logical step — drop intermediate outputs from that step.
+- Between major context switches — when moving to a new task area.
+
+### What to Drop
+- File reads, grep results, and tool outputs you already used.
+- Build/test output after you analyzed and acted on it.
+- Old diagnostic or exploration results that are no longer relevant.
+
+### What to Keep
+- Your current task requirements and constraints.
+- Recent errors and unresolved decisions.
+- Active work context and files being edited.`;
+
 const AGENT_SECTIONS: Record<AgentType, string> = {
     sisyphus: SISYPHUS_SECTION,
     atlas: ATLAS_SECTION,
@@ -128,27 +144,39 @@ const AGENT_SECTIONS: Record<AgentType, string> = {
     "athena-junior": ATHENA_SECTION,
 };
 
-export function buildMagicContextSection(agent: AgentType, protectedTags: number): string {
-    const section = AGENT_SECTIONS[agent];
+/** Signature strings used to detect known agents from system prompt content. */
+const AGENT_SIGNATURES: [AgentType, string][] = [
+    ["sisyphus-junior", "Sisyphus-Junior"],
+    ["sisyphus", "You are Sisyphus"],
+    ["atlas", "You are Atlas"],
+    ["hephaestus", "You are Hephaestus"],
+    ["oracle", "You are Oracle"],
+    ["athena-junior", "athena-junior"],
+    ["athena", "You are Athena"],
+];
+
+/**
+ * Detect which agent is active by scanning the system prompt for known signatures.
+ * Returns the detected agent type or null for unknown agents.
+ * Order matters — more specific signatures (e.g., "Sisyphus-Junior") are checked first.
+ */
+export function detectAgentFromSystemPrompt(systemPrompt: string): AgentType | null {
+    for (const [agent, signature] of AGENT_SIGNATURES) {
+        if (systemPrompt.includes(signature)) {
+            return agent;
+        }
+    }
+    return null;
+}
+
+export function buildMagicContextSection(agent: AgentType | null, protectedTags: number): string {
+    const section = agent ? AGENT_SECTIONS[agent] : GENERIC_SECTION;
     return `## Magic Context
 
 ${BASE_INTRO(protectedTags)}
 ${section}
 
 Prefer many small targeted operations over one large blanket operation. Compress early and often — don't wait for warnings.`;
-}
-
-export function replaceMagicContextSection(
-    prompt: string,
-    agent: AgentType,
-    protectedTags: number,
-): string {
-    const defaultSection = buildMagicContextSection(agent, DEFAULT_PROTECTED_TAGS);
-    if (!prompt.includes(defaultSection)) {
-        return prompt;
-    }
-
-    return prompt.replace(defaultSection, buildMagicContextSection(agent, protectedTags));
 }
 
 import { DEFAULT_PROTECTED_TAGS } from "../features/magic-context/defaults";

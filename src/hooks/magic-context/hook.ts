@@ -56,6 +56,15 @@ export interface MagicContextDeps {
             enabled: boolean;
             injection_budget_tokens: number;
         };
+        sidekick?: {
+            enabled: boolean;
+            endpoint: string;
+            model: string;
+            api_key: string;
+            max_tool_calls: number;
+            timeout_ms: number;
+            system_prompt?: string;
+        };
     };
 }
 
@@ -123,6 +132,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     const liveModelBySession = new Map<string, { providerID: string; modelID: string }>();
     const recentReduceBySession = new Map<string, number>();
     const toolUsageSinceUserTurn = new Map<string, number>();
+    const sidekickState = { ranSessions: new Set<string>() };
 
     const nudgerWithRecentReduce = createNudger({
         protected_tags: deps.config.protected_tags,
@@ -152,6 +162,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                   injectionBudgetTokens: deps.config.memory.injection_budget_tokens,
               }
             : undefined,
+        sidekickConfig: deps.config.sidekick,
+        sidekickState,
         compartmentTokenBudget:
             deps.config.compartment_token_budget ?? DEFAULT_COMPARTMENT_TOKEN_BUDGET,
         historianTimeoutMs: deps.config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
@@ -204,6 +216,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
 
     const systemPromptHashHandler = createSystemPromptHashHandler({
         db,
+        protectedTags: deps.config.protected_tags,
         flushedSessions,
         lastHeuristicsTurnId,
     });
@@ -230,6 +243,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             emergencyNudgeFired,
             flushedSessions,
             lastHeuristicsTurnId,
+            sidekickRanSessions: sidekickState.ranSessions,
             client: deps.client,
             protectedTags: deps.config.protected_tags,
         }),

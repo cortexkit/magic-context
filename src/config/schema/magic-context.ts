@@ -61,6 +61,25 @@ export const MagicContextConfigSchema = z
                 auto_promote: true,
                 retrieval_count_promotion_threshold: 3,
             }),
+        /** Optional sidekick agent configuration for session-start memory retrieval */
+        sidekick: z
+            .object({
+                enabled: z.boolean().default(false),
+                endpoint: z.string().default("http://localhost:1234/v1"),
+                model: z.string().default("qwen3.5-9b"),
+                api_key: z.string().default(""),
+                max_tool_calls: z.number().default(3),
+                timeout_ms: z.number().default(30000),
+                system_prompt: z.string().optional(),
+            })
+            .default({
+                enabled: false,
+                endpoint: "http://localhost:1234/v1",
+                model: "qwen3.5-9b",
+                api_key: "",
+                max_tool_calls: 3,
+                timeout_ms: 30000,
+            }),
     })
     .transform((data) => ({
         ...data,

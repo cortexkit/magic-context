@@ -155,6 +155,13 @@ export async function embedText(
     }
 }
 
+export async function embed(
+    text: string,
+    providerConfig?: EmbeddingProviderConfig,
+): Promise<Float32Array | null> {
+    return embedText(text, providerConfig);
+}
+
 /**
  * Embed multiple texts in a batch. Returns null entries for failures.
  */

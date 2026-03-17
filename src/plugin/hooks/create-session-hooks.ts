@@ -48,6 +48,7 @@ export function createSessionHooks(args: {
                 compartment_token_budget: pluginConfig.compartment_token_budget,
                 historian_timeout_ms: pluginConfig.historian_timeout_ms,
                 memory: pluginConfig.memory,
+                sidekick: pluginConfig.sidekick,
             },
         }),
     };

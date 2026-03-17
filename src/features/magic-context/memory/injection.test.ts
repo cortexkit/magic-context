@@ -50,12 +50,12 @@ afterEach(() => {
 
 describe("buildMemoryInjectionBlock", () => {
     describe("#given no memories", () => {
-        it("returns null when no memories exist", () => {
+        it("returns null when no memories exist", async () => {
             //#given
             db = makeMemoryDatabase();
 
             //#when
-            const result = buildMemoryInjectionBlock(db, "/repo/project", 100);
+            const result = await buildMemoryInjectionBlock(db, "/repo/project", 100);
 
             //#then
             expect(result).toBeNull();
@@ -63,7 +63,7 @@ describe("buildMemoryInjectionBlock", () => {
     });
 
     describe("#given memories within budget", () => {
-        it("formats memories as XML with category sections", () => {
+        it("formats memories as XML with category sections", async () => {
             //#given
             db = makeMemoryDatabase();
             insertTestMemory({
@@ -78,7 +78,7 @@ describe("buildMemoryInjectionBlock", () => {
             });
 
             //#when
-            const result = buildMemoryInjectionBlock(db, "/repo/project", 500);
+            const result = await buildMemoryInjectionBlock(db, "/repo/project", 500);
 
             //#then
             expect(result).toBe(
@@ -95,7 +95,7 @@ describe("buildMemoryInjectionBlock", () => {
             );
         });
 
-        it("orders categories by priority", () => {
+        it("orders categories by priority", async () => {
             //#given
             db = makeMemoryDatabase();
             insertTestMemory({
@@ -115,7 +115,7 @@ describe("buildMemoryInjectionBlock", () => {
             });
 
             //#when
-            const result = buildMemoryInjectionBlock(db, "/repo/project", 500);
+            const result = await buildMemoryInjectionBlock(db, "/repo/project", 500);
 
             //#then
             expect(result?.indexOf("<USER_DIRECTIVES>")).toBeLessThan(
@@ -126,7 +126,7 @@ describe("buildMemoryInjectionBlock", () => {
             );
         });
 
-        it("includes both project and global memories", () => {
+        it("includes both project and global memories", async () => {
             //#given
             db = makeMemoryDatabase();
             insertTestMemory({
@@ -141,7 +141,7 @@ describe("buildMemoryInjectionBlock", () => {
             });
 
             //#when
-            const result = buildMemoryInjectionBlock(db, "/repo/project", 500);
+            const result = await buildMemoryInjectionBlock(db, "/repo/project", 500);
 
             //#then
             expect(result).toContain("- Project rule");
@@ -150,7 +150,7 @@ describe("buildMemoryInjectionBlock", () => {
     });
 
     describe("#given memories exceeding budget", () => {
-        it("truncates from lowest-priority categories first", () => {
+        it("truncates from lowest-priority categories first", async () => {
             //#given
             db = makeMemoryDatabase();
             insertTestMemory({
@@ -165,14 +165,14 @@ describe("buildMemoryInjectionBlock", () => {
             });
 
             //#when
-            const result = buildMemoryInjectionBlock(db, "/repo/project", 30);
+            const result = await buildMemoryInjectionBlock(db, "/repo/project", 30);
 
             //#then
             expect(result).toContain("<USER_DIRECTIVES>");
             expect(result).not.toContain("<KNOWN_ISSUES>");
         });
 
-        it("always includes USER_DIRECTIVES when they exist", () => {
+        it("always includes USER_DIRECTIVES when they exist", async () => {
             //#given
             db = makeMemoryDatabase();
             insertTestMemory({
@@ -187,14 +187,14 @@ describe("buildMemoryInjectionBlock", () => {
             });
 
             //#when
-            const result = buildMemoryInjectionBlock(db, "/repo/project", 20);
+            const result = await buildMemoryInjectionBlock(db, "/repo/project", 20);
 
             //#then
             expect(result).toContain("<USER_DIRECTIVES>");
             expect(result).toContain("- Primary directive");
         });
 
-        it("respects the budget token limit", () => {
+        it("respects the budget token limit", async () => {
             //#given
             db = makeMemoryDatabase();
             insertTestMemory({
@@ -210,7 +210,7 @@ describe("buildMemoryInjectionBlock", () => {
             updateMemoryStatus(db, archived.id, "archived");
 
             //#when
-            const result = buildMemoryInjectionBlock(db, "/repo/project", 25);
+            const result = await buildMemoryInjectionBlock(db, "/repo/project", 25);
 
             //#then
             expect(result).not.toBeNull();
@@ -219,7 +219,7 @@ describe("buildMemoryInjectionBlock", () => {
     });
 
     describe("#given special characters", () => {
-        it("XML-escapes memory content with special characters", () => {
+        it("XML-escapes memory content with special characters", async () => {
             //#given
             db = makeMemoryDatabase();
             insertTestMemory({
@@ -229,7 +229,7 @@ describe("buildMemoryInjectionBlock", () => {
             });
 
             //#when
-            const result = buildMemoryInjectionBlock(db, "/repo/project", 500);
+            const result = await buildMemoryInjectionBlock(db, "/repo/project", 500);
 
             //#then
             expect(result).toContain("- Use &lt;Bun&gt; &amp; keep &gt; npm");

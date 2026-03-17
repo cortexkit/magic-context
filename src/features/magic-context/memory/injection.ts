@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { log } from "../../../shared/logger";
+import { runSidekick } from "../sidekick/agent";
+import type { SidekickConfig, SidekickRunState } from "../sidekick/types";
 import { CATEGORY_PRIORITY } from "./constants";
 import { getMemoriesByProject } from "./storage-memory";
 import type { Memory, MemoryCategory } from "./types";
@@ -10,6 +12,10 @@ function escapeXml(text: string): string {
 
 function estimateTokens(text: string): number {
     return Math.ceil(text.length / 3.5);
+}
+
+function renderSidekickBlock(content: string): string {
+    return `<sidekick-context>\n${escapeXml(content)}\n</sidekick-context>`;
 }
 
 function renderMemoryBlock(memoriesByCategory: Map<MemoryCategory, Memory[]>): string | null {
@@ -73,11 +79,35 @@ function dedupeMemories(memories: Memory[]): Memory[] {
  *
  * Budget is in approximate tokens (~3.5 chars per token).
  */
-export function buildMemoryInjectionBlock(
+export async function buildMemoryInjectionBlock(
     db: Database,
     projectPath: string,
     budgetTokens: number,
-): string | null {
+    sidekickConfig?: SidekickConfig,
+    sidekickState?: SidekickRunState,
+    sessionId?: string,
+    userMessage?: string,
+): Promise<string | null> {
+    if (
+        sidekickConfig?.enabled &&
+        sidekickState &&
+        sessionId &&
+        userMessage &&
+        !sidekickState.ranSessions.has(sessionId)
+    ) {
+        sidekickState.ranSessions.add(sessionId);
+        const sidekickResult = await runSidekick({
+            db,
+            projectPath,
+            userMessage,
+            config: sidekickConfig,
+        });
+
+        if (sidekickResult) {
+            return renderSidekickBlock(sidekickResult);
+        }
+    }
+
     const mergedMemories = dedupeMemories([
         ...getMemoriesByProject(db, projectPath, ["active", "permanent"]),
         ...getMemoriesByProject(db, "__global__", ["active", "permanent"]),
