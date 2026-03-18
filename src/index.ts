@@ -68,7 +68,15 @@ const plugin: Plugin = async (ctx) => {
             config.command = commandConfig;
             config.agent = {
                 ...(config.agent ?? {}),
-                ...(pluginConfig.historian ? { historian: pluginConfig.historian } : {}),
+                ...(pluginConfig.historian
+                    ? {
+                          historian: {
+                              ...pluginConfig.historian,
+                              mode: "subagent",
+                              hidden: true,
+                          },
+                      }
+                    : {}),
             };
         },
     };
