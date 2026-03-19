@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { log } from "../../../shared/logger";
+import { escapeXmlContent } from "../compartment-storage";
 import { cosineSimilarity } from "../memory/cosine-similarity";
 import { embed } from "../memory/embedding";
 import { loadAllEmbeddings } from "../memory/storage-memory-embeddings";
@@ -46,10 +47,6 @@ interface SearchMemoryArgs {
     query: string;
 }
 
-function escapeXml(text: string): string {
-    return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-}
-
 function formatMemories(memories: Memory[]): string {
     if (memories.length === 0) {
         return "No matching memories found.";
@@ -58,7 +55,7 @@ function formatMemories(memories: Memory[]): string {
     return memories
         .map(
             (memory, index) =>
-                `${index + 1}. [${memory.category}] ${escapeXml(memory.content)} (project: ${memory.projectPath})`,
+                `${index + 1}. [${memory.category}] ${escapeXmlContent(memory.content)} (project: ${memory.projectPath})`,
         )
         .join("\n");
 }

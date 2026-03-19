@@ -15,19 +15,17 @@ type SessionMessage = {
     parts?: unknown;
 };
 
-function isObject(value: unknown): value is Record<string, unknown> {
-    return typeof value === "object" && value !== null;
-}
+import { isRecord } from "../../shared/record-type-guard";
 
 function asSessionMessage(value: unknown): SessionMessage | null {
-    if (!isObject(value)) return null;
+    if (!isRecord(value)) return null;
     const info = value.info;
     const parts = value.parts;
     return {
-        info: isObject(info)
+        info: isRecord(info)
             ? {
                   role: typeof info.role === "string" ? info.role : undefined,
-                  time: isObject(info.time)
+                  time: isRecord(info.time)
                       ? {
                             created:
                                 typeof info.time.created === "number"
@@ -48,7 +46,7 @@ function getCreatedTime(message: SessionMessage): number {
 function getTextParts(message: SessionMessage): MessagePart[] {
     if (!Array.isArray(message.parts)) return [];
     return message.parts
-        .filter((part): part is Record<string, unknown> => isObject(part))
+        .filter((part): part is Record<string, unknown> => isRecord(part))
         .map((part) => ({
             type: typeof part.type === "string" ? part.type : undefined,
             text: typeof part.text === "string" ? part.text : undefined,
