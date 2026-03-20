@@ -1,7 +1,18 @@
+import { hasMeaningfulUserText } from "./read-session-formatting";
 import { isTextPart } from "./tag-part-guards";
 import type { MessageLike } from "./transform-operations";
 
+/**
+ * Check if a user message contains real user content (not just ignored
+ * notifications, system reminders, or command output). Uses the same
+ * logic the historian uses for protected-tail counting.
+ */
+function isMeaningfulUserMessage(msg: MessageLike): boolean {
+    return msg.info.role === "user" && hasMeaningfulUserText(msg.parts as unknown[]);
+}
+
 export function findSessionId(messages: MessageLike[]): string | null {
+    // Session ID is valid on any user message, including ignored ones
     for (let index = messages.length - 1; index >= 0; index -= 1) {
         const message = messages[index];
         if (message.info.role === "user" && typeof message.info.sessionID === "string") {
@@ -15,7 +26,7 @@ export function findSessionId(messages: MessageLike[]): string | null {
 export function findLastUserMessageId(messages: MessageLike[]): string | null {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
         const message = messages[index];
-        if (message.info.role === "user" && typeof message.info.id === "string") {
+        if (isMeaningfulUserMessage(message) && typeof message.info.id === "string") {
             return message.info.id;
         }
     }
@@ -29,7 +40,7 @@ export function appendReminderToLatestUserMessage(
 ): boolean {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
         const message = messages[index];
-        if (message.info.role !== "user") {
+        if (!isMeaningfulUserMessage(message)) {
             continue;
         }
 
@@ -54,7 +65,7 @@ export function appendReminderToLatestUserMessage(
 export function countMessagesSinceLastUser(messages: MessageLike[]): number {
     let messagesSinceLastUser = 0;
     for (let i = messages.length - 1; i >= 0; i -= 1) {
-        if (messages[i].info.role === "user") break;
+        if (isMeaningfulUserMessage(messages[i])) break;
         messagesSinceLastUser += 1;
     }
     return messagesSinceLastUser;
