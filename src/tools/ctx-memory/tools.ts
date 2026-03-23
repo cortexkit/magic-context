@@ -175,7 +175,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 }
 
                 const memory = getMemoryById(deps.db, args.id);
-                if (!memory) {
+                if (!memory || memory.projectPath !== deps.projectPath) {
                     return `Error: Memory with ID ${args.id} was not found.`;
                 }
 
@@ -189,7 +189,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 }
 
                 const memory = getMemoryById(deps.db, args.id);
-                if (!memory) {
+                if (!memory || memory.projectPath !== deps.projectPath) {
                     return `Error: Memory with ID ${args.id} was not found.`;
                 }
 

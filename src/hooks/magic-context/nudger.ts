@@ -32,7 +32,7 @@ function formatLargestTags(tags: ReturnType<typeof getTopNBySize>): string {
 function formatOldToolTags(activeTags: TagEntry[], protectedCount: number, count: number): string {
     const sortedByNumber = [...activeTags].sort((a, b) => a.tagNumber - b.tagNumber);
     const protectedThreshold =
-        sortedByNumber.length > protectedCount
+        protectedCount > 0 && sortedByNumber.length > protectedCount
             ? sortedByNumber[sortedByNumber.length - protectedCount].tagNumber
             : Infinity;
     const midpoint = Math.floor(sortedByNumber.length / 2);
