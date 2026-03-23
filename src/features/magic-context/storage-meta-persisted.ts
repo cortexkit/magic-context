@@ -15,6 +15,12 @@ interface PersistedNudgePlacementRow {
 
 interface PersistedStickyTurnReminderRow {
     sticky_turn_reminder_text: string;
+    sticky_turn_reminder_message_id: string;
+}
+
+export interface PersistedStickyTurnReminder {
+    text: string;
+    messageId: string | null;
 }
 
 function isPersistedUsageRow(row: unknown): row is PersistedUsageRow {
@@ -36,7 +42,10 @@ function isPersistedNudgePlacementRow(row: unknown): row is PersistedNudgePlacem
 function isPersistedStickyTurnReminderRow(row: unknown): row is PersistedStickyTurnReminderRow {
     if (row === null || typeof row !== "object") return false;
     const r = row as Record<string, unknown>;
-    return typeof r.sticky_turn_reminder_text === "string";
+    return (
+        typeof r.sticky_turn_reminder_text === "string" &&
+        typeof r.sticky_turn_reminder_message_id === "string"
+    );
 }
 
 export function loadPersistedUsage(
@@ -109,33 +118,49 @@ export function clearPersistedNudgePlacement(db: Database, sessionId: string): v
     ).run(sessionId);
 }
 
-export function getPersistedStickyTurnReminder(db: Database, sessionId: string): string | null {
+export function getPersistedStickyTurnReminder(
+    db: Database,
+    sessionId: string,
+): PersistedStickyTurnReminder | null {
     const result = db
-        .prepare("SELECT sticky_turn_reminder_text FROM session_meta WHERE session_id = ?")
+        .prepare(
+            "SELECT sticky_turn_reminder_text, sticky_turn_reminder_message_id FROM session_meta WHERE session_id = ?",
+        )
         .get(sessionId);
 
     if (!isPersistedStickyTurnReminderRow(result)) {
         return null;
     }
 
-    return result.sticky_turn_reminder_text.length > 0 ? result.sticky_turn_reminder_text : null;
+    if (result.sticky_turn_reminder_text.length === 0) {
+        return null;
+    }
+
+    return {
+        text: result.sticky_turn_reminder_text,
+        messageId:
+            result.sticky_turn_reminder_message_id.length > 0
+                ? result.sticky_turn_reminder_message_id
+                : null,
+    };
 }
 
 export function setPersistedStickyTurnReminder(
     db: Database,
     sessionId: string,
     text: string,
+    messageId = "",
 ): void {
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
         db.prepare(
-            "UPDATE session_meta SET sticky_turn_reminder_text = ? WHERE session_id = ?",
-        ).run(text, sessionId);
+            "UPDATE session_meta SET sticky_turn_reminder_text = ?, sticky_turn_reminder_message_id = ? WHERE session_id = ?",
+        ).run(text, messageId, sessionId);
     })();
 }
 
 export function clearPersistedStickyTurnReminder(db: Database, sessionId: string): void {
-    db.prepare("UPDATE session_meta SET sticky_turn_reminder_text = '' WHERE session_id = ?").run(
-        sessionId,
-    );
+    db.prepare(
+        "UPDATE session_meta SET sticky_turn_reminder_text = '', sticky_turn_reminder_message_id = '' WHERE session_id = ?",
+    ).run(sessionId);
 }

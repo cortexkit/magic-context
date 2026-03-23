@@ -128,6 +128,7 @@ describe("storage-db", () => {
           nudge_anchor_message_id TEXT DEFAULT '',
           nudge_anchor_text TEXT DEFAULT '',
           sticky_turn_reminder_text TEXT DEFAULT '',
+          sticky_turn_reminder_message_id TEXT DEFAULT '',
           is_subagent INTEGER DEFAULT 0,
           last_context_percentage REAL DEFAULT 0,
           last_input_tokens INTEGER DEFAULT 0,

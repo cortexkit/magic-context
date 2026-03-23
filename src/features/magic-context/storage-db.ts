@@ -144,6 +144,7 @@ export function initializeDatabase(db: Database): void {
       nudge_anchor_message_id TEXT DEFAULT '',
       nudge_anchor_text TEXT DEFAULT '',
       sticky_turn_reminder_text TEXT DEFAULT '',
+      sticky_turn_reminder_message_id TEXT DEFAULT '',
       is_subagent INTEGER DEFAULT 0,
       last_context_percentage REAL DEFAULT 0,
       last_input_tokens INTEGER DEFAULT 0,
@@ -170,6 +171,7 @@ export function initializeDatabase(db: Database): void {
     ensureColumn(db, "session_meta", "nudge_anchor_message_id", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "nudge_anchor_text", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "sticky_turn_reminder_text", "TEXT DEFAULT ''");
+    ensureColumn(db, "session_meta", "sticky_turn_reminder_message_id", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "times_execute_threshold_reached", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "compartment_in_progress", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "system_prompt_hash", "INTEGER DEFAULT 0");
