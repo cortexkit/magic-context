@@ -127,11 +127,13 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 protectedTailStart,
             );
             if (!chunk.text || chunk.messageCount === 0 || chunk.endIndex < offset) {
-                const partial = promoteAndFinalize(
-                    `raw history ${offset}-${protectedTailStart - 1} could not be turned into a valid historian chunk`,
+                // Remaining messages before the protected tail are too few or all noise.
+                // If we already have valid candidates, this is a normal completion — not a partial failure.
+                const promoted = promoteAndFinalize(
+                    `remaining messages ${offset}-${protectedTailStart - 1} were too few or all noise to form a historian chunk`,
                 );
-                if (partial) {
-                    return `## Magic Recomp — Partial\n\n${partial}`;
+                if (promoted) {
+                    return `## Magic Recomp — Complete\n\n${promoted}`;
                 }
                 return `## Magic Recomp — Failed\n\nRecomp stopped because raw history ${offset}-${protectedTailStart - 1} could not be turned into a valid historian chunk. Nothing was written.`;
             }
