@@ -84,17 +84,8 @@ Architecture decisions, naming conventions, user preferences — anything that s
 
 ```
 ctx_memory(action="write", category="ARCHITECTURE_DECISIONS", content="Event sourcing for the orders domain.")
-ctx_memory(action="list")
+ctx_memory(action="search", query="authentication approach", category="CONSTRAINTS")
 ctx_memory(action="delete", id=42)
-ctx_memory(action="promote", id=7)     // Pin as permanent
-```
-
-### `ctx_recall` — Search past knowledge
-
-Semantic search over the memory store. Results are ranked by a blend of embedding similarity and full-text matching. Use this when the agent needs to find a decision or preference from a previous session.
-
-```
-ctx_recall(query="authentication approach", category="CONSTRAINTS")
 ```
 
 ### Automatic context injection
@@ -143,7 +134,7 @@ As context usage grows, Magic Context sends rolling reminders to the agent sugge
 
 After each historian run, qualifying facts are promoted to the persistent memory store. On every subsequent turn, active memories are injected alongside compartments in the `<session-history>` block. When a new session starts, it inherits all project and global memories from previous sessions.
 
-Memories are searchable via `ctx_recall` using semantic embeddings (local by default) with full-text search as a fallback.
+Memories are searchable via `ctx_memory(action="search", ...)` using semantic embeddings (local by default) with full-text search as a fallback.
 
 ---
 

@@ -74,7 +74,7 @@ CREATE TABLE memories (
   source_session_id TEXT,               -- which session this was first extracted from
   source_type TEXT DEFAULT 'historian', -- historian | agent | dreamer | user
   seen_count INTEGER DEFAULT 1,        -- incremented when historian re-extracts the same fact
-  retrieval_count INTEGER DEFAULT 0,   -- incremented only on agent ctx_recall lookups
+  retrieval_count INTEGER DEFAULT 0,   -- incremented only on agent ctx_memory search lookups
   first_seen_at INTEGER NOT NULL,      -- timestamp of first extraction
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -158,15 +158,15 @@ A session fact is promoted to cross-session memory when:
 2. It doesn't duplicate an existing memory (checked by `normalized_hash`), AND
 3. It was extracted by historian during a normal compartment run
 
-Dedup on the write path uses deterministic `normalized_hash` (fast, no embedding inference). Semantic similarity is only used during dreamer consolidation and `ctx_recall` retrieval.
+Dedup on the write path uses deterministic `normalized_hash` (fast, no embedding inference). Semantic similarity is only used during dreamer consolidation and `ctx_memory search` retrieval.
 
-Agent-initiated promotion: the `ctx_memory` tool allows explicit write/promote/delete by the agent or user at any time.
+Agent-initiated writes and deletes: the `ctx_memory` tool allows explicit write/delete/search by the agent or user at any time.
 
 ### Seen vs Retrieved Counts (Oracle refinement)
 
 Two counters track different signals:
 - **`seen_count`**: incremented when historian re-extracts the same fact in a later session. Indicates the fact is being repeatedly discovered, suggesting durability.
-- **`retrieval_count`**: incremented only when the agent actively searches for and retrieves this memory via `ctx_recall`. Indicates the fact is actively useful.
+- **`retrieval_count`**: incremented only when the agent actively searches for and retrieves this memory via `ctx_memory(action="search", ...)`. Indicates the fact is actively useful.
 
 Permanence promotion keys off `retrieval_count >= 3`, not `seen_count`. A fact that gets re-extracted 10 times but never retrieved may just be noise. A fact retrieved 3 times is proven useful.
 
@@ -190,7 +190,7 @@ On the first transform call for a new session:
 
 At current scale (79 memories = ~2400 tokens), this injects everything. The budget cap and selective injection are safety valves for growth.
 
-### Layer 2: Agent Search Tool — `ctx_recall` (Phase 1)
+### Layer 2: Agent Search Tool — `ctx_memory(action="search", ...)` (Phase 1)
 
 A tool the agent can call mid-session to search memories:
 - Input: natural language query string
@@ -242,7 +242,7 @@ A configurable LLM agent that runs at session start to augment the user's first 
 ### Layer 4: FTS5 Keyword Search (fallback + hybrid component)
 
 Used in two ways:
-- **Hybrid retrieval** for `ctx_recall`: FTS5 exact-token scores are combined with embedding cosine similarity for better precision on technical terms (paths, config keys, symbol names)
+- **Hybrid retrieval** for `ctx_memory search`: FTS5 exact-token scores are combined with embedding cosine similarity for better precision on technical terms (paths, config keys, symbol names)
 - **Standalone fallback**: when embeddings are unavailable (provider = "off")
 - **Category browsing**: admin tools and `/ctx-status` display
 
@@ -269,7 +269,7 @@ Embeddings stored as raw `Float32Array` BLOBs in separate `memory_embeddings` ta
 ### Embedding Lifecycle (Oracle refinement: lazy initialization)
 
 - **Do NOT load the embedding model during plugin init.** The plugin has a tight startup budget.
-- Lazy-init the model on first semantic use (first `ctx_recall` call or first selective injection)
+- Lazy-init the model on first semantic use (first `ctx_memory search` call or first selective injection)
 - Warm the model in background after first session starts
 - New memory inserted → enqueue embedding job (run after historian transaction commits)
 - Memory content updated → re-embed
@@ -475,8 +475,8 @@ Dream Session (scheduled window)
 | 1.2 Embedding module | `@huggingface/transformers` lazy-init, embed/search, BLOB storage, background warm | 1.1 |
 | 1.3 Historian promotion | Post-commit rule-based fact promotion with hash dedup, async embedding | 1.1, 1.2 |
 | 1.4 Auto-injection | `<project-memory>` block on first transform, budget-capped, deterministic selective injection | 1.1 |
-| 1.5 `ctx_recall` tool | Hybrid retrieval: semantic + FTS5 token overlap, updates retrieval_count | 1.2 |
-| 1.6 `ctx_memory` tool | Agent-initiated write/delete/promote for explicit memory management | 1.1, 1.2 |
+| 1.5 `ctx_memory search` action | Hybrid retrieval: semantic + FTS5 token overlap, updates retrieval_count | 1.2 |
+| 1.6 `ctx_memory` tool | Agent-initiated write/delete/search for explicit memory management | 1.1, 1.2 |
 | 1.7 Config surface | `magic_context.memory.*` schema: enabled, injection_budget, embedding_provider | 1.1 |
 | 1.8 Tests | Storage, promotion, injection, hybrid search, tool execution | All above |
 

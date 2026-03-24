@@ -1,75 +1,197 @@
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
-import { getMemoryByHash, updateMemorySeenCount } from "../../features/magic-context/memory";
+import {
+    ensureMemoryEmbeddings,
+    getMemoryByHash,
+    getMemoriesByProject,
+    loadAllEmbeddings,
+    searchMemoriesFTS,
+    updateMemoryRetrievalCount,
+    updateMemorySeenCount,
+} from "../../features/magic-context/memory";
 import {
     archiveMemory,
     CATEGORY_PRIORITY,
-    getMemoriesByProject,
     getMemoryById,
     insertMemory,
     type Memory,
     type MemoryCategory,
     saveEmbedding,
-    updateMemoryStatus,
 } from "../../features/magic-context/memory";
-import { embedText, getEmbeddingModelId } from "../../features/magic-context/memory/embedding";
+import {
+    embedText,
+    getEmbeddingModelId,
+    isEmbeddingEnabled,
+} from "../../features/magic-context/memory/embedding";
+import { cosineSimilarity } from "../../features/magic-context/memory/cosine-similarity";
 import { computeNormalizedHash } from "../../features/magic-context/memory/normalize-hash";
 import { log } from "../../shared/logger";
-import { CTX_MEMORY_DESCRIPTION, CTX_MEMORY_TOOL_NAME } from "./constants";
-import type { CtxMemoryArgs, CtxMemoryToolDeps } from "./types";
+import { CTX_MEMORY_DESCRIPTION, CTX_MEMORY_TOOL_NAME, DEFAULT_SEARCH_LIMIT } from "./constants";
+import type { CtxMemoryArgs, CtxMemorySearchResult, CtxMemoryToolDeps } from "./types";
 
-const MAX_CONTENT_PREVIEW_LENGTH = 120;
+const SEMANTIC_WEIGHT = 0.7;
+const FTS_WEIGHT = 0.3;
+const SINGLE_SOURCE_PENALTY = 0.8;
+
 const MEMORY_CATEGORIES = new Set<string>(CATEGORY_PRIORITY);
 
 function isMemoryCategory(value: string): value is MemoryCategory {
     return MEMORY_CATEGORIES.has(value);
 }
 
-function truncateContent(content: string): string {
-    const normalized = content.replace(/\s+/g, " ").trim();
-    if (normalized.length <= MAX_CONTENT_PREVIEW_LENGTH) {
-        return normalized;
+function normalizeLimit(limit?: number): number {
+    if (typeof limit !== "number" || !Number.isFinite(limit)) {
+        return DEFAULT_SEARCH_LIMIT;
     }
 
-    return `${normalized.slice(0, MAX_CONTENT_PREVIEW_LENGTH - 3)}...`;
+    return Math.max(1, Math.floor(limit));
 }
 
-function groupMemoriesByCategory(memories: Memory[]): Map<MemoryCategory, Memory[]> {
-    const grouped = new Map<MemoryCategory, Memory[]>();
+function normalizeCategory(category?: string): string | undefined {
+    const trimmed = category?.trim();
+    return trimmed ? trimmed : undefined;
+}
 
-    for (const category of CATEGORY_PRIORITY) {
-        grouped.set(category, []);
+function normalizeCosineScore(score: number): number {
+    if (!Number.isFinite(score)) {
+        return 0;
     }
+
+    return Math.min(1, Math.max(0, score));
+}
+
+function formatSearchResults(query: string, results: CtxMemorySearchResult[]): string {
+    if (results.length === 0) {
+        return `No memories found matching "${query}".`;
+    }
+
+    const noun = results.length === 1 ? "memory" : "memories";
+    const body = results
+        .map(
+            (result, index) =>
+                `[${index + 1}] (score: ${result.score.toFixed(2)}) [${result.category}]\n${result.content}`,
+        )
+        .join("\n\n");
+
+    return `Found ${results.length} ${noun} matching "${query}":\n\n${body}`;
+}
+
+function filterByCategory(memories: Memory[], category?: string): Memory[] {
+    if (!category) {
+        return memories;
+    }
+
+    return memories.filter((memory) => memory.category === category);
+}
+
+async function getSemanticScores(
+    deps: CtxMemoryToolDeps,
+    query: string,
+    memories: Memory[],
+): Promise<Map<number, number>> {
+    const semanticScores = new Map<number, number>();
+
+    if (!deps.embeddingEnabled || !isEmbeddingEnabled() || memories.length === 0) {
+        return semanticScores;
+    }
+
+    const queryEmbedding = await embedText(query);
+    if (!queryEmbedding) {
+        return semanticScores;
+    }
+
+    const embeddings = await ensureMemoryEmbeddings({
+        db: deps.db,
+        memories,
+        existingEmbeddings: loadAllEmbeddings(deps.db, deps.projectPath),
+    });
 
     for (const memory of memories) {
-        grouped.get(memory.category)?.push(memory);
+        const memoryEmbedding = embeddings.get(memory.id);
+        if (!memoryEmbedding) {
+            continue;
+        }
+
+        semanticScores.set(
+            memory.id,
+            normalizeCosineScore(cosineSimilarity(queryEmbedding, memoryEmbedding)),
+        );
     }
 
-    for (const [category, items] of [...grouped.entries()]) {
-        if (items.length === 0) {
-            grouped.delete(category);
+    return semanticScores;
+}
+
+function getFtsScores(
+    deps: CtxMemoryToolDeps,
+    query: string,
+    category?: string,
+    limit = DEFAULT_SEARCH_LIMIT,
+): Map<number, number> {
+    try {
+        const matches = filterByCategory(
+            searchMemoriesFTS(deps.db, deps.projectPath, query, limit),
+            category,
+        );
+
+        return new Map(matches.map((memory, rank) => [memory.id, 1 / (rank + 1)]));
+    } catch {
+        return new Map();
+    }
+}
+
+function mergeResults(
+    memories: Memory[],
+    semanticScores: Map<number, number>,
+    ftsScores: Map<number, number>,
+    limit: number,
+): CtxMemorySearchResult[] {
+    const memoryById = new Map(memories.map((memory) => [memory.id, memory]));
+    const candidateIds = new Set<number>([...semanticScores.keys(), ...ftsScores.keys()]);
+
+    const results: CtxMemorySearchResult[] = [];
+
+    for (const id of candidateIds) {
+        const memory = memoryById.get(id);
+        if (!memory) {
+            continue;
+        }
+
+        const semanticScore = semanticScores.get(id);
+        const ftsScore = ftsScores.get(id);
+
+        let score = 0;
+        let source = "fts";
+
+        if (semanticScore !== undefined && ftsScore !== undefined) {
+            score = SEMANTIC_WEIGHT * semanticScore + FTS_WEIGHT * ftsScore;
+            source = "hybrid";
+        } else if (semanticScore !== undefined) {
+            score = semanticScore * SINGLE_SOURCE_PENALTY;
+            source = "semantic";
+        } else if (ftsScore !== undefined) {
+            score = ftsScore * SINGLE_SOURCE_PENALTY;
+            source = "fts";
+        }
+
+        if (score > 0) {
+            results.push({
+                id,
+                category: memory.category,
+                content: memory.content,
+                score,
+                source,
+            });
         }
     }
 
-    return grouped;
-}
+    return results
+        .sort((left, right) => {
+            if (right.score !== left.score) {
+                return right.score - left.score;
+            }
 
-function formatMemoryLine(memory: Memory): string {
-    return `- [ID: ${memory.id}] [${memory.category}] ${truncateContent(memory.content)} (${memory.status}, seen: ${memory.seenCount}, retrieved: ${memory.retrievalCount})`;
-}
-
-function formatScopeSection(title: string, memories: Memory[]): string | null {
-    if (memories.length === 0) {
-        return null;
-    }
-
-    const grouped = groupMemoriesByCategory(memories);
-    const sections = [...grouped.entries()].map(([category, items]) =>
-        [`### ${category} (${items.length})`, items.map(formatMemoryLine).join("\n")].join("\n\n"),
-    );
-
-    return [`## ${title} (${memories.length} total)`, sections.join("\n\n")]
-        .filter(Boolean)
-        .join("\n\n");
+            return left.id - right.id;
+        })
+        .slice(0, limit);
 }
 
 function queueMemoryEmbedding(deps: CtxMemoryToolDeps, memoryId: number, content: string): void {
@@ -108,7 +230,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
         description: CTX_MEMORY_DESCRIPTION,
         args: {
             action: tool.schema
-                .enum(["write", "delete", "promote", "list"])
+                .enum(["write", "delete", "search"])
                 .describe("Action to perform on memories"),
             content: tool.schema
                 .string()
@@ -117,11 +239,18 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
             category: tool.schema
                 .string()
                 .optional()
-                .describe("Memory category (required for write, optional filter for list)"),
-            id: tool.schema
+                .describe("Memory category (required for write, optional filter for search)"),
+            id: tool.schema.number().optional().describe("Memory ID (required for delete)"),
+            query: tool.schema
+                .string()
+                .optional()
+                .describe(
+                    "Natural language search query for project memories (required for search)",
+                ),
+            limit: tool.schema
                 .number()
                 .optional()
-                .describe("Memory ID (required for delete and promote)"),
+                .describe("Maximum results to return for search (default: 10)"),
         },
         async execute(args: CtxMemoryArgs, toolContext) {
             if (!deps.memoryEnabled) {
@@ -183,37 +312,40 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 return `Archived memory [ID: ${args.id}].`;
             }
 
-            if (args.action === "promote") {
-                if (typeof args.id !== "number" || !Number.isInteger(args.id)) {
-                    return "Error: 'id' is required when action is 'promote'.";
+            if (args.action === "search") {
+                if (typeof args.query !== "string") {
+                    return "Error: 'query' must be provided when action is 'search'.";
                 }
 
-                const memory = getMemoryById(deps.db, args.id);
-                if (!memory || memory.projectPath !== deps.projectPath) {
-                    return `Error: Memory with ID ${args.id} was not found.`;
+                const query = args.query.trim();
+                if (!query) {
+                    return "Error: 'query' must be provided when action is 'search'.";
                 }
 
-                updateMemoryStatus(deps.db, args.id, "permanent");
-                return `Promoted memory [ID: ${args.id}] to permanent.`;
+                const limit = normalizeLimit(args.limit);
+                const category = normalizeCategory(args.category);
+                const projectMemories = filterByCategory(
+                    getMemoriesByProject(deps.db, deps.projectPath),
+                    category,
+                );
+                const ftsLimit = Math.max(limit * 5, projectMemories.length, DEFAULT_SEARCH_LIMIT);
+
+                const semanticScores = await getSemanticScores(deps, query, projectMemories);
+                const ftsScores = getFtsScores(deps, query, category, ftsLimit);
+                const results = mergeResults(projectMemories, semanticScores, ftsScores, limit);
+
+                if (results.length > 0) {
+                    deps.db.transaction(() => {
+                        for (const result of results) {
+                            updateMemoryRetrievalCount(deps.db, result.id);
+                        }
+                    })();
+                }
+
+                return formatSearchResults(query, results);
             }
 
-            const requestedCategory = args.category?.trim();
-            if (requestedCategory && !isMemoryCategory(requestedCategory)) {
-                return `Error: Unknown memory category '${requestedCategory}'.`;
-            }
-
-            const memories = getMemoriesByProject(deps.db, deps.projectPath).filter(
-                (memory) => !requestedCategory || memory.category === requestedCategory,
-            );
-
-            if (memories.length === 0) {
-                return "No cross-session memories stored yet.";
-            }
-
-            return (
-                formatScopeSection("Project Memories", memories) ??
-                "No cross-session memories stored yet."
-            );
+            return "Error: Unknown action.";
         },
     });
 }

@@ -1,15 +1,21 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import {
     getMemoriesByProject,
     getMemoryById,
     insertMemory,
+    saveEmbedding,
 } from "../../features/magic-context/memory";
 
-const embedTextMock = mock(async () => null as Float32Array | null);
+let queryEmbedding: Float32Array | null = null;
+const embeddingQueries: string[] = [];
 
 mock.module("../../features/magic-context/memory/embedding", () => ({
-    embedText: embedTextMock,
+    embedText: async (text: string) => {
+        embeddingQueries.push(text);
+        return queryEmbedding ? new Float32Array(queryEmbedding) : null;
+    },
+    isEmbeddingEnabled: () => true,
     getEmbeddingModelId: () => "mock:model",
 }));
 
@@ -75,18 +81,26 @@ function createTestDb(): Database {
 
 const toolContext = (sessionID = "ses-memory") => ({ sessionID }) as never;
 
+afterEach(() => {
+    queryEmbedding = null;
+    embeddingQueries.length = 0;
+});
+
+afterAll(() => {
+    mock.restore();
+});
+
 describe("createCtxMemoryTools", () => {
     let db: Database;
     let tools: ReturnType<typeof createCtxMemoryTools>;
 
     beforeEach(() => {
         db = createTestDb();
-        embedTextMock.mockReset();
-        embedTextMock.mockImplementation(async () => null);
         tools = createCtxMemoryTools({
             db,
             projectPath: "/repo/project",
             memoryEnabled: true,
+            embeddingEnabled: false,
         });
     });
 
@@ -160,7 +174,6 @@ describe("createCtxMemoryTools", () => {
                     action: "write",
                     category: "USER_PREFERENCES",
                     content: "Keep answers dense.",
-                    // scope parameter removed — all memories are project-scoped
                 },
                 toolContext(),
             );
@@ -169,32 +182,6 @@ describe("createCtxMemoryTools", () => {
 
             expect(memories).toHaveLength(1);
             expect(memories[0]?.projectPath).toBe("/repo/project");
-        });
-
-        it("uses project path when scope is project or default", async () => {
-            await tools.ctx_memory.execute(
-                {
-                    action: "write",
-                    category: "CONSTRAINTS",
-                    content: "No as any.",
-                },
-                toolContext(),
-            );
-
-            await tools.ctx_memory.execute(
-                {
-                    action: "write",
-                    category: "ENVIRONMENT",
-                    content: "Runs on darwin.",
-                    scope: "project",
-                },
-                toolContext(),
-            );
-
-            const memories = getMemoriesByProject(db, "/repo/project");
-
-            expect(memories).toHaveLength(2);
-            expect(memories.every((memory) => memory.projectPath === "/repo/project")).toBe(true);
         });
     });
 
@@ -234,97 +221,198 @@ describe("createCtxMemoryTools", () => {
         });
     });
 
-    describe("#given promote action", () => {
-        it("sets memory status to permanent", async () => {
-            const memory = insertMemory(db, {
+    describe("#given search action", () => {
+        it("returns semantic results when embeddings available", async () => {
+            const embeddingTools = createCtxMemoryTools({
+                db,
+                projectPath: "/repo/project",
+                memoryEnabled: true,
+                embeddingEnabled: true,
+            });
+
+            const semanticMatch = insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "ARCHITECTURE_DECISIONS",
-                content: "Use SQLite for persistence.",
-            });
-
-            const result = await tools.ctx_memory.execute(
-                { action: "promote", id: memory.id },
-                toolContext(),
-            );
-            const updated = getMemoryById(db, memory.id);
-
-            expect(result).toContain("Promoted memory");
-            expect(updated?.status).toBe("permanent");
-        });
-
-        it("returns error when ID is missing", async () => {
-            const result = await tools.ctx_memory.execute({ action: "promote" }, toolContext());
-
-            expect(result).toContain("Error");
-            expect(result).toContain("'id' is required");
-        });
-    });
-
-    describe("#given list action", () => {
-        it("lists project memories only", async () => {
-            insertMemory(db, {
-                projectPath: "/repo/project",
-                category: "USER_DIRECTIVES",
-                content: "Always run bun test before finishing.",
-            });
-            insertMemory(db, {
-                projectPath: "/repo/project",
-                category: "USER_PREFERENCES",
-                content: "Keep answers terse.",
-            });
-
-            const result = await tools.ctx_memory.execute({ action: "list" }, toolContext());
-
-            expect(result).toContain("## Project Memories (2 total)");
-            expect(result).toContain("### USER_DIRECTIVES (1)");
-            expect(result).toContain("### USER_PREFERENCES (1)");
-        });
-
-        it("filters by category when specified", async () => {
-            insertMemory(db, {
-                projectPath: "/repo/project",
-                category: "USER_DIRECTIVES",
-                content: "Always run bun test before finishing.",
+                content: "Magic-context stores architecture decisions in SQLite.",
             });
             insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "CONSTRAINTS",
-                content: "No as any.",
+                content: "Never use npm in this repository.",
+            });
+            saveEmbedding(db, semanticMatch.id, new Float32Array([1, 0]), "mock:model");
+
+            queryEmbedding = new Float32Array([1, 0]);
+
+            const result = await embeddingTools.ctx_memory.execute(
+                { action: "search", query: "cross-session retrieval policy" },
+                toolContext(),
+            );
+
+            expect(result).toContain('Found 1 memory matching "cross-session retrieval policy"');
+            expect(result).toContain("[ARCHITECTURE_DECISIONS]");
+            expect(result).toContain("Magic-context stores architecture decisions in SQLite.");
+            expect(result).toContain("score: 0.80");
+            expect(embeddingQueries).toEqual(["cross-session retrieval policy"]);
+            expect(getMemoryById(db, semanticMatch.id)?.retrievalCount).toBe(1);
+        });
+
+        it("falls back to FTS5-only when embedding provider is off", async () => {
+            insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONSTRAINTS",
+                content: "Historian must not summarize the last five meaningful user turns.",
+            });
+
+            const result = await tools.ctx_memory.execute(
+                { action: "search", query: "Historian summarize" },
+                toolContext(),
+            );
+
+            expect(result).toContain('Found 1 memory matching "Historian summarize"');
+            expect(result).toContain("[CONSTRAINTS]");
+            expect(result).toContain("score: 0.80");
+            expect(embeddingQueries).toEqual([]);
+        });
+
+        it("combines semantic and FTS5 scores", async () => {
+            const embeddingTools = createCtxMemoryTools({
+                db,
+                projectPath: "/repo/project",
+                memoryEnabled: true,
+                embeddingEnabled: true,
+            });
+
+            const semanticOnly = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "ARCHITECTURE_DECISIONS",
+                content: "Magic-context stores session notes in SQLite compartments.",
+            });
+            const hybridWinner = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "WORKFLOW_RULES",
+                content: "Always run bun test before merge.",
+            });
+            const ftsOnly = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "USER_DIRECTIVES",
+                content: "Run bun checks before release.",
+            });
+
+            saveEmbedding(db, semanticOnly.id, new Float32Array([0.95, 0.31]), "mock:model");
+            saveEmbedding(db, hybridWinner.id, new Float32Array([1, 0]), "mock:model");
+            queryEmbedding = new Float32Array([1, 0]);
+
+            const result = await embeddingTools.ctx_memory.execute(
+                { action: "search", query: "run bun" },
+                toolContext(),
+            );
+            const semanticIndex = result.indexOf(semanticOnly.content);
+            const winnerIndex = result.indexOf("Always run bun test before merge.");
+            const ftsOnlyIndex = result.indexOf(ftsOnly.content);
+
+            expect(result).toContain("score: 0.85");
+            expect(result).toContain("score: 0.76");
+            expect(result).toContain("score: 0.30");
+            expect(semanticIndex).toBeGreaterThan(-1);
+            expect(winnerIndex).toBeGreaterThan(-1);
+            expect(ftsOnlyIndex).toBeGreaterThan(-1);
+            expect(winnerIndex).toBeLessThan(semanticIndex);
+            expect(ftsOnlyIndex).toBeGreaterThan(semanticIndex);
+        });
+
+        it("increments retrieval_count for returned results", async () => {
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONFIG_DEFAULTS",
+                content: "Default cache TTL is five minutes.",
+            });
+
+            await tools.ctx_memory.execute({ action: "search", query: "cache TTL" }, toolContext());
+
+            expect(getMemoryById(db, memory.id)?.retrievalCount).toBe(1);
+        });
+
+        it("respects limit parameter", async () => {
+            const embeddingTools = createCtxMemoryTools({
+                db,
+                projectPath: "/repo/project",
+                memoryEnabled: true,
+                embeddingEnabled: true,
+            });
+
+            const first = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "WORKFLOW_RULES",
+                content: "Memory ranking favors retrieval guidance.",
+            });
+            const second = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "USER_DIRECTIVES",
+                content: "Memory ranking stores release guidance.",
+            });
+            saveEmbedding(db, first.id, new Float32Array([1, 0]), "mock:model");
+            saveEmbedding(db, second.id, new Float32Array([0.6, 0.8]), "mock:model");
+            queryEmbedding = new Float32Array([1, 0]);
+
+            const result = await embeddingTools.ctx_memory.execute(
+                { action: "search", query: "cross-session memory ranking", limit: 1 },
+                toolContext(),
+            );
+
+            expect(result).toContain('Found 1 memory matching "cross-session memory ranking"');
+            expect(result).toContain(first.content);
+            expect(result).not.toContain(second.content);
+            expect(getMemoryById(db, first.id)?.retrievalCount).toBe(1);
+            expect(getMemoryById(db, second.id)?.retrievalCount).toBe(0);
+        });
+
+        it("filters results by category when specified", async () => {
+            insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "ARCHITECTURE_DECISIONS",
+                content: "Magic-context uses SQLite storage.",
+            });
+            insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONSTRAINTS",
+                content: "SQLite writes must stay transactional.",
             });
 
             const result = await tools.ctx_memory.execute(
                 {
-                    action: "list",
-                    category: "USER_DIRECTIVES",
+                    action: "search",
+                    query: "SQLite",
+                    category: "CONSTRAINTS",
                 },
                 toolContext(),
             );
 
-            expect(result).toContain("USER_DIRECTIVES");
-            expect(result).not.toContain("CONSTRAINTS");
+            expect(result).toContain('Found 1 memory matching "SQLite"');
+            expect(result).toContain("[CONSTRAINTS]");
+            expect(result).not.toContain("[ARCHITECTURE_DECISIONS]");
         });
 
-        it("shows memory details: id, category, content, status, counts", async () => {
-            const memory = insertMemory(db, {
+        it("returns empty message when no memories match", async () => {
+            insertMemory(db, {
                 projectPath: "/repo/project",
-                category: "ARCHITECTURE_DECISIONS",
-                content: "Magic-context stores compartments, categorized facts, and session notes.",
+                category: "ENVIRONMENT",
+                content: "CI runs on darwin and linux.",
             });
 
-            const result = await tools.ctx_memory.execute({ action: "list" }, toolContext());
-
-            expect(result).toContain(`### ARCHITECTURE_DECISIONS (1)`);
-            expect(result).toContain(`[ID: ${memory.id}]`);
-            expect(result).toContain(
-                "Magic-context stores compartments, categorized facts, and session notes.",
+            const result = await tools.ctx_memory.execute(
+                { action: "search", query: "windows gpu" },
+                toolContext(),
             );
-            expect(result).toContain("active, seen: 1, retrieved: 0");
+
+            expect(result).toBe('No memories found matching "windows gpu".');
         });
 
-        it("returns message when no memories exist", async () => {
-            const result = await tools.ctx_memory.execute({ action: "list" }, toolContext());
+        it("returns error when query is missing", async () => {
+            const result = await tools.ctx_memory.execute({ action: "search" }, toolContext());
 
-            expect(result).toBe("No cross-session memories stored yet.");
+            expect(result).toContain("Error");
+            expect(result).toContain("'query' must be provided");
         });
     });
 
@@ -334,6 +422,7 @@ describe("createCtxMemoryTools", () => {
                 db,
                 projectPath: "/repo/project",
                 memoryEnabled: false,
+                embeddingEnabled: false,
             });
 
             const results = await Promise.all([
@@ -342,12 +431,13 @@ describe("createCtxMemoryTools", () => {
                     toolContext(),
                 ),
                 disabledTools.ctx_memory.execute({ action: "delete", id: 1 }, toolContext()),
-                disabledTools.ctx_memory.execute({ action: "promote", id: 1 }, toolContext()),
-                disabledTools.ctx_memory.execute({ action: "list" }, toolContext()),
+                disabledTools.ctx_memory.execute(
+                    { action: "search", query: "architecture" },
+                    toolContext(),
+                ),
             ]);
 
             expect(results).toEqual([
-                "Cross-session memory is disabled for this project.",
                 "Cross-session memory is disabled for this project.",
                 "Cross-session memory is disabled for this project.",
                 "Cross-session memory is disabled for this project.",
