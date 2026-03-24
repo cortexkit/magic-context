@@ -4,7 +4,7 @@ import { deleteDreamState, getDreamState, setDreamState } from "./storage-dream-
 const LEASE_HOLDER_KEY = "dreaming_lease_holder";
 const LEASE_HEARTBEAT_KEY = "dreaming_lease_heartbeat";
 const LEASE_EXPIRY_KEY = "dreaming_lease_expiry";
-const LEASE_DURATION_MS = 120_000;
+const LEASE_DURATION_MS = 2 * 60 * 1000; // 2 minutes — renewed periodically during task execution
 
 function getLeaseExpiry(db: Database): number | null {
     const value = getDreamState(db, LEASE_EXPIRY_KEY);

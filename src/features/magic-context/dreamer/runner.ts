@@ -86,6 +86,12 @@ export async function runDream(args: {
             log(`[dreamer] starting task: ${taskName}`);
             const taskStartedAt = Date.now();
             let agentSessionId: string | null = null;
+            // Renew lease periodically while the LLM task runs (can take 5+ min on slow models)
+            const leaseRenewalInterval = setInterval(() => {
+                if (!renewLease(args.db, holderId)) {
+                    log(`[dreamer] task ${taskName}: background lease renewal failed`);
+                }
+            }, 60_000);
 
             try {
                 const existingDocs =
@@ -169,6 +175,7 @@ export async function runDream(args: {
                     error: errorMsg,
                 });
             } finally {
+                clearInterval(leaseRenewalInterval);
                 if (agentSessionId) {
                     await args.client.session
                         .delete({
@@ -179,10 +186,6 @@ export async function runDream(args: {
                             log("[dreamer] failed to delete child session:", error);
                         });
                 }
-            }
-
-            if (!renewLease(args.db, holderId)) {
-                log("[dreamer] lease renewal failed mid-run — lease may have expired");
             }
         }
     } finally {
