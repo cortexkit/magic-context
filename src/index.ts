@@ -73,12 +73,27 @@ const plugin: Plugin = async (ctx) => {
             };
 
             config.command = commandConfig;
+            // Extract only agent-override fields (not scheduling fields) for agent registration
+            const dreamerAgentOverrides = pluginConfig.dreamer
+                ? (() => {
+                      const {
+                          enabled: _enabled,
+                          schedule: _schedule,
+                          max_runtime_minutes: _max,
+                          tasks: _tasks,
+                          task_timeout_minutes: _tto,
+                          ...agentOverrides
+                      } = pluginConfig.dreamer;
+                      return agentOverrides;
+                  })()
+                : undefined;
+
             config.agent = {
                 ...(config.agent ?? {}),
                 [DREAMER_AGENT]: buildHiddenAgentConfig(
                     DREAMER_AGENT,
                     DREAMER_SYSTEM_PROMPT,
-                    pluginConfig.dreamer,
+                    dreamerAgentOverrides,
                 ),
                 [HISTORIAN_AGENT]: buildHiddenAgentConfig(
                     HISTORIAN_AGENT,

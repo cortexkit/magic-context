@@ -317,7 +317,7 @@ describe("magic-context hook", () => {
         const deps = createMockDeps(promptMocks);
         deps.config = {
             ...deps.config,
-            dreaming: {
+            dreamer: {
                 enabled: true,
                 schedule: "02:00-06:00",
                 max_runtime_minutes: 60,
@@ -394,7 +394,7 @@ describe("magic-context hook", () => {
         const scheduleEnd = new Date(nowForSchedule.getTime() + 60_000);
         deps.config = {
             ...deps.config,
-            dreaming: {
+            dreamer: {
                 enabled: true,
                 schedule: `${formatHm(scheduleStart)}-${formatHm(scheduleEnd)}`,
                 max_runtime_minutes: 60,

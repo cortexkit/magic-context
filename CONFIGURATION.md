@@ -79,18 +79,21 @@ Configures the background historian agent that compresses session history into c
 
 ## `dreamer`
 
-Configures the dreamer agent that maintains cross-session memory quality. Same shape as `historian`. Dreamer creates ephemeral child sessions inside OpenCode to run each maintenance task.
+Configures the dreamer agent — both the model it uses and the maintenance tasks it runs. Dreamer creates ephemeral child sessions inside OpenCode for each task.
 
 ```jsonc
 {
   "dreamer": {
+    "enabled": true,
     "model": "github-copilot/gpt-5.4",
-    "fallback_models": [
-      "anthropic/claude-sonnet-4-6"
-    ]
+    "fallback_models": ["anthropic/claude-sonnet-4-6"],
+    "schedule": "02:00-06:00",
+    "tasks": ["consolidate", "verify", "archive-stale", "improve", "maintain-docs"]
   }
 }
 ```
+
+### Agent fields
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -100,21 +103,7 @@ Configures the dreamer agent that maintains cross-session memory quality. Same s
 | `variant` | `string` | Agent variant. |
 | `prompt` | `string` | Custom system prompt override. |
 
----
-
-## `dreaming`
-
-Controls when and how the dreamer runs its maintenance tasks.
-
-```jsonc
-{
-  "dreaming": {
-    "enabled": true,
-    "schedule": "02:00-06:00",
-    "tasks": ["consolidate", "verify", "archive-stale", "improve", "maintain-docs"]
-  }
-}
-```
+### Operational fields
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -233,12 +222,9 @@ Optional prompt augmenter that runs on `/ctx-aug`. Uses an OpenAI-compatible end
   },
 
   "dreamer": {
-    "model": "github-copilot/gpt-5.4",
-    "fallback_models": ["anthropic/claude-sonnet-4-6"]
-  },
-
-  "dreaming": {
     "enabled": true,
+    "model": "github-copilot/gpt-5.4",
+    "fallback_models": ["anthropic/claude-sonnet-4-6"],
     "schedule": "02:00-06:00",
     "tasks": ["consolidate", "verify", "archive-stale", "improve", "maintain-docs"]
   },

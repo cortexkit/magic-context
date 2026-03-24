@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import type { DreamingConfig } from "../../config/schema/magic-context";
+import type { DreamerConfig } from "../../config/schema/magic-context";
 import {
     enqueueDream,
     ensureDreamQueueTable,
@@ -132,8 +132,8 @@ async function executeDreaming(
             text: string,
             params: NotificationParams,
         ) => Promise<void>;
-        dreaming?: {
-            config: DreamingConfig;
+        dreamer?: {
+            config: DreamerConfig;
             projectPath: string;
             client: unknown;
             directory: string;
@@ -142,7 +142,7 @@ async function executeDreaming(
     },
     sessionId: string,
 ): Promise<never> {
-    if (!deps.dreaming?.config?.tasks?.length) {
+    if (!deps.dreamer?.config?.tasks?.length) {
         await deps.sendNotification(
             sessionId,
             "## /ctx-dream\n\nDreaming is not configured for this project.",
@@ -152,7 +152,7 @@ async function executeDreaming(
     }
 
     ensureDreamQueueTable(deps.db);
-    const entry = enqueueDream(deps.db, deps.dreaming.projectPath, "manual");
+    const entry = enqueueDream(deps.db, deps.dreamer.projectPath, "manual");
     if (!entry) {
         await deps.sendNotification(sessionId, "Dream already queued for this project", {});
         throw new Error(`${SENTINEL_PREFIX}CTX-DREAM_HANDLED__`);
@@ -160,14 +160,14 @@ async function executeDreaming(
 
     await deps.sendNotification(sessionId, "Starting dream run...", {});
 
-    const result = deps.dreaming.executeDream
-        ? await deps.dreaming.executeDream(sessionId)
+    const result = deps.dreamer.executeDream
+        ? await deps.dreamer.executeDream(sessionId)
         : await processDreamQueue({
               db: deps.db,
-              client: deps.dreaming.client as never,
-              tasks: deps.dreaming.config.tasks,
-              taskTimeoutMinutes: deps.dreaming.config.task_timeout_minutes,
-              maxRuntimeMinutes: deps.dreaming.config.max_runtime_minutes,
+              client: deps.dreamer.client as never,
+              tasks: deps.dreamer.config.tasks,
+              taskTimeoutMinutes: deps.dreamer.config.task_timeout_minutes,
+              maxRuntimeMinutes: deps.dreamer.config.max_runtime_minutes,
           });
 
     await deps.sendNotification(
@@ -200,8 +200,8 @@ export function createMagicContextCommandHandler(deps: {
         client: unknown;
         pendingResults: Map<string, string>;
     };
-    dreaming?: {
-        config: DreamingConfig;
+    dreamer?: {
+        config: DreamerConfig;
         projectPath: string;
         client: unknown;
         directory: string;

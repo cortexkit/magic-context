@@ -45,13 +45,6 @@ describe("MagicContextConfigSchema", () => {
                     timeout_ms: 30000,
                 },
             });
-            expect(result.dreaming).toEqual({
-                enabled: false,
-                schedule: "02:00-06:00",
-                max_runtime_minutes: 120,
-                tasks: ["consolidate", "verify", "archive-stale", "improve"],
-                task_timeout_minutes: 20,
-            });
             expect(result.historian).toBeUndefined();
             expect(result.dreamer).toBeUndefined();
         });

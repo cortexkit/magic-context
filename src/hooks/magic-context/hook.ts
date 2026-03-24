@@ -2,7 +2,7 @@ import {
     DEFAULT_COMPARTMENT_TOKEN_BUDGET,
     DEFAULT_HISTORIAN_TIMEOUT_MS,
     DEFAULT_NUDGE_INTERVAL_TOKENS,
-    type DreamingConfig,
+    type DreamerConfig,
 } from "../../config/schema/magic-context";
 import {
     checkScheduleAndEnqueue,
@@ -78,7 +78,7 @@ export interface MagicContextDeps {
             timeout_ms: number;
             system_prompt?: string;
         };
-        dreaming?: DreamingConfig;
+        dreamer?: DreamerConfig;
     };
 }
 
@@ -201,7 +201,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     });
 
     const runDreamQueueInBackground = (): void => {
-        const dreaming = deps.config.dreaming;
+        const dreaming = deps.config.dreamer;
         if (!dreaming?.enabled || !dreaming.schedule?.trim()) {
             return;
         }
@@ -268,9 +268,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                   pendingResults: pendingSidekickResults,
               }
             : undefined,
-        dreaming: deps.config.dreaming
+        dreamer: deps.config.dreamer
             ? {
-                  config: deps.config.dreaming,
+                  config: deps.config.dreamer,
                   projectPath,
                   client: deps.client,
                   directory: deps.directory,

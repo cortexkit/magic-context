@@ -387,7 +387,7 @@ describe("createMagicContextCommandHandler", () => {
                 db,
                 protectedTags: 3,
                 sendNotification,
-                dreaming: {
+                dreamer: {
                     config: {
                         enabled: true,
                         schedule: "02:00-06:00",
@@ -433,7 +433,7 @@ describe("createMagicContextCommandHandler", () => {
                 db,
                 protectedTags: 3,
                 sendNotification,
-                dreaming: {
+                dreamer: {
                     config: {
                         enabled: true,
                         schedule: "02:00-06:00",

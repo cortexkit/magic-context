@@ -61,10 +61,6 @@ function mergeConfigs(
         },
     };
 
-    if (base.dreaming || override.dreaming) {
-        config.dreaming = override.dreaming ?? base.dreaming;
-    }
-
     return config;
 }
 
@@ -87,8 +83,6 @@ function parsePluginConfig(rawConfig: Record<string, unknown>): MagicContextPlug
         disabled_hooks: disabledHooks,
         command,
     };
-
-    config.dreaming = parsed.data.dreaming;
 
     return config;
 }

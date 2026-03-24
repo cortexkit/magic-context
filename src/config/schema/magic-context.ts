@@ -49,6 +49,23 @@ export const DreamingConfigSchema = z
         task_timeout_minutes: 20,
     });
 
+/** Combined dreamer agent + scheduling configuration */
+export const DreamerConfigSchema = AgentOverrideConfigSchema.merge(
+    z.object({
+        /** Enable scheduled dreaming (default: false) */
+        enabled: z.boolean().default(false),
+        /** Scheduled window for overnight dreaming (e.g. "02:00-06:00") */
+        schedule: z.string().default("02:00-06:00"),
+        /** Maximum runtime per dream session in minutes (default: 120) */
+        max_runtime_minutes: z.number().min(10).default(120),
+        /** Tasks to run during dreaming, in order */
+        tasks: z.array(DreamingTaskSchema).default(DEFAULT_DREAMER_TASKS),
+        /** Minutes allocated per task before moving to next (default: 20) */
+        task_timeout_minutes: z.number().min(5).default(20),
+    }),
+);
+export type DreamerConfig = z.infer<typeof DreamerConfigSchema>;
+
 const BaseEmbeddingConfigSchema = z
     .object({
         provider: z.enum(["local", "openai-compatible", "off"]).default("local"),
@@ -101,7 +118,7 @@ export type DreamingConfig = z.infer<typeof DreamingConfigSchema>;
 export interface MagicContextConfig {
     enabled: boolean;
     historian?: z.infer<typeof AgentOverrideConfigSchema>;
-    dreamer?: z.infer<typeof AgentOverrideConfigSchema>;
+    dreamer?: DreamerConfig;
     cache_ttl: string | { default: string; [modelKey: string]: string };
     nudge_interval_tokens: number;
     execute_threshold_percentage: number | { default: number; [modelKey: string]: number };
@@ -128,7 +145,6 @@ export interface MagicContextConfig {
         timeout_ms: number;
         system_prompt?: string;
     };
-    dreaming?: DreamingConfig;
 }
 
 export const MagicContextConfigSchema = z
@@ -137,8 +153,8 @@ export const MagicContextConfigSchema = z
         enabled: z.boolean().default(false),
         /** Historian agent configuration (model, fallback_models, variant, temperature, maxTokens, permission, etc.) */
         historian: AgentOverrideConfigSchema.optional(),
-        /** Dreamer agent configuration (model, fallback_models, variant, temperature, etc.) */
-        dreamer: AgentOverrideConfigSchema.optional(),
+        /** Dreamer agent + scheduling configuration (model, fallback_models, enabled, schedule, tasks, etc.) */
+        dreamer: DreamerConfigSchema.optional(),
         /** Cache TTL: string (e.g. "5m") or per-model object ({ default: "5m", "model-id": "10m" }) */
         cache_ttl: z
             .union([z.string(), z.object({ default: z.string() }).catchall(z.string())])
@@ -214,25 +230,10 @@ export const MagicContextConfigSchema = z
                 max_tool_calls: 3,
                 timeout_ms: 30000,
             }),
-        /** Dreamer maintenance configuration */
-        dreaming: DreamingConfigSchema,
     })
     .transform((data): MagicContextConfig => {
-        const { dreaming, ...rest } = data;
-        const config: MagicContextConfig = {
-            ...rest,
+        return {
+            ...data,
             protected_tags: data.protected_tags ?? DEFAULT_PROTECTED_TAGS,
         };
-
-        // Non-enumerable intentional: dreaming is merged separately in loadPluginConfig
-        // (not via spread) to avoid double-assignment. Keeping it non-enumerable prevents
-        // it from leaking into spreads while still being directly accessible. See audit #28.
-        Object.defineProperty(config, "dreaming", {
-            value: dreaming,
-            enumerable: false,
-            writable: true,
-            configurable: true,
-        });
-
-        return config;
     });
