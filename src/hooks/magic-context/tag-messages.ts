@@ -1,9 +1,9 @@
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import { getSourceContents, saveSourceContent } from "../../features/magic-context/storage";
 import type { Tagger } from "../../features/magic-context/tagger";
+import { isReduceToolPart } from "./drop-stale-reduce-calls";
 import { byteSize, isThinkingPart, prependTag } from "./tag-content-primitives";
 import { createExistingTagResolver } from "./tag-id-fallback";
-import { isReduceToolPart } from "./drop-stale-reduce-calls";
 import {
     buildFileSourceContent,
     isFilePart,

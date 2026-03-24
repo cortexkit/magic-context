@@ -17,12 +17,12 @@ import { queueDropsForCompartmentalizedMessages } from "./compartment-runner-dro
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
 import { buildExistingStateXml } from "./compartment-runner-state-xml";
 import type { CandidateCompartment, CompartmentRunnerDeps } from "./compartment-runner-types";
-import { renderMemoryBlock } from "./inject-compartments";
 import {
     getReducedRecompTokenBudget,
     validateChunkCoverage,
     validateStoredCompartments,
 } from "./compartment-runner-validation";
+import { renderMemoryBlock } from "./inject-compartments";
 import {
     getProtectedTailStartOrdinal,
     getRawSessionMessageCount,

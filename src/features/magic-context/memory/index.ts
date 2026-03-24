@@ -1,6 +1,6 @@
 export * from "./constants";
-export * from "./embedding-backfill";
 export * from "./embedding";
+export * from "./embedding-backfill";
 export * from "./normalize-hash";
 export { resolveProjectIdentity } from "./project-identity";
 export { promoteSessionFactsToMemory } from "./promotion";

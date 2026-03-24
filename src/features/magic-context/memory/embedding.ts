@@ -3,8 +3,8 @@ import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "../../../config/schema/magic-cont
 import { log } from "../../../shared/logger";
 import { cosineSimilarity } from "./cosine-similarity";
 import { LocalEmbeddingProvider } from "./embedding-local";
-import type { EmbeddingProvider } from "./embedding-provider";
 import { OpenAICompatibleEmbeddingProvider } from "./embedding-openai";
+import type { EmbeddingProvider } from "./embedding-provider";
 
 const DEFAULT_EMBEDDING_CONFIG: EmbeddingConfig = {
     provider: "local",

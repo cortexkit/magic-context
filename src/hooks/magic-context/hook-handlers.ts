@@ -10,8 +10,8 @@ import type { PluginContext } from "../../plugin/types";
 import { sessionLog } from "../../shared/logger";
 import { FORCE_COMPARTMENT_PERCENTAGE } from "./compartment-trigger";
 import { getMessageUpdatedAssistantInfo, getSessionProperties } from "./event-payloads";
-import { clearNoteNudgeState, onNoteTrigger } from "./note-nudger";
 import { resolveSessionId as resolveEventSessionId } from "./event-resolvers";
+import { clearNoteNudgeState, onNoteTrigger } from "./note-nudger";
 import { generateEmergencyNudgeText } from "./nudger";
 
 const TOOL_HEAVY_TURN_REMINDER_THRESHOLD = 5;

@@ -1,11 +1,11 @@
-import { Database } from "bun:sqlite";
-import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import {Database} from "bun:sqlite";
+import {afterAll, afterEach, beforeEach, describe, expect, it, mock} from "bun:test";
 import {
     getMemoriesByProject,
     getMemoryById,
     insertMemory,
     saveEmbedding,
-} from "../../features/magic-context/memory";
+} from "../../features/magic-context";
 
 let queryEmbedding: Float32Array | null = null;
 const embeddingQueries: string[] = [];
@@ -19,43 +19,48 @@ mock.module("../../features/magic-context/memory/embedding", () => ({
     getEmbeddingModelId: () => "mock:model",
 }));
 
-const { createCtxMemoryTools } = await import("./tools");
+const {createCtxMemoryTools} = await import("./tools");
 
 function createTestDb(): Database {
     const db = new Database(":memory:");
     db.run(`
-    CREATE TABLE IF NOT EXISTS memories (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      project_path TEXT NOT NULL,
-      category TEXT NOT NULL,
-      content TEXT NOT NULL,
-      normalized_hash TEXT NOT NULL,
-      source_session_id TEXT,
-      source_type TEXT DEFAULT 'historian',
-      seen_count INTEGER DEFAULT 1,
-      retrieval_count INTEGER DEFAULT 0,
-      first_seen_at INTEGER NOT NULL,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      last_seen_at INTEGER NOT NULL,
-      last_retrieved_at INTEGER,
-      status TEXT DEFAULT 'active',
-      expires_at INTEGER,
-      verification_status TEXT DEFAULT 'unverified',
-      verified_at INTEGER,
-      superseded_by_memory_id INTEGER,
-      merged_from TEXT,
-      metadata_json TEXT,
-      UNIQUE(project_path, category, normalized_hash)
-    );
+        CREATE TABLE IF NOT EXISTS memories
+        (
+            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_path            TEXT    NOT NULL,
+            category                TEXT    NOT NULL,
+            content                 TEXT    NOT NULL,
+            normalized_hash         TEXT    NOT NULL,
+            source_session_id       TEXT,
+            source_type             TEXT    DEFAULT 'historian',
+            seen_count              INTEGER DEFAULT 1,
+            retrieval_count         INTEGER DEFAULT 0,
+            first_seen_at           INTEGER NOT NULL,
+            created_at              INTEGER NOT NULL,
+            updated_at              INTEGER NOT NULL,
+            last_seen_at            INTEGER NOT NULL,
+            last_retrieved_at       INTEGER,
+            status                  TEXT    DEFAULT 'active',
+            expires_at              INTEGER,
+            verification_status     TEXT    DEFAULT 'unverified',
+            verified_at             INTEGER,
+            superseded_by_memory_id INTEGER,
+            merged_from             TEXT,
+            metadata_json           TEXT,
+            UNIQUE (project_path, category, normalized_hash)
+        );
 
-    CREATE TABLE IF NOT EXISTS memory_embeddings (
-      memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
-      embedding BLOB NOT NULL,
-      model_id TEXT
-    );
+        CREATE TABLE IF NOT EXISTS memory_embeddings
+        (
+            memory_id INTEGER PRIMARY KEY REFERENCES memories (id) ON DELETE CASCADE,
+            embedding BLOB NOT NULL,
+            model_id  TEXT
+        );
 
-    CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+        CREATE
+        VIRTUAL
+        TABLE IF
+        NOT EXISTS memories_fts USING fts5(
       content,
       category,
       content='memories',
@@ -63,24 +68,28 @@ function createTestDb(): Database {
       tokenize='porter unicode61'
     );
 
-    CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
-      INSERT INTO memories_fts(rowid, content, category) VALUES (new.id, new.content, new.category);
-    END;
+        CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+        INSERT INTO memories_fts(rowid, content, category)
+        VALUES (new.id, new.content, new.category);
+        END;
 
-    CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
-      INSERT INTO memories_fts(memories_fts, rowid, content, category) VALUES ('delete', old.id, old.content, old.category);
-    END;
+        CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, content, category)
+        VALUES ('delete', old.id, old.content, old.category);
+        END;
 
-    CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
-      INSERT INTO memories_fts(memories_fts, rowid, content, category) VALUES ('delete', old.id, old.content, old.category);
-      INSERT INTO memories_fts(rowid, content, category) VALUES (new.id, new.content, new.category);
-    END;
-  `);
+        CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, content, category)
+        VALUES ('delete', old.id, old.content, old.category);
+        INSERT INTO memories_fts(rowid, content, category)
+        VALUES (new.id, new.content, new.category);
+        END;
+    `);
     return db;
 }
 
 const toolContext = (sessionID = "ses-memory", agent = "general") =>
-    ({ sessionID, agent }) as never;
+    ({sessionID, agent}) as never;
 
 afterEach(() => {
     queryEmbedding = null;
@@ -195,7 +204,7 @@ describe("createCtxMemoryTools", () => {
             });
 
             const result = await tools.ctx_memory.execute(
-                { action: "delete", id: memory.id },
+                {action: "delete", id: memory.id},
                 toolContext(),
             );
             const updated = getMemoryById(db, memory.id);
@@ -205,7 +214,7 @@ describe("createCtxMemoryTools", () => {
         });
 
         it("returns error when ID is missing", async () => {
-            const result = await tools.ctx_memory.execute({ action: "delete" }, toolContext());
+            const result = await tools.ctx_memory.execute({action: "delete"}, toolContext());
 
             expect(result).toContain("Error");
             expect(result).toContain("'id' is required");
@@ -213,7 +222,7 @@ describe("createCtxMemoryTools", () => {
 
         it("returns error when memory not found", async () => {
             const result = await tools.ctx_memory.execute(
-                { action: "delete", id: 999 },
+                {action: "delete", id: 999},
                 toolContext(),
             );
 
@@ -236,7 +245,7 @@ describe("createCtxMemoryTools", () => {
             });
 
             const result = await tools.ctx_memory.execute(
-                { action: "list", limit: 10 },
+                {action: "list", limit: 10},
                 toolContext(),
             );
 
@@ -326,6 +335,7 @@ describe("createCtxMemoryTools", () => {
     });
 
     describe("#given search action", () => {
+
         it("returns semantic results when embeddings available", async () => {
             const embeddingTools = createCtxMemoryTools({
                 db,
@@ -339,17 +349,19 @@ describe("createCtxMemoryTools", () => {
                 category: "ARCHITECTURE_DECISIONS",
                 content: "Magic-context stores architecture decisions in SQLite.",
             });
+
             insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "CONSTRAINTS",
                 content: "Never use npm in this repository.",
             });
+
             saveEmbedding(db, semanticMatch.id, new Float32Array([1, 0]), "mock:model");
 
             queryEmbedding = new Float32Array([1, 0]);
 
             const result = await embeddingTools.ctx_memory.execute(
-                { action: "search", query: "cross-session retrieval policy" },
+                {action: "search", query: "cross-session retrieval policy"},
                 toolContext(),
             );
 
@@ -359,6 +371,7 @@ describe("createCtxMemoryTools", () => {
             expect(result).toContain("score: 0.80");
             expect(embeddingQueries).toEqual(["cross-session retrieval policy"]);
             expect(getMemoryById(db, semanticMatch.id)?.retrievalCount).toBe(1);
+
         });
 
         it("falls back to FTS5-only when embedding provider is off", async () => {
@@ -369,7 +382,7 @@ describe("createCtxMemoryTools", () => {
             });
 
             const result = await tools.ctx_memory.execute(
-                { action: "search", query: "Historian summarize" },
+                {action: "search", query: "Historian summarize"},
                 toolContext(),
             );
 
@@ -407,8 +420,9 @@ describe("createCtxMemoryTools", () => {
             saveEmbedding(db, hybridWinner.id, new Float32Array([1, 0]), "mock:model");
             queryEmbedding = new Float32Array([1, 0]);
 
+            // TODO: This causes bun panic, why? investigate
             const result = await embeddingTools.ctx_memory.execute(
-                { action: "search", query: "run bun" },
+                {action: "search", query: "run bun"},
                 toolContext(),
             );
             const semanticIndex = result.indexOf(semanticOnly.content);
@@ -432,7 +446,7 @@ describe("createCtxMemoryTools", () => {
                 content: "Default cache TTL is five minutes.",
             });
 
-            await tools.ctx_memory.execute({ action: "search", query: "cache TTL" }, toolContext());
+            await tools.ctx_memory.execute({action: "search", query: "cache TTL"}, toolContext());
 
             expect(getMemoryById(db, memory.id)?.retrievalCount).toBe(1);
         });
@@ -460,7 +474,7 @@ describe("createCtxMemoryTools", () => {
             queryEmbedding = new Float32Array([1, 0]);
 
             const result = await embeddingTools.ctx_memory.execute(
-                { action: "search", query: "cross-session memory ranking", limit: 1 },
+                {action: "search", query: "cross-session memory ranking", limit: 1},
                 toolContext(),
             );
 
@@ -505,7 +519,7 @@ describe("createCtxMemoryTools", () => {
             });
 
             const result = await tools.ctx_memory.execute(
-                { action: "search", query: "windows gpu" },
+                {action: "search", query: "windows gpu"},
                 toolContext(),
             );
 
@@ -513,7 +527,7 @@ describe("createCtxMemoryTools", () => {
         });
 
         it("returns error when query is missing", async () => {
-            const result = await tools.ctx_memory.execute({ action: "search" }, toolContext());
+            const result = await tools.ctx_memory.execute({action: "search"}, toolContext());
 
             expect(result).toContain("Error");
             expect(result).toContain("'query' must be provided");
@@ -531,12 +545,12 @@ describe("createCtxMemoryTools", () => {
 
             const results = await Promise.all([
                 disabledTools.ctx_memory.execute(
-                    { action: "write", category: "USER_DIRECTIVES", content: "x" },
+                    {action: "write", category: "USER_DIRECTIVES", content: "x"},
                     toolContext(),
                 ),
-                disabledTools.ctx_memory.execute({ action: "delete", id: 1 }, toolContext()),
+                disabledTools.ctx_memory.execute({action: "delete", id: 1}, toolContext()),
                 disabledTools.ctx_memory.execute(
-                    { action: "search", query: "architecture" },
+                    {action: "search", query: "architecture"},
                     toolContext(),
                 ),
             ]);
@@ -559,7 +573,7 @@ describe("createCtxMemoryTools", () => {
                 allowedActions: ["write", "delete", "search"],
             });
 
-            const result = await primaryTools.ctx_memory.execute({ action: "list" }, toolContext());
+            const result = await primaryTools.ctx_memory.execute({action: "list"}, toolContext());
 
             expect(result).toContain("not allowed");
         });
@@ -579,7 +593,7 @@ describe("createCtxMemoryTools", () => {
             });
 
             const result = await primaryTools.ctx_memory.execute(
-                { action: "list" },
+                {action: "list"},
                 toolContext("ses-dream", "dreamer"),
             );
 

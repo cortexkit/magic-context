@@ -8,16 +8,17 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import type { SessionMeta, TagEntry } from "../../features/magic-context/types";
+import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
 import { applyContextNudge } from "./apply-context-nudge";
 import { getActiveCompartmentRun } from "./compartment-runner";
 import { dropStaleReduceCalls } from "./drop-stale-reduce-calls";
-import { getErrorMessage } from "../../shared/error-message";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import {
     type PreparedCompartmentInjection,
     renderCompartmentInjection,
 } from "./inject-compartments";
+import { getNotNudgeText } from "./note-nudger";
 import {
     appendSupplementalNudgeToAssistant,
     canAppendSupplementalNudgeToAssistant,
@@ -31,10 +32,9 @@ import {
     stripInlineThinking,
     stripSystemInjectedMessages,
 } from "./strip-content";
-import { getNotNudgeText } from "./note-nudger";
 import {
-    appendReminderToUserMessageById,
     appendReminderToLatestUserMessage,
+    appendReminderToUserMessageById,
     countMessagesSinceLastUser,
 } from "./transform-message-helpers";
 import {

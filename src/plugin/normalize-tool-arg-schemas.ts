@@ -1,4 +1,4 @@
-import { tool, type ToolDefinition } from "@opencode-ai/plugin";
+import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 
 type ToolArgSchema = ToolDefinition["args"][string];
 

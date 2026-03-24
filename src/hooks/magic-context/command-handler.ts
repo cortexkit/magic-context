@@ -1,15 +1,14 @@
 import type { Database } from "bun:sqlite";
-import type { DreamerConfig } from "../../config/schema/magic-context";
-import type { SidekickConfig } from "../../config/schema/magic-context";
+import type { DreamerConfig, SidekickConfig } from "../../config/schema/magic-context";
 import {
+    type DreamRunResult,
     enqueueDream,
     ensureDreamQueueTable,
     processDreamQueue,
-    type DreamRunResult,
 } from "../../features/magic-context/dreamer";
-import { sessionLog } from "../../shared";
 import { runSidekick } from "../../features/magic-context/sidekick/agent";
 import type { PluginContext } from "../../plugin/types";
+import { sessionLog } from "../../shared";
 import { executeFlush } from "./execute-flush";
 import { executeStatus } from "./execute-status";
 import type { NotificationParams } from "./send-session-notification";

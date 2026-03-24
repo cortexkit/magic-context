@@ -1,5 +1,5 @@
-import { log } from "../../../shared/logger";
 import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "../../../config/schema/magic-context";
+import { log } from "../../../shared/logger";
 import type { EmbeddingProvider } from "./embedding-provider";
 
 type EmbeddingPipelineResult = {

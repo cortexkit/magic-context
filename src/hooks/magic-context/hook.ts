@@ -5,13 +5,13 @@ import {
     type DreamerConfig,
     type SidekickConfig,
 } from "../../config/schema/magic-context";
+import type { createCompactionHandler } from "../../features/magic-context/compaction";
 import {
     checkScheduleAndEnqueue,
     ensureDreamQueueTable,
     processDreamQueue,
     registerDreamProjectDirectory,
 } from "../../features/magic-context/dreamer";
-import type { createCompactionHandler } from "../../features/magic-context/compaction";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import {

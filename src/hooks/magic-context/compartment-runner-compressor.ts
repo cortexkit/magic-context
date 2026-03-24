@@ -1,19 +1,19 @@
 import type { Database } from "bun:sqlite";
+import { DEFAULT_HISTORIAN_TIMEOUT_MS } from "../../config/schema/magic-context";
 import type { Compartment } from "../../features/magic-context/compartment-storage";
 import {
     getCompartments,
     getSessionFacts,
     replaceAllCompartmentState,
 } from "../../features/magic-context/compartment-storage";
-import { sessionLog } from "../../shared/logger";
-import { getErrorMessage } from "../../shared/error-message";
-import { buildCompressorPrompt, COMPRESSOR_AGENT_SYSTEM_PROMPT } from "./compartment-prompt";
-import { parseCompartmentOutput } from "./compartment-parser";
-import { estimateTokens } from "./read-session-formatting";
 import type { PluginContext } from "../../plugin/types";
 import { normalizeSDKResponse, promptSyncWithModelSuggestionRetry } from "../../shared";
+import { getErrorMessage } from "../../shared/error-message";
+import { sessionLog } from "../../shared/logger";
 import { extractLatestAssistantText } from "../../tools/look-at/assistant-message-extractor";
-import { DEFAULT_HISTORIAN_TIMEOUT_MS } from "../../config/schema/magic-context";
+import { parseCompartmentOutput } from "./compartment-parser";
+import { buildCompressorPrompt, COMPRESSOR_AGENT_SYSTEM_PROMPT } from "./compartment-prompt";
+import { estimateTokens } from "./read-session-formatting";
 
 const HISTORIAN_AGENT = "historian";
 

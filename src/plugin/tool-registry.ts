@@ -1,6 +1,6 @@
 import type { ToolDefinition } from "@opencode-ai/plugin";
-import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "../config/schema/magic-context";
 import type { MagicContextPluginConfig } from "../config";
+import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "../config/schema/magic-context";
 import { DEFAULT_PROTECTED_TAGS } from "../features/magic-context/defaults";
 import {
     clearEmbeddingsForProject,
@@ -55,7 +55,9 @@ export function createToolRegistry(args: {
         const storedModelId = getStoredModelId(db, projectPath);
         const hasEmbeddings =
             (db
-                .prepare("SELECT 1 FROM memory_embeddings WHERE project_path = ? LIMIT 1")
+                .prepare(
+                    "SELECT 1 FROM memory_embeddings me JOIN memories m ON me.memory_id = m.id WHERE m.project_path = ? LIMIT 1",
+                )
                 .get(projectPath) as { 1: number } | null) !== null;
 
         if (hasEmbeddings && storedModelId !== currentModelId) {

@@ -1,3 +1,5 @@
+import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
+import { removeSystemReminders } from "../../shared/system-directive";
 import { getRawSessionMessageCountFromDb, withReadOnlySessionDb } from "./read-session-db";
 import {
     type ChunkBlock,
@@ -13,8 +15,6 @@ import {
 } from "./read-session-formatting";
 import { type RawMessage, readRawSessionMessagesFromDb } from "./read-session-raw";
 import { isFilePart, isTextPart, isToolPartWithOutput } from "./tag-part-guards";
-import { removeSystemReminders } from "../../shared/system-directive";
-import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
 
 /** Strip system-reminder blocks and OMO markers from user text for chunk compaction. */
 function cleanUserText(text: string): string {

@@ -1,32 +1,30 @@
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import { DREAMER_AGENT } from "../../agents/dreamer";
 import {
+    archiveMemory,
+    CATEGORY_PRIORITY,
     ensureMemoryEmbeddings,
-    getMemoryByHash,
     getMemoriesByProject,
+    getMemoryByHash,
+    getMemoryById,
+    insertMemory,
     loadAllEmbeddings,
+    type Memory,
+    type MemoryCategory,
+    mergeMemoryStats,
+    saveEmbedding,
     searchMemoriesFTS,
+    supersededMemory,
+    updateMemoryContent,
     updateMemoryRetrievalCount,
     updateMemorySeenCount,
 } from "../../features/magic-context/memory";
-import {
-    archiveMemory,
-    CATEGORY_PRIORITY,
-    getMemoryById,
-    mergeMemoryStats,
-    insertMemory,
-    supersededMemory,
-    type Memory,
-    type MemoryCategory,
-    saveEmbedding,
-    updateMemoryContent,
-} from "../../features/magic-context/memory";
+import { cosineSimilarity } from "../../features/magic-context/memory/cosine-similarity";
 import {
     embedText,
     getEmbeddingModelId,
     isEmbeddingEnabled,
 } from "../../features/magic-context/memory/embedding";
-import { cosineSimilarity } from "../../features/magic-context/memory/cosine-similarity";
 import { computeNormalizedHash } from "../../features/magic-context/memory/normalize-hash";
 import { log } from "../../shared/logger";
 import { CTX_MEMORY_DESCRIPTION, CTX_MEMORY_TOOL_NAME, DEFAULT_SEARCH_LIMIT } from "./constants";

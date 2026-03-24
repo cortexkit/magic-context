@@ -8,6 +8,7 @@ import { parseCacheTtl } from "../../features/magic-context/scheduler";
 import { getPendingOps } from "../../features/magic-context/storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta";
 import { getTagsBySession } from "../../features/magic-context/storage-tags";
+import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
 import {
     getProactiveCompartmentTriggerPercentage,
@@ -15,7 +16,6 @@ import {
 } from "./compartment-trigger";
 import { resolveExecuteThreshold } from "./event-resolvers";
 import { formatBytes } from "./format-bytes";
-import { getErrorMessage } from "../../shared/error-message";
 import {
     formatRollingNudgeBand,
     getRollingNudgeBand,

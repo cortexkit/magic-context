@@ -5,8 +5,8 @@ import {
     removePendingOp,
     updateTagStatus,
 } from "../../features/magic-context/storage";
-import { sessionLog } from "../../shared/logger";
 import { getErrorMessage } from "../../shared/error-message";
+import { sessionLog } from "../../shared/logger";
 
 export function executeFlush(db: Database, sessionId: string): string {
     try {

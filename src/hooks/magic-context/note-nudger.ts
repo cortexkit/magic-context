@@ -13,8 +13,8 @@
  * It does NOT include note content — just a count and "use ctx_note read" hint.
  */
 
-import { getSessionNotes } from "../../features/magic-context/storage-notes";
 import type { Database } from "bun:sqlite";
+import { getSessionNotes } from "../../features/magic-context/storage-notes";
 
 export type NoteNudgeTrigger = "historian_complete" | "commit_detected" | "todos_complete";
 
