@@ -1,74 +1,98 @@
 # Technology Stack
 
-**Analysis Date:** 2026-03-23
+**Analysis Date:** 2026-03-25
 
 ## Languages
 
 **Primary:**
-- TypeScript 5.8+ — All source code in `src/**/*.ts`
+- TypeScript 5.8+ — all source code in `src/`, targeting ESNext with strict mode enabled
 
 **Secondary:**
-- JavaScript (.mjs) — Scripts in `scripts/**/*.mjs`
+- JavaScript (`.mjs`) — build utility scripts in `scripts/` (e.g., `scripts/version-sync.mjs`)
 
 ## Runtime
 
 **Environment:**
-- Bun 1.3.11 — Primary runtime, bundler, and test runner
-- Node.js 22.19.0 — Available in environment; Bun is the development target
+- Bun ≥ 1.0 (current dev installation: 1.3.11)
+- No Node.js engine constraint declared; Bun is the required runtime
+- ESM-only package (`"type": "module"` in `package.json`)
 
 **Package Manager:**
-- Bun
-- Lockfile: `bun.lock` (present, gitignored — not committed)
+- Bun (lockfile: `bun.lock` — committed)
 
 ## Frameworks
 
 **Core:**
-- `@opencode-ai/plugin` ^1.2.26 — Plugin host interface; defines the `Plugin` type and `ToolDefinition` API that the entire codebase is built around
+- `@opencode-ai/plugin` ^1.2.26 — OpenCode plugin SDK; defines the `Plugin` type, `ToolDefinition`, event hooks, and the agent config injection APIs
+- `@opencode-ai/sdk` (transitive, imported via type-only imports) — provides `Message`, `Part`, `Event`, `AgentConfig` types used throughout the plugin
+
+**Build:**
+- Bun's native bundler (`bun build`) — bundles `src/index.ts` to `dist/` targeting Bun, ESM format
+- TypeScript compiler (`tsc`) — used only for declaration emit (`--emitDeclarationOnly`); no transpilation
+- Two tsconfig files: `tsconfig.json` (src, declaration-only) and `tsconfig.scripts.json` (scripts dir)
 
 **Testing:**
-- `bun:test` (built-in) — Bun's native test runner; no additional test framework needed
+- Bun's built-in test runner (`bun test`) — test files follow `*.test.ts` naming, co-located with source
 
-**Build/Dev:**
-- `bun build` — Bundles `src/index.ts` to `dist/` targeting `bun` runtime with ESM format
-- `tsc` (TypeScript 5.8+) — Emits type declarations only (`--emitDeclarationOnly`); not used for JS transpilation
-- Biome 2.4.7 — Unified linter + formatter (replaces ESLint + Prettier)
+**Linting / Formatting:**
+- Biome 2.4.7 (`@biomejs/biome`) — single tool for both lint and format
+- Config: `biome.json`
 
 ## Key Dependencies
 
 **Critical:**
-- `@opencode-ai/plugin` ^1.2.26 — Host plugin API; defines how hooks, tools, events, and message transforms are registered with OpenCode
-- `@opencode-ai/sdk` (peer/indirect via types) — OpenCode SDK for `createOpencodeClient`, `Event`, `Message`, `Part`, `AgentConfig` types
-- `@huggingface/transformers` ^3.5.1 — Local ML inference (WASM-based); used for running the `Xenova/all-MiniLM-L6-v2` sentence embedding model in-process. Declared as external in the build to avoid bundling
-- `zod` ^4.1.8 — Schema validation and config parsing throughout `src/config/`
-- `ai-tokenizer` ^1.0.6 — Token counting for context budget calculations
+- `@opencode-ai/plugin` ^1.2.26 — the entire plugin surface area (tools, hooks, events, config injection) is built on this SDK; breaking changes here would require significant rework
+- `@huggingface/transformers` ^3.5.1 — runs local ML inference for semantic embeddings (`Xenova/all-MiniLM-L6-v2`); loaded dynamically and marked `--external` in the build (not bundled)
+- `zod` ^4.1.8 — schema validation for all config parsing (`src/config/schema/`), runtime type coercion and defaults
+- `ai-tokenizer` ^1.0.6 — token counting for context budget calculations (nudge thresholds, compartment budgets)
 
 **Infrastructure:**
-- `bun:sqlite` (built-in) — Bun native SQLite binding for all persistent storage; no ORM
+- `bun:sqlite` (built-in Bun API) — SQLite database accessed via Bun's native binding; no external SQLite npm package needed
+- `node:fs`, `node:path`, `node:os` — standard Node-compatible APIs used for filesystem paths and home directory resolution
 
 ## Configuration
 
 **Environment:**
-- No `.env` file in use — the plugin is configured via `magic-context.jsonc` at project root, `.opencode/magic-context.jsonc`, or `~/.config/opencode/magic-context.jsonc`
-- Plugin config is loaded at startup by `src/config/index.ts` via `loadPluginConfig(ctx.directory)`
-- Optional env-style values (embedding API key, sidekick API key) are set in `magic-context.jsonc`, not environment variables
+- No `.env` file required by the plugin itself — all user-facing config is in `magic-context.jsonc`
+- Config is loaded from three locations in priority order:
+  1. `<project-root>/magic-context.jsonc`
+  2. `<project-root>/.opencode/magic-context.jsonc`
+  3. `~/.config/opencode/magic-context.jsonc`
+- Parsed with a custom JSONC parser (`src/shared/jsonc-parser.ts`) that strips comments
+- Validated and defaulted with Zod in `src/config/schema/magic-context.ts`
 
 **Build:**
-- `tsconfig.json` — Main TS config; targets ESNext, moduleResolution bundler, emits declarations only to `dist/`
-- `tsconfig.scripts.json` — Extends main config; adds `scripts/` to include, no emit
-- `biome.json` — Linter + formatter config (4-space indent, 100 char line width, double quotes, trailing commas, semicolons always)
+- `tsconfig.json` — `rootDir: src`, `outDir: dist`, `lib: ES2022`, `moduleResolution: bundler`
+- `tsconfig.scripts.json` — covers `scripts/` directory separately
+- Build output is `dist/index.js` (ESM bundle) + `dist/index.d.ts` (declarations)
+- External dependencies excluded from bundle: `@huggingface/transformers`, `@opencode-ai/plugin`
 
 ## Platform Requirements
 
 **Development:**
-- Bun 1.3.x or later
-- macOS/Linux (path handling uses `node:os`, `node:path`)
+- Bun ≥ 1.0 (required for `bun:sqlite`, native bundler, test runner)
+- No browser support — server/agent runtime only
 
 **Production:**
-- Published to npm as `@cortexkit/magic-context-opencode`
-- Consumed as a plugin by OpenCode (`@opencode-ai/plugin` host)
-- Distributed from `dist/` (ESM, with `.d.ts` type declarations)
-- `@huggingface/transformers` is an external peer dep (not bundled) — consumers must install it separately if using local embeddings
+- Deployed as an npm package (`@cortexkit/magic-context-opencode`)
+- Consumed by OpenCode as a plugin; OpenCode must be running on a Bun-compatible runtime
+- SQLite database stored locally at `~/.local/share/opencode/storage/plugin/magic-context/context.db`
+- Respects `XDG_DATA_HOME` for alternative storage locations
+
+## Biome Configuration Summary (`biome.json`)
+
+- Indent: 4 spaces
+- Line width: 100
+- Quotes: double
+- Trailing commas: all
+- Semicolons: always
+- `noNonNullAssertion`: warn (off in tests)
+- `noExplicitAny`: warn (off in tests)
+- `useConst`: error
+- `noForEach`: off
+- VCS integration enabled (respects `.gitignore`)
+- Files covered: `src/**/*.ts`, `scripts/**/*.mjs`
 
 ---
 
-*Stack analysis: 2026-03-23*
+*Stack analysis: 2026-03-25*

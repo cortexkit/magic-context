@@ -1,211 +1,210 @@
 # Architecture
 
-**Analysis Date:** 2026-03-23
+**Analysis Date:** 2026-03-25
 
 ## Pattern Overview
 
-**Overall:** OpenCode Plugin — Event-driven Hook Pipeline with SQLite-backed State Machine
+**Overall:** Plugin-driven orchestration. `src/index.ts` exports a single `Plugin` factory that wires all subsystems — hooks, tools, commands, and hidden agents — into OpenCode's plugin API (`@opencode-ai/plugin`).
 
 **Key Characteristics:**
-- The entire system is an OpenCode plugin registered via `@opencode-ai/plugin`; it intercepts and transforms LLM conversation messages on every turn
-- All mutable state is persisted in a single SQLite database (`context.db`); in-memory Maps supplement DB for hot-path reads and cross-hook coordination
-- The core design constraint is **LLM provider cache preservation**: mutations are queued and deferred until the cache prefix is provably stale (TTL expired or context threshold crossed)
-- Subagent (child) sessions run in **reduced mode** — full feature set is skipped; only tagging and structural cleanup run
-- Background historian agent runs as a child OpenCode session to summarize conversation history into compartments
-
----
+- Thin adapter layer in `src/plugin/` delegates all business logic to `src/hooks/magic-context/` and `src/features/magic-context/`.
+- SQLite-backed durable state (`src/features/magic-context/storage-db.ts`) stores tags, pending ops, compartments, memories, dream state, and per-session metadata.
+- Three hidden sub-agents (dreamer, historian, sidekick) are spawned as child sessions via the OpenCode `client.session` API; they are never exposed in the main conversation.
+- The plugin **self-disables** when OpenCode's built-in auto-compaction is active (detected in `src/shared/opencode-compaction-detector.ts`).
 
 ## Layers
 
-**Plugin Entry Layer:**
-- Purpose: Registers all OpenCode hooks and exposes tools; wires dependencies
-- Location: `src/index.ts`, `src/plugin/`
-- Contains: Plugin factory, tool registry, event adapter, session hook factory
-- Depends on: All inner layers
-- Used by: OpenCode runtime (external)
+**Plugin bootstrap:**
+- Purpose: Register the plugin, load config, wire agents, hooks, commands, and tools.
+- Location: `src/index.ts`
+- Contains: Plugin factory, config mutation, hidden agent registration, feature-flag guard.
+- Depends on: `src/config/index.ts`, `src/plugin/`, `src/features/builtin-commands/commands.ts`, `src/shared/model-requirements.ts`.
+- Used by: Build output `dist/index.js`, OpenCode plugin loader.
 
-**Hook Orchestration Layer:**
-- Purpose: Manages per-session state, composes the transform pipeline, and dispatches hook invocations
-- Location: `src/hooks/magic-context/hook.ts`, `src/hooks/magic-context/`
-- Contains: `createMagicContextHook()` factory, event handler, command handler, nudger, transform coordinator, system-prompt hash detector, text complete handler
-- Depends on: Feature layer, shared utilities
-- Used by: Plugin entry layer
+**Plugin adapters:**
+- Purpose: Keep OpenCode-facing hook wrappers minimal and delegate real work inward.
+- Location: `src/plugin/event.ts`, `src/plugin/messages-transform.ts`, `src/plugin/tool-registry.ts`, `src/plugin/hooks/create-session-hooks.ts`
+- Contains: Hook wrappers, tool registration, per-session hook construction, schema normalization.
+- Depends on: `src/hooks/magic-context/`, `src/tools/`, `src/features/magic-context/`.
+- Used by: `src/index.ts`.
 
-**Transform Pipeline Layer:**
-- Purpose: Rewrites the in-flight message array before it is sent to the LLM provider
-- Location: `src/hooks/magic-context/transform.ts`, `src/hooks/magic-context/transform-*.ts`
-- Contains: Phase 1 setup (`transform.ts`), Phase 2 post-process (`transform-postprocess-phase.ts`), compartment phase (`transform-compartment-phase.ts`), operations (`transform-operations.ts`)
-- Depends on: Feature layer (storage, scheduler, tagger), internal hook utilities
-- Used by: Hook orchestration layer
+**Magic-context runtime:**
+- Purpose: Execute the message-transform pipeline, lifecycle event handling, nudging, compartment management, command handling, and historian coordination.
+- Location: `src/hooks/magic-context/`
+- Contains: `hook.ts` (composition root), `transform.ts` (pipeline entry), `transform-postprocess-phase.ts` (mutation phase), `event-handler.ts`, `command-handler.ts`, compartment runners, nudger, note-nudger, send helpers.
+- Depends on: `src/features/magic-context/`, `src/shared/`, `src/agents/magic-context-prompt.ts`.
+- Used by: `src/plugin/hooks/create-session-hooks.ts`, `src/plugin/event.ts`.
 
-**Feature Layer:**
-- Purpose: Domain logic — scheduling, tagging, storage schemas, compartment summaries, memory system, dreamer, sidekick
+**Core feature services:**
+- Purpose: Encapsulate reusable, stateful services behind narrow APIs.
 - Location: `src/features/magic-context/`
-- Contains: `Tagger`, `Scheduler`, `ContextDatabase` (SQLite), compartment storage, notes storage, memory subsystem, dreamer subsystem, sidekick client
-- Depends on: Shared utilities, `bun:sqlite`
-- Used by: Hook orchestration layer, transform pipeline, tools layer
+- Contains: Storage access (storage.ts, storage-db.ts, storage-*.ts), tagger, scheduler, compaction handler, memory system (`memory/`), dreamer queue/runner/scheduler/lease (`dreamer/`), sidekick runner (`sidekick/`), built-in command definitions (`builtin-commands/`).
+- Depends on: `src/shared/`, `bun:sqlite`.
+- Used by: `src/hooks/magic-context/`, `src/plugin/tool-registry.ts`, `src/index.ts`.
 
-**Tools Layer:**
-- Purpose: Agent-callable tools exposed to the LLM; each tool writes to the DB and returns structured text
-- Location: `src/tools/`
-- Contains: `ctx_reduce`, `ctx_expand`, `ctx_note`, `ctx_recall`, `ctx_memory`, `look-at`
-- Depends on: Feature layer (storage, range-parser, memory)
-- Used by: Plugin entry layer (via tool registry); invoked by LLM at runtime
+**Tool surface:**
+- Purpose: Expose agent-facing tools with validated argument schemas and storage-backed execution.
+- Location: `src/tools/ctx-reduce/`, `src/tools/ctx-expand/`, `src/tools/ctx-note/`, `src/tools/ctx-memory/`, `src/tools/look-at/`
+- Contains: Tool definitions using `@opencode-ai/plugin`'s `tool()` helper, argument schemas, action gating, user-facing result formatting.
+- Depends on: `src/features/magic-context/`, `src/hooks/magic-context/read-session-chunk.ts`.
+- Used by: `src/plugin/tool-registry.ts`.
 
-**Config Layer:**
-- Purpose: Load and validate plugin configuration from JSONC files; merge user-global and project-level configs
-- Location: `src/config/`
-- Contains: `loadPluginConfig()`, `MagicContextConfigSchema` (Zod), agent-override schema
-- Depends on: `zod`, shared JSONC parser
-- Used by: Plugin entry layer at initialization
-
-**Shared Utilities Layer:**
-- Purpose: Cross-cutting helpers with no domain dependencies
-- Location: `src/shared/`
-- Contains: Logger, error message formatter, data-path resolver, model suggestion retry, system directive, OpenCode config dir helpers, JSONC parser
-
-**Agents Layer:**
-- Purpose: Define agent-facing constants and prompts
-- Location: `src/agents/`
-- Contains: `HISTORIAN_AGENT` constant (`historian.ts`), `COMPARTMENT_AGENT_SYSTEM_PROMPT` (`magic-context-prompt.ts`)
-
----
+**Configuration and shared utilities:**
+- Purpose: Centralize config parsing, defaults, path resolution, logging, and SDK normalization.
+- Location: `src/config/`, `src/shared/`
+- Contains: Zod schemas (`src/config/schema/magic-context.ts`), config merging (`src/config/index.ts`), data-path helpers, buffered file logger, JSONC parsing, model helpers, SDK response normalization.
+- Depends on: Node built-ins, Zod.
+- Used by: All other layers.
 
 ## Data Flow
 
-**Per-Turn Message Transform Flow:**
+### Plugin Startup
 
-1. OpenCode calls `experimental.chat.messages.transform` with `{ messages: unknown[] }`
-2. `createMessagesTransformHandler` delegates to `createTransform` (in `hook.ts`)
-3. **Phase 1** (`transform.ts`):
-   - Find `sessionId` from message metadata
-   - Load `sessionMeta` from SQLite (fail-open: skip on error)
-   - Determine full vs. reduced mode (`isSubagent`)
-   - Prepare compartment injection (read DB: compartments, facts, notes, memories)
-   - Tag all messages via `Tagger` (assign `§N§` identifiers, write `tags` table)
-   - Apply flushed statuses (drops already committed)
-   - Strip structural noise (empty parts, orphaned tool results)
-   - Strip cleared reasoning blocks
-   - Compute watermark (highest dropped tag number)
-   - Load context usage from in-memory map
-   - Ask Scheduler: `"execute"` or `"defer"`
-   - Run compartment phase (may start historian sub-agent, or await it if ≥95% usage)
-4. **Phase 2** (`transform-postprocess-phase.ts`):
-   - Apply pending operations (if scheduler says execute or explicit flush)
-   - Apply heuristic cleanup (auto-drop old tools, deduplicate, strip images/reasoning)
-   - Watermark cleanup
-   - Batch finalize (single SQLite transaction for all DB writes)
-   - Drop stale `ctx_reduce` calls
-   - Render compartment injection (splice `<session-history>` synthetic message)
-   - Strip dropped placeholder messages
-   - Handle sticky turn reminders
-   - Compute and apply nudge (cache-anchored)
+1. `src/index.ts` calls `loadPluginConfig(ctx.directory)` — merges user-level config (`~/.config/opencode/magic-context.jsonc`), project-root config (`magic-context.jsonc`), and `.opencode/magic-context.*`.
+2. Calls `isOpenCodeAutoCompactionEnabled()` — if OpenCode's own compaction is on, `pluginConfig.enabled` is forced to `false`.
+3. `createSessionHooks()` in `src/plugin/hooks/create-session-hooks.ts` builds the `Tagger`, `Scheduler`, and `CompactionHandler`, then calls `createMagicContextHook()` which opens the SQLite database and returns all hook handlers (or `null` if storage is unavailable).
+4. `createToolRegistry()` in `src/plugin/tool-registry.ts` independently opens the same SQLite database, resolves project identity, initializes embeddings, and returns gated tool definitions.
+5. `src/index.ts` returns the assembled plugin object containing `tool`, `event`, `config`, and all hook handler keys.
+6. The `config` hook mutates the OpenCode config to inject hidden agent definitions (dreamer, historian, sidekick) and built-in slash commands.
 
-**Agent `ctx_reduce` Drop Flow:**
+### Session Message-Transform Pipeline
 
-1. LLM calls `ctx_reduce(drop="3-5,12")`
-2. `ctx_reduce` tool handler (`src/tools/ctx-reduce/tools.ts`): parses ranges, validates tag IDs, inserts rows into `pending_ops` table
-3. `tool.execute.after` hook: updates `recentReduceBySession` timestamp (suppresses nudges)
-4. On next transform: scheduler decides execute/defer; if execute → `applyPendingOperations()` applies drops
+1. OpenCode calls `experimental.chat.messages.transform` → `src/plugin/messages-transform.ts` → `createTransform()` in `src/hooks/magic-context/transform.ts`.
+2. `createTransform()` extracts the session ID from the message array and reads `SessionMeta` from SQLite.
+3. `tagMessages()` in `src/hooks/magic-context/transform-operations.ts` assigns incremental `§N§` tag numbers to untagged messages and writes them to the `tags` table.
+4. `getTagsBySession()` loads the current tag state; `applyFlushedStatuses()` applies any pending `ctx-flush` op.
+5. `stripStructuralNoise()` and `stripClearedReasoning()` prune rendering artifacts from the message array.
+6. `runCompartmentPhase()` in `src/hooks/magic-context/transform-compartment-phase.ts` decides whether to start/await a historian agent run (injecting `<compartment>` blocks into the session history).
+7. `runPostTransformPhase()` in `src/hooks/magic-context/transform-postprocess-phase.ts` applies pending drop/compact operations, heuristic cleanup, nudge placement, and memory injection.
 
-**Historian (Compartment Summarization) Flow:**
+### Event Lifecycle
 
-1. `checkCompartmentTrigger` fires in event handler on `message.updated` events
-2. If triggered: `compartmentInProgress` set to true in `session_meta`
-3. `runCompartmentPhase` (in transform): reads raw history chunk, starts historian as child OpenCode session
-4. Historian agent runs, produces XML compartments/facts/notes
-5. `compartment-runner.ts`: parses output, calls `replaceAllCompartmentState()` atomically
-6. Qualifying facts promoted to `memories` table via `promoteSessionFactsToMemory()`
-7. Next transform: `prepareCompartmentInjection` reads new state, `renderCompartmentInjection` splices `<session-history>` block
+1. OpenCode emits `session.created`, `session.deleted`, `message.updated`, and `assistant.message.completed` events.
+2. `src/plugin/event.ts` forwards them to `createEventHandler()` in `src/hooks/magic-context/event-handler.ts`.
+3. `session.created` writes initial `SessionMeta` (subagent flag, cache TTL, model key).
+4. `session.deleted` clears tags and session state from SQLite.
+5. `message.updated` records context usage (token counts, percentage), checks compaction state, and evaluates whether a historian compartment run should start. After event handling, `runDreamQueueInBackground()` checks the dreamer schedule.
+6. `assistant.message.completed` records the last-response time.
 
-**Cross-Session Memory Flow:**
+### Memory and Search Flow
 
-1. Memories written to `memories` table (by historian promotion or explicit `ctx_memory` tool call)
-2. Local embeddings computed via `@huggingface/transformers` or OpenAI embedding API
-3. `ctx_recall` tool: performs FTS + cosine similarity search, returns ranked results
-4. Memory block injected into `<session-history>` via `prepareCompartmentInjection` (cached in `session_meta.memoryBlockCache` between historian runs)
+1. Agent calls `ctx_memory` tool in `src/tools/ctx-memory/tools.ts` with `action` = `write`, `delete`, `search`, `list`, `update`, `merge`, or `archive`.
+2. Write operations hash content with `computeNormalizedHash()`, UPSERT into the `memories` SQLite table, and trigger FTS sync via SQL triggers defined in `src/features/magic-context/storage-db.ts`.
+3. If embedding is enabled, `embedText()` in `src/features/magic-context/memory/embedding.ts` generates a vector (local via `@huggingface/transformers`, or OpenAI API), stored in `memory_embeddings`.
+4. Search merges BM25 FTS scores from `searchMemoriesFTS()` and cosine similarity from `loadAllEmbeddings()` + `cosineSimilarity()` with configurable weights (70% semantic, 30% FTS).
+5. Active memories are injected into the session history as a `<project-memory>` XML block by `renderMemoryBlock()` in `src/hooks/magic-context/inject-compartments.ts`.
 
-**State Management:**
-- SQLite (`context.db`): Tags, pending ops, compartments, session facts, session notes, memories, memory embeddings, dream state, session meta
-- In-memory Maps (hook closure): `contextUsageMap`, `liveModelBySession`, `variantBySession`, `recentReduceBySession`, `toolUsageSinceUserTurn`, `emergencyNudgeFired`, `flushedSessions`, `lastHeuristicsTurnId`
+### Dreamer Background Flow
 
----
+1. Each `message.updated` event calls `runDreamQueueInBackground()` in `src/hooks/magic-context/hook.ts`, which checks the cron-style schedule at most once per hour.
+2. `checkScheduleAndEnqueue()` in `src/features/magic-context/dreamer/scheduler.ts` adds a `dream_queue` entry if the schedule fires.
+3. `processDreamQueue()` in `src/features/magic-context/dreamer/runner.ts` dequeues the entry, acquires a cooperative SQLite lease (`src/features/magic-context/dreamer/lease.ts`), then iterates over configured `tasks`.
+4. Each task creates a child OpenCode session (`client.session.create`), sends a task prompt to the `dreamer` hidden agent, waits for completion, extracts the assistant response, then deletes the child session.
+5. On completion `setDreamState(db, "last_dream_at", ...)` records the timestamp.
+
+### Command Augmentation Flow
+
+1. OpenCode calls `command.execute.before` with the command name.
+2. `src/plugin/messages-transform.ts` delegates to `createMagicContextCommandHandler()` in `src/hooks/magic-context/command-handler.ts`.
+3. `/ctx-status` → `executeStatus()` returns a markdown status report.
+4. `/ctx-flush` → `executeFlush()` marks the session as flushed.
+5. `/ctx-recomp` → `executeContextRecomp()` runs the historian synchronously.
+6. `/ctx-aug` → `runSidekick()` spawns a child session, searches memories, and re-injects the augmented prompt as a real user message.
+7. `/ctx-dream` → `enqueueDream()` then `processDreamQueue()`.
+8. All handlers throw a sentinel error prefixed with `__CONTEXT_MANAGEMENT_` to stop OpenCode's default command fallthrough.
 
 ## Key Abstractions
 
-**Tagger (`src/features/magic-context/tagger.ts`):**
-- Purpose: Assigns and tracks monotonically increasing `§N§` tag numbers per session
-- Maintains per-session counters and messageId→tagNumber assignment maps in memory; persists to `tags` table in SQLite
-- Pattern: Factory function returning a `Tagger` interface; shared singleton across all sessions
+**Magic Context hook (`createMagicContextHook`):**
+- Purpose: Own all per-instance runtime state (in-memory maps, db handle, sub-handlers) and return the full hook handler object.
+- Location: `src/hooks/magic-context/hook.ts`
+- Pattern: Composition root; returns `null` on storage failure (fail-closed).
 
-**Scheduler (`src/features/magic-context/scheduler.ts`):**
-- Purpose: Decides each turn whether to execute queued drop operations ("execute") or hold them ("defer")
-- Pattern: Interface with single `shouldExecute()` method; decision based on context usage percentage vs. threshold AND elapsed time vs. cache TTL
+**Tool registry (`createToolRegistry`):**
+- Purpose: Gate tool availability by `pluginConfig.enabled` and storage readiness; expose `ctx_reduce`, `ctx_expand`, `ctx_note`, and optionally `ctx_memory`.
+- Location: `src/plugin/tool-registry.ts`
+- Pattern: Registry builder with conditional feature exposure and schema normalization.
 
-**ContextDatabase (`src/features/magic-context/storage-db.ts`):**
-- Purpose: Single SQLite database handle; opened once at plugin init, shared across all hook callbacks
-- Path: `~/.local/share/opencode/storage/plugin/magic-context/context.db`
-- Pattern: Module-level Map cache keyed by DB path; falls back to `:memory:` if disk unavailable (disables plugin)
+**SQLite database (`openDatabase`):**
+- Purpose: Single shared `context.db` opened under `~/.local/share/opencode/storage/plugin/magic-context/context.db` with WAL mode and a 5s busy timeout.
+- Location: `src/features/magic-context/storage-db.ts`
+- Pattern: Module-level singleton map (`Map<string, Database>`); falls back to `:memory:` on filesystem error, tracked via `WeakMap<Database, boolean>`.
+- Tables: `tags`, `pending_ops`, `source_contents`, `compartments`, `recomp_compartments`, `recomp_facts`, `session_facts`, `session_notes`, `memories`, `memory_embeddings`, `dream_state`, `session_meta`, `memories_fts` (virtual FTS5).
 
-**NudgePlacementStore (`src/hooks/magic-context/nudge-placement-store.ts`):**
-- Purpose: Tracks which assistant message carries the nudge text (the "anchor") to prevent cache-busting re-placement
-- Pattern: Hybrid in-memory + DB store; reads from memory first, writes to both
+**Tagger (`createTagger`):**
+- Purpose: Assign monotonically increasing `§N§` tag numbers to messages per session, backed by the `tags` table and `session_meta.counter`.
+- Location: `src/features/magic-context/tagger.ts`
+- Pattern: Stateful object initialized from SQLite on each transform call.
 
-**PreparedCompartmentInjection:**
-- Purpose: Immutable snapshot of all compartment/fact/note/memory data, prepared in Phase 1 before mutations, rendered in Phase 2 after mutations
-- Pattern: Two-phase commit — prepare early, render late
+**Scheduler (`createScheduler`):**
+- Purpose: Decide whether to run pending ops based on context usage percentage vs. the configured `execute_threshold_percentage`.
+- Location: `src/features/magic-context/scheduler.ts`
+- Pattern: Pure decision function; no side effects.
 
-**EmbeddingProvider (`src/features/magic-context/memory/embedding-provider.ts`):**
-- Purpose: Interface for generating vector embeddings from text
-- Implementations: `embedding-local.ts` (HuggingFace Transformers, local WASM), `embedding-openai.ts` (OpenAI API)
-- Pattern: Strategy interface selected at initialization
+**Compartment runner:**
+- Purpose: Spawn the historian hidden agent to compress old session history into `<compartment>` summaries stored in SQLite.
+- Location: `src/hooks/magic-context/compartment-runner.ts`, `compartment-runner-incremental.ts`, `compartment-runner-recomp.ts`
+- Pattern: In-flight promise registry (`Map<string, Promise<void>>`) ensures only one historian run per session at a time.
 
----
+**Memory store:**
+- Purpose: Project-scoped durable knowledge store with FTS and optional vector search.
+- Location: `src/features/magic-context/memory/storage-memory.ts`, `storage-memory-fts.ts`, `storage-memory-embeddings.ts`
+- Pattern: SQLite repository with FTS5 triggers and `cosine-similarity.ts` for vector re-ranking.
+
+**Dream queue and lease:**
+- Purpose: Run at most one dreamer worker at a time with restart-safe cooperative lease lock.
+- Location: `src/features/magic-context/dreamer/queue.ts`, `lease.ts`, `storage-dream-state.ts`
+- Pattern: SQLite-backed FIFO queue plus expiring lease in `dream_state`.
+
+**Hidden agents:**
+- Purpose: Isolated agent identities; prompts are separate from wiring.
+- Location: `src/agents/dreamer.ts`, `src/agents/historian.ts`, `src/agents/sidekick.ts`, `src/agents/magic-context-prompt.ts`
+- Pattern: Named string constants plus prompt builder functions; registered via the `config` hook at startup.
 
 ## Entry Points
 
-**Plugin Entry (`src/index.ts`):**
-- Triggers: OpenCode loads `dist/index.js` as plugin
-- Responsibilities: Load config, detect auto-compaction conflict, initialize session hooks + tool registry, register all OpenCode hook slots
+**Plugin entry:**
+- Location: `src/index.ts`
+- Triggers: OpenCode loads the package listed in `package.json` `"main"` (`dist/index.js`).
+- Responsibilities: Load config, self-disable when OpenCode auto-compaction is active, build session hooks and tool registry, return the plugin object with all handler keys.
 
-**Messages Transform (`src/plugin/messages-transform.ts`):**
-- Triggers: Every LLM turn before messages are sent to provider
-- Responsibilities: Delegate to `createTransform` (full pipeline)
+**Message-transform entry:**
+- Location: `src/plugin/messages-transform.ts`
+- Triggers: `experimental.chat.messages.transform` on every model call.
+- Responsibilities: Delegate the mutable message array to the magic-context transform pipeline.
 
-**Event Handler (`src/plugin/event.ts` → `src/hooks/magic-context/event-handler.ts`):**
-- Triggers: `session.created`, `message.updated`, `session.compacted`, `session.deleted`
-- Responsibilities: Track context usage, fire compartment triggers, manage session lifecycle state
+**Event entry:**
+- Location: `src/plugin/event.ts`
+- Triggers: OpenCode `event` hook for session and message lifecycle events.
+- Responsibilities: Forward all events to the magic-context runtime event handler.
 
-**Command Handler (`src/hooks/magic-context/command-handler.ts`):**
-- Triggers: User runs `/ctx-status`, `/ctx-flush`, `/ctx-recomp`, `/ctx-aug`
-- Responsibilities: Status display, force-flush pending ops, trigger recompaction, run sidekick augmentation
+**Tool entry:**
+- Location: `src/plugin/tool-registry.ts`
+- Triggers: Plugin initialization.
+- Responsibilities: Open storage, normalize argument schemas, expose the conditional tool set.
 
----
+**System-prompt entry:**
+- Location: `src/hooks/magic-context/system-prompt-hash.ts`
+- Triggers: `experimental.chat.system.transform` on every model call.
+- Responsibilities: Detect system-prompt changes that invalidate the nudge anchor.
 
 ## Error Handling
 
-**Strategy:** Fail-open for transform pipeline (errors in session meta load → skip transform entirely rather than block chat); fail-closed for storage init (non-persistent DB → disable plugin and show toast)
-
-**Patterns:**
-- `try/catch` with `log()` for non-critical transform steps; pipeline continues without the failing step
-- Storage layer disables itself if DB is non-persistent; `isDatabasePersisted()` checked at startup
-- `getErrorMessage()` utility (`src/shared/error-message.ts`) normalizes all error types to strings
-- Historian runs have configurable timeout (`historian_timeout_ms`); timeout cancels the historian session gracefully
-
----
+**Strategy:**
+- **Fail closed on storage unavailability:** `createMagicContextHook()` returns `null` and shows a TUI toast; `createToolRegistry()` returns `{}`. Both check `isDatabasePersisted()` before proceeding.
+- **Fail open inside per-turn handlers:** transform steps catch errors individually, log them, and skip the failing mutation rather than aborting the whole turn.
+- **Sentinel errors for command fallthrough:** `command-handler.ts` throws errors prefixed with `__CONTEXT_MANAGEMENT_` to prevent OpenCode from running its default command execution after magic-context handles a command.
 
 ## Cross-Cutting Concerns
 
-**Logging:** `src/shared/logger.ts` — `log()` function, delegates to `console.log`; all log lines prefixed with `[magic-context]`
+**Logging:** Buffered file logger at `src/shared/logger.ts`. Writes to `os.tmpdir()/magic-context.log` with 500ms flush interval; silenced in test environments (`NODE_ENV === "test"`).
 
-**Validation:** Zod schemas for all config inputs (`src/config/schema/magic-context.ts`); `parseRangeString` validates tag range inputs for `ctx_reduce`
+**Storage path:** SQLite database at `{XDG_DATA_HOME ?? ~/.local/share}/opencode/storage/plugin/magic-context/context.db`, resolved in `src/shared/data-path.ts`.
 
-**Authentication:** Not applicable — plugin runs as local process within OpenCode; OpenAI embedding API key is optional and user-configured
+**Config resolution order:** User config (`~/.config/opencode/magic-context.jsonc`) < project-root config (`{project}/magic-context.jsonc`) < `.opencode/` config (`{project}/.opencode/magic-context.*`). Project overrides user; `.opencode/` overrides project root.
 
-**Cache Preservation:** Architectural-level concern woven through all mutation decisions; scheduler, nudge anchoring, compartment injection, deferred writes all designed around LLM provider cache TTL semantics
-
-**Subagent Detection:** `isSubagent` flag set in `session_meta` on `session.created` event; used to gate full-feature-mode transforms
+**Sub-agent spawning:** Both dreamer (`src/features/magic-context/dreamer/runner.ts`) and sidekick (`src/features/magic-context/sidekick/agent.ts`) use `client.session.create` + `promptSyncWithModelSuggestionRetry` + `client.session.delete`. The historian compartment runner (`src/hooks/magic-context/compartment-runner-incremental.ts`) follows the same pattern.
 
 ---
 
-*Architecture analysis: 2026-03-23*
+*Architecture analysis: 2026-03-25*
