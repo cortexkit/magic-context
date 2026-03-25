@@ -24,4 +24,5 @@ tmp/
 .sisyphus/
 .opencode/
 local-ignore/
+.planning/
 
