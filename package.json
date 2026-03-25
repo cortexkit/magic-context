@@ -7,6 +7,16 @@
   "types": "dist/index.d.ts",
   "author": "ualtinok",
   "license": "MIT",
+  "keywords": [
+    "opencode",
+    "plugin",
+    "context",
+    "memory",
+    "ai",
+    "llm",
+    "prompt-caching",
+    "session-history"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/ualtinok/opencode-magic-context"

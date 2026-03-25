@@ -97,7 +97,7 @@ Check verifiable memories against actual repository state. Update stale wording,
 ### Verification examples
 - Memory: "compartment_token_budget defaults to 20000" → grep schema for \`compartment_token_budget\`, check \`.default(...)\`
 - Memory: "Durable state lives in ~/.local/share/opencode/storage/plugin/magic-context/context.db" → check storage-db.ts for the path construction
-- Memory: "ctx_recall is read-only search" → grep for ctx_recall tool definition — if removed, archive
+- Memory: "ctx_memory search combines semantic and FTS" → grep for ctx_memory tool definition, verify search action exists
 
 ### Success criteria
 - All CONFIG_DEFAULTS memories match actual schema defaults.

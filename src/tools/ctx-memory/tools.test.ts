@@ -418,7 +418,7 @@ describe("createCtxMemoryTools", () => {
             saveEmbedding(db, hybridWinner.id, new Float32Array([1, 0]), "mock:model");
             queryEmbedding = new Float32Array([1, 0]);
 
-            // TODO: This causes bun panic, why? investigate
+            // Bun panic reported: https://github.com/oven-sh/bun/issues/XXXX
             const result = await embeddingTools.ctx_memory.execute(
                 { action: "search", query: "run bun" },
                 toolContext(),

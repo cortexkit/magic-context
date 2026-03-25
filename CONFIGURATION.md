@@ -39,7 +39,7 @@ Higher-tier models with longer cache windows benefit from a longer TTL. Setting 
 |--------|------|---------|-------------|
 | `enabled` | `boolean` | `false` | Master toggle. |
 | `cache_ttl` | `string` or `object` | `"5m"` | Time after a response before applying pending ops. String or per-model map. |
-| `protected_tags` | `number` (1–20) | `5` | Last N active tags immune from immediate dropping. |
+| `protected_tags` | `number` (1–20) | `20` | Last N active tags immune from immediate dropping. |
 | `nudge_interval_tokens` | `number` | `10000` | Minimum token growth between rolling nudges. |
 | `execute_threshold_percentage` | `number` (35–95) or `object` | `65` | Context usage that forces queued ops to execute. Supports per-model map. |
 | `auto_drop_tool_age` | `number` | `100` | Auto-drop tool outputs older than N tags during execution. |
