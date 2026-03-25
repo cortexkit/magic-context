@@ -217,6 +217,11 @@ export function runPostTransformPhase(args: RunPostTransformPhaseArgs): void {
                 args.lastHeuristicsTurnId.set(args.sessionId, args.currentTurnId);
             }
         }
+        // After a TTL-based scheduler execute, reset lastResponseTime so
+        // subsequent transforms defer instead of re-executing every pass.
+        if (args.schedulerDecision === "execute" && !isExplicitFlush) {
+            updateSessionMeta(args.db, args.sessionId, { lastResponseTime: Date.now() });
+        }
         args.batch?.finalize();
         logTransformTiming(args.sessionId, "batchFinalize:heuristics", performance.now());
         if (args.sessionMeta.lastTransformError !== null) {

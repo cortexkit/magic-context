@@ -50,7 +50,7 @@ export function isSessionMetaRow(row: unknown): row is SessionMetaRow {
         typeof r.last_input_tokens === "number" &&
         typeof r.times_execute_threshold_reached === "number" &&
         typeof r.compartment_in_progress === "number" &&
-        typeof r.system_prompt_hash === "string"
+        (typeof r.system_prompt_hash === "string" || typeof r.system_prompt_hash === "number")
     );
 }
 
@@ -110,6 +110,6 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
         lastInputTokens: row.last_input_tokens,
         timesExecuteThresholdReached: row.times_execute_threshold_reached,
         compartmentInProgress: row.compartment_in_progress === 1,
-        systemPromptHash: row.system_prompt_hash,
+        systemPromptHash: String(row.system_prompt_hash),
     };
 }
