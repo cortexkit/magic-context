@@ -33,6 +33,7 @@ function getRootCommitHash(directory: string): string | undefined {
         const firstLine = hash.split("\n")[0]?.trim();
         return firstLine && firstLine.length >= 7 ? firstLine : undefined;
     } catch {
+        // Intentional: git may not be installed or directory may not be a repo — fall back to directory hash
         return undefined;
     }
 }

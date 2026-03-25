@@ -75,6 +75,7 @@ function readUserCompactionConfig(_directory: string): boolean | undefined {
 
         return hasCompactionConflict(config?.compaction);
     } catch {
+        // Intentional: config read is best-effort; missing/unreadable config is not an error
         return undefined;
     }
 }

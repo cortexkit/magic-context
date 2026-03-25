@@ -50,6 +50,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         }
 
         const rawMessageCount = getRawSessionMessageCount(sessionId);
+        // Intentional: session.get failure is non-fatal — we fall back to deps.directory
         const parentSessionResponse = await client.session
             .get({ path: { id: sessionId } })
             .catch(() => null);

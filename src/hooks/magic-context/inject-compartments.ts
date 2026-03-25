@@ -119,6 +119,9 @@ export function prepareCompartmentInjection(
     if (projectPath) {
         // Use cached memory block to avoid cache busting on background changes (ctx_memory write, promotion).
         // Cache is cleared by replaceAllCompartmentState after historian runs (which already bust cache).
+        // Audit note: `as` cast is safe here — session_meta schema is owned by this plugin and the two
+        // columns are guaranteed present after initializeDatabase(). A type guard would add overhead on a
+        // hot path (every transform) for a table we fully control.
         const cached = db
             .prepare(
                 "SELECT memory_block_cache, memory_block_count FROM session_meta WHERE session_id = ?",

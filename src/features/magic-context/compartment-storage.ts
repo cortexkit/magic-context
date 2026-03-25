@@ -112,6 +112,8 @@ function toSessionFact(row: SessionFactRow): SessionFact {
 
 export function getCompartments(db: Database, sessionId: string): Compartment[] {
     const rows = db
+        // Audit note: SELECT * is intentional — compartments table is owned by this plugin, columns are
+        // validated by isCompartmentRow(), and all columns are needed for rendering and validation.
         .prepare("SELECT * FROM compartments WHERE session_id = ? ORDER BY sequence ASC")
         .all(sessionId)
         .filter(isCompartmentRow);

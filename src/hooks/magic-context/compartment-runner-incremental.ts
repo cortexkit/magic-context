@@ -97,6 +97,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunk.text}`,
         );
 
+        // Intentional: session.get failure is non-fatal — we fall back to deps.directory
         const parentSessionResponse = await client.session
             .get({ path: { id: sessionId } })
             .catch(() => null);

@@ -204,6 +204,7 @@ function getFtsScores(
 
         return new Map(matches.map((memory, rank) => [memory.id, 1 / (rank + 1)]));
     } catch {
+        // Intentional: FTS search is best-effort fallback for semantic search — empty result is safe degradation
         return new Map();
     }
 }

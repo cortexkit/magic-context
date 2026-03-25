@@ -437,6 +437,8 @@ function mergeMetadataJson(existing: string | null, patch: Record<string, string
                 base = parsed as Record<string, unknown>;
             }
         } catch {
+            // Intentional: corrupted metadata JSON defaults to empty — the merge will overwrite with fresh values.
+            // Logging would require passing sessionId through a low-level utility used by multiple callers.
             base = {};
         }
     }
