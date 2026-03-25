@@ -70,15 +70,20 @@ export function peekQueue(db: Database): DreamQueueEntry | null {
     };
 }
 
-/** Claim the next unstarted entry by marking started_at. Returns null if queue is empty. */
+/** Claim the next unstarted entry atomically by marking started_at. Returns null if queue is empty. */
 export function dequeueNext(db: Database): DreamQueueEntry | null {
-    const entry = peekQueue(db);
-    if (!entry) return null;
-
     const now = Date.now();
-    db.prepare("UPDATE dream_queue SET started_at = ? WHERE id = ?").run(now, entry.id);
+    return db.transaction(() => {
+        const entry = peekQueue(db);
+        if (!entry) return null;
 
-    return { ...entry, startedAt: now };
+        const result = db
+            .prepare("UPDATE dream_queue SET started_at = ? WHERE id = ? AND started_at IS NULL")
+            .run(now, entry.id);
+        if (result.changes === 0) return null; // already claimed by another caller
+
+        return { ...entry, startedAt: now };
+    })();
 }
 
 /** Remove a completed or failed entry from the queue. */

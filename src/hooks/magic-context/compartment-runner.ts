@@ -1,3 +1,4 @@
+import { sessionLog } from "../../shared/logger";
 import { runCompartmentAgent } from "./compartment-runner-incremental";
 import { executeContextRecompInternal } from "./compartment-runner-recomp";
 import type { CompartmentRunnerDeps } from "./compartment-runner-types";
@@ -14,9 +15,13 @@ export function startCompartmentAgent(deps: CompartmentRunnerDeps): void {
         return;
     }
 
-    const promise = runCompartmentAgent(deps).finally(() => {
-        activeRuns.delete(deps.sessionId);
-    });
+    const promise = runCompartmentAgent(deps)
+        .catch((err) => {
+            sessionLog(deps.sessionId, "compartment agent: unhandled rejection:", err);
+        })
+        .finally(() => {
+            activeRuns.delete(deps.sessionId);
+        });
     activeRuns.set(deps.sessionId, promise);
 }
 
@@ -29,7 +34,11 @@ export async function executeContextRecomp(deps: CompartmentRunnerDeps): Promise
     const promise = executeContextRecompInternal(deps);
     activeRuns.set(
         sessionId,
-        promise.then(() => undefined),
+        promise
+            .then(() => undefined)
+            .catch((err) => {
+                sessionLog(sessionId, "compartment agent: recomp unhandled rejection:", err);
+            }),
     );
     try {
         return await promise;

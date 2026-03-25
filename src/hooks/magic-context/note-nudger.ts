@@ -41,13 +41,7 @@ function getState(sessionId: string): NoteNudgeState {
  */
 export function onNoteTrigger(sessionId: string, _trigger: NoteNudgeTrigger): void {
     const state = getState(sessionId);
-    if (state.nudgeDelivered) {
-        // A new trigger after delivery — ready to nudge again
-        state.triggerPending = true;
-    } else {
-        // No prior delivery — this trigger itself enables nudging
-        state.triggerPending = true;
-    }
+    state.triggerPending = true;
 }
 
 /**

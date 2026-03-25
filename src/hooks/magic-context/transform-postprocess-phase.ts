@@ -144,6 +144,7 @@ export function runPostTransformPhase(args: RunPostTransformPhaseArgs): void {
                 `pending ops WILL APPLY — reason=${applyReason}, pendingOps=${pendingOps.length}, context=${args.contextUsage.percentage.toFixed(1)}%`,
             );
             const pendingCountBefore = pendingOps.length;
+            const tApply = performance.now();
             didMutateFromPendingOperations = applyPendingOperations(
                 args.sessionId,
                 args.db,
@@ -156,7 +157,7 @@ export function runPostTransformPhase(args: RunPostTransformPhaseArgs): void {
             if (pendingCountBefore > 0 && pendingCountAfter === 0) {
                 clearPersistedStickyTurnReminder(args.db, args.sessionId);
             }
-            logTransformTiming(args.sessionId, "applyPendingOperations", performance.now());
+            logTransformTiming(args.sessionId, "applyPendingOperations", tApply);
         }
         if (shouldRunHeuristics) {
             const t5 = performance.now();

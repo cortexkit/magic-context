@@ -11,6 +11,10 @@ const FLUSH_INTERVAL_MS = 500;
 const BUFFER_SIZE_LIMIT = 50;
 
 function flush(): void {
+    if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+    }
     if (buffer.length === 0) return;
     const data = buffer.join("");
     buffer = [];
@@ -51,4 +55,9 @@ export function sessionLog(sessionId: string, message: string, data?: unknown): 
 
 export function getLogFilePath(): string {
     return logFile;
+}
+
+// Flush remaining buffer on process exit
+if (!isTestEnv) {
+    process.on("exit", flush);
 }

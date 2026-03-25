@@ -43,7 +43,7 @@ export function isInScheduleWindow(schedule: string, now: Date = new Date()): bo
 /** Find projects that have session activity since their last dream. Scopes by project_path in session_meta. */
 export function findProjectsNeedingDream(db: Database): string[] {
     const lastDreamAtStr = getDreamState(db, "last_dream_at");
-    const lastDreamAt = lastDreamAtStr ? Number(lastDreamAtStr) : 0;
+    const lastDreamAt = lastDreamAtStr ? Number(lastDreamAtStr) || 0 : 0;
 
     // Find distinct project paths from memories that have been updated since last dream
     const rows = db
@@ -70,7 +70,7 @@ export function checkScheduleAndEnqueue(db: Database, schedule: string): number 
     // Don't enqueue if a dream already ran during this window today
     const lastDreamAtStr = getDreamState(db, "last_dream_at");
     if (lastDreamAtStr) {
-        const lastDreamAt = Number(lastDreamAtStr);
+        const lastDreamAt = Number(lastDreamAtStr) || 0;
         const window = parseScheduleWindow(schedule);
         if (window) {
             const now = new Date();

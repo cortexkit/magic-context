@@ -135,9 +135,11 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             return;
         }
 
-        // Append new compartments (existing stay untouched in DB) and replace facts
-        appendCompartments(db, sessionId, newCompartments);
-        replaceSessionFacts(db, sessionId, validatedPass.facts ?? []);
+        // Append new compartments (existing stay untouched in DB) and replace facts atomically
+        db.transaction(() => {
+            appendCompartments(db, sessionId, newCompartments);
+            replaceSessionFacts(db, sessionId, validatedPass.facts ?? []);
+        })();
         promoteSessionFactsToMemory(
             db,
             sessionId,
