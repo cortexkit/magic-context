@@ -19,7 +19,7 @@ describe("MagicContextConfigSchema", () => {
                 cache_ttl: "5m",
                 nudge_interval_tokens: DEFAULT_NUDGE_INTERVAL_TOKENS,
                 execute_threshold_percentage: 65,
-                protected_tags: 5,
+                protected_tags: 20,
                 auto_drop_tool_age: 100,
                 clear_reasoning_age: 50,
                 iteration_nudge_threshold: 15,

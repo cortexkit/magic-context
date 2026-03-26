@@ -2,6 +2,7 @@
 
 import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { ensureDreamQueueTable } from "../../features/magic-context/dreamer/queue";
 import { createMagicContextCommandHandler } from "./command-handler";
 
 function createTestDb(): Database {
@@ -63,6 +64,7 @@ function createTestDb(): Database {
       system_prompt_hash INTEGER DEFAULT 0
     );
   `);
+    ensureDreamQueueTable(db);
     return db;
 }
 

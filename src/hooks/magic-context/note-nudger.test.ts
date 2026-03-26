@@ -3,7 +3,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
 import { addSessionNote } from "../../features/magic-context/storage-notes";
-import { clearNoteNudgeState, onNoteTrigger } from "./note-nudger";
+import { clearNoteNudgeState, getNoteNudgeText, onNoteTrigger } from "./note-nudger";
 
 const dbs: Database[] = [];
 
@@ -38,12 +38,12 @@ describe("note-nudger", () => {
 
         onNoteTrigger("ses-trigger", "historian_complete");
 
-        expect(getNotNudgeText(db, "ses-trigger")).toContain("You have 1 deferred note");
-        expect(getNotNudgeText(db, "ses-trigger")).toBeNull();
+        expect(getNoteNudgeText(db, "ses-trigger")).toContain("You have 1 deferred note");
+        expect(getNoteNudgeText(db, "ses-trigger")).toBeNull();
 
         onNoteTrigger("ses-trigger", "commit_detected");
 
-        expect(getNotNudgeText(db, "ses-trigger")).toContain("You have 1 deferred note");
+        expect(getNoteNudgeText(db, "ses-trigger")).toContain("You have 1 deferred note");
     });
 
     it("returns null when no notes exist even if triggered", () => {
@@ -51,7 +51,7 @@ describe("note-nudger", () => {
 
         onNoteTrigger("ses-empty", "todos_complete");
 
-        expect(getNotNudgeText(db, "ses-empty")).toBeNull();
+        expect(getNoteNudgeText(db, "ses-empty")).toBeNull();
     });
 
     it("clears session state so prior triggers no longer produce nudges", () => {
@@ -61,10 +61,10 @@ describe("note-nudger", () => {
         onNoteTrigger("ses-clear", "historian_complete");
         clearNoteNudgeState("ses-clear");
 
-        expect(getNotNudgeText(db, "ses-clear")).toBeNull();
+        expect(getNoteNudgeText(db, "ses-clear")).toBeNull();
 
         onNoteTrigger("ses-clear", "todos_complete");
 
-        expect(getNotNudgeText(db, "ses-clear")).toContain("You have 1 deferred note");
+        expect(getNoteNudgeText(db, "ses-clear")).toContain("You have 1 deferred note");
     });
 });

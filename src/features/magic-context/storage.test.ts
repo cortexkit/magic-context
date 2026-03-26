@@ -130,6 +130,28 @@ function makeMemoryDatabase(): Database {
       compartment_in_progress INTEGER DEFAULT 0,
       system_prompt_hash INTEGER DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS recomp_compartments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      start_message INTEGER NOT NULL,
+      end_message INTEGER NOT NULL,
+      start_message_id TEXT DEFAULT '',
+      end_message_id TEXT DEFAULT '',
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      pass_number INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE(session_id, sequence)
+    );
+    CREATE TABLE IF NOT EXISTS recomp_facts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      category TEXT NOT NULL,
+      content TEXT NOT NULL,
+      pass_number INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    );
   `);
     return db;
 }

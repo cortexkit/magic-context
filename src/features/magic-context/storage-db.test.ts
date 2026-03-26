@@ -79,7 +79,9 @@ describe("storage-db", () => {
                     "idx_tags_session_tag_number",
                     "idx_pending_ops_session",
                     "idx_source_contents_session",
-                    "idx_session_meta_session",
+                    "idx_compartments_session",
+                    "idx_session_facts_session",
+                    "idx_session_notes_session",
                 ]),
             );
         });

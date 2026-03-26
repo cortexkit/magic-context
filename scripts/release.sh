@@ -81,6 +81,9 @@ bun run lint 2>&1 || { echo "Error: Lint failed"; exit 1; }
 echo "  bun typecheck..."
 bun run typecheck 2>&1 || { echo "Error: Typecheck failed"; exit 1; }
 
+echo "  bun test..."
+bun test 2>&1 || { echo "Error: Tests failed"; exit 1; }
+
 echo "  bun build..."
 bun run build 2>&1 || { echo "Error: Build failed"; exit 1; }
 

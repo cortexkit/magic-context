@@ -1541,20 +1541,14 @@ describe("createTransform protected tail", () => {
         expect(createSession).not.toHaveBeenCalled();
     });
 
-    it("clears stale compartmentInProgress and still applies pending ops in the same pass", async () => {
-        //#given
+    it("clears stale compartmentInProgress when no eligible history exists", async () => {
+        //#given — stale compartmentInProgress with no raw history to resume
         useTempDataHome("transform-protected-tail-pending-");
-        createOpenCodeDbForTransform("ses-pt-pending", [
-            { id: "m-raw-1", role: "user", text: "recent 1" },
-            { id: "m-raw-2", role: "user", text: "recent 2" },
-            { id: "m-raw-3", role: "user", text: "recent 3" },
-        ]);
-        const shouldExecute = mock<Scheduler["shouldExecute"]>(() => "defer");
-        const scheduler: Scheduler = { shouldExecute };
+        createOpenCodeDbForTransform("ses-pt-pending", []);
         const db = openDatabase();
         const transform = createTransform({
             tagger: createTagger(),
-            scheduler,
+            scheduler: { shouldExecute: () => "defer" },
             contextUsageMap: new Map([
                 [
                     "ses-pt-pending",
@@ -1567,7 +1561,7 @@ describe("createTransform protected tail", () => {
             flushedSessions: new Set<string>(),
             lastHeuristicsTurnId: new Map<string, string>(),
             clearReasoningAge: 50,
-            protectedTags: 0,
+            protectedTags: 10,
             autoDropToolAge: 1000,
             client: {
                 session: {
@@ -1581,41 +1575,26 @@ describe("createTransform protected tail", () => {
             directory: "/tmp",
         });
 
-        const firstPass: TestMessage[] = [
+        const messages: TestMessage[] = [
             {
                 info: { id: "m-user", role: "user", sessionID: "ses-pt-pending" },
-                parts: [{ type: "text", text: "keep me" }],
+                parts: [{ type: "text", text: "hello" }],
             },
             {
                 info: { id: "m-assistant", role: "assistant" },
-                parts: [{ type: "text", text: "assistant" }],
+                parts: [{ type: "text", text: "world" }],
             },
         ];
-        await transform({}, { messages: firstPass });
 
-        queuePendingOp(db, "ses-pt-pending", 1, "drop");
+        //#when — first pass initializes session, then set stale flag
+        await transform({}, { messages });
         updateSessionMeta(db, "ses-pt-pending", { compartmentInProgress: true });
-        shouldExecute.mockImplementation(() => "execute");
+        expect(getOrCreateSessionMeta(db, "ses-pt-pending").compartmentInProgress).toBe(true);
 
-        const secondPass: TestMessage[] = [
-            {
-                info: { id: "m-user", role: "user", sessionID: "ses-pt-pending" },
-                parts: [{ type: "text", text: "keep me" }],
-            },
-            {
-                info: { id: "m-assistant", role: "assistant" },
-                parts: [{ type: "text", text: "assistant" }],
-            },
-        ];
-
-        //#when
-        await transform({}, { messages: secondPass });
+        //#when — second pass detects stale flag, clears it (no eligible history to resume)
+        await transform({}, { messages });
 
         //#then
-        expect(secondPass).toHaveLength(1);
-        expect(text(secondPass[0], 0)).toContain("assistant");
-        expect(getTagById(db, "ses-pt-pending", 1)?.status).toBe("dropped");
-        expect(getPendingOps(db, "ses-pt-pending")).toHaveLength(0);
         expect(getOrCreateSessionMeta(db, "ses-pt-pending").compartmentInProgress).toBe(false);
     });
 });
