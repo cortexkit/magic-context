@@ -295,13 +295,14 @@ async function runCompressorPass(args: CompressorPassArgs): Promise<Array<{
             };
         });
 
-        // If the final compartment's endMessageId is empty, the compressor introduced
-        // a boundary we can't anchor. Reject to avoid broken visible-prefix trimming.
-        const last = mapped[mapped.length - 1];
-        if (last && !last.endMessageId) {
+        // Reject if any compartment has empty messageIds — the compressor introduced
+        // boundaries we can't anchor. Empty interior IDs cause silent data degradation,
+        // and an empty final endMessageId breaks visible-prefix trimming.
+        const hasEmptyIds = mapped.some((c) => !c.startMessageId || !c.endMessageId);
+        if (hasEmptyIds) {
             sessionLog(
                 sessionId,
-                "compressor: rejecting — final compartment has empty endMessageId",
+                "compressor: rejecting — one or more compartments have empty messageIds",
             );
             return null;
         }

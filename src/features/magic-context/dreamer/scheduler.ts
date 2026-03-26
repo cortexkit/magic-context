@@ -91,10 +91,10 @@ export function checkScheduleAndEnqueue(db: Database, schedule: string): number 
     }
 
     let enqueued = 0;
-    for (const projectPath of projects) {
-        const entry = enqueueDream(db, projectPath, "scheduled");
+    for (const projectIdentity of projects) {
+        const entry = enqueueDream(db, projectIdentity, "scheduled");
         if (entry) {
-            log(`[dreamer] enqueued project for scheduled dream: ${projectPath}`);
+            log(`[dreamer] enqueued project for scheduled dream: ${projectIdentity}`);
             enqueued++;
         }
     }

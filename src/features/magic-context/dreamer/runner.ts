@@ -9,7 +9,13 @@ import { getErrorMessage } from "../../../shared/error-message";
 import { log } from "../../../shared/logger";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
 import { acquireLease, getLeaseHolder, releaseLease, renewLease } from "./lease";
-import { clearStaleEntries, dequeueNext, removeDreamEntry, resetDreamEntry } from "./queue";
+import {
+    clearStaleEntries,
+    dequeueNext,
+    getEntryRetryCount,
+    removeDreamEntry,
+    resetDreamEntry,
+} from "./queue";
 import { getDreamState, setDreamState } from "./storage-dream-state";
 import { buildDreamTaskPrompt, DREAMER_SYSTEM_PROMPT } from "./task-prompts";
 
@@ -18,12 +24,12 @@ import { buildDreamTaskPrompt, DREAMER_SYSTEM_PROMPT } from "./task-prompts";
 // Acceptable for v1 since multi-checkout dreaming is an edge case.
 const dreamProjectDirectories = new Map<string, string>();
 
-export function registerDreamProjectDirectory(projectPath: string, directory: string): void {
-    dreamProjectDirectories.set(projectPath, directory);
+export function registerDreamProjectDirectory(projectIdentity: string, directory: string): void {
+    dreamProjectDirectories.set(projectIdentity, directory);
 }
 
-function resolveDreamSessionDirectory(projectPath: string): string {
-    return dreamProjectDirectories.get(projectPath) ?? projectPath;
+function resolveDreamSessionDirectory(projectIdentity: string): string {
+    return dreamProjectDirectories.get(projectIdentity) ?? projectIdentity;
 }
 
 export interface DreamRunResult {
@@ -41,7 +47,8 @@ export interface DreamRunResult {
 export async function runDream(args: {
     db: Database;
     client: PluginContext["client"];
-    projectPath: string;
+    /** Project identity (e.g. "git:<sha>"), NOT a filesystem path. Used for dream state keys. */
+    projectIdentity: string;
     tasks: DreamingTask[];
     taskTimeoutMinutes: number;
     maxRuntimeMinutes: number;
@@ -58,7 +65,7 @@ export async function runDream(args: {
     };
 
     log(
-        `[dreamer] starting dream run: ${args.tasks.length} tasks, timeout=${args.taskTimeoutMinutes}m, maxRuntime=${args.maxRuntimeMinutes}m, project=${args.projectPath}`,
+        `[dreamer] starting dream run: ${args.tasks.length} tasks, timeout=${args.taskTimeoutMinutes}m, maxRuntime=${args.maxRuntimeMinutes}m, project=${args.projectIdentity}`,
     );
 
     if (!acquireLease(args.db, holderId)) {
@@ -80,7 +87,7 @@ export async function runDream(args: {
     let parentSessionId = args.parentSessionId;
     if (!parentSessionId) {
         try {
-            const sessionDir = args.sessionDirectory ?? args.projectPath;
+            const sessionDir = args.sessionDirectory ?? args.projectIdentity;
             const listResponse = await args.client.session.list({
                 query: { directory: sessionDir },
             });
@@ -101,9 +108,9 @@ export async function runDream(args: {
 
     const deadline = startedAt + args.maxRuntimeMinutes * 60 * 1000;
     const lastDreamAt =
-        getDreamState(args.db, `last_dream_at:${args.projectPath}`) ??
+        getDreamState(args.db, `last_dream_at:${args.projectIdentity}`) ??
         getDreamState(args.db, "last_dream_at");
-    log(`[dreamer] last dream at: ${lastDreamAt ?? "never"} (project=${args.projectPath})`);
+    log(`[dreamer] last dream at: ${lastDreamAt ?? "never"} (project=${args.projectIdentity})`);
 
     try {
         for (const taskName of args.tasks) {
@@ -133,16 +140,18 @@ export async function runDream(args: {
             }, 60_000);
 
             try {
+                // Use sessionDirectory (filesystem path) for file checks, not projectPath (identity like "git:<sha>")
+                const docsDir = args.sessionDirectory ?? args.projectIdentity;
                 const existingDocs =
                     taskName === "maintain-docs"
                         ? {
-                              architecture: existsSync(join(args.projectPath, "ARCHITECTURE.md")),
-                              structure: existsSync(join(args.projectPath, "STRUCTURE.md")),
+                              architecture: existsSync(join(docsDir, "ARCHITECTURE.md")),
+                              structure: existsSync(join(docsDir, "STRUCTURE.md")),
                           }
                         : undefined;
 
                 const taskPrompt = buildDreamTaskPrompt(taskName, {
-                    projectPath: args.projectPath,
+                    projectPath: args.projectIdentity,
                     lastDreamAt,
                     existingDocs,
                 });
@@ -152,7 +161,7 @@ export async function runDream(args: {
                         ...(parentSessionId ? { parentID: parentSessionId } : {}),
                         title: `magic-context-dream-${taskName}`,
                     },
-                    query: { directory: args.sessionDirectory ?? args.projectPath },
+                    query: { directory: args.sessionDirectory ?? args.projectIdentity },
                 });
 
                 const createdSession = shared.normalizeSDKResponse(
@@ -170,7 +179,7 @@ export async function runDream(args: {
                     args.client,
                     {
                         path: { id: agentSessionId },
-                        query: { directory: args.sessionDirectory ?? args.projectPath },
+                        query: { directory: args.sessionDirectory ?? args.projectIdentity },
                         body: {
                             agent: DREAMER_AGENT,
                             system: DREAMER_SYSTEM_PROMPT,
@@ -185,7 +194,7 @@ export async function runDream(args: {
 
                 const messagesResponse = await args.client.session.messages({
                     path: { id: agentSessionId },
-                    query: { directory: args.sessionDirectory ?? args.projectPath },
+                    query: { directory: args.sessionDirectory ?? args.projectIdentity },
                 });
                 const messages = shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
                     preferResponseOnMissingData: true,
@@ -222,7 +231,7 @@ export async function runDream(args: {
                     await args.client.session
                         .delete({
                             path: { id: agentSessionId },
-                            query: { directory: args.sessionDirectory ?? args.projectPath },
+                            query: { directory: args.sessionDirectory ?? args.projectIdentity },
                         })
                         .catch((error: unknown) => {
                             log("[dreamer] failed to delete child session:", error);
@@ -240,7 +249,7 @@ export async function runDream(args: {
     // should not block re-scheduling for the project.
     const hasSuccessfulTask = result.tasks.some((t) => !t.error);
     if (hasSuccessfulTask) {
-        setDreamState(args.db, `last_dream_at:${args.projectPath}`, String(result.finishedAt));
+        setDreamState(args.db, `last_dream_at:${args.projectIdentity}`, String(result.finishedAt));
         setDreamState(args.db, "last_dream_at", String(result.finishedAt));
     }
     const totalDuration = ((result.finishedAt - startedAt) / 1000).toFixed(1);
@@ -251,6 +260,8 @@ export async function runDream(args: {
     );
     return result;
 }
+
+const MAX_LEASE_RETRIES = 3;
 
 export async function processDreamQueue(args: {
     db: Database;
@@ -266,30 +277,47 @@ export async function processDreamQueue(args: {
         return null;
     }
 
-    const projectDirectory = resolveDreamSessionDirectory(entry.projectPath);
+    const projectDirectory = resolveDreamSessionDirectory(entry.projectIdentity);
     log(
-        `[dreamer] dequeued project ${entry.projectPath} (dir=${projectDirectory}), starting dream run`,
+        `[dreamer] dequeued project ${entry.projectIdentity} (dir=${projectDirectory}), starting dream run`,
     );
 
-    const result = await runDream({
-        db: args.db,
-        client: args.client,
-        projectPath: projectDirectory,
-        tasks: args.tasks,
-        taskTimeoutMinutes: args.taskTimeoutMinutes,
-        maxRuntimeMinutes: args.maxRuntimeMinutes,
-        sessionDirectory: projectDirectory,
-    });
+    let result: DreamRunResult;
+    try {
+        result = await runDream({
+            db: args.db,
+            client: args.client,
+            // entry.projectIdentity is the project identity (e.g. "git:<sha>") — used for dream state keys.
+            // projectDirectory is the filesystem path — used for session creation and file access.
+            projectIdentity: entry.projectIdentity,
+            tasks: args.tasks,
+            taskTimeoutMinutes: args.taskTimeoutMinutes,
+            maxRuntimeMinutes: args.maxRuntimeMinutes,
+            sessionDirectory: projectDirectory,
+        });
+    } catch (error) {
+        log(`[dreamer] runDream threw for ${entry.projectIdentity}: ${getErrorMessage(error)}`);
+        // Remove the entry so it doesn't stay stuck in "started" state for 2 hours
+        removeDreamEntry(args.db, entry.id);
+        return null;
+    }
 
     // Only remove queue entry if the dream actually ran (lease acquired).
-    // If lease acquisition failed, the entry stays so it can be retried.
+    // If lease acquisition failed, the entry stays so it can be retried (up to MAX_LEASE_RETRIES).
     const leaseError = result.tasks.find((t) => t.name === "lease" && t.error);
     if (leaseError) {
-        log(
-            `[dreamer] lease acquisition failed for ${entry.projectPath} — keeping queue entry for retry`,
-        );
-        // Reset started_at so it can be dequeued again
-        resetDreamEntry(args.db, entry.id);
+        const retryCount = getEntryRetryCount(args.db, entry.id);
+        if (retryCount >= MAX_LEASE_RETRIES) {
+            log(
+                `[dreamer] lease acquisition failed ${retryCount + 1} times for ${entry.projectIdentity} — removing queue entry`,
+            );
+            removeDreamEntry(args.db, entry.id);
+        } else {
+            log(
+                `[dreamer] lease acquisition failed for ${entry.projectIdentity} (attempt ${retryCount + 1}/${MAX_LEASE_RETRIES}) — keeping for retry`,
+            );
+            resetDreamEntry(args.db, entry.id);
+        }
     } else {
         removeDreamEntry(args.db, entry.id);
     }

@@ -8,7 +8,6 @@ import {
 import type { createCompactionHandler } from "../../features/magic-context/compaction";
 import {
     checkScheduleAndEnqueue,
-    ensureDreamQueueTable,
     processDreamQueue,
     registerDreamProjectDirectory,
 } from "../../features/magic-context/dreamer";
@@ -134,7 +133,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         return null;
     }
 
-    ensureDreamQueueTable(db);
     const projectPath = resolveProjectIdentity(deps.directory);
     registerDreamProjectDirectory(projectPath, deps.directory);
 

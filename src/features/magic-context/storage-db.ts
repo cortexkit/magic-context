@@ -117,7 +117,8 @@ export function initializeDatabase(db: Database): void {
       project_path TEXT NOT NULL,
       reason TEXT NOT NULL,
       enqueued_at INTEGER NOT NULL,
-      started_at INTEGER
+      started_at INTEGER,
+      retry_count INTEGER DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_dream_queue_project ON dream_queue(project_path);
 
@@ -217,6 +218,7 @@ export function initializeDatabase(db: Database): void {
     ensureColumn(db, "memory_embeddings", "model_id", "TEXT");
     ensureColumn(db, "session_meta", "memory_block_cache", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "memory_block_count", "INTEGER DEFAULT 0");
+    ensureColumn(db, "dream_queue", "retry_count", "INTEGER DEFAULT 0");
 }
 
 function ensureColumn(db: Database, table: string, column: string, definition: string): void {

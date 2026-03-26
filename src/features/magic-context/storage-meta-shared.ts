@@ -14,7 +14,9 @@ export interface SessionMetaRow {
     last_input_tokens: number;
     times_execute_threshold_reached: number;
     compartment_in_progress: number;
-    system_prompt_hash: string;
+    // Intentional: type is string (MD5 hex digest), but the guard accepts string|number
+    // for backward compatibility with pre-release DBs where the column was INTEGER.
+    system_prompt_hash: string | number;
 }
 
 export const META_COLUMNS: Record<string, string> = {

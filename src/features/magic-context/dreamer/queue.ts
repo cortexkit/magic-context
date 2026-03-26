@@ -2,7 +2,8 @@ import type { Database } from "bun:sqlite";
 
 export interface DreamQueueEntry {
     id: number;
-    projectPath: string;
+    /** Project identity (e.g. "git:<sha>"), NOT a filesystem path */
+    projectIdentity: string;
     reason: string;
     enqueuedAt: number;
     startedAt: number | null;
@@ -21,17 +22,17 @@ export function ensureDreamQueueTable(db: Database): void {
     db.run("CREATE INDEX IF NOT EXISTS idx_dream_queue_project ON dream_queue(project_path)");
 }
 
-/** Enqueue a project for dreaming. Skips if the same project is already queued and not started. */
+/** Enqueue a project for dreaming. Skips if the same project already has any queue entry (queued or running). */
 export function enqueueDream(
     db: Database,
-    projectPath: string,
+    projectIdentity: string,
     reason: string,
 ): DreamQueueEntry | null {
     const now = Date.now();
     return db.transaction(() => {
         const existing = db
             .query<{ id: number }, [string]>("SELECT id FROM dream_queue WHERE project_path = ?")
-            .get(projectPath);
+            .get(projectIdentity);
 
         if (existing) {
             return null; // already queued
@@ -39,11 +40,11 @@ export function enqueueDream(
 
         const result = db
             .prepare("INSERT INTO dream_queue (project_path, reason, enqueued_at) VALUES (?, ?, ?)")
-            .run(projectPath, reason, now);
+            .run(projectIdentity, reason, now);
 
         return {
             id: Number(result.lastInsertRowid),
-            projectPath,
+            projectIdentity,
             reason,
             enqueuedAt: now,
             startedAt: null,
@@ -63,7 +64,7 @@ export function peekQueue(db: Database): DreamQueueEntry | null {
 
     return {
         id: row.id,
-        projectPath: row.project_path,
+        projectIdentity: row.project_path,
         reason: row.reason,
         enqueuedAt: row.enqueued_at,
         startedAt: null,
@@ -91,9 +92,21 @@ export function removeDreamEntry(db: Database, id: number): void {
     db.prepare("DELETE FROM dream_queue WHERE id = ?").run(id);
 }
 
-/** Reset a dequeued entry so it can be retried (e.g., after lease failure). */
+/** Reset a dequeued entry so it can be retried (e.g., after lease failure). Increments retry_count. */
 export function resetDreamEntry(db: Database, id: number): void {
-    db.prepare("UPDATE dream_queue SET started_at = NULL WHERE id = ?").run(id);
+    db.prepare(
+        "UPDATE dream_queue SET started_at = NULL, retry_count = COALESCE(retry_count, 0) + 1 WHERE id = ?",
+    ).run(id);
+}
+
+/** Get the retry count for a queue entry. */
+export function getEntryRetryCount(db: Database, id: number): number {
+    const row = db
+        .query<{ retry_count: number | null }, [number]>(
+            "SELECT retry_count FROM dream_queue WHERE id = ?",
+        )
+        .get(id);
+    return row?.retry_count ?? 0;
 }
 
 /** Clear stale started entries (stuck for more than maxAgeMs). */

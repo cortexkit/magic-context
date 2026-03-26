@@ -3,7 +3,6 @@ import type { DreamerConfig, SidekickConfig } from "../../config/schema/magic-co
 import {
     type DreamRunResult,
     enqueueDream,
-    ensureDreamQueueTable,
     processDreamQueue,
 } from "../../features/magic-context/dreamer";
 import { runSidekick } from "../../features/magic-context/sidekick/agent";
@@ -149,7 +148,7 @@ async function executeDreaming(
         throw new Error(`${SENTINEL_PREFIX}CTX-DREAM_HANDLED__`);
     }
 
-    ensureDreamQueueTable(deps.db);
+    // dream_queue table is created in initializeDatabase() — no ensureDreamQueueTable needed
     const entry = enqueueDream(deps.db, deps.dreamer.projectPath, "manual");
     if (!entry) {
         await deps.sendNotification(sessionId, "Dream already queued for this project", {});

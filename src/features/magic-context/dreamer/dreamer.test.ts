@@ -124,7 +124,7 @@ describe("dreamer", () => {
             const result = await runDream({
                 db,
                 client,
-                projectPath: "/repo/project",
+                projectIdentity: "/repo/project",
                 tasks: ["consolidate", "verify"],
                 taskTimeoutMinutes: 5,
                 maxRuntimeMinutes: 10,
