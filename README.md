@@ -81,7 +81,7 @@ And overnight, a **dreamer** agent consolidates, verifies, and improves memories
 
 ## What Your Agent Gets
 
-Magic Context injects structured context automatically and gives the agent five tools.
+Magic Context injects structured context automatically and gives the agent four tools.
 
 ### `ctx_reduce` — Shed weight
 
@@ -91,7 +91,7 @@ After tool-heavy turns (large grep results, file reads, bash output), the agent 
 ctx_reduce(drop="3-5,12")     // Drop tags 3, 4, 5, and 12
 ```
 
-Recent tags (last 10 by default) are protected. Drops targeting them stay queued until they age out.
+Recent tags (last 20 by default) are protected. Drops targeting them stay queued until they age out.
 
 ### `ctx_expand` — Decompress history
 
@@ -202,7 +202,7 @@ The dreamer runs during a configurable schedule window and creates ephemeral Ope
 
 All settings live in `magic-context.jsonc` as flat top-level keys. See **[CONFIGURATION.md](./CONFIGURATION.md)** for the full reference — cache TTL tuning, per-model execute thresholds, historian model selection, embedding providers, memory settings, sidekick, and dreamer.
 
-**Config locations** (searched in order, first wins):
+**Config locations** (merged in order, project overrides user):
 1. `<project-root>/magic-context.jsonc`
 2. `<project-root>/.opencode/magic-context.jsonc`
 3. `~/.config/opencode/magic-context.jsonc`
