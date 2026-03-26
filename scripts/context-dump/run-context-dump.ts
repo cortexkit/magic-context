@@ -147,7 +147,7 @@ export async function runContextDump(sessionId: string): Promise<ContextDumpResu
 	try {
 		const preparedCompartmentInjection = isSubagent
 			? null
-			: prepareCompartmentInjection(contextDb, sessionId, transformedMessages as unknown as MessageLike[])
+			: prepareCompartmentInjection(contextDb, sessionId, transformedMessages as unknown as MessageLike[], true)
 		const compartmentInjection = preparedCompartmentInjection
 			? renderCompartmentInjection(sessionId, transformedMessages as unknown as MessageLike[], preparedCompartmentInjection)
 			: { injected: false, compartmentEndMessage: -1, compartmentCount: 0, skippedVisibleMessages: 0 }

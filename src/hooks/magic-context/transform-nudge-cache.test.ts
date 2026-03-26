@@ -128,10 +128,10 @@ describe("createTransform nudge cache handling", () => {
         expect(getPersistedNudgePlacement(db, "ses-1")).toBeNull();
     });
 
-    it("clears stored nudge placement when flushed statuses mutate content", async () => {
-        //#given
+    it("clears stored nudge placement when flushed statuses mutate content on execute pass", async () => {
+        //#given — execute pass so nudge placement clear is allowed
         useTempDataHome("context-transform-nudge-flushed-");
-        const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
+        const scheduler: Scheduler = { shouldExecute: mock(() => "execute" as const) };
         const db = openDatabase();
         const nudgePlacements = createNudgePlacementStore(db);
         const contextUsageMap = new Map<string, { usage: ContextUsage; updatedAt: number }>([

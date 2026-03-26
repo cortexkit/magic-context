@@ -19,6 +19,7 @@ import {
     renderCompartmentInjection,
 } from "./inject-compartments";
 import { getNoteNudgeText } from "./note-nudger";
+import { reinjectNudgeAtAnchor } from "./nudge-injection";
 import type { NudgePlacementStore } from "./nudge-placement-store";
 import type { ContextNudge } from "./nudger";
 import {
@@ -101,6 +102,8 @@ export function runPostTransformPhase(args: RunPostTransformPhaseArgs): void {
     const hasPendingUserOps = pendingOps.length > 0;
     const shouldApplyPendingOps =
         (args.schedulerDecision === "execute" || isExplicitFlush) && !compartmentRunning;
+    // Central cache-busting gate used by all mutation paths below.
+    const isCacheBustingPass = isExplicitFlush || shouldApplyPendingOps;
     const shouldRunHeuristics =
         args.fullFeatureMode &&
         !compartmentRunning &&
@@ -228,7 +231,9 @@ export function runPostTransformPhase(args: RunPostTransformPhaseArgs): void {
         updateSessionMeta(args.db, args.sessionId, { lastTransformError: getErrorMessage(error) });
         args.nudgePlacements.clear(args.sessionId);
     }
-    if (didMutateFromPendingOperations) {
+    // Only clear nudge placements on cache-busting passes. Clearing on defer would
+    // cause the next pass to re-anchor the nudge on a cached assistant message (Finding 2).
+    if (didMutateFromPendingOperations && isCacheBustingPass) {
         args.nudgePlacements.clear(args.sessionId);
     }
 
@@ -274,17 +279,21 @@ export function runPostTransformPhase(args: RunPostTransformPhaseArgs): void {
     }
 
     // Remove system-injected messages (notifications, reminders, internal markers)
-    // that are OUTSIDE the protected tail. Recent ones in the tail may contain
-    // actionable info (e.g., background task IDs the agent needs for background_output).
-    // Use the configured protected_tags count to find the boundary — messages in the
-    // last N tags are kept.
-    const protectedTailStart = Math.max(0, args.messages.length - args.protectedTags * 2);
-    const strippedSystemInjected = stripSystemInjectedMessages(args.messages, protectedTailStart);
-    if (strippedSystemInjected > 0) {
-        sessionLog(
-            args.sessionId,
-            `stripped ${strippedSystemInjected} system-injected messages (notifications/reminders)`,
+    // that are OUTSIDE the protected tail. Only strip on cache-busting passes because
+    // the dynamic protected tail boundary can shift as conversation grows, which would
+    // remove previously-cached messages on defer passes (Finding 5).
+    if (isCacheBustingPass) {
+        const protectedTailStart = Math.max(0, args.messages.length - args.protectedTags * 2);
+        const strippedSystemInjected = stripSystemInjectedMessages(
+            args.messages,
+            protectedTailStart,
         );
+        if (strippedSystemInjected > 0) {
+            sessionLog(
+                args.sessionId,
+                `stripped ${strippedSystemInjected} system-injected messages (notifications/reminders)`,
+            );
+        }
     }
 
     const pendingUserTurnReminder = getPersistedStickyTurnReminder(args.db, args.sessionId);
@@ -292,7 +301,6 @@ export function runPostTransformPhase(args: RunPostTransformPhaseArgs): void {
         // Only clear the reminder when the pass is already cache-busting (execute/flush).
         // Clearing on a cache-safe pass would remove text from an anchored user message,
         // changing cached content and busting the Anthropic prompt-cache prefix.
-        const isCacheBustingPass = isExplicitFlush || shouldApplyPendingOps || shouldRunHeuristics;
         if (args.hasRecentReduceCall && isCacheBustingPass) {
             clearPersistedStickyTurnReminder(args.db, args.sessionId);
             sessionLog(
@@ -351,8 +359,22 @@ export function runPostTransformPhase(args: RunPostTransformPhaseArgs): void {
             const t9 = performance.now();
             applyContextNudge(args.messages, nudge, args.nudgePlacements, args.sessionId);
             logTransformTiming(args.sessionId, "applyContextNudge", t9);
-        } else {
+        } else if (isCacheBustingPass) {
+            // Only retire the nudge anchor on cache-busting passes (Finding 4).
+            // Clearing on defer would remove previously-injected nudge text from
+            // the cached assistant message.
             args.nudgePlacements.clear(args.sessionId);
+        } else {
+            // Defer pass: replay existing anchor to keep cached content stable.
+            const existing = args.nudgePlacements.get(args.sessionId);
+            if (existing) {
+                reinjectNudgeAtAnchor(
+                    args.messages,
+                    existing.nudgeText,
+                    args.nudgePlacements,
+                    args.sessionId,
+                );
+            }
         }
 
         const deferredNoteText = getNoteNudgeText(args.db, args.sessionId);

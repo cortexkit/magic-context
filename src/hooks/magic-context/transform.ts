@@ -105,6 +105,18 @@ export function createTransform(deps: TransformDeps) {
         const canRunCompartments =
             fullFeatureMode && deps.client !== undefined && compartmentDirectory.length > 0;
 
+        // Compute cache-busting status early so compartment injection can use it.
+        // The scheduler and flush state are available before tagging.
+        const contextUsageEarly = loadContextUsage(deps.contextUsageMap, db, sessionId);
+        const schedulerDecisionEarly = resolveSchedulerDecision(
+            deps.scheduler,
+            sessionMeta,
+            contextUsageEarly,
+            sessionId,
+        );
+        const isCacheBusting =
+            deps.flushedSessions.has(sessionId) || schedulerDecisionEarly === "execute";
+
         let pendingCompartmentInjection: PreparedCompartmentInjection | null = null;
         if (fullFeatureMode) {
             const projectPath = deps.memoryConfig?.enabled
@@ -114,6 +126,7 @@ export function createTransform(deps: TransformDeps) {
                 db,
                 sessionId,
                 messages,
+                isCacheBusting,
                 projectPath,
                 deps.memoryConfig?.injectionBudgetTokens,
             );
@@ -165,9 +178,10 @@ export function createTransform(deps: TransformDeps) {
             logTransformTiming(sessionId, "batchFinalize:flushed", t2);
         } catch (error) {
             sessionLog(sessionId, "transform failed applying flushed statuses:", error);
-            deps.nudgePlacements.clear(sessionId);
+            // Only clear on cache-busting passes to avoid re-anchor on next defer (Finding 2).
+            if (isCacheBusting) deps.nudgePlacements.clear(sessionId);
         }
-        if (didMutateFromFlushedStatuses) {
+        if (didMutateFromFlushedStatuses && isCacheBusting) {
             deps.nudgePlacements.clear(sessionId);
         }
 
@@ -196,15 +210,9 @@ export function createTransform(deps: TransformDeps) {
             }
         }
 
-        const contextUsage = loadContextUsage(deps.contextUsageMap, db, sessionId);
-        const schedulerDecision = resolveSchedulerDecision(
-            deps.scheduler,
-            sessionMeta,
-            contextUsage,
-            sessionId,
-        );
-        const isCacheBusting =
-            deps.flushedSessions.has(sessionId) || schedulerDecision === "execute";
+        // Reuse the early scheduler result — inputs haven't changed.
+        const contextUsage = contextUsageEarly;
+        const schedulerDecision = schedulerDecisionEarly;
         const rawGetNotifParams = deps.getNotificationParams;
         const compartmentPhase = await runCompartmentPhase({
             canRunCompartments,

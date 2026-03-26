@@ -14,10 +14,23 @@ import type { MessageLike } from "./tag-messages";
 export interface PreparedCompartmentInjection {
     block: string;
     compartmentEndMessage: number;
+    compartmentEndMessageId: string;
     compartmentCount: number;
     skippedVisibleMessages: number;
     factCount: number;
     memoryCount: number;
+}
+
+/**
+ * In-memory cache of the last compartment injection result per session.
+ * On defer (cache-safe) passes, the cached result is replayed so that historian
+ * publications between passes do not bust the Anthropic prompt-cache prefix.
+ * The cache is refreshed only on cache-busting passes (execute / explicit flush).
+ */
+const injectionCache = new Map<string, PreparedCompartmentInjection>();
+
+export function clearInjectionCache(sessionId: string): void {
+    injectionCache.delete(sessionId);
 }
 
 export interface CompartmentInjectionResult {
@@ -104,11 +117,30 @@ export function prepareCompartmentInjection(
     db: Database,
     sessionId: string,
     messages: MessageLike[],
+    isCacheBusting: boolean,
     projectPath?: string,
     injectionBudgetTokens?: number,
 ): PreparedCompartmentInjection | null {
+    // On defer (cache-safe) passes, replay the cached injection result so that
+    // historian publications between passes do not bust the prompt-cache prefix.
+    const cached = injectionCache.get(sessionId);
+    if (!isCacheBusting && cached) {
+        // Re-do the splice with the cached boundary (messages are rebuilt fresh each pass)
+        if (cached.compartmentEndMessageId.length > 0) {
+            const cutoffIndex = messages.findIndex(
+                (message) => message.info.id === cached.compartmentEndMessageId,
+            );
+            if (cutoffIndex >= 0) {
+                const remaining = messages.slice(cutoffIndex + 1);
+                messages.splice(0, messages.length, ...remaining);
+            }
+        }
+        return cached;
+    }
+
     const compartments = getCompartments(db, sessionId);
     if (compartments.length === 0) {
+        injectionCache.delete(sessionId);
         return null;
     }
 
@@ -122,15 +154,15 @@ export function prepareCompartmentInjection(
         // Audit note: `as` cast is safe here — session_meta schema is owned by this plugin and the two
         // columns are guaranteed present after initializeDatabase(). A type guard would add overhead on a
         // hot path (every transform) for a table we fully control.
-        const cached = db
+        const cachedMemory = db
             .prepare(
                 "SELECT memory_block_cache, memory_block_count FROM session_meta WHERE session_id = ?",
             )
             .get(sessionId) as { memory_block_cache: string; memory_block_count: number } | null;
 
-        if (cached?.memory_block_cache) {
-            memoryBlock = cached.memory_block_cache;
-            memoryCount = cached.memory_block_count;
+        if (cachedMemory?.memory_block_cache) {
+            memoryBlock = cachedMemory.memory_block_cache;
+            memoryCount = cachedMemory.memory_block_count;
         } else {
             let memories = getMemoriesByProject(db, projectPath, ["active", "permanent"]);
             if (injectionBudgetTokens && memories.length > 0) {
@@ -160,14 +192,17 @@ export function prepareCompartmentInjection(
                 compartmentEndMessage: lastEnd,
             },
         );
-        return {
+        const result: PreparedCompartmentInjection = {
             block,
             compartmentEndMessage: lastEnd,
+            compartmentEndMessageId: "",
             compartmentCount: compartments.length,
             skippedVisibleMessages: 0,
             factCount: facts.length,
             memoryCount,
         };
+        injectionCache.set(sessionId, result);
+        return result;
     }
 
     let skippedVisibleMessages = 0;
@@ -178,14 +213,17 @@ export function prepareCompartmentInjection(
         messages.splice(0, messages.length, ...remaining);
     }
 
-    return {
+    const result: PreparedCompartmentInjection = {
         block,
         compartmentEndMessage: lastEnd,
+        compartmentEndMessageId: lastEndMessageId,
         compartmentCount: compartments.length,
         skippedVisibleMessages,
         factCount: facts.length,
         memoryCount,
     };
+    injectionCache.set(sessionId, result);
+    return result;
 }
 
 export function renderCompartmentInjection(

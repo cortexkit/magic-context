@@ -78,6 +78,7 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
             args.db,
             args.resolvedSessionId,
             args.messages,
+            args.cacheAlreadyBusting ?? false,
             args.projectPath,
             args.injectionBudgetTokens,
         );
