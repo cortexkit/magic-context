@@ -75,6 +75,7 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                     limit: normalizeLimit(args.limit),
                     memoryEnabled: deps.memoryEnabled,
                     embeddingEnabled: deps.embeddingEnabled,
+                    readMessages: deps.readMessages,
                 },
             );
 

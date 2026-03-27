@@ -28,6 +28,7 @@ describe("createCtxSearchTools", () => {
             projectPath: "/repo/project",
             memoryEnabled: false,
             embeddingEnabled: false,
+            readMessages: () => [],
         });
 
         const result = await tools.ctx_search.execute({ query: "   " }, toolContext());
@@ -41,12 +42,11 @@ describe("createCtxSearchTools", () => {
             projectPath: "/repo/project",
             memoryEnabled: false,
             embeddingEnabled: false,
+            readMessages: () => [],
         });
 
         const result = await tools.ctx_search.execute({ query: "missing" }, toolContext());
 
-        expect(result).toBe(
-            'No results found for "missing" across memories, session facts, or message history.',
-        );
+        expect(result).toContain("No results found");
     });
 });

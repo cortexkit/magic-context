@@ -10,4 +10,11 @@ export interface CtxSearchToolDeps {
     projectPath: string;
     memoryEnabled: boolean;
     embeddingEnabled: boolean;
+    /** Override message reader for testing (avoids opening OpenCode DB in CI). */
+    readMessages?: (sessionId: string) => Array<{
+        ordinal: number;
+        id: string;
+        role: string;
+        parts: unknown[];
+    }>;
 }
