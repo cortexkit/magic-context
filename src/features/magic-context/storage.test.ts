@@ -29,6 +29,7 @@ import {
     updateSessionMeta,
     updateTagStatus,
 } from "./storage";
+import { initializeDatabase } from "./storage-db";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -61,98 +62,7 @@ function resolveDbPath(dataHome: string): string {
 
 function makeMemoryDatabase(): Database {
     const db = new Database(":memory:");
-    db.run(`
-    CREATE TABLE IF NOT EXISTS tags (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT,
-      message_id TEXT,
-      type TEXT,
-      status TEXT DEFAULT 'active',
-      byte_size INTEGER,
-      tag_number INTEGER,
-      UNIQUE(session_id, tag_number)
-    );
-    CREATE TABLE IF NOT EXISTS pending_ops (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT,
-      tag_id INTEGER,
-      operation TEXT,
-      queued_at INTEGER
-    );
-    CREATE TABLE IF NOT EXISTS source_contents (
-      tag_id INTEGER,
-      session_id TEXT,
-      content TEXT,
-      created_at INTEGER,
-      PRIMARY KEY(session_id, tag_id)
-    );
-    CREATE TABLE IF NOT EXISTS compartments (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL,
-      sequence INTEGER NOT NULL,
-      start_message INTEGER NOT NULL,
-      end_message INTEGER NOT NULL,
-      title TEXT NOT NULL,
-      content TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      UNIQUE(session_id, sequence)
-    );
-    CREATE TABLE IF NOT EXISTS session_facts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL,
-      category TEXT NOT NULL,
-      content TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS session_notes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL,
-      content TEXT NOT NULL,
-      created_at INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS session_meta (
-      session_id TEXT PRIMARY KEY,
-      last_response_time INTEGER,
-      cache_ttl TEXT,
-      counter INTEGER DEFAULT 0,
-      last_nudge_tokens INTEGER DEFAULT 0,
-      last_nudge_band TEXT DEFAULT '',
-      last_transform_error TEXT DEFAULT '',
-      nudge_anchor_message_id TEXT DEFAULT '',
-      nudge_anchor_text TEXT DEFAULT '',
-      sticky_turn_reminder_text TEXT DEFAULT '',
-      sticky_turn_reminder_message_id TEXT DEFAULT '',
-      is_subagent INTEGER DEFAULT 0,
-      last_context_percentage REAL DEFAULT 0,
-      last_input_tokens INTEGER DEFAULT 0,
-      times_execute_threshold_reached INTEGER DEFAULT 0,
-      compartment_in_progress INTEGER DEFAULT 0,
-      system_prompt_hash INTEGER DEFAULT 0
-    );
-    CREATE TABLE IF NOT EXISTS recomp_compartments (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL,
-      sequence INTEGER NOT NULL,
-      start_message INTEGER NOT NULL,
-      end_message INTEGER NOT NULL,
-      start_message_id TEXT DEFAULT '',
-      end_message_id TEXT DEFAULT '',
-      title TEXT NOT NULL,
-      content TEXT NOT NULL,
-      pass_number INTEGER NOT NULL,
-      created_at INTEGER NOT NULL,
-      UNIQUE(session_id, sequence)
-    );
-    CREATE TABLE IF NOT EXISTS recomp_facts (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL,
-      category TEXT NOT NULL,
-      content TEXT NOT NULL,
-      pass_number INTEGER NOT NULL,
-      created_at INTEGER NOT NULL
-    );
-  `);
+    initializeDatabase(db);
     return db;
 }
 

@@ -82,7 +82,7 @@ describe("storage-meta", () => {
 
             //#then
             expect(db.transaction).toHaveBeenCalledTimes(1);
-            expect(db.prepare).toHaveBeenCalledTimes(9);
+            expect(db.prepare).toHaveBeenCalledTimes(11);
         });
     });
 });

@@ -17,7 +17,7 @@ const DREAM_TIMER_INTERVAL_MS = 15 * 60 * 1000;
 export function startDreamScheduleTimer(args: {
     client: PluginContext["client"];
     dreamerConfig: DreamerConfig;
-}): void {
+}): (() => void) | undefined {
     const { client, dreamerConfig } = args;
 
     if (!dreamerConfig.enabled || !dreamerConfig.schedule?.trim()) {
@@ -51,4 +51,9 @@ export function startDreamScheduleTimer(args: {
     log(
         `[dreamer] started independent schedule timer (every ${DREAM_TIMER_INTERVAL_MS / 60_000}m)`,
     );
+
+    return () => {
+        clearInterval(timer);
+        log("[dreamer] stopped dream schedule timer");
+    };
 }

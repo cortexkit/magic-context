@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { clearIndexedMessages } from "./message-index";
 import {
     BOOLEAN_META_KEYS,
     ensureSessionMetaRow,
@@ -73,5 +74,6 @@ export function clearSession(db: Database, sessionId: string): void {
         db.prepare("DELETE FROM session_notes WHERE session_id = ?").run(sessionId);
         db.prepare("DELETE FROM recomp_compartments WHERE session_id = ?").run(sessionId);
         db.prepare("DELETE FROM recomp_facts WHERE session_id = ?").run(sessionId);
+        clearIndexedMessages(db, sessionId);
     })();
 }

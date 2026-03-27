@@ -79,7 +79,7 @@ function getLastIndexedOrdinal(db: Database, sessionId: string): number {
     return typeof row?.last_indexed_ordinal === "number" ? row.last_indexed_ordinal : 0;
 }
 
-function clearIndexedMessages(db: Database, sessionId: string): void {
+export function clearIndexedMessages(db: Database, sessionId: string): void {
     getDeleteFtsStatement(db).run(sessionId);
     getDeleteIndexStatement(db).run(sessionId);
 }

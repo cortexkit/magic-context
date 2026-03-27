@@ -212,7 +212,7 @@ function getMemoriesByProjectStatement(db: Database, statuses: MemoryStatus[]): 
     if (!stmt) {
         const placeholders = statuses.map(() => "?").join(", ");
         stmt = db.prepare(
-            `SELECT ${getMemorySelectColumns()} FROM memories WHERE project_path = ? AND status IN (${placeholders}) ORDER BY category ASC, updated_at DESC, id ASC`,
+            `SELECT ${getMemorySelectColumns()} FROM memories WHERE project_path = ? AND status IN (${placeholders}) AND (expires_at IS NULL OR expires_at > ?) ORDER BY category ASC, updated_at DESC, id ASC`,
         );
         statements.set(db, stmt);
     }
@@ -399,7 +399,7 @@ export function getMemoriesByProject(
     }
 
     const rows = getMemoriesByProjectStatement(db, statuses)
-        .all(projectPath, ...statuses)
+        .all(projectPath, ...statuses, Date.now())
         .filter(isMemoryRow);
 
     return rows.map(toMemory);

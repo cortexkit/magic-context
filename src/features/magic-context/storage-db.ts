@@ -122,6 +122,7 @@ export function initializeDatabase(db: Database): void {
       retry_count INTEGER DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_dream_queue_project ON dream_queue(project_path);
+CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, enqueued_at);
 
     CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
       content,

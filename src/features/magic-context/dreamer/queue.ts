@@ -21,6 +21,9 @@ export function ensureDreamQueueTable(db: Database): void {
         )
     `);
     db.run("CREATE INDEX IF NOT EXISTS idx_dream_queue_project ON dream_queue(project_path)");
+    db.run(
+        "CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, enqueued_at)",
+    );
 }
 
 /** Enqueue a project for dreaming. Skips if the same project already has any queue entry (queued or running). */

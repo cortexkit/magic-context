@@ -5,6 +5,7 @@ import { cosineSimilarity } from "./cosine-similarity";
 import { LocalEmbeddingProvider } from "./embedding-local";
 import { OpenAICompatibleEmbeddingProvider } from "./embedding-openai";
 import type { EmbeddingProvider } from "./embedding-provider";
+import { computeNormalizedHash } from "./normalize-hash";
 
 const DEFAULT_EMBEDDING_CONFIG: EmbeddingConfig = {
     provider: "local",
@@ -43,7 +44,8 @@ function resolveModelId(config: EmbeddingConfig): string {
     if (config.provider === "openai-compatible") {
         const endpoint = config.endpoint.trim();
         const model = config.model.trim();
-        return `openai-compat:${endpoint}:${model}`;
+        const keyHash = config.api_key ? computeNormalizedHash(config.api_key) : "nokey";
+        return `openai-compat:${endpoint}:${model}:${keyHash}`;
     }
 
     return config.model.trim() || DEFAULT_LOCAL_EMBEDDING_MODEL;

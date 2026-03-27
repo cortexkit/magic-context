@@ -13,8 +13,8 @@ export function createCompactionHandler(): CompactionHandler {
                     "UPDATE tags SET status = 'compacted' WHERE session_id = ? AND status IN ('active', 'dropped')",
                 ).run(sessionId);
                 db.prepare("DELETE FROM pending_ops WHERE session_id = ?").run(sessionId);
+                updateSessionMeta(db, sessionId, { lastNudgeBand: null });
             })();
-            updateSessionMeta(db, sessionId, { lastNudgeBand: null });
         },
     };
 }

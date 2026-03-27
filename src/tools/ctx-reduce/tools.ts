@@ -37,7 +37,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             let dropIds: number[] = [];
 
             try {
-                if (args.drop) dropIds = parseRangeString(args.drop);
+                dropIds = parseRangeString(args.drop);
             } catch (e) {
                 return `Error: Invalid range syntax. ${(e as Error).message}`;
             }
