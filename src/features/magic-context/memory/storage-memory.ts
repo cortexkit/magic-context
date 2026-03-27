@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { invalidateMemory, invalidateProject } from "./embedding-cache";
 import { computeNormalizedHash } from "./normalize-hash";
 import type {
     Memory,
@@ -373,6 +374,8 @@ export function insertMemory(db: Database, input: MemoryInput): Memory {
     if (!inserted) {
         throw new Error("Failed to load inserted memory row");
     }
+
+    invalidateProject(input.projectPath);
     return inserted;
 }
 
@@ -467,6 +470,8 @@ export function updateMemoryContent(
     content: string,
     normalizedHash: string,
 ): void {
+    const memory = getMemoryById(db, id);
+
     db.transaction(() => {
         getUpdateMemoryContentStatement(db).run(content, normalizedHash, Date.now(), id);
 
@@ -480,6 +485,10 @@ export function updateMemoryContent(
         }
         stmt.run(id);
     })();
+
+    if (memory) {
+        invalidateMemory(memory.projectPath, id);
+    }
 }
 
 export function supersededMemory(db: Database, id: number, supersededById: number): void {
@@ -524,10 +533,16 @@ export function archiveMemory(db: Database, id: number, reason?: string): void {
 }
 
 export function deleteMemory(db: Database, id: number): void {
+    const memory = getMemoryById(db, id);
+
     db.transaction(() => {
         getDeleteMemoryEmbeddingStatement(db).run(id);
         getDeleteMemoryStatement(db).run(id);
     })();
+
+    if (memory) {
+        invalidateProject(memory.projectPath);
+    }
 }
 
 export function getMemoryCount(db: Database, projectPath?: string): number {

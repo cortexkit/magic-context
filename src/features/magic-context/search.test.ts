@@ -11,7 +11,7 @@ const rawMessagesBySession = new Map<
 >();
 
 import { replaceSessionFacts } from "./compartment-storage";
-import { getMemoryById, insertMemory, saveEmbedding } from "./memory";
+import { getMemoryById, insertMemory, resetEmbeddingCacheForTests, saveEmbedding } from "./memory";
 import { unifiedSearch } from "./search";
 import { initializeDatabase } from "./storage-db";
 
@@ -32,6 +32,7 @@ afterEach(() => {
     queryEmbedding = null;
     embeddingQueries.length = 0;
     rawMessagesBySession.clear();
+    resetEmbeddingCacheForTests();
 });
 
 describe("unifiedSearch", () => {
@@ -186,5 +187,39 @@ describe("unifiedSearch", () => {
                 isEmbeddingRuntimeEnabled,
             }),
         ).toEqual([]);
+    });
+
+    it("falls back to full semantic search when FTS finds no matches", async () => {
+        const memory = insertMemory(db, {
+            projectPath: "/repo/project",
+            category: "ARCHITECTURE_DECISIONS",
+            content: "alpha beta gamma",
+        });
+        saveEmbedding(db, memory.id, new Float32Array([0, 1]), "mock:model");
+        queryEmbedding = new Float32Array([0, 1]);
+
+        const results = await unifiedSearch(
+            db,
+            "ses-semantic",
+            "/repo/project",
+            "vector-only query",
+            {
+                limit: 5,
+                memoryEnabled: true,
+                embeddingEnabled: true,
+                readMessages,
+                embedQuery,
+                isEmbeddingRuntimeEnabled,
+            },
+        );
+
+        const memoryResults = results.filter(
+            (result): result is Extract<(typeof results)[number], { source: "memory" }> =>
+                result.source === "memory",
+        );
+
+        expect(memoryResults).toHaveLength(1);
+        expect(memoryResults[0]?.memoryId).toBe(memory.id);
+        expect(memoryResults[0]?.matchType).toBe("semantic");
     });
 });

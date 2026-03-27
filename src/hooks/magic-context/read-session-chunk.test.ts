@@ -8,7 +8,9 @@ import { dirname, join } from "node:path";
 import {
     getProtectedTailStartOrdinal,
     getRawSessionMessageIdsThrough,
+    readRawSessionMessages,
     readSessionChunk,
+    withRawSessionMessageCache,
 } from "./read-session-chunk";
 
 const tempDirs: string[] = [];
@@ -141,6 +143,31 @@ function createOpenCodeDbWithMessages(
     }
 }
 
+function appendOpenCodeMessage(
+    sessionId: string,
+    message: { id: string; role: string; part: Record<string, unknown> },
+    timestamp: number,
+): void {
+    const dbPath = join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db");
+    const db = new Database(dbPath);
+    try {
+        db.prepare(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+        ).run(
+            message.id,
+            sessionId,
+            timestamp,
+            timestamp,
+            JSON.stringify({ id: message.id, role: message.role, sessionID: sessionId }),
+        );
+        db.prepare(
+            "INSERT INTO part (message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+        ).run(message.id, sessionId, timestamp, timestamp, JSON.stringify(message.part));
+    } finally {
+        db.close(false);
+    }
+}
+
 describe("readSessionChunk", () => {
     it("reads raw OpenCode messages with stable ordinals and ids", () => {
         useTempDataHome("read-session-chunk-");
@@ -156,6 +183,40 @@ describe("readSessionChunk", () => {
         expect(chunk.text).toContain("[2-3] A: done");
         expect(chunk.text).not.toContain("msg_");
         expect(chunk.text).not.toContain("tool call");
+    });
+
+    it("reuses cached raw messages within nested cache scopes and clears afterward", () => {
+        useTempDataHome("read-session-cache-scope-");
+        createOpenCodeDbWithMessages("ses-cache", [
+            { id: "m-1", role: "user", part: { type: "text", text: "turn 1" } },
+        ]);
+
+        withRawSessionMessageCache(() => {
+            const outerRead = readRawSessionMessages("ses-cache");
+            expect(outerRead).toHaveLength(1);
+
+            withRawSessionMessageCache(() => {
+                const nestedRead = readRawSessionMessages("ses-cache");
+                expect(nestedRead).toBe(outerRead);
+
+                appendOpenCodeMessage(
+                    "ses-cache",
+                    { id: "m-2", role: "assistant", part: { type: "text", text: "turn 2" } },
+                    2,
+                );
+
+                const nestedCachedRead = readRawSessionMessages("ses-cache");
+                expect(nestedCachedRead).toBe(outerRead);
+                expect(nestedCachedRead).toHaveLength(1);
+            });
+
+            const outerCachedRead = readRawSessionMessages("ses-cache");
+            expect(outerCachedRead).toBe(outerRead);
+            expect(outerCachedRead).toHaveLength(1);
+        });
+
+        const freshRead = readRawSessionMessages("ses-cache");
+        expect(freshRead).toHaveLength(2);
     });
 
     it("returns raw message ids through an ordinal", () => {

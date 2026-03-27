@@ -18,6 +18,8 @@ import { isFilePart, isTextPart, isToolPartWithOutput } from "./tag-part-guards"
 
 export { extractTexts, hasMeaningfulUserText } from "./read-session-formatting";
 
+let activeRawMessageCache: Map<string, RawMessage[]> | null = null;
+
 /** Strip system-reminder blocks and OMO markers from user text for chunk compaction. */
 export function cleanUserText(text: string): string {
     return removeSystemReminders(text).replace(OMO_INTERNAL_INITIATOR_MARKER, "").trim();
@@ -37,7 +39,33 @@ export interface SessionChunk {
     commitClusterCount: number;
 }
 
+export function withRawSessionMessageCache<T>(fn: () => T): T {
+    const outerCache = activeRawMessageCache;
+    if (!outerCache) {
+        activeRawMessageCache = new Map();
+    }
+
+    try {
+        return fn();
+    } finally {
+        if (!outerCache) {
+            activeRawMessageCache = null;
+        }
+    }
+}
+
 export function readRawSessionMessages(sessionId: string): RawMessage[] {
+    if (activeRawMessageCache) {
+        const cached = activeRawMessageCache.get(sessionId);
+        if (cached) {
+            return cached;
+        }
+
+        const messages = withReadOnlySessionDb((db) => readRawSessionMessagesFromDb(db, sessionId));
+        activeRawMessageCache.set(sessionId, messages);
+        return messages;
+    }
+
     return withReadOnlySessionDb((db) => readRawSessionMessagesFromDb(db, sessionId));
 }
 
@@ -46,43 +74,39 @@ export function getRawSessionMessageCount(sessionId: string): number {
 }
 
 export function getRawSessionTagKeysThrough(sessionId: string, upToMessageIndex: number): string[] {
-    return withReadOnlySessionDb((db) => {
-        const messages = readRawSessionMessagesFromDb(db, sessionId);
-        const keys: string[] = [];
+    const messages = readRawSessionMessages(sessionId);
+    const keys: string[] = [];
 
-        for (const message of messages) {
-            if (message.ordinal > upToMessageIndex) break;
+    for (const message of messages) {
+        if (message.ordinal > upToMessageIndex) break;
 
-            for (const [partIndex, part] of message.parts.entries()) {
-                if (isTextPart(part)) {
-                    keys.push(`${message.id}:p${partIndex}`);
-                }
-                if (isFilePart(part)) {
-                    keys.push(`${message.id}:file${partIndex}`);
-                }
-                if (isToolPartWithOutput(part)) {
-                    keys.push(part.callID);
-                }
+        for (const [partIndex, part] of message.parts.entries()) {
+            if (isTextPart(part)) {
+                keys.push(`${message.id}:p${partIndex}`);
+            }
+            if (isFilePart(part)) {
+                keys.push(`${message.id}:file${partIndex}`);
+            }
+            if (isToolPartWithOutput(part)) {
+                keys.push(part.callID);
             }
         }
+    }
 
-        return keys;
-    });
+    return keys;
 }
 
 const PROTECTED_TAIL_USER_TURNS = 5;
 
 export function getProtectedTailStartOrdinal(sessionId: string): number {
-    return withReadOnlySessionDb((db) => {
-        const messages = readRawSessionMessagesFromDb(db, sessionId);
-        const userOrdinals = messages
-            .filter((m) => m.role === "user" && hasMeaningfulUserText(m.parts))
-            .map((m) => m.ordinal);
-        if (userOrdinals.length < PROTECTED_TAIL_USER_TURNS) {
-            return 1;
-        }
-        return userOrdinals[userOrdinals.length - PROTECTED_TAIL_USER_TURNS];
-    });
+    const messages = readRawSessionMessages(sessionId);
+    const userOrdinals = messages
+        .filter((m) => m.role === "user" && hasMeaningfulUserText(m.parts))
+        .map((m) => m.ordinal);
+    if (userOrdinals.length < PROTECTED_TAIL_USER_TURNS) {
+        return 1;
+    }
+    return userOrdinals[userOrdinals.length - PROTECTED_TAIL_USER_TURNS];
 }
 
 export function readSessionChunk(
@@ -212,9 +236,7 @@ export function readSessionChunk(
 
 export function getRawSessionMessageIdsThrough(sessionId: string, endOrdinal: number): string[] {
     if (endOrdinal < 1) return [];
-    return withReadOnlySessionDb((db) =>
-        readRawSessionMessagesFromDb(db, sessionId)
-            .filter((message) => message.ordinal <= endOrdinal)
-            .map((message) => message.id),
-    );
+    return readRawSessionMessages(sessionId)
+        .filter((message) => message.ordinal <= endOrdinal)
+        .map((message) => message.id);
 }

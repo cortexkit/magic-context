@@ -11,9 +11,11 @@ import {
     getMemoryByHash,
     getMemoryById,
     getMemoryCount,
+    getProjectEmbeddings,
     getStoredModelId,
     insertMemory,
     loadAllEmbeddings,
+    resetEmbeddingCacheForTests,
     saveEmbedding,
     searchMemoriesFTS,
     updateMemoryContent,
@@ -85,6 +87,7 @@ function makeMemoryDatabase(): Database {
 }
 
 afterEach(() => {
+    resetEmbeddingCacheForTests();
     if (db) {
         db.close(false);
     }
@@ -232,6 +235,46 @@ describe("storage-memory", () => {
             expect(updated?.content).toBe("cache_ttl=10m");
             expect(updated?.normalizedHash).toBe(computeNormalizedHash("cache_ttl=10m"));
             expect(loadAllEmbeddings(db, "/repo/project")).toEqual(new Map());
+        });
+
+        it("#when cache-sensitive writes occur #then embedding cache invalidates updated project entries", () => {
+            db = makeMemoryDatabase();
+
+            const memory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONFIG_DEFAULTS",
+                content: "cache_ttl=5m",
+            });
+            saveEmbedding(db, memory.id, new Float32Array([0.1, 0.2]), "local:model-a");
+
+            const initialCache = getProjectEmbeddings(db, "/repo/project");
+            expect(Array.from(initialCache.get(memory.id) ?? [])).toEqual(
+                Array.from(new Float32Array([0.1, 0.2])),
+            );
+
+            updateMemoryContent(
+                db,
+                memory.id,
+                "cache_ttl=10m",
+                computeNormalizedHash("cache_ttl=10m"),
+            );
+
+            const cacheAfterUpdate = getProjectEmbeddings(db, "/repo/project");
+            expect(cacheAfterUpdate.has(memory.id)).toBeFalse();
+
+            const secondMemory = insertMemory(db, {
+                projectPath: "/repo/project",
+                category: "CONFIG_DEFAULTS",
+                content: "cache_ttl=15m",
+            });
+            saveEmbedding(db, secondMemory.id, new Float32Array([0.3, 0.4]), "local:model-a");
+
+            const cacheAfterInsert = getProjectEmbeddings(db, "/repo/project");
+            expect(Array.from(cacheAfterInsert.keys())).toEqual([secondMemory.id]);
+
+            deleteMemory(db, secondMemory.id);
+
+            expect(getProjectEmbeddings(db, "/repo/project")).toEqual(new Map());
         });
     });
 

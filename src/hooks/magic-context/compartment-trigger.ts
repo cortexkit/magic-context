@@ -8,6 +8,7 @@ import {
     getProtectedTailStartOrdinal,
     getRawSessionMessageCount,
     readSessionChunk,
+    withRawSessionMessageCache,
 } from "./read-session-chunk";
 
 const PROACTIVE_TRIGGER_OFFSET_PERCENTAGE = 2;
@@ -80,41 +81,48 @@ function getUnsummarizedTailInfo(
     sessionId: string,
     compartmentTokenBudget: number,
 ): TailInfo {
-    try {
-        const lastCompartmentEnd = getLastCompartmentEndMessage(db, sessionId);
-        const nextStartOrdinal = Math.max(1, lastCompartmentEnd + 1);
-        const rawMessageCount = getRawSessionMessageCount(sessionId);
-        const protectedTailStart = getProtectedTailStartOrdinal(sessionId);
-        const hasEligibleHistory =
-            rawMessageCount >= nextStartOrdinal && nextStartOrdinal < protectedTailStart;
+    return withRawSessionMessageCache(() => {
+        try {
+            const lastCompartmentEnd = getLastCompartmentEndMessage(db, sessionId);
+            const nextStartOrdinal = Math.max(1, lastCompartmentEnd + 1);
+            const rawMessageCount = getRawSessionMessageCount(sessionId);
+            const protectedTailStart = getProtectedTailStartOrdinal(sessionId);
+            const hasEligibleHistory =
+                rawMessageCount >= nextStartOrdinal && nextStartOrdinal < protectedTailStart;
 
-        if (!hasEligibleHistory) {
-            return { ...TAIL_INFO_DEFAULTS, nextStartOrdinal };
+            if (!hasEligibleHistory) {
+                return { ...TAIL_INFO_DEFAULTS, nextStartOrdinal };
+            }
+
+            // Read a large enough window to capture commit clusters and tail size.
+            // Use 3x the compartment budget so we can detect the tail-size trigger.
+            const scanBudget = Math.max(
+                MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE,
+                compartmentTokenBudget * TAIL_SIZE_TRIGGER_MULTIPLIER,
+            );
+            const chunk = readSessionChunk(
+                sessionId,
+                scanBudget,
+                nextStartOrdinal,
+                protectedTailStart,
+            );
+            const isMeaningful =
+                chunk.hasMore ||
+                chunk.tokenEstimate >= MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE ||
+                chunk.messageCount >= MIN_PROACTIVE_TAIL_MESSAGE_COUNT;
+
+            return {
+                nextStartOrdinal,
+                hasNewRawHistory: true,
+                isMeaningful,
+                tokenEstimate: chunk.tokenEstimate,
+                commitClusterCount: chunk.commitClusterCount,
+            };
+        } catch (error) {
+            sessionLog(sessionId, "compartment trigger: raw tail inspection failed:", error);
+            return TAIL_INFO_DEFAULTS;
         }
-
-        // Read a large enough window to capture commit clusters and tail size.
-        // Use 3x the compartment budget so we can detect the tail-size trigger.
-        const scanBudget = Math.max(
-            MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE,
-            compartmentTokenBudget * TAIL_SIZE_TRIGGER_MULTIPLIER,
-        );
-        const chunk = readSessionChunk(sessionId, scanBudget, nextStartOrdinal, protectedTailStart);
-        const isMeaningful =
-            chunk.hasMore ||
-            chunk.tokenEstimate >= MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE ||
-            chunk.messageCount >= MIN_PROACTIVE_TAIL_MESSAGE_COUNT;
-
-        return {
-            nextStartOrdinal,
-            hasNewRawHistory: true,
-            isMeaningful,
-            tokenEstimate: chunk.tokenEstimate,
-            commitClusterCount: chunk.commitClusterCount,
-        };
-    } catch (error) {
-        sessionLog(sessionId, "compartment trigger: raw tail inspection failed:", error);
-        return TAIL_INFO_DEFAULTS;
-    }
+    });
 }
 
 export function checkCompartmentTrigger(

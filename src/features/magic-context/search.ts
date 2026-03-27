@@ -4,8 +4,9 @@ import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
 import {
     ensureMemoryEmbeddings,
     getMemoriesByProject,
-    loadAllEmbeddings,
+    getProjectEmbeddings,
     type Memory,
+    peekProjectEmbeddings,
     searchMemoriesFTS,
     updateMemoryRetrievalCount,
 } from "./memory";
@@ -18,6 +19,7 @@ import { getSessionFacts, type SessionFact } from "./storage";
 type PreparedStatement = ReturnType<Database["prepare"]>;
 
 const DEFAULT_UNIFIED_SEARCH_LIMIT = 10;
+const FTS_SEMANTIC_CANDIDATE_LIMIT = 50;
 const SEMANTIC_WEIGHT = 0.7;
 const FTS_WEIGHT = 0.3;
 const SINGLE_SOURCE_PENALTY = 0.8;
@@ -180,10 +182,11 @@ async function getSemanticScores(args: {
         return semanticScores;
     }
 
+    const cachedEmbeddings = getProjectEmbeddings(args.db, args.projectPath);
     const embeddings = await ensureMemoryEmbeddings({
         db: args.db,
         memories: args.memories,
-        existingEmbeddings: loadAllEmbeddings(args.db, args.projectPath),
+        existingEmbeddings: cachedEmbeddings,
     });
 
     for (const memory of args.memories) {
@@ -201,18 +204,42 @@ async function getSemanticScores(args: {
     return semanticScores;
 }
 
-function getFtsScores(args: {
+function getFtsMatches(args: {
     db: Database;
     projectPath: string;
     query: string;
     limit: number;
-}): Map<number, number> {
+}): Memory[] {
     try {
-        const matches = searchMemoriesFTS(args.db, args.projectPath, args.query, args.limit);
-        return new Map(matches.map((memory, rank) => [memory.id, 1 / (rank + 1)]));
+        return searchMemoriesFTS(args.db, args.projectPath, args.query, args.limit);
     } catch {
-        return new Map();
+        return [];
     }
+}
+
+function getFtsScores(matches: Memory[]): Map<number, number> {
+    return new Map(matches.map((memory, rank) => [memory.id, 1 / (rank + 1)]));
+}
+
+function selectSemanticCandidates(args: {
+    memories: Memory[];
+    projectPath: string;
+    ftsMatches: Memory[];
+}): Memory[] {
+    if (args.ftsMatches.length === 0) {
+        return args.memories;
+    }
+
+    const candidateIds = new Set(args.ftsMatches.map((memory) => memory.id));
+    const cachedEmbeddings = peekProjectEmbeddings(args.projectPath);
+
+    if (cachedEmbeddings) {
+        for (const memoryId of cachedEmbeddings.keys()) {
+            candidateIds.add(memoryId);
+        }
+    }
+
+    return args.memories.filter((memory) => candidateIds.has(memory.id));
 }
 
 function mergeMemoryResults(args: {
@@ -290,16 +317,27 @@ async function searchMemories(args: {
         return [];
     }
 
+    const ftsMatches = getFtsMatches({
+        db: args.db,
+        projectPath: args.projectPath,
+        query: args.query,
+        limit: FTS_SEMANTIC_CANDIDATE_LIMIT,
+    });
+    const ftsScores = getFtsScores(ftsMatches);
+    const semanticCandidates = selectSemanticCandidates({
+        memories,
+        projectPath: args.projectPath,
+        ftsMatches,
+    });
     const semanticScores = await getSemanticScores({
         db: args.db,
         projectPath: args.projectPath,
         query: args.query,
-        memories,
+        memories: semanticCandidates,
         embeddingEnabled: args.embeddingEnabled,
         embedQuery: args.embedQuery,
         isEmbeddingRuntimeEnabled: args.isEmbeddingRuntimeEnabled,
     });
-    const ftsScores = getFtsScores(args);
 
     return mergeMemoryResults({
         memories,
