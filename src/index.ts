@@ -7,6 +7,7 @@ import { getMagicContextBuiltinCommands } from "./features/builtin-commands/comm
 import { DREAMER_SYSTEM_PROMPT } from "./features/magic-context/dreamer/task-prompts";
 import { SIDEKICK_SYSTEM_PROMPT } from "./features/magic-context/sidekick/agent";
 import { COMPARTMENT_AGENT_SYSTEM_PROMPT } from "./hooks/magic-context/compartment-prompt";
+import { startDreamScheduleTimer } from "./plugin/dream-timer";
 import { createEventHandler } from "./plugin/event";
 import { createSessionHooks } from "./plugin/hooks/create-session-hooks";
 import { createMessagesTransformHandler } from "./plugin/messages-transform";
@@ -30,6 +31,15 @@ const plugin: Plugin = async (ctx) => {
         ctx,
         pluginConfig,
     });
+
+    // Start independent dream schedule timer at plugin level (not inside hooks)
+    // so overnight dreaming works even when the user isn't chatting.
+    if (pluginConfig.dreamer) {
+        startDreamScheduleTimer({
+            client: ctx.client,
+            dreamerConfig: pluginConfig.dreamer,
+        });
+    }
 
     return {
         tool: tools,

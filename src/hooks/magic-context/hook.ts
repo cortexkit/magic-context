@@ -56,6 +56,7 @@ export interface MagicContextDeps {
     compactionHandler: ReturnType<typeof createCompactionHandler>;
     config: {
         protected_tags: number;
+        ctx_reduce_enabled?: boolean;
         nudge_interval_tokens?: number;
         auto_drop_tool_age?: number;
         clear_reasoning_age?: number;
@@ -146,13 +147,17 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     const liveModelBySession = new Map<string, { providerID: string; modelID: string }>();
     const recentReduceBySession = new Map<string, number>();
     const toolUsageSinceUserTurn = new Map<string, number>();
-    const nudgerWithRecentReduce = createNudger({
-        protected_tags: deps.config.protected_tags,
-        nudge_interval_tokens: deps.config.nudge_interval_tokens ?? DEFAULT_NUDGE_INTERVAL_TOKENS,
-        iteration_nudge_threshold: deps.config.iteration_nudge_threshold ?? 15,
-        execute_threshold_percentage: deps.config.execute_threshold_percentage ?? 65,
-        recentReduceBySession,
-    });
+    const ctxReduceEnabled = deps.config.ctx_reduce_enabled !== false;
+    const nudgerWithRecentReduce = ctxReduceEnabled
+        ? createNudger({
+              protected_tags: deps.config.protected_tags,
+              nudge_interval_tokens:
+                  deps.config.nudge_interval_tokens ?? DEFAULT_NUDGE_INTERVAL_TOKENS,
+              iteration_nudge_threshold: deps.config.iteration_nudge_threshold ?? 15,
+              execute_threshold_percentage: deps.config.execute_threshold_percentage ?? 65,
+              recentReduceBySession,
+          })
+        : () => null;
 
     const transform = createTransform({
         tagger: deps.tagger,
@@ -278,6 +283,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     const systemPromptHashHandler = createSystemPromptHashHandler({
         db,
         protectedTags: deps.config.protected_tags,
+        ctxReduceEnabled,
         flushedSessions,
         lastHeuristicsTurnId,
     });
@@ -296,6 +302,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         commitSeenLastPass,
         client: deps.client,
         protectedTags: deps.config.protected_tags,
+        ctxReduceEnabled,
     });
 
     return {
@@ -309,6 +316,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             variantBySession,
             flushedSessions,
             lastHeuristicsTurnId,
+            ctxReduceEnabled,
         }),
         event: async (input: { event: { type: string; properties?: unknown } }) => {
             await eventHook(input);

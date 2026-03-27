@@ -26,6 +26,12 @@ NEVER drop user messages — they are short and will be summarized by compartmen
 NEVER drop assistant text messages unless they are exceptionally large. Your conversation messages are lightweight; only large tool outputs are worth dropping.
 Before your turn finishes, consider using \`ctx_reduce\` to drop large tool outputs you no longer need.`;
 
+/** Intro when ctx_reduce is disabled — no drop guidance, no ctx_reduce references. */
+const BASE_INTRO_NO_REDUCE = `Messages and tool outputs are tagged with §N§ identifiers (e.g., §1§, §42§).
+Use \`ctx_note\` for deferred intentions — things to tackle later, not right now. NOT for task tracking (use todos). Notes survive context compression and you'll be reminded at natural work boundaries (after commits, historian runs, todo completion).
+Use \`ctx_memory\` to manage cross-session project memories. Write new memories, delete stale ones, or search stored memories by category. Memories persist across sessions and are automatically injected into new sessions.
+Use \`ctx_expand\` to decompress a compartment range to see the original conversation transcript. Use \`start\`/\`end\` from \`<compartment start=N end=M>\` attributes. Returns the compacted U:/A: transcript for that message range, capped at ~15K tokens.`;
+
 const SISYPHUS_SECTION = `
 ### Reduction Triggers
 - After collecting background agent results (explore/librarian) — drop raw outputs once you extracted what you need.
@@ -182,7 +188,16 @@ export function detectAgentFromSystemPrompt(systemPrompt: string): AgentType | n
     return null;
 }
 
-export function buildMagicContextSection(agent: AgentType | null, protectedTags: number): string {
+export function buildMagicContextSection(
+    agent: AgentType | null,
+    protectedTags: number,
+    ctxReduceEnabled = true,
+): string {
+    if (!ctxReduceEnabled) {
+        return `## Magic Context
+
+${BASE_INTRO_NO_REDUCE}`;
+    }
     const section = agent ? AGENT_SECTIONS[agent] : GENERIC_SECTION;
     return `## Magic Context
 

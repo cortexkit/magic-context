@@ -50,22 +50,27 @@ export function createChatMessageHook(args: {
     variantBySession: VariantBySession;
     flushedSessions: FlushedSessions;
     lastHeuristicsTurnId: LastHeuristicsTurnId;
+    ctxReduceEnabled?: boolean;
 }) {
     return async (input: { sessionID?: string; variant?: string }) => {
         const sessionId = input.sessionID;
         if (!sessionId) return;
 
-        const sessionMeta = getOrCreateSessionMeta(args.db, sessionId);
-        const turnUsage = args.toolUsageSinceUserTurn.get(sessionId);
-        const agentAlreadyReduced = args.recentReduceBySession.has(sessionId);
-        if (
-            !sessionMeta.isSubagent &&
-            !agentAlreadyReduced &&
-            getPersistedStickyTurnReminder(args.db, sessionId) === null &&
-            turnUsage !== undefined &&
-            turnUsage >= TOOL_HEAVY_TURN_REMINDER_THRESHOLD
-        ) {
-            setPersistedStickyTurnReminder(args.db, sessionId, TOOL_HEAVY_TURN_REMINDER_TEXT);
+        // Only set sticky turn reminders when ctx_reduce is enabled — the reminder
+        // tells the agent to use ctx_reduce, which doesn't exist when disabled.
+        if (args.ctxReduceEnabled !== false) {
+            const sessionMeta = getOrCreateSessionMeta(args.db, sessionId);
+            const turnUsage = args.toolUsageSinceUserTurn.get(sessionId);
+            const agentAlreadyReduced = args.recentReduceBySession.has(sessionId);
+            if (
+                !sessionMeta.isSubagent &&
+                !agentAlreadyReduced &&
+                getPersistedStickyTurnReminder(args.db, sessionId) === null &&
+                turnUsage !== undefined &&
+                turnUsage >= TOOL_HEAVY_TURN_REMINDER_THRESHOLD
+            ) {
+                setPersistedStickyTurnReminder(args.db, sessionId, TOOL_HEAVY_TURN_REMINDER_TEXT);
+            }
         }
         args.toolUsageSinceUserTurn.set(sessionId, 0);
 
@@ -103,6 +108,7 @@ export function createEventHook(args: {
     commitSeenLastPass?: Map<string, boolean>;
     client: PluginContext["client"];
     protectedTags: number;
+    ctxReduceEnabled?: boolean;
 }) {
     return async (input: { event: { type: string; properties?: unknown } }) => {
         await args.eventHandler(input);
@@ -140,6 +146,10 @@ export function createEventHook(args: {
             args.emergencyNudgeFired.delete(sessionId);
             return;
         }
+
+        // Skip 80% emergency nudge when ctx_reduce is disabled — it tells the
+        // agent to "STOP AND COMPRESS" which requires ctx_reduce.
+        if (args.ctxReduceEnabled === false) return;
 
         if (args.emergencyNudgeFired.has(sessionId)) return;
 

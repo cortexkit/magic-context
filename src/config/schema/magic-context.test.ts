@@ -47,6 +47,7 @@ describe("MagicContextConfigSchema", () => {
         it("parses an enabled config without stale reduction-specific keys", () => {
             const input = {
                 enabled: true,
+                ctx_reduce_enabled: true,
                 cache_ttl: "10m",
                 protected_tags: 3,
                 nudge_interval_tokens: 15_000,

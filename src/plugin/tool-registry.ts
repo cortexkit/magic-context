@@ -69,11 +69,14 @@ export function createToolRegistry(args: {
         }
     }
 
+    const ctxReduceEnabled = pluginConfig.ctx_reduce_enabled !== false;
     const allTools: Record<string, ToolDefinition> = {
-        ...createCtxReduceTools({
-            db,
-            protectedTags: pluginConfig.protected_tags ?? DEFAULT_PROTECTED_TAGS,
-        }),
+        ...(ctxReduceEnabled
+            ? createCtxReduceTools({
+                  db,
+                  protectedTags: pluginConfig.protected_tags ?? DEFAULT_PROTECTED_TAGS,
+              })
+            : {}),
         ...createCtxExpandTools(),
         ...createCtxNoteTools({ db }),
         ...(memoryEnabled

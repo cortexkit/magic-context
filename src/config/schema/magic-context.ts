@@ -124,6 +124,10 @@ export type DreamingConfig = z.infer<typeof DreamingConfigSchema>;
 
 export interface MagicContextConfig {
     enabled: boolean;
+    /** When false, ctx_reduce tool is not registered, all nudges are disabled,
+     *  and prompt guidance about ctx_reduce is stripped. Heuristic cleanup,
+     *  compartments, memory, and other features continue to work. Default: true. */
+    ctx_reduce_enabled: boolean;
     historian?: z.infer<typeof AgentOverrideConfigSchema>;
     dreamer?: DreamerConfig;
     cache_ttl: string | { default: string; [modelKey: string]: string };
@@ -150,6 +154,10 @@ export const MagicContextConfigSchema = z
     .object({
         /** Enable magic context (default: false) */
         enabled: z.boolean().default(false),
+        /** When false, ctx_reduce tool is hidden, all nudges disabled, and prompt
+         *  guidance about ctx_reduce stripped. Heuristic cleanup, compartments,
+         *  memory, and other features still work. (default: true) */
+        ctx_reduce_enabled: z.boolean().default(true),
         /** Historian agent configuration (model, fallback_models, variant, temperature, maxTokens, permission, etc.) */
         historian: AgentOverrideConfigSchema.optional(),
         /** Dreamer agent + scheduling configuration (model, fallback_models, enabled, schedule, tasks, etc.) */

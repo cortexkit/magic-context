@@ -27,6 +27,7 @@ const MAGIC_CONTEXT_MARKER = "## Magic Context";
 export function createSystemPromptHashHandler(deps: {
     db: ContextDatabase;
     protectedTags: number;
+    ctxReduceEnabled: boolean;
     flushedSessions: Set<string>;
     lastHeuristicsTurnId: Map<string, string>;
 }): (input: { sessionID?: string }, output: { system: string[] }) => Promise<void> {
@@ -38,7 +39,11 @@ export function createSystemPromptHashHandler(deps: {
         const fullPrompt = output.system.join("\n");
         if (fullPrompt.length > 0 && !fullPrompt.includes(MAGIC_CONTEXT_MARKER)) {
             const detectedAgent = detectAgentFromSystemPrompt(fullPrompt);
-            const guidance = buildMagicContextSection(detectedAgent, deps.protectedTags);
+            const guidance = buildMagicContextSection(
+                detectedAgent,
+                deps.protectedTags,
+                deps.ctxReduceEnabled,
+            );
             output.system.push(guidance);
             sessionLog(
                 sessionId,
