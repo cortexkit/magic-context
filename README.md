@@ -27,9 +27,9 @@
 
 ## What is Magic Context?
 
-Context windows fill up, old messages get dropped, and the agent loses track of decisions it made twenty minutes ago. Magic Context is an OpenCode plugin that fixes this:
+Your agent should never stop working to manage its own context. Magic Context is an OpenCode plugin that handles it entirely in the background:
 
-**1.** Transparent context compaction via a background historian — all operations are **cache-aware** and deferred to avoid wasting cached prefixes.
+**1.** Transparent context compaction via a background historian — the main agent keeps working while a separate model compresses older conversation. All operations are **cache-aware** and deferred to avoid wasting cached prefixes.
 
 **2.** Cross-session project memory — architecture decisions, constraints, and preferences persist across conversations.
 
