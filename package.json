@@ -41,6 +41,7 @@
     "prepublishOnly": "bun run build"
   },
   "dependencies": {
+    "@clack/prompts": "^1.1.0",
     "@huggingface/transformers": "^3.5.1",
     "@opencode-ai/plugin": "^1.2.26",
     "ai-tokenizer": "^1.0.6",
