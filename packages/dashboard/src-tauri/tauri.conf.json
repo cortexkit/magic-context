@@ -34,6 +34,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -41,5 +42,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY5MUNBMDIxNjUxMEM2MkYKUldRdnhoQmxJYUFjYVU0SlNNbzRWMGJ3MndKOENIVDR0N0N6b0Jyd1l6TUNFTlpZTzV3RXlRYkEK",
+      "endpoints": [
+        "https://github.com/cortexkit/opencode-magic-context/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

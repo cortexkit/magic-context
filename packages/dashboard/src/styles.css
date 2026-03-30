@@ -1169,6 +1169,54 @@ select.config-input {
   font-size: 12px;
 }
 
+/* ── Update toast ────────────────────────────────────── */
+.update-toast {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  margin: 12px 20px 0;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.12), rgba(99, 102, 241, 0.08));
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: var(--radius-lg);
+  animation: toast-in 200ms ease-out;
+  flex-shrink: 0;
+}
+
+.update-toast-content {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.update-toast-icon {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.update-toast-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.update-toast-text strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.update-toast-text span {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.update-toast-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 /* Per-model field rows */
 .per-model-row {
   display: flex;

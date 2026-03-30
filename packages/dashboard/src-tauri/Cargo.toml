@@ -24,6 +24,9 @@ regex = "1"
 lazy_static = "1"
 tokio = { version = "1", features = ["fs", "io-util", "sync", "macros"] }
 reqwest = { version = "0.12", features = ["json"] }
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+tauri-plugin-dialog = "2"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

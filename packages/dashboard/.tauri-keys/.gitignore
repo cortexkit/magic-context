@@ -1,0 +1,4 @@
+# Private signing key — NEVER commit
+*.key
+# Public key is safe to track
+!*.key.pub
