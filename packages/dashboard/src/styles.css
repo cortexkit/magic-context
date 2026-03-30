@@ -64,6 +64,7 @@ body {
   grid-column: 1;
   background: var(--bg-panel);
   border-right: 1px solid var(--border);
+  border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -123,6 +124,7 @@ body {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  border-top: 1px solid var(--border);
 }
 
 /* ── Status bar ──────────────────────────────────────── */
