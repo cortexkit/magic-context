@@ -289,6 +289,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         db,
         protectedTags: deps.config.protected_tags,
         ctxReduceEnabled,
+        dreamerEnabled: deps.config.dreamer?.enabled === true,
+        injectDocs: deps.config.dreamer?.inject_docs !== false,
+        directory: deps.directory,
         flushedSessions,
         lastHeuristicsTurnId,
     });

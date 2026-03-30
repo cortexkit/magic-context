@@ -2,8 +2,13 @@ export const CTX_NOTE_DESCRIPTION = `Save or inspect durable session notes that 
 Use this for short goals, constraints, decisions, or reminders worth carrying forward.
 
 Actions:
-- \`write\`: Append one note.
-- \`read\`: Show current notes.
-- \`clear\`: Remove all notes.
+- \`write\`: Append one note. Optionally provide \`surface_condition\` to create a smart note.
+- \`read\`: Show current notes (session notes + ready smart notes).
+- \`clear\`: Remove all session notes.
+- \`dismiss\`: Dismiss a ready smart note by \`note_id\`.
+
+**Smart Notes**: When \`surface_condition\` is provided with \`write\`, the note becomes a project-scoped smart note.
+The dreamer evaluates smart note conditions during nightly runs and surfaces them when conditions are met.
+Example: \`ctx_note(action="write", content="Implement X because Y", surface_condition="When PR #42 is merged in this repo")\`
 
 Historian reads these notes, deduplicates them, and rewrites the remaining useful notes over time.`;

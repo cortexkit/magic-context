@@ -124,6 +124,21 @@ export function initializeDatabase(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_dream_queue_project ON dream_queue(project_path);
 CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, enqueued_at);
 
+    CREATE TABLE IF NOT EXISTS smart_notes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_path TEXT NOT NULL,
+      content TEXT NOT NULL,
+      surface_condition TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_session_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      last_checked_at INTEGER,
+      ready_at INTEGER,
+      ready_reason TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_smart_notes_project_status ON smart_notes(project_path, status);
+
     CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
       content,
       category,

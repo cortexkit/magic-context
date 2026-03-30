@@ -194,17 +194,15 @@ export function buildMagicContextSection(
     agent: AgentType | null,
     protectedTags: number,
     ctxReduceEnabled = true,
+    dreamerEnabled = false,
 ): string {
-    if (!ctxReduceEnabled) {
-        return `## Magic Context
+    const smartNoteGuidance = dreamerEnabled
+        ? `\nWhen \`surface_condition\` is provided with \`write\`, the note becomes a project-scoped smart note.\nThe dreamer evaluates smart note conditions during nightly runs and surfaces them when conditions are met.\nExample: \`ctx_note(action="write", content="Implement X because Y", surface_condition="When PR #42 is merged in this repo")\``
+        : "";
 
-${BASE_INTRO_NO_REDUCE}`;
+    if (!ctxReduceEnabled) {
+        return `## Magic Context\n\n${BASE_INTRO_NO_REDUCE}${smartNoteGuidance}`;
     }
     const section = agent ? AGENT_SECTIONS[agent] : GENERIC_SECTION;
-    return `## Magic Context
-
-${BASE_INTRO(protectedTags)}
-${section}
-
-Prefer many small targeted operations over one large blanket operation. Compress early and often — don't wait for warnings.`;
+    return `## Magic Context\n\n${BASE_INTRO(protectedTags)}${smartNoteGuidance}\n${section}\n\nPrefer many small targeted operations over one large blanket operation. Compress early and often — don't wait for warnings.`;
 }

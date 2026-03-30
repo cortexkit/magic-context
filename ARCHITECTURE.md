@@ -6,8 +6,9 @@
 
 **Key Characteristics:**
 - Route all OpenCode integration through thin adapters in `src/plugin/` and keep feature logic in `src/hooks/`, `src/features/`, and `src/tools/`.
-- Use SQLite-backed durable state from `src/features/magic-context/storage*.ts` for tags, pending ops, compartments, memories, and dreamer queue state.
+- Use SQLite-backed durable state from `src/features/magic-context/storage*.ts` for tags, pending ops, compartments, memories, dreamer queue state, and per-session cache-stability watermarks (`cleared_reasoning_through_tag`, `stripped_placeholder_ids`).
 - Use hidden subagents from `src/agents/*.ts` plus prompt builders in `src/features/magic-context/dreamer/task-prompts.ts`, `src/features/magic-context/sidekick/agent.ts`, and `src/hooks/magic-context/compartment-prompt.ts`.
+- Replay all persistent message mutations (reasoning clearing, placeholder stripping) on every transform pass — including defer passes — so stripped state survives OpenCode's message rebuilds without re-triggering a cache bust.
 
 ## Layers
 
@@ -70,9 +71,16 @@
 
 **Session transform pipeline:**
 1. Enter `createMagicContextHook()` in `src/hooks/magic-context/hook.ts` — open persistent storage, set up in-memory maps, and create the transform.
-2. Run the transform from `src/hooks/magic-context/transform.ts` — tag messages, load session state, prepare compartment injection, and schedule deferred work.
-3. Run postprocessing in `src/hooks/magic-context/transform-postprocess-phase.ts` — apply pending ops, heuristic cleanup, reasoning cleanup, stale reduce-call cleanup, compartment rendering, and nudge placement.
+2. Run the transform from `src/hooks/magic-context/transform.ts` — tag messages, load session state, prepare compartment injection, and schedule deferred work. On every pass (including defer), replay persisted reasoning clearing using `replayClearedReasoning()` and `replayStrippedInlineThinking()` from `src/hooks/magic-context/strip-content.ts` to maintain stripped state when OpenCode rebuilds messages from its own DB.
+3. Run postprocessing in `src/hooks/magic-context/transform-postprocess-phase.ts` — apply pending ops, heuristic cleanup, reasoning cleanup, stale reduce-call cleanup, compartment rendering, and nudge placement. Stripped placeholder message IDs are read from `stripped_placeholder_ids` in `session_meta` (via `src/features/magic-context/storage-meta-persisted.ts`) and replayed on every pass; the persisted set is updated when new empty shells are detected on cache-busting passes only.
 4. Persist session state through storage helpers exported by `src/features/magic-context/storage.ts`.
+
+**System prompt stability:**
+- Freeze the `Today's date:` line in the system prompt on defer passes using a per-session `stickyDateBySession` map in `src/hooks/magic-context/system-prompt-hash.ts`. Update the sticky date only on cache-busting passes. This prevents a midnight date flip from causing a spurious cache rebuild.
+- Track the reasoning-clearing watermark (`cleared_reasoning_through_tag` column in `session_meta`) as a persisted integer so clearing survives across OpenCode message rebuilds.
+
+**Note nudge trigger gating:**
+- The todowrite note-nudge fires in `src/hooks/magic-context/hook-handlers.ts` only when ALL todo items have a terminal status (`completed` or `cancelled`). Intermediate todowrite calls during active work do not trigger the nudge.
 
 **Memory and search flow:**
 1. Create, update, merge, archive, list, or search memories through `src/tools/ctx-memory/tools.ts`.
@@ -118,6 +126,16 @@
 - Purpose: Keep hidden-agent identities and prompt text isolated from runtime wiring.
 - Location: `src/agents/dreamer.ts`, `src/agents/historian.ts`, `src/agents/sidekick.ts`, `src/agents/magic-context-prompt.ts`
 - Pattern: Constants plus prompt builders.
+
+**Content stripping and replay:**
+- Purpose: Strip reasoning, inline thinking, placeholder shells, and structural noise from messages, and replay those operations on every transform pass to maintain stable message content across OpenCode's message rebuilds.
+- Location: `src/hooks/magic-context/strip-content.ts`
+- Pattern: Stateless strip functions paired with persisted watermarks (`cleared_reasoning_through_tag`, `stripped_placeholder_ids`) read from `session_meta` via `src/features/magic-context/storage-meta-persisted.ts`.
+
+**Persisted session meta:**
+- Purpose: Store per-session scalars and JSON blobs that must survive across transform passes and OpenCode restarts.
+- Location: `src/features/magic-context/storage-meta-shared.ts`, `src/features/magic-context/storage-meta-persisted.ts`, `src/features/magic-context/storage-meta-session.ts`
+- Pattern: `session_meta` SQLite table with `ensureColumn()` migrations; typed row interfaces with runtime guards.
 
 ## Entry Points
 

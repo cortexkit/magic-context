@@ -51,6 +51,6 @@ describe("createCtxNoteTools", () => {
         const readResult = await tools.ctx_note.execute({ action: "read" }, toolContext());
 
         expect(clearResult).toContain("Cleared 1 session note");
-        expect(readResult).toContain("No session notes saved yet");
+        expect(readResult).toContain("No session notes or smart notes");
     });
 });

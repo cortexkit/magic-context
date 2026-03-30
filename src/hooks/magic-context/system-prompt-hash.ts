@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
     buildMagicContextSection,
     detectAgentFromSystemPrompt,
@@ -7,9 +9,38 @@ import {
     getOrCreateSessionMeta,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
-import { sessionLog } from "../../shared/logger";
+import { log, sessionLog } from "../../shared/logger";
 
 const MAGIC_CONTEXT_MARKER = "## Magic Context";
+const PROJECT_DOCS_MARKER = "<project-docs>";
+
+const DOC_FILES = ["ARCHITECTURE.md", "STRUCTURE.md"] as const;
+
+/**
+ * Read dreamer-maintained project docs from the repo root.
+ * Returns a wrapped XML block or null if no docs exist.
+ */
+function readProjectDocs(directory: string): string | null {
+    const sections: string[] = [];
+
+    for (const filename of DOC_FILES) {
+        const filePath = join(directory, filename);
+        try {
+            if (existsSync(filePath)) {
+                const content = readFileSync(filePath, "utf-8").trim();
+                if (content.length > 0) {
+                    sections.push(`<${filename}>\n${content}\n</${filename}>`);
+                }
+            }
+        } catch (error) {
+            log(`[magic-context] failed to read ${filename}:`, error);
+        }
+    }
+
+    if (sections.length === 0) return null;
+
+    return `${PROJECT_DOCS_MARKER}\n${sections.join("\n\n")}\n</project-docs>`;
+}
 
 /**
  * Handle system prompt via experimental.chat.system.transform:
@@ -28,6 +59,11 @@ export function createSystemPromptHashHandler(deps: {
     db: ContextDatabase;
     protectedTags: number;
     ctxReduceEnabled: boolean;
+    dreamerEnabled: boolean;
+    /** When true + dreamerEnabled, inject ARCHITECTURE.md and STRUCTURE.md into system prompt */
+    injectDocs: boolean;
+    /** Project root directory for reading doc files */
+    directory: string;
     flushedSessions: Set<string>;
     lastHeuristicsTurnId: Map<string, string>;
 }): (input: { sessionID?: string }, output: { system: string[] }) => Promise<void> {
@@ -35,6 +71,13 @@ export function createSystemPromptHashHandler(deps: {
     // and only update it on cache-busting passes. This prevents a midnight date
     // flip from causing an unnecessary flush + cache rebuild.
     const stickyDateBySession = new Map<string, string>();
+
+    // Per-session cached doc content: read from disk on first access, refreshed
+    // only on cache-busting passes so mid-session dreamer doc updates don't cause
+    // spurious cache busts.
+    const cachedDocsBySession = new Map<string, string | null>();
+
+    const shouldInjectDocs = deps.dreamerEnabled && deps.injectDocs;
 
     return async (input, output): Promise<void> => {
         const sessionId = input.sessionID;
@@ -48,6 +91,7 @@ export function createSystemPromptHashHandler(deps: {
                 detectedAgent,
                 deps.protectedTags,
                 deps.ctxReduceEnabled,
+                deps.dreamerEnabled,
             );
             output.system.push(guidance);
             sessionLog(
@@ -56,8 +100,30 @@ export function createSystemPromptHashHandler(deps: {
             );
         }
 
-        // ── Step 2: Freeze volatile date to prevent unnecessary cache busts ──
+        // ── Step 1.5: Inject dreamer-maintained project docs ──
         const isCacheBusting = deps.flushedSessions.has(sessionId);
+
+        if (shouldInjectDocs) {
+            const hasCached = cachedDocsBySession.has(sessionId);
+
+            if (!hasCached || isCacheBusting) {
+                // Read fresh from disk on first access or cache-busting pass
+                const docsContent = readProjectDocs(deps.directory);
+                cachedDocsBySession.set(sessionId, docsContent);
+                if (docsContent && !hasCached) {
+                    sessionLog(sessionId, `loaded project docs (${docsContent.length} chars)`);
+                } else if (docsContent && isCacheBusting) {
+                    sessionLog(sessionId, "refreshed project docs (cache-busting pass)");
+                }
+            }
+
+            const docsBlock = cachedDocsBySession.get(sessionId);
+            if (docsBlock && !fullPrompt.includes(PROJECT_DOCS_MARKER)) {
+                output.system.push(docsBlock);
+            }
+        }
+
+        // ── Step 2: Freeze volatile date to prevent unnecessary cache busts ──
         const DATE_PATTERN = /Today's date: .+/;
 
         for (let i = 0; i < output.system.length; i++) {

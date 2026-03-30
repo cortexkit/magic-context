@@ -79,7 +79,11 @@ export function createToolRegistry(args: {
               })
             : {}),
         ...createCtxExpandTools(),
-        ...createCtxNoteTools({ db }),
+        ...createCtxNoteTools({
+            db,
+            dreamerEnabled: pluginConfig.dreamer?.enabled === true,
+            projectIdentity: projectPath,
+        }),
         ...createCtxSearchTools({
             db,
             projectPath,

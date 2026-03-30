@@ -41,6 +41,8 @@ export const DreamerConfigSchema = AgentOverrideConfigSchema.merge(
         tasks: z.array(DreamingTaskSchema).default(DEFAULT_DREAMER_TASKS),
         /** Minutes allocated per task before moving to next (default: 20) */
         task_timeout_minutes: z.number().min(5).default(20),
+        /** Inject ARCHITECTURE.md and STRUCTURE.md into system prompt (default: true) */
+        inject_docs: z.boolean().default(true),
     }),
 );
 export type DreamerConfig = z.infer<typeof DreamerConfigSchema>;

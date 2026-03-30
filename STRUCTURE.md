@@ -44,12 +44,12 @@
 **`src/hooks/`:**
 - Purpose: Hold hook implementations and hook-specific helpers.
 - Contains: The `magic-context` runtime and auxiliary hook logic.
-- Key files: `src/hooks/magic-context/hook.ts`, `src/hooks/magic-context/transform.ts`, `src/hooks/auto-slash-command/constants.ts`
+- Key files: `src/hooks/magic-context/hook.ts`, `src/hooks/magic-context/transform.ts`, `src/hooks/magic-context/strip-content.ts`, `src/hooks/auto-slash-command/constants.ts`
 
 **`src/features/`:**
 - Purpose: Group reusable subsystem logic by feature.
 - Contains: Magic-context services, dreamer runtime, sidekick support, storage, scheduler, tagger, and built-in commands.
-- Key files: `src/features/magic-context/storage-db.ts`, `src/features/magic-context/dreamer/runner.ts`, `src/features/magic-context/memory/storage-memory.ts`, `src/features/builtin-commands/commands.ts`
+- Key files: `src/features/magic-context/storage-db.ts`, `src/features/magic-context/storage-meta-persisted.ts`, `src/features/magic-context/dreamer/runner.ts`, `src/features/magic-context/memory/storage-memory.ts`, `src/features/builtin-commands/commands.ts`
 
 **`src/tools/`:**
 - Purpose: Define the agent-facing tool surface.
@@ -77,7 +77,7 @@
 
 **Configuration:** `src/config/index.ts`: Load and merge config files; `src/config/schema/magic-context.ts`: define defaults and schema rules.
 
-**Core Logic:** `src/hooks/magic-context/transform.ts`: run the turn transform; `src/hooks/magic-context/hook.ts`: compose runtime services; `src/features/magic-context/storage-db.ts`: create durable storage.
+**Core Logic:** `src/hooks/magic-context/transform.ts`: run the turn transform; `src/hooks/magic-context/hook.ts`: compose runtime services; `src/hooks/magic-context/strip-content.ts`: strip and replay reasoning, inline thinking, and placeholder messages; `src/features/magic-context/storage-db.ts`: create durable storage; `src/features/magic-context/storage-meta-persisted.ts`: read and write per-session persisted scalars and JSON blobs.
 
 **Tests:** co-locate tests with source as `src/**/*.test.ts`, for example `src/hooks/magic-context/hook.test.ts` and `src/tools/ctx-memory/tools.test.ts`.
 

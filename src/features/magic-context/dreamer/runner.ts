@@ -8,6 +8,11 @@ import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
 import { getErrorMessage } from "../../../shared/error-message";
 import { log } from "../../../shared/logger";
+import {
+    getPendingSmartNotes,
+    markSmartNoteChecked,
+    markSmartNoteReady,
+} from "../storage-smart-notes";
 import { acquireLease, getLeaseHolder, releaseLease, renewLease } from "./lease";
 import {
     clearStaleEntries,
@@ -239,6 +244,25 @@ export async function runDream(args: {
                 }
             }
         }
+        // ── Smart note evaluation phase ──
+        // Runs after regular dream tasks, evaluates pending smart note conditions.
+        // Not a user-configurable task — always runs when dreamer has pending smart notes.
+        if (Date.now() <= deadline) {
+            try {
+                await evaluateSmartNotes({
+                    db: args.db,
+                    client: args.client,
+                    projectIdentity: args.projectIdentity,
+                    parentSessionId,
+                    sessionDirectory: args.sessionDirectory,
+                    holderId,
+                    deadline,
+                    result,
+                });
+            } catch (error) {
+                log(`[dreamer] smart note evaluation failed: ${getErrorMessage(error)}`);
+            }
+        }
     } finally {
         releaseLease(args.db, holderId);
         log(`[dreamer] lease released: ${holderId}`);
@@ -259,6 +283,182 @@ export async function runDream(args: {
         `[dreamer] dream run finished in ${totalDuration}s: ${succeeded} succeeded, ${failed} failed`,
     );
     return result;
+}
+
+async function evaluateSmartNotes(args: {
+    db: Database;
+    client: PluginContext["client"];
+    projectIdentity: string;
+    parentSessionId: string | undefined;
+    sessionDirectory: string | undefined;
+    holderId: string;
+    deadline: number;
+    result: DreamRunResult;
+}): Promise<void> {
+    const pendingNotes = getPendingSmartNotes(args.db, args.projectIdentity);
+    if (pendingNotes.length === 0) {
+        log("[dreamer] smart notes: no pending notes to evaluate");
+        return;
+    }
+
+    log(`[dreamer] smart notes: evaluating ${pendingNotes.length} pending note(s)`);
+
+    // Build a single evaluation prompt for all pending notes.
+    // The dreamer checks each condition and returns structured results.
+    const noteDescriptions = pendingNotes
+        .map((n) => `- Note #${n.id}: "${n.content}"\n  Condition: ${n.surfaceCondition}`)
+        .join("\n");
+
+    const evaluationPrompt = `You are evaluating smart note conditions for the magic-context system.
+
+For each note below, determine whether its surface condition has been met.
+You have access to tools like GitHub CLI (gh), web search, and the local codebase to verify conditions.
+
+## Pending Smart Notes
+
+${noteDescriptions}
+
+## Instructions
+
+1. Check each condition using the tools available to you.
+2. Be conservative — only mark a condition as met when you have clear evidence.
+3. Respond with a JSON array of results:
+
+\`\`\`json
+[
+  { "id": <note_id>, "met": true/false, "reason": "brief explanation" }
+]
+\`\`\`
+
+Only include notes whose conditions you could definitively evaluate. Skip notes where you cannot determine the status (they will be re-evaluated next run).`;
+
+    const taskStartedAt = Date.now();
+    let agentSessionId: string | null = null;
+    const abortController = new AbortController();
+    const leaseInterval = setInterval(() => {
+        try {
+            if (!renewLease(args.db, args.holderId)) {
+                log("[dreamer] smart notes: lease renewal failed — aborting");
+                abortController.abort();
+            }
+        } catch {
+            abortController.abort();
+        }
+    }, 60_000);
+
+    try {
+        const createResponse = await args.client.session.create({
+            body: {
+                ...(args.parentSessionId ? { parentID: args.parentSessionId } : {}),
+                title: "magic-context-dream-smart-notes",
+            },
+            query: { directory: args.sessionDirectory ?? args.projectIdentity },
+        });
+        const created = shared.normalizeSDKResponse(
+            createResponse,
+            null as { id?: string } | null,
+            { preferResponseOnMissingData: true },
+        );
+        agentSessionId = typeof created?.id === "string" ? created.id : null;
+        if (!agentSessionId) throw new Error("Could not create smart note evaluation session.");
+
+        log(`[dreamer] smart notes: child session created ${agentSessionId}`);
+
+        const remainingMs = Math.max(0, args.deadline - Date.now());
+        await shared.promptSyncWithModelSuggestionRetry(
+            args.client,
+            {
+                path: { id: agentSessionId },
+                query: { directory: args.sessionDirectory ?? args.projectIdentity },
+                body: {
+                    agent: DREAMER_AGENT,
+                    system: DREAMER_SYSTEM_PROMPT,
+                    parts: [{ type: "text", text: evaluationPrompt }],
+                },
+            },
+            { timeoutMs: Math.min(remainingMs, 5 * 60 * 1000), signal: abortController.signal },
+        );
+
+        const messagesResponse = await args.client.session.messages({
+            path: { id: agentSessionId },
+            query: { directory: args.sessionDirectory ?? args.projectIdentity },
+        });
+        const messages = shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
+            preferResponseOnMissingData: true,
+        });
+        const output = extractLatestAssistantText(messages);
+        if (!output) throw new Error("Smart note evaluation returned no output.");
+
+        // Parse the JSON results from the LLM response
+        const jsonMatch = output.match(/\[[\s\S]*?\]/);
+        if (!jsonMatch) {
+            log("[dreamer] smart notes: no JSON array found in output, skipping");
+            // Still mark all as checked
+            for (const note of pendingNotes) markSmartNoteChecked(args.db, note.id);
+            return;
+        }
+
+        const evaluations = JSON.parse(jsonMatch[0]) as Array<{
+            id: number;
+            met: boolean;
+            reason?: string;
+        }>;
+        let surfaced = 0;
+        let checked = 0;
+        for (const evaluation of evaluations) {
+            if (typeof evaluation.id !== "number") continue;
+            const note = pendingNotes.find((n) => n.id === evaluation.id);
+            if (!note) continue;
+
+            if (evaluation.met) {
+                markSmartNoteReady(args.db, note.id, evaluation.reason);
+                surfaced++;
+                log(
+                    `[dreamer] smart notes: #${note.id} condition MET — "${evaluation.reason ?? "condition satisfied"}"`,
+                );
+            } else {
+                markSmartNoteChecked(args.db, note.id);
+                checked++;
+            }
+        }
+
+        // Mark any notes not in the evaluation as checked (LLM skipped them)
+        for (const note of pendingNotes) {
+            if (!evaluations.some((e) => e.id === note.id)) {
+                markSmartNoteChecked(args.db, note.id);
+            }
+        }
+
+        const durationMs = Date.now() - taskStartedAt;
+        log(
+            `[dreamer] smart notes: evaluated ${pendingNotes.length} notes in ${(durationMs / 1000).toFixed(1)}s — ${surfaced} surfaced, ${checked} still pending`,
+        );
+        args.result.tasks.push({
+            name: "smart-notes",
+            durationMs,
+            result: `${surfaced} surfaced, ${checked} still pending`,
+        });
+    } catch (error) {
+        const durationMs = Date.now() - taskStartedAt;
+        const errorMsg = getErrorMessage(error);
+        log(`[dreamer] smart notes: failed after ${(durationMs / 1000).toFixed(1)}s — ${errorMsg}`);
+        args.result.tasks.push({
+            name: "smart-notes",
+            durationMs,
+            result: null,
+            error: errorMsg,
+        });
+    } finally {
+        clearInterval(leaseInterval);
+        if (agentSessionId) {
+            await args.client.session
+                .delete({
+                    path: { id: agentSessionId },
+                    query: { directory: args.sessionDirectory ?? args.projectIdentity },
+                })
+                .catch(() => {});
+        }
+    }
 }
 
 const MAX_LEASE_RETRIES = 3;

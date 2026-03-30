@@ -42,6 +42,18 @@ export {
     removePendingOp,
 } from "./storage-ops";
 export {
+    addSmartNote,
+    deleteSmartNote,
+    dismissSmartNote,
+    getPendingSmartNotes,
+    getReadySmartNotes,
+    getSmartNotes,
+    markSmartNoteChecked,
+    markSmartNoteReady,
+    type SmartNote,
+    type SmartNoteStatus,
+} from "./storage-smart-notes";
+export {
     getSourceContents,
     replaceSourceContent,
     saveSourceContent,

@@ -22,6 +22,7 @@ import {
     setPersistedNoteNudgeTriggerMessageId,
 } from "../../features/magic-context/storage-meta-persisted";
 import { getSessionNotes } from "../../features/magic-context/storage-notes";
+import { getReadySmartNotes } from "../../features/magic-context/storage-smart-notes";
 import { sessionLog } from "../../shared/logger";
 
 export type NoteNudgeTrigger = "historian_complete" | "commit_detected" | "todos_complete";
@@ -48,6 +49,7 @@ export function peekNoteNudgeText(
     db: Database,
     sessionId: string,
     currentUserMessageId?: string | null,
+    projectIdentity?: string,
 ): string | null {
     const state = getPersistedNoteNudge(db, sessionId);
 
@@ -77,14 +79,22 @@ export function peekNoteNudgeText(
 
     // Check if there are actually notes to remind about
     const notes = getSessionNotes(db, sessionId);
-    if (notes.length === 0) {
+    const readySmartCount = projectIdentity ? getReadySmartNotes(db, projectIdentity).length : 0;
+    const totalCount = notes.length + readySmartCount;
+    if (totalCount === 0) {
         sessionLog(sessionId, "note-nudge: triggerPending but no notes found, skipping");
         return null;
     }
 
-    sessionLog(sessionId, `note-nudge: delivering nudge for ${notes.length} notes`);
-    const plural = notes.length === 1 ? "note" : "notes";
-    return `You have ${notes.length} deferred ${plural}. Review with ctx_note read — some may be actionable now.`;
+    const parts: string[] = [];
+    if (notes.length > 0) {
+        parts.push(`${notes.length} deferred note${notes.length === 1 ? "" : "s"}`);
+    }
+    if (readySmartCount > 0) {
+        parts.push(`${readySmartCount} ready smart note${readySmartCount === 1 ? "" : "s"}`);
+    }
+    sessionLog(sessionId, `note-nudge: delivering nudge for ${parts.join(" and ")}`);
+    return `You have ${parts.join(" and ")}. Review with ctx_note read — some may be actionable now.`;
 }
 
 /**
