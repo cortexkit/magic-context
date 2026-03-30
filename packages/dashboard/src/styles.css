@@ -1080,6 +1080,91 @@ select.config-input {
   font-size: 12px;
 }
 
+/* ── Filter Select (lightweight dropdown) ────────────────── */
+.fsel {
+  position: relative;
+}
+
+.fsel-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-family: var(--sans-font);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color var(--transition-fast);
+  white-space: nowrap;
+}
+
+.fsel-trigger:hover {
+  border-color: var(--border-light);
+}
+
+.fsel-value {
+  flex: 1;
+  text-align: left;
+}
+
+.fsel-value.placeholder {
+  color: var(--text-muted);
+}
+
+.fsel-chevron {
+  color: var(--text-muted);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.fsel-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 100%;
+  z-index: 50;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+  padding: 4px;
+  animation: dropdown-in 120ms ease-out;
+}
+
+.fsel-option {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--sans-font);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--transition-fast);
+}
+
+.fsel-option:hover {
+  background: var(--bg-hover);
+}
+
+.fsel-option.active {
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent);
+}
+
+.fsel-compact .fsel-trigger {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
 /* Per-model field rows */
 .per-model-row {
   display: flex;

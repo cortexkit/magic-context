@@ -11,6 +11,7 @@ import {
   truncate,
 } from "../../lib/api";
 import MemoryDetail from "./MemoryDetail";
+import FilterSelect from "../shared/FilterSelect";
 
 export default function MemoryBrowser() {
   const [projectFilter, setProjectFilter] = createSignal<string>("");
@@ -105,47 +106,41 @@ export default function MemoryBrowser() {
       </div>
 
       <div class="filter-bar">
-        <select
-          class="filter-select"
+        <FilterSelect
           value={projectFilter()}
-          onChange={(e) => setProjectFilter(e.currentTarget.value)}
-          title={projectFilter() || "All projects"}
-        >
-          <option value="">All projects</option>
-          <For each={projects() ?? []}>
-            {(proj) => (
-              <option value={proj.identity} title={proj.path || proj.identity}>
-                {proj.label}
-              </option>
-            )}
-          </For>
-        </select>
+          onChange={setProjectFilter}
+          placeholder="All projects"
+          options={[
+            { value: "", label: "All projects" },
+            ...(projects() ?? []).map((p) => ({ value: p.identity, label: p.label })),
+          ]}
+        />
         <input
           class="search-input"
           type="text"
           placeholder="Search memories..."
           onInput={(e) => handleSearch(e.currentTarget.value)}
         />
-        <select
-          class="filter-select"
+        <FilterSelect
           value={statusFilter()}
-          onChange={(e) => setStatusFilter(e.currentTarget.value)}
-        >
-          <option value="">All status</option>
-          <option value="active">Active</option>
-          <option value="permanent">Permanent</option>
-          <option value="archived">Archived</option>
-        </select>
-        <select
-          class="filter-select"
+          onChange={setStatusFilter}
+          placeholder="All status"
+          options={[
+            { value: "", label: "All status" },
+            { value: "active", label: "Active" },
+            { value: "permanent", label: "Permanent" },
+            { value: "archived", label: "Archived" },
+          ]}
+        />
+        <FilterSelect
           value={categoryFilter()}
-          onChange={(e) => setCategoryFilter(e.currentTarget.value)}
-        >
-          <option value="">All categories</option>
-          <For each={stats()?.categories ?? []}>
-            {(cat) => <option value={cat.category}>{cat.category} ({cat.count})</option>}
-          </For>
-        </select>
+          onChange={setCategoryFilter}
+          placeholder="All categories"
+          options={[
+            { value: "", label: "All categories" },
+            ...(stats()?.categories ?? []).map((c) => ({ value: c.category, label: `${c.category} (${c.count})` })),
+          ]}
+        />
       </div>
 
       <div class="scroll-area">

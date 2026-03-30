@@ -10,6 +10,7 @@ import {
   formatRelativeTime,
   truncate,
 } from "../../lib/api";
+import FilterSelect from "../shared/FilterSelect";
 
 export default function SessionViewer() {
   const [selectedSession, setSelectedSession] = createSignal<string | null>(null);
@@ -118,20 +119,15 @@ export default function SessionViewer() {
       <Show when={!selectedSession()}>
         {/* Filter bar */}
         <div class="filter-bar">
-          <select
-            class="filter-select"
+          <FilterSelect
             value={projectFilter()}
-            onChange={(e) => setProjectFilter(e.currentTarget.value)}
-          >
-            <option value="">All projects</option>
-            <For each={projects() ?? []}>
-              {(proj) => (
-                <option value={proj.identity} title={proj.path || proj.identity}>
-                  {proj.label}
-                </option>
-              )}
-            </For>
-          </select>
+            onChange={setProjectFilter}
+            placeholder="All projects"
+            options={[
+              { value: "", label: "All projects" },
+              ...(projects() ?? []).map((p) => ({ value: p.identity, label: p.label })),
+            ]}
+          />
           <input
             class="search-input"
             type="text"

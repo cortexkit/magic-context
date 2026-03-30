@@ -1,6 +1,7 @@
 import { createSignal, createResource, createEffect, For, Show, onMount, onCleanup } from "solid-js";
 import type { LogEntry } from "../../lib/types";
 import { getLogEntries, truncate } from "../../lib/api";
+import FilterSelect from "../shared/FilterSelect";
 
 export default function LogViewer() {
   const [sessionFilter, setSessionFilter] = createSignal<string>("");
@@ -115,26 +116,24 @@ export default function LogViewer() {
           placeholder="Search logs..."
           onInput={(e) => setSearchQuery(e.currentTarget.value)}
         />
-        <select
-          class="filter-select"
+        <FilterSelect
           value={sessionFilter()}
-          onChange={(e) => setSessionFilter(e.currentTarget.value)}
-        >
-          <option value="">All sessions</option>
-          <For each={uniqueSessions()}>
-            {(sid) => <option value={sid}>{truncate(sid, 16)}</option>}
-          </For>
-        </select>
-        <select
-          class="filter-select"
+          onChange={setSessionFilter}
+          placeholder="All sessions"
+          options={[
+            { value: "", label: "All sessions" },
+            ...uniqueSessions().map((sid) => ({ value: sid, label: truncate(sid, 16) })),
+          ]}
+        />
+        <FilterSelect
           value={componentFilter()}
-          onChange={(e) => setComponentFilter(e.currentTarget.value)}
-        >
-          <option value="">All components</option>
-          <For each={uniqueComponents()}>
-            {(comp) => <option value={comp}>{comp}</option>}
-          </For>
-        </select>
+          onChange={setComponentFilter}
+          placeholder="All components"
+          options={[
+            { value: "", label: "All components" },
+            ...uniqueComponents().map((c) => ({ value: c, label: c })),
+          ]}
+        />
       </div>
 
       <div class="scroll-area" ref={logContainerRef}>

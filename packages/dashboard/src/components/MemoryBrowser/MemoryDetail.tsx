@@ -1,6 +1,7 @@
 import { createSignal, Show } from "solid-js";
 import type { Memory } from "../../lib/types";
 import { formatTimestamp } from "../../lib/api";
+import FilterSelect from "../shared/FilterSelect";
 
 interface Props {
   memory: Memory;
@@ -57,16 +58,16 @@ export default function MemoryDetail(props: Props) {
             <tr>
               <td>Status</td>
               <td>
-                <select
-                  class="filter-select"
+                <FilterSelect
+                  compact
                   value={props.memory.status}
-                  onChange={(e) => props.onStatusChange(props.memory.id, e.currentTarget.value)}
-                  style={{ "min-width": "100px" }}
-                >
-                  <option value="active">active</option>
-                  <option value="permanent">permanent</option>
-                  <option value="archived">archived</option>
-                </select>
+                  onChange={(v) => props.onStatusChange(props.memory.id, v)}
+                  options={[
+                    { value: "active", label: "active" },
+                    { value: "permanent", label: "permanent" },
+                    { value: "archived", label: "archived" },
+                  ]}
+                />
               </td>
             </tr>
             <tr>
