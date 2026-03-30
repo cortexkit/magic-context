@@ -1,5 +1,7 @@
 # Architecture
 
+> All `src/` paths below are relative to `packages/plugin/` — the published npm package.
+
 ## Pattern Overview
 
 **Overall:** Use a plugin-driven orchestration pattern centered on `@opencode-ai/plugin` entrypoints in `src/index.ts`.

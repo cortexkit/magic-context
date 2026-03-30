@@ -36,7 +36,7 @@ jobs:
         run: bun run build
 
       - name: Test
-        run: bun test
+        run: bun run test
 
   publish-npm:
     name: Publish to npm
@@ -63,12 +63,16 @@ jobs:
       - name: Sync version from tag
         run: node scripts/version-sync.mjs --from-tag
 
-      - name: Build
-        run: bun run build
+      - name: Build plugin
+        run: bun run --cwd packages/plugin build
+
+      - name: Copy README for npm package
+        run: cp README.md packages/plugin/README.md
 
       # Uses npm Trusted Publishing (OIDC) — configured on npmjs.com
       - name: Publish to npm
         run: npm publish --access public --provenance
+        working-directory: packages/plugin
 
   github-release:
     name: Create GitHub Release

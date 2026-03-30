@@ -75,16 +75,18 @@ fi
 echo "→ Running pre-release checks..."
 echo ""
 
+PLUGIN_DIR="packages/plugin"
+
 echo "  bun lint..."
-bun run lint 2>&1 || { echo "Error: Lint failed"; exit 1; }
+bun run --cwd "$PLUGIN_DIR" lint 2>&1 || { echo "Error: Lint failed"; exit 1; }
 
 echo "  bun typecheck..."
-bun run typecheck 2>&1 || { echo "Error: Typecheck failed"; exit 1; }
+bun run --cwd "$PLUGIN_DIR" typecheck 2>&1 || { echo "Error: Typecheck failed"; exit 1; }
 
 echo "  bun test..."
 # Bun has a known panic crash after tests complete (https://github.com/oven-sh/bun/issues/XXXXX).
 # All tests pass but the process exits non-zero. Check output for failures instead of exit code.
-TEST_OUTPUT=$(bun test 2>&1 || true)
+TEST_OUTPUT=$(bun test --cwd "$PLUGIN_DIR" 2>&1 || true)
 echo "$TEST_OUTPUT"
 if echo "$TEST_OUTPUT" | grep -q "[1-9][0-9]* fail"; then
   echo "Error: Tests failed"
@@ -92,7 +94,10 @@ if echo "$TEST_OUTPUT" | grep -q "[1-9][0-9]* fail"; then
 fi
 
 echo "  bun build..."
-bun run build 2>&1 || { echo "Error: Build failed"; exit 1; }
+bun run --cwd "$PLUGIN_DIR" build 2>&1 || { echo "Error: Build failed"; exit 1; }
+
+# Copy root README into plugin package for npm publishing
+cp README.md "$PLUGIN_DIR/README.md"
 
 echo "  ✓ All checks passed"
 echo ""

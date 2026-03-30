@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/animation/out/optimized2.gif" alt="Magic Context in action" width="720">
+  <img src="packages/plugin/docs/animation/out/optimized2.gif" alt="Magic Context in action" width="720">
 </p>
 
 <p align="center">
@@ -314,9 +314,9 @@ bun run format           # Format (Biome)
 **Utility scripts:**
 
 ```sh
-bun scripts/tail-view.ts             # Show post-compartment message tail
-bun scripts/context-dump.ts          # Dump full context state for a session
-bun scripts/backfill-embeddings.ts   # Backfill missing memory embeddings
+bun packages/plugin/scripts/tail-view.ts             # Show post-compartment message tail
+bun packages/plugin/scripts/context-dump/index.ts     # Dump full context state for a session
+bun packages/plugin/scripts/backfill-embeddings.ts   # Backfill missing memory embeddings
 ```
 
 Dream execution requires a live OpenCode server — the dreamer creates ephemeral child sessions. Use `/ctx-dream` inside OpenCode for on-demand maintenance.

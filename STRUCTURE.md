@@ -1,5 +1,7 @@
 # Codebase Structure
 
+> All paths below are relative to `packages/plugin/` — the published npm package.
+
 ## Directory Layout
 
 ```text
