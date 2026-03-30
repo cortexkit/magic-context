@@ -214,7 +214,9 @@ function getFtsMatches(args: {
     try {
         return searchMemoriesFTS(args.db, args.projectPath, args.query, args.limit);
     } catch (error) {
-        log(`[search] FTS query failed for "${args.query}": ${error instanceof Error ? error.message : String(error)}`);
+        log(
+            `[search] FTS query failed for "${args.query}": ${error instanceof Error ? error.message : String(error)}`,
+        );
         return [];
     }
 }
