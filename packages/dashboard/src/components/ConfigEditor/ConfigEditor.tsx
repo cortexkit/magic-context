@@ -1,6 +1,6 @@
 import { createSignal, createResource, Show, For, createMemo, type JSX } from "solid-js";
 import type { ProjectConfigEntry } from "../../lib/types";
-import { getConfig, saveConfig, getProjectConfigs, saveProjectConfig, getAvailableModels } from "../../lib/api";
+import { getConfig, saveConfig, getProjectConfigs, saveProjectConfig } from "../../lib/api";
 import ModelSelect from "./ModelSelect";
 import PerModelField from "./PerModelField";
 
@@ -113,12 +113,13 @@ function ConfigForm(props: {
   content: string;
   onSave: (content: string) => void;
   saveStatus: string | null;
+  models: string[];
 }) {
   const [showRaw, setShowRaw] = createSignal(false);
   const [rawEdit, setRawEdit] = createSignal<string | null>(null);
   const [formData, setFormData] = createSignal<Record<string, unknown>>(parseJsonc(props.content));
   const [embeddingTestResult, setEmbeddingTestResult] = createSignal<{ ok: boolean; message: string } | null>(null);
-  const [models] = createResource(getAvailableModels);
+  const models = () => props.models;
 
   // Reset form data when content prop changes
   const parsed = createMemo(() => parseJsonc(props.content));
@@ -745,6 +746,7 @@ function ConfigForm(props: {
 function ProjectConfigDetail(props: {
   entry: ProjectConfigEntry;
   onBack: () => void;
+  models: string[];
 }) {
   const configPath = () => props.entry.exists ? props.entry.config_path : (props.entry.alt_exists ? props.entry.alt_config_path! : props.entry.config_path);
   const [config] = createResource(() => configPath(), async () => {
@@ -782,6 +784,7 @@ function ProjectConfigDetail(props: {
           content={config()!.content}
           onSave={handleSave}
           saveStatus={saveStatus()}
+          models={props.models}
         />
       </Show>
     </div>
@@ -790,7 +793,7 @@ function ProjectConfigDetail(props: {
 
 // ── Main ConfigEditor ───────────────────────────────────────
 
-export default function ConfigEditor() {
+export default function ConfigEditor(props: { models: string[] }) {
   const [tab, setTab] = createSignal<"user" | "projects">("user");
   const [userConfig, { refetch: refetchUser }] = createResource(() => getConfig("user"));
   const [projectConfigs, { refetch: refetchProjects }] = createResource(getProjectConfigs);
@@ -857,6 +860,7 @@ export default function ConfigEditor() {
                 content={userConfig()!.content}
                 onSave={handleUserSave}
                 saveStatus={saveStatus()}
+                models={props.models}
               />
             </Show>
           </Show>
@@ -867,6 +871,7 @@ export default function ConfigEditor() {
             <ProjectConfigDetail
               entry={selectedProject()!}
               onBack={() => setSelectedProject(null)}
+              models={props.models}
             />
           ) : (projectConfigs() ?? []).length > 0 ? (
             <div class="list-gap">
