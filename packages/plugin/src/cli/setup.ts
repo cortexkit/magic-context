@@ -375,6 +375,23 @@ export async function runSetup(): Promise<number> {
 
     note(summary, "Configuration");
 
+    // Ask user to star the repo
+    const shouldStar = await confirm("★ Star the repo on GitHub?", true);
+    if (shouldStar) {
+        try {
+            const { execSync } = await import("node:child_process");
+            execSync(
+                "gh api --silent --method PUT /user/starred/cortexkit/opencode-magic-context",
+                { stdio: "ignore", timeout: 10_000 },
+            );
+            log.success("Thanks for starring! ★");
+        } catch {
+            log.info(
+                "Couldn't star automatically. You can star manually:\n  https://github.com/cortexkit/opencode-magic-context",
+            );
+        }
+    }
+
     outro("Run 'opencode' to start!");
 
     return 0;
