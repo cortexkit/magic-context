@@ -54,15 +54,12 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2"
-
       - name: Build and upload artifacts
         uses: tauri-apps/tauri-action@v0
         timeout-minutes: 30
         with:
           projectPath: packages/dashboard
-          tauriScript: cargo tauri
+          tauriScript: bunx tauri
           args: --target ${{ matrix.settings.target }}
           updaterJsonPreferNsis: true
           tagName: ${{ github.ref_name }}
