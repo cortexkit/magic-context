@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { readRawSessionMessages } from "../../hooks/magic-context/read-session-chunk";
 import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
+import { log } from "../../shared/logger";
 import {
     ensureMemoryEmbeddings,
     getMemoriesByProject,
@@ -15,7 +16,6 @@ import { embedText, isEmbeddingEnabled } from "./memory/embedding";
 import { sanitizeFtsQuery } from "./memory/storage-memory-fts";
 import { ensureMessagesIndexed } from "./message-index";
 import { getSessionFacts, type SessionFact } from "./storage";
-import { log } from "../../shared/logger";
 
 type PreparedStatement = ReturnType<Database["prepare"]>;
 
