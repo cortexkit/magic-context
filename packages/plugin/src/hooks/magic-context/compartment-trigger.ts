@@ -58,13 +58,14 @@ function estimateProjectedPostDropPercentage(
 
     let droppableBytes = 0;
 
-    // 1. Pending user-queued drops (from ctx_reduce)
+    // 1. Pending user-queued drops (from ctx_reduce) — include both text and reasoning bytes
+    //    because dropping a message tag also clears its associated reasoning parts
     const pendingDrops = getPendingOps(db, sessionId).filter((op) => op.operation === "drop");
+    const pendingDropTagIds = new Set(pendingDrops.map((op) => op.tagId));
     if (pendingDrops.length > 0) {
-        const pendingDropTagIds = new Set(pendingDrops.map((op) => op.tagId));
         droppableBytes += activeTags
             .filter((tag) => pendingDropTagIds.has(tag.tagNumber))
-            .reduce((sum, tag) => sum + tag.byteSize, 0);
+            .reduce((sum, tag) => sum + tag.byteSize + tag.reasoningByteSize, 0);
     }
 
     // 2. Heuristic auto-drop: old tool outputs outside protected tail
@@ -73,7 +74,6 @@ function estimateProjectedPostDropPercentage(
     if (autoDropToolAge !== undefined && protectedTags !== undefined) {
         const toolAgeCutoff = maxTag - autoDropToolAge;
         const protectedCutoff = maxTag - protectedTags;
-        const pendingDropTagIds = new Set(pendingDrops.map((op) => op.tagId));
 
         for (const tag of activeTags) {
             // Skip already counted pending drops
@@ -89,6 +89,8 @@ function estimateProjectedPostDropPercentage(
         const reasoningAgeCutoff = maxTag - clearReasoningAge;
         for (const tag of activeTags) {
             if (tag.type !== "message") continue;
+            // Skip tags already fully counted in pending drops (text + reasoning)
+            if (pendingDropTagIds.has(tag.tagNumber)) continue;
             // Only count reasoning not yet cleared (between watermark and age cutoff)
             if (tag.tagNumber <= clearedReasoningThroughTag) continue;
             if (tag.tagNumber > reasoningAgeCutoff) continue;
