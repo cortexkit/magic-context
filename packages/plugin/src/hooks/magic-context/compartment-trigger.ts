@@ -70,11 +70,6 @@ function estimateProjectedPostDropPercentage(
 
     // 2. Heuristic auto-drop: old tool outputs outside protected tail
     // 3. Reasoning clearing: reasoning bytes on message tags between watermark and age cutoff
-    // Note: reasoning on thinking-only assistant messages (no text part) is attributed to
-    // subsequent tool tags at runtime via precedingThinkingParts, but not reflected in any
-    // tag's reasoningByteSize. This is a known conservative undercount (~31% of assistant
-    // messages are thinking-only). Those bytes are freed when the tool tag is dropped, but
-    // the projection doesn't account for them.
     const maxTag = activeTags.reduce((max, t) => Math.max(max, t.tagNumber), 0);
     if (autoDropToolAge !== undefined && protectedTags !== undefined) {
         const toolAgeCutoff = maxTag - autoDropToolAge;
@@ -85,7 +80,7 @@ function estimateProjectedPostDropPercentage(
             if (pendingDropTagIds.has(tag.tagNumber)) continue;
             if (tag.tagNumber > protectedCutoff) continue;
             if (tag.type === "tool" && tag.tagNumber <= toolAgeCutoff) {
-                droppableBytes += tag.byteSize;
+                droppableBytes += tag.byteSize + tag.reasoningByteSize;
             }
         }
     }

@@ -11,6 +11,7 @@ import {
     openDatabase,
     queuePendingOp,
 } from "../../features/magic-context/storage";
+import type { SessionMeta } from "../../features/magic-context/types";
 import { checkCompartmentTrigger } from "./compartment-trigger";
 
 const tempDirs: string[] = [];
@@ -88,7 +89,7 @@ function createOpenCodeDb(
     }
 }
 
-function makeSessionMeta(sessionId: string, lastContextPercentage: number) {
+function makeSessionMeta(sessionId: string, lastContextPercentage: number): SessionMeta {
     return {
         sessionId,
         counter: 0,
@@ -102,6 +103,8 @@ function makeSessionMeta(sessionId: string, lastContextPercentage: number) {
         timesExecuteThresholdReached: 0,
         compartmentInProgress: false,
         lastTransformError: null,
+        systemPromptHash: "",
+        clearedReasoningThroughTag: 0,
     };
 }
 
@@ -156,6 +159,38 @@ describe("checkCompartmentTrigger", () => {
             { percentage: 63, inputTokens: 126_000 },
             62,
             65,
+        );
+
+        expect(result).toEqual({ shouldFire: false });
+    });
+
+    it("does not fire proactively when auto-droppable tool reasoning brings projected usage below target", () => {
+        useTempDataHome("compartment-trigger-tool-reasoning-");
+        createOpenCodeDb("ses-tool-reasoning", [
+            { id: "m-1", role: "user", text: "setup" },
+            { id: "m-2", role: "assistant", text: "done" },
+            { id: "m-3", role: "user", text: "a ".repeat(7000) },
+            { id: "m-4", role: "assistant", text: "b ".repeat(7000) },
+            { id: "m-5", role: "user", text: "protected tail 1" },
+            { id: "m-6", role: "user", text: "protected tail 2" },
+            { id: "m-7", role: "user", text: "protected tail 3" },
+            { id: "m-8", role: "user", text: "protected tail 4" },
+            { id: "m-9", role: "user", text: "protected tail 5" },
+        ]);
+        const db = openDatabase();
+        insertTag(db, "ses-tool-reasoning", "call-1", "tool", 100, 1, 900);
+        insertTag(db, "ses-tool-reasoning", "m-2", "message", 100, 2);
+
+        const result = checkCompartmentTrigger(
+            db,
+            "ses-tool-reasoning",
+            makeSessionMeta("ses-tool-reasoning", 62),
+            { percentage: 63, inputTokens: 126_000 },
+            62,
+            65,
+            undefined,
+            0,
+            0,
         );
 
         expect(result).toEqual({ shouldFire: false });

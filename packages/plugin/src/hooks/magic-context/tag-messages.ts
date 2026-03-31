@@ -68,6 +68,19 @@ function collectRelevantSourceTagIds(
     return Array.from(relevantTagIds);
 }
 
+function getReasoningByteSize(parts: ThinkingLikePart[]): number {
+    let reasoningBytes = 0;
+
+    for (const part of parts) {
+        const content = part.thinking ?? part.text ?? "";
+        if (content && content !== "[cleared]") {
+            reasoningBytes += byteSize(content);
+        }
+    }
+
+    return reasoningBytes;
+}
+
 export function tagMessages(
     sessionId: string,
     messages: MessageLike[],
@@ -159,17 +172,7 @@ export function tagMessages(
                         contentId,
                         textOrdinal,
                     );
-                    // Compute reasoning byte size from thinking parts associated with this message
-                    let reasoningBytes = 0;
-                    if (textOrdinal === 0) {
-                        // Attribute reasoning to the first text part of the message
-                        for (const tp of thinkingParts) {
-                            const content = tp.thinking ?? tp.text ?? "";
-                            if (content && content !== "[cleared]") {
-                                reasoningBytes += byteSize(content);
-                            }
-                        }
-                    }
+                    const reasoningBytes = textOrdinal === 0 ? getReasoningByteSize(thinkingParts) : 0;
                     const tagId = tagger.assignTag(
                         sessionId,
                         contentId,
@@ -214,6 +217,7 @@ export function tagMessages(
                 if (isToolPartWithOutput(part)) {
                     const toolPart = part;
                     const thinkingParts = precedingThinkingParts;
+                    const reasoningBytes = getReasoningByteSize(thinkingParts);
 
                     const tagId = tagger.assignTag(
                         sessionId,
@@ -221,6 +225,7 @@ export function tagMessages(
                         "tool",
                         byteSize(toolPart.state.output),
                         db,
+                        reasoningBytes,
                     );
                     messageTagNumbers.set(
                         message,

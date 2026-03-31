@@ -4,9 +4,10 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
+import { closeDatabase, getTagById, openDatabase } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
 import { clearOldReasoning, tagMessages } from "./transform-operations";
+import { byteSize } from "./tag-content-primitives";
 
 type TextPart = { type: "text"; text: string };
 type ToolPart = { type: "tool"; callID: string; state: { output: string } };
@@ -40,6 +41,47 @@ function useTempDataHome(prefix: string): void {
 
 describe("tagMessages", () => {
     describe("#given assistant message with thinking + tool_use but no text", () => {
+        it("#then stores preceding thinking bytes on the tool tag", () => {
+            useTempDataHome("tag-tool-reasoning-bytes-");
+            const db = openDatabase();
+            const tagger = createTagger();
+
+            const thinkingPart: ThinkingPart = {
+                type: "thinking",
+                thinking: "long reasoning about tool use",
+            };
+            const reasoningPart: ReasoningPart = {
+                type: "reasoning",
+                text: "structured reasoning payload",
+            };
+            const messages: TestMessage[] = [
+                {
+                    info: { id: "m-user", role: "user", sessionID: "ses-1" },
+                    parts: [{ type: "text", text: "run the command" }],
+                },
+                {
+                    info: { id: "m-assistant", role: "assistant" },
+                    parts: [
+                        thinkingPart,
+                        reasoningPart,
+                        { type: "tool-invocation", callID: "call-1" },
+                    ],
+                },
+                {
+                    info: { id: "m-tool", role: "tool" },
+                    parts: [{ type: "tool", callID: "call-1", state: { output: "command output" } }],
+                },
+            ];
+
+            tagMessages("ses-1", messages, tagger, db);
+
+            const toolTagId = tagger.getTag("ses-1", "call-1");
+            expect(toolTagId).toBeDefined();
+            expect(getTagById(db, "ses-1", toolTagId!)?.reasoningByteSize).toBe(
+                byteSize(thinkingPart.thinking) + byteSize(reasoningPart.text),
+            );
+        });
+
         describe("#when tool output is dropped", () => {
             it("#then clears thinking in the preceding assistant message", () => {
                 useTempDataHome("tag-cross-msg-clear-");
