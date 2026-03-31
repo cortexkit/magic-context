@@ -22,7 +22,8 @@ function makeMemoryDatabase(): Database {
       type TEXT,
       status TEXT DEFAULT 'active',
       byte_size INTEGER,
-      tag_number INTEGER,
+      tag_number INTEGER NOT NULL,
+      reasoning_byte_size INTEGER NOT NULL DEFAULT 0,
       UNIQUE(session_id, id)
     );
     CREATE TABLE IF NOT EXISTS pending_ops (
@@ -113,8 +114,8 @@ describe("storage-tags", () => {
             db = makeMemoryDatabase();
             insertTag(db, "ses-1", "msg-1", "message", 100, 1);
             db.prepare(
-                "INSERT INTO tags (session_id, message_id, type, byte_size, tag_number) VALUES (?, NULL, ?, ?, NULL)",
-            ).run("ses-1", "message", 200);
+                "INSERT INTO tags (session_id, message_id, type, byte_size, tag_number) VALUES (?, NULL, ?, ?, ?)",
+            ).run("ses-1", "message", 200, 99);
 
             const tags = getTagsBySession(db, "ses-1");
 

@@ -388,6 +388,7 @@ describe("createEventHandler", () => {
                 type: "message",
                 status: "active",
                 byteSize: 64,
+                reasoningByteSize: 0,
                 sessionId: "ses-removed",
             },
         ]);

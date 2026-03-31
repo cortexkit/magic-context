@@ -4,6 +4,7 @@ export interface TagEntry {
     type: "message" | "tool" | "file";
     status: "active" | "dropped" | "compacted";
     byteSize: number;
+    reasoningByteSize: number;
     sessionId: string;
 }
 

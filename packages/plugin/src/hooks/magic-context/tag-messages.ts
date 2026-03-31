@@ -159,12 +159,24 @@ export function tagMessages(
                         contentId,
                         textOrdinal,
                     );
+                    // Compute reasoning byte size from thinking parts associated with this message
+                    let reasoningBytes = 0;
+                    if (textOrdinal === 0) {
+                        // Attribute reasoning to the first text part of the message
+                        for (const tp of thinkingParts) {
+                            const content = tp.thinking ?? tp.text ?? "";
+                            if (content && content !== "[cleared]") {
+                                reasoningBytes += byteSize(content);
+                            }
+                        }
+                    }
                     const tagId = tagger.assignTag(
                         sessionId,
                         contentId,
                         "message",
                         byteSize(textPart.text),
                         db,
+                        reasoningBytes,
                     );
                     if (existingTagId === undefined) {
                         const sourceContent = stripTagPrefix(textPart.text);

@@ -45,6 +45,8 @@ function estimateProjectedPostDropPercentage(
     usage: ContextUsage,
     autoDropToolAge?: number,
     protectedTags?: number,
+    clearReasoningAge?: number,
+    clearedReasoningThroughTag?: number,
 ): number | null {
     const activeTags = getTagsBySession(db, sessionId).filter((tag) => tag.status === "active");
     const totalActiveBytes = activeTags.reduce((sum, tag) => sum + tag.byteSize, 0);
@@ -62,8 +64,9 @@ function estimateProjectedPostDropPercentage(
     }
 
     // 2. Heuristic auto-drop: old tool outputs outside protected tail
+    // 3. Reasoning clearing: reasoning bytes on message tags between watermark and age cutoff
+    const maxTag = activeTags.reduce((max, t) => Math.max(max, t.tagNumber), 0);
     if (autoDropToolAge !== undefined && protectedTags !== undefined) {
-        const maxTag = activeTags.reduce((max, t) => Math.max(max, t.tagNumber), 0);
         const toolAgeCutoff = maxTag - autoDropToolAge;
         const protectedCutoff = maxTag - protectedTags;
         const pendingDropTagIds = new Set(pendingDrops.map((op) => op.tagId));
@@ -74,6 +77,19 @@ function estimateProjectedPostDropPercentage(
             if (tag.tagNumber > protectedCutoff) continue;
             if (tag.type === "tool" && tag.tagNumber <= toolAgeCutoff) {
                 droppableBytes += tag.byteSize;
+            }
+        }
+    }
+
+    if (clearReasoningAge !== undefined && clearedReasoningThroughTag !== undefined) {
+        const reasoningAgeCutoff = maxTag - clearReasoningAge;
+        for (const tag of activeTags) {
+            if (tag.type !== "message") continue;
+            // Only count reasoning not yet cleared (between watermark and age cutoff)
+            if (tag.tagNumber <= clearedReasoningThroughTag) continue;
+            if (tag.tagNumber > reasoningAgeCutoff) continue;
+            if (tag.reasoningByteSize > 0) {
+                droppableBytes += tag.reasoningByteSize;
             }
         }
     }
@@ -159,6 +175,7 @@ export function checkCompartmentTrigger(
     compartmentTokenBudget: number = DEFAULT_COMPARTMENT_TOKEN_BUDGET,
     autoDropToolAge?: number,
     protectedTagCount?: number,
+    clearReasoningAge?: number,
 ): CompartmentTriggerResult {
     if (sessionMeta.compartmentInProgress) {
         return { shouldFire: false };
@@ -175,6 +192,8 @@ export function checkCompartmentTrigger(
         usage,
         autoDropToolAge,
         protectedTagCount,
+        clearReasoningAge,
+        sessionMeta.clearedReasoningThroughTag,
     );
     const relativePostDropTarget = executeThresholdPercentage * POST_DROP_TARGET_RATIO;
 

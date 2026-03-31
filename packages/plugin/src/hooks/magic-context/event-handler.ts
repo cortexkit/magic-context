@@ -58,6 +58,7 @@ export interface EventHandlerDeps {
     config: {
         protected_tags: number;
         auto_drop_tool_age?: number;
+        clear_reasoning_age?: number;
         execute_threshold_percentage?: number | { default: number; [modelKey: string]: number };
         cache_ttl: CacheTtlConfig;
         modelContextLimitsCache?: Map<string, number>;
@@ -290,6 +291,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                             undefined, // compartmentTokenBudget — use default
                             deps.config.auto_drop_tool_age ?? 100,
                             deps.config.protected_tags,
+                            deps.config.clear_reasoning_age ?? 50,
                         );
 
                         if (triggerResult.shouldFire) {

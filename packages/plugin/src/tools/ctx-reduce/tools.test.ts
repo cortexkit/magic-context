@@ -12,7 +12,8 @@ function createTestDb(): Database {
       status TEXT NOT NULL DEFAULT 'active',
       byte_size INTEGER NOT NULL DEFAULT 0,
       session_id TEXT NOT NULL,
-      tag_number INTEGER NOT NULL
+      tag_number INTEGER NOT NULL,
+      reasoning_byte_size INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE pending_ops (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

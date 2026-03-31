@@ -23,6 +23,7 @@ function createMockDb(options?: { failCounterWrite?: boolean; rollbackTransactio
                     messageId: string,
                     type: TagEntry["type"],
                     byteSize: number,
+                    _reasoningByteSize: number,
                     _tagNumber: number,
                 ) => {
                     const tag: StoredTag = {
@@ -31,6 +32,7 @@ function createMockDb(options?: { failCounterWrite?: boolean; rollbackTransactio
                         type,
                         status: "active",
                         byteSize,
+                        reasoningByteSize: _reasoningByteSize ?? 0,
                         sessionId,
                         tagNumber: _tagNumber,
                     };

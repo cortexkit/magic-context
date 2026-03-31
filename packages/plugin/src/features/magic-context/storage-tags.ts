@@ -14,7 +14,7 @@ function getInsertTagStatement(db: Database): PreparedStatement {
     let stmt = insertTagStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "INSERT INTO tags (session_id, message_id, type, byte_size, tag_number) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO tags (session_id, message_id, type, byte_size, reasoning_byte_size, tag_number) VALUES (?, ?, ?, ?, ?, ?)",
         );
         insertTagStatements.set(db, stmt);
     }
@@ -78,6 +78,7 @@ interface TagRow {
     type: string;
     status: string;
     byte_size: number;
+    reasoning_byte_size: number;
     session_id: string;
     tag_number: number;
 }
@@ -102,6 +103,7 @@ function isTagRow(row: unknown): row is TagRow {
         typeof r.session_id === "string" &&
         typeof r.tag_number === "number"
     );
+    // reasoning_byte_size may be missing on old rows (ensureColumn adds DEFAULT 0)
 }
 
 function toTagEntry(row: TagRow): TagEntry {
@@ -114,6 +116,7 @@ function toTagEntry(row: TagRow): TagEntry {
         type,
         status,
         byteSize: row.byte_size,
+        reasoningByteSize: row.reasoning_byte_size ?? 0,
         sessionId: row.session_id,
     };
 }
@@ -141,8 +144,9 @@ export function insertTag(
     type: TagEntry["type"],
     byteSize: number,
     tagNumber: number,
+    reasoningByteSize: number = 0,
 ): number {
-    getInsertTagStatement(db).run(sessionId, messageId, type, byteSize, tagNumber);
+    getInsertTagStatement(db).run(sessionId, messageId, type, byteSize, reasoningByteSize, tagNumber);
 
     return tagNumber;
 }
@@ -199,7 +203,7 @@ export function getMaxTagNumberBySession(db: Database, sessionId: string): numbe
 export function getTagsBySession(db: Database, sessionId: string): TagEntry[] {
     const rows = db
         .prepare(
-            "SELECT id, message_id, type, status, byte_size, session_id, tag_number FROM tags WHERE session_id = ? ORDER BY tag_number ASC, id ASC",
+            "SELECT id, message_id, type, status, byte_size, reasoning_byte_size, session_id, tag_number FROM tags WHERE session_id = ? ORDER BY tag_number ASC, id ASC",
         )
         .all(sessionId)
         .filter(isTagRow);
@@ -210,7 +214,7 @@ export function getTagsBySession(db: Database, sessionId: string): TagEntry[] {
 export function getTagById(db: Database, sessionId: string, tagId: number): TagEntry | null {
     const result = db
         .prepare(
-            "SELECT id, message_id, type, status, byte_size, session_id, tag_number FROM tags WHERE session_id = ? AND tag_number = ?",
+            "SELECT id, message_id, type, status, byte_size, reasoning_byte_size, session_id, tag_number FROM tags WHERE session_id = ? AND tag_number = ?",
         )
         .get(sessionId, tagId);
 
@@ -228,7 +232,7 @@ export function getTopNBySize(db: Database, sessionId: string, n: number): TagEn
 
     const rows = db
         .prepare(
-            "SELECT id, message_id, type, status, byte_size, session_id, tag_number FROM tags WHERE session_id = ? AND status = 'active' ORDER BY byte_size DESC, tag_number ASC LIMIT ?",
+            "SELECT id, message_id, type, status, byte_size, reasoning_byte_size, session_id, tag_number FROM tags WHERE session_id = ? AND status = 'active' ORDER BY byte_size DESC, tag_number ASC LIMIT ?",
         )
         .all(sessionId, n)
         .filter(isTagRow);

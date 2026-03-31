@@ -8,6 +8,7 @@ export interface Tagger {
         type: TagEntry["type"],
         byteSize: number,
         db: Database,
+        reasoningByteSize?: number,
     ): number;
     getTag(sessionId: string, messageId: string): number | undefined;
     bindTag(sessionId: string, messageId: string, tagNumber: number): void;
@@ -76,6 +77,7 @@ export function createTagger(): Tagger {
         type: TagEntry["type"],
         byteSize: number,
         db: Database,
+        reasoningByteSize: number = 0,
     ): number {
         const sessionAssignments = getSessionAssignments(sessionId);
 
@@ -88,7 +90,7 @@ export function createTagger(): Tagger {
         const next = current + 1;
 
         db.transaction(() => {
-            insertTag(db, sessionId, messageId, type, byteSize, next);
+            insertTag(db, sessionId, messageId, type, byteSize, next, reasoningByteSize);
             getUpsertCounterStatement(db).run(sessionId, next);
         })();
 
