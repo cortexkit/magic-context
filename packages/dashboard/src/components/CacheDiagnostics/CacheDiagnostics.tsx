@@ -10,6 +10,8 @@ export default function CacheDiagnostics() {
   const [loading, setLoading] = createSignal(true);
   const [paused, setPaused] = createSignal(false);
   const [selectedSession, setSelectedSession] = createSignal<string | null>(null);
+  const [hideSubagents, setHideSubagents] = createSignal(true);
+  const [subagentIds, setSubagentIds] = createSignal<Set<string>>(new Set());
 
   const fetchData = async () => {
     try {
@@ -20,12 +22,15 @@ export default function CacheDiagnostics() {
       ]);
       setEvents(eventsData);
       setSessionStats(statsData);
-      // Build session ID → title lookup
+      // Build session ID → title lookup and subagent set
       const names: Record<string, string> = {};
+      const subs = new Set<string>();
       for (const s of sessions) {
         if (s.title) names[s.session_id] = s.title;
+        if (s.is_subagent) subs.add(s.session_id);
       }
       setSessionNames(names);
+      setSubagentIds(subs);
     } finally {
       setLoading(false);
     }
@@ -41,9 +46,17 @@ export default function CacheDiagnostics() {
   }, 5000);
   onCleanup(() => clearInterval(refreshInterval));
 
+  const isSubagent = (sessionId: string) => subagentIds().has(sessionId);
+
+  const filteredStats = () => {
+    const stats = sessionStats();
+    return hideSubagents() ? stats.filter(s => !isSubagent(s.session_id)) : stats;
+  };
+
   const filteredEvents = () => {
     const sid = selectedSession();
-    const all = events();
+    let all = events();
+    if (hideSubagents()) all = all.filter(e => !isSubagent(e.session_id));
     return sid ? all.filter(e => e.session_id === sid) : all;
   };
 
@@ -76,6 +89,12 @@ export default function CacheDiagnostics() {
             <span style={{ color: "var(--green)", "font-size": "12px", "margin-right": "8px" }}>● Live</span>
           </Show>
           <button
+            class={`btn sm ${!hideSubagents() ? "primary" : ""}`}
+            onClick={() => setHideSubagents(!hideSubagents())}
+          >
+            {hideSubagents() ? "Show subagents" : "Hide subagents"}
+          </button>
+          <button
             class={`btn sm ${paused() ? "primary" : ""}`}
             onClick={() => setPaused(!paused())}
           >
@@ -86,7 +105,7 @@ export default function CacheDiagnostics() {
 
       {/* Session cards */}
       <div style={{ padding: "0 20px 12px" }}>
-        <Show when={sessionStats().length > 0}>
+        <Show when={filteredStats().length > 0}>
           <div style={{ "font-size": "11px", color: "var(--text-secondary)", "margin-bottom": "8px" }}>
             Recent Sessions
             <Show when={selectedSession()}>
@@ -101,7 +120,7 @@ export default function CacheDiagnostics() {
             </Show>
           </div>
           <div style={{ display: "flex", gap: "8px", "flex-wrap": "wrap" }}>
-            <For each={sessionStats()}>
+            <For each={filteredStats()}>
               {(stat) => {
                 const isActive = () => selectedSession() === stat.session_id;
                 return (
