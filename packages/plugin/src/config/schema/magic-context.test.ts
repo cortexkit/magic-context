@@ -58,6 +58,10 @@ describe("MagicContextConfigSchema", () => {
                 compartment_token_budget: 25_000,
                 history_budget_percentage: 0.2,
                 historian_timeout_ms: 360_000,
+                commit_cluster_trigger: {
+                    enabled: true,
+                    min_clusters: 3,
+                },
                 embedding: {
                     provider: "openai-compatible",
                     endpoint: "http://localhost:1234/v1",

@@ -15,7 +15,7 @@ const PROACTIVE_TRIGGER_OFFSET_PERCENTAGE = 2;
 const POST_DROP_TARGET_RATIO = 0.75;
 const MIN_PROACTIVE_TAIL_TOKEN_ESTIMATE = 6_000;
 const MIN_PROACTIVE_TAIL_MESSAGE_COUNT = 12;
-const MIN_COMMIT_CLUSTERS_FOR_TRIGGER = 2;
+const DEFAULT_MIN_COMMIT_CLUSTERS_FOR_TRIGGER = 3;
 const TAIL_SIZE_TRIGGER_MULTIPLIER = 3;
 const FORCE_COMPARTMENT_PERCENTAGE = 80;
 const BLOCK_UNTIL_DONE_PERCENTAGE = 95;
@@ -182,6 +182,7 @@ export function checkCompartmentTrigger(
     autoDropToolAge?: number,
     protectedTagCount?: number,
     clearReasoningAge?: number,
+    commitClusterTrigger?: { enabled: boolean; min_clusters: number },
 ): CompartmentTriggerResult {
     if (sessionMeta.compartmentInProgress) {
         return { shouldFire: false };
@@ -223,14 +224,18 @@ export function checkCompartmentTrigger(
         return { shouldFire: true, reason: "force_80" };
     }
 
-    // Commit-cluster trigger: 2+ distinct work phases with commits, enough token volume
+    // Commit-cluster trigger: N+ distinct work phases with commits, enough token volume
+    const clusterEnabled = commitClusterTrigger?.enabled ?? true;
+    const minClusters =
+        commitClusterTrigger?.min_clusters ?? DEFAULT_MIN_COMMIT_CLUSTERS_FOR_TRIGGER;
     if (
-        tailInfo.commitClusterCount >= MIN_COMMIT_CLUSTERS_FOR_TRIGGER &&
+        clusterEnabled &&
+        tailInfo.commitClusterCount >= minClusters &&
         tailInfo.tokenEstimate >= compartmentTokenBudget
     ) {
         sessionLog(
             sessionId,
-            `compartment trigger: commit-cluster fire — ${tailInfo.commitClusterCount} clusters, ~${tailInfo.tokenEstimate} tokens in eligible prefix`,
+            `compartment trigger: commit-cluster fire — ${tailInfo.commitClusterCount} clusters (min=${minClusters}), ~${tailInfo.tokenEstimate} tokens in eligible prefix`,
         );
         return { shouldFire: true, reason: "commit_clusters" };
     }

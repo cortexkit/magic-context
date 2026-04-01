@@ -120,6 +120,10 @@ export interface MagicContextConfig {
     compartment_token_budget: number;
     history_budget_percentage: number;
     historian_timeout_ms: number;
+    commit_cluster_trigger: {
+        enabled: boolean;
+        min_clusters: number;
+    };
     embedding: EmbeddingConfig;
     memory: {
         enabled: boolean;
@@ -175,6 +179,15 @@ export const MagicContextConfigSchema = z
             .default(DEFAULT_HISTORY_BUDGET_PERCENTAGE),
         /** Timeout for each historian prompt call in milliseconds (default: 300000) */
         historian_timeout_ms: z.number().min(60_000).default(DEFAULT_HISTORIAN_TIMEOUT_MS),
+        /** Commit-cluster trigger: fire historian when enough commit clusters accumulate in the unsummarized tail */
+        commit_cluster_trigger: z
+            .object({
+                /** Enable commit-cluster based historian triggering (default: true) */
+                enabled: z.boolean().default(true),
+                /** Minimum commit clusters required to trigger historian (min: 1, default: 3) */
+                min_clusters: z.number().min(1).default(3),
+            })
+            .default({ enabled: true, min_clusters: 3 }),
         /** Embedding provider configuration */
         embedding: EmbeddingConfigSchema.default({
             provider: "local",

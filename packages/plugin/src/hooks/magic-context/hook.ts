@@ -75,6 +75,7 @@ export interface MagicContextDeps {
         };
         sidekick?: SidekickConfig;
         dreamer?: DreamerConfig;
+        commit_cluster_trigger?: { enabled: boolean; min_clusters: number };
     };
 }
 
@@ -242,6 +243,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         nudgeIntervalTokens: deps.config.nudge_interval_tokens ?? DEFAULT_NUDGE_INTERVAL_TOKENS,
         executeThresholdPercentage: deps.config.execute_threshold_percentage ?? 65,
         historyBudgetPercentage: deps.config.history_budget_percentage,
+        commitClusterTrigger: deps.config.commit_cluster_trigger,
         getLiveModelKey: (sessionId) => {
             const model = liveModelBySession.get(sessionId);
             return model ? `${model.providerID}/${model.modelID}` : undefined;

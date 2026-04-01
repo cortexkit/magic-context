@@ -552,6 +552,41 @@ fn load_raw_db_cache_events(limit: usize, since_timestamp: Option<i64>) -> Resul
 
 fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec<DbCacheEvent> {
     let log_cause_candidates = if enrich_causes { build_log_cause_candidates() } else { Vec::new() };
+
+    // Build a map of earliest timestamp per session in our window so we can
+    // detect whether an event is truly the session's first message vs just
+    // the oldest event in the current 200-event window.
+    let mut earliest_ts_in_window: HashMap<String, i64> = HashMap::new();
+    for row in &rows {
+        earliest_ts_in_window
+            .entry(row.session_id.clone())
+            .and_modify(|ts| { if row.timestamp < *ts { *ts = row.timestamp; } })
+            .or_insert(row.timestamp);
+    }
+
+    // Check which sessions truly have their first-ever assistant message in our window
+    // by querying whether an earlier assistant message exists in the DB.
+    let true_first_sessions: HashSet<String> = if let Some(opencode_db_path) = resolve_opencode_db_path() {
+        if let Ok(conn) = open_readonly(&opencode_db_path) {
+            earliest_ts_in_window.iter().filter(|(session_id, &earliest_ts)| {
+                // If there's any assistant message with tokens BEFORE our earliest, it's not the first
+                let has_earlier: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM message WHERE session_id = ?1
+                     AND json_extract(data, '$.role') = 'assistant'
+                     AND COALESCE(CAST(json_extract(data, '$.tokens.total') AS INTEGER), 0) > 0
+                     AND time_created < ?2)",
+                    rusqlite::params![session_id, earliest_ts],
+                    |row| row.get(0),
+                ).unwrap_or(false);
+                !has_earlier
+            }).map(|(sid, _)| sid.clone()).collect()
+        } else {
+            HashSet::new()
+        }
+    } else {
+        HashSet::new()
+    };
+
     let mut seen_sessions = HashSet::new();
     let mut chronological = Vec::with_capacity(rows.len());
 
@@ -564,7 +599,8 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
         };
 
         let is_first_session_event = seen_sessions.insert(row.session_id.clone());
-        let (severity, cause) = if is_first_session_event {
+        let is_truly_first = is_first_session_event && true_first_sessions.contains(&row.session_id);
+        let (severity, cause) = if is_truly_first {
             (
                 "info".to_string(),
                 Some("First message (new session)".to_string()),

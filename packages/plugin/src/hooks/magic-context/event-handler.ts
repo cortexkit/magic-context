@@ -62,6 +62,7 @@ export interface EventHandlerDeps {
         execute_threshold_percentage?: number | { default: number; [modelKey: string]: number };
         cache_ttl: CacheTtlConfig;
         modelContextLimitsCache?: Map<string, number>;
+        commit_cluster_trigger?: { enabled: boolean; min_clusters: number };
     };
     tagger: Tagger;
     db: ReturnType<typeof import("../../features/magic-context/storage").openDatabase>;
@@ -292,6 +293,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                             deps.config.auto_drop_tool_age ?? 100,
                             deps.config.protected_tags,
                             deps.config.clear_reasoning_age ?? 50,
+                            deps.config.commit_cluster_trigger,
                         );
 
                         if (triggerResult.shouldFire) {

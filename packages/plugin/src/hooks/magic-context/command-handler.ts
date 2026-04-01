@@ -183,6 +183,7 @@ export function createMagicContextCommandHandler(deps: {
     nudgeIntervalTokens?: number;
     executeThresholdPercentage?: number | { default: number; [modelKey: string]: number };
     historyBudgetPercentage?: number;
+    commitClusterTrigger?: { enabled: boolean; min_clusters: number };
     getLiveModelKey?: (sessionId: string) => string | undefined;
     onFlush?: (sessionId: string) => void;
     executeRecomp?: (sessionId: string) => Promise<string>;
@@ -255,6 +256,7 @@ export function createMagicContextCommandHandler(deps: {
                     deps.executeThresholdPercentage,
                     liveModelKey,
                     deps.historyBudgetPercentage,
+                    deps.commitClusterTrigger,
                 );
                 result += result ? `\n\n${statusOutput}` : statusOutput;
             }

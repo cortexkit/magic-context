@@ -512,6 +512,53 @@ function ConfigForm(props: {
                       {/* Right: Settings sliders */}
                       <div class="config-card-content">
                         <For each={fields}>{renderField}</For>
+
+                        {/* Commit Cluster Trigger */}
+                        {(() => {
+                          const commitCluster = () => (getNestedValue(formData(), "commit_cluster_trigger") as { enabled?: boolean; min_clusters?: number } | undefined) ?? {};
+                          const enabled = () => commitCluster().enabled ?? true;
+                          const minClusters = () => commitCluster().min_clusters ?? 3;
+                          return (
+                            <>
+                              <div class="config-field">
+                                <div class="config-field-header">
+                                  <label class="config-field-label">Commit Cluster Trigger</label>
+                                  <span class="config-field-key">commit_cluster_trigger.enabled</span>
+                                </div>
+                                <span class="config-field-desc">Fire historian when enough git commit clusters accumulate in the unsummarized conversation tail. A commit cluster is a distinct work phase where the agent made git commits, separated by meaningful user turns.</span>
+                                <label class="toggle-switch">
+                                  <input
+                                    type="checkbox"
+                                    checked={enabled()}
+                                    onChange={(e) => handleFieldChange("commit_cluster_trigger", { ...commitCluster(), enabled: e.currentTarget.checked })}
+                                  />
+                                  <span class="toggle-slider" />
+                                  <span class="toggle-label">{enabled() ? "Enabled" : "Disabled"}</span>
+                                </label>
+                              </div>
+
+                              <Show when={enabled()}>
+                                <div class="config-field">
+                                  <div class="config-field-header">
+                                    <label class="config-field-label">Min Clusters</label>
+                                    <span class="config-field-key">commit_cluster_trigger.min_clusters</span>
+                                  </div>
+                                  <span class="config-field-desc">Minimum number of commit clusters required to trigger historian</span>
+                                  <input
+                                    class="config-input"
+                                    type="number"
+                                    min={1}
+                                    value={minClusters()}
+                                    onInput={(e) => {
+                                      const v = e.currentTarget.value;
+                                      handleFieldChange("commit_cluster_trigger", { ...commitCluster(), min_clusters: v ? Math.max(1, Number(v)) : 3 });
+                                    }}
+                                  />
+                                </div>
+                              </Show>
+                            </>
+                          );
+                        })()}
                       </div>
                     </div>
                   ) : (

@@ -118,7 +118,7 @@ export function runPostTransformPhase(args: RunPostTransformPhaseArgs): void {
             ? "explicit_flush"
             : forceMaterialization
               ? `force_materialization (${args.contextUsage.percentage.toFixed(1)}% >= ${args.forceMaterializationPercentage}%)`
-              : `pending_ops_execute (pendingOps=${pendingOps.length}, scheduler=${args.schedulerDecision})`;
+              : `scheduler_execute (pendingOps=${pendingOps.length}, scheduler=${args.schedulerDecision})`;
         sessionLog(
             args.sessionId,
             `heuristics WILL RUN — reason=${reason}, context=${args.contextUsage.percentage.toFixed(1)}%, turn=${args.currentTurnId}`,

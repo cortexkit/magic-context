@@ -33,6 +33,7 @@ export function executeStatus(
         | { default: number; [modelKey: string]: number } = DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
     liveModelKey?: string,
     historyBudgetPercentage?: number,
+    commitClusterTrigger?: { enabled: boolean; min_clusters: number },
 ): string {
     const executeThresholdPercentage = resolveExecuteThreshold(
         executeThresholdPercentageConfig,
@@ -123,7 +124,7 @@ export function executeStatus(
                 `- Resolved context limit: ${contextLimit > 0 ? contextLimit.toLocaleString() : "unknown"}`,
                 `- Proactive compartment evaluation: ${proactiveCompartmentTrigger}%`,
                 `- Post-drop target for historian: ${(executeThresholdPercentage * POST_DROP_TARGET_RATIO).toFixed(0)}% (${executeThresholdPercentage}% * ${POST_DROP_TARGET_RATIO})`,
-                `- Historian also fires on: 2+ commit clusters with sufficient tokens, or tail > ${3}x compartment budget`,
+                `- Commit cluster trigger: ${commitClusterTrigger?.enabled !== false ? `enabled (min ${commitClusterTrigger?.min_clusters ?? 3} clusters)` : "disabled"}, tail-size trigger: > 3x compartment budget`,
             );
         }
 

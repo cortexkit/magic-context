@@ -49,6 +49,27 @@ Higher-tier models with longer cache windows benefit from a longer TTL. Setting 
 | `compartment_token_budget` | `number` | `20000` | Token budget for historian input chunks. |
 | `historian_timeout_ms` | `number` | `300000` | Timeout per historian call (ms). |
 | `history_budget_percentage` | `number` (0–1) | `0.15` | Fraction of usable context reserved for the history block. Triggers compression when exceeded. |
+| `commit_cluster_trigger` | `object` | See below | Controls the commit-cluster historian trigger. |
+
+### `commit_cluster_trigger`
+
+A **commit cluster** is a distinct work phase where the agent made one or more git commits, separated from other commit clusters by meaningful user turns. For example, if the agent commits a fix, then the user asks a new question, and the agent commits another change — that's 2 commit clusters. This heuristic detects natural work-unit boundaries and fires historian to compartmentalize them, even when context pressure is low.
+
+```jsonc
+{
+  "commit_cluster_trigger": {
+    "enabled": true,    // default: true
+    "min_clusters": 3   // default: 3, minimum: 1
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `boolean` | `true` | Enable commit-cluster based historian triggering. |
+| `min_clusters` | `number` | `3` | Minimum number of commit clusters in the unsummarized tail before historian fires. The tail must also contain at least `compartment_token_budget` tokens. |
+
+Set `enabled: false` to disable this trigger entirely and rely only on pressure-based and tail-size triggers for historian.
 
 ---
 
