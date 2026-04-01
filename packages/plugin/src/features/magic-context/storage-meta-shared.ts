@@ -17,6 +17,7 @@ export interface SessionMetaRow {
     // Intentional: type is string (MD5 hex digest), but the guard accepts string|number
     // for backward compatibility with pre-release DBs where the column was INTEGER.
     system_prompt_hash: string | number;
+    system_prompt_tokens: number;
     cleared_reasoning_through_tag: number;
 }
 
@@ -33,6 +34,7 @@ export const META_COLUMNS: Record<string, string> = {
     timesExecuteThresholdReached: "times_execute_threshold_reached",
     compartmentInProgress: "compartment_in_progress",
     systemPromptHash: "system_prompt_hash",
+    systemPromptTokens: "system_prompt_tokens",
     clearedReasoningThroughTag: "cleared_reasoning_through_tag",
 };
 
@@ -55,6 +57,7 @@ export function isSessionMetaRow(row: unknown): row is SessionMetaRow {
         typeof r.times_execute_threshold_reached === "number" &&
         typeof r.compartment_in_progress === "number" &&
         (typeof r.system_prompt_hash === "string" || typeof r.system_prompt_hash === "number") &&
+        typeof r.system_prompt_tokens === "number" &&
         typeof r.cleared_reasoning_through_tag === "number"
     );
 }
@@ -74,6 +77,7 @@ export function getDefaultSessionMeta(sessionId: string): SessionMeta {
         timesExecuteThresholdReached: 0,
         compartmentInProgress: false,
         systemPromptHash: "",
+        systemPromptTokens: 0,
         clearedReasoningThroughTag: 0,
     };
 }
@@ -120,6 +124,7 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
         timesExecuteThresholdReached: row.times_execute_threshold_reached,
         compartmentInProgress: row.compartment_in_progress === 1,
         systemPromptHash: String(row.system_prompt_hash),
+        systemPromptTokens: row.system_prompt_tokens,
         clearedReasoningThroughTag: row.cleared_reasoning_through_tag,
     };
 }

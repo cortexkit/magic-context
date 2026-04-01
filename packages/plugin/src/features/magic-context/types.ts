@@ -30,6 +30,7 @@ export interface SessionMeta {
     timesExecuteThresholdReached: number;
     compartmentInProgress: boolean;
     systemPromptHash: string;
+    systemPromptTokens: number;
     clearedReasoningThroughTag: number;
 }
 

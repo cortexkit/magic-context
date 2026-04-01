@@ -112,6 +112,7 @@ export interface SessionMetaRow {
 
 export interface ContextTokenBreakdown {
   total_input_tokens: number;
+  system_prompt_tokens: number;
   compartment_tokens: number;
   fact_tokens: number;
   memory_tokens: number;

@@ -263,6 +263,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "session_meta", "memory_block_count", "INTEGER DEFAULT 0");
     ensureColumn(db, "dream_queue", "retry_count", "INTEGER DEFAULT 0");
     ensureColumn(db, "tags", "reasoning_byte_size", "INTEGER DEFAULT 0");
+    ensureColumn(db, "session_meta", "system_prompt_tokens", "INTEGER DEFAULT 0");
 }
 
 function ensureColumn(db: Database, table: string, column: string, definition: string): void {

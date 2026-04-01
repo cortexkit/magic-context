@@ -390,6 +390,7 @@ export default function SessionViewer() {
                 const hasData = () => total() > 0;
                 
                 // Calculate percentages
+                const systemPct = () => hasData() ? (data().system_prompt_tokens / total()) * 100 : 0;
                 const compartmentPct = () => hasData() ? (data().compartment_tokens / total()) * 100 : 0;
                 const factPct = () => hasData() ? (data().fact_tokens / total()) * 100 : 0;
                 const memoryPct = () => hasData() ? (data().memory_tokens / total()) * 100 : 0;
@@ -397,6 +398,7 @@ export default function SessionViewer() {
 
                 // Colors for each section
                 const colors = {
+                  system: "#c084fc",
                   compartments: "#4a9eff",
                   facts: "#f0b429",
                   memories: "#48bb78",
@@ -420,6 +422,21 @@ export default function SessionViewer() {
                           overflow: "hidden",
                           "margin-bottom": "20px",
                         }}>
+                          <Show when={data().system_prompt_tokens > 0}>
+                            <div style={{
+                              width: `${systemPct()}%`,
+                              background: colors.system,
+                              display: "flex",
+                              "align-items": "center",
+                              "justify-content": "center",
+                              "font-size": "11px",
+                              "font-weight": "600",
+                              color: "#fff",
+                              "min-width": systemPct() > 8 ? "auto" : "0",
+                            }}>
+                              {systemPct() > 8 ? `${systemPct().toFixed(0)}%` : ""}
+                            </div>
+                          </Show>
                           <Show when={data().compartment_tokens > 0}>
                             <div style={{
                               width: `${compartmentPct()}%`,
@@ -484,6 +501,25 @@ export default function SessionViewer() {
 
                         {/* Legend with details */}
                         <div style={{ display: "flex", "flex-direction": "column", gap: "12px" }}>
+                          {/* System Prompt */}
+                          <div style={{ display: "flex", "align-items": "center", gap: "12px" }}>
+                            <div style={{
+                              width: "12px",
+                              height: "12px",
+                              "border-radius": "3px",
+                              background: colors.system,
+                              "flex-shrink": "0",
+                            }} />
+                            <div style={{ flex: 1, display: "flex", "justify-content": "space-between", "align-items": "center" }}>
+                              <span style={{ "font-size": "13px" }}>
+                                System Prompt
+                              </span>
+                              <span style={{ "font-size": "13px", "font-weight": "500", "font-family": "var(--font-mono)" }}>
+                                {data().system_prompt_tokens.toLocaleString()} <span style={{ color: "var(--text-muted)", "font-size": "12px" }}>({systemPct().toFixed(1)}%)</span>
+                              </span>
+                            </div>
+                          </div>
+
                           {/* Compartments */}
                           <div style={{ display: "flex", "align-items": "center", gap: "12px" }}>
                             <div style={{
@@ -552,7 +588,7 @@ export default function SessionViewer() {
                             }} />
                             <div style={{ flex: 1, display: "flex", "justify-content": "space-between", "align-items": "center" }}>
                               <span style={{ "font-size": "13px" }}>
-                                Conversation + System
+                                Conversation
                               </span>
                               <span style={{ "font-size": "13px", "font-weight": "500", "font-family": "var(--font-mono)" }}>
                                 {data().conversation_tokens.toLocaleString()} <span style={{ color: "var(--text-muted)", "font-size": "12px" }}>({conversationPct().toFixed(1)}%)</span>

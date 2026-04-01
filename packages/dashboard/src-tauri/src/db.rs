@@ -182,10 +182,11 @@ pub struct DreamStateEntry {
 #[derive(Debug, Serialize, Clone)]
 pub struct ContextTokenBreakdown {
     pub total_input_tokens: i64,
+    pub system_prompt_tokens: i64,
     pub compartment_tokens: i64,
     pub fact_tokens: i64,
     pub memory_tokens: i64,
-    pub conversation_tokens: i64, // total - compartments - facts - memories (includes system prompt)
+    pub conversation_tokens: i64, // total - compartments - facts - memories - system_prompt
     pub compartment_count: i64,
     pub fact_count: i64,
     pub memory_count: i64,
@@ -203,14 +204,14 @@ pub fn get_context_token_breakdown(
     conn: &Connection,
     session_id: &str,
 ) -> Result<Option<ContextTokenBreakdown>, rusqlite::Error> {
-    // Get total input tokens from session_meta
-    let total_input_tokens: i64 = conn
+    // Get total input tokens and system prompt tokens from session_meta
+    let (total_input_tokens, system_prompt_tokens): (i64, i64) = conn
         .query_row(
-            "SELECT COALESCE(last_input_tokens, 0) FROM session_meta WHERE session_id = ?1",
+            "SELECT COALESCE(last_input_tokens, 0), COALESCE(system_prompt_tokens, 0) FROM session_meta WHERE session_id = ?1",
             [session_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .unwrap_or(0);
+        .unwrap_or((0, 0));
 
     // If no input tokens recorded, return None (no data available)
     if total_input_tokens == 0 {
@@ -257,8 +258,8 @@ pub fn get_context_token_breakdown(
     let fact_tokens = estimate_tokens(fact_chars);
     let memory_tokens = estimate_tokens(memory_chars);
 
-    // Conversation tokens = total - known sections (includes system prompt)
-    let known_tokens = compartment_tokens + fact_tokens + memory_tokens;
+    // Conversation tokens = total - all known sections
+    let known_tokens = system_prompt_tokens + compartment_tokens + fact_tokens + memory_tokens;
     let conversation_tokens = if total_input_tokens > known_tokens {
         total_input_tokens - known_tokens
     } else {
@@ -267,6 +268,7 @@ pub fn get_context_token_breakdown(
 
     Ok(Some(ContextTokenBreakdown {
         total_input_tokens,
+        system_prompt_tokens,
         compartment_tokens,
         fact_tokens,
         memory_tokens,

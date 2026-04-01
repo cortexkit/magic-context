@@ -187,8 +187,17 @@ export function createSystemPromptHashHandler(deps: {
             );
         }
 
+        // Estimate system prompt tokens (~4 chars per token) for dashboard visibility
+        const systemPromptTokens = Math.ceil(systemContent.length / 4);
+
         if (currentHash !== previousHash) {
-            updateSessionMeta(deps.db, sessionId, { systemPromptHash: currentHash });
+            updateSessionMeta(deps.db, sessionId, {
+                systemPromptHash: currentHash,
+                systemPromptTokens,
+            });
+        } else if (sessionMeta.systemPromptTokens === 0 && systemPromptTokens > 0) {
+            // Backfill on first pass when hash was already initialized
+            updateSessionMeta(deps.db, sessionId, { systemPromptTokens });
         }
     };
 }

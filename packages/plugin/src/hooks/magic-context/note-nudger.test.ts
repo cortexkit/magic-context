@@ -38,6 +38,7 @@ function makeDb(): Database {
             times_execute_threshold_reached INTEGER DEFAULT 0,
             compartment_in_progress INTEGER DEFAULT 0,
             system_prompt_hash TEXT DEFAULT '',
+            system_prompt_tokens INTEGER DEFAULT 0,
             note_nudge_trigger_pending INTEGER DEFAULT 0,
             note_nudge_trigger_message_id TEXT DEFAULT '',
             note_nudge_sticky_text TEXT DEFAULT '',
