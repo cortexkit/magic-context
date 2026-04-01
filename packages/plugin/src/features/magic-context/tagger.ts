@@ -89,10 +89,30 @@ export function createTagger(): Tagger {
         const current = counters.get(sessionId) ?? 0;
         const next = current + 1;
 
-        db.transaction(() => {
-            insertTag(db, sessionId, messageId, type, byteSize, next, reasoningByteSize);
-            getUpsertCounterStatement(db).run(sessionId, next);
-        })();
+        try {
+            db.transaction(() => {
+                insertTag(db, sessionId, messageId, type, byteSize, next, reasoningByteSize);
+                getUpsertCounterStatement(db).run(sessionId, next);
+            })();
+        } catch (error: unknown) {
+            // Benign duplicate: the tag already exists in the DB from a previous pass
+            // whose in-memory state was lost (e.g., error in a different tag within the
+            // same batch). Recover by binding the existing tag number from DB.
+            if (
+                error instanceof Error &&
+                "code" in error &&
+                error.code === "SQLITE_CONSTRAINT_UNIQUE"
+            ) {
+                const row = db
+                    .prepare("SELECT tag_number FROM tags WHERE session_id = ? AND message_id = ?")
+                    .get(sessionId, messageId) as { tag_number: number } | null;
+                if (row) {
+                    sessionAssignments.set(messageId, row.tag_number);
+                    return row.tag_number;
+                }
+            }
+            throw error;
+        }
 
         counters.set(sessionId, next);
         sessionAssignments.set(messageId, next);
