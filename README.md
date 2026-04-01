@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img src="packages/plugin/docs/animation/out/optimized2.gif" alt="Magic Context in action" width="720">
+  <img src="https://raw.githubusercontent.com/cortexkit/opencode-magic-context/master/packages/plugin/docs/animation/out/optimized2.gif" alt="Magic Context in action" width="720">
 </p>
 
 <p align="center">
