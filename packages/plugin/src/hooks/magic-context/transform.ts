@@ -68,6 +68,7 @@ export interface TransformDeps {
     };
     compartmentTokenBudget?: number;
     historyBudgetPercentage?: number;
+    executeThresholdPercentage?: number | { default: number; [modelKey: string]: number };
     historianTimeoutMs?: number;
     getNotificationParams?: (
         sessionId: string,
@@ -264,6 +265,13 @@ export function createTransform(deps: TransformDeps) {
                 deps.historyBudgetPercentage && contextUsage.percentage > 0
                     ? Math.floor(
                           (contextUsage.inputTokens / (contextUsage.percentage / 100)) *
+                              (Math.min(
+                                  typeof deps.executeThresholdPercentage === "number"
+                                      ? deps.executeThresholdPercentage
+                                      : (deps.executeThresholdPercentage?.default ?? 80),
+                                  80,
+                              ) /
+                                  100) *
                               deps.historyBudgetPercentage,
                       )
                     : undefined,

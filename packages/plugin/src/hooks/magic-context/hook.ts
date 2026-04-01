@@ -185,6 +185,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         compartmentTokenBudget:
             deps.config.compartment_token_budget ?? DEFAULT_COMPARTMENT_TOKEN_BUDGET,
         historyBudgetPercentage: deps.config.history_budget_percentage,
+        executeThresholdPercentage: deps.config.execute_threshold_percentage,
         historianTimeoutMs: deps.config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
         getNotificationParams: (sessionId) =>
             getLiveNotificationParams(sessionId, liveModelBySession, variantBySession),

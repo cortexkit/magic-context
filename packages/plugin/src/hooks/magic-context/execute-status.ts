@@ -143,7 +143,11 @@ export function executeStatus(
 
         const budgetTokens =
             historyBudgetPercentage && contextLimit > 0
-                ? Math.floor(contextLimit * historyBudgetPercentage)
+                ? Math.floor(
+                      contextLimit *
+                          (Math.min(executeThresholdPercentage, 80) / 100) *
+                          historyBudgetPercentage,
+                  )
                 : null;
         const budgetUsage = budgetTokens
             ? ((historyBlockTokens / budgetTokens) * 100).toFixed(0)
