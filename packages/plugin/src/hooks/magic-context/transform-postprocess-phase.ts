@@ -112,7 +112,7 @@ export function runPostTransformPhase(args: RunPostTransformPhaseArgs): void {
         !compartmentRunning &&
         (isExplicitFlush ||
             forceMaterialization ||
-            (hasPendingUserOps && args.schedulerDecision === "execute" && !alreadyRanThisTurn));
+            (args.schedulerDecision === "execute" && !alreadyRanThisTurn));
     if (shouldRunHeuristics) {
         const reason = isExplicitFlush
             ? "explicit_flush"
