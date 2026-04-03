@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { parse, stringify } from "comment-json";
 
 import type { ConflictResult } from "./conflict-detector";
+import { readJsoncFile } from "./jsonc-parser";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
 
 type JsonObject = Record<string, unknown>;
@@ -38,17 +38,16 @@ function readConfig(filePath: string): JsonObject | null {
     if (!existsSync(filePath)) {
         return {};
     }
-    try {
-        const raw = readFileSync(filePath, "utf-8");
-        return parse(raw) as JsonObject;
-    } catch {
-        return null;
-    }
+
+    return readJsoncFile<JsonObject>(filePath);
 }
 
+// Intentional: conflict-fixer uses JSON.stringify (not comment-json) because this module
+// is imported by the TUI process which loads raw source and cannot resolve npm dependencies.
+// Comment preservation for config writes is handled by the CLI paths (doctor.ts, setup.ts).
 function writeConfig(filePath: string, config: JsonObject): void {
     ensureParentDir(filePath);
-    writeFileSync(filePath, `${stringify(config, null, 2)}\n`);
+    writeFileSync(filePath, `${JSON.stringify(config, null, 2)}\n`);
 }
 
 function resolveUserOpenCodeConfigPath(): string {
