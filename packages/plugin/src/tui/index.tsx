@@ -277,10 +277,9 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
     return (
         <box flexDirection="column" width="100%" paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
             {/* Title */}
-            <box justifyContent="center" width="100%" marginBottom={1}>
-                <text fg={t().accent}>
-                    <b>⚡ Magic Context Status</b>  <text fg={t().textMuted}>v{packageJson.version}</text>
-                </text>
+            <box justifyContent="center" width="100%" marginBottom={1} flexDirection="row" gap={2}>
+                <text fg={t().accent}><b>⚡ Magic Context Status</b></text>
+                <text fg={t().textMuted}>v{packageJson.version}</text>
             </box>
 
             {/* Context summary line */}
