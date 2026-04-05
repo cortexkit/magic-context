@@ -141,6 +141,11 @@ async function executeDreaming(
             directory: string;
             executeDream?: (sessionId: string) => Promise<DreamRunResult | null>;
             experimentalUserMemories?: { enabled: boolean; promotionThreshold: number };
+            experimentalPinKeyFiles?: {
+                enabled: boolean;
+                token_budget: number;
+                min_reads: number;
+            };
         };
     },
     sessionId: string,
@@ -172,6 +177,7 @@ async function executeDreaming(
               taskTimeoutMinutes: deps.dreamer.config.task_timeout_minutes,
               maxRuntimeMinutes: deps.dreamer.config.max_runtime_minutes,
               experimentalUserMemories: deps.dreamer.experimentalUserMemories,
+              experimentalPinKeyFiles: deps.dreamer.experimentalPinKeyFiles,
           });
 
     await deps.sendNotification(
@@ -212,6 +218,11 @@ export function createMagicContextCommandHandler(deps: {
         directory: string;
         executeDream?: (sessionId: string) => Promise<DreamRunResult | null>;
         experimentalUserMemories?: { enabled: boolean; promotionThreshold: number };
+        experimentalPinKeyFiles?: {
+            enabled: boolean;
+            token_budget: number;
+            min_reads: number;
+        };
     };
 }) {
     const isStatusCommand = (command: string): boolean => command === "ctx-status";

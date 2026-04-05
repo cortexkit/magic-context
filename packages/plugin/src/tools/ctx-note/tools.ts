@@ -21,13 +21,9 @@ export interface CtxNoteToolDeps {
 
 function formatNoteLine(note: Note): string {
     const statusSuffix = note.status === "active" ? "" : ` (${note.status})`;
-    const dismissHint =
-        note.status === "dismissed"
-            ? ""
-            : ` _(dismiss with \`ctx_note(action="dismiss", note_id=${note.id})\`)_`;
 
     if (note.type === "session") {
-        return `- **#${note.id}**${statusSuffix}: ${note.content}${dismissHint}`;
+        return `- **#${note.id}**${statusSuffix}: ${note.content}`;
     }
 
     const conditionText =
@@ -36,8 +32,10 @@ function formatNoteLine(note: Note): string {
             : (note.surfaceCondition ?? "No condition recorded");
     const conditionLabel = note.status === "ready" ? "Condition met" : "Condition";
 
-    return `- **#${note.id}**${statusSuffix}: ${note.content}\n  ${conditionLabel}: ${conditionText}${dismissHint}`;
+    return `- **#${note.id}**${statusSuffix}: ${note.content}\n  ${conditionLabel}: ${conditionText}`;
 }
+
+const DISMISS_FOOTER = '\n\nTo dismiss a stale note: ctx_note(action="dismiss", note_id=N)';
 
 function buildReadSections(args: {
     db: Database;
@@ -222,7 +220,7 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 return "## Notes\n\nNo session notes or smart notes.";
             }
 
-            return sections.join("\n\n");
+            return sections.join("\n\n") + DISMISS_FOOTER;
         },
     });
 }

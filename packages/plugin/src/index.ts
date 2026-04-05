@@ -62,6 +62,13 @@ const plugin: Plugin = async (ctx) => {
                           pluginConfig.experimental.user_memories?.promotion_threshold,
                   }
                 : undefined,
+            experimentalPinKeyFiles: pluginConfig.experimental?.pin_key_files?.enabled
+                ? {
+                      enabled: true,
+                      token_budget: pluginConfig.experimental.pin_key_files?.token_budget,
+                      min_reads: pluginConfig.experimental.pin_key_files?.min_reads,
+                  }
+                : undefined,
         });
 
         // Start TUI→server action message consumer (handles recomp confirmations etc.)

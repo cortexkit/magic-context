@@ -130,6 +130,13 @@ export interface MagicContextConfig {
             enabled: boolean;
             promotion_threshold: number;
         };
+        pin_key_files: {
+            enabled: boolean;
+            /** Total token budget for all pinned key files (default: 10000) */
+            token_budget: number;
+            /** Minimum full-read count before a file is considered for pinning (default: 4) */
+            min_reads: number;
+        };
     };
     embedding: EmbeddingConfig;
     memory: {
@@ -217,10 +224,24 @@ export const MagicContextConfigSchema = z
                         promotion_threshold: z.number().min(2).max(20).default(3),
                     })
                     .default({ enabled: false, promotion_threshold: 3 }),
+                /** Pin frequently-read key files into the system prompt so the agent
+                 *  doesn't need to re-read them after context drops. Dreamer identifies
+                 *  key files per session based on read patterns. Requires dreamer. Default: false. */
+                pin_key_files: z
+                    .object({
+                        /** Enable key file pinning (default: false) */
+                        enabled: z.boolean().default(false),
+                        /** Total token budget for all pinned key files (min: 2000, max: 30000, default: 10000) */
+                        token_budget: z.number().min(2000).max(30000).default(10000),
+                        /** Minimum full-read count before a file is considered for pinning (min: 2, default: 4) */
+                        min_reads: z.number().min(2).max(20).default(4),
+                    })
+                    .default({ enabled: false, token_budget: 10000, min_reads: 4 }),
             })
             .default({
                 compaction_markers: false,
                 user_memories: { enabled: false, promotion_threshold: 3 },
+                pin_key_files: { enabled: false, token_budget: 10000, min_reads: 4 },
             }),
         /** Cross-session memory configuration */
         memory: z

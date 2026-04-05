@@ -79,6 +79,7 @@ export interface MagicContextDeps {
         experimental?: {
             compaction_markers?: boolean;
             user_memories?: { enabled: boolean; promotion_threshold: number };
+            pin_key_files?: { enabled: boolean; token_budget: number; min_reads: number };
         };
     };
 }
@@ -246,6 +247,13 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                           deps.config.experimental.user_memories?.promotion_threshold,
                   }
                 : undefined,
+            experimentalPinKeyFiles: deps.config.experimental?.pin_key_files?.enabled
+                ? {
+                      enabled: true,
+                      token_budget: deps.config.experimental.pin_key_files?.token_budget,
+                      min_reads: deps.config.experimental.pin_key_files?.min_reads,
+                  }
+                : undefined,
         }).catch((error: unknown) => {
             log("[dreamer] scheduled queue processing failed:", error);
         });
@@ -303,6 +311,13 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                                 deps.config.experimental.user_memories?.promotion_threshold,
                         }
                       : undefined,
+                  experimentalPinKeyFiles: deps.config.experimental?.pin_key_files?.enabled
+                      ? {
+                            enabled: true,
+                            token_budget: deps.config.experimental.pin_key_files?.token_budget,
+                            min_reads: deps.config.experimental.pin_key_files?.min_reads,
+                        }
+                      : undefined,
               }
             : undefined,
     });
@@ -319,6 +334,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         flushedSessions,
         lastHeuristicsTurnId,
         experimentalUserMemories: deps.config.experimental?.user_memories?.enabled,
+        experimentalPinKeyFiles: deps.config.experimental?.pin_key_files?.enabled ?? false,
+        experimentalPinKeyFilesTokenBudget: deps.config.experimental?.pin_key_files?.token_budget,
     });
 
     const eventHook = createEventHook({

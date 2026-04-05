@@ -23,6 +23,11 @@ export function startDreamScheduleTimer(args: {
     embeddingConfig: EmbeddingConfig;
     memoryEnabled: boolean;
     experimentalUserMemories?: { enabled: boolean; promotionThreshold: number };
+    experimentalPinKeyFiles?: {
+        enabled: boolean;
+        token_budget: number;
+        min_reads: number;
+    };
 }): (() => void) | undefined {
     const {
         client,
@@ -31,6 +36,7 @@ export function startDreamScheduleTimer(args: {
         embeddingConfig,
         memoryEnabled,
         experimentalUserMemories,
+        experimentalPinKeyFiles,
     } = args;
     const dreamingEnabled = Boolean(dreamerConfig?.enabled && dreamerConfig.schedule?.trim());
     const embeddingSweepEnabled = memoryEnabled && embeddingConfig.provider !== "off";
@@ -71,6 +77,7 @@ export function startDreamScheduleTimer(args: {
                 taskTimeoutMinutes: dreamerConfig.task_timeout_minutes,
                 maxRuntimeMinutes: dreamerConfig.max_runtime_minutes,
                 experimentalUserMemories,
+                experimentalPinKeyFiles,
             }).catch((error: unknown) => {
                 log("[dreamer] timer-triggered queue processing failed:", error);
             });

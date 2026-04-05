@@ -68,6 +68,11 @@ describe("MagicContextConfigSchema", () => {
                         enabled: false,
                         promotion_threshold: 3,
                     },
+                    pin_key_files: {
+                        enabled: false,
+                        token_budget: 10000,
+                        min_reads: 4,
+                    },
                 },
                 embedding: {
                     provider: "openai-compatible",

@@ -1,9 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import {
     buildMagicContextSection,
     detectAgentFromSystemPrompt,
 } from "../../agents/magic-context-prompt";
+import { escapeXmlAttr, escapeXmlContent } from "../../features/magic-context/compartment-storage";
+import { getKeyFiles } from "../../features/magic-context/key-files/storage-key-files";
 import {
     type ContextDatabase,
     getOrCreateSessionMeta,
@@ -11,11 +13,14 @@ import {
 } from "../../features/magic-context/storage";
 import { getActiveUserMemories } from "../../features/magic-context/user-memory/storage-user-memory";
 import { log, sessionLog } from "../../shared/logger";
+import { estimateTokens } from "./read-session-formatting";
 
 const MAGIC_CONTEXT_MARKER = "## Magic Context";
 const PROJECT_DOCS_MARKER = "<project-docs>";
 const USER_PROFILE_MARKER = "<user-profile>";
+const KEY_FILES_MARKER = "<key-files>";
 const cachedUserProfileBySession = new Map<string, string | null>();
+const cachedKeyFilesBySession = new Map<string, string | null>();
 
 const DOC_FILES = ["ARCHITECTURE.md", "STRUCTURE.md"] as const;
 
@@ -71,6 +76,10 @@ export function createSystemPromptHashHandler(deps: {
     lastHeuristicsTurnId: Map<string, string>;
     /** When true, inject stable user memories as <user-profile> into system prompt */
     experimentalUserMemories?: boolean;
+    /** When true, inject pinned key files as <key-files> into system prompt */
+    experimentalPinKeyFiles?: boolean;
+    /** Token budget for key files injection (default 10000) */
+    experimentalPinKeyFilesTokenBudget?: number;
 }): (input: { sessionID?: string }, output: { system: string[] }) => Promise<void> {
     // Per-session sticky date: we freeze the date string from the system prompt
     // and only update it on cache-busting passes. This prevents a midnight date
@@ -154,6 +163,97 @@ export function createSystemPromptHashHandler(deps: {
             }
         }
 
+        // ── Step 1.7: Inject pinned key files ──
+        if (deps.experimentalPinKeyFiles) {
+            const hasCachedKeyFiles = cachedKeyFilesBySession.has(sessionId);
+
+            if (!hasCachedKeyFiles || isCacheBusting) {
+                const keyFileEntries = getKeyFiles(deps.db, sessionId);
+                if (keyFileEntries.length > 0) {
+                    const sections: string[] = [];
+                    const projectRoot = resolve(deps.directory);
+                    let remainingBudgetTokens = deps.experimentalPinKeyFilesTokenBudget ?? 10_000;
+
+                    for (const entry of keyFileEntries) {
+                        try {
+                            const absPath = resolve(deps.directory, entry.filePath);
+                            // Path traversal guard: resolved path must be inside project root.
+                            // Use realpathSync to follow symlinks — a symlink inside the project
+                            // could point outside it, bypassing the resolve() check.
+                            if (!absPath.startsWith(projectRoot + sep) && absPath !== projectRoot) {
+                                log(
+                                    `[magic-context] key file path escapes project root, skipping: ${entry.filePath}`,
+                                );
+                                continue;
+                            }
+                            if (!existsSync(absPath)) continue;
+
+                            let realPath: string;
+                            try {
+                                realPath = realpathSync(absPath);
+                            } catch {
+                                continue; // broken symlink
+                            }
+                            if (
+                                !realPath.startsWith(projectRoot + sep) &&
+                                realPath !== projectRoot
+                            ) {
+                                log(
+                                    `[magic-context] key file symlink escapes project root, skipping: ${entry.filePath} → ${realPath}`,
+                                );
+                                continue;
+                            }
+
+                            const content = readFileSync(realPath, "utf-8").trim();
+                            if (content.length === 0) continue;
+
+                            // Token budget enforcement using shared estimator
+                            const fileTokens = estimateTokens(content);
+                            if (fileTokens > remainingBudgetTokens) {
+                                log(
+                                    `[magic-context] key file ${entry.filePath} exceeds remaining budget (${fileTokens} > ${remainingBudgetTokens}), skipping`,
+                                );
+                                continue;
+                            }
+                            remainingBudgetTokens -= fileTokens;
+
+                            sections.push(
+                                `<file path="${escapeXmlAttr(entry.filePath)}">\n${escapeXmlContent(content)}\n</file>`,
+                            );
+                        } catch (error) {
+                            log(
+                                `[magic-context] failed to read key file ${entry.filePath}:`,
+                                error,
+                            );
+                        }
+                    }
+                    if (sections.length > 0) {
+                        cachedKeyFilesBySession.set(
+                            sessionId,
+                            `${KEY_FILES_MARKER}\n${sections.join("\n\n")}\n</key-files>`,
+                        );
+                        if (!hasCachedKeyFiles) {
+                            sessionLog(
+                                sessionId,
+                                `loaded ${sections.length} key file(s) into system prompt`,
+                            );
+                        } else {
+                            sessionLog(sessionId, "refreshed key files (cache-busting pass)");
+                        }
+                    } else {
+                        cachedKeyFilesBySession.set(sessionId, null);
+                    }
+                } else {
+                    cachedKeyFilesBySession.set(sessionId, null);
+                }
+            }
+
+            const keyFilesBlock = cachedKeyFilesBySession.get(sessionId);
+            if (keyFilesBlock && !fullPrompt.includes(KEY_FILES_MARKER)) {
+                output.system.push(keyFilesBlock);
+            }
+        }
+
         // ── Step 2: Freeze volatile date to prevent unnecessary cache busts ──
         const DATE_PATTERN = /Today's date: .+/;
 
@@ -218,8 +318,8 @@ export function createSystemPromptHashHandler(deps: {
             );
         }
 
-        // Estimate system prompt tokens (~4 chars per token) for dashboard visibility
-        const systemPromptTokens = Math.ceil(systemContent.length / 4);
+        // Estimate system prompt tokens for dashboard visibility
+        const systemPromptTokens = estimateTokens(systemContent);
 
         if (currentHash !== previousHash) {
             updateSessionMeta(deps.db, sessionId, {

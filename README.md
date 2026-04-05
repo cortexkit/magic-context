@@ -45,6 +45,8 @@ Your agent should never stop working to manage its own context. Magic Context is
 
 **User Memories** — historian extracts behavioral observations about you alongside its normal compartment output (communication style, expertise level, review focus, working patterns). Recurring observations are promoted by the dreamer to stable user memories that appear in all sessions via `<user-profile>`. Enable with `experimental.user_memories.enabled: true` (requires dreamer).
 
+**Key File Pinning** — dreamer analyzes which files your agent reads most frequently across the session. Core orientation files (architecture, config, types) that get re-read after every context drop are pinned into the system prompt as `<key-files>`, so the agent always has them without needing to re-read from disk. Files are read fresh on each cache-busting pass. Enable with `experimental.pin_key_files.enabled: true` (requires dreamer).
+
 ---
 
 ## Get Started

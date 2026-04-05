@@ -289,6 +289,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "tags", "reasoning_byte_size", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "system_prompt_tokens", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "compaction_marker_state", "TEXT DEFAULT ''");
+    ensureColumn(db, "session_meta", "key_files", "TEXT DEFAULT ''");
 }
 
 // Intentional: the definition regex allows single quotes and parens because SQLite column

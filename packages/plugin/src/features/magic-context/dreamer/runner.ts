@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { DREAMER_AGENT } from "../../../agents/dreamer";
@@ -6,8 +6,17 @@ import type { DreamingTask } from "../../../config/schema/magic-context";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
+import { getDataDir } from "../../../shared/data-path";
 import { getErrorMessage } from "../../../shared/error-message";
 import { log } from "../../../shared/logger";
+import {
+    applyKeyFileResults,
+    buildKeyFilesPrompt,
+    getKeyFileCandidates,
+    heuristicKeyFileSelection,
+    KEY_FILES_SYSTEM_PROMPT,
+    parseKeyFilesOutput,
+} from "../key-files/identify-key-files";
 import { getMemoryCountsByStatus } from "../memory/storage-memory";
 import { getPendingSmartNotes, markNoteChecked, markNoteReady } from "../storage-notes";
 import { reviewUserMemories } from "../user-memory/review-user-memories";
@@ -27,6 +36,20 @@ import { buildDreamTaskPrompt, DREAMER_SYSTEM_PROMPT } from "./task-prompts";
 // Multiple checkouts of the same repo overwrite each other; the last-active checkout wins.
 // Acceptable for v1 since multi-checkout dreaming is an edge case.
 const dreamProjectDirectories = new Map<string, string>();
+
+interface SessionListEntry {
+    id?: string;
+}
+
+interface SessionIdRow {
+    sessionId: string;
+}
+
+interface ExperimentalPinKeyFilesConfig {
+    enabled: boolean;
+    token_budget: number;
+    min_reads: number;
+}
 
 export function registerDreamProjectDirectory(projectIdentity: string, directory: string): void {
     dreamProjectDirectories.set(projectIdentity, directory);
@@ -61,6 +84,278 @@ function countNewIds(beforeIds: number[], afterIds: number[]): number {
     return count;
 }
 
+function getOpenCodeDbPath(): string {
+    return join(getDataDir(), "opencode", "opencode.db");
+}
+
+function openOpenCodeDb(): Database | null {
+    const dbPath = getOpenCodeDbPath();
+    if (!existsSync(dbPath)) {
+        log(`[key-files] OpenCode DB not found at ${dbPath} — skipping`);
+        return null;
+    }
+
+    try {
+        const db = new Database(dbPath, { readonly: true });
+        db.exec("PRAGMA busy_timeout = 5000");
+        return db;
+    } catch (error) {
+        log(`[key-files] failed to open OpenCode DB at ${dbPath}: ${getErrorMessage(error)}`);
+        return null;
+    }
+}
+
+function isSessionIdRow(row: unknown): row is SessionIdRow {
+    if (row === null || typeof row !== "object") {
+        return false;
+    }
+
+    return typeof (row as SessionIdRow).sessionId === "string";
+}
+
+function hasExplicitEmptyKeyFilesOutput(text: string): boolean {
+    return /```(?:json)?\s*\[\s*\]\s*```/s.test(text) || /^\s*\[\s*\]\s*$/s.test(text);
+}
+
+async function getActiveProjectSessionIds(args: {
+    db: Database;
+    client: PluginContext["client"];
+    projectIdentity: string;
+    sessionDirectory: string | undefined;
+}): Promise<string[]> {
+    const listResponse = await args.client.session.list({
+        query: { directory: args.sessionDirectory ?? args.projectIdentity },
+    });
+    const sessions = shared.normalizeSDKResponse(listResponse, [] as SessionListEntry[], {
+        preferResponseOnMissingData: true,
+    });
+    const projectSessionIds = new Set(
+        sessions
+            .map((session) => (typeof session?.id === "string" ? session.id : null))
+            .filter((sessionId): sessionId is string => Boolean(sessionId)),
+    );
+
+    if (projectSessionIds.size === 0) {
+        return [];
+    }
+
+    return args.db
+        .prepare(
+            "SELECT session_id AS sessionId FROM session_meta WHERE is_subagent = 0 ORDER BY session_id ASC",
+        )
+        .all()
+        .filter(isSessionIdRow)
+        .map((row) => row.sessionId)
+        .filter((sessionId) => projectSessionIds.has(sessionId));
+}
+
+async function identifyKeyFilesForSession(args: {
+    db: Database;
+    client: PluginContext["client"];
+    parentSessionId: string | undefined;
+    sessionDirectory: string;
+    holderId: string;
+    deadline: number;
+    sessionId: string;
+    config: ExperimentalPinKeyFilesConfig;
+}): Promise<void> {
+    let openCodeDb: Database | null = null;
+
+    try {
+        openCodeDb = openOpenCodeDb();
+        if (!openCodeDb) {
+            return;
+        }
+
+        const candidates = getKeyFileCandidates(
+            openCodeDb,
+            args.sessionId,
+            args.config.min_reads,
+            args.config.token_budget,
+        );
+        if (candidates.length === 0) {
+            log(`[key-files][${args.sessionId}] no candidates found — skipping`);
+            return;
+        }
+
+        const prompt = buildKeyFilesPrompt(
+            candidates,
+            args.config.token_budget,
+            args.config.min_reads,
+        );
+        const applyHeuristicFallback = (): void => {
+            heuristicKeyFileSelection(
+                args.db,
+                args.sessionId,
+                candidates,
+                args.config.token_budget,
+            );
+        };
+
+        let agentSessionId: string | null = null;
+        const abortController = new AbortController();
+        const leaseInterval = setInterval(() => {
+            try {
+                if (!renewLease(args.db, args.holderId)) {
+                    log(`[key-files][${args.sessionId}] lease renewal failed — aborting`);
+                    abortController.abort();
+                }
+            } catch {
+                abortController.abort();
+            }
+        }, 60_000);
+
+        try {
+            const createResponse = await args.client.session.create({
+                body: {
+                    ...(args.parentSessionId ? { parentID: args.parentSessionId } : {}),
+                    title: `magic-context-dream-key-files-${args.sessionId.slice(0, 12)}`,
+                },
+                query: { directory: args.sessionDirectory },
+            });
+            const created = shared.normalizeSDKResponse(
+                createResponse,
+                null as { id?: string } | null,
+                { preferResponseOnMissingData: true },
+            );
+            agentSessionId = typeof created?.id === "string" ? created.id : null;
+            if (!agentSessionId) {
+                throw new Error("Could not create key-file identification session.");
+            }
+
+            log(`[key-files][${args.sessionId}] child session created ${agentSessionId}`);
+
+            const remainingMs = Math.max(0, args.deadline - Date.now());
+            await shared.promptSyncWithModelSuggestionRetry(
+                args.client,
+                {
+                    path: { id: agentSessionId },
+                    query: { directory: args.sessionDirectory },
+                    body: {
+                        agent: DREAMER_AGENT,
+                        system: KEY_FILES_SYSTEM_PROMPT,
+                        parts: [{ type: "text", text: prompt }],
+                    },
+                },
+                { timeoutMs: Math.min(remainingMs, 5 * 60 * 1000), signal: abortController.signal },
+            );
+
+            const messagesResponse = await args.client.session.messages({
+                path: { id: agentSessionId },
+                query: { directory: args.sessionDirectory },
+            });
+            const messages = shared.normalizeSDKResponse(messagesResponse, [] as unknown[], {
+                preferResponseOnMissingData: true,
+            });
+            const responseText = extractLatestAssistantText(messages);
+            if (!responseText) {
+                log(
+                    `[key-files][${args.sessionId}] no response from agent — using heuristic fallback`,
+                );
+                applyHeuristicFallback();
+                return;
+            }
+
+            const parsed = parseKeyFilesOutput(responseText);
+            if (parsed.length > 0 || hasExplicitEmptyKeyFilesOutput(responseText)) {
+                const candidatePaths = new Set(candidates.map((c) => c.filePath));
+                applyKeyFileResults(
+                    args.db,
+                    args.sessionId,
+                    parsed,
+                    args.config.token_budget,
+                    candidatePaths,
+                );
+                return;
+            }
+
+            log(
+                `[key-files][${args.sessionId}] could not parse agent output — using heuristic fallback`,
+            );
+            applyHeuristicFallback();
+        } catch (error) {
+            log(
+                `[key-files][${args.sessionId}] identification failed: ${getErrorMessage(error)} — using heuristic fallback`,
+            );
+            try {
+                applyHeuristicFallback();
+            } catch (fallbackError) {
+                log(
+                    `[key-files][${args.sessionId}] heuristic fallback failed: ${getErrorMessage(fallbackError)}`,
+                );
+            }
+        } finally {
+            clearInterval(leaseInterval);
+            if (agentSessionId) {
+                await args.client.session
+                    .delete({
+                        path: { id: agentSessionId },
+                        query: { directory: args.sessionDirectory },
+                    })
+                    .catch((error: unknown) => {
+                        log(
+                            `[key-files][${args.sessionId}] session cleanup failed: ${getErrorMessage(error)}`,
+                        );
+                    });
+            }
+        }
+    } finally {
+        if (openCodeDb) {
+            try {
+                openCodeDb.close(false);
+            } catch (error) {
+                log(
+                    `[key-files][${args.sessionId}] failed to close OpenCode DB: ${getErrorMessage(error)}`,
+                );
+            }
+        }
+    }
+}
+
+async function identifyKeyFiles(args: {
+    db: Database;
+    client: PluginContext["client"];
+    projectIdentity: string;
+    parentSessionId: string | undefined;
+    sessionDirectory: string;
+    holderId: string;
+    deadline: number;
+    config: ExperimentalPinKeyFilesConfig;
+}): Promise<void> {
+    const sessionIds = await getActiveProjectSessionIds({
+        db: args.db,
+        client: args.client,
+        projectIdentity: args.projectIdentity,
+        sessionDirectory: args.sessionDirectory,
+    });
+    if (sessionIds.length === 0) {
+        log(`[key-files] no active sessions found for ${args.projectIdentity}`);
+        return;
+    }
+
+    log(
+        `[key-files] evaluating ${sessionIds.length} active session(s) for ${args.projectIdentity}`,
+    );
+
+    for (const sessionId of sessionIds) {
+        if (Date.now() > args.deadline) {
+            log("[key-files] deadline reached — stopping key-file identification");
+            break;
+        }
+
+        await identifyKeyFilesForSession({
+            db: args.db,
+            client: args.client,
+            parentSessionId: args.parentSessionId,
+            sessionDirectory: args.sessionDirectory,
+            holderId: args.holderId,
+            deadline: args.deadline,
+            sessionId,
+            config: args.config,
+        });
+    }
+}
+
 export async function runDream(args: {
     db: Database;
     client: PluginContext["client"];
@@ -72,6 +367,7 @@ export async function runDream(args: {
     parentSessionId?: string;
     sessionDirectory?: string;
     experimentalUserMemories?: { enabled: boolean; promotionThreshold: number };
+    experimentalPinKeyFiles?: ExperimentalPinKeyFilesConfig;
 }): Promise<DreamRunResult> {
     const holderId = crypto.randomUUID();
     const startedAt = Date.now();
@@ -303,6 +599,22 @@ export async function runDream(args: {
                 });
             } catch (error) {
                 log(`[dreamer] smart note evaluation failed: ${getErrorMessage(error)}`);
+            }
+        }
+        if (args.experimentalPinKeyFiles?.enabled && Date.now() <= deadline) {
+            try {
+                await identifyKeyFiles({
+                    db: args.db,
+                    client: args.client,
+                    projectIdentity: args.projectIdentity,
+                    parentSessionId,
+                    sessionDirectory: args.sessionDirectory ?? args.projectIdentity,
+                    holderId,
+                    deadline,
+                    config: args.experimentalPinKeyFiles,
+                });
+            } catch (error) {
+                log(`[key-files] identification phase failed: ${getErrorMessage(error)}`);
             }
         }
     } finally {
@@ -551,6 +863,7 @@ export async function processDreamQueue(args: {
     taskTimeoutMinutes: number;
     maxRuntimeMinutes: number;
     experimentalUserMemories?: { enabled: boolean; promotionThreshold: number };
+    experimentalPinKeyFiles?: ExperimentalPinKeyFilesConfig;
 }): Promise<DreamRunResult | null> {
     // Use configured max runtime + 30min buffer for stale threshold instead of hardcoded 2h
     const maxRuntimeMs = args.maxRuntimeMinutes * 60 * 1000;
@@ -578,6 +891,7 @@ export async function processDreamQueue(args: {
             maxRuntimeMinutes: args.maxRuntimeMinutes,
             sessionDirectory: projectDirectory,
             experimentalUserMemories: args.experimentalUserMemories,
+            experimentalPinKeyFiles: args.experimentalPinKeyFiles,
         });
     } catch (error) {
         log(`[dreamer] runDream threw for ${entry.projectIdentity}: ${getErrorMessage(error)}`);

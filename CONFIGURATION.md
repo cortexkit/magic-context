@@ -289,6 +289,21 @@ When enabled, historian extracts behavioral observations about the user alongsid
 
 - `promotion_threshold`: minimum number of semantically similar candidate observations before dreamer considers promoting to a stable memory (2–20, default 3).
 
+### `experimental.pin_key_files`
+
+| Key | Type | Default |
+|-----|------|---------|
+| `experimental.pin_key_files.enabled` | `boolean` | `false` |
+| `experimental.pin_key_files.token_budget` | `number` | `10000` |
+| `experimental.pin_key_files.min_reads` | `number` | `4` |
+
+When enabled, dreamer analyzes which files each session's agent reads most frequently (full reads only, not partial line ranges). Core orientation files — architecture, config, types — that are repeatedly re-read after context drops are pinned into the system prompt as a `<key-files>` block. Files are read fresh from disk on each cache-busting pass.
+
+**Requires dreamer to be enabled.** Without dreamer, no key files are identified. The dreamer runs the analysis as a post-task step, inspecting all active non-subagent sessions for the project.
+
+- `token_budget`: maximum total tokens for all pinned files combined (2000–30000, default 10000). Files are selected by a knapsack solver to fit within this budget.
+- `min_reads`: minimum number of full-file reads before a file is considered for pinning (2–20, default 4). Lower values are more aggressive but risk pinning task-specific files.
+
 ## Commands
 
 | Command | Description |
@@ -353,6 +368,11 @@ When enabled, historian extracts behavioral observations about the user alongsid
     "user_memories": {
       "enabled": false,
       "promotion_threshold": 3
+    },
+    "pin_key_files": {
+      "enabled": false,
+      "token_budget": 10000,
+      "min_reads": 4
     }
   }
 }

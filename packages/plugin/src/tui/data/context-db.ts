@@ -272,7 +272,7 @@ export function loadSidebarSnapshot(sessionId: string, directory: string): Sideb
             for (const c of compRows) {
                 compartmentTokens += Math.ceil(
                     `<compartment start="${c.start_message}" end="${c.end_message}" title="${c.title}">\n${c.content}\n</compartment>\n`
-                        .length / 4,
+                        .length / 3.5,
                 );
             }
         } catch {
@@ -285,7 +285,7 @@ export function loadSidebarSnapshot(sessionId: string, directory: string): Sideb
                 )
                 .all(sessionId);
             for (const f of factRows) {
-                factTokens += Math.ceil(`* ${f.content}\n`.length / 4);
+                factTokens += Math.ceil(`* ${f.content}\n`.length / 3.5);
             }
         } catch {
             /* session_facts table may not exist */
@@ -294,7 +294,7 @@ export function loadSidebarSnapshot(sessionId: string, directory: string): Sideb
         if (meta) {
             const cached = (meta as Record<string, unknown>).memory_block_cache;
             if (typeof cached === "string" && cached.length > 0) {
-                memoryTokens = Math.ceil(cached.length / 4);
+                memoryTokens = Math.ceil(cached.length / 3.5);
             }
         }
 
@@ -514,14 +514,14 @@ export function loadStatusDetail(
 
             let histTokens = 0;
             for (const c of compartments) {
-                // ~4 chars per token estimate (same as plugin's estimateTokens)
+                // ~3.5 chars per token estimate (matches plugin's estimateTokens)
                 histTokens += Math.ceil(
                     `<compartment start="${c.start_message}" end="${c.end_message}" title="${c.title}">\n${c.content}\n</compartment>\n`
-                        .length / 4,
+                        .length / 3.5,
                 );
             }
             for (const f of facts) {
-                histTokens += Math.ceil(`* ${f.content}\n`.length / 4);
+                histTokens += Math.ceil(`* ${f.content}\n`.length / 3.5);
             }
             detail.historyBlockTokens = histTokens;
 
