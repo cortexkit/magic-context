@@ -22,6 +22,7 @@
   <a href="#what-is-magic-context">What is Magic Context?</a> ·
   <a href="#what-your-agent-gets">What Your Agent Gets</a> ·
   <a href="#how-it-works">How It Works</a> ·
+  <a href="#magic-context-app">🖥️ Desktop App <sup>(NEW)</sup></a> ·
   <a href="#commands">Commands</a> ·
   <a href="#configuration">Configuration</a>
 </p>
@@ -313,6 +314,27 @@ On startup, Magic Context checks for common configuration problems — OpenCode'
 | `/ctx-recomp` | Rebuild compartments and facts from raw history — use when stored state seems wrong |
 | `/ctx-aug` | Run sidekick augmentation on a prompt — retrieves relevant memories via a separate model |
 | `/ctx-dream` | Run dreamer maintenance on demand — consolidate, verify, archive, improve memories |
+
+---
+
+## Magic Context App
+
+A companion desktop app for browsing and managing Magic Context state outside of OpenCode.
+
+<p align="center">
+  <a href="https://github.com/cortexkit/opencode-magic-context/releases?q=dashboard"><strong>⬇️ Download for macOS · Windows · Linux</strong></a>
+</p>
+
+**Features:**
+- **Memory Browser** — search, filter, and edit project memories with category and project filtering
+- **Session History** — browse compartments, facts, and notes for any session with timeline navigation
+- **Cache Diagnostics** — real-time cache hit/miss timeline, bust cause detection, per-session stats
+- **Dreamer Management** — view dream run history per project, trigger runs, inspect task results
+- **Configuration Editor** — form-based editing for all settings including model selection with fallback chains
+- **Log Viewer** — live-tailing log viewer with search
+- **System Tray** — quick access to dreamer status and controls
+
+The app reads directly from Magic Context's SQLite database — no additional server or API required. Auto-updates are built in.
 
 ---
 
