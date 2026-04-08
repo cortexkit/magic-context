@@ -140,7 +140,13 @@ Already installed but something isn't working? Run the doctor to check and auto-
 bunx @cortexkit/opencode-magic-context doctor
 ```
 
-Doctor checks for conflicts (compaction, DCP, OMO hooks), ensures the TUI sidebar is configured, and verifies the plugin is registered — fixing what it can automatically.
+Doctor checks for conflicts (compaction, DCP, OMO hooks), ensures the TUI sidebar is configured, verifies the plugin is registered, and checks the npm cache — fixing what it can automatically.
+
+Use `--force` to force-clear the plugin cache even when versions match (fixes broken transitive dependencies):
+
+```bash
+bunx @cortexkit/opencode-magic-context doctor --force
+```
 
 ---
 

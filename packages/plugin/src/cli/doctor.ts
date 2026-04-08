@@ -33,7 +33,7 @@ function getOpenCodeCacheDir(): string {
     return join(homedir(), ".cache", "opencode");
 }
 
-async function clearPluginCache(): Promise<{
+async function clearPluginCache(force = false): Promise<{
     action: "cleared" | "up_to_date" | "not_found" | "error";
     path: string;
     cached?: string;
@@ -81,8 +81,8 @@ async function clearPluginCache(): Promise<{
         }
     }
 
-    // If we know both versions and they match, skip
-    if (cachedVersion && cachedVersion === selfVersion) {
+    // If we know both versions and they match, skip (unless forced)
+    if (!force && cachedVersion && cachedVersion === selfVersion) {
         return {
             action: "up_to_date",
             path: pluginCacheDir,
@@ -105,7 +105,7 @@ async function clearPluginCache(): Promise<{
     }
 }
 
-export async function runDoctor(): Promise<number> {
+export async function runDoctor(options: { force?: boolean } = {}): Promise<number> {
     intro("Magic Context Doctor");
 
     let issues = 0;
@@ -229,7 +229,7 @@ export async function runDoctor(): Promise<number> {
     }
 
     // 8. Check plugin npm cache — clear only if outdated
-    const cacheResult = await clearPluginCache();
+    const cacheResult = await clearPluginCache(options.force);
     if (cacheResult.action === "cleared") {
         const versionInfo = cacheResult.cached
             ? ` (cached: ${cacheResult.cached}${cacheResult.latest ? `, latest: ${cacheResult.latest}` : ""})`
