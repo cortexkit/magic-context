@@ -4,12 +4,12 @@
  */
 import type { Database } from "bun:sqlite";
 import type { MagicContextConfig } from "../config/schema/magic-context";
+import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
 import { openDatabase } from "../features/magic-context/storage";
+import { log } from "../shared/logger";
 import { drainNotifications } from "../shared/rpc-notifications";
 import type { MagicContextRpcServer } from "../shared/rpc-server";
 import type { SidebarSnapshot, StatusDetail } from "../shared/rpc-types";
-import { log } from "../shared/logger";
-import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
 
 function getDb(): Database | null {
     try {
@@ -57,11 +57,7 @@ function resolveConfigValue<T>(
     return defaultValue;
 }
 
-function buildSidebarSnapshot(
-    db: Database,
-    sessionId: string,
-    directory: string,
-): SidebarSnapshot {
+function buildSidebarSnapshot(db: Database, sessionId: string, directory: string): SidebarSnapshot {
     const empty: SidebarSnapshot = {
         sessionId,
         usagePercentage: 0,
@@ -471,9 +467,7 @@ export function registerRpcHandlers(
         const sessionId = String(params.sessionId ?? "");
         if (!sessionId) return { ok: false, error: "no session" };
 
-        const { executeContextRecomp } = await import(
-            "../hooks/magic-context/compartment-runner"
-        );
+        const { executeContextRecomp } = await import("../hooks/magic-context/compartment-runner");
         const { sendIgnoredMessage } = await import(
             "../hooks/magic-context/send-session-notification"
         );

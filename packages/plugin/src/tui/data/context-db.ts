@@ -2,30 +2,30 @@
  * TUI data layer — pure RPC client, no direct SQLite access.
  * All data is fetched from the server plugin via HTTP RPC.
  */
-import os from "node:os"
-import path from "node:path"
-import { MagicContextRpcClient } from "../../shared/rpc-client"
-import type { SidebarSnapshot, StatusDetail, RpcNotificationMessage } from "../../shared/rpc-types"
+import os from "node:os";
+import path from "node:path";
+import { MagicContextRpcClient } from "../../shared/rpc-client";
+import type { RpcNotificationMessage, SidebarSnapshot, StatusDetail } from "../../shared/rpc-types";
 
-export type { SidebarSnapshot, StatusDetail }
+export type { SidebarSnapshot, StatusDetail };
 
-let rpcClient: MagicContextRpcClient | null = null
+let rpcClient: MagicContextRpcClient | null = null;
 
 function getStorageDir(): string {
-    const dataDir = process.env.XDG_DATA_HOME ?? path.join(os.homedir(), ".local", "share")
-    return path.join(dataDir, "opencode", "storage", "plugin", "magic-context")
+    const dataDir = process.env.XDG_DATA_HOME ?? path.join(os.homedir(), ".local", "share");
+    return path.join(dataDir, "opencode", "storage", "plugin", "magic-context");
 }
 
 /** Initialize the RPC client. Call once on TUI startup. */
 export function initRpcClient(directory: string): void {
-    const storageDir = getStorageDir()
-    rpcClient = new MagicContextRpcClient(storageDir, directory)
+    const storageDir = getStorageDir();
+    rpcClient = new MagicContextRpcClient(storageDir, directory);
 }
 
 /** Clean up the RPC client. */
 export function closeRpc(): void {
-    rpcClient?.reset()
-    rpcClient = null
+    rpcClient?.reset();
+    rpcClient = null;
 }
 
 const EMPTY_SNAPSHOT: SidebarSnapshot = {
@@ -48,25 +48,25 @@ const EMPTY_SNAPSHOT: SidebarSnapshot = {
     compartmentTokens: 0,
     factTokens: 0,
     memoryTokens: 0,
-}
+};
 
 /** Fetch sidebar snapshot from the server via RPC. */
 export async function loadSidebarSnapshot(
     sessionId: string,
     directory: string,
 ): Promise<SidebarSnapshot> {
-    if (!rpcClient) return { ...EMPTY_SNAPSHOT, sessionId }
+    if (!rpcClient) return { ...EMPTY_SNAPSHOT, sessionId };
     try {
         const result = await rpcClient.call<SidebarSnapshot>("sidebar-snapshot", {
             sessionId,
             directory,
-        })
+        });
         if ((result as unknown as Record<string, unknown>).error) {
-            return { ...EMPTY_SNAPSHOT, sessionId }
+            return { ...EMPTY_SNAPSHOT, sessionId };
         }
-        return result
+        return result;
     } catch {
-        return { ...EMPTY_SNAPSHOT, sessionId }
+        return { ...EMPTY_SNAPSHOT, sessionId };
     }
 }
 
@@ -102,65 +102,65 @@ export async function loadStatusDetail(
         historyBlockTokens: 0,
         compressionBudget: null,
         compressionUsage: null,
-    }
+    };
 
-    if (!rpcClient) return emptyDetail
+    if (!rpcClient) return emptyDetail;
     try {
         const result = await rpcClient.call<StatusDetail>("status-detail", {
             sessionId,
             directory,
             modelKey,
-        })
+        });
         if ((result as unknown as Record<string, unknown>).error) {
-            return emptyDetail
+            return emptyDetail;
         }
-        return result
+        return result;
     } catch {
-        return emptyDetail
+        return emptyDetail;
     }
 }
 
 /** Get compartment count via RPC. */
 export async function getCompartmentCount(sessionId: string): Promise<number> {
-    if (!rpcClient) return 0
+    if (!rpcClient) return 0;
     try {
-        const result = await rpcClient.call<{ count: number }>("compartment-count", { sessionId })
-        return result.count ?? 0
+        const result = await rpcClient.call<{ count: number }>("compartment-count", { sessionId });
+        return result.count ?? 0;
     } catch {
-        return 0
+        return 0;
     }
 }
 
 /** Send recomp request to server via RPC. */
 export async function requestRecomp(sessionId: string): Promise<boolean> {
-    if (!rpcClient) return false
+    if (!rpcClient) return false;
     try {
-        const result = await rpcClient.call<{ ok: boolean }>("recomp", { sessionId })
-        return result.ok ?? false
+        const result = await rpcClient.call<{ ok: boolean }>("recomp", { sessionId });
+        return result.ok ?? false;
     } catch {
-        return false
+        return false;
     }
 }
 
 export interface TuiMessage {
-    type: string
-    payload: Record<string, unknown>
-    sessionId?: string
+    type: string;
+    payload: Record<string, unknown>;
+    sessionId?: string;
 }
 
 /** Poll for pending server→TUI notifications via RPC. */
 export async function consumeTuiMessages(): Promise<TuiMessage[]> {
-    if (!rpcClient) return []
+    if (!rpcClient) return [];
     try {
         const result = await rpcClient.call<{ messages: RpcNotificationMessage[] }>(
             "pending-notifications",
-        )
+        );
         return (result.messages ?? []).map((m) => ({
             type: m.type,
             payload: m.payload,
             sessionId: m.sessionId,
-        }))
+        }));
     } catch {
-        return []
+        return [];
     }
 }

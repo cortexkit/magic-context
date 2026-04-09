@@ -24,14 +24,11 @@ export class MagicContextRpcClient {
             throw new Error("Magic Context RPC server not available");
         }
 
-        const response = await this.fetchWithTimeout(
-            `http://127.0.0.1:${port}/rpc/${method}`,
-            {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(params),
-            },
-        );
+        const response = await this.fetchWithTimeout(`http://127.0.0.1:${port}/rpc/${method}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(params),
+        });
 
         if (!response.ok) {
             const text = await response.text();
@@ -100,10 +97,9 @@ export class MagicContextRpcClient {
 
     private async healthCheck(port: number): Promise<boolean> {
         try {
-            const response = await this.fetchWithTimeout(
-                `http://127.0.0.1:${port}/health`,
-                { method: "GET" },
-            );
+            const response = await this.fetchWithTimeout(`http://127.0.0.1:${port}/health`, {
+                method: "GET",
+            });
             return response.ok;
         } catch {
             return false;

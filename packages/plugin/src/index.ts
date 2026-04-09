@@ -15,13 +15,13 @@ import { startDreamScheduleTimer } from "./plugin/dream-timer";
 import { createEventHandler } from "./plugin/event";
 import { createSessionHooks } from "./plugin/hooks/create-session-hooks";
 import { createMessagesTransformHandler } from "./plugin/messages-transform";
-import { createToolRegistry } from "./plugin/tool-registry";
 import { registerRpcHandlers } from "./plugin/rpc-handlers";
+import { createToolRegistry } from "./plugin/tool-registry";
 import { type ConflictResult, detectConflicts } from "./shared/conflict-detector";
 import { getOpenCodeStorageDir } from "./shared/data-path";
-import { MagicContextRpcServer } from "./shared/rpc-server";
 import { log } from "./shared/logger";
 import { getAgentFallbackModels } from "./shared/model-requirements";
+import { MagicContextRpcServer } from "./shared/rpc-server";
 
 const plugin: Plugin = async (ctx) => {
     const pluginConfig = loadPluginConfig(ctx.directory);

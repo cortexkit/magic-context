@@ -1,10 +1,5 @@
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import {
-    createServer,
-    type IncomingMessage,
-    type Server,
-    type ServerResponse,
-} from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
 import { log } from "./logger";
 import { rpcPortFilePath } from "./rpc-utils";
