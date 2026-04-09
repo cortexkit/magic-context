@@ -70,7 +70,7 @@ irm https://raw.githubusercontent.com/cortexkit/opencode-magic-context/master/sc
 
 **Or run directly (any OS):**
 ```bash
-bunx @cortexkit/opencode-magic-context setup
+bunx @cortexkit/opencode-magic-context@latest setup
 ```
 
 The wizard will:
@@ -136,7 +136,7 @@ The setup wizard handles this automatically if it detects an oh-my-openagent or 
 Already installed but something isn't working? Run the doctor to check and auto-fix configuration issues:
 
 ```bash
-bunx @cortexkit/opencode-magic-context doctor
+bunx @cortexkit/opencode-magic-context@latest doctor
 ```
 
 Doctor checks for conflicts (compaction, DCP, OMO hooks), ensures the TUI sidebar is configured, verifies the plugin is registered, and checks the npm cache — fixing what it can automatically.
@@ -144,7 +144,7 @@ Doctor checks for conflicts (compaction, DCP, OMO hooks), ensures the TUI sideba
 Use `--force` to force-clear the plugin cache even when versions match (fixes broken transitive dependencies):
 
 ```bash
-bunx @cortexkit/opencode-magic-context doctor --force
+bunx @cortexkit/opencode-magic-context@latest doctor --force
 ```
 
 ---
@@ -306,7 +306,7 @@ The TUI plugin is configured automatically by the setup wizard and the `doctor` 
 
 ### Startup conflict detection
 
-On startup, Magic Context checks for common configuration problems — OpenCode's built-in compaction being enabled, DCP plugin being active alongside Magic Context, or conflicting oh-my-openagent hooks. When conflicts are detected, it warns the active session with a fix suggestion pointing to `bunx @cortexkit/opencode-magic-context doctor`.
+On startup, Magic Context checks for common configuration problems — OpenCode's built-in compaction being enabled, DCP plugin being active alongside Magic Context, or conflicting oh-my-openagent hooks. When conflicts are detected, it warns the active session with a fix suggestion pointing to `bunx @cortexkit/opencode-magic-context@latest doctor`.
 
 ---
 

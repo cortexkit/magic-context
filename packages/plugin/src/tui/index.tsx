@@ -103,7 +103,7 @@ function showConflictDialog(api: TuiPluginApi, directory: string, reasons: strin
                 }, 50)
             }}
             onCancel={() => {
-                api.ui.toast({ message: "Magic Context remains disabled. Run: bunx @cortexkit/opencode-magic-context doctor", variant: "warning", duration: 5000 })
+                api.ui.toast({ message: "Magic Context remains disabled. Run: bunx @cortexkit/opencode-magic-context@latest doctor", variant: "warning", duration: 5000 })
             }}
         />
     ))
@@ -152,7 +152,7 @@ function showTuiSetupDialog(api: TuiPluginApi) {
                 }, 50)
             }}
             onCancel={() => {
-                api.ui.toast({ message: "You can add the sidebar later via: bunx @cortexkit/opencode-magic-context doctor", variant: "info", duration: 5000 })
+                api.ui.toast({ message: "You can add the sidebar later via: bunx @cortexkit/opencode-magic-context@latest doctor", variant: "info", duration: 5000 })
             }}
         />
     ))

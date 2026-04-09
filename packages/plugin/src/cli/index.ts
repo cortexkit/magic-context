@@ -20,8 +20,8 @@ if (command === "setup") {
     console.log("    doctor --force   Force clear plugin cache (fixes broken dependencies)");
     console.log("");
     console.log("  Usage:");
-    console.log("    bunx @cortexkit/opencode-magic-context setup");
-    console.log("    bunx @cortexkit/opencode-magic-context doctor");
+    console.log("    bunx @cortexkit/opencode-magic-context@latest setup");
+    console.log("    bunx @cortexkit/opencode-magic-context@latest doctor");
     console.log("");
     process.exit(command ? 1 : 0);
 }

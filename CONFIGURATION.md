@@ -19,7 +19,7 @@ The setup wizard adds this automatically.
 If something isn't working, run the doctor to auto-detect and fix common issues:
 
 ```bash
-bunx @cortexkit/opencode-magic-context doctor
+bunx @cortexkit/opencode-magic-context@latest doctor
 ```
 
 Doctor checks: OpenCode installation, plugin registration, `magic-context.jsonc` existence, conflicts (compaction, DCP, OMO hooks), and TUI sidebar configuration. It auto-fixes what it can.
