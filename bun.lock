@@ -25,13 +25,13 @@
     },
     "packages/plugin": {
       "name": "@cortexkit/opencode-magic-context",
-      "version": "0.4.2",
+      "version": "0.8.4",
       "bin": {
         "opencode-magic-context": "dist/cli.js",
       },
       "dependencies": {
         "@clack/prompts": "^1.1.0",
-        "@huggingface/transformers": "^3.5.1",
+        "@huggingface/transformers": "~3.7.6",
         "@opencode-ai/plugin": "^1.2.26",
         "@opencode-ai/sdk": "^1.2.26",
         "ai-tokenizer": "^1.0.6",
@@ -168,7 +168,7 @@
 
     "@huggingface/jinja": ["@huggingface/jinja@0.5.6", "", {}, "sha512-MyMWyLnjqo+KRJYSH7oWNbsOn5onuIvfXYPcc0WOGxU0eHUV7oAYUoQTl2BMdu7ml+ea/bu11UM+EshbeHwtIA=="],
 
-    "@huggingface/transformers": ["@huggingface/transformers@3.8.1", "", { "dependencies": { "@huggingface/jinja": "^0.5.3", "onnxruntime-node": "1.21.0", "onnxruntime-web": "1.22.0-dev.20250409-89f8206ba4", "sharp": "^0.34.1" } }, "sha512-tsTk4zVjImqdqjS8/AOZg2yNLd1z9S5v+7oUPpXaasDRwEDhB+xnglK1k5cad26lL5/ZIaeREgWWy0bs9y9pPA=="],
+    "@huggingface/transformers": ["@huggingface/transformers@3.7.6", "", { "dependencies": { "@huggingface/jinja": "^0.5.1", "onnxruntime-node": "1.21.0", "onnxruntime-web": "1.22.0-dev.20250409-89f8206ba4", "sharp": "^0.34.1" } }, "sha512-OYlIRY8vj8r/pNx2CdXcDHz4KqpEC+bUMKzdVW5Dx//gp4XRmK+/g8as0h3cssRQYT0vG1A6VCfZy8SV0F4RDQ=="],
 
     "@img/colour": ["@img/colour@1.1.0", "", {}, "sha512-Td76q7j57o/tLVdgS746cYARfSyxk8iEfRxewL9h4OMzYhbW4TAcppl0mT4eyqXddh6L/jwoM75mo7ixa/pCeQ=="],
 

@@ -37,7 +37,12 @@ export function log(message: string, data?: unknown): void {
     if (isTestEnv) return;
     try {
         const timestamp = new Date().toISOString();
-        const serialized = data === undefined ? "" : ` ${JSON.stringify(data)}`;
+        const serialized =
+            data === undefined
+                ? ""
+                : data instanceof Error
+                  ? ` ${data.message}${data.stack ? `\n${data.stack}` : ""}`
+                  : ` ${JSON.stringify(data)}`;
         buffer.push(`[${timestamp}] ${message}${serialized}\n`);
         if (buffer.length >= BUFFER_SIZE_LIMIT) {
             flush();

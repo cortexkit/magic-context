@@ -170,10 +170,10 @@ export const MagicContextConfigSchema = z
         /** Context percentage that forces queued operations to execute. Number or per-model object ({ default: 65, "provider/model": 45 }). Default: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE */
         execute_threshold_percentage: z
             .union([
-                z.number().min(35).max(95),
+                z.number().min(20).max(95),
                 z
-                    .object({ default: z.number().min(35).max(95) })
-                    .catchall(z.number().min(35).max(95)),
+                    .object({ default: z.number().min(20).max(95) })
+                    .catchall(z.number().min(20).max(95)),
             ])
             .default(DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE),
         /** Number of recent tags to protect from dropping (min: 1, max: 100, default: 20) */

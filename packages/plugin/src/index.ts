@@ -26,6 +26,42 @@ import { MagicContextRpcServer } from "./shared/rpc-server";
 const plugin: Plugin = async (ctx) => {
     const pluginConfig = loadPluginConfig(ctx.directory);
 
+    // Surface config validation warnings to user and log
+    if (pluginConfig.configWarnings?.length) {
+        for (const w of pluginConfig.configWarnings) {
+            log(`[magic-context] config warning: ${w}`);
+        }
+        // Send warning to user via startup notification (after a short delay so session is ready)
+        const warningText = [
+            "## ⚠️ Magic Context Config Warning",
+            "",
+            "Some configuration values are invalid and were replaced with defaults:",
+            "",
+            ...pluginConfig.configWarnings.map((w) => `- ${w}`),
+            "",
+            "Check your `magic-context.jsonc` to fix these values.",
+        ].join("\n");
+
+        setTimeout(async () => {
+            try {
+                const { sendIgnoredMessage } = await import(
+                    "./hooks/magic-context/send-session-notification"
+                );
+                // sendIgnoredMessage already handles TUI (toast) vs Desktop (ignored message)
+                // via isTuiConnected(). We need a session ID — use the first active session.
+                const sessions = await Promise.resolve((ctx.client as any).session?.list?.()).catch(
+                    () => null,
+                );
+                const sessionId = (sessions as any)?.data?.[0]?.id ?? (sessions as any)?.[0]?.id;
+                if (sessionId) {
+                    await sendIgnoredMessage(ctx.client, sessionId, warningText, {});
+                }
+            } catch {
+                // Intentional: config warning delivery must not crash startup
+            }
+        }, 3000);
+    }
+
     // Detect conflicts that prevent magic-context from operating correctly
     let conflictResult: ConflictResult | null = null;
     if (pluginConfig.enabled) {
