@@ -213,6 +213,33 @@ describe("strip-content", () => {
                 });
             });
         });
+
+        describe("#given a thinking part with no thinking or text fields", () => {
+            describe("#when stripping cleared reasoning", () => {
+                it("#then preserves it defensively — undefined fields are not a cleared shell", () => {
+                    // Edge-case shape: a future provider (or upstream bug) could
+                    // emit a thinking-type part carrying only non-standard fields
+                    // like `data` or `signature`, with neither `thinking` nor
+                    // `text` set. The old predicate treated "both undefined" as
+                    // "drop", which would mutate the latest assistant message and
+                    // break Anthropic replay. The guard must preserve these
+                    // parts because we cannot prove they are cleared shells.
+                    const undefinedFieldsPart = {
+                        type: "thinking",
+                        signature: "opaque-provider-signature",
+                    };
+                    const textPart = { type: "text", text: "latest response" };
+                    const msg = message("m-latest", "assistant", [undefinedFieldsPart, textPart]);
+
+                    const stripped = stripClearedReasoning([msg]);
+
+                    expect(stripped).toBe(0);
+                    expect(msg.parts).toHaveLength(2);
+                    expect(msg.parts[0]).toBe(undefinedFieldsPart);
+                    expect(msg.parts[1]).toBe(textPart);
+                });
+            });
+        });
     });
 
     describe("stripInlineThinking", () => {

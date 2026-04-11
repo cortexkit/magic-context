@@ -290,6 +290,15 @@ export function stripClearedReasoning(messages: MessageLike[]): number {
             if (!isRecord(part)) return true;
             const partType = part.type as string;
             if (!CLEARED_REASONING_TYPES.has(partType)) return true;
+            // Defense-in-depth: if neither `thinking` nor `text` is present on
+            // the part, we cannot tell whether it's a cleared shell — keep it.
+            // This protects edge-case thinking shapes (e.g., future providers
+            // emitting parts with only a `data` or `signature` field) from
+            // being wrongly dropped. Anthropic requires thinking-like blocks in
+            // the latest assistant message to be replayed unchanged, and an
+            // undefined-fields part cannot be known to be cleared, so it is
+            // not safe to strip it.
+            if (!("thinking" in part) && !("text" in part)) return true;
             const thinking = "thinking" in part ? (part.thinking as string | undefined) : undefined;
             const text = "text" in part ? (part.text as string | undefined) : undefined;
             return (
