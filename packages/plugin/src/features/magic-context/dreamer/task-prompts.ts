@@ -106,58 +106,81 @@ Check verifiable memories against actual repository state. Update stale wording,
 
 // ── Archive Stale ──────────────────────────────────────────────────────────
 
-export function buildArchiveStalePrompt(projectPath: string): string {
+export function buildArchiveStalePrompt(
+    projectPath: string,
+    userMemories?: Array<{ id: number; content: string }>,
+): string {
+    const userProfileBlock =
+        userMemories && userMemories.length > 0
+            ? `
+### Global User Profile (already injected into ALL sessions across ALL projects)
+These user memories are ALREADY available to the agent globally. Project memories that merely restate the same preference/rule are redundant and should be archived — but ONLY if the project memory adds ZERO project-specific detail beyond what the global memory already says.
+
+${userMemories.map((um) => `- [U${um.id}] ${um.content}`).join("\n")}
+`
+            : "";
+
     return `## Task: Archive Stale Memories
 
 **Project:** ${projectPath}
 
 ### Goal
-Find and archive memories that reference removed features, discontinued tools, old paths, obsolete workflows, or completed one-time instructions.
+Find and archive memories that waste the limited injection budget (~6000 tokens, fits ~150 memories).
+${userProfileBlock}
+### Archive criteria (archive IF any apply)
+
+1. **Code restatement without rationale** — merely describes what code does without explaining WHY or what would break if changed.
+   - Archive: "Tag assignment uses one DB transaction" (obvious from code)
+   - Keep: "Tag assignment uses one DB transaction because tags rows and session_meta.counter must stay in sync" (explains the constraint)
+
+2. **Redundant with other memories** — same information expressed differently. Keep the better-worded one.
+
+3. **Stale implementation detail** — references specific functions, line numbers, or internal structures that change frequently and are better found by reading code.
+   - Archive: "Function X is called at line 289 of file Y"
+   - Keep: "Feature X requires Y to be initialized before Z" (design constraint)
+
+4. **Low retrieval signal** — seen_count=1, retrieval_count=0, and no constraint language. These were promoted once but never needed again.
+
+5. **Redundant with global user profile** — ONLY if the project memory adds ZERO project-specific detail beyond what the global memory already says. A project memory that applies a global principle to a specific context (e.g., "cache awareness is highest priority" applies a general principle to THIS project's north star) is NOT redundant — it narrows the global principle.
+
+6. **Bare config defaults** — single-line values like \`enabled=true\` or \`experimental.X=false\` with no surrounding explanation or rationale.
+
+7. **Completed one-time instructions** — imperative USER_DIRECTIVES like "Add X", "Create Y", "Publish as Z" where the action has clearly been done.
+
+### Keep criteria (keep IF ANY apply — these OVERRIDE archive criteria)
+
+1. **Contains constraint/rule** — uses "must", "never", "always", "cannot", "should not". CONSTRAINTS category gets extra protection: only archive if the EXACT same constraint exists word-for-word in another memory.
+2. **Captures non-obvious design reasoning** — explains WHY, not just WHAT. Look for "because", "so that", "to prevent", "to avoid".
+3. **Project-specific behavioral rule** — even if it sounds generic, if it's in USER_DIRECTIVES it was explicitly stated by the user for this project. Only archive if: (a) the action is clearly completed, or (b) it is 100% identical in scope to a global user memory.
+4. **Post-failure learning** — memories that encode lessons learned from real bugs, regressions, or user corrections. These prevent re-encountering the same problem.
+5. **Environment/path information** — saves agent from hunting for locations.
+6. **Config defaults with context** — prevents wrong assumptions. Archive ONLY bare values with no surrounding explanation.
+7. **Known issues** — prevents re-encountering solved problems. NEVER archive KNOWN_ISSUES.
+8. **High retrieval signal** — retrieval_count > 0 means the agent actually searched for this.
+9. **Priority/philosophy statements** — "X is the highest priority" or "north star" type directives that shape all decisions.
 
 ### Process
 
 1. **List all active memories** with \`ctx_memory(action="list")\`.
-2. **Scan for staleness signals:**
-   - References to tools that no longer exist (grep the tool registry)
-   - References to files or directories that were deleted or renamed
-   - References to old repository names, branches, or workflows
-   - References to features explicitly described as "removed" or "replaced"
-   - References to config keys that no longer appear in the schema
-   - Session-local context that has no ongoing value ("in this session", "earlier today")
-   - **Completed one-time instructions** in USER_DIRECTIVES — imperative directives like "Add X", "Create Y", "License as MIT", "Publish as Z" where the action has clearly been done (check the codebase to confirm completion)
-   - **Low-value implementation minutiae** in ARCHITECTURE_DECISIONS — single-line statements that merely restate what code does without explaining WHY or capturing a non-obvious constraint. Example: "Tag assignment uses one DB transaction" just restates code behavior — this belongs in source comments, not project memory. Keep memories that explain *why* a design choice was made, *what constraint* drove it, or *what would break* if it changed.
+2. **Apply the archive and keep criteria above to each memory.**
 3. **Verify each candidate** against the codebase before archiving:
    - Check if the file/tool/path actually exists
-   - Check if the feature is mentioned in current code
-   - For USER_DIRECTIVES: verify the instructed action was completed (e.g., "License as MIT" → check LICENSE file exists)
+   - For USER_DIRECTIVES: verify the instructed action was completed
    - If the reference is ambiguous, leave it alone
 4. **Archive** with \`ctx_memory(action="archive", id=N, reason="...")\`. Always include a specific reason.
 
-### Common staleness patterns
-- Old plugin paths (e.g., \`oh-my-opencode\` references when the plugin is now \`magic-context\`)
-- Removed tools (e.g., \`ctx_recall\` was merged into \`ctx_memory\`)
-- Discontinued workflows (e.g., "replay onto integrate branch")
-- Branch-era context ("on feat/context-management")
-- Stale config keys or defaults that changed
-- Completed setup/publishing/licensing instructions that are done and won't recur
-- Implementation details that simply restate code behavior without adding design rationale
-
-### USER_DIRECTIVES handling
-- **Archive** completed one-time instructions: "License as MIT", "Publish as @cortexkit/...", "Add changelog to releases", "For the README animation, emphasize X"
-- **Keep** ongoing preferences and behavioral rules: "Ask before changing behavior when audit finding is ambiguous", "Cache awareness is the highest-priority feature"
-- **Keep** workflow preferences that apply to future work: "Always use scripts/release.sh for releases"
-- Rule of thumb: if the directive uses imperative "do this" language and the action is done, archive it. If it describes how to behave going forward, keep it.
-
-### ARCHITECTURE_DECISIONS pruning
-- **Archive** memories that only restate what code does: "Function X calls Y", "Module A imports B"
-- **Keep** memories that explain constraints, tradeoffs, or non-obvious design reasoning: "X uses Y because Z would cause cache busts"
-- **Keep** memories that warn about gotchas: "Don't use cwd fallback because it causes cross-project contamination"
-- Rule of thumb: if removing the memory would cause someone to make a wrong design decision, keep it. If it's just restating navigable code structure, archive it — ARCHITECTURE.md covers that.
+### Category-specific rules
+- **CONSTRAINTS**: archive ONLY when provably redundant with another specific constraint (not just thematically similar). Each constraint typically guards against a specific bug — losing it means the bug can return.
+- **USER_DIRECTIVES**: archive ONLY completed one-time tasks or exact duplicates of global user profile entries. Keep ongoing behavioral rules even if they have low retrieval.
+- **KNOWN_ISSUES**: NEVER archive — these prevent re-encountering bugs.
+- **ARCHITECTURE_DECISIONS**: archive code restatements freely, keep anything with "because", "so that", "to prevent", "to avoid".
+- **CONFIG_DEFAULTS**: archive bare values with no context, keep values that include rationale or prevent wrong assumptions.
 
 ### Success criteria
 - No active memories reference non-existent files, tools, or paths.
 - No completed one-time instructions remain in USER_DIRECTIVES.
 - ARCHITECTURE_DECISIONS contains design reasoning, not code restatements.
+- CONSTRAINTS are preserved unless provably duplicated.
 - Every archived memory has a specific reason.
 - Conservative — when in doubt, leave it active.`;
 }
@@ -373,6 +396,7 @@ export function buildDreamTaskPrompt(
         projectPath: string;
         lastDreamAt?: string | null;
         existingDocs?: { architecture: boolean; structure: boolean };
+        userMemories?: Array<{ id: number; content: string }>;
     },
 ): string {
     switch (task) {
@@ -381,7 +405,7 @@ export function buildDreamTaskPrompt(
         case "verify":
             return buildVerifyPrompt(args.projectPath);
         case "archive-stale":
-            return buildArchiveStalePrompt(args.projectPath);
+            return buildArchiveStalePrompt(args.projectPath, args.userMemories);
         case "improve":
             return buildImprovePrompt(args.projectPath);
         case "maintain-docs":

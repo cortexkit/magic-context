@@ -20,6 +20,7 @@ import {
 import { getMemoryCountsByStatus } from "../memory/storage-memory";
 import { getPendingSmartNotes, markNoteChecked, markNoteReady } from "../storage-notes";
 import { reviewUserMemories } from "../user-memory/review-user-memories";
+import { getActiveUserMemories } from "../user-memory/storage-user-memory";
 import { acquireLease, getLeaseHolder, releaseLease, renewLease } from "./lease";
 import {
     clearStaleEntries,
@@ -503,10 +504,20 @@ export async function runDream(args: {
                           }
                         : undefined;
 
+                // Load user memories for archive-stale dedup context
+                const userMemories =
+                    taskName === "archive-stale"
+                        ? getActiveUserMemories(args.db).map((um) => ({
+                              id: um.id,
+                              content: um.content,
+                          }))
+                        : undefined;
+
                 const taskPrompt = buildDreamTaskPrompt(taskName, {
                     projectPath: args.projectIdentity,
                     lastDreamAt,
                     existingDocs,
+                    userMemories,
                 });
 
                 const createResponse = await args.client.session.create({

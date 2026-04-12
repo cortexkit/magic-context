@@ -74,8 +74,33 @@ export function renderMemoryBlock(memories: Memory[]): string | null {
 
 const CHARS_PER_TOKEN_ESTIMATE = 4;
 
+/** Constraint keywords that signal a memory encodes a rule rather than a description. */
+const CONSTRAINT_KEYWORDS = /\b(must|never|always|cannot|should not|must not)\b/i;
+
 /**
- * Sort memories by priority (permanent first, then higher seen_count) and trim to budget.
+ * Assign a utility tier to a memory for injection priority.
+ * Lower tier = higher priority (packed first).
+ *
+ * Tier 0: Agent actually searched for and found this memory.
+ * Tier 1: Contains constraint/rule keywords — likely guards against a real bug.
+ * Tier 2: Everything else.
+ */
+function utilityTier(m: Memory): number {
+    if (m.retrievalCount > 0) return 0;
+    if (CONSTRAINT_KEYWORDS.test(m.content)) return 1;
+    return 2;
+}
+
+/**
+ * Sort memories by priority and trim to budget.
+ *
+ * Priority order:
+ *   1. permanent status first
+ *   2. utility tier (retrieved > constraint > other)
+ *   3. seen count descending
+ *   4. shorter content first (fit more memories in budget)
+ *   5. deterministic id tiebreaker for cache stability
+ *
  * Estimates ~4 chars per token for budget enforcement.
  */
 function trimMemoriesToBudget(
@@ -87,9 +112,15 @@ function trimMemoriesToBudget(
         // Permanent memories first
         if (a.status === "permanent" && b.status !== "permanent") return -1;
         if (b.status === "permanent" && a.status !== "permanent") return 1;
+        // Then by utility tier (lower = higher priority)
+        const tierDiff = utilityTier(a) - utilityTier(b);
+        if (tierDiff !== 0) return tierDiff;
         // Then by seen count descending (more frequently seen = higher priority)
         const seenDiff = b.seenCount - a.seenCount;
         if (seenDiff !== 0) return seenDiff;
+        // Prefer shorter memories so more fit in budget
+        const lenDiff = a.content.length - b.content.length;
+        if (lenDiff !== 0) return lenDiff;
         // Deterministic tiebreaker by id to ensure stable ordering for cache safety
         return a.id - b.id;
     });
