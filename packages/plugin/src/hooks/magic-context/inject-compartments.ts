@@ -184,11 +184,6 @@ export function prepareCompartmentInjection(
     }
 
     const compartments = getCompartments(db, sessionId);
-    if (compartments.length === 0) {
-        injectionCache.delete(sessionId);
-        return null;
-    }
-
     const facts = getSessionFacts(db, sessionId);
 
     let memoryBlock: string | undefined;
@@ -223,7 +218,32 @@ export function prepareCompartmentInjection(
         }
     }
 
+    // Nothing to inject if we have no compartments, no facts, and no memories
+    if (compartments.length === 0 && facts.length === 0 && !memoryBlock) {
+        injectionCache.delete(sessionId);
+        return null;
+    }
+
     const block = buildCompartmentBlock(compartments, facts, memoryBlock);
+
+    // When there are no compartments yet (new session, or memories seeded before
+    // historian first run), inject memories/facts without a boundary cutoff.
+    // No messages are spliced because there's nothing to replace — the block is
+    // prepended to message[0] the same way system-level context is.
+    if (compartments.length === 0) {
+        const result: PreparedCompartmentInjection = {
+            block,
+            compartmentEndMessage: 0,
+            compartmentEndMessageId: "",
+            compartmentCount: 0,
+            skippedVisibleMessages: 0,
+            factCount: facts.length,
+            memoryCount,
+        };
+        injectionCache.set(sessionId, result);
+        return result;
+    }
+
     const lastCompartment = compartments[compartments.length - 1];
     const lastEnd = lastCompartment.endMessage;
     const lastEndMessageId = lastCompartment.endMessageId;
@@ -289,10 +309,17 @@ export function renderCompartmentInjection(
     }
 
     const memoryLabel = prepared.memoryCount > 0 ? ` + ${prepared.memoryCount} memories` : "";
-    sessionLog(
-        sessionId,
-        `injected ${prepared.compartmentCount} compartments + ${prepared.factCount} facts${memoryLabel} into message[0]`,
-    );
+    if (prepared.compartmentCount > 0) {
+        sessionLog(
+            sessionId,
+            `injected ${prepared.compartmentCount} compartments + ${prepared.factCount} facts${memoryLabel} into message[0]`,
+        );
+    } else {
+        sessionLog(
+            sessionId,
+            `injected ${prepared.factCount} facts${memoryLabel} into message[0] (no compartments yet)`,
+        );
+    }
 
     return {
         injected: true,

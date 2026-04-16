@@ -287,12 +287,19 @@ export function runPostTransformPhase(args: RunPostTransformPhaseArgs): void {
             args.pendingCompartmentInjection,
         );
         if (compartmentResult.injected) {
-            sessionLog(
-                args.sessionId,
-                `transform: injected ${compartmentResult.compartmentCount} compartments ` +
-                    `(covering raw messages 1-${compartmentResult.compartmentEndMessage}, ` +
-                    `skipped ${compartmentResult.skippedVisibleMessages} visible messages)`,
-            );
+            if (compartmentResult.compartmentCount > 0) {
+                sessionLog(
+                    args.sessionId,
+                    `transform: injected ${compartmentResult.compartmentCount} compartments ` +
+                        `(covering raw messages 1-${compartmentResult.compartmentEndMessage}, ` +
+                        `skipped ${compartmentResult.skippedVisibleMessages} visible messages)`,
+                );
+            } else {
+                sessionLog(
+                    args.sessionId,
+                    "transform: injected memories/facts block (no compartments yet)",
+                );
+            }
         }
     }
 
