@@ -40,6 +40,8 @@ export interface SpawnOptions {
     magicContextConfig?: Record<string, unknown>;
     /** Extra opencode.json provider/model config, merged with defaults. */
     openCodeConfigExtra?: Record<string, unknown>;
+    /** Override the mock model's context token limit. Default 200000. */
+    modelContextLimit?: number;
 }
 
 /**
@@ -109,7 +111,7 @@ function writeConfigs(
                         id: "mock-sonnet",
                         name: "Mock Sonnet",
                         cost: { input: 0, output: 0 },
-                        limit: { context: 200000, output: 8192 },
+                        limit: { context: opts.modelContextLimit ?? 200000, output: 8192 },
                         options: {},
                     },
                 },

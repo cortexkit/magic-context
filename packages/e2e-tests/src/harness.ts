@@ -26,6 +26,8 @@ export interface TestHarnessOptions {
     magicContextConfig?: Record<string, unknown>;
     /** Extra opencode.json config. Merged onto test defaults. */
     openCodeConfigExtra?: Record<string, unknown>;
+    /** Override the mock model's context token limit. Default 200000. */
+    modelContextLimit?: number;
     /**
      * Default response used when the mock queue is empty. Lets tests send extra
      * prompts without worrying about scripting every one.
@@ -81,6 +83,7 @@ export class TestHarness {
             mockProviderURL: baseURL,
             magicContextConfig: options.magicContextConfig,
             openCodeConfigExtra: options.openCodeConfigExtra,
+            modelContextLimit: options.modelContextLimit,
         };
         const opencode = await spawnOpencode(spawnOpts);
 
