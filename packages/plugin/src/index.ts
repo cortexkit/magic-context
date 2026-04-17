@@ -22,6 +22,7 @@ import { type ConflictResult, detectConflicts } from "./shared/conflict-detector
 import { getOpenCodeStorageDir } from "./shared/data-path";
 import { log } from "./shared/logger";
 import { getAgentFallbackModels } from "./shared/model-requirements";
+import { refreshModelLimitsFromApi } from "./shared/models-dev-cache";
 import { MagicContextRpcServer } from "./shared/rpc-server";
 
 const plugin: Plugin = async (ctx) => {
@@ -127,6 +128,20 @@ const plugin: Plugin = async (ctx) => {
         rpcServer.start().catch((err) => {
             log(`[magic-context] RPC server failed to start: ${err}`);
         });
+
+        // Warm the model-context-limit cache from OpenCode's SDK and refresh
+        // periodically. The API response matches OpenCode's internal resolution
+        // (live models.dev cache + compiled-in snapshot + custom provider overrides
+        // + derived experimental modes), so any model OpenCode knows the limit
+        // for, we know too. Fire-and-forget: if it fails we fall through to the
+        // disk-based loader in models-dev-cache.
+        void refreshModelLimitsFromApi(ctx.client);
+        setInterval(
+            () => {
+                void refreshModelLimitsFromApi(ctx.client);
+            },
+            5 * 60 * 1000,
+        );
     }
 
     // Conflict warning / cleanup for Desktop mode.
