@@ -34,6 +34,7 @@ export interface SessionMeta {
     compartmentInProgress: boolean;
     systemPromptHash: string;
     systemPromptTokens: number;
+    conversationTokens: number;
     clearedReasoningThroughTag: number;
 }
 

@@ -80,6 +80,8 @@ function buildSidebarSnapshot(db: Database, sessionId: string, directory: string
         compartmentTokens: 0,
         factTokens: 0,
         memoryTokens: 0,
+        conversationTokens: 0,
+        toolTokens: 0,
     };
 
     try {
@@ -96,6 +98,10 @@ function buildSidebarSnapshot(db: Database, sessionId: string, directory: string
             : 0;
         const inputTokens = meta ? Number(meta.last_input_tokens ?? 0) : 0;
         const systemPromptTokens = meta ? Number(meta.system_prompt_tokens ?? 0) : 0;
+        // messagesBlockTokens = token estimate of output.messages[] after
+        // transform, persisted by transform.ts. Includes injected
+        // compartments/facts/memories (they're in message[0]).
+        const messagesBlockTokens = meta ? Number(meta.conversation_tokens ?? 0) : 0;
         const compartmentInProgress = meta ? Boolean(meta.compartment_in_progress) : false;
         const cacheTtl = meta ? String(meta.cache_ttl ?? "5m") : "5m";
         const memoryBlockCount = meta ? Number(meta.memory_block_count ?? 0) : 0;
@@ -219,6 +225,18 @@ function buildSidebarSnapshot(db: Database, sessionId: string, directory: string
             }
         }
 
+        // Display-layer attribution: messagesBlockTokens is the transform's
+        // persisted estimate of all messages sent to the provider (includes
+        // injected compartments/facts/memories). Strip those injected bits to
+        // isolate real user/assistant conversation. Tools is the remainder of
+        // inputTokens after accounting for system prompt and messages block.
+        const injectedInMessages = compartmentTokens + factTokens + memoryTokens;
+        const conversationTokens = Math.max(0, messagesBlockTokens - injectedInMessages);
+        const toolTokens = Math.max(
+            0,
+            inputTokens - systemPromptTokens - messagesBlockTokens,
+        );
+
         return {
             sessionId,
             usagePercentage,
@@ -239,6 +257,8 @@ function buildSidebarSnapshot(db: Database, sessionId: string, directory: string
             compartmentTokens,
             factTokens,
             memoryTokens,
+            conversationTokens,
+            toolTokens,
         };
     } catch (err) {
         log("[rpc] sidebar-snapshot error:", err);

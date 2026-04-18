@@ -23,6 +23,19 @@ export interface SidebarSnapshot {
     compartmentTokens: number;
     factTokens: number;
     memoryTokens: number;
+    /**
+     * Token estimate of the real user/assistant conversation, excluding
+     * injected <session-history> blocks. Equals messageTokens −
+     * (compartmentTokens + factTokens + memoryTokens). Display layer shows
+     * this as "Conversation".
+     */
+    conversationTokens: number;
+    /**
+     * Token estimate of tool schemas in the prompt (bash, edit, grep, MCP
+     * servers, ctx_* tools, etc.). Computed as inputTokens − systemPromptTokens
+     * − messageTokens and clamped to ≥ 0. Display layer shows this as "Tools".
+     */
+    toolTokens: number;
 }
 
 export interface StatusDetail extends SidebarSnapshot {

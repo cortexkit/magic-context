@@ -244,10 +244,10 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                 detail: `(${d.memoryBlockCount})`,
             })
 
-        const used = d.systemPromptTokens + d.compartmentTokens + d.factTokens + d.memoryTokens
-        const convTokens = Math.max(0, d.inputTokens - used)
-        if (convTokens > 0)
-            segs.push({ label: "Conversation", tokens: convTokens, color: t().textMuted })
+        if (d.conversationTokens > 0)
+            segs.push({ label: "Conversation", tokens: d.conversationTokens, color: t().textMuted })
+        if (d.toolTokens > 0)
+            segs.push({ label: "Tool Definitions", tokens: d.toolTokens, color: "#9ca3af" })
 
         return { segs, total }
     }

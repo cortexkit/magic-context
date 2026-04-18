@@ -299,6 +299,11 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "session_meta", "system_prompt_tokens", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "compaction_marker_state", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "key_files", "TEXT DEFAULT ''");
+    // Token estimate of output.messages[] after transform manipulation. Used by
+    // the sidebar / dashboard to split inputTokens into Conversation vs Tools
+    // segments, since Anthropic's usage data rolls system + tools + messages
+    // together into cache.write but we want to attribute them separately.
+    ensureColumn(db, "session_meta", "conversation_tokens", "INTEGER DEFAULT 0");
 }
 
 // Intentional: the definition regex allows single quotes and parens because SQLite column

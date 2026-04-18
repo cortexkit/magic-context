@@ -48,6 +48,8 @@ const EMPTY_SNAPSHOT: SidebarSnapshot = {
     compartmentTokens: 0,
     factTokens: 0,
     memoryTokens: 0,
+    conversationTokens: 0,
+    toolTokens: 0,
 };
 
 /** Fetch sidebar snapshot from the server via RPC. */

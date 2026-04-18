@@ -18,6 +18,7 @@ export interface SessionMetaRow {
     // for backward compatibility with pre-release DBs where the column was INTEGER.
     system_prompt_hash: string | number;
     system_prompt_tokens: number;
+    conversation_tokens: number;
     cleared_reasoning_through_tag: number;
 }
 
@@ -35,6 +36,7 @@ export const META_COLUMNS: Record<string, string> = {
     compartmentInProgress: "compartment_in_progress",
     systemPromptHash: "system_prompt_hash",
     systemPromptTokens: "system_prompt_tokens",
+    conversationTokens: "conversation_tokens",
     clearedReasoningThroughTag: "cleared_reasoning_through_tag",
 };
 
@@ -78,6 +80,7 @@ export function getDefaultSessionMeta(sessionId: string): SessionMeta {
         compartmentInProgress: false,
         systemPromptHash: "",
         systemPromptTokens: 0,
+        conversationTokens: 0,
         clearedReasoningThroughTag: 0,
     };
 }
@@ -125,6 +128,8 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
         compartmentInProgress: row.compartment_in_progress === 1,
         systemPromptHash: String(row.system_prompt_hash),
         systemPromptTokens: row.system_prompt_tokens,
+        conversationTokens:
+            typeof row.conversation_tokens === "number" ? row.conversation_tokens : 0,
         clearedReasoningThroughTag: row.cleared_reasoning_through_tag,
     };
 }

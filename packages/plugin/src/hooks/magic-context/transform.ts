@@ -18,6 +18,7 @@ import { sessionLog } from "../../shared/logger";
 import { getActiveCompartmentRun, startCompartmentAgent } from "./compartment-runner";
 import { FORCE_MATERIALIZE_PERCENTAGE } from "./compartment-trigger";
 import { resolveExecuteThreshold } from "./event-resolvers";
+import { estimateImageTokensFromDataUrl } from "./image-token-estimate";
 import {
     type PreparedCompartmentInjection,
     prepareCompartmentInjection,
@@ -586,19 +587,117 @@ export function createTransform(deps: TransformDeps) {
 
         // Estimate the total token size of the transformed messages array so
         // the sidebar / dashboard can attribute inputTokens between System
-        // (from system.transform), Tools (inferred as the remainder), and
-        // Conversation (actual messages minus injected compartments/facts/memories).
-        // This value intentionally includes the injected <session-history>
-        // block — the display layer subtracts compartmentTokens/factTokens/
-        // memoryTokens to isolate real user/assistant conversation.
+        // (from system.transform), Tool Definitions (inferred as the
+        // remainder), and Conversation (actual messages minus injected
+        // compartments/facts/memories).
+        //
+        // Counts every token-bearing field across all part types Anthropic
+        // serializes: text, reasoning (signed thinking we still forward for
+        // the latest assistant), tool inputs, tool outputs, tool_result
+        // content. Previously only `text` parts were counted, which produced
+        // ~10x underestimates on sessions with long tool traces and pushed
+        // the delta into Tool Definitions. This value intentionally includes
+        // the injected <session-history> block — the display layer subtracts
+        // compartmentTokens/factTokens/memoryTokens to isolate real
+        // user/assistant conversation.
         let conversationTokens = 0;
         for (const message of messages) {
             for (const part of message.parts) {
                 if (!part || typeof part !== "object") continue;
-                const p = part as { type?: string; text?: string; ignored?: boolean };
+                const p = part as {
+                    type?: string
+                    text?: string
+                    ignored?: boolean
+                    state?: { input?: unknown; output?: unknown }
+                    args?: unknown
+                    input?: unknown
+                    content?: unknown
+                    mime?: string
+                    metadata?: { anthropic?: { signature?: string } }
+                }
                 if (p.ignored) continue;
-                if (p.type === "text" && typeof p.text === "string") {
-                    conversationTokens += estimateTokens(p.text);
+                switch (p.type) {
+                    case "text": {
+                        if (typeof p.text === "string")
+                            conversationTokens += estimateTokens(p.text);
+                        break;
+                    }
+                    case "reasoning": {
+                        if (typeof p.text === "string")
+                            conversationTokens += estimateTokens(p.text);
+                        // Signed reasoning carries an anthropic signature that
+                        // is billed as input tokens on the wire. Typical size
+                        // ~2,400 chars / ~600 tokens per block.
+                        const sig = p.metadata?.anthropic?.signature;
+                        if (typeof sig === "string")
+                            conversationTokens += estimateTokens(sig);
+                        break;
+                    }
+                    case "file": {
+                        // Images: Anthropic bills by visual tokens using
+                        // (width × height) / 750. Parse PNG/JPEG/WebP/GIF
+                        // headers from the data URL to get real dimensions
+                        // instead of over-estimating from base64 char length.
+                        // https://docs.claude.com/en/build-with-claude/vision
+                        if (typeof p.mime === "string" && p.mime.startsWith("image/")) {
+                            const url =
+                                typeof (p as { url?: unknown }).url === "string"
+                                    ? (p as { url: string }).url
+                                    : undefined;
+                            if (url && url.startsWith("data:")) {
+                                conversationTokens += estimateImageTokensFromDataUrl(url);
+                            } else {
+                                conversationTokens += 1200; // fallback for non-data-url refs
+                            }
+                        }
+                        break;
+                    }
+                    case "tool": {
+                        // OpenCode format: { state: { input, output } }
+                        if (p.state && typeof p.state === "object") {
+                            if (p.state.input !== undefined) {
+                                const s =
+                                    typeof p.state.input === "string"
+                                        ? p.state.input
+                                        : JSON.stringify(p.state.input)
+                                if (s) conversationTokens += estimateTokens(s)
+                            }
+                            if (p.state.output !== undefined) {
+                                const s =
+                                    typeof p.state.output === "string"
+                                        ? p.state.output
+                                        : JSON.stringify(p.state.output)
+                                if (s) conversationTokens += estimateTokens(s)
+                            }
+                        }
+                        break
+                    }
+                    case "tool-invocation": {
+                        if (p.args !== undefined) {
+                            const s =
+                                typeof p.args === "string" ? p.args : JSON.stringify(p.args)
+                            if (s) conversationTokens += estimateTokens(s)
+                        }
+                        break
+                    }
+                    case "tool_use": {
+                        if (p.input !== undefined) {
+                            const s =
+                                typeof p.input === "string" ? p.input : JSON.stringify(p.input)
+                            if (s) conversationTokens += estimateTokens(s)
+                        }
+                        break
+                    }
+                    case "tool_result": {
+                        if (p.content !== undefined) {
+                            const s =
+                                typeof p.content === "string"
+                                    ? p.content
+                                    : JSON.stringify(p.content)
+                            if (s) conversationTokens += estimateTokens(s)
+                        }
+                        break
+                    }
                 }
             }
         }

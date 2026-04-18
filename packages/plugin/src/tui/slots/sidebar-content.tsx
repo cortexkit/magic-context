@@ -89,15 +89,23 @@ const TokenBreakdown = (props: {
             })
         }
 
-        // Conversation = remaining tokens (gray)
-        const used = s.systemPromptTokens + s.compartmentTokens + s.factTokens + s.memoryTokens
-        const convTokens = Math.max(0, s.inputTokens - used)
-        if (convTokens > 0) {
+        // Conversation = real user/assistant text (excludes injected session-history)
+        if (s.conversationTokens > 0) {
             result.push({
                 key: "conv",
-                tokens: convTokens,
+                tokens: s.conversationTokens,
                 color: props.theme.textMuted,
                 label: "Conversation",
+            })
+        }
+
+        // Tools = inputTokens - system - messagesBlock (schemas for bash, edit, MCP, etc.)
+        if (s.toolTokens > 0) {
+            result.push({
+                key: "tools",
+                tokens: s.toolTokens,
+                color: COLORS.conversation,
+                label: "Tool Definitions",
             })
         }
 
