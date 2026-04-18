@@ -47,6 +47,8 @@ function makeMemoryDatabase(): Database {
       historian_last_failure_at INTEGER DEFAULT NULL,
       system_prompt_hash INTEGER DEFAULT 0,
       system_prompt_tokens INTEGER DEFAULT 0,
+      conversation_tokens INTEGER DEFAULT 0,
+      tool_call_tokens INTEGER DEFAULT 0,
       cleared_reasoning_through_tag INTEGER DEFAULT 0
     );
   `);

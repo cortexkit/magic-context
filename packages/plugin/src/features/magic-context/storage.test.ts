@@ -390,6 +390,49 @@ describe("magic-context storage", () => {
         db.close(false);
     });
 
+    it("preserves numeric columns when text columns are NULL (regression: cache bust cascade)", () => {
+        //#given
+        // Simulates an older row seeded before ensureColumn added last_transform_error
+        // with a DEFAULT. SQLite sets existing rows to NULL, not the default, so the
+        // text column is NULL but the numeric columns (last_response_time,
+        // last_context_percentage, etc.) carry real cumulative state.
+        // Pre-fix: validator rejected the row, getOrCreateSessionMeta returned
+        // defaults with lastResponseTime=0, scheduler thought TTL had elapsed on
+        // every pass, applyPendingOperations re-ran forever, and each execute
+        // mutation busted cache.
+        const db = makeMemoryDatabase();
+        const realResponseTime = 1_700_000_000_000;
+        // First seed the row so subsequent UPDATE matches.
+        db.prepare(
+            `INSERT INTO session_meta (session_id, last_response_time, cache_ttl, counter)
+             VALUES (?, ?, '59m', 42)`,
+        ).run("ses-nullish", realResponseTime);
+        db.prepare(
+            `UPDATE session_meta SET
+                last_response_time = ?,
+                cache_ttl = '59m',
+                counter = 42,
+                last_nudge_tokens = 100,
+                last_context_percentage = 25.5,
+                last_input_tokens = 250000,
+                last_transform_error = NULL
+             WHERE session_id = ?`,
+        ).run(realResponseTime, "ses-nullish");
+
+        //#when
+        const meta = getOrCreateSessionMeta(db, "ses-nullish");
+
+        //#then — real cumulative state must survive, not be reset to defaults
+        expect(meta.sessionId).toBe("ses-nullish");
+        expect(meta.lastResponseTime).toBe(realResponseTime);
+        expect(meta.cacheTtl).toBe("59m");
+        expect(meta.counter).toBe(42);
+        expect(meta.lastContextPercentage).toBe(25.5);
+        expect(meta.lastInputTokens).toBe(250000);
+        expect(meta.lastTransformError).toBeNull();
+        db.close(false);
+    });
+
     it("getTopNBySize only returns tags with active status", () => {
         //#given
         const db = makeMemoryDatabase();

@@ -100,6 +100,9 @@ export function getSessionReadStats(
         spreadAcrossCompartments: 0, // TODO: compute from compartment boundaries if needed
         editCount: editCounts.get(row.file_path) ?? 0,
         latestReadBytes: row.latest_read_bytes ?? 0,
+        // Rough estimate from byte size — we don't have the file content at
+        // this layer. Used only for dreamer's key-file budget-fit filtering,
+        // where approximate bucketing is sufficient. Intentional: bytes/3.5.
         latestReadTokens: Math.ceil((row.latest_read_bytes ?? 0) / 3.5),
     }));
 }

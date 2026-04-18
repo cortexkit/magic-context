@@ -19,6 +19,7 @@ export interface SessionMetaRow {
     system_prompt_hash: string | number;
     system_prompt_tokens: number;
     conversation_tokens: number;
+    tool_call_tokens: number;
     cleared_reasoning_through_tag: number;
 }
 
@@ -37,10 +38,26 @@ export const META_COLUMNS: Record<string, string> = {
     systemPromptHash: "system_prompt_hash",
     systemPromptTokens: "system_prompt_tokens",
     conversationTokens: "conversation_tokens",
+    toolCallTokens: "tool_call_tokens",
     clearedReasoningThroughTag: "cleared_reasoning_through_tag",
 };
 
 export const BOOLEAN_META_KEYS = new Set(["isSubagent", "compartmentInProgress"]);
+
+// Defensive typeof checks: columns may be NULL in DB when a row was seeded
+// before a column was added with ensureColumn (SQLite sets existing rows to
+// NULL, not to the DEFAULT). Treat null as "absent/empty" rather than
+// rejecting the whole row — falling back to defaults silently loses the real
+// lastResponseTime, cacheTtl, lastContextPercentage, etc., causing the
+// scheduler to always return "execute" and pending ops to re-apply across
+// every turn (cache bust cascade).
+function isStringOrNull(value: unknown): boolean {
+    return value === null || typeof value === "string";
+}
+
+function isNumberOrNull(value: unknown): boolean {
+    return value === null || typeof value === "number";
+}
 
 export function isSessionMetaRow(row: unknown): row is SessionMetaRow {
     if (row === null || typeof row !== "object") return false;
@@ -48,19 +65,27 @@ export function isSessionMetaRow(row: unknown): row is SessionMetaRow {
     return (
         typeof r.session_id === "string" &&
         typeof r.last_response_time === "number" &&
-        typeof r.cache_ttl === "string" &&
+        isStringOrNull(r.cache_ttl) &&
         typeof r.counter === "number" &&
         typeof r.last_nudge_tokens === "number" &&
-        typeof r.last_nudge_band === "string" &&
-        typeof r.last_transform_error === "string" &&
+        isStringOrNull(r.last_nudge_band) &&
+        isStringOrNull(r.last_transform_error) &&
         typeof r.is_subagent === "number" &&
         typeof r.last_context_percentage === "number" &&
         typeof r.last_input_tokens === "number" &&
-        typeof r.times_execute_threshold_reached === "number" &&
-        typeof r.compartment_in_progress === "number" &&
-        (typeof r.system_prompt_hash === "string" || typeof r.system_prompt_hash === "number") &&
-        typeof r.system_prompt_tokens === "number" &&
-        typeof r.cleared_reasoning_through_tag === "number"
+        // INTEGER columns added via ensureColumn: pre-existing rows get NULL
+        // instead of DEFAULT. Strict typeof "number" would reject those rows
+        // and trigger the scheduler-reset cascade described above. toSessionMeta
+        // falls back to 0 for NULL.
+        isNumberOrNull(r.times_execute_threshold_reached) &&
+        isNumberOrNull(r.compartment_in_progress) &&
+        (r.system_prompt_hash === null ||
+            typeof r.system_prompt_hash === "string" ||
+            typeof r.system_prompt_hash === "number") &&
+        isNumberOrNull(r.system_prompt_tokens) &&
+        isNumberOrNull(r.conversation_tokens) &&
+        isNumberOrNull(r.tool_call_tokens) &&
+        isNumberOrNull(r.cleared_reasoning_through_tag)
     );
 }
 
@@ -81,6 +106,7 @@ export function getDefaultSessionMeta(sessionId: string): SessionMeta {
         systemPromptHash: "",
         systemPromptTokens: 0,
         conversationTokens: 0,
+        toolCallTokens: 0,
         clearedReasoningThroughTag: 0,
     };
 }
@@ -110,26 +136,38 @@ export function ensureSessionMetaRow(db: Database, sessionId: string): void {
 }
 
 export function toSessionMeta(row: SessionMetaRow): SessionMeta {
+    // Defensive: NULL text columns (e.g. seeded rows pre-ensureColumn) must not
+    // crash with `.length on null`. Treat null/empty as absent and map to the
+    // SessionMeta representation.
+    const nudgeBandRaw = typeof row.last_nudge_band === "string" ? row.last_nudge_band : "";
+    const transformErrorRaw =
+        typeof row.last_transform_error === "string" ? row.last_transform_error : "";
+    const cacheTtlRaw =
+        typeof row.cache_ttl === "string" && row.cache_ttl.length > 0 ? row.cache_ttl : "5m";
+    const systemPromptHashRaw = row.system_prompt_hash == null ? "" : row.system_prompt_hash;
+    // Defensive numeric fallbacks: when isSessionMetaRow accepts NULL for
+    // INTEGER columns added via ensureColumn, the raw row may have `null`
+    // here. Coerce to 0 so callers see a usable SessionMeta without having
+    // to null-check every scalar field.
+    const numOrZero = (value: unknown): number => (typeof value === "number" ? value : 0);
     return {
         sessionId: row.session_id,
         lastResponseTime: row.last_response_time,
-        cacheTtl: row.cache_ttl,
+        cacheTtl: cacheTtlRaw,
         counter: row.counter,
         lastNudgeTokens: row.last_nudge_tokens,
         lastNudgeBand:
-            row.last_nudge_band.length > 0
-                ? (row.last_nudge_band as SessionMeta["lastNudgeBand"])
-                : null,
-        lastTransformError: row.last_transform_error.length > 0 ? row.last_transform_error : null,
+            nudgeBandRaw.length > 0 ? (nudgeBandRaw as SessionMeta["lastNudgeBand"]) : null,
+        lastTransformError: transformErrorRaw.length > 0 ? transformErrorRaw : null,
         isSubagent: row.is_subagent === 1,
         lastContextPercentage: row.last_context_percentage,
         lastInputTokens: row.last_input_tokens,
-        timesExecuteThresholdReached: row.times_execute_threshold_reached,
+        timesExecuteThresholdReached: numOrZero(row.times_execute_threshold_reached),
         compartmentInProgress: row.compartment_in_progress === 1,
-        systemPromptHash: String(row.system_prompt_hash),
-        systemPromptTokens: row.system_prompt_tokens,
-        conversationTokens:
-            typeof row.conversation_tokens === "number" ? row.conversation_tokens : 0,
-        clearedReasoningThroughTag: row.cleared_reasoning_through_tag,
+        systemPromptHash: String(systemPromptHashRaw),
+        systemPromptTokens: numOrZero(row.system_prompt_tokens),
+        conversationTokens: numOrZero(row.conversation_tokens),
+        toolCallTokens: numOrZero(row.tool_call_tokens),
+        clearedReasoningThroughTag: numOrZero(row.cleared_reasoning_through_tag),
     };
 }

@@ -384,7 +384,11 @@ describe("executeContextRecomp", () => {
             client,
             db,
             sessionId: "ses-recomp-full-state",
-            historianChunkTokens: 7,
+            // Budget sized so chunking packs ~2 messages per pass with the real
+            // Claude tokenizer (ai-tokenizer). The previous value of 7 relied on
+            // the `/3.5` heuristic fallback and no longer reproduces a 2-pass
+            // split with accurate tokenization.
+            historianChunkTokens: 13,
             directory: "/tmp",
         });
 

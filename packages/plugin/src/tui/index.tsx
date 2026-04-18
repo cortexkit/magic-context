@@ -246,8 +246,10 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
 
         if (d.conversationTokens > 0)
             segs.push({ label: "Conversation", tokens: d.conversationTokens, color: t().textMuted })
-        if (d.toolTokens > 0)
-            segs.push({ label: "Tool Definitions", tokens: d.toolTokens, color: "#9ca3af" })
+        if (d.toolCallTokens > 0)
+            segs.push({ label: "Tool Calls", tokens: d.toolCallTokens, color: "#6b7280" })
+        if (d.toolDefinitionTokens > 0)
+            segs.push({ label: "Tool Defs + Overhead", tokens: d.toolDefinitionTokens, color: "#9ca3af" })
 
         return { segs, total }
     }

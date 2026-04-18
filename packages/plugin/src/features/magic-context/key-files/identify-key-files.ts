@@ -94,7 +94,7 @@ export function getKeyFileCandidates(
     const maxPerFileTokens = Math.min(tokenBudget / 2, 5000);
     // Filter to files within the project directory — long-running sessions may have
     // read files from other repos, which should not be pinned as key files.
-    const projectPrefix = projectDirectory ? projectDirectory.replace(/\/$/, "") + "/" : undefined;
+    const projectPrefix = projectDirectory ? `${projectDirectory.replace(/\/$/, "")}/` : undefined;
     return stats.filter(
         (s) =>
             s.latestReadTokens > 0 &&

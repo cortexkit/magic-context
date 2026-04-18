@@ -8,6 +8,7 @@ import { resolveProjectIdentity } from "../features/magic-context/memory/project
 import { openDatabase } from "../features/magic-context/storage";
 import { getLiveNotificationParams } from "../hooks/magic-context/hook-handlers";
 import type { LiveSessionState } from "../hooks/magic-context/live-session-state";
+import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
 import { log } from "../shared/logger";
 import { drainNotifications } from "../shared/rpc-notifications";
 import type { MagicContextRpcServer } from "../shared/rpc-server";
@@ -81,7 +82,8 @@ function buildSidebarSnapshot(db: Database, sessionId: string, directory: string
         factTokens: 0,
         memoryTokens: 0,
         conversationTokens: 0,
-        toolTokens: 0,
+        toolCallTokens: 0,
+        toolDefinitionTokens: 0,
     };
 
     try {
@@ -98,10 +100,14 @@ function buildSidebarSnapshot(db: Database, sessionId: string, directory: string
             : 0;
         const inputTokens = meta ? Number(meta.last_input_tokens ?? 0) : 0;
         const systemPromptTokens = meta ? Number(meta.system_prompt_tokens ?? 0) : 0;
-        // messagesBlockTokens = token estimate of output.messages[] after
-        // transform, persisted by transform.ts. Includes injected
-        // compartments/facts/memories (they're in message[0]).
+        // messagesBlockTokens = token estimate of text/reasoning/image parts
+        // in output.messages[] after transform, persisted by transform.ts.
+        // Includes injected compartments/facts/memories (they're in message[0]).
         const messagesBlockTokens = meta ? Number(meta.conversation_tokens ?? 0) : 0;
+        // toolCallTokensRaw = token estimate of tool_use/tool_result/tool/
+        // tool-invocation parts in output.messages[], persisted by transform.
+        // These are tool call I/O inside conversation (not tool schemas).
+        const toolCallTokensRaw = meta ? Number(meta.tool_call_tokens ?? 0) : 0;
         const compartmentInProgress = meta ? Boolean(meta.compartment_in_progress) : false;
         const cacheTtl = meta ? String(meta.cache_ttl ?? "5m") : "5m";
         const memoryBlockCount = meta ? Number(meta.memory_block_count ?? 0) : 0;
@@ -168,7 +174,7 @@ function buildSidebarSnapshot(db: Database, sessionId: string, directory: string
             }
         }
 
-        // Token estimates (~3.5 chars/token)
+        // Token estimates via real Claude tokenizer (ai-tokenizer).
         let compartmentTokens = 0;
         let factTokens = 0;
         let memoryTokens = 0;
@@ -182,9 +188,8 @@ function buildSidebarSnapshot(db: Database, sessionId: string, directory: string
                 )
                 .all(sessionId);
             for (const c of compRows) {
-                compartmentTokens += Math.ceil(
-                    `<compartment start="${c.start_message}" end="${c.end_message}" title="${c.title}">\n${c.content}\n</compartment>\n`
-                        .length / 3.5,
+                compartmentTokens += estimateTokens(
+                    `<compartment start="${c.start_message}" end="${c.end_message}" title="${c.title}">\n${c.content}\n</compartment>\n`,
                 );
             }
         } catch {
@@ -197,7 +202,7 @@ function buildSidebarSnapshot(db: Database, sessionId: string, directory: string
                 )
                 .all(sessionId);
             for (const f of factRows) {
-                factTokens += Math.ceil(`* ${f.content}\n`.length / 3.5);
+                factTokens += estimateTokens(`* ${f.content}\n`);
             }
         } catch {
             /* session_facts table may not exist */
@@ -205,7 +210,7 @@ function buildSidebarSnapshot(db: Database, sessionId: string, directory: string
         if (meta) {
             const cached = meta.memory_block_cache;
             if (typeof cached === "string" && cached.length > 0) {
-                memoryTokens = Math.ceil(cached.length / 3.5);
+                memoryTokens = estimateTokens(cached);
             }
         }
 
@@ -225,16 +230,23 @@ function buildSidebarSnapshot(db: Database, sessionId: string, directory: string
             }
         }
 
-        // Display-layer attribution: messagesBlockTokens is the transform's
-        // persisted estimate of all messages sent to the provider (includes
-        // injected compartments/facts/memories). Strip those injected bits to
-        // isolate real user/assistant conversation. Tools is the remainder of
-        // inputTokens after accounting for system prompt and messages block.
+        // Display-layer attribution. The transform persists two separate
+        // counters from output.messages[]:
+        //   messagesBlockTokens (conversation_tokens)
+        //     = text + reasoning + image parts (includes injected
+        //       compartments/facts/memories in message[0]).
+        //   toolCallTokensRaw (tool_call_tokens)
+        //     = tool_use/tool_result/tool/tool-invocation parts.
+        // Strip the injected bits out of messagesBlockTokens to get real
+        // "Conversation". Tool call I/O inside messages is "Tool Calls".
+        // Tool schemas (OpenCode's separate `tools` request parameter) are not
+        // in messages — they surface as the residual "Tool Definitions".
         const injectedInMessages = compartmentTokens + factTokens + memoryTokens;
         const conversationTokens = Math.max(0, messagesBlockTokens - injectedInMessages);
-        const toolTokens = Math.max(
+        const toolCallTokens = Math.max(0, toolCallTokensRaw);
+        const toolDefinitionTokens = Math.max(
             0,
-            inputTokens - systemPromptTokens - messagesBlockTokens,
+            inputTokens - systemPromptTokens - messagesBlockTokens - toolCallTokens,
         );
 
         return {
@@ -258,7 +270,8 @@ function buildSidebarSnapshot(db: Database, sessionId: string, directory: string
             factTokens,
             memoryTokens,
             conversationTokens,
-            toolTokens,
+            toolCallTokens,
+            toolDefinitionTokens,
         };
     } catch (err) {
         log("[rpc] sidebar-snapshot error:", err);
@@ -404,13 +417,12 @@ function buildStatusDetail(
 
             let histTokens = 0;
             for (const c of compartments) {
-                histTokens += Math.ceil(
-                    `<compartment start="${c.start_message}" end="${c.end_message}" title="${c.title}">\n${c.content}\n</compartment>\n`
-                        .length / 3.5,
+                histTokens += estimateTokens(
+                    `<compartment start="${c.start_message}" end="${c.end_message}" title="${c.title}">\n${c.content}\n</compartment>\n`,
                 );
             }
             for (const f of facts) {
-                histTokens += Math.ceil(`* ${f.content}\n`.length / 3.5);
+                histTokens += estimateTokens(`* ${f.content}\n`);
             }
             detail.historyBlockTokens = histTokens;
 

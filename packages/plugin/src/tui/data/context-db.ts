@@ -49,7 +49,8 @@ const EMPTY_SNAPSHOT: SidebarSnapshot = {
     factTokens: 0,
     memoryTokens: 0,
     conversationTokens: 0,
-    toolTokens: 0,
+    toolCallTokens: 0,
+    toolDefinitionTokens: 0,
 };
 
 /** Fetch sidebar snapshot from the server via RPC. */

@@ -53,6 +53,38 @@ export { createNudgePlacementStore, type NudgePlacementStore } from "./nudge-pla
 import { clearHistorianFailureState } from "../../features/magic-context/storage-meta-persisted";
 import type { LiveModelBySession } from "./hook-handlers";
 
+// Per-session message token cache. Keyed by message ID, value is the token
+// contribution of that message split into conversation (text/reasoning/images)
+// and tool call (tool_use/tool_result/tool/tool-invocation) buckets.
+//
+// Messages are append-only once streaming completes, so the cached value is
+// stable across transform passes. Cleared on session.deleted and entries are
+// invalidated on message.removed via clearMessageTokensCache().
+const messageTokensBySession = new Map<
+    string,
+    Map<string, { conversation: number; toolCall: number }>
+>();
+
+function getMessageTokensCache(
+    sessionId: string,
+): Map<string, { conversation: number; toolCall: number }> {
+    let cache = messageTokensBySession.get(sessionId);
+    if (!cache) {
+        cache = new Map();
+        messageTokensBySession.set(sessionId, cache);
+    }
+    return cache;
+}
+
+export function clearMessageTokensCache(sessionId: string, messageId?: string): void {
+    if (messageId === undefined) {
+        messageTokensBySession.delete(sessionId);
+        return;
+    }
+    const cache = messageTokensBySession.get(sessionId);
+    if (cache) cache.delete(messageId);
+}
+
 /**
  * Extract the provider/model from the last assistant message in the array.
  * Used for early model-change detection before loadContextUsage.
@@ -600,37 +632,82 @@ export function createTransform(deps: TransformDeps) {
         // the injected <session-history> block — the display layer subtracts
         // compartmentTokens/factTokens/memoryTokens to isolate real
         // user/assistant conversation.
+        // Split message content into two honest buckets for the sidebar:
+        //   conversationTokens = real user/assistant discussion
+        //                        (text, reasoning, images) — the part users
+        //                        actually wrote/read
+        //   toolCallTokens     = tool call I/O inside messages
+        //                        (tool, tool_use, tool_result, tool-invocation)
+        //                        — actionable, can be compacted by ctx_reduce
+        // Tool DEFINITIONS (schemas OpenCode sends in the separate `tools`
+        // parameter) are not in messages — they surface as a residual at
+        // display time (inputTokens − system − messagesBlock − toolCalls).
+        //
+        // Cached per message ID. Messages are append-only once streaming
+        // completes, so the token contribution of a completed message is
+        // stable across transform passes. Cleared on message.removed events
+        // (see hook-handlers.ts). On the rare mid-transform mutation (e.g.
+        // historian-driven drop), the cache will be ~slightly stale until
+        // the next cache-busting pass; acceptable drift for a display
+        // estimate.
+        const msgTokens = getMessageTokensCache(sessionId);
         let conversationTokens = 0;
+        let toolCallTokens = 0;
         for (const message of messages) {
+            const mid = (message.info as { id?: string }).id;
+            if (mid) {
+                const cached = msgTokens.get(mid);
+                if (cached) {
+                    conversationTokens += cached.conversation;
+                    toolCallTokens += cached.toolCall;
+                    continue;
+                }
+            }
+            let conv = 0;
+            let tool = 0;
             for (const part of message.parts) {
                 if (!part || typeof part !== "object") continue;
                 const p = part as {
-                    type?: string
-                    text?: string
-                    ignored?: boolean
-                    state?: { input?: unknown; output?: unknown }
-                    args?: unknown
-                    input?: unknown
-                    content?: unknown
-                    mime?: string
-                    metadata?: { anthropic?: { signature?: string } }
-                }
+                    type?: string;
+                    text?: string;
+                    thinking?: string;
+                    signature?: string;
+                    data?: string;
+                    ignored?: boolean;
+                    state?: { input?: unknown; output?: unknown };
+                    args?: unknown;
+                    input?: unknown;
+                    content?: unknown;
+                    mime?: string;
+                    metadata?: { anthropic?: { signature?: string } };
+                };
                 if (p.ignored) continue;
                 switch (p.type) {
                     case "text": {
-                        if (typeof p.text === "string")
-                            conversationTokens += estimateTokens(p.text);
+                        if (typeof p.text === "string") {
+                            conv += estimateTokens(p.text);
+                        }
                         break;
                     }
                     case "reasoning": {
-                        if (typeof p.text === "string")
-                            conversationTokens += estimateTokens(p.text);
-                        // Signed reasoning carries an anthropic signature that
-                        // is billed as input tokens on the wire. Typical size
-                        // ~2,400 chars / ~600 tokens per block.
+                        // OpenCode's internal representation of reasoning.
+                        // Content is in `text`, signature is in metadata.
+                        if (typeof p.text === "string") conv += estimateTokens(p.text);
                         const sig = p.metadata?.anthropic?.signature;
-                        if (typeof sig === "string")
-                            conversationTokens += estimateTokens(sig);
+                        if (typeof sig === "string") conv += estimateTokens(sig);
+                        break;
+                    }
+                    case "thinking": {
+                        // Anthropic wire-format thinking part. Content is in
+                        // `thinking`, signature is in `signature`. Typical
+                        // signature ~3,500 chars / ~600 tokens per block.
+                        if (typeof p.thinking === "string") conv += estimateTokens(p.thinking);
+                        if (typeof p.signature === "string") conv += estimateTokens(p.signature);
+                        break;
+                    }
+                    case "redacted_thinking": {
+                        // Redacted thinking: opaque `data` blob, billed as input.
+                        if (typeof p.data === "string") conv += estimateTokens(p.data);
                         break;
                     }
                     case "file": {
@@ -644,10 +721,10 @@ export function createTransform(deps: TransformDeps) {
                                 typeof (p as { url?: unknown }).url === "string"
                                     ? (p as { url: string }).url
                                     : undefined;
-                            if (url && url.startsWith("data:")) {
-                                conversationTokens += estimateImageTokensFromDataUrl(url);
+                            if (url?.startsWith("data:")) {
+                                conv += estimateImageTokensFromDataUrl(url);
                             } else {
-                                conversationTokens += 1200; // fallback for non-data-url refs
+                                conv += 1200; // fallback for non-data-url refs
                             }
                         }
                         break;
@@ -659,50 +736,52 @@ export function createTransform(deps: TransformDeps) {
                                 const s =
                                     typeof p.state.input === "string"
                                         ? p.state.input
-                                        : JSON.stringify(p.state.input)
-                                if (s) conversationTokens += estimateTokens(s)
+                                        : JSON.stringify(p.state.input);
+                                if (s) tool += estimateTokens(s);
                             }
                             if (p.state.output !== undefined) {
                                 const s =
                                     typeof p.state.output === "string"
                                         ? p.state.output
-                                        : JSON.stringify(p.state.output)
-                                if (s) conversationTokens += estimateTokens(s)
+                                        : JSON.stringify(p.state.output);
+                                if (s) tool += estimateTokens(s);
                             }
                         }
-                        break
+                        break;
                     }
                     case "tool-invocation": {
                         if (p.args !== undefined) {
-                            const s =
-                                typeof p.args === "string" ? p.args : JSON.stringify(p.args)
-                            if (s) conversationTokens += estimateTokens(s)
+                            const s = typeof p.args === "string" ? p.args : JSON.stringify(p.args);
+                            if (s) tool += estimateTokens(s);
                         }
-                        break
+                        break;
                     }
                     case "tool_use": {
                         if (p.input !== undefined) {
                             const s =
-                                typeof p.input === "string" ? p.input : JSON.stringify(p.input)
-                            if (s) conversationTokens += estimateTokens(s)
+                                typeof p.input === "string" ? p.input : JSON.stringify(p.input);
+                            if (s) tool += estimateTokens(s);
                         }
-                        break
+                        break;
                     }
                     case "tool_result": {
                         if (p.content !== undefined) {
                             const s =
                                 typeof p.content === "string"
                                     ? p.content
-                                    : JSON.stringify(p.content)
-                            if (s) conversationTokens += estimateTokens(s)
+                                    : JSON.stringify(p.content);
+                            if (s) tool += estimateTokens(s);
                         }
-                        break
+                        break;
                     }
                 }
             }
+            if (mid) msgTokens.set(mid, { conversation: conv, toolCall: tool });
+            conversationTokens += conv;
+            toolCallTokens += tool;
         }
         try {
-            updateSessionMeta(db, sessionId, { conversationTokens });
+            updateSessionMeta(db, sessionId, { conversationTokens, toolCallTokens });
         } catch (error) {
             // Pure display/telemetry optimization — never fail transform on a
             // BUSY/transient error here. Next pass will refresh the value.

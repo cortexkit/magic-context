@@ -42,6 +42,8 @@ function makeDb(): Database {
             historian_last_failure_at INTEGER DEFAULT NULL,
             system_prompt_hash TEXT DEFAULT '',
             system_prompt_tokens INTEGER DEFAULT 0,
+      conversation_tokens INTEGER DEFAULT 0,
+      tool_call_tokens INTEGER DEFAULT 0,
             note_nudge_trigger_pending INTEGER DEFAULT 0,
             note_nudge_trigger_message_id TEXT DEFAULT '',
             note_nudge_sticky_text TEXT DEFAULT '',

@@ -4,7 +4,6 @@ import { describe, expect, it } from "bun:test";
 import { createMessagesTransformHandler } from "./messages-transform";
 
 // Minimal fake message shape — just needs info + parts.
-// biome-ignore lint/suspicious/noExplicitAny: test fixture does not need full SDK types
 function makeOutput(): any {
     return {
         messages: [
@@ -60,7 +59,6 @@ describe("createMessagesTransformHandler — error boundary (issue #23)", () => 
             magicContext: {
                 "experimental.chat.messages.transform": async (_input, out) => {
                     called = true;
-                    // biome-ignore lint/suspicious/noExplicitAny: test fixture — real shape irrelevant
                     (out.messages as any).push({
                         info: { id: "injected", role: "user", sessionID: "ses_test" },
                         parts: [{ type: "text", text: "injected" }],

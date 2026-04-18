@@ -89,7 +89,8 @@ const TokenBreakdown = (props: {
             })
         }
 
-        // Conversation = real user/assistant text (excludes injected session-history)
+        // Conversation = real user/assistant text/reasoning/images
+        // (excludes injected session-history and excludes tool call I/O)
         if (s.conversationTokens > 0) {
             result.push({
                 key: "conv",
@@ -99,13 +100,25 @@ const TokenBreakdown = (props: {
             })
         }
 
-        // Tools = inputTokens - system - messagesBlock (schemas for bash, edit, MCP, etc.)
-        if (s.toolTokens > 0) {
+        // Tool Calls = tool_use/tool_result/tool/tool-invocation parts in messages
+        // (actionable — users can reduce via ctx_reduce)
+        if (s.toolCallTokens > 0) {
             result.push({
-                key: "tools",
-                tokens: s.toolTokens,
+                key: "tool-calls",
+                tokens: s.toolCallTokens,
+                color: "#6b7280",
+                label: "Tool Calls",
+            })
+        }
+
+        // Tool Definitions = tool schemas sent separately by OpenCode
+        // (residual: inputTokens - system - messagesBlock - toolCalls)
+        if (s.toolDefinitionTokens > 0) {
+            result.push({
+                key: "tool-defs",
+                tokens: s.toolDefinitionTokens,
                 color: COLORS.conversation,
-                label: "Tool Definitions",
+                label: "Tool Defs + Overhead",
             })
         }
 

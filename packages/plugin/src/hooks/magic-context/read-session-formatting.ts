@@ -103,8 +103,21 @@ function truncateArg(value: string, maxLen = 60): string {
     return `${value.slice(0, maxLen)}…`;
 }
 
+// Real Claude tokenizer (ai-tokenizer with Claude encoding). Static ESM
+// import — ai-tokenizer is a hard runtime dependency and is used on every
+// transform pass, so there's no reason to lazy-load it. The previous
+// dynamic `eval("require")` pattern silently failed in Bun's ESM runtime
+// and fell back to `Math.ceil(text.length / 3.5)`, which over-counted
+// base64 thinking signatures and under-counted JSON tool content, making
+// the sidebar's "Tool Defs + Overhead" residual wrong on long sessions.
+import Tokenizer from "ai-tokenizer";
+import * as claudeEncoding from "ai-tokenizer/encoding/claude";
+
+const tokenizer = new Tokenizer(claudeEncoding);
+
 export function estimateTokens(text: string): number {
-    return Math.ceil(text.length / 3.5);
+    if (!text) return 0;
+    return tokenizer.count(text);
 }
 
 export function normalizeText(text: string): string {

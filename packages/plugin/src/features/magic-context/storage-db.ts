@@ -304,6 +304,83 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // segments, since Anthropic's usage data rolls system + tools + messages
     // together into cache.write but we want to attribute them separately.
     ensureColumn(db, "session_meta", "conversation_tokens", "INTEGER DEFAULT 0");
+    // Token estimate of tool-call parts (tool_use, tool_result, tool, tool-invocation)
+    // inside messages. Separate from conversation_tokens so the sidebar can show an
+    // actionable "Tool Calls" slice that users can reduce via ctx_reduce.
+    ensureColumn(db, "session_meta", "tool_call_tokens", "INTEGER DEFAULT 0");
+
+    // One-time heal: when ensureColumn adds a new TEXT DEFAULT '' or
+    // INTEGER DEFAULT N column, SQLite leaves pre-existing rows with NULL
+    // instead of applying the DEFAULT. isSessionMetaRow used to check
+    // `typeof === "string"` / `"number"` strictly (null fails), so rows
+    // with NULL columns were rejected → getOrCreateSessionMeta returned
+    // defaults (lastResponseTime=0, cacheTtl="5m") → scheduler always
+    // returned "execute" → applyPendingOperations re-ran forever → each
+    // execute pass mutated message content → sustained cache-bust cascade.
+    // The defensive validator now accepts null, but we also heal the data
+    // for good measure (belt and suspenders — failures here are non-fatal).
+    healNullTextColumns(db);
+    healNullIntegerColumns(db);
+}
+
+function healNullTextColumns(db: Database): void {
+    const columns: Array<[string, string]> = [
+        ["cache_ttl", ""],
+        ["last_nudge_band", ""],
+        ["last_transform_error", ""],
+        ["nudge_anchor_message_id", ""],
+        ["nudge_anchor_text", ""],
+        ["sticky_turn_reminder_text", ""],
+        ["sticky_turn_reminder_message_id", ""],
+        ["note_nudge_trigger_message_id", ""],
+        ["note_nudge_sticky_text", ""],
+        ["note_nudge_sticky_message_id", ""],
+        ["system_prompt_hash", ""],
+        ["stripped_placeholder_ids", ""],
+        ["memory_block_cache", ""],
+        ["compaction_marker_state", ""],
+        ["key_files", ""],
+    ];
+    for (const [column, fallback] of columns) {
+        try {
+            db.prepare(`UPDATE session_meta SET ${column} = ? WHERE ${column} IS NULL`).run(
+                fallback,
+            );
+        } catch (_error) {
+            // Ignore — the column may not exist yet on a brand-new DB that
+            // hasn't gone through all ensureColumn calls yet. The heal runs
+            // again on next startup.
+        }
+    }
+}
+
+function healNullIntegerColumns(db: Database): void {
+    // INTEGER columns added via ensureColumn against pre-existing rows.
+    // SQLite does not backfill the DEFAULT on ALTER TABLE, so old rows have
+    // NULL. The validator tolerates null as of this release, but we still
+    // normalize to 0 so subsequent reads from any path (including paths
+    // that bypass toSessionMeta) see a well-formed row.
+    const columns: Array<[string, number]> = [
+        ["times_execute_threshold_reached", 0],
+        ["compartment_in_progress", 0],
+        ["historian_failure_count", 0],
+        ["cleared_reasoning_through_tag", 0],
+        ["memory_block_count", 0],
+        ["system_prompt_tokens", 0],
+        ["conversation_tokens", 0],
+        ["tool_call_tokens", 0],
+        ["note_nudge_trigger_pending", 0],
+    ];
+    for (const [column, fallback] of columns) {
+        try {
+            db.prepare(`UPDATE session_meta SET ${column} = ? WHERE ${column} IS NULL`).run(
+                fallback,
+            );
+        } catch (_error) {
+            // Same rationale as the text heal — swallow missing-column errors
+            // on brand-new DBs; next startup reruns this.
+        }
+    }
 }
 
 // Intentional: the definition regex allows single quotes and parens because SQLite column

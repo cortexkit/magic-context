@@ -24,18 +24,25 @@ export interface SidebarSnapshot {
     factTokens: number;
     memoryTokens: number;
     /**
-     * Token estimate of the real user/assistant conversation, excluding
-     * injected <session-history> blocks. Equals messageTokens −
-     * (compartmentTokens + factTokens + memoryTokens). Display layer shows
-     * this as "Conversation".
+     * Token estimate of real user/assistant discussion (text + reasoning +
+     * image parts) inside messages, excluding injected <session-history>
+     * blocks. Display layer shows this as "Conversation".
      */
     conversationTokens: number;
     /**
-     * Token estimate of tool schemas in the prompt (bash, edit, grep, MCP
-     * servers, ctx_* tools, etc.). Computed as inputTokens − systemPromptTokens
-     * − messageTokens and clamped to ≥ 0. Display layer shows this as "Tools".
+     * Token estimate of tool call I/O inside messages (tool_use, tool_result,
+     * tool, tool-invocation parts). Actionable — users can reduce via
+     * ctx_reduce. Display layer shows this as "Tool Calls".
      */
-    toolTokens: number;
+    toolCallTokens: number;
+    /**
+     * Token estimate of tool schemas OpenCode sends alongside in the request
+     * `tools` parameter (bash, edit, grep, MCP servers, ctx_* tools, etc.).
+     * Computed as inputTokens − systemPromptTokens − messagesBlock −
+     * toolCallTokens and clamped to ≥ 0. Display layer shows this as
+     * "Tool Definitions". Includes tokenizer imprecision residual.
+     */
+    toolDefinitionTokens: number;
 }
 
 export interface StatusDetail extends SidebarSnapshot {

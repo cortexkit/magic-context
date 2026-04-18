@@ -35,6 +35,7 @@ export interface SessionMeta {
     systemPromptHash: string;
     systemPromptTokens: number;
     conversationTokens: number;
+    toolCallTokens: number;
     clearedReasoningThroughTag: number;
 }
 
