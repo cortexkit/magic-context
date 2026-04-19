@@ -165,6 +165,7 @@ export interface TransformDeps {
     experimentalCompactionMarkers?: boolean;
     experimentalUserMemories?: boolean;
     liveModelBySession?: LiveModelBySession;
+    autoHealLimit?: { enabled: boolean; default?: number; models: Record<string, number> };
 }
 
 export function createTransform(deps: TransformDeps) {
@@ -634,6 +635,88 @@ export function createTransform(deps: TransformDeps) {
             projectPath: deps.projectPath,
         });
         logTransformTiming(sessionId, "postTransformPhase", tPostProcess);
+
+        if (deps.autoHealLimit?.enabled) {
+            const modelKey = deps.getModelKey?.(sessionId);
+            let healLimit = deps.autoHealLimit.default;
+            if (modelKey && deps.autoHealLimit.models[modelKey] !== undefined) {
+                healLimit = deps.autoHealLimit.models[modelKey];
+            } else if (modelKey && modelKey.includes("/")) {
+                const [, modelName] = modelKey.split("/");
+                if (deps.autoHealLimit.models[modelName] !== undefined) {
+                    healLimit = deps.autoHealLimit.models[modelName];
+                }
+            }
+
+            if (healLimit && contextUsage.inputTokens > healLimit) {
+                if (!compartmentInProgress && canRunCompartments && deps.client) {
+                    const { startCompartmentAgent } = await import("./compartment-runner");
+                    startCompartmentAgent({
+                        client: deps.client,
+                        db,
+                        sessionId,
+                        historianChunkTokens: deps.getHistorianChunkTokens?.() ?? 0,
+                        historyBudgetTokens,
+                        historianTimeoutMs: deps.historianTimeoutMs,
+                        directory: deps.projectPath ?? process.cwd(),
+                        fallbackModelId: deps.getFallbackModelId?.(sessionId),
+                        getNotificationParams: deps.getNotificationParams
+                            ? () => deps.getNotificationParams!(sessionId)
+                            : undefined,
+                        experimentalCompactionMarkers: deps.experimentalCompactionMarkers,
+                        experimentalUserMemories: deps.experimentalUserMemories,
+                    });
+                    updateSessionMeta(db, sessionId, { compartmentInProgress: true });
+                }
+
+                const safetyBufferTokens = 5000;
+                let tokensToShed = contextUsage.inputTokens - healLimit + safetyBufferTokens;
+                
+                sessionLog(
+                    sessionId,
+                    `auto-heal: Context (${contextUsage.inputTokens}) > limit (${healLimit}). Truncating ${tokensToShed} tokens in-flight...`
+                );
+
+                const { isTextPart, isToolPartWithOutput } = await import("./tag-part-guards");
+
+                const candidates: { part: any; size: number; textRef: 'text' | 'output'; msgIndex: number }[] = [];
+                
+                const protectedMessageCount = 4;
+                const maxIndex = Math.max(0, messages.length - protectedMessageCount);
+
+                for (let i = 0; i < maxIndex; i++) {
+                    const msg = messages[i];
+                    if (msg.info?.role === "system") continue;
+
+                    for (const part of msg.parts) {
+                        if (isTextPart(part) && part.text.length > 500) {
+                            candidates.push({ part, size: part.text.length, textRef: 'text', msgIndex: i });
+                        } else if (isToolPartWithOutput(part) && part.state.output.length > 500) {
+                            candidates.push({ part, size: part.state.output.length, textRef: 'output', msgIndex: i });
+                        }
+                    }
+                }
+
+                candidates.sort((a, b) => {
+                    if (a.msgIndex !== b.msgIndex) return a.msgIndex - b.msgIndex;
+                    return b.size - a.size;
+                });
+
+                for (const candidate of candidates) {
+                    if (tokensToShed <= 0) break;
+                    
+                    const approxTokensSaved = Math.floor(candidate.size / 3.5);
+                    
+                    if (candidate.textRef === 'text') {
+                        candidate.part.text = `[Magic Context Auto-Heal: Truncated ${approxTokensSaved} tokens of text to prevent provider overflow. Historian triggered.]`;
+                    } else {
+                        candidate.part.state.output = `[Magic Context Auto-Heal: Truncated ${approxTokensSaved} tokens of tool output to prevent provider overflow. Historian triggered.]`;
+                    }
+                    
+                    tokensToShed -= approxTokensSaved;
+                }
+            }
+        }
 
         // Estimate the total token size of the transformed messages array so
         // the sidebar / dashboard can attribute inputTokens between System

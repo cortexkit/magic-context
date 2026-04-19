@@ -1849,4 +1849,139 @@ describe("createTransform historian failure handling", () => {
 
         expect(createSession).toHaveBeenCalledTimes(1);
     });
+
+    describe("autoHealLimit", () => {
+        it("truncates oldest tool outputs and protects the newest 4 messages", async () => {
+            useTempDataHome("context-transform-autoheal-");
+            const db = openDatabase();
+            const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
+            
+            const liveModelBySession = new Map([
+                ["ses-autoheal", { providerID: "github-copilot", modelID: "gpt-5.3-codex" }]
+            ]);
+            
+            const contextUsageMap = new Map<string, { usage: ContextUsage; updatedAt: number }>([
+                ["ses-autoheal", { usage: { percentage: 90, inputTokens: 265000 }, updatedAt: Date.now() }],
+            ]);
+
+            const transform = createTransform({
+                tagger: createTagger(),
+                scheduler,
+                contextUsageMap,
+                nudger: mock(() => null),
+                db,
+                nudgePlacements: createNudgePlacementStore(),
+                flushedSessions: new Set<string>(),
+                lastHeuristicsTurnId: new Map<string, string>(),
+                clearReasoningAge: 50,
+                protectedTags: 0,
+                autoDropToolAge: 1000,
+                dropToolStructure: true,
+                liveModelBySession,
+                getModelKey: (sessionId) => "github-copilot/gpt-5.3-codex",
+                autoHealLimit: {
+                    enabled: true,
+                    default: 300000,
+                    models: {
+                        "github-copilot/gpt-5.3-codex": 260000,
+                    }
+                },
+                client: { createSession: mock(), prompt: mock() } as any,
+                getHistorianChunkTokens: () => 500,
+                historianTimeoutMs: 10000,
+            });
+
+            // Create 6 messages. 
+            // 0: System
+            // 1: Old tool output (Should be truncated)
+            // 2, 3, 4, 5: The protected zone (4 newest messages). 
+            // Message 4 contains a new tool output (Should NOT be truncated)
+            const messages: TestMessage[] = [
+                {
+                    info: { id: "m-sys", role: "system", sessionID: "ses-autoheal" },
+                    parts: [{ type: "text", text: "System prompt" }],
+                },
+                {
+                    info: { id: "m-old", role: "assistant", sessionID: "ses-autoheal" },
+                    parts: [{ type: "tool", callID: "call-1", state: { output: "a".repeat(50000) } }],
+                },
+                {
+                    info: { id: "m-user-old", role: "user", sessionID: "ses-autoheal" },
+                    parts: [{ type: "text", text: "Old prompt" }],
+                },
+                {
+                    info: { id: "m-ast-old", role: "assistant", sessionID: "ses-autoheal" },
+                    parts: [{ type: "text", text: "Old response" }],
+                },
+                {
+                    info: { id: "m-new-tool", role: "assistant", sessionID: "ses-autoheal" },
+                    parts: [{ type: "tool", callID: "call-2", state: { output: "b".repeat(50000) } }],
+                },
+                {
+                    info: { id: "m-user-new", role: "user", sessionID: "ses-autoheal" },
+                    parts: [{ type: "text", text: "Newest prompt" }],
+                }
+            ];
+
+            const result = await transform({}, { messages });
+
+            expect(result?.messages).toBeDefined();
+            
+            // Check that the old tool output was truncated
+            const oldToolPart = result?.messages![1].parts[0] as ToolPart;
+            expect(oldToolPart.state.output).toContain("Magic Context Auto-Heal: Truncated");
+            expect(oldToolPart.state.output).not.toContain("a".repeat(50000));
+
+            // Check that the NEW tool output (inside the protected 4 messages) is completely intact
+            const newToolPart = result?.messages![4].parts[0] as ToolPart;
+            expect(newToolPart.state.output).not.toContain("Magic Context Auto-Heal: Truncated");
+            expect(newToolPart.state.output).toBe("b".repeat(50000));
+            
+            // Check that historian was triggered
+            const meta = getOrCreateSessionMeta(db, "ses-autoheal");
+            expect(meta.compartmentInProgress).toBe(true);
+        });
+
+        it("does not throw an error if input tokens are under the limit", async () => {
+            useTempDataHome("context-transform-autoheal-safe-");
+            const db = openDatabase();
+            const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
+            
+            const contextUsageMap = new Map<string, { usage: ContextUsage; updatedAt: number }>([
+                ["ses-autoheal-safe", { usage: { percentage: 50, inputTokens: 150000 }, updatedAt: Date.now() }],
+            ]);
+
+            const transform = createTransform({
+                tagger: createTagger(),
+                scheduler,
+                contextUsageMap,
+                nudger: mock(() => null),
+                db,
+                nudgePlacements: createNudgePlacementStore(),
+                flushedSessions: new Set<string>(),
+                lastHeuristicsTurnId: new Map<string, string>(),
+                clearReasoningAge: 50,
+                protectedTags: 0,
+                autoDropToolAge: 1000,
+                dropToolStructure: true,
+                getModelKey: (sessionId) => "github-copilot/gpt-5.3-codex",
+                autoHealLimit: {
+                    enabled: true,
+                    default: 300000,
+                    models: {
+                        "github-copilot/gpt-5.3-codex": 260000,
+                    }
+                },
+            });
+
+            const messages: TestMessage[] = [
+                {
+                    info: { id: "m-user", role: "user", sessionID: "ses-autoheal-safe" },
+                    parts: [{ type: "text", text: "Do some work" }],
+                }
+            ];
+
+            await transform({}, { messages });
+        });
+    });
 });

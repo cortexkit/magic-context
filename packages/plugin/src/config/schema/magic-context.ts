@@ -119,6 +119,10 @@ export interface MagicContextConfig {
     iteration_nudge_threshold: number;
     history_budget_percentage: number;
     historian_timeout_ms: number;
+    auto_heal_limit?: {
+        enabled: boolean;
+        buffer_tokens: number;
+    };
     commit_cluster_trigger: {
         enabled: boolean;
         min_clusters: number;
@@ -192,6 +196,13 @@ export const MagicContextConfigSchema = z
             .default(DEFAULT_HISTORY_BUDGET_PERCENTAGE),
         /** Timeout for each historian prompt call in milliseconds (default: 300000) */
         historian_timeout_ms: z.number().min(60_000).default(DEFAULT_HISTORIAN_TIMEOUT_MS),
+        /** Automatically truncate old tool outputs in-flight if context approaches the provider limit, bypassing OpenCode overflow errors */
+        auto_heal_limit: z
+            .object({
+                enabled: z.boolean().default(false),
+                buffer_tokens: z.number().default(5000),
+            })
+            .default({ enabled: false, buffer_tokens: 5000 }),
         /** Commit-cluster trigger: fire historian when enough commit clusters accumulate in the unsummarized tail */
         commit_cluster_trigger: z
             .object({

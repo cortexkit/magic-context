@@ -79,6 +79,7 @@ export interface MagicContextDeps {
         };
         sidekick?: SidekickConfig;
         dreamer?: DreamerConfig;
+        auto_heal_limit?: { enabled: boolean; default?: number; models: Record<string, number> };
         commit_cluster_trigger?: { enabled: boolean; min_clusters: number };
         compaction_markers?: boolean;
         experimental?: {
@@ -228,6 +229,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         experimentalCompactionMarkers: deps.config.compaction_markers,
         experimentalUserMemories: deps.config.experimental?.user_memories?.enabled,
         liveModelBySession,
+        autoHealLimit: deps.config.auto_heal_limit,
     });
     const eventHandler = createEventHandler({
         contextUsageMap,
