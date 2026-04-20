@@ -137,6 +137,18 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         );
         const sessionDirectory = parentSession?.directory ?? directory;
 
+        // Defensive: use MAX(sequence) + 1 rather than .length. These only
+        // differ when the current DB state has a gap or non-zero-indexed
+        // sequences (e.g., from an older partial recomp that wrote off-by-one
+        // sequences). Using .length would pick a sequence that collides with
+        // an existing row and trigger "UNIQUE constraint failed:
+        // compartments.session_id, compartments.sequence" on insert.
+        const maxExistingSequence = priorCompartments.reduce(
+            (max, c) => (c.sequence > max ? c.sequence : max),
+            -1,
+        );
+        const sequenceOffset = priorCompartments.length === 0 ? 0 : maxExistingSequence + 1;
+
         const validatedPass = await runValidatedHistorianPass({
             client,
             parentSessionId: sessionId,
@@ -144,7 +156,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             prompt,
             chunk,
             priorCompartments,
-            sequenceOffset: priorCompartments.length,
+            sequenceOffset,
             dumpLabelBase: `incremental-${sessionId}-${chunk.startIndex}-${chunk.endIndex}`,
             timeoutMs: historianTimeoutMs,
             fallbackModelId: deps.fallbackModelId,

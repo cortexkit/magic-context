@@ -229,9 +229,10 @@ export async function executePartialRecompInternal(
             offset = lastInStaging >= snapStart ? lastInStaging + 1 : snapStart;
         } else {
             // Fresh partial recomp: seed staging with prior compartments, record range.
-            candidateCompartments = priorCompartments.map((c, idx) =>
-                compartmentToInput(c, idx + 1),
-            );
+            // Sequences are 0-indexed to match the invariant MAX(sequence) = count - 1.
+            // Any gap or off-by-one here propagates into incremental historian's
+            // sequenceOffset math and triggers UNIQUE constraint failures on the next run.
+            candidateCompartments = priorCompartments.map((c, idx) => compartmentToInput(c, idx));
             passCount = 0;
             offset = snapStart;
             // Save initial staging (prior only, pass_number 0) so a crash right after
@@ -288,10 +289,15 @@ export async function executePartialRecompInternal(
             // Append tail with renumbered sequences so the final staging includes
             // prior + new + tail. `validateStoredCompartments` then passes because
             // the full set is contiguous from message 1.
+            // Sequences are 0-indexed (continuing from candidateCompartments.length).
+            // The `+ 1` off-by-one here previously created a gap between "prior + new"
+            // and "tail" that broke the invariant MAX(sequence) = count - 1 and
+            // caused incremental historian's sequenceOffset to collide with an
+            // existing sequence — producing UNIQUE constraint failures.
             const merged: CompartmentInput[] = [
                 ...candidateCompartments,
                 ...tailCompartments.map((c, idx) =>
-                    compartmentToInput(c, candidateCompartments.length + idx + 1),
+                    compartmentToInput(c, candidateCompartments.length + idx),
                 ),
             ];
 

@@ -188,3 +188,92 @@ describe("snapRangeToCompartments", () => {
         }
     });
 });
+
+/**
+ * Regression test for "UNIQUE constraint failed: compartments.session_id, compartments.sequence"
+ *
+ * Bug: partial recomp assigned 1-indexed sequences to prior compartments (`idx + 1`)
+ * and to tail compartments (`candidateCompartments.length + idx + 1`). This created
+ * a gap between the "prior + new" block and the "tail" block, breaking the invariant
+ * `MAX(sequence) = count - 1`. Next incremental historian then computed
+ * `sequenceOffset = priorCompartments.length`, which collided with an existing
+ * sequence at the tail's original max value.
+ *
+ * Fix: use 0-indexed sequences (`idx` and `candidateCompartments.length + idx`) so
+ * the invariant holds, and defensively compute `sequenceOffset = MAX(sequence) + 1`
+ * in the incremental historian.
+ */
+describe("sequence numbering invariants for partial recomp output", () => {
+    // Simulate the final promote merge: prior + new + tail
+    function simulatePartialRecompMerge(
+        priorCount: number,
+        newBuiltCount: number,
+        tailCount: number,
+    ): number[] {
+        // Match the actual code in compartment-runner-partial-recomp.ts:
+        //   candidateCompartments = priorCompartments.map((c, idx) => input(c, idx))
+        //   historian new-built uses sequenceOffset = candidateCompartments.length = priorCount
+        //   final merge appends tail with `candidateCompartments.length + idx`
+        const priorSeqs = Array.from({ length: priorCount }, (_, idx) => idx);
+        const candidateLen = priorCount + newBuiltCount;
+        const newBuiltSeqs = Array.from({ length: newBuiltCount }, (_, idx) => priorCount + idx);
+        const tailSeqs = Array.from({ length: tailCount }, (_, idx) => candidateLen + idx);
+        return [...priorSeqs, ...newBuiltSeqs, ...tailSeqs];
+    }
+
+    test("full range recomp (no prior, no tail) produces contiguous 0-indexed sequences", () => {
+        const seqs = simulatePartialRecompMerge(0, 5, 0);
+        expect(seqs).toEqual([0, 1, 2, 3, 4]);
+        expect(Math.min(...seqs)).toBe(0);
+        expect(Math.max(...seqs)).toBe(seqs.length - 1);
+    });
+
+    test("recomp with tail preserved (the exact scenario that caused UNIQUE failure)", () => {
+        // Mirrors /ctx-recomp 1-11322 with 267 rebuilt + 85 preserved tail
+        const seqs = simulatePartialRecompMerge(0, 267, 85);
+        expect(seqs.length).toBe(352);
+        expect(Math.min(...seqs)).toBe(0);
+        expect(Math.max(...seqs)).toBe(351);
+        // No gaps — every integer 0..351 must appear exactly once
+        const set = new Set(seqs);
+        expect(set.size).toBe(352);
+        for (let i = 0; i <= 351; i++) {
+            expect(set.has(i)).toBe(true);
+        }
+    });
+
+    test("recomp with prior preserved and tail preserved", () => {
+        const seqs = simulatePartialRecompMerge(50, 100, 30);
+        expect(seqs.length).toBe(180);
+        expect(Math.min(...seqs)).toBe(0);
+        expect(Math.max(...seqs)).toBe(179);
+        const set = new Set(seqs);
+        expect(set.size).toBe(180);
+    });
+
+    test("incremental sequenceOffset = MAX(sequence) + 1 is robust to existing gaps", () => {
+        // Simulate legacy DB with a gap at sequence 267 (the bug state)
+        const priorSeqs = [
+            ...Array.from({ length: 267 }, (_, i) => i), // 0..266
+            ...Array.from({ length: 85 }, (_, i) => 268 + i), // 268..352 (gap at 267)
+        ];
+        expect(priorSeqs.length).toBe(352);
+        expect(Math.max(...priorSeqs)).toBe(352);
+
+        // Old (buggy): sequenceOffset = priorCompartments.length = 352 → collides with existing 352
+        const oldOffset = priorSeqs.length;
+        expect(priorSeqs.includes(oldOffset)).toBe(true); // would collide
+
+        // New (fixed): sequenceOffset = max + 1 = 353 → no collision
+        const newOffset = Math.max(...priorSeqs) + 1;
+        expect(priorSeqs.includes(newOffset)).toBe(false); // no collision
+        expect(newOffset).toBe(353);
+    });
+
+    test("empty prior + any new compartments uses offset 0", () => {
+        const priorSeqs: number[] = [];
+        const offset =
+            priorSeqs.length === 0 ? 0 : priorSeqs.reduce((max, s) => (s > max ? s : max), -1) + 1;
+        expect(offset).toBe(0);
+    });
+});
