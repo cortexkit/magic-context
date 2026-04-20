@@ -160,7 +160,6 @@ describe("event-resolvers", () => {
                 [key: string]: number;
             };
             // Simulate missing default by deleting
-            // biome-ignore lint/performance/noDelete: test setup requires actual missing key
             delete (config as Record<string, unknown>).default;
 
             //#when

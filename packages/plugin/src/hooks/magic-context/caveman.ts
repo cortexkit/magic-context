@@ -121,8 +121,6 @@ const HEDGING_PHRASES = [
 
 const PLEASANTRIES = ["please", "thanks", "thank you", "kindly", "if possible"];
 
-const ARTICLES = ["the", "a", "an"];
-
 /** Auxiliary verbs we drop when they appear in non-essential positions.
  *  We only drop them between a subject noun and a participle/verb, where
  *  dropping changes tense but preserves meaning enough for a terse summary. */
@@ -222,10 +220,7 @@ function dropPhrases(text: string, phrases: string[]): string {
 function dropArticles(text: string): string {
     // Match " the ", " a ", " an " (with leading space) and replace with single space.
     // Also match at start of line: "The X" → "X".
-    let working = text.replace(/\b(?:the|a|an)\b\s+/gi, (match, _offset, full) => {
-        // Keep if at end of sentence fragment (before a period or line end) — rare.
-        return "";
-    });
+    let working = text.replace(/\b(?:the|a|an)\b\s+/gi, "");
     // Collapse resulting multiple spaces.
     working = working.replace(/ +/g, " ");
     return working;
