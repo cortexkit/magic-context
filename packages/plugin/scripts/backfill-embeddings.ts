@@ -1,36 +1,75 @@
 #!/usr/bin/env bun
 /**
  * Backfill embeddings for all memories that don't have one yet.
- * Run: bun scripts/backfill-embeddings.ts
+ *
+ * Reads the user's magic-context.jsonc (same as the running plugin) to resolve
+ * the active embedding provider, so this works for local MiniLM, OpenAI-
+ * compatible (LMStudio/Ollama), or any other configured endpoint.
+ *
+ * Run: bun scripts/backfill-embeddings.ts [--project <path>]
+ *   --project  Only backfill memories for this project_path (default: all).
  */
 import { Database } from "bun:sqlite";
+import { readFileSync } from "node:fs";
+import { parseJsonc } from "../src/shared/jsonc-parser";
+import { MagicContextConfigSchema } from "../src/config/schema/magic-context";
 import {
     embedBatch,
     ensureEmbeddingModel,
     getEmbeddingModelId,
     initializeEmbedding,
 } from "../src/features/magic-context/memory/embedding";
-import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "../src/config/schema/magic-context";
 import { saveEmbedding } from "../src/features/magic-context/memory/storage-memory-embeddings";
 
 const DB_PATH = `${process.env.HOME}/.local/share/opencode/storage/plugin/magic-context/context.db`;
+const USER_CONFIG_PATH = `${process.env.HOME}/.config/opencode/magic-context.jsonc`;
+
+function loadEmbeddingConfigFromUserFile() {
+    try {
+        const raw = readFileSync(USER_CONFIG_PATH, "utf8");
+        const parsed = parseJsonc(raw);
+        const config = MagicContextConfigSchema.parse(parsed);
+        if (config.embedding) {
+            console.log(
+                `Using embedding config from ${USER_CONFIG_PATH}: provider=${config.embedding.provider}`,
+            );
+            return config.embedding;
+        }
+    } catch (err) {
+        console.warn(`Could not read ${USER_CONFIG_PATH}: ${String(err)}`);
+    }
+    console.log("Falling back to local MiniLM default.");
+    return { provider: "local" as const, model: "Xenova/all-MiniLM-L6-v2" };
+}
 
 async function main() {
+    const projectFilter = process.argv.includes("--project")
+        ? process.argv[process.argv.indexOf("--project") + 1]
+        : null;
+
     const db = new Database(DB_PATH);
     db.run("PRAGMA journal_mode=WAL");
-    initializeEmbedding({ provider: "local", model: DEFAULT_LOCAL_EMBEDDING_MODEL });
+    const embeddingConfig = loadEmbeddingConfigFromUserFile();
+    initializeEmbedding(embeddingConfig);
 
-    // Find memories without embeddings
-    const allMemories = db
-        .prepare(
-            `SELECT m.id, m.content, m.category, m.project_path
-             FROM memories m
-             LEFT JOIN memory_embeddings me ON me.memory_id = m.id
-             WHERE m.status != 'deleted' AND me.memory_id IS NULL`,
-        )
-        .all() as Array<{ id: number; content: string; category: string; project_path: string }>;
+    // Find memories without embeddings (optionally filtered to one project)
+    const query = projectFilter
+        ? `SELECT m.id, m.content, m.category, m.project_path
+           FROM memories m
+           LEFT JOIN memory_embeddings me ON me.memory_id = m.id
+           WHERE m.status != 'deleted' AND me.memory_id IS NULL AND m.project_path = ?`
+        : `SELECT m.id, m.content, m.category, m.project_path
+           FROM memories m
+           LEFT JOIN memory_embeddings me ON me.memory_id = m.id
+           WHERE m.status != 'deleted' AND me.memory_id IS NULL`;
+    const stmt = db.prepare(query);
+    const allMemories = (
+        projectFilter ? stmt.all(projectFilter) : stmt.all()
+    ) as Array<{ id: number; content: string; category: string; project_path: string }>;
 
-    console.log(`Found ${allMemories.length} memories without embeddings`);
+    console.log(
+        `Found ${allMemories.length} memories without embeddings${projectFilter ? ` in project ${projectFilter}` : ""}`,
+    );
 
     if (allMemories.length === 0) {
         console.log("Nothing to do.");
