@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicehash/tauri/dev/packages/tauri-utils/schema.json",
   "productName": "Magic Context Dashboard",
-  "version": "0.2.8",
+  "version": "0.3.0",
   "identifier": "com.cortexkit.magic-context-dashboard",
   "build": {
     "beforeDevCommand": "bun run dev:frontend",

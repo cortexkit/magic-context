@@ -335,7 +335,7 @@ On startup, Magic Context checks for common configuration problems — OpenCode'
 A companion desktop app for browsing and managing Magic Context state outside of OpenCode.
 
 <p align="center">
-   <a href="https://github.com/cortexkit/opencode-magic-context/releases/tag/dashboard-v0.2.8"><strong>⬇️ Download for macOS · Windows · Linux</strong></a></p>
+   <a href="https://github.com/cortexkit/opencode-magic-context/releases/tag/dashboard-v0.3.0"><strong>⬇️ Download for macOS · Windows · Linux</strong></a></p>
 
 **Features:**
 - **Memory Browser** — search, filter, and edit project memories with category and project filtering
