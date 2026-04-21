@@ -28,6 +28,11 @@ import { estimateTokens } from "./read-session-formatting";
 
 const HISTORIAN_AGENT = "historian";
 
+/** Per-session cache of the last depth histogram string we logged.
+ *  Used to suppress repeat log lines when the histogram hasn't changed
+ *  between scheduler passes (most passes don't alter compartment depth). */
+const lastDepthHistogramBySession = new Map<string, string>();
+
 export interface CompressorDeps {
     client: PluginContext["client"];
     db: Database;
@@ -61,7 +66,6 @@ interface ScoredCompartment {
     index: number;
     tokenEstimate: number;
     averageDepth: number;
-    score: number;
 }
 
 /**
@@ -119,8 +123,28 @@ export async function runCompressionPassIfNeeded(deps: CompressorDeps): Promise<
         deps.maxCompartmentsPerPass ?? DEFAULT_COMPRESSOR_MAX_COMPARTMENTS_PER_PASS;
     const graceCompartments = deps.graceCompartments ?? DEFAULT_COMPRESSOR_GRACE_COMPARTMENTS;
 
-    // Score every compartment: weighted age (older first) × inverse-depth (less compressed first).
+    // Enrich compartments with current depth + token estimates for selection.
     const scored = scoreCompartments(db, sessionId, compartments);
+
+    // Debug: emit the depth histogram across all eligible scope so forensics on
+    // bad compressor runs (e.g. runaway cascades) can be done from logs alone.
+    const depthHistogram = new Map<number, number>();
+    for (const s of scored) {
+        const bucket = Math.round(s.averageDepth);
+        depthHistogram.set(bucket, (depthHistogram.get(bucket) ?? 0) + 1);
+    }
+    const histText = [...depthHistogram.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([d, n]) => `d${d}=${n}`)
+        .join(" ");
+    // Suppress repeat logs on unchanged histograms — most scheduler passes
+    // don't actually alter compartment depth, and emitting the same line
+    // every pass is pure noise.
+    const histKey = `${scored.length}|${histText}`;
+    if (lastDepthHistogramBySession.get(sessionId) !== histKey) {
+        lastDepthHistogramBySession.set(sessionId, histKey);
+        sessionLog(sessionId, `compressor: depth histogram (${scored.length} total) ${histText}`);
+    }
 
     // Cap how many compartments we can afford to pick without violating the floor.
     // The compressor produces fewer output compartments than input; the difference
@@ -134,7 +158,7 @@ export async function runCompressionPassIfNeeded(deps: CompressorDeps): Promise<
         return false;
     }
 
-    const contiguous = findOldestContiguousSameDepthBand(scored, {
+    const contiguous = selectCompressionBand(scored, {
         maxPickable: maxCompartmentsPerPass,
         maxMergeDepth,
         graceCompartments,
@@ -239,18 +263,19 @@ export async function runCompressionPassIfNeeded(deps: CompressorDeps): Promise<
 // Selection helpers.
 // ---------------------------------------------------------------------------
 
+/**
+ * Enrich each compartment with its current token estimate and average
+ * compression depth. The previous revision computed a weighted age+depth
+ * score here, but the score was never consulted — selection was oldest-first
+ * regardless. With the new `selectCompressionBand` (lowest-depth-first,
+ * oldest-within-depth) we don't need an aggregate score at all, so this
+ * function just attaches the two fields selection actually reads.
+ */
 function scoreCompartments(
     db: Database,
     sessionId: string,
     compartments: Compartment[],
 ): ScoredCompartment[] {
-    // maxDepth is only used for normalization; we read it once.
-    let maxDepthAcrossSession = 0;
-    for (const c of compartments) {
-        const d = getAverageCompressionDepth(db, sessionId, c.startMessage, c.endMessage);
-        if (d > maxDepthAcrossSession) maxDepthAcrossSession = d;
-    }
-
     return compartments.map((compartment, index) => {
         const tokenEstimate = estimateTokens(
             `<compartment start="${compartment.startMessage}" end="${compartment.endMessage}" title="${compartment.title}">\n${compartment.content}\n</compartment>\n`,
@@ -261,11 +286,7 @@ function scoreCompartments(
             compartment.startMessage,
             compartment.endMessage,
         );
-        const normalizedAge = compartments.length > 1 ? 1 - index / (compartments.length - 1) : 1;
-        const normalizedDepth =
-            maxDepthAcrossSession > 0 ? 1 - averageDepth / maxDepthAcrossSession : 1;
-        const score = 0.7 * normalizedAge + 0.3 * normalizedDepth;
-        return { compartment, index, tokenEstimate, averageDepth, score };
+        return { compartment, index, tokenEstimate, averageDepth };
     });
 }
 
@@ -281,72 +302,109 @@ interface SelectionConstraints {
 }
 
 /**
- * Find the oldest contiguous band of compartments that share the same rounded depth.
+ * Pick a contiguous same-depth band of compartments to compress next.
  *
- * Strategy: scan oldest→newest (low index first). Skip compartments at max depth,
- * and skip the newest `graceCompartments` (grace period). Within the remaining
- * scope, find the oldest run of 2+ consecutive compartments with the SAME rounded
- * averageDepth. This keeps per-pass work uniform (same LLM prompt tier for all
- * inputs) and naturally progresses: depth 0 bands get compressed first, producing
- * depth 1 bands, which compress next, etc.
+ * Strategy (depth-first, oldest-within-tier):
+ *   1. Eligible scope = [0, scored.length - graceCompartments).
+ *      Newest `graceCompartments` are never compressed (protects just-published
+ *      historian output).
+ *   2. Within eligible scope, ignore compartments whose rounded depth is
+ *      already at `maxMergeDepth` — they're done.
+ *   3. Find the **minimum** depth tier that still exists in scope.
+ *   4. Anchor on the **oldest** compartment at that minimum depth (lowest
+ *      index). Extend forward while the next compartment has the same rounded
+ *      depth, stopping at maxPickable / floorHeadroom / scope end.
+ *   5. Require runLen ≥ 2. If the oldest minimum-depth compartment can't form
+ *      a run (neighbor has a different depth), the algorithm would stall —
+ *      so fall back to finding the *next* oldest compartment at minDepth and
+ *      retry. This preserves the old "skip singleton and move on" safety
+ *      without abandoning the min-depth invariant.
  *
- * Constraints:
- * - Skip compartments with averageDepth >= maxMergeDepth (already maxed out).
- * - Skip the newest graceCompartments (never compress fresh work).
- * - Cap picks at maxPickable to avoid huge LLM inputs.
- * - Cap picks at floorHeadroom to avoid violating min-compartment floor. Each
- *   merge reduces count by (input - output), so limiting picks to floorHeadroom
- *   guarantees we can't fall below floor even in the worst case (output = 1).
+ * Why this shape:
+ *   The previous algorithm was oldest-first regardless of depth. After the
+ *   first pass compressed seq 0-14 to depth 1, the next pass picked seq 0-X
+ *   AGAIN because they were still the oldest. The cascade ran depth 0→1→2→
+ *   3→4→5 on the same range within hours, crushing early compartments to
+ *   empty title-only shells while the rest of history stayed at depth 0.
+ *
+ *   Depth-first selection means: once seq 0-14 reach depth 1, the next pass
+ *   prefers any depth-0 band elsewhere (seq 15+) before touching seq 0-14
+ *   again. Old→new gets pushed down one tier at a time, producing a smooth
+ *   depth gradient (old = deeper, recent = shallower) like memory decay.
+ *
+ *   Grace window still protects the newest N from compression entirely so
+ *   freshly-published historian output has time to settle.
  */
-export function findOldestContiguousSameDepthBand(
+export function selectCompressionBand(
     scored: ScoredCompartment[],
     constraints: SelectionConstraints,
 ): ScoredCompartment[] {
     const { maxPickable, maxMergeDepth, graceCompartments, floorHeadroom } = constraints;
-    // Absolute hard caps — picking beyond these is unsafe regardless of what the band looks like.
     const hardMaxPick = Math.max(0, Math.min(maxPickable, floorHeadroom));
     if (hardMaxPick < 2) return [];
 
-    // Scope excludes the newest graceCompartments: eligible range is [0, scanEnd).
     const scanEnd = Math.max(0, scored.length - graceCompartments);
     if (scanEnd < 2) return [];
 
-    let i = 0;
-    while (i < scanEnd) {
-        const c = scored[i];
-        if (!c || c.averageDepth >= maxMergeDepth) {
-            i++;
-            continue;
+    // Collect every distinct depth tier present in eligible scope, ascending.
+    // We'll try tiers in this order: if the lowest tier can't form a run of 2,
+    // fall back to the next tier up, etc. This keeps the depth-first
+    // preference (old history compresses first, stays deeper) while avoiding
+    // a stall when the lowest tier happens to be a lone compartment.
+    const tiers = new Set<number>();
+    for (let i = 0; i < scanEnd; i++) {
+        const entry = scored[i];
+        if (!entry) continue;
+        if (entry.averageDepth >= maxMergeDepth) continue;
+        tiers.add(Math.round(entry.averageDepth));
+    }
+    if (tiers.size === 0) return [];
+    const orderedTiers = [...tiers].sort((a, b) => a - b);
+
+    for (const targetDepth of orderedTiers) {
+        // Scan oldest→newest at this tier. Return the first contiguous run of
+        // 2+ compartments whose rounded avgDepth equals `targetDepth`.
+        let i = 0;
+        while (i < scanEnd) {
+            const anchor = scored[i];
+            if (!anchor) {
+                i++;
+                continue;
+            }
+            if (
+                anchor.averageDepth >= maxMergeDepth ||
+                Math.round(anchor.averageDepth) !== targetDepth
+            ) {
+                i++;
+                continue;
+            }
+            let j = i;
+            while (j < scanEnd) {
+                const entry = scored[j];
+                if (!entry) break;
+                if (entry.averageDepth >= maxMergeDepth) break;
+                if (Math.round(entry.averageDepth) !== targetDepth) break;
+                if (j - i >= hardMaxPick) break;
+                j++;
+            }
+            const runLen = j - i;
+            if (runLen >= 2) {
+                return scored.slice(i, j);
+            }
+            // Singleton at this tier here — advance past it and keep scanning
+            // the same tier for another anchor.
+            i = Math.max(j, i + 1);
         }
-        const anchorDepth = Math.round(c.averageDepth);
-        let j = i;
-        while (j < scanEnd) {
-            const entry = scored[j];
-            if (!entry) break;
-            if (entry.averageDepth >= maxMergeDepth) break;
-            if (Math.round(entry.averageDepth) !== anchorDepth) break;
-            if (j - i >= hardMaxPick) break;
-            j++;
-        }
-        const runLen = j - i;
-        if (runLen >= 2) {
-            return scored.slice(i, j);
-        }
-        // No viable run starting at i. Resume scanning AT j, not past it — j is
-        // the boundary where the inner loop broke, which means scored[j] has a
-        // different depth from scored[i] but may itself anchor a new run with
-        // scored[j+1], scored[j+2], etc. Jumping to j+1 would skip scored[j]
-        // and miss the band [scored[j], scored[j+1], ...].
-        //
-        // Progress is still guaranteed: `i+1` ensures we never stall on the
-        // same index when the inner loop didn't advance (e.g. c was at max
-        // depth and got `continue`-d above, or hardMaxPick=2 stops at j=i+1
-        // and we need to move to j — which is i+1 — anyway).
-        i = Math.max(j, i + 1);
     }
 
     return [];
 }
+
+/**
+ * @deprecated Use {@link selectCompressionBand}. Kept as an export for the
+ * existing test suite that targets the older naming; semantics are identical.
+ */
+export const findOldestContiguousSameDepthBand = selectCompressionBand;
 
 /**
  * Snap LLM-output ordinals to enclosing input compartment boundaries.

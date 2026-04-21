@@ -181,38 +181,120 @@ export async function embedUnembeddedMemories(
     return embedUnembeddedMemoriesForProject(db, projectPath, config, batchSize);
 }
 
+/** Wall-clock ceiling per sweep invocation — ensures a hung/slow endpoint can't
+ *  hold the sweep running across many 15-min ticks. On ceiling, the sweep
+ *  gracefully stops; the next tick picks up the remaining work. */
+const SWEEP_MAX_WALL_CLOCK_MS = 10 * 60 * 1000;
+
+/** If N consecutive batches return zero embedded memories, stop — that signals
+ *  the endpoint is failing silently or there's nothing left to do. Without
+ *  this guard, a broken provider would loop until the wall-clock deadline. */
+const SWEEP_MAX_CONSECUTIVE_EMPTY = 3;
+
+/** Singleton guard: prevents a second dream-timer tick from spawning a
+ *  parallel sweep while the previous one is still draining. */
+let sweepInProgress = false;
+
 /**
- * Sweep ALL projects for unembedded memories, not just one project.
- * Used by the dream timer to ensure cross-project embedding coverage.
+ * Sweep ALL projects for unembedded memories, draining each fully before
+ * moving to the next. Projects are ordered by most-recent memory activity
+ * (MAX(updated_at)), so the project you're actively working in gets
+ * embedded first after a provider switch.
+ *
+ * Within one invocation:
+ *   - Each project is drained in batches of `batchSize` until `embedUnembeddedMemoriesForProject`
+ *     returns 0 (nothing left, or a batch failure).
+ *   - Wall-clock deadline + consecutive-empty fail-safe prevent runaway
+ *     or infinite looping when the provider is unhealthy.
+ *
+ * Between invocations:
+ *   - The module-level `sweepInProgress` flag guards against parallel runs
+ *     from the same process. If a sweep is still running when the next
+ *     15-min tick fires, that tick is a no-op.
+ *
+ * Used by the dream timer for proactive embedding coverage. After a
+ * provider change wipes embeddings, this path drains the full backlog on
+ * a single tick (bounded by wall clock) instead of trickling 10/15min.
  */
 export async function embedAllUnembeddedMemories(
     db: Database,
     config: EmbeddingConfig,
     batchSize = 10,
 ): Promise<number> {
-    const resolvedConfig = resolveEmbeddingConfig(config);
-    if (resolvedConfig.provider === "off") return 0;
-
-    const projects = db
-        .prepare(
-            `SELECT DISTINCT m.project_path FROM memories m
-             WHERE m.status IN ('active', 'permanent')
-             AND m.id NOT IN (SELECT memory_id FROM memory_embeddings)
-             LIMIT 20`,
-        )
-        .all() as Array<{ project_path: string }>;
-
-    let total = 0;
-    for (const row of projects) {
-        const count = await embedUnembeddedMemoriesForProject(
-            db,
-            row.project_path,
-            config,
-            batchSize,
-        );
-        total += count;
+    if (sweepInProgress) {
+        log("[magic-context] embedding sweep already in progress, skipping this tick");
+        return 0;
     }
-    return total;
+    sweepInProgress = true;
+    const startedAt = Date.now();
+    const deadline = startedAt + SWEEP_MAX_WALL_CLOCK_MS;
+
+    try {
+        const resolvedConfig = resolveEmbeddingConfig(config);
+        if (resolvedConfig.provider === "off") return 0;
+
+        // Order projects by most-recent memory activity so the live project
+        // drains first. `updated_at` reflects both new writes and existing
+        // memory updates, which is what we want: any fresh churn = recent.
+        const projects = db
+            .prepare(
+                `SELECT m.project_path, MAX(m.updated_at) AS latest
+                 FROM memories m
+                 WHERE m.status IN ('active', 'permanent')
+                 AND m.id NOT IN (SELECT memory_id FROM memory_embeddings)
+                 GROUP BY m.project_path
+                 ORDER BY latest DESC
+                 LIMIT 20`,
+            )
+            .all() as Array<{ project_path: string; latest: number }>;
+
+        let total = 0;
+        let consecutiveEmpty = 0;
+
+        outer: for (const project of projects) {
+            while (Date.now() < deadline) {
+                const count = await embedUnembeddedMemoriesForProject(
+                    db,
+                    project.project_path,
+                    config,
+                    batchSize,
+                );
+                if (count === 0) {
+                    // Either drained or the batch silently failed. Either
+                    // way, this project can't make progress right now.
+                    consecutiveEmpty += 1;
+                    if (consecutiveEmpty >= SWEEP_MAX_CONSECUTIVE_EMPTY) {
+                        log(
+                            `[magic-context] embedding sweep: ${SWEEP_MAX_CONSECUTIVE_EMPTY} consecutive empty batches, stopping (total=${total})`,
+                        );
+                        break outer;
+                    }
+                    break; // move to next project
+                }
+                consecutiveEmpty = 0;
+                total += count;
+
+                // Partial batch = fewer rows than batchSize = project drained.
+                if (count < batchSize) break;
+            }
+
+            if (Date.now() >= deadline) {
+                log(
+                    `[magic-context] embedding sweep: wall-clock deadline reached after ${((Date.now() - startedAt) / 1000).toFixed(1)}s (total=${total})`,
+                );
+                break;
+            }
+        }
+
+        return total;
+    } finally {
+        sweepInProgress = false;
+    }
+}
+
+/** Test-only: reset the in-progress guard. */
+export function _resetEmbeddingSweepGuard(): void {
+    sweepInProgress = false;
 }
 
 async function embedUnembeddedMemoriesForProject(

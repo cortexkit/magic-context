@@ -2,7 +2,10 @@
 
 import { describe, expect, it } from "bun:test";
 
-import { findOldestContiguousSameDepthBand } from "./compartment-runner-compressor";
+import {
+    findOldestContiguousSameDepthBand,
+    selectCompressionBand,
+} from "./compartment-runner-compressor";
 
 // Minimal shape for the test — the selector only reads averageDepth and index.
 // We use `as unknown as Parameters<typeof findOldestContiguousSameDepthBand>[0][number]`
@@ -133,5 +136,99 @@ describe("findOldestContiguousSameDepthBand — band-boundary regression", () =>
                 floorHeadroom: 1,
             }),
         ).toEqual([]);
+    });
+});
+
+describe("selectCompressionBand — depth-first cascade prevention", () => {
+    it("prefers a newer depth-0 band over an older depth-1 band", () => {
+        // This is the core bug the redesign fixes. Old state:
+        //   seq 0-3 at depth 1 (already compressed once)
+        //   seq 4-10 at depth 0 (untouched)
+        // Old selector (oldest-first, same-depth) would pick seq 0-1 again
+        // because they form the oldest same-depth run, cascading the same
+        // range to depth 2, 3, 4, 5.
+        // New selector picks the depth-0 band instead, spreading compression
+        // uniformly across history.
+        const band = selectCompressionBand(scored(1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0), {
+            maxPickable: 5,
+            maxMergeDepth: 5,
+            graceCompartments: 0,
+            floorHeadroom: 20,
+        });
+        expect(band.map((b) => b.index)).toEqual([4, 5, 6, 7, 8]);
+    });
+
+    it("picks depth 0 when depth 0 exists, even if depth 1 band is older and longer", () => {
+        // [1, 1, 1, 1, 1, 0, 0] — old algorithm: oldest same-depth band = [0..4].
+        // New algorithm: minimum depth in scope = 0, so pick depth-0 run at [5, 6].
+        const band = selectCompressionBand(scored(1, 1, 1, 1, 1, 0, 0), {
+            maxPickable: 10,
+            maxMergeDepth: 5,
+            graceCompartments: 0,
+            floorHeadroom: 20,
+        });
+        expect(band.map((b) => b.index)).toEqual([5, 6]);
+    });
+
+    it("falls back to next tier when lowest tier has no run of 2", () => {
+        // [0, 1, 1, 1] — depth 0 is a singleton at index 0 and can't form a
+        // run. Fall back to depth 1, which has a run [1, 2, 3].
+        const band = selectCompressionBand(scored(0, 1, 1, 1), {
+            maxPickable: 2,
+            maxMergeDepth: 5,
+            graceCompartments: 0,
+            floorHeadroom: 10,
+        });
+        expect(band.map((b) => b.index)).toEqual([1, 2]);
+    });
+
+    it("ignores compartments at max depth entirely when computing min tier", () => {
+        // [5, 5, 5, 5, 2, 2, 0, 0] — depths 5 are maxed out (ignored).
+        // Min depth in remaining scope = 0. Pick [6, 7].
+        const band = selectCompressionBand(scored(5, 5, 5, 5, 2, 2, 0, 0), {
+            maxPickable: 10,
+            maxMergeDepth: 5,
+            graceCompartments: 0,
+            floorHeadroom: 20,
+        });
+        expect(band.map((b) => b.index)).toEqual([6, 7]);
+    });
+
+    it("produces uniform depth-0 coverage over repeated passes before any tier increments", () => {
+        // Simulate the full cascade: 20 compartments all at depth 0, grace=5.
+        // Selecting once picks seq [0..4] (oldest depth-0 band). After
+        // "compression" bumps those to depth 1, selection should pick seq
+        // [5..9] next, not revisit seq 0. Repeat until all eligible seq at 1.
+        const depths = Array(20).fill(0);
+        const maxPickable = 5;
+        const graceCompartments = 5;
+        const passes: number[][] = [];
+
+        for (let pass = 0; pass < 5; pass++) {
+            const band = selectCompressionBand(scored(...depths), {
+                maxPickable,
+                maxMergeDepth: 5,
+                graceCompartments,
+                floorHeadroom: 50,
+            });
+            if (band.length === 0) break;
+            passes.push(band.map((b) => b.index));
+            // Simulate compression: bump those indexes to depth 1.
+            for (const s of band) depths[s.index] = 1;
+        }
+
+        // With 20 compartments and grace=5, eligible range is [0, 15). Each
+        // pass consumes 5 depth-0 slots. After 3 passes, all 15 eligible
+        // slots are at depth 1. The 4th pass then starts the depth-1→2 cycle
+        // from seq 0.
+        expect(passes.length).toBeGreaterThanOrEqual(3);
+        expect(passes[0]).toEqual([0, 1, 2, 3, 4]);
+        expect(passes[1]).toEqual([5, 6, 7, 8, 9]);
+        expect(passes[2]).toEqual([10, 11, 12, 13, 14]);
+        // After all depth-0 bands are compressed, pass 4 returns to oldest
+        // depth-1 band (expected tier-upgrade behavior).
+        if (passes.length >= 4) {
+            expect(passes[3]).toEqual([0, 1, 2, 3, 4]);
+        }
     });
 });
