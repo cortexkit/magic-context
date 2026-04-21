@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { detectConfigFile, parseJsonc } from "../shared/jsonc-parser";
 import { type MagicContextConfig, MagicContextConfigSchema } from "./schema/magic-context";
+import { substituteConfigVariables } from "./variable";
 
 export interface MagicContextPluginConfig extends MagicContextConfig {
     disabled_hooks?: string[];
@@ -30,12 +31,27 @@ function getProjectConfigBasePath(directory: string): string {
     return join(directory, ".opencode", CONFIG_FILE_BASENAME);
 }
 
-function loadConfigFile(configPath: string): Record<string, unknown> | null {
+interface LoadedConfigFile {
+    config: Record<string, unknown>;
+    /** Warnings from {env:} / {file:} substitution, with config-path prefix applied. */
+    warnings: string[];
+}
+
+function loadConfigFile(configPath: string): LoadedConfigFile | null {
     try {
         if (!existsSync(configPath)) {
             return null;
         }
-        return parseJsonc<Record<string, unknown>>(readFileSync(configPath, "utf-8"));
+        const rawText = readFileSync(configPath, "utf-8");
+        // Substitute {env:VAR} and {file:path} tokens on the raw text before
+        // parsing so users can reference env vars (API keys) and external files
+        // without leaking secrets into the config file itself. Matches OpenCode's
+        // ConfigVariable.substitute semantics exactly.
+        const substituted = substituteConfigVariables({ text: rawText, configPath });
+        return {
+            config: parseJsonc<Record<string, unknown>>(substituted.text),
+            warnings: substituted.warnings.map((w) => `${configPath}: ${w}`),
+        };
     } catch (error) {
         console.warn(
             `[magic-context] failed to load config from ${configPath}:`,
@@ -163,23 +179,27 @@ export function loadPluginConfig(
     const dotOpenCodeDetected = detectConfigFile(getProjectConfigBasePath(directory));
     const projectDetected = rootDetected.format !== "none" ? rootDetected : dotOpenCodeDetected;
 
-    const userConfig = userDetected.format === "none" ? null : loadConfigFile(userDetected.path);
-    const projectConfig =
+    const userLoaded = userDetected.format === "none" ? null : loadConfigFile(userDetected.path);
+    const projectLoaded =
         projectDetected.format === "none" ? null : loadConfigFile(projectDetected.path);
 
     let config: MagicContextPluginConfig & { configWarnings?: string[] } = parsePluginConfig({});
     const allWarnings: string[] = [];
 
-    if (userConfig) {
-        const parsed = parsePluginConfig(userConfig);
+    if (userLoaded) {
+        // Variable-substitution warnings surface first so users see missing
+        // env vars before any downstream schema-validation warnings.
+        allWarnings.push(...userLoaded.warnings.map((w) => `[user config] ${w}`));
+        const parsed = parsePluginConfig(userLoaded.config);
         if (parsed.configWarnings?.length) {
             allWarnings.push(...parsed.configWarnings.map((w) => `[user config] ${w}`));
         }
         config = mergeConfigs(config, parsed);
     }
 
-    if (projectConfig) {
-        const parsed = parsePluginConfig(projectConfig);
+    if (projectLoaded) {
+        allWarnings.push(...projectLoaded.warnings.map((w) => `[project config] ${w}`));
+        const parsed = parsePluginConfig(projectLoaded.config);
         if (parsed.configWarnings?.length) {
             allWarnings.push(...parsed.configWarnings.map((w) => `[project config] ${w}`));
         }
