@@ -12,6 +12,30 @@ import {
 
 export { intro, log, note, outro, spinner };
 
+/**
+ * Runtime note on interactive prompts under `curl | bash`:
+ *
+ * `install.sh` does `bunx ... setup </dev/tty` to reconnect the setup
+ * process's stdin to the terminal after the install script was piped through
+ * bash. For that path to work with Clack's `select()` prompt (which relies on
+ * raw-mode keypress events), the setup process needs to run under a Node
+ * runtime — Bun's TTY stream handling does not currently deliver `data`/
+ * `keypress` events through a fresh `/dev/tty` open and `select()` freezes.
+ *
+ * `install.sh` is structured to prefer `bunx` *without* `--bun`, so the CLI's
+ * `#!/usr/bin/env node` shebang is honored and setup runs on Node, which
+ * handles `</dev/tty` redirects correctly. When the user has no compatible
+ * Node on PATH we fall back to `bunx --bun` with a warning pointing users to
+ * the direct `bunx --bun ... setup` invocation (which inherits an interactive
+ * TTY and works fine).
+ *
+ * If you're tempted to pass a custom `input: Readable` here, don't — we
+ * verified that both `fs.createReadStream("/dev/tty")` and
+ * `new tty.ReadStream(openSync("/dev/tty"))` fail under Bun 1.3.x: the latter
+ * advertises `isTTY=true` but emits zero data events. The only reliable fix
+ * is at the runtime boundary (install.sh).
+ */
+
 function handleCancel(value: unknown): void {
     if (isCancel(value)) {
         log.warn("Setup cancelled.");
