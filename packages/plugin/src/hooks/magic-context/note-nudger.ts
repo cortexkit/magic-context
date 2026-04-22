@@ -16,12 +16,17 @@
 import type { Database } from "bun:sqlite";
 import {
     clearPersistedNoteNudge,
+    getNoteLastReadAt,
     getPersistedNoteNudge,
     setPersistedDeliveredNoteNudge,
     setPersistedNoteNudgeTrigger,
     setPersistedNoteNudgeTriggerMessageId,
 } from "../../features/magic-context/storage-meta-persisted";
-import { getReadySmartNotes, getSessionNotes } from "../../features/magic-context/storage-notes";
+import {
+    getReadySmartNotes,
+    getSessionNotes,
+    type Note,
+} from "../../features/magic-context/storage-notes";
 import { sessionLog } from "../../shared/logger";
 
 export type NoteNudgeTrigger = "historian_complete" | "commit_detected" | "todos_complete";
@@ -107,23 +112,70 @@ export function peekNoteNudgeText(
 
     // Check if there are actually notes to remind about
     const notes = getSessionNotes(db, sessionId);
-    const readySmartCount = projectIdentity ? getReadySmartNotes(db, projectIdentity).length : 0;
-    const totalCount = notes.length + readySmartCount;
+    const readySmartNotes = projectIdentity ? getReadySmartNotes(db, projectIdentity) : [];
+    const totalCount = notes.length + readySmartNotes.length;
     if (totalCount === 0) {
         sessionLog(sessionId, "note-nudge: triggerPending but no notes found, skipping");
         clearPersistedNoteNudge(db, sessionId);
         return null;
     }
 
+    // Suppress if the agent already ran ctx_note(read) AFTER the most recent
+    // note activity. In that case the agent has seen the current note state in
+    // recent context (the tool result is in message history) and there's no
+    // new information to surface. This is the main "stop bugging the agent"
+    // heuristic — nudging them to re-read something they already read provides
+    // no benefit.
+    const lastReadAt = getNoteLastReadAt(db, sessionId);
+    if (lastReadAt > 0) {
+        const mostRecentNoteActivity = maxNoteActivityTime([...notes, ...readySmartNotes]);
+        // Strict > so same-millisecond races favor the newer note. If a note
+        // write and a ctx_note(read) land in the same ms, we can't tell which
+        // happened first; err on the side of surfacing the note once more
+        // rather than silently suppressing a potentially new reminder.
+        if (mostRecentNoteActivity > 0 && lastReadAt > mostRecentNoteActivity) {
+            sessionLog(
+                sessionId,
+                `note-nudge: suppressing — agent already ran ctx_note(read) at ${new Date(
+                    lastReadAt,
+                ).toISOString()}, no new notes since ${new Date(
+                    mostRecentNoteActivity,
+                ).toISOString()}`,
+            );
+            clearPersistedNoteNudge(db, sessionId);
+            return null;
+        }
+    }
+
     const parts: string[] = [];
     if (notes.length > 0) {
         parts.push(`${notes.length} deferred note${notes.length === 1 ? "" : "s"}`);
     }
-    if (readySmartCount > 0) {
-        parts.push(`${readySmartCount} ready smart note${readySmartCount === 1 ? "" : "s"}`);
+    if (readySmartNotes.length > 0) {
+        parts.push(
+            `${readySmartNotes.length} ready smart note${readySmartNotes.length === 1 ? "" : "s"}`,
+        );
     }
     sessionLog(sessionId, `note-nudge: delivering nudge for ${parts.join(" and ")}`);
     return `You have ${parts.join(" and ")}. Review with ctx_note read — some may be actionable now.`;
+}
+
+/**
+ * Return the latest `updated_at` or `ready_at` timestamp across a batch of
+ * notes. Used to compare against the agent's last ctx_note(read) watermark
+ * so we skip nudges when the current note state was already read.
+ *
+ * `ready_at` matters for smart notes that were pending at read time and just
+ * transitioned to ready — even if their `updated_at` happens to be older, the
+ * ready transition is new information the agent hasn't seen.
+ */
+function maxNoteActivityTime(notes: Note[]): number {
+    let max = 0;
+    for (const note of notes) {
+        if (note.updatedAt > max) max = note.updatedAt;
+        if (note.readyAt !== null && note.readyAt > max) max = note.readyAt;
+    }
+    return max;
 }
 
 /**

@@ -1131,6 +1131,192 @@ function ConfigForm(props: {
                   </div>
                 </div>
               </div>
+
+              {/* User Memories + Key File Pinning — graduated from experimental in v0.14 */}
+              <div class="config-card-two-col">
+                <div class="config-card-content">
+                  <div class="config-field">
+                    <div class="config-field-header">
+                      <span class="config-field-label">User Memories</span>
+                      <span class="config-field-key">dreamer.user_memories.enabled</span>
+                    </div>
+                    <span class="config-field-desc">
+                      Extract behavioral observations from historian runs, promote recurring
+                      patterns to stable user memories. Requires dreamer.
+                    </span>
+                    <label class="toggle-switch">
+                      <input
+                        type="checkbox"
+                        checked={
+                          (getNestedValue(
+                            formData(),
+                            "dreamer.user_memories.enabled",
+                          ) as boolean) ?? true
+                        }
+                        onChange={(e) =>
+                          handleFieldChange(
+                            "dreamer.user_memories.enabled",
+                            e.currentTarget.checked,
+                          )
+                        }
+                      />
+                      <span class="toggle-slider" />
+                      <span class="toggle-label">
+                        {((getNestedValue(
+                          formData(),
+                          "dreamer.user_memories.enabled",
+                        ) as boolean) ?? true)
+                          ? "Enabled"
+                          : "Disabled"}
+                      </span>
+                    </label>
+                  </div>
+
+                  <Show
+                    when={
+                      ((getNestedValue(
+                        formData(),
+                        "dreamer.user_memories.enabled",
+                      ) as boolean) ?? true)
+                    }
+                  >
+                    <div class="config-field">
+                      <div class="config-field-header">
+                        <span class="config-field-label">Promotion Threshold</span>
+                        <span class="config-field-key">
+                          dreamer.user_memories.promotion_threshold
+                        </span>
+                      </div>
+                      <span class="config-field-desc">
+                        Minimum candidate observations before dreamer promotes to stable (2–20)
+                      </span>
+                      <input
+                        class="config-input"
+                        type="number"
+                        min={2}
+                        max={20}
+                        value={
+                          (getNestedValue(
+                            formData(),
+                            "dreamer.user_memories.promotion_threshold",
+                          ) as number) ?? 3
+                        }
+                        onInput={(e) =>
+                          handleFieldChange(
+                            "dreamer.user_memories.promotion_threshold",
+                            Number(e.currentTarget.value),
+                          )
+                        }
+                      />
+                    </div>
+                  </Show>
+                </div>
+
+                <div class="config-card-content">
+                  <div class="config-field">
+                    <div class="config-field-header">
+                      <span class="config-field-label">Key File Pinning</span>
+                      <span class="config-field-key">dreamer.pin_key_files.enabled</span>
+                    </div>
+                    <span class="config-field-desc">
+                      Pin frequently-read files into the system prompt so the agent doesn't need to
+                      re-read them after drops. Requires dreamer.
+                    </span>
+                    <label class="toggle-switch">
+                      <input
+                        type="checkbox"
+                        checked={
+                          (getNestedValue(
+                            formData(),
+                            "dreamer.pin_key_files.enabled",
+                          ) as boolean) ?? false
+                        }
+                        onChange={(e) =>
+                          handleFieldChange(
+                            "dreamer.pin_key_files.enabled",
+                            e.currentTarget.checked,
+                          )
+                        }
+                      />
+                      <span class="toggle-slider" />
+                      <span class="toggle-label">
+                        {((getNestedValue(
+                          formData(),
+                          "dreamer.pin_key_files.enabled",
+                        ) as boolean) ?? false)
+                          ? "Enabled"
+                          : "Disabled"}
+                      </span>
+                    </label>
+                  </div>
+
+                  <Show
+                    when={
+                      (getNestedValue(
+                        formData(),
+                        "dreamer.pin_key_files.enabled",
+                      ) as boolean) ?? false
+                    }
+                  >
+                    <div class="config-field">
+                      <div class="config-field-header">
+                        <span class="config-field-label">Token Budget</span>
+                        <span class="config-field-key">dreamer.pin_key_files.token_budget</span>
+                      </div>
+                      <span class="config-field-desc">
+                        Total tokens for all pinned key files (2,000–30,000)
+                      </span>
+                      <input
+                        class="config-input"
+                        type="number"
+                        min={2000}
+                        max={30000}
+                        step={1000}
+                        value={
+                          (getNestedValue(
+                            formData(),
+                            "dreamer.pin_key_files.token_budget",
+                          ) as number) ?? 10000
+                        }
+                        onInput={(e) =>
+                          handleFieldChange(
+                            "dreamer.pin_key_files.token_budget",
+                            Number(e.currentTarget.value),
+                          )
+                        }
+                      />
+                    </div>
+
+                    <div class="config-field">
+                      <div class="config-field-header">
+                        <span class="config-field-label">Min Reads</span>
+                        <span class="config-field-key">dreamer.pin_key_files.min_reads</span>
+                      </div>
+                      <span class="config-field-desc">
+                        Minimum full-read count before a file is eligible for pinning (2–20)
+                      </span>
+                      <input
+                        class="config-input"
+                        type="number"
+                        min={2}
+                        max={20}
+                        value={
+                          (getNestedValue(
+                            formData(),
+                            "dreamer.pin_key_files.min_reads",
+                          ) as number) ?? 4
+                        }
+                        onInput={(e) =>
+                          handleFieldChange(
+                            "dreamer.pin_key_files.min_reads",
+                            Number(e.currentTarget.value),
+                          )
+                        }
+                      />
+                    </div>
+                  </Show>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -1286,183 +1472,6 @@ function ConfigForm(props: {
             );
           })()}
 
-          {/* Experimental Features */}
-          {(() => {
-            const exp = () =>
-              (getNestedValue(formData(), "experimental") as
-                | {
-                    user_memories?: { enabled?: boolean; promotion_threshold?: number };
-                    pin_key_files?: {
-                      enabled?: boolean;
-                      token_budget?: number;
-                      min_reads?: number;
-                    };
-                  }
-                | undefined) ?? {};
-
-            const userMemEnabled = () => exp().user_memories?.enabled ?? false;
-            const userMemThreshold = () => exp().user_memories?.promotion_threshold ?? 3;
-            const pinEnabled = () => exp().pin_key_files?.enabled ?? false;
-            const pinBudget = () => exp().pin_key_files?.token_budget ?? 10000;
-            const pinMinReads = () => exp().pin_key_files?.min_reads ?? 4;
-
-            const updateExp = (path: string, value: unknown) => {
-              const current = exp();
-              if (path.startsWith("user_memories.")) {
-                const um = current.user_memories ?? { enabled: false, promotion_threshold: 3 };
-                const field = path.split(".")[1];
-                handleFieldChange("experimental", {
-                  ...current,
-                  user_memories: { ...um, [field]: value },
-                });
-              } else if (path.startsWith("pin_key_files.")) {
-                const pk = current.pin_key_files ?? {
-                  enabled: false,
-                  token_budget: 10000,
-                  min_reads: 4,
-                };
-                const field = path.split(".")[1];
-                handleFieldChange("experimental", {
-                  ...current,
-                  pin_key_files: { ...pk, [field]: value },
-                });
-              }
-            };
-
-            return (
-              <div class="config-card full-width">
-                <div class="config-card-header">
-                  <span class="config-card-icon">🧪</span>
-                  <span class="config-card-title">Experimental</span>
-                </div>
-                <div class="config-card-two-col">
-                  {/* Left column: User Memories */}
-                  <div class="config-card-content">
-                    <div class="config-field">
-                      <div class="config-field-header">
-                        <span class="config-field-label">User Memories</span>
-                        <span class="config-field-key">experimental.user_memories.enabled</span>
-                      </div>
-                      <span class="config-field-desc">
-                        Extract behavioral observations from historian runs, promote recurring
-                        patterns to stable user memories. Requires dreamer.
-                      </span>
-                      <label class="toggle-switch">
-                        <input
-                          type="checkbox"
-                          checked={userMemEnabled()}
-                          onChange={(e) =>
-                            updateExp("user_memories.enabled", e.currentTarget.checked)
-                          }
-                        />
-                        <span class="toggle-slider" />
-                        <span class="toggle-label">
-                          {userMemEnabled() ? "Enabled" : "Disabled"}
-                        </span>
-                      </label>
-                    </div>
-
-                    <Show when={userMemEnabled()}>
-                      <div class="config-field">
-                        <div class="config-field-header">
-                          <span class="config-field-label">Promotion Threshold</span>
-                          <span class="config-field-key">
-                            experimental.user_memories.promotion_threshold
-                          </span>
-                        </div>
-                        <span class="config-field-desc">
-                          Minimum candidate observations before dreamer promotes to stable (2–20)
-                        </span>
-                        <input
-                          class="config-input"
-                          type="number"
-                          min={2}
-                          max={20}
-                          value={userMemThreshold()}
-                          onInput={(e) =>
-                            updateExp(
-                              "user_memories.promotion_threshold",
-                              Number(e.currentTarget.value),
-                            )
-                          }
-                        />
-                      </div>
-                    </Show>
-                  </div>
-
-                  {/* Right column: Key File Pinning */}
-                  <div class="config-card-content">
-                    <div class="config-field">
-                      <div class="config-field-header">
-                        <span class="config-field-label">Key File Pinning</span>
-                        <span class="config-field-key">experimental.pin_key_files.enabled</span>
-                      </div>
-                      <span class="config-field-desc">
-                        Pin frequently-read files into the system prompt so the agent doesn't need
-                        to re-read them after drops. Requires dreamer.
-                      </span>
-                      <label class="toggle-switch">
-                        <input
-                          type="checkbox"
-                          checked={pinEnabled()}
-                          onChange={(e) =>
-                            updateExp("pin_key_files.enabled", e.currentTarget.checked)
-                          }
-                        />
-                        <span class="toggle-slider" />
-                        <span class="toggle-label">{pinEnabled() ? "Enabled" : "Disabled"}</span>
-                      </label>
-                    </div>
-
-                    <Show when={pinEnabled()}>
-                      <div class="config-field">
-                        <div class="config-field-header">
-                          <span class="config-field-label">Token Budget</span>
-                          <span class="config-field-key">
-                            experimental.pin_key_files.token_budget
-                          </span>
-                        </div>
-                        <span class="config-field-desc">
-                          Total tokens for all pinned key files (2,000–30,000)
-                        </span>
-                        <input
-                          class="config-input"
-                          type="number"
-                          min={2000}
-                          max={30000}
-                          step={1000}
-                          value={pinBudget()}
-                          onInput={(e) =>
-                            updateExp("pin_key_files.token_budget", Number(e.currentTarget.value))
-                          }
-                        />
-                      </div>
-
-                      <div class="config-field">
-                        <div class="config-field-header">
-                          <span class="config-field-label">Min Reads</span>
-                          <span class="config-field-key">experimental.pin_key_files.min_reads</span>
-                        </div>
-                        <span class="config-field-desc">
-                          Minimum full-read count before a file is eligible for pinning (2–20)
-                        </span>
-                        <input
-                          class="config-input"
-                          type="number"
-                          min={2}
-                          max={20}
-                          value={pinMinReads()}
-                          onInput={(e) =>
-                            updateExp("pin_key_files.min_reads", Number(e.currentTarget.value))
-                          }
-                        />
-                      </div>
-                    </Show>
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
         </div>
       </Show>
     </div>

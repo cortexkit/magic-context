@@ -71,15 +71,6 @@ describe("MagicContextConfigSchema", () => {
                     grace_compartments: 10,
                 },
                 experimental: {
-                    user_memories: {
-                        enabled: false,
-                        promotion_threshold: 3,
-                    },
-                    pin_key_files: {
-                        enabled: false,
-                        token_budget: 10000,
-                        min_reads: 4,
-                    },
                     temporal_awareness: false,
                     git_commit_indexing: {
                         enabled: false,
@@ -88,7 +79,7 @@ describe("MagicContextConfigSchema", () => {
                     },
                     auto_search: {
                         enabled: false,
-                        score_threshold: 0.65,
+                        score_threshold: 0.55,
                         min_prompt_chars: 20,
                     },
                 },

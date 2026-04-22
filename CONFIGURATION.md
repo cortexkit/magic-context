@@ -395,14 +395,16 @@ It is useful when starting a new session. It's better to choose a fast and cheap
 
 ---
 
-## Experimental Features
+## Dreamer Sub-Features
 
-### `experimental_user_memories`
+Two sub-features used to live under `experimental` and graduated to `dreamer.*` in v0.14. The `doctor` command migrates existing configs automatically and preserves any user-set `enabled` state.
+
+### `dreamer.user_memories`
 
 | Key | Type | Default |
 |-----|------|---------|
-| `experimental.user_memories.enabled` | `boolean` | `false` |
-| `experimental.user_memories.promotion_threshold` | `number` | `3` |
+| `dreamer.user_memories.enabled` | `boolean` | `true` |
+| `dreamer.user_memories.promotion_threshold` | `number` | `3` |
 
 When enabled, historian extracts behavioral observations about the user alongside compartments. These are stored as candidates and reviewed by dreamer during scheduled runs. Recurring patterns that appear across multiple historian runs are promoted to stable user memories, injected into all sessions via `<user-profile>` in the system prompt.
 
@@ -410,13 +412,13 @@ When enabled, historian extracts behavioral observations about the user alongsid
 
 - `promotion_threshold`: minimum number of semantically similar candidate observations before dreamer considers promoting to a stable memory (2–20, default 3).
 
-### `experimental.pin_key_files`
+### `dreamer.pin_key_files`
 
 | Key | Type | Default |
 |-----|------|---------|
-| `experimental.pin_key_files.enabled` | `boolean` | `false` |
-| `experimental.pin_key_files.token_budget` | `number` | `10000` |
-| `experimental.pin_key_files.min_reads` | `number` | `4` |
+| `dreamer.pin_key_files.enabled` | `boolean` | `false` |
+| `dreamer.pin_key_files.token_budget` | `number` | `10000` |
+| `dreamer.pin_key_files.min_reads` | `number` | `4` |
 
 When enabled, dreamer analyzes which files each session's agent reads most frequently (full reads only, not partial line ranges). Core orientation files — architecture, config, types — that are repeatedly re-read after context drops are pinned into the system prompt as a `<key-files>` block. Files are read fresh from disk on each cache-busting pass.
 
@@ -424,6 +426,8 @@ When enabled, dreamer analyzes which files each session's agent reads most frequ
 
 - `token_budget`: maximum total tokens for all pinned files combined (2000–30000, default 10000). Files are selected by a knapsack solver to fit within this budget.
 - `min_reads`: minimum number of full-file reads before a file is considered for pinning (2–20, default 4). Lower values are more aggressive but risk pinning task-specific files.
+
+## Experimental Features
 
 ### `experimental.temporal_awareness`
 
@@ -462,7 +466,7 @@ When enabled, Magic Context indexes HEAD git commits (skipping merges) from the 
 | Key | Type | Default |
 |-----|------|---------|
 | `experimental.auto_search.enabled` | `boolean` | `false` |
-| `experimental.auto_search.score_threshold` | `number` | `0.65` |
+| `experimental.auto_search.score_threshold` | `number` | `0.55` |
 | `experimental.auto_search.min_prompt_chars` | `number` | `20` |
 
 When enabled, Magic Context runs a background `ctx_search` on each new user message and, when a strong match is found, appends a compact "vague recall" hint to that user message. The hint surfaces highly compressed fragments from the best matches so the agent can decide whether to run `ctx_search` for the full content.
@@ -485,7 +489,7 @@ Run ctx_search to retrieve full context if relevant.
 
 **Parameters:**
 
-- `score_threshold`: minimum top-hit cosine score for the hint to fire (0.5–0.9, default 0.65). More permissive than direct injection because false-positive cost is small — the agent ignores irrelevant hints.
+- `score_threshold`: minimum top-hit cosine score for the hint to fire (0.3–0.95, default 0.55). More permissive than direct injection because false-positive cost is small — the agent ignores irrelevant hints. Lowered from 0.65 → 0.55 in v0.14 after the v0.14 visible-memory hard filter removed the biggest noise source.
 - `min_prompt_chars`: minimum user message length to trigger auto-search (default 20). Short prompts like "yes" or "ok" don't get a hint.
 
 **Suppression rules.** The hint is not appended when:

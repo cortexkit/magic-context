@@ -51,7 +51,12 @@ import { logTransformTiming } from "./transform-stage-logger";
 
 export { createNudgePlacementStore, type NudgePlacementStore } from "./nudge-placement-store";
 
-import { clearHistorianFailureState } from "../../features/magic-context/storage-meta-persisted";
+import {
+    clearDetectedContextLimit,
+    clearEmergencyRecovery,
+    clearHistorianFailureState,
+    getOverflowState,
+} from "../../features/magic-context/storage-meta-persisted";
 import type { LiveModelBySession } from "./hook-handlers";
 
 // Per-session message token cache. Keyed by message ID, value is the token
@@ -278,6 +283,13 @@ export function createTransform(deps: TransformDeps) {
                         lastInputTokens: 0,
                     });
                     clearHistorianFailureState(db, sessionId);
+                    // Clear any detected context limit from a prior overflow — the
+                    // old limit was specific to the previous model and must not
+                    // leak into pressure math for the new model. The recovery
+                    // flag is cleared too; the new model gets a fresh chance
+                    // to overflow (and a fresh detection cycle) if it must.
+                    clearDetectedContextLimit(db, sessionId);
+                    clearEmergencyRecovery(db, sessionId);
                     // Also clear the in-memory usage map so loadContextUsage gets fresh values
                     deps.contextUsageMap.delete(sessionId);
                 }
@@ -320,7 +332,37 @@ export function createTransform(deps: TransformDeps) {
 
         // Compute context usage AFTER first-pass reset so threshold checks use
         // clean state (0%) instead of stale values from a previous model/session.
-        const contextUsageEarly = loadContextUsage(deps.contextUsageMap, db, sessionId);
+        let contextUsageEarly = loadContextUsage(deps.contextUsageMap, db, sessionId);
+
+        // Overflow-triggered emergency recovery: if a prior provider response
+        // included a context-overflow error, the event handler persisted
+        // needs_emergency_recovery=1. On the very next transform pass we bump
+        // the effective percentage to 95% so the existing emergency path
+        // (abort + historian + aggressive drops) fires regardless of what
+        // pressure math says. Without this, an overflow on a session whose
+        // limit resolver over-reported the real limit would never enter the
+        // emergency path — we'd just keep hitting the same overflow error.
+        if (fullFeatureMode) {
+            try {
+                const overflowState = getOverflowState(db, sessionId);
+                if (overflowState.needsEmergencyRecovery && contextUsageEarly.percentage < 95) {
+                    sessionLog(
+                        sessionId,
+                        `transform: bumping percentage to 95% due to overflow recovery flag (was ${contextUsageEarly.percentage.toFixed(1)}%, detectedLimit=${overflowState.detectedContextLimit || "unknown"})`,
+                    );
+                    contextUsageEarly = {
+                        ...contextUsageEarly,
+                        percentage: 95,
+                    };
+                }
+            } catch (error) {
+                sessionLog(
+                    sessionId,
+                    "transform: overflow recovery state read failed:",
+                    getErrorMessage(error),
+                );
+            }
+        }
         const historyBudgetTokens = resolveHistoryBudgetTokens(
             deps.historyBudgetPercentage,
             contextUsageEarly,

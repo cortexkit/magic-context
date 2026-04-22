@@ -267,12 +267,7 @@ export function prepareCompartmentInjection(
             try {
                 db.prepare(
                     "UPDATE session_meta SET memory_block_cache = ?, memory_block_count = ?, memory_block_ids = ? WHERE session_id = ?",
-                ).run(
-                    memoryBlock ?? "",
-                    memoryCount,
-                    JSON.stringify(renderedIds),
-                    sessionId,
-                );
+                ).run(memoryBlock ?? "", memoryCount, JSON.stringify(renderedIds), sessionId);
             } catch (error) {
                 const code = (error as { code?: string } | null)?.code;
                 if (code === "SQLITE_BUSY") {

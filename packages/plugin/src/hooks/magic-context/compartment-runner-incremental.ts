@@ -8,6 +8,7 @@ import { promoteSessionFactsToMemory } from "../../features/magic-context/memory
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { getMemoriesByProject } from "../../features/magic-context/memory/storage-memory";
 import {
+    clearEmergencyRecovery,
     clearHistorianFailureState,
     incrementHistorianFailure,
 } from "../../features/magic-context/storage";
@@ -190,6 +191,12 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             appendCompartments(db, sessionId, newCompartments);
             replaceSessionFacts(db, sessionId, validatedPass.facts ?? []);
             clearHistorianFailureState(db, sessionId);
+            // Successful historian publication means the overflow recovery is
+            // complete for this session. Clear the flag so we don't keep
+            // force-bumping percentage on future turns. detectedContextLimit
+            // stays — it's the authoritative real limit and remains valuable
+            // for pressure math going forward.
+            clearEmergencyRecovery(db, sessionId);
         })();
         // Invalidate in-memory injection cache so the next transform rebuilds <session-history>
         // with the new compartments/facts. Without this, cached stale content persists.

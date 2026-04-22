@@ -142,7 +142,7 @@ export async function ensureEmbeddingModel(): Promise<boolean> {
     return currentProvider.initialize();
 }
 
-export async function embedText(text: string): Promise<Float32Array | null> {
+export async function embedText(text: string, signal?: AbortSignal): Promise<Float32Array | null> {
     const currentProvider = getOrCreateProvider();
     if (!currentProvider) {
         return null;
@@ -152,10 +152,13 @@ export async function embedText(text: string): Promise<Float32Array | null> {
         return null;
     }
 
-    return currentProvider.embed(text);
+    return currentProvider.embed(text, signal);
 }
 
-export async function embedBatch(texts: string[]): Promise<(Float32Array | null)[]> {
+export async function embedBatch(
+    texts: string[],
+    signal?: AbortSignal,
+): Promise<(Float32Array | null)[]> {
     if (texts.length === 0) {
         return [];
     }
@@ -169,7 +172,7 @@ export async function embedBatch(texts: string[]): Promise<(Float32Array | null)
         return Array.from({ length: texts.length }, () => null);
     }
 
-    return currentProvider.embedBatch(texts);
+    return currentProvider.embedBatch(texts, signal);
 }
 
 export async function embedUnembeddedMemories(

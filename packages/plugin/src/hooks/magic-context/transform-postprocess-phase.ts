@@ -576,16 +576,19 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
 
     // Auto-search hint — append a vague-recall fragment hint to the latest
     // user message when experimental.auto_search is enabled and search
-    // returns a high-confidence match. Runs OUTSIDE fullFeatureMode because
-    // appending to the user's own turn is cache-safe (user message hasn't
-    // been cached yet) and useful across subagent sessions too.
-    if (args.autoSearch?.enabled && args.projectPath) {
+    // returns a high-confidence match. Gated behind fullFeatureMode: subagent
+    // sessions (historian, compressor, dreamer child tasks, council members,
+    // etc.) are driven by the main agent via prompt injection, not by the
+    // user. There is no user prompt to semantically ground against, and
+    // running embedding on subagent input wastes cycles + saturates the
+    // embedding endpoint when many subagents run in parallel (e.g. Athena
+    // council).
+    if (args.fullFeatureMode && args.autoSearch?.enabled && args.projectPath) {
         // Resolve memory ids currently rendered in the <session-history>
         // block. The auto-search runner drops hint fragments for memories the
         // agent already sees in message[0] so the hint stays "vague recall"
         // for content not already in context.
-        const visibleMemoryIds =
-            getVisibleMemoryIds(args.db, args.sessionId) ?? undefined;
+        const visibleMemoryIds = getVisibleMemoryIds(args.db, args.sessionId) ?? undefined;
 
         try {
             await runAutoSearchHint({

@@ -2,6 +2,7 @@
 
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
+import { setNoteLastReadAt } from "../../features/magic-context/storage-meta-persisted";
 import { addNote } from "../../features/magic-context/storage-notes";
 import {
     clearNoteNudgeState,
@@ -48,6 +49,7 @@ function makeDb(): Database {
             note_nudge_trigger_message_id TEXT DEFAULT '',
             note_nudge_sticky_text TEXT DEFAULT '',
             note_nudge_sticky_message_id TEXT DEFAULT '',
+            note_last_read_at INTEGER DEFAULT 0,
             cleared_reasoning_through_tag INTEGER DEFAULT 0
         );
 
@@ -119,6 +121,62 @@ describe("note-nudger", () => {
         onNoteTrigger(db, "ses-empty", "todos_complete");
 
         expect(getNoteNudgeText(db, "ses-empty")).toBeNull();
+    });
+
+    it("suppresses nudge when agent ran ctx_note(read) after all note activity", () => {
+        const db = makeDb();
+        const note = addNote(db, "session", {
+            sessionId: "ses-read-watermark",
+            content: "Already-seen note.",
+        });
+
+        // Simulate agent running ctx_note(read) shortly after the note was added.
+        setNoteLastReadAt(db, "ses-read-watermark", note.updatedAt + 1000);
+
+        onNoteTrigger(db, "ses-read-watermark", "commit_detected");
+        // First peek records the trigger-time message so it gets deferred.
+        expect(peekNoteNudgeText(db, "ses-read-watermark", "u-1")).toBeNull();
+        // Subsequent peek on a new user message would normally deliver, but
+        // the read watermark is newer than all note activity → skip entirely.
+        expect(peekNoteNudgeText(db, "ses-read-watermark", "u-2")).toBeNull();
+    });
+
+    it("still delivers when a new note arrives after the last ctx_note(read)", () => {
+        const db = makeDb();
+        const older = addNote(db, "session", {
+            sessionId: "ses-new-activity",
+            content: "Old note already seen.",
+        });
+
+        // Agent read notes right after the older note was written, well before
+        // the new note arrived. Use a small forward jump so real-world clocks
+        // can't accidentally push a same-millisecond `addNote` past this mark.
+        const readAt = older.updatedAt + 1;
+        setNoteLastReadAt(db, "ses-new-activity", readAt);
+
+        // A new note must land strictly after the recorded read watermark.
+        // `addNote` uses `Date.now()` which may share a millisecond with the
+        // first insert on fast hardware, so stamp its timestamps explicitly.
+        const newerAt = readAt + 1;
+        db.prepare(
+            `INSERT INTO notes (type, status, content, session_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        ).run(
+            "session",
+            "active",
+            "New note after last read.",
+            "ses-new-activity",
+            newerAt,
+            newerAt,
+        );
+
+        onNoteTrigger(db, "ses-new-activity", "historian_complete");
+        // Defer first peek (trigger-time message).
+        expect(peekNoteNudgeText(db, "ses-new-activity", "u-1")).toBeNull();
+        // On the next user message, the nudge fires because one note is newer
+        // than the last read watermark.
+        expect(peekNoteNudgeText(db, "ses-new-activity", "u-2")).toContain(
+            "You have 2 deferred notes",
+        );
     });
 
     it("clears persisted state so prior triggers and stickies no longer produce nudges", () => {

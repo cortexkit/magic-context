@@ -8,6 +8,7 @@ import {
     getReadySmartNotes,
     getSessionNotes,
     type Note,
+    setNoteLastReadAt,
     updateNote,
 } from "../../features/magic-context/storage";
 import { CTX_NOTE_DESCRIPTION } from "./constants";
@@ -215,6 +216,15 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                 projectIdentity: deps.projectIdentity,
                 sessionId,
             });
+
+            // Record read watermark so note-nudger can suppress reminders
+            // when the agent has already seen notes in recent context and no
+            // new notes have been written since.
+            try {
+                setNoteLastReadAt(deps.db, sessionId);
+            } catch {
+                // Best-effort — the watermark is a suppression hint, not correctness.
+            }
 
             if (sections.length === 0) {
                 return "## Notes\n\nNo session notes or smart notes.";

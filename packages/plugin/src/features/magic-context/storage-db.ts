@@ -279,6 +279,10 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "session_meta", "note_nudge_trigger_message_id", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "note_nudge_sticky_text", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "note_nudge_sticky_message_id", "TEXT DEFAULT ''");
+    // Timestamp of last ctx_note(read) call for this session. Used by note-nudger
+    // to suppress nudges when the agent has already seen notes in recent context
+    // and no new notes have been created or updated since.
+    ensureColumn(db, "session_meta", "note_last_read_at", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "times_execute_threshold_reached", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "compartment_in_progress", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "historian_failure_count", "INTEGER DEFAULT 0");
@@ -320,6 +324,17 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // requests a different range than what is already staged.
     ensureColumn(db, "session_meta", "recomp_partial_range_start", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "recomp_partial_range_end", "INTEGER DEFAULT 0");
+    // Context limit reported by the provider in an overflow error message. When
+    // non-zero, this overrides all other resolution sources (models.dev cache,
+    // user config, defaults) because it's the most authoritative signal we can
+    // get — the model itself told us what fits. Set by overflow event handler
+    // when parseReportedLimit() extracts a number; cleared on model switch.
+    ensureColumn(db, "session_meta", "detected_context_limit", "INTEGER DEFAULT 0");
+    // True when the current session has hit an unrecovered context overflow
+    // and needs the emergency recovery path (block at 95%, abort current
+    // request, fire historian + aggressive drops) on its next transform pass.
+    // Cleared once recovery succeeds.
+    ensureColumn(db, "session_meta", "needs_emergency_recovery", "INTEGER DEFAULT 0");
 
     // One-time heal: when ensureColumn adds a new TEXT DEFAULT '' or
     // INTEGER DEFAULT N column, SQLite leaves pre-existing rows with NULL

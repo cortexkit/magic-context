@@ -1,3 +1,5 @@
+import type { ContextDatabase } from "../../features/magic-context/storage";
+import { getOverflowState } from "../../features/magic-context/storage-meta-persisted";
 import { log, sessionLog } from "../../shared/logger";
 import { getModelsDevContextLimit } from "../../shared/models-dev-cache";
 
@@ -6,26 +8,45 @@ const MAX_EXECUTE_THRESHOLD = 80;
 
 type CacheTtlConfig = string | Record<string, string>;
 
+/**
+ * Resolve the effective context limit for a (providerID, modelID) pair.
+ *
+ * Resolution order:
+ *   1. Detected limit from a prior overflow error, when smaller than the
+ *      configured/cache limit. Providers report the REAL limit in the error
+ *      message, which is authoritative for the current deployment.
+ *   2. OpenCode's models.dev cache (overlaid with user's
+ *      `provider.*.models.*.limit.context`).
+ *   3. Conservative default (128k).
+ *
+ * The session context (db + sessionID) is optional — callers that operate
+ * outside a specific session (e.g. warm-up, status-bar summaries) can omit it
+ * and fall back to the global cache/default.
+ */
 export function resolveContextLimit(
     providerID: string | undefined,
     modelID: string | undefined,
+    ctx?: { db?: ContextDatabase; sessionID?: string },
 ): number {
-    if (!providerID) {
-        return DEFAULT_CONTEXT_LIMIT;
-    }
+    const fromModelsDev =
+        providerID && modelID ? getModelsDevContextLimit(providerID, modelID) : undefined;
+    const baseline = fromModelsDev ?? DEFAULT_CONTEXT_LIMIT;
 
-    // Read from OpenCode's models.dev cache file at ~/.cache/opencode/models.json.
-    // `getModelsDevContextLimit` also overlays custom `provider.*.models.*.limit.context`
-    // entries from the user's opencode.json(c), so explicit user overrides are honored.
-    if (modelID) {
-        const modelsDevLimit = getModelsDevContextLimit(providerID, modelID);
-        if (modelsDevLimit !== undefined) {
-            return modelsDevLimit;
+    if (ctx?.db && ctx.sessionID) {
+        try {
+            const overflow = getOverflowState(ctx.db, ctx.sessionID);
+            // A detected limit only wins when it is smaller than the baseline —
+            // providers never under-report their real limit. If the baseline is
+            // already accurate, no need to downgrade.
+            if (overflow.detectedContextLimit > 0 && overflow.detectedContextLimit < baseline) {
+                return overflow.detectedContextLimit;
+            }
+        } catch {
+            // Reading session meta is best-effort — fall through to baseline.
         }
     }
 
-    // Conservative default for models not in models.dev and not configured.
-    return DEFAULT_CONTEXT_LIMIT;
+    return baseline;
 }
 
 export function resolveCacheTtl(cacheTtl: CacheTtlConfig, modelKey: string | undefined): string {

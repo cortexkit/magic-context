@@ -62,6 +62,34 @@ export const DreamerConfigSchema = AgentOverrideConfigSchema.merge(
         task_timeout_minutes: z.number().min(5).default(20),
         /** Inject ARCHITECTURE.md and STRUCTURE.md into system prompt (default: true) */
         inject_docs: z.boolean().default(true),
+        /** User memory pipeline: historian extracts behavior observations from each
+         *  compartment run; dreamer reviews recurring patterns and promotes them to
+         *  stable user memories injected into all sessions as `<user-profile>`.
+         *  Requires dreamer to be enabled for promotion to actually happen.
+         *  Graduated from experimental in v0.14. Default: enabled. */
+        user_memories: z
+            .object({
+                /** Enable user memory extraction and promotion (default: true) */
+                enabled: z.boolean().default(true),
+                /** Minimum candidate observations before dreamer considers promotion (default: 3) */
+                promotion_threshold: z.number().min(2).max(20).default(3),
+            })
+            .default({ enabled: true, promotion_threshold: 3 }),
+        /** Pin frequently-read key files into the system prompt so the agent
+         *  doesn't need to re-read them after context drops. Dreamer identifies
+         *  key files per session based on read patterns. Requires dreamer to be
+         *  enabled for selection to happen. Graduated from experimental in v0.14.
+         *  Default: disabled. */
+        pin_key_files: z
+            .object({
+                /** Enable key file pinning (default: false) */
+                enabled: z.boolean().default(false),
+                /** Total token budget for all pinned key files (min: 2000, max: 30000, default: 10000) */
+                token_budget: z.number().min(2000).max(30000).default(10000),
+                /** Minimum full-read count before a file is considered for pinning (min: 2, default: 4) */
+                min_reads: z.number().min(2).max(20).default(4),
+            })
+            .default({ enabled: false, token_budget: 10000, min_reads: 4 }),
     }),
 );
 export type DreamerConfig = z.infer<typeof DreamerConfigSchema>;
@@ -170,17 +198,6 @@ export interface MagicContextConfig {
         grace_compartments: number;
     };
     experimental: {
-        user_memories: {
-            enabled: boolean;
-            promotion_threshold: number;
-        };
-        pin_key_files: {
-            enabled: boolean;
-            /** Total token budget for all pinned key files (default: 10000) */
-            token_budget: number;
-            /** Minimum full-read count before a file is considered for pinning (default: 4) */
-            min_reads: number;
-        };
         /** Inject elapsed-time markers between user messages and date ranges on
          *  compartments so the agent has a wall-clock sense of the session. */
         temporal_awareness: boolean;
@@ -344,32 +361,10 @@ export const MagicContextConfigSchema = z
             provider: "local",
             model: DEFAULT_LOCAL_EMBEDDING_MODEL,
         }),
-        /** Experimental features — gated behind flags, may change between releases. */
+        /** Experimental features — gated behind flags, may change between releases.
+         *  Note: user_memories and pin_key_files graduated to top-level `dreamer.*` in v0.14. */
         experimental: z
             .object({
-                /** Extract user behavior observations from historian runs and promote recurring patterns
-                 *  to stable user memories injected into all sessions. Requires dreamer. Default: false. */
-                user_memories: z
-                    .object({
-                        /** Enable user memory extraction and promotion (default: false) */
-                        enabled: z.boolean().default(false),
-                        /** Minimum candidate observations before dreamer considers promotion (default: 3) */
-                        promotion_threshold: z.number().min(2).max(20).default(3),
-                    })
-                    .default({ enabled: false, promotion_threshold: 3 }),
-                /** Pin frequently-read key files into the system prompt so the agent
-                 *  doesn't need to re-read them after context drops. Dreamer identifies
-                 *  key files per session based on read patterns. Requires dreamer. Default: false. */
-                pin_key_files: z
-                    .object({
-                        /** Enable key file pinning (default: false) */
-                        enabled: z.boolean().default(false),
-                        /** Total token budget for all pinned key files (min: 2000, max: 30000, default: 10000) */
-                        token_budget: z.number().min(2000).max(30000).default(10000),
-                        /** Minimum full-read count before a file is considered for pinning (min: 2, default: 4) */
-                        min_reads: z.number().min(2).max(20).default(4),
-                    })
-                    .default({ enabled: false, token_budget: 10000, min_reads: 4 }),
                 /** Inject wall-clock gap markers (<!-- +Xm -->) between user messages
                  *  where > 5 min elapsed since the previous message, and add start/end
                  *  date attributes on compartments. Gives the agent a sense of session
@@ -394,19 +389,17 @@ export const MagicContextConfigSchema = z
                 auto_search: z
                     .object({
                         enabled: z.boolean().default(false),
-                        /** Top hit score must exceed this threshold for the hint to fire (min: 0.3, max: 0.95, default: 0.65) */
-                        score_threshold: z.number().min(0.3).max(0.95).default(0.65),
+                        /** Top hit score must exceed this threshold for the hint to fire (min: 0.3, max: 0.95, default: 0.55) */
+                        score_threshold: z.number().min(0.3).max(0.95).default(0.55),
                         /** Skip hint when user message is shorter than this (min: 5, max: 500, default: 20) */
                         min_prompt_chars: z.number().min(5).max(500).default(20),
                     })
-                    .default({ enabled: false, score_threshold: 0.65, min_prompt_chars: 20 }),
+                    .default({ enabled: false, score_threshold: 0.55, min_prompt_chars: 20 }),
             })
             .default({
-                user_memories: { enabled: false, promotion_threshold: 3 },
-                pin_key_files: { enabled: false, token_budget: 10000, min_reads: 4 },
                 temporal_awareness: false,
                 git_commit_indexing: { enabled: false, since_days: 365, max_commits: 2000 },
-                auto_search: { enabled: false, score_threshold: 0.65, min_prompt_chars: 20 },
+                auto_search: { enabled: false, score_threshold: 0.55, min_prompt_chars: 20 },
             }),
         /** Cross-session memory configuration */
         memory: z

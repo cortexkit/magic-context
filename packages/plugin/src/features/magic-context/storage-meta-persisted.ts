@@ -329,6 +329,42 @@ export function clearPersistedNoteNudge(db: Database, sessionId: string): void {
     ).run(sessionId);
 }
 
+/**
+ * Return the timestamp of the most recent ctx_note(read) call for this session,
+ * or 0 when the session has never called it. Used by note-nudger to suppress
+ * reminders when the agent has already seen notes in recent context.
+ */
+export function getNoteLastReadAt(db: Database, sessionId: string): number {
+    try {
+        const result = db
+            .prepare("SELECT note_last_read_at FROM session_meta WHERE session_id = ?")
+            .get(sessionId);
+        if (!result || typeof result !== "object") return 0;
+        const value = (result as { note_last_read_at?: unknown }).note_last_read_at;
+        return typeof value === "number" && Number.isFinite(value) ? value : 0;
+    } catch {
+        // Column may not exist yet on a DB that hasn't gone through
+        // ensureColumn (e.g. minimal test schemas). The watermark is a
+        // suppression hint, not required for correctness — return 0 so
+        // the nudge flow proceeds as if ctx_note(read) has never been called.
+        return 0;
+    }
+}
+
+/**
+ * Record that ctx_note(read) was just called for this session. The watermark is
+ * compared against note updated_at / created_at on each nudge decision.
+ */
+export function setNoteLastReadAt(db: Database, sessionId: string, at = Date.now()): void {
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        db.prepare("UPDATE session_meta SET note_last_read_at = ? WHERE session_id = ?").run(
+            at,
+            sessionId,
+        );
+    })();
+}
+
 export function getHistorianFailureState(
     db: Database,
     sessionId: string,
@@ -373,6 +409,91 @@ export function clearHistorianFailureState(db: Database, sessionId: string): voi
         db.prepare(
             "UPDATE session_meta SET historian_failure_count = 0, historian_last_error = NULL, historian_last_failure_at = NULL WHERE session_id = ?",
         ).run(sessionId);
+    })();
+}
+
+// ── Overflow detection state ──
+//
+// When a provider returns a context-overflow error, we persist two signals:
+//   - detected_context_limit: the real limit reported in the error (when we
+//     can parse one). Used as the highest-priority source in the context
+//     limit resolver — the model itself is more authoritative than models.dev.
+//   - needs_emergency_recovery: a one-shot flag that tells the next transform
+//     pass to enter the 95% emergency recovery path (block, abort current
+//     request, fire historian + aggressive drops) even if pressure math says
+//     we are below 95%. Cleared once recovery succeeds or session is cleared.
+
+export interface PersistedOverflowState {
+    /** Provider-reported context limit from the overflow error; 0 means none detected. */
+    detectedContextLimit: number;
+    /** True while recovery is still required after an overflow. */
+    needsEmergencyRecovery: boolean;
+}
+
+export function getOverflowState(db: Database, sessionId: string): PersistedOverflowState {
+    const result = db
+        .prepare(
+            "SELECT detected_context_limit, needs_emergency_recovery FROM session_meta WHERE session_id = ?",
+        )
+        .get(sessionId) as
+        | { detected_context_limit?: number; needs_emergency_recovery?: number }
+        | undefined;
+    if (!result) {
+        return { detectedContextLimit: 0, needsEmergencyRecovery: false };
+    }
+    const limit =
+        typeof result.detected_context_limit === "number" && result.detected_context_limit > 0
+            ? result.detected_context_limit
+            : 0;
+    const needs =
+        typeof result.needs_emergency_recovery === "number" && result.needs_emergency_recovery > 0;
+    return { detectedContextLimit: limit, needsEmergencyRecovery: needs };
+}
+
+/**
+ * Record that a provider reported an overflow. Sets the recovery flag
+ * unconditionally; also persists the real limit if one was extracted from the
+ * error message. Transactional so the two fields always agree.
+ */
+export function recordOverflowDetected(
+    db: Database,
+    sessionId: string,
+    reportedLimit: number | undefined,
+): void {
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        if (typeof reportedLimit === "number" && reportedLimit > 0) {
+            db.prepare(
+                "UPDATE session_meta SET detected_context_limit = ?, needs_emergency_recovery = 1 WHERE session_id = ?",
+            ).run(reportedLimit, sessionId);
+        } else {
+            db.prepare(
+                "UPDATE session_meta SET needs_emergency_recovery = 1 WHERE session_id = ?",
+            ).run(sessionId);
+        }
+    })();
+}
+
+/** Clear the recovery flag. Keeps the detected limit (valuable even after recovery). */
+export function clearEmergencyRecovery(db: Database, sessionId: string): void {
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        db.prepare("UPDATE session_meta SET needs_emergency_recovery = 0 WHERE session_id = ?").run(
+            sessionId,
+        );
+    })();
+}
+
+/**
+ * Clear the detected limit. Called when the session switches to a different
+ * model — the old limit is no longer relevant.
+ */
+export function clearDetectedContextLimit(db: Database, sessionId: string): void {
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        db.prepare("UPDATE session_meta SET detected_context_limit = 0 WHERE session_id = ?").run(
+            sessionId,
+        );
     })();
 }
 

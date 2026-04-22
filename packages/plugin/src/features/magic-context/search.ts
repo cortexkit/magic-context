@@ -53,7 +53,7 @@ export interface UnifiedSearchOptions {
     memoryEnabled?: boolean;
     embeddingEnabled?: boolean;
     readMessages?: (sessionId: string) => RawMessage[];
-    embedQuery?: (text: string) => Promise<Float32Array | null>;
+    embedQuery?: (text: string, signal?: AbortSignal) => Promise<Float32Array | null>;
     isEmbeddingRuntimeEnabled?: () => boolean;
     /** Only return message-history hits with ordinal ≤ this value (e.g. last compartment end). -1 or omit to search all. */
     maxMessageOrdinal?: number;
@@ -71,6 +71,19 @@ export interface UnifiedSearchOptions {
      *  to disable filtering (for callers outside the transform context that
      *  can't resolve the visible set). */
     visibleMemoryIds?: Set<number> | null;
+    /** Abort signal — if provided, cancels in-flight embedding requests
+     *  (and any downstream HTTP calls) when the caller gives up. Used by
+     *  transform-hot-path callers like auto-search whose own 3s timeout
+     *  needs to cancel the 30s embedding fetch. */
+    signal?: AbortSignal;
+    /** When true (default), increment retrieval_count on memory hits. Explicit
+     *  `ctx_search` tool calls from the agent SHOULD count — the agent asked
+     *  for the memory, saw it, and used it. Plugin-internal automatic surfacing
+     *  (e.g. auto-search hints appended to every user prompt) should NOT count
+     *  because the agent may never actually consume the hint, and even if they
+     *  do, automatic surfacing doesn't indicate usefulness. Mis-counting drives
+     *  spurious retrieval-count-based memory promotion decisions. */
+    countRetrievals?: boolean;
 }
 
 export interface MemorySearchResult {
@@ -157,8 +170,9 @@ async function getSemanticScores(args: {
     query: string;
     memories: Memory[];
     embeddingEnabled: boolean;
-    embedQuery: (text: string) => Promise<Float32Array | null>;
+    embedQuery: (text: string, signal?: AbortSignal) => Promise<Float32Array | null>;
     isEmbeddingRuntimeEnabled: () => boolean;
+    signal?: AbortSignal;
 }): Promise<Map<number, number>> {
     const semanticScores = new Map<number, number>();
 
@@ -166,7 +180,7 @@ async function getSemanticScores(args: {
         return semanticScores;
     }
 
-    const queryEmbedding = await args.embedQuery(args.query);
+    const queryEmbedding = await args.embedQuery(args.query, args.signal);
     if (!queryEmbedding) {
         return semanticScores;
     }
@@ -305,9 +319,10 @@ async function searchMemories(args: {
     limit: number;
     memoryEnabled: boolean;
     embeddingEnabled: boolean;
-    embedQuery: (text: string) => Promise<Float32Array | null>;
+    embedQuery: (text: string, signal?: AbortSignal) => Promise<Float32Array | null>;
     isEmbeddingRuntimeEnabled: () => boolean;
     visibleMemoryIds?: Set<number> | null;
+    signal?: AbortSignal;
 }): Promise<MemorySearchResult[]> {
     if (!args.memoryEnabled) {
         return [];
@@ -338,6 +353,7 @@ async function searchMemories(args: {
         embeddingEnabled: args.embeddingEnabled,
         embedQuery: args.embedQuery,
         isEmbeddingRuntimeEnabled: args.isEmbeddingRuntimeEnabled,
+        signal: args.signal,
     });
 
     return mergeMemoryResults({
@@ -490,15 +506,16 @@ async function searchGitCommitsAsync(args: {
     query: string;
     limit: number;
     embeddingEnabled: boolean;
-    embedQuery: (text: string) => Promise<Float32Array | null>;
+    embedQuery: (text: string, signal?: AbortSignal) => Promise<Float32Array | null>;
     isEmbeddingRuntimeEnabled: () => boolean;
+    signal?: AbortSignal;
 }): Promise<GitCommitSearchResult[]> {
     if (args.limit <= 0) return [];
 
     let queryEmbedding: Float32Array | null = null;
     if (args.embeddingEnabled && args.isEmbeddingRuntimeEnabled()) {
         try {
-            queryEmbedding = await args.embedQuery(args.query);
+            queryEmbedding = await args.embedQuery(args.query, args.signal);
         } catch (error) {
             log(
                 `[search] git commit query embedding failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -566,6 +583,7 @@ export async function unifiedSearch(
                   embedQuery,
                   isEmbeddingRuntimeEnabled,
                   visibleMemoryIds: options.visibleMemoryIds,
+                  signal: options.signal,
               })
             : Promise.resolve([] as MemorySearchResult[]),
         runMessages
@@ -589,6 +607,7 @@ export async function unifiedSearch(
                   embeddingEnabled,
                   embedQuery,
                   isEmbeddingRuntimeEnabled,
+                  signal: options.signal,
               })
             : Promise.resolve([] as GitCommitSearchResult[]),
     ]);
@@ -597,16 +616,22 @@ export async function unifiedSearch(
         .sort(compareUnifiedResults)
         .slice(0, limit);
 
-    const memoryIds = results
-        .filter((result): result is MemorySearchResult => result.source === "memory")
-        .map((result) => result.memoryId);
+    // Only count retrievals for explicit agent-driven searches. Plugin-internal
+    // automatic surfacing (auto-search hints) should not inflate retrieval_count
+    // because the agent may never actually consume the hint.
+    const countRetrievals = options.countRetrievals ?? true;
+    if (countRetrievals) {
+        const memoryIds = results
+            .filter((result): result is MemorySearchResult => result.source === "memory")
+            .map((result) => result.memoryId);
 
-    if (memoryIds.length > 0) {
-        db.transaction(() => {
-            for (const memoryId of memoryIds) {
-                updateMemoryRetrievalCount(db, memoryId);
-            }
-        })();
+        if (memoryIds.length > 0) {
+            db.transaction(() => {
+                for (const memoryId of memoryIds) {
+                    updateMemoryRetrievalCount(db, memoryId);
+                }
+            })();
+        }
     }
 
     return results;

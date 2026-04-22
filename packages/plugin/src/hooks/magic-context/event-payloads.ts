@@ -2,6 +2,7 @@ import { isRecord } from "../../shared/record-type-guard";
 
 export type MagicContextEventType =
     | "session.created"
+    | "session.error"
     | "message.updated"
     | "message.removed"
     | "session.compacted"
@@ -35,6 +36,14 @@ export interface MessageUpdatedAssistantInfo {
             write?: number;
         };
     };
+    /** Error attached to the assistant message, if any. OpenCode attaches
+     *  context-overflow errors here in addition to emitting session.error. */
+    error?: unknown;
+}
+
+export interface SessionErrorInfo {
+    sessionID: string;
+    error: unknown;
 }
 
 export interface MessageRemovedInfo {
@@ -105,7 +114,22 @@ export function getMessageUpdatedAssistantInfo(
                 write: typeof cache?.write === "number" ? cache.write : undefined,
             },
         },
+        error: info.error !== undefined ? info.error : undefined,
     };
+}
+
+/**
+ * Extract `session.error` event payload. The event carries `{ sessionID, error }`
+ * at the top level (no `info` wrapper). We intentionally keep `error` as
+ * `unknown` — the plugin does not depend on OpenCode's NamedError shape, the
+ * overflow detector accepts strings, Errors, or objects with `message`.
+ */
+export function getSessionErrorInfo(properties: unknown): SessionErrorInfo | null {
+    if (!isRecord(properties)) return null;
+    const sessionID = properties.sessionID;
+    if (typeof sessionID !== "string" || sessionID.length === 0) return null;
+    // Error may be absent on certain error shapes (SDK variant); treat as unknown.
+    return { sessionID, error: properties.error };
 }
 
 export function getMessageRemovedInfo(properties: unknown): MessageRemovedInfo | null {

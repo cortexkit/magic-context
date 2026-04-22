@@ -1,4 +1,5 @@
 import type { createCompactionHandler } from "../../features/magic-context/compaction";
+import { detectOverflow } from "../../features/magic-context/overflow-detection";
 import {
     clearHistorianFailureState,
     clearPersistedNoteNudge,
@@ -10,10 +11,12 @@ import {
     getHistorianFailureState,
     getMaxTagNumberBySession,
     getOrCreateSessionMeta,
+    getOverflowState,
     getPersistedNoteNudge,
     getPersistedNudgePlacement,
     getPersistedReasoningWatermark,
     getPersistedStickyTurnReminder,
+    recordOverflowDetected,
     removeStrippedPlaceholderId,
     setPersistedReasoningWatermark,
     updateSessionMeta,
@@ -29,6 +32,7 @@ import {
     getMessageRemovedInfo,
     getMessageUpdatedAssistantInfo,
     getSessionCreatedInfo,
+    getSessionErrorInfo,
     getSessionProperties,
 } from "./event-payloads";
 import {
@@ -199,6 +203,29 @@ export function createEventHandler(deps: EventHandlerDeps) {
             return;
         }
 
+        if (input.event.type === "session.error") {
+            const errInfo = getSessionErrorInfo(input.event.properties);
+            if (!errInfo) {
+                return;
+            }
+            try {
+                const detection = detectOverflow(errInfo.error);
+                if (!detection.isOverflow) {
+                    return;
+                }
+                const existing = getOverflowState(deps.db, errInfo.sessionID);
+                recordOverflowDetected(deps.db, errInfo.sessionID, detection.reportedLimit);
+                sessionLog(
+                    errInfo.sessionID,
+                    `overflow detected via session.error: reportedLimit=${detection.reportedLimit ?? "unknown"} pattern=${detection.matchedPattern ?? "n/a"} (previousRecovery=${existing.needsEmergencyRecovery})`,
+                );
+                deps.onSessionCacheInvalidated?.(errInfo.sessionID);
+            } catch (error) {
+                sessionLog(errInfo.sessionID, "event session.error handling failed:", error);
+            }
+            return;
+        }
+
         if (input.event.type === "message.updated") {
             const info = getMessageUpdatedAssistantInfo(input.event.properties);
             if (!info) {
@@ -225,6 +252,30 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 clearMessageTokensCache(info.sessionID, info.messageID);
             } else {
                 clearMessageTokensCache(info.sessionID);
+            }
+
+            // Secondary overflow-detection path: OpenCode attaches overflow
+            // errors to the assistant message itself in addition to emitting
+            // session.error. Checking both ensures we catch the error no
+            // matter which event arrives first or fails to arrive at all.
+            if (info.error !== undefined && info.error !== null) {
+                const detection = detectOverflow(info.error);
+                if (detection.isOverflow) {
+                    try {
+                        recordOverflowDetected(deps.db, info.sessionID, detection.reportedLimit);
+                        sessionLog(
+                            info.sessionID,
+                            `overflow detected via message.updated: reportedLimit=${detection.reportedLimit ?? "unknown"} pattern=${detection.matchedPattern ?? "n/a"}`,
+                        );
+                        deps.onSessionCacheInvalidated?.(info.sessionID);
+                    } catch (error) {
+                        sessionLog(
+                            info.sessionID,
+                            "event message.updated overflow persistence failed:",
+                            error,
+                        );
+                    }
+                }
             }
 
             const now = Date.now();
@@ -273,7 +324,10 @@ export function createEventHandler(deps: EventHandlerDeps) {
                         (info.tokens?.input ?? 0) +
                         (info.tokens?.cache?.read ?? 0) +
                         (info.tokens?.cache?.write ?? 0);
-                    const contextLimit = resolveContextLimit(info.providerID, info.modelID);
+                    const contextLimit = resolveContextLimit(info.providerID, info.modelID, {
+                        db: deps.db,
+                        sessionID: info.sessionID,
+                    });
                     const percentage =
                         contextLimit > 0 ? (totalInputTokens / contextLimit) * 100 : 0;
 

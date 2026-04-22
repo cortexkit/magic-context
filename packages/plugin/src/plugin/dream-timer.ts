@@ -56,7 +56,9 @@ const registeredProjects = new Map<string, ProjectRegistration>();
  * itself stops only when the last project unregisters.
  */
 export function startDreamScheduleTimer(args: ProjectRegistration): (() => void) | undefined {
-    const dreamingEnabled = Boolean(args.dreamerConfig?.enabled && args.dreamerConfig.schedule?.trim());
+    const dreamingEnabled = Boolean(
+        args.dreamerConfig?.enabled && args.dreamerConfig.schedule?.trim(),
+    );
     const embeddingSweepEnabled = args.memoryEnabled && args.embeddingConfig.provider !== "off";
     const commitIndexingEnabled = args.gitCommitIndexing?.enabled === true;
 
@@ -115,9 +117,7 @@ export function startDreamScheduleTimer(args: ProjectRegistration): (() => void)
  * iterates every registered project for its per-directory work.
  */
 function runTick(origin: "startup" | "interval"): void {
-    log(
-        `[dreamer] timer tick (${origin}) — projects=${registeredProjects.size}`,
-    );
+    log(`[dreamer] timer tick (${origin}) — projects=${registeredProjects.size}`);
     try {
         // Memory embedding sweep is global (iterates all projects in DB),
         // so we only need to call it once per tick — not per registered
@@ -139,10 +139,7 @@ function runTick(origin: "startup" | "interval"): void {
                         }
                     })
                     .catch((error: unknown) => {
-                        log(
-                            "[magic-context] periodic memory embedding sweep failed:",
-                            error,
-                        );
+                        log("[magic-context] periodic memory embedding sweep failed:", error);
                     });
             }
         }
@@ -167,8 +164,13 @@ function runTick(origin: "startup" | "interval"): void {
  * plugin once per project in the same process, and every project needs its
  * own commits indexed and its own dream schedule honored.
  */
-async function sweepProject(reg: ProjectRegistration, origin: "startup" | "interval"): Promise<void> {
-    const dreamingEnabled = Boolean(reg.dreamerConfig?.enabled && reg.dreamerConfig.schedule?.trim());
+async function sweepProject(
+    reg: ProjectRegistration,
+    origin: "startup" | "interval",
+): Promise<void> {
+    const dreamingEnabled = Boolean(
+        reg.dreamerConfig?.enabled && reg.dreamerConfig.schedule?.trim(),
+    );
     const commitIndexingEnabled = reg.gitCommitIndexing?.enabled === true;
 
     if (commitIndexingEnabled && reg.gitCommitIndexing) {
@@ -200,10 +202,7 @@ async function sweepProject(reg: ProjectRegistration, origin: "startup" | "inter
             experimentalPinKeyFiles: reg.experimentalPinKeyFiles,
         });
     } catch (error) {
-        log(
-            `[dreamer] timer-triggered queue processing failed for ${reg.directory}:`,
-            error,
-        );
+        log(`[dreamer] timer-triggered queue processing failed for ${reg.directory}:`, error);
     }
 }
 

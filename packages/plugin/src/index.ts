@@ -101,18 +101,17 @@ const plugin: Plugin = async (ctx) => {
             dreamerConfig: pluginConfig.dreamer,
             embeddingConfig: pluginConfig.embedding,
             memoryEnabled: pluginConfig.memory?.enabled === true,
-            experimentalUserMemories: pluginConfig.experimental?.user_memories?.enabled
+            experimentalUserMemories: pluginConfig.dreamer?.user_memories?.enabled
                 ? {
                       enabled: true,
-                      promotionThreshold:
-                          pluginConfig.experimental.user_memories?.promotion_threshold,
+                      promotionThreshold: pluginConfig.dreamer.user_memories.promotion_threshold,
                   }
                 : undefined,
-            experimentalPinKeyFiles: pluginConfig.experimental?.pin_key_files?.enabled
+            experimentalPinKeyFiles: pluginConfig.dreamer?.pin_key_files?.enabled
                 ? {
                       enabled: true,
-                      token_budget: pluginConfig.experimental.pin_key_files?.token_budget,
-                      min_reads: pluginConfig.experimental.pin_key_files?.min_reads,
+                      token_budget: pluginConfig.dreamer.pin_key_files.token_budget,
+                      min_reads: pluginConfig.dreamer.pin_key_files.min_reads,
                   }
                 : undefined,
             gitCommitIndexing: pluginConfig.experimental?.git_commit_indexing?.enabled
@@ -284,7 +283,7 @@ const plugin: Plugin = async (ctx) => {
                 ),
                 [HISTORIAN_AGENT]: buildHiddenAgentConfig(
                     HISTORIAN_AGENT,
-                    pluginConfig.experimental?.user_memories?.enabled
+                    pluginConfig.dreamer?.user_memories?.enabled
                         ? COMPARTMENT_AGENT_SYSTEM_PROMPT + USER_OBSERVATIONS_APPENDIX
                         : COMPARTMENT_AGENT_SYSTEM_PROMPT,
                     historianAgentOverrides,

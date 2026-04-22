@@ -23,12 +23,31 @@ export interface MockResponse {
     content?: unknown[];
     /** Stop reason reported to the caller. */
     stop_reason?: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence";
-    /** Token usage reported to the caller — critical for threshold tests. */
-    usage: MockUsage;
+    /**
+     * Token usage reported to the caller — critical for threshold tests.
+     * Required unless `error` is set (errors don't report usage).
+     */
+    usage?: MockUsage;
     /** Delay before responding (simulate slow historian). */
     delayMs?: number;
     /** Optional model name echoed back in the response. Defaults to request's model. */
     model?: string;
+    /**
+     * Return an error response instead of an assistant message.
+     * Use this to simulate provider-side failures like context overflow,
+     * rate limits, and auth errors. The harness emits an Anthropic-shaped
+     * error body with the given HTTP status and error.type/message. These
+     * errors are what `parseAPICallError` in OpenCode (and the overflow
+     * detector in magic-context) match against.
+     */
+    error?: {
+        /** HTTP status code (e.g. 400 for overflow, 413 for payload too large). */
+        status: number;
+        /** Anthropic error.type value (e.g. "invalid_request_error"). */
+        type: string;
+        /** Human-readable error message — regex-matched for overflow detection. */
+        message: string;
+    };
 }
 
 export interface CapturedRequest {
@@ -186,6 +205,40 @@ export class MockProvider {
                 await Bun.sleep(scripted.delayMs);
             }
 
+            // Error response: emit an Anthropic-shaped error body with the
+            // requested HTTP status. This bypasses the SSE/streaming path
+            // because Anthropic itself returns non-SSE JSON errors even when
+            // stream=true was requested.
+            if (scripted.error) {
+                return new Response(
+                    JSON.stringify({
+                        type: "error",
+                        error: {
+                            type: scripted.error.type,
+                            message: scripted.error.message,
+                        },
+                    }),
+                    {
+                        status: scripted.error.status,
+                        headers: { "content-type": "application/json" },
+                    },
+                );
+            }
+
+            const usage = scripted.usage;
+            if (!usage) {
+                return new Response(
+                    JSON.stringify({
+                        type: "error",
+                        error: {
+                            type: "mock_error",
+                            message: "MockResponse requires `usage` or `error`",
+                        },
+                    }),
+                    { status: 500, headers: { "content-type": "application/json" } },
+                );
+            }
+
             const content =
                 scripted.content ??
                 [{ type: "text", text: scripted.text ?? "OK" }];
@@ -223,12 +276,12 @@ export class MockProvider {
                                 stop_reason: null,
                                 stop_sequence: null,
                                 usage: {
-                                    input_tokens: scripted.usage.input_tokens,
+                                    input_tokens: usage.input_tokens,
                                     output_tokens: 0,
                                     cache_creation_input_tokens:
-                                        scripted.usage.cache_creation_input_tokens ?? 0,
+                                        usage.cache_creation_input_tokens ?? 0,
                                     cache_read_input_tokens:
-                                        scripted.usage.cache_read_input_tokens ?? 0,
+                                        usage.cache_read_input_tokens ?? 0,
                                 },
                             },
                         });
@@ -331,7 +384,7 @@ export class MockProvider {
                                 stop_sequence: null,
                             },
                             usage: {
-                                output_tokens: scripted.usage.output_tokens,
+                                output_tokens: usage.output_tokens,
                             },
                         });
 
@@ -360,10 +413,10 @@ export class MockProvider {
                 stop_reason: scripted.stop_reason ?? "end_turn",
                 stop_sequence: null,
                 usage: {
-                    input_tokens: scripted.usage.input_tokens,
-                    output_tokens: scripted.usage.output_tokens,
-                    cache_creation_input_tokens: scripted.usage.cache_creation_input_tokens ?? 0,
-                    cache_read_input_tokens: scripted.usage.cache_read_input_tokens ?? 0,
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0,
+                    cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
                 },
             };
 

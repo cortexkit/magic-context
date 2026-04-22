@@ -452,6 +452,108 @@ export async function runDoctor(
                 fixed++;
             }
 
+            // Migrate experimental.user_memories → dreamer.user_memories.
+            // The feature is now stable and lives under dreamer config (since
+            // dreamer owns candidate review and promotion). We preserve the
+            // user's existing enabled state so users who had it enabled keep
+            // it enabled, and users who had it explicitly disabled stay opted
+            // out. New users (no existing setting) get the new default:
+            // enabled=true under dreamer.user_memories.
+            if (experimental && "user_memories" in experimental) {
+                const dreamer = (mcConfig.dreamer as Record<string, unknown> | undefined) ?? {};
+                const oldUM = experimental.user_memories;
+                const existingUM = dreamer.user_memories;
+                if (existingUM === undefined) {
+                    // No dreamer.user_memories yet — move the whole block over.
+                    dreamer.user_memories = oldUM;
+                } else if (
+                    typeof oldUM === "object" &&
+                    oldUM !== null &&
+                    typeof existingUM === "object" &&
+                    existingUM !== null
+                ) {
+                    // Both blocks exist — merge field-by-field so we don't drop
+                    // sub-fields like `promotion_threshold` that the user set
+                    // under experimental. Existing dreamer.user_memories fields
+                    // win (user already graduated them).
+                    const merged = {
+                        ...(oldUM as Record<string, unknown>),
+                        ...(existingUM as Record<string, unknown>),
+                    };
+                    dreamer.user_memories = merged;
+                } else if (typeof oldUM === "object" && oldUM !== null) {
+                    // Old block is a proper object but new block is a malformed
+                    // primitive (e.g., user wrote `dreamer.user_memories: true`
+                    // as a shortcut). Without this branch we'd silently drop
+                    // the old block's sub-fields like `promotion_threshold`.
+                    // Coerce the primitive to { enabled: <primitive-as-bool> }
+                    // shape, then merge — old sub-fields fill in, new enabled
+                    // preserves what the user literally typed.
+                    const coerced: Record<string, unknown> = {
+                        ...(oldUM as Record<string, unknown>),
+                        enabled: Boolean(existingUM),
+                    };
+                    dreamer.user_memories = coerced;
+                    log.warn(
+                        `Coerced malformed dreamer.user_memories (${typeof existingUM}) to object form while merging sub-fields from experimental.user_memories`,
+                    );
+                }
+                // else: both are primitive/malformed — nothing safe to merge.
+                mcConfig.dreamer = dreamer;
+                delete experimental.user_memories;
+                mcChanged = true;
+                log.success(
+                    "Migrated experimental.user_memories → dreamer.user_memories (now default: enabled)",
+                );
+                fixed++;
+            }
+
+            // Migrate experimental.pin_key_files → dreamer.pin_key_files.
+            // Same story as user_memories — feature graduated to stable under
+            // dreamer config. Existing `enabled: true` values are preserved so
+            // we do not silently disable the feature for users who opted in.
+            if (experimental && "pin_key_files" in experimental) {
+                const dreamer = (mcConfig.dreamer as Record<string, unknown> | undefined) ?? {};
+                const oldPKF = experimental.pin_key_files;
+                const existingPKF = dreamer.pin_key_files;
+                if (existingPKF === undefined) {
+                    dreamer.pin_key_files = oldPKF;
+                } else if (
+                    typeof oldPKF === "object" &&
+                    oldPKF !== null &&
+                    typeof existingPKF === "object" &&
+                    existingPKF !== null
+                ) {
+                    // Merge field-by-field so sub-fields like `token_budget`
+                    // and `min_reads` from the old block are not silently lost
+                    // when a user has partially graduated.
+                    const merged = {
+                        ...(oldPKF as Record<string, unknown>),
+                        ...(existingPKF as Record<string, unknown>),
+                    };
+                    dreamer.pin_key_files = merged;
+                } else if (typeof oldPKF === "object" && oldPKF !== null) {
+                    // Old block is a proper object but new block is a malformed
+                    // primitive. Coerce and merge so sub-fields like
+                    // `token_budget` / `min_reads` are not dropped.
+                    const coerced: Record<string, unknown> = {
+                        ...(oldPKF as Record<string, unknown>),
+                        enabled: Boolean(existingPKF),
+                    };
+                    dreamer.pin_key_files = coerced;
+                    log.warn(
+                        `Coerced malformed dreamer.pin_key_files (${typeof existingPKF}) to object form while merging sub-fields from experimental.pin_key_files`,
+                    );
+                }
+                mcConfig.dreamer = dreamer;
+                delete experimental.pin_key_files;
+                mcChanged = true;
+                log.success(
+                    "Migrated experimental.pin_key_files → dreamer.pin_key_files (preserved user enabled state)",
+                );
+                fixed++;
+            }
+
             // Remove `compartment_token_budget` — replaced by auto-derivation from
             // main/historian model context in later versions. The value is no longer
             // read; leaving it in config is harmless but misleading.
@@ -594,20 +696,23 @@ export async function runDoctor(
         log.success("TUI sidebar plugin configured (tui.json created)");
     }
 
-    // 7. Check user memories + dreamer compatibility
+    // 7. Check user memories + dreamer compatibility.
+    // user_memories graduated from experimental to dreamer.user_memories in
+    // v0.14, and the default is now enabled. Candidate extraction still
+    // requires dreamer to actually promote candidates into stable memories,
+    // so warn loudly when the combination is wrong.
     if (existsSync(paths.magicContextConfig)) {
         try {
             const mcRaw = readFileSync(paths.magicContextConfig, "utf-8");
             const mcConfig = parse(mcRaw) as Record<string, unknown>;
-            const userMemObj = (mcConfig?.experimental as Record<string, unknown>)?.user_memories as
-                | Record<string, unknown>
-                | undefined;
-            const userMemEnabled = userMemObj?.enabled === true;
             const dreamerObj = mcConfig?.dreamer as Record<string, unknown> | undefined;
             const dreamerEnabled = dreamerObj?.enabled === true;
+            const userMemObj = dreamerObj?.user_memories as Record<string, unknown> | undefined;
+            // user_memories defaults to enabled, so treat `undefined` as true.
+            const userMemEnabled = userMemObj?.enabled !== false;
             if (userMemEnabled && !dreamerEnabled) {
                 log.warn(
-                    "experimental_user_memories is enabled but dreamer is disabled — user memory candidates will be collected but never promoted to stable memories",
+                    "dreamer.user_memories is enabled (default) but dreamer itself is disabled — user memory candidates will be collected but never promoted to stable memories. Enable `dreamer.enabled: true` or set `dreamer.user_memories.enabled: false` to silence this.",
                 );
                 issues++;
             }

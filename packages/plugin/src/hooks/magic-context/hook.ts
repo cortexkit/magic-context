@@ -78,6 +78,9 @@ export interface MagicContextDeps {
             enabled: boolean;
             injection_budget_tokens: number;
         };
+        embedding?: {
+            provider?: "local" | "openai-compatible" | "off";
+        };
         sidekick?: SidekickConfig;
         dreamer?: DreamerConfig;
         commit_cluster_trigger?: { enabled: boolean; min_clusters: number };
@@ -89,8 +92,6 @@ export interface MagicContextDeps {
             cooldown_ms: number;
         };
         experimental?: {
-            user_memories?: { enabled: boolean; promotion_threshold: number };
-            pin_key_files?: { enabled: boolean; token_budget: number; min_reads: number };
             temporal_awareness?: boolean;
             git_commit_indexing?: { enabled: boolean; since_days: number; max_commits: number };
             auto_search?: {
@@ -265,7 +266,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         },
         projectPath,
         experimentalCompactionMarkers: deps.config.compaction_markers,
-        experimentalUserMemories: deps.config.experimental?.user_memories?.enabled,
+        experimentalUserMemories: deps.config.dreamer?.user_memories?.enabled,
         experimentalTemporalAwareness: deps.config.experimental?.temporal_awareness === true,
         historianTwoPass: deps.config.historian?.two_pass === true,
         compressorMinCompartmentRatio:
@@ -287,7 +288,11 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                   scoreThreshold: deps.config.experimental.auto_search.score_threshold,
                   minPromptChars: deps.config.experimental.auto_search.min_prompt_chars,
                   memoryEnabled: deps.config.memory?.enabled !== false,
-                  embeddingEnabled: deps.config.experimental?.auto_search?.enabled === true,
+                  // Gate semantic search on the actual embedding provider, not
+                  // on auto_search itself — the outer `if` already gates on
+                  // auto_search.enabled. If the provider is "off" we still
+                  // want FTS-backed message/memory hits to drive the hint.
+                  embeddingEnabled: deps.config.embedding?.provider !== "off",
                   gitCommitsEnabled:
                       deps.config.experimental?.git_commit_indexing?.enabled === true,
               }
@@ -331,18 +336,17 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             tasks: dreaming.tasks,
             taskTimeoutMinutes: dreaming.task_timeout_minutes,
             maxRuntimeMinutes: dreaming.max_runtime_minutes,
-            experimentalUserMemories: deps.config.experimental?.user_memories?.enabled
+            experimentalUserMemories: deps.config.dreamer?.user_memories?.enabled
                 ? {
                       enabled: true,
-                      promotionThreshold:
-                          deps.config.experimental.user_memories?.promotion_threshold,
+                      promotionThreshold: deps.config.dreamer.user_memories.promotion_threshold,
                   }
                 : undefined,
-            experimentalPinKeyFiles: deps.config.experimental?.pin_key_files?.enabled
+            experimentalPinKeyFiles: deps.config.dreamer?.pin_key_files?.enabled
                 ? {
                       enabled: true,
-                      token_budget: deps.config.experimental.pin_key_files?.token_budget,
-                      min_reads: deps.config.experimental.pin_key_files?.min_reads,
+                      token_budget: deps.config.dreamer.pin_key_files.token_budget,
+                      min_reads: deps.config.dreamer.pin_key_files.min_reads,
                   }
                 : undefined,
         }).catch((error: unknown) => {
@@ -426,18 +430,18 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                   projectPath,
                   client: deps.client,
                   directory: deps.directory,
-                  experimentalUserMemories: deps.config.experimental?.user_memories?.enabled
+                  experimentalUserMemories: deps.config.dreamer?.user_memories?.enabled
                       ? {
                             enabled: true,
                             promotionThreshold:
-                                deps.config.experimental.user_memories?.promotion_threshold,
+                                deps.config.dreamer.user_memories.promotion_threshold,
                         }
                       : undefined,
-                  experimentalPinKeyFiles: deps.config.experimental?.pin_key_files?.enabled
+                  experimentalPinKeyFiles: deps.config.dreamer?.pin_key_files?.enabled
                       ? {
                             enabled: true,
-                            token_budget: deps.config.experimental.pin_key_files?.token_budget,
-                            min_reads: deps.config.experimental.pin_key_files?.min_reads,
+                            token_budget: deps.config.dreamer.pin_key_files.token_budget,
+                            min_reads: deps.config.dreamer.pin_key_files.min_reads,
                         }
                       : undefined,
               }
@@ -456,9 +460,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         directory: deps.directory,
         flushedSessions,
         lastHeuristicsTurnId,
-        experimentalUserMemories: deps.config.experimental?.user_memories?.enabled,
-        experimentalPinKeyFiles: deps.config.experimental?.pin_key_files?.enabled ?? false,
-        experimentalPinKeyFilesTokenBudget: deps.config.experimental?.pin_key_files?.token_budget,
+        experimentalUserMemories: deps.config.dreamer?.user_memories?.enabled,
+        experimentalPinKeyFiles: deps.config.dreamer?.pin_key_files?.enabled ?? false,
+        experimentalPinKeyFilesTokenBudget: deps.config.dreamer?.pin_key_files?.token_budget,
         experimentalTemporalAwareness: deps.config.experimental?.temporal_awareness === true,
     });
 

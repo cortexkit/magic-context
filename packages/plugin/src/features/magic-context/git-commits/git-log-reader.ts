@@ -103,9 +103,7 @@ export async function readGitCommits(
         // retry. We DO log the reason though — a silent empty-result masked a
         // real cwd / PATH / timeout bug during the v0.14 git-commits rollout.
         const message = error instanceof Error ? error.message : String(error);
-        log(
-            `[git-commits] readGitCommits failed at cwd=${directory}: ${message.slice(0, 500)}`,
-        );
+        log(`[git-commits] readGitCommits failed at cwd=${directory}: ${message.slice(0, 500)}`);
         return [];
     }
 
@@ -126,7 +124,19 @@ export function parseGitLogOutput(stdout: string): GitCommit[] {
         const record = rawRecord.replace(/^\s+/, "");
         if (!record) continue;
 
-        const fields = record.split(FIELD_SEPARATOR);
+        // Split only on the first 4 FIELD_SEPARATOR occurrences so an embedded
+        // \x1f inside the commit body doesn't truncate the body at the first
+        // such byte. JavaScript's split(sep, limit) caps the output array
+        // rather than capping the split count, so we split manually.
+        const fields: string[] = [];
+        let remaining = record;
+        for (let i = 0; i < 4; i++) {
+            const idx = remaining.indexOf(FIELD_SEPARATOR);
+            if (idx < 0) break;
+            fields.push(remaining.slice(0, idx));
+            remaining = remaining.slice(idx + FIELD_SEPARATOR.length);
+        }
+        fields.push(remaining); // the body (may contain further \x1f bytes)
         if (fields.length < 5) continue;
 
         const sha = fields[0].trim();

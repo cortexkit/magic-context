@@ -349,7 +349,12 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
         return this.pipeline !== null;
     }
 
-    async embed(text: string): Promise<Float32Array | null> {
+    async embed(text: string, signal?: AbortSignal): Promise<Float32Array | null> {
+        // Local inference is fast (typically <100ms) and can't be cancelled
+        // mid-compute with transformers.js, so we honor `signal` only as a
+        // pre-flight check — callers whose timeout already fired get null
+        // without starting fresh inference work.
+        if (signal?.aborted) return null;
         if (!(await this.initialize())) {
             return null;
         }
@@ -374,9 +379,13 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
         }
     }
 
-    async embedBatch(texts: string[]): Promise<(Float32Array | null)[]> {
+    async embedBatch(texts: string[], signal?: AbortSignal): Promise<(Float32Array | null)[]> {
         if (texts.length === 0) {
             return [];
+        }
+
+        if (signal?.aborted) {
+            return Array.from({ length: texts.length }, () => null);
         }
 
         if (!(await this.initialize())) {
