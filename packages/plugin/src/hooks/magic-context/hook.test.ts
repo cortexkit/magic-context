@@ -9,7 +9,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import type { Scheduler } from "../../features/magic-context/scheduler";
-import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
+import {
+    closeDatabase,
+    getOrCreateSessionMeta,
+    openDatabase,
+    updateSessionMeta,
+} from "../../features/magic-context/storage";
 import type { Tagger } from "../../features/magic-context/tagger";
 import { createMagicContextHook, type MagicContextDeps } from "./hook";
 
@@ -326,6 +331,9 @@ describe("magic-context hook", () => {
                 max_runtime_minutes: 60,
                 tasks: ["consolidate"],
                 task_timeout_minutes: 10,
+                inject_docs: true,
+                user_memories: { enabled: true, promotion_threshold: 3 },
+                pin_key_files: { enabled: false, token_budget: 10000, min_reads: 4 },
             },
         };
         const hook = requireHook(createMagicContextHook(deps));
@@ -486,6 +494,9 @@ describe("magic-context hook", () => {
                 max_runtime_minutes: 60,
                 tasks: ["consolidate"],
                 task_timeout_minutes: 10,
+                inject_docs: true,
+                user_memories: { enabled: true, promotion_threshold: 3 },
+                pin_key_files: { enabled: false, token_budget: 10000, min_reads: 4 },
             },
         };
         const originalDateNow = Date.now;
@@ -657,6 +668,57 @@ describe("magic-context hook", () => {
         });
 
         expect(promptMocks.promptAsync).toHaveBeenCalledTimes(2);
+    });
+
+    it("clears the reasoning watermark when message.updated reports a model change", async () => {
+        process.env.XDG_DATA_HOME = makeTempDir("hook-model-change-watermark-");
+        const hook = requireHook(createMagicContextHook(createMockDeps()));
+
+        await hook.event!({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        role: "assistant",
+                        finish: "stop",
+                        sessionID: "ses-model-change",
+                        providerID: "openai",
+                        modelID: "gpt-4o",
+                        tokens: {
+                            input: 20_000,
+                            output: 10,
+                            cache: { read: 0, write: 0 },
+                        },
+                    },
+                },
+            },
+        });
+
+        updateSessionMeta(openDatabase(), "ses-model-change", { clearedReasoningThroughTag: 7 });
+
+        await hook.event!({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        role: "assistant",
+                        finish: "stop",
+                        sessionID: "ses-model-change",
+                        providerID: "opencode-go",
+                        modelID: "kimi-k2.6",
+                        tokens: {
+                            input: 25_000,
+                            output: 10,
+                            cache: { read: 0, write: 0 },
+                        },
+                    },
+                },
+            },
+        });
+
+        expect(
+            getOrCreateSessionMeta(openDatabase(), "ses-model-change").clearedReasoningThroughTag,
+        ).toBe(0);
     });
 
     it("injects a hidden ctx_reduce reminder on the next user turn after a tool-heavy turn without ctx_reduce", async () => {

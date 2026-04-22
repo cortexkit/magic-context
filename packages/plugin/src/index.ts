@@ -52,10 +52,21 @@ const plugin: Plugin = async (ctx) => {
                 );
                 // sendIgnoredMessage already handles TUI (toast) vs Desktop (ignored message)
                 // via isTuiConnected(). We need a session ID — use the first active session.
-                const sessions = await Promise.resolve((ctx.client as any).session?.list?.()).catch(
+                // SDK types don't expose `session.list()`'s actual response shape (the
+                // client surface has been through multiple revisions; some versions
+                // return `{ data: [...] }`, others return the array directly), so we
+                // probe both shapes defensively at runtime.
+                type SessionListFn = () => Promise<
+                    { data?: Array<{ id?: string }> } | Array<{ id?: string }>
+                >;
+                const clientWithSessions = ctx.client as unknown as {
+                    session?: { list?: SessionListFn };
+                };
+                const sessions = await Promise.resolve(clientWithSessions.session?.list?.()).catch(
                     () => null,
                 );
-                const sessionId = (sessions as any)?.data?.[0]?.id ?? (sessions as any)?.[0]?.id;
+                const sessionList = Array.isArray(sessions) ? sessions : sessions?.data;
+                const sessionId = sessionList?.[0]?.id;
                 if (sessionId) {
                     // This runs before any active session necessarily reports its live agent,
                     // so keep the startup warning unbound to a specific agent on purpose.

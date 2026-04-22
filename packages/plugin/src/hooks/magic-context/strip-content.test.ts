@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 import {
     clearOldReasoning,
+    replayClearedReasoning,
     stripClearedReasoning,
     stripDroppedPlaceholderMessages,
     stripInlineThinking,
@@ -131,6 +132,62 @@ describe("strip-content", () => {
                 });
             });
         });
+
+        describe("#given a provider that requires typed reasoning preservation", () => {
+            describe("#when the skip gate is enabled", () => {
+                it("#then returns zero and leaves reasoning untouched", () => {
+                    const msg = message("m-1", "assistant", [{ type: "text", text: "response" }]);
+                    const reasoningPart: ThinkingLikePart = {
+                        type: "reasoning",
+                        text: "must stay for reasoning_content",
+                    };
+                    const reasoningByMessage = new Map<MessageLike, ThinkingLikePart[]>([
+                        [msg, [reasoningPart]],
+                    ]);
+                    const messageTagNumbers = new Map<MessageLike, number>([[msg, 1]]);
+
+                    const cleared = clearOldReasoning(
+                        [msg],
+                        reasoningByMessage,
+                        messageTagNumbers,
+                        0,
+                        true,
+                    );
+
+                    expect(cleared).toBe(0);
+                    expect(reasoningPart.text).toBe("must stay for reasoning_content");
+                });
+            });
+        });
+    });
+
+    describe("replayClearedReasoning", () => {
+        describe("#given a persisted watermark on a reasoning-preserving model", () => {
+            describe("#when the skip gate is enabled", () => {
+                it("#then replays nothing and leaves typed reasoning untouched", () => {
+                    const msg = message("m-1", "assistant", [{ type: "text", text: "response" }]);
+                    const reasoningPart: ThinkingLikePart = {
+                        type: "reasoning",
+                        text: "keep me",
+                    };
+                    const reasoningByMessage = new Map<MessageLike, ThinkingLikePart[]>([
+                        [msg, [reasoningPart]],
+                    ]);
+                    const messageTagNumbers = new Map<MessageLike, number>([[msg, 1]]);
+
+                    const replayed = replayClearedReasoning(
+                        [msg],
+                        reasoningByMessage,
+                        messageTagNumbers,
+                        99,
+                        true,
+                    );
+
+                    expect(replayed).toBe(0);
+                    expect(reasoningPart.text).toBe("keep me");
+                });
+            });
+        });
     });
 
     describe("stripClearedReasoning", () => {
@@ -239,6 +296,24 @@ describe("strip-content", () => {
                     expect(msg.parts).toHaveLength(2);
                     expect(msg.parts[0]).toBe(undefinedFieldsPart);
                     expect(msg.parts[1]).toBe(textPart);
+                });
+            });
+        });
+
+        describe("#given cleared reasoning on a model that requires reasoning_content", () => {
+            describe("#when the skip gate is enabled", () => {
+                it("#then it keeps the typed reasoning parts untouched", () => {
+                    const clearedPart = {
+                        type: "reasoning",
+                        text: "[cleared]",
+                    };
+                    const msg = message("m-1", "assistant", [clearedPart]);
+
+                    const stripped = stripClearedReasoning([msg], true);
+
+                    expect(stripped).toBe(0);
+                    expect(msg.parts).toHaveLength(1);
+                    expect(msg.parts[0]).toBe(clearedPart);
                 });
             });
         });

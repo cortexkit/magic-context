@@ -205,7 +205,9 @@ export function replayClearedReasoning(
     reasoningByMessage: Map<MessageLike, ThinkingLikePart[]>,
     messageTagNumbers: Map<MessageLike, number>,
     persistedWatermark: number,
+    skipTypedReasoningCleanup = false,
 ): number {
+    if (skipTypedReasoningCleanup) return 0;
     if (persistedWatermark <= 0) return 0;
 
     let cleared = 0;
@@ -264,7 +266,9 @@ export function clearOldReasoning(
     reasoningByMessage: Map<MessageLike, ThinkingLikePart[]>,
     messageTagNumbers: Map<MessageLike, number>,
     clearReasoningAge: number,
+    skipTypedReasoningCleanup = false,
 ): number {
+    if (skipTypedReasoningCleanup) return 0;
     const maxTag = findMaxTag(messageTagNumbers);
     if (maxTag === 0) return 0;
 
@@ -303,7 +307,11 @@ function findMaxTag(messageTagNumbers: Map<MessageLike, number>): number {
 
 const CLEARED_REASONING_TYPES = new Set(["thinking", "reasoning"]);
 
-export function stripClearedReasoning(messages: MessageLike[]): number {
+export function stripClearedReasoning(
+    messages: MessageLike[],
+    skipTypedReasoningCleanup = false,
+): number {
+    if (skipTypedReasoningCleanup) return 0;
     let stripped = 0;
     for (const message of messages) {
         if (message.info.role !== "assistant") continue;

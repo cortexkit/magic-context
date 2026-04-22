@@ -1,4 +1,5 @@
 import {
+    clearPersistedReasoningWatermark,
     getPersistedStickyTurnReminder,
     setPersistedStickyTurnReminder,
 } from "../../features/magic-context/storage";
@@ -54,15 +55,28 @@ export function createChatMessageHook(args: {
     db: Parameters<typeof getOrCreateSessionMeta>[0];
     toolUsageSinceUserTurn: ToolUsageSinceUserTurn;
     recentReduceBySession: RecentReduceBySession;
+    liveModelBySession: LiveModelBySession;
     variantBySession: VariantBySession;
     agentBySession: AgentBySession;
     flushedSessions: FlushedSessions;
     lastHeuristicsTurnId: LastHeuristicsTurnId;
     ctxReduceEnabled?: boolean;
 }) {
-    return async (input: { sessionID?: string; variant?: string; agent?: string }) => {
+    return async (input: {
+        sessionID?: string;
+        variant?: string;
+        agent?: string;
+        model?: { providerID?: string; modelID?: string };
+    }) => {
         const sessionId = input.sessionID;
         if (!sessionId) return;
+
+        if (input.model?.providerID && input.model.modelID) {
+            args.liveModelBySession.set(sessionId, {
+                providerID: input.model.providerID,
+                modelID: input.model.modelID,
+            });
+        }
 
         // Only set sticky turn reminders when ctx_reduce is enabled — the reminder
         // tells the agent to use ctx_reduce, which doesn't exist when disabled.
@@ -141,15 +155,28 @@ export function createEventHook(args: {
                     (previous.providerID !== assistantInfo.providerID ||
                         previous.modelID !== assistantInfo.modelID)
                 ) {
+                    // The reasoning watermark is only valid for the model that
+                    // produced it. On a switch TO an interleaved-reasoning
+                    // provider (e.g. Moonshot/Kimi), replaying the old
+                    // watermark would re-clear typed reasoning that OpenCode
+                    // must preserve so it can emit `reasoning_content` on the
+                    // wire. On a switch BACK to a normal model, keeping the old
+                    // watermark would make reasoning cleanup resume from the
+                    // previous model's cutoff instead of starting fresh. Clear
+                    // it for both forward and backward transitions.
                     sessionLog(
                         assistantInfo.sessionID,
-                        `model changed (${previous.providerID}/${previous.modelID} -> ${assistantInfo.providerID}/${assistantInfo.modelID}), clearing historian failure state`,
+                        `model changed (${previous.providerID}/${previous.modelID} -> ${assistantInfo.providerID}/${assistantInfo.modelID}), clearing historian failure state and reasoning watermark`,
                     );
                     // Don't clear lastContextPercentage/lastInputTokens here — the event handler
                     // already computed the correct percentage using the NEW model's context limit
                     // (via resolveContextLimit with the new providerID/modelID). Clearing would
                     // erase the first valid usage sample from the new model.
                     clearHistorianFailureState(args.db, assistantInfo.sessionID);
+                    clearPersistedReasoningWatermark(args.db, assistantInfo.sessionID);
+                    updateSessionMeta(args.db, assistantInfo.sessionID, {
+                        clearedReasoningThroughTag: 0,
+                    });
                 }
             }
         }

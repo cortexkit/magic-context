@@ -251,9 +251,7 @@ function parsePluginConfig(
             ...parsed.data,
             disabled_hooks: disabledHooks,
             command,
-            ...(preMigrationWarnings.length > 0
-                ? { configWarnings: preMigrationWarnings }
-                : {}),
+            ...(preMigrationWarnings.length > 0 ? { configWarnings: preMigrationWarnings } : {}),
         };
     }
 

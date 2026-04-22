@@ -14,28 +14,39 @@
  *      Used during cold starts before the API cache warms up and in any
  *      code path that cannot reach the SDK client.
  *
- * The public `getModelsDevContextLimit()` getter is synchronous: it checks
- * the API cache first, then the file cache. The plugin warms and refreshes
- * the API cache from `src/index.ts` at startup and on a timer.
+ * The public getters (`getModelsDevContextLimit()` and
+ * `getModelsDevInterleavedField()`) are synchronous: they check the API cache
+ * first, then the file cache. The plugin warms and refreshes the API cache
+ * from `src/index.ts` at startup and on a timer.
  */
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
-import type { createOpencodeClient } from "@opencode-ai/sdk";
 import { sessionLog } from "./logger";
 
-type OpencodeClient = ReturnType<typeof createOpencodeClient>;
+interface OpencodeClientLike {
+    config: {
+        providers: () => Promise<{ data?: { providers?: unknown } }>;
+    };
+}
 
 const RELOAD_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes, matches OpenCode's TTL
 
+interface CachedModelMetadata {
+    limit?: number;
+    interleavedField?: string;
+}
+
+type InterleavedConfig = boolean | { field?: string } | undefined;
+
 /** Populated async from OpenCode SDK. Primary source of truth when available. */
-let apiCache: Map<string, number> | null = null;
+let apiCache: Map<string, CachedModelMetadata> | null = null;
 let apiLoadedAt = 0;
 
 /** Populated sync from disk as fallback. */
-let fileCache: Map<string, number> | null = null;
+let fileCache: Map<string, CachedModelMetadata> | null = null;
 let fileLastAttempt = 0;
 
 function hashFast(input: string): string {
@@ -104,8 +115,57 @@ function resolveLimit(limit: { context?: number; input?: number } | undefined): 
     return undefined;
 }
 
-function loadModelsDevLimitsFromFile(): Map<string, number> {
-    const limits = new Map<string, number>();
+function resolveInterleavedField(interleaved: InterleavedConfig): string | undefined {
+    if (
+        interleaved &&
+        typeof interleaved === "object" &&
+        typeof interleaved.field === "string" &&
+        interleaved.field.length > 0
+    ) {
+        return interleaved.field;
+    }
+    return undefined;
+}
+
+function setCachedModelMetadata(
+    cache: Map<string, CachedModelMetadata>,
+    key: string,
+    model:
+        | {
+              limit?: { context?: number; input?: number };
+              capabilities?: { interleaved?: InterleavedConfig };
+              interleaved?: InterleavedConfig;
+              experimental?: { modes?: Record<string, unknown> };
+          }
+        | undefined,
+): void {
+    const limit = resolveLimit(model?.limit);
+    const interleavedField =
+        resolveInterleavedField(model?.capabilities?.interleaved) ??
+        resolveInterleavedField(model?.interleaved);
+
+    if (limit === undefined && interleavedField === undefined) {
+        return;
+    }
+
+    const value: CachedModelMetadata = {};
+    if (limit !== undefined) value.limit = limit;
+    if (interleavedField !== undefined) value.interleavedField = interleavedField;
+    cache.set(key, value);
+
+    // OpenCode creates derived model IDs from experimental.modes
+    // e.g. gpt-5.4 + modes.fast → gpt-5.4-fast. These inherit the same
+    // context limit and interleaved-reasoning contract as the parent model.
+    const modes = model?.experimental?.modes;
+    if (modes && typeof modes === "object") {
+        for (const mode of Object.keys(modes)) {
+            cache.set(`${key}-${mode}`, value);
+        }
+    }
+}
+
+function loadModelsDevMetadataFromFile(): Map<string, CachedModelMetadata> {
+    const metadata = new Map<string, CachedModelMetadata>();
 
     // 1. Read OpenCode's models.dev cache file (base layer).
     const modelsJsonPath = getModelsJsonPath();
@@ -121,6 +181,8 @@ function loadModelsDevLimitsFromFile(): Map<string, number> {
                         string,
                         {
                             limit?: { context?: number; input?: number };
+                            capabilities?: { interleaved?: InterleavedConfig };
+                            interleaved?: InterleavedConfig;
                             experimental?: { modes?: Record<string, unknown> };
                         }
                     >;
@@ -130,18 +192,7 @@ function loadModelsDevLimitsFromFile(): Map<string, number> {
             for (const [providerId, provider] of Object.entries(data)) {
                 if (!provider?.models || typeof provider.models !== "object") continue;
                 for (const [modelId, model] of Object.entries(provider.models)) {
-                    const effective = resolveLimit(model?.limit);
-                    if (typeof effective === "number" && effective > 0) {
-                        limits.set(`${providerId}/${modelId}`, effective);
-                        // OpenCode creates derived model IDs from experimental.modes
-                        // e.g. gpt-5.4 + modes.fast → gpt-5.4-fast (inherits parent limit).
-                        const modes = model?.experimental?.modes;
-                        if (modes && typeof modes === "object") {
-                            for (const mode of Object.keys(modes)) {
-                                limits.set(`${providerId}/${modelId}-${mode}`, effective);
-                            }
-                        }
-                    }
+                    setCachedModelMetadata(metadata, `${providerId}/${modelId}`, model);
                 }
             }
         }
@@ -177,10 +228,7 @@ function loadModelsDevLimitsFromFile(): Map<string, number> {
                 for (const [providerId, provider] of Object.entries(config.provider)) {
                     if (!provider?.models || typeof provider.models !== "object") continue;
                     for (const [modelId, model] of Object.entries(provider.models)) {
-                        const effective = resolveLimit(model?.limit);
-                        if (typeof effective === "number" && effective > 0) {
-                            limits.set(`${providerId}/${modelId}`, effective);
-                        }
+                        setCachedModelMetadata(metadata, `${providerId}/${modelId}`, model);
                     }
                 }
             }
@@ -195,10 +243,10 @@ function loadModelsDevLimitsFromFile(): Map<string, number> {
 
     sessionLog(
         "global",
-        `models-dev-cache: file-layer loaded ${limits.size} model limits (modelsJsonPath=${modelsJsonPath}, found=${fileFound})`,
+        `models-dev-cache: file-layer loaded ${metadata.size} model metadata entries (modelsJsonPath=${modelsJsonPath}, found=${fileFound})`,
     );
 
-    return limits;
+    return metadata;
 }
 
 /**
@@ -212,7 +260,7 @@ function loadModelsDevLimitsFromFile(): Map<string, number> {
  *
  * Safe to call concurrently; only overwrites the cache on success.
  */
-export async function refreshModelLimitsFromApi(client: OpencodeClient): Promise<void> {
+export async function refreshModelLimitsFromApi(client: OpencodeClientLike): Promise<void> {
     try {
         const result = await client.config.providers();
         const data = (result as { data?: { providers?: Array<unknown> } }).data;
@@ -222,18 +270,23 @@ export async function refreshModelLimitsFromApi(client: OpencodeClient): Promise
             return;
         }
 
-        const map = new Map<string, number>();
+        const map = new Map<string, CachedModelMetadata>();
         for (const entry of providers) {
             const p = entry as {
                 id?: string;
-                models?: Record<string, { limit?: { context?: number; input?: number } }>;
+                models?: Record<
+                    string,
+                    {
+                        limit?: { context?: number; input?: number };
+                        capabilities?: { interleaved?: InterleavedConfig };
+                        interleaved?: InterleavedConfig;
+                        experimental?: { modes?: Record<string, unknown> };
+                    }
+                >;
             };
             if (!p?.id || !p.models || typeof p.models !== "object") continue;
             for (const [modelId, model] of Object.entries(p.models)) {
-                const effective = resolveLimit(model?.limit);
-                if (typeof effective === "number" && effective > 0) {
-                    map.set(`${p.id}/${modelId}`, effective);
-                }
+                setCachedModelMetadata(map, `${p.id}/${modelId}`, model);
             }
         }
 
@@ -245,7 +298,7 @@ export async function refreshModelLimitsFromApi(client: OpencodeClient): Promise
         if (previousSize === null || previousSize !== map.size) {
             sessionLog(
                 "global",
-                `models-dev-cache: API layer loaded ${map.size} model limits${
+                `models-dev-cache: API layer loaded ${map.size} model metadata entries${
                     previousSize !== null ? ` (was ${previousSize})` : ""
                 }`,
             );
@@ -274,16 +327,44 @@ export function getModelsDevContextLimit(providerID: string, modelID: string): n
     const key = `${providerID}/${modelID}`;
 
     if (apiCache) {
-        const fromApi = apiCache.get(key);
+        const fromApi = apiCache.get(key)?.limit;
         if (typeof fromApi === "number") return fromApi;
     }
 
     const now = Date.now();
     if (!fileCache || now - fileLastAttempt > RELOAD_INTERVAL_MS) {
         fileLastAttempt = now;
-        fileCache = loadModelsDevLimitsFromFile();
+        fileCache = loadModelsDevMetadataFromFile();
     }
-    return fileCache.get(key);
+    return fileCache.get(key)?.limit;
+}
+
+/**
+ * Returns the provider-specific interleaved reasoning field when the model
+ * requires one (for example `reasoning_content` for Moonshot/Kimi style
+ * providers). Undefined means the cache has no such capability recorded.
+ */
+export function getModelsDevInterleavedField(
+    providerID: string,
+    modelID: string,
+): string | undefined {
+    const key = `${providerID}/${modelID}`;
+
+    if (apiCache) {
+        const fromApi = apiCache.get(key)?.interleavedField;
+        if (typeof fromApi === "string" && fromApi.length > 0) {
+            return fromApi;
+        }
+    }
+
+    const now = Date.now();
+    if (!fileCache || now - fileLastAttempt > RELOAD_INTERVAL_MS) {
+        fileLastAttempt = now;
+        fileCache = loadModelsDevMetadataFromFile();
+    }
+
+    const fromFile = fileCache.get(key)?.interleavedField;
+    return typeof fromFile === "string" && fromFile.length > 0 ? fromFile : undefined;
 }
 
 /** Clear in-memory caches (for testing). */

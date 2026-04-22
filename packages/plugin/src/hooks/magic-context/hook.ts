@@ -492,6 +492,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             db,
             toolUsageSinceUserTurn,
             recentReduceBySession,
+            liveModelBySession,
             variantBySession,
             agentBySession,
             flushedSessions,

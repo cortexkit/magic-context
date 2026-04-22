@@ -30,6 +30,7 @@ export {
     clearHistorianFailureState,
     clearPersistedNoteNudge,
     clearPersistedNudgePlacement,
+    clearPersistedReasoningWatermark,
     clearPersistedStickyTurnReminder,
     clearSession,
     getHistorianFailureState,

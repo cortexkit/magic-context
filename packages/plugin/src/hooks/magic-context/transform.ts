@@ -28,6 +28,7 @@ import type { NudgePlacementStore } from "./nudge-placement-store";
 import type { ContextNudge } from "./nudger";
 import { getProtectedTailStartOrdinal, getRawSessionMessageCount } from "./read-session-chunk";
 import { estimateTokens } from "./read-session-formatting";
+import { modelRequiresInterleavedReasoning } from "./reasoning-capability";
 import { sendIgnoredMessage } from "./send-session-notification";
 import {
     replayClearedReasoning,
@@ -55,6 +56,7 @@ import {
     clearDetectedContextLimit,
     clearEmergencyRecovery,
     clearHistorianFailureState,
+    clearPersistedReasoningWatermark,
     getOverflowState,
 } from "../../features/magic-context/storage-meta-persisted";
 import type { LiveModelBySession } from "./hook-handlers";
@@ -281,8 +283,10 @@ export function createTransform(deps: TransformDeps) {
                     updateSessionMeta(db, sessionId, {
                         lastContextPercentage: 0,
                         lastInputTokens: 0,
+                        clearedReasoningThroughTag: 0,
                     });
                     clearHistorianFailureState(db, sessionId);
+                    clearPersistedReasoningWatermark(db, sessionId);
                     // Clear any detected context limit from a prior overflow — the
                     // old limit was specific to the previous model and must not
                     // leak into pressure math for the new model. The recovery
@@ -292,6 +296,12 @@ export function createTransform(deps: TransformDeps) {
                     clearEmergencyRecovery(db, sessionId);
                     // Also clear the in-memory usage map so loadContextUsage gets fresh values
                     deps.contextUsageMap.delete(sessionId);
+                    sessionMeta = {
+                        ...sessionMeta,
+                        lastContextPercentage: 0,
+                        lastInputTokens: 0,
+                        clearedReasoningThroughTag: 0,
+                    };
                 }
             }
         }
@@ -605,6 +615,11 @@ export function createTransform(deps: TransformDeps) {
         // Replay persisted reasoning clearing on EVERY pass (including defer).
         // This ensures reasoning cleared on a previous cache-busting pass stays cleared
         // even when OpenCode rebuilds messages fresh from its own DB.
+        const currentSessionModel =
+            deps.liveModelBySession?.get(sessionId) ??
+            findLastAssistantModel(messages) ??
+            undefined;
+        const skipTypedReasoningCleanup = modelRequiresInterleavedReasoning(currentSessionModel);
         const persistedReasoningWatermark = sessionMeta?.clearedReasoningThroughTag ?? 0;
         if (persistedReasoningWatermark > 0) {
             const tReplay = performance.now();
@@ -613,6 +628,7 @@ export function createTransform(deps: TransformDeps) {
                 reasoningByMessage,
                 messageTagNumbers,
                 persistedReasoningWatermark,
+                skipTypedReasoningCleanup,
             );
             const replayedInline = replayStrippedInlineThinking(
                 messages,
@@ -629,7 +645,15 @@ export function createTransform(deps: TransformDeps) {
         }
 
         const t4 = performance.now();
-        const strippedClearedReasoning = stripClearedReasoning(messages);
+        // Providers that declare `capabilities.interleaved.field` (for example
+        // Moonshot/Kimi's `reasoning_content`) require typed reasoning parts to
+        // survive until OpenCode's provider transform concatenates them onto the
+        // outgoing wire message. If magic-context removes every reasoning part
+        // here, OpenCode omits the required field and the provider rejects the
+        // request. Inline <thinking>...</thinking> text is intentionally NOT
+        // gated — it lives inside ordinary text parts and does not participate
+        // in the provider's typed reasoning_content contract.
+        const strippedClearedReasoning = stripClearedReasoning(messages, skipTypedReasoningCleanup);
         logTransformTiming(
             sessionId,
             "stripClearedReasoning",
@@ -640,9 +664,16 @@ export function createTransform(deps: TransformDeps) {
         // Strip reasoning from non-first assistants in consecutive runs to
         // avoid @ai-sdk/anthropic's groupIntoBlocks producing interleaved
         // thinking blocks that Opus 4.7 rejects. See strip-content.ts for
-        // full explanation.
+        // full explanation. Skip entirely when the current model uses
+        // interleaved reasoning (Moonshot/Kimi `reasoning_content`): that
+        // workaround targets an Anthropic SDK quirk, and removing reasoning
+        // parts from a Moonshot/Kimi assistant message breaks the wire
+        // contract because OpenCode's provider transform needs those parts
+        // to emit `reasoning_content`.
         const tMergeStrip = performance.now();
-        const strippedMergedReasoning = stripReasoningFromMergedAssistants(messages);
+        const strippedMergedReasoning = skipTypedReasoningCleanup
+            ? 0
+            : stripReasoningFromMergedAssistants(messages);
         if (strippedMergedReasoning > 0) {
             sessionLog(
                 sessionId,
@@ -741,6 +772,7 @@ export function createTransform(deps: TransformDeps) {
             watermark,
             forceMaterializationPercentage: FORCE_MATERIALIZE_PERCENTAGE,
             hasRecentReduceCall,
+            skipTypedReasoningCleanup,
             projectPath: deps.projectPath,
             autoSearch: deps.autoSearch,
         });

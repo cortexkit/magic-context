@@ -4,6 +4,7 @@ export {
     clearHistorianFailureState,
     clearPersistedNoteNudge,
     clearPersistedNudgePlacement,
+    clearPersistedReasoningWatermark,
     clearPersistedStickyTurnReminder,
     getHistorianFailureState,
     getNoteLastReadAt,

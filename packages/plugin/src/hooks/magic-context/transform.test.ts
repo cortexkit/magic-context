@@ -2,7 +2,7 @@
 
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it, mock } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -29,6 +29,7 @@ import {
 import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import type { PluginContext } from "../../plugin/types";
+import { clearModelsDevCache } from "../../shared/models-dev-cache";
 import { createNudgePlacementStore, createTransform } from "./transform";
 
 type TextPart = { type: "text"; text: string };
@@ -47,16 +48,27 @@ type TestPart =
     | StepFinishPart
     | ReasoningPart;
 type TestMessage = {
-    info: { id?: string; role: string; sessionID?: string };
+    info: {
+        id?: string;
+        role: string;
+        sessionID?: string;
+        providerID?: string;
+        modelID?: string;
+    };
     parts: TestPart[];
 };
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
+const originalXdgCacheHome = process.env.XDG_CACHE_HOME;
 
 afterEach(() => {
     closeDatabase();
-    process.env.XDG_DATA_HOME = originalXdgDataHome;
+    clearModelsDevCache();
+    if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = originalXdgDataHome;
+    if (originalXdgCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = originalXdgCacheHome;
 
     for (const dir of tempDirs) {
         rmSync(dir, { recursive: true, force: true });
@@ -70,8 +82,16 @@ function makeTempDir(prefix: string): string {
     return dir;
 }
 
+// Points both XDG_DATA_HOME (plugin storage) and XDG_CACHE_HOME (OpenCode's
+// models.json cache read by `models-dev-cache.ts`) at the same temp directory.
+// Tests that only touch plugin storage don't care about the cache isolation;
+// tests that exercise model-capability lookup (e.g., interleaved.field gating)
+// can write a synthetic models.json into <temp>/opencode/models.json and have
+// models-dev-cache read it.
 function useTempDataHome(prefix: string): void {
-    process.env.XDG_DATA_HOME = makeTempDir(prefix);
+    const dir = makeTempDir(prefix);
+    process.env.XDG_DATA_HOME = dir;
+    process.env.XDG_CACHE_HOME = dir;
 }
 
 function text(message: TestMessage, index: number): string {
@@ -1420,6 +1440,214 @@ describe("createTransform", () => {
         //#then — dropped tag's content is replaced even without usage data
         expect(toolOutput(messages[1], 1)).toBe("");
         expect(nudger).toHaveBeenCalledTimes(2);
+    });
+
+    it("preserves typed reasoning parts across transform passes for interleaved-reasoning models", async () => {
+        useTempDataHome("context-transform-interleaved-reasoning-");
+        // useTempDataHome points XDG_CACHE_HOME at the temp dir; write a
+        // synthetic models.json so `models-dev-cache.ts` sees that Kimi
+        // declares `interleaved.field = "reasoning_content"` without needing
+        // live provider data.
+        const cacheHome = process.env.XDG_CACHE_HOME as string;
+        const opencodeDir = join(cacheHome, "opencode");
+        mkdirSync(opencodeDir, { recursive: true });
+        writeFileSync(
+            join(opencodeDir, "models.json"),
+            JSON.stringify({
+                "opencode-go": {
+                    models: {
+                        "kimi-k2.6": {
+                            limit: { context: 262144, output: 65536 },
+                            interleaved: { field: "reasoning_content" },
+                        },
+                    },
+                },
+            }),
+        );
+        clearModelsDevCache();
+
+        const scheduler: Scheduler = { shouldExecute: mock(() => "execute" as const) };
+        const db = openDatabase();
+        const flushedSessions = new Set<string>(["ses-kimi"]);
+        const liveModelBySession = new Map<string, { providerID: string; modelID: string }>([
+            ["ses-kimi", { providerID: "opencode-go", modelID: "kimi-k2.6" }],
+        ]);
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler,
+            contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
+                [
+                    "ses-kimi",
+                    { usage: { percentage: 70, inputTokens: 180_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            nudger: () => null,
+            db,
+            nudgePlacements: createNudgePlacementStore(),
+            flushedSessions,
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 0,
+            protectedTags: 0,
+            autoDropToolAge: 1000,
+            dropToolStructure: true,
+            liveModelBySession,
+        });
+
+        const firstPass: TestMessage[] = [
+            {
+                info: { id: "m-user", role: "user", sessionID: "ses-kimi" },
+                parts: [{ type: "text", text: "run the tool" }],
+            },
+            {
+                info: {
+                    id: "m-assistant",
+                    role: "assistant",
+                    sessionID: "ses-kimi",
+                    providerID: "opencode-go",
+                    modelID: "kimi-k2.6",
+                },
+                parts: [
+                    { type: "reasoning", text: "must survive" },
+                    { type: "text", text: "tool call follows" },
+                ],
+            },
+        ];
+
+        await transform({}, { messages: firstPass });
+
+        expect(firstPass[1]?.parts.filter((part) => part.type === "reasoning")).toHaveLength(1);
+        expect(getOrCreateSessionMeta(db, "ses-kimi").clearedReasoningThroughTag).toBe(0);
+
+        updateSessionMeta(db, "ses-kimi", { clearedReasoningThroughTag: 99 });
+        flushedSessions.add("ses-kimi");
+        const secondPass: TestMessage[] = [
+            {
+                info: { id: "m-user", role: "user", sessionID: "ses-kimi" },
+                parts: [{ type: "text", text: "run the tool" }],
+            },
+            {
+                info: {
+                    id: "m-assistant",
+                    role: "assistant",
+                    sessionID: "ses-kimi",
+                    providerID: "opencode-go",
+                    modelID: "kimi-k2.6",
+                },
+                parts: [
+                    { type: "reasoning", text: "must survive" },
+                    { type: "text", text: "tool call follows" },
+                ],
+            },
+        ];
+
+        await transform({}, { messages: secondPass });
+
+        const reasoningParts =
+            secondPass[1]?.parts.filter((part) => part.type === "reasoning") ?? [];
+        expect(reasoningParts).toHaveLength(1);
+        expect(secondPass[1]?.parts).toHaveLength(2);
+        expect((reasoningParts[0] as ReasoningPart).text).toBe("must survive");
+    });
+
+    it("preserves reasoning across consecutive assistants for interleaved-reasoning models", async () => {
+        // The Anthropic groupIntoBlocks workaround
+        // (`stripReasoningFromMergedAssistants`) strips reasoning from
+        // non-first assistants in a consecutive run. That workaround is
+        // Anthropic-specific and actively breaks Moonshot/Kimi because
+        // OpenCode needs every reasoning part on tool-call messages to emit
+        // `reasoning_content`. This test documents that the gate keeps
+        // reasoning on BOTH assistants in a consecutive run when the live
+        // model uses interleaved reasoning.
+        useTempDataHome("context-transform-interleaved-merged-");
+        const cacheHome = process.env.XDG_CACHE_HOME as string;
+        const opencodeDir = join(cacheHome, "opencode");
+        mkdirSync(opencodeDir, { recursive: true });
+        writeFileSync(
+            join(opencodeDir, "models.json"),
+            JSON.stringify({
+                "opencode-go": {
+                    models: {
+                        "kimi-k2.6": {
+                            limit: { context: 262144, output: 65536 },
+                            interleaved: { field: "reasoning_content" },
+                        },
+                    },
+                },
+            }),
+        );
+        clearModelsDevCache();
+
+        const scheduler: Scheduler = { shouldExecute: mock(() => "execute" as const) };
+        const db = openDatabase();
+        const flushedSessions = new Set<string>(["ses-kimi-run"]);
+        const liveModelBySession = new Map<string, { providerID: string; modelID: string }>([
+            ["ses-kimi-run", { providerID: "opencode-go", modelID: "kimi-k2.6" }],
+        ]);
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler,
+            contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
+                [
+                    "ses-kimi-run",
+                    { usage: { percentage: 70, inputTokens: 180_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            nudger: () => null,
+            db,
+            nudgePlacements: createNudgePlacementStore(),
+            flushedSessions,
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 0,
+            protectedTags: 0,
+            autoDropToolAge: 1000,
+            dropToolStructure: true,
+            liveModelBySession,
+        });
+
+        const messages: TestMessage[] = [
+            {
+                info: { id: "m-user", role: "user", sessionID: "ses-kimi-run" },
+                parts: [{ type: "text", text: "do a multi-step task" }],
+            },
+            {
+                info: {
+                    id: "m-assistant-1",
+                    role: "assistant",
+                    sessionID: "ses-kimi-run",
+                    providerID: "opencode-go",
+                    modelID: "kimi-k2.6",
+                },
+                parts: [
+                    { type: "reasoning", text: "step 1 reasoning" },
+                    { type: "text", text: "step 1 output" },
+                ],
+            },
+            {
+                info: {
+                    id: "m-assistant-2",
+                    role: "assistant",
+                    sessionID: "ses-kimi-run",
+                    providerID: "opencode-go",
+                    modelID: "kimi-k2.6",
+                },
+                parts: [
+                    { type: "reasoning", text: "step 2 reasoning" },
+                    { type: "text", text: "step 2 output" },
+                ],
+            },
+        ];
+
+        await transform({}, { messages });
+
+        // BOTH assistants must keep their reasoning parts. The Anthropic
+        // merged-assistants workaround would have stripped reasoning from
+        // the second assistant.
+        const assistant1Reasoning = messages[1]?.parts.filter((p) => p.type === "reasoning") ?? [];
+        const assistant2Reasoning = messages[2]?.parts.filter((p) => p.type === "reasoning") ?? [];
+        expect(assistant1Reasoning).toHaveLength(1);
+        expect(assistant2Reasoning).toHaveLength(1);
+        expect((assistant1Reasoning[0] as ReasoningPart).text).toBe("step 1 reasoning");
+        expect((assistant2Reasoning[0] as ReasoningPart).text).toBe("step 2 reasoning");
     });
 });
 

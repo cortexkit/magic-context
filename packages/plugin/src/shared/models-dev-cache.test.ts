@@ -6,6 +6,7 @@ import {
     clearModelsDevCache,
     getModelsDevCacheState,
     getModelsDevContextLimit,
+    getModelsDevInterleavedField,
     refreshModelLimitsFromApi,
 } from "./models-dev-cache";
 
@@ -167,7 +168,6 @@ describe("models-dev-cache", () => {
                 }),
             },
         };
-        // @ts-expect-error mock narrow shape
         await refreshModelLimitsFromApi(mockClient);
 
         //#then
@@ -266,7 +266,6 @@ describe("models-dev-cache", () => {
                 }),
             },
         };
-        // @ts-expect-error mock narrow shape
         await refreshModelLimitsFromApi(mockClient);
 
         // API value wins.
@@ -277,23 +276,76 @@ describe("models-dev-cache", () => {
         expect(state.apiCount).toBe(1);
     });
 
+    test("reads interleaved reasoning field metadata from models.json", () => {
+        const opencodeDir = join(tempDir, "opencode");
+        mkdirSync(opencodeDir, { recursive: true });
+        writeFileSync(
+            join(opencodeDir, "models.json"),
+            JSON.stringify({
+                "opencode-go": {
+                    models: {
+                        "kimi-k2.6": {
+                            limit: { context: 262144 },
+                            interleaved: { field: "reasoning_content" },
+                        },
+                        "plain-model": {
+                            limit: { context: 262144 },
+                        },
+                    },
+                },
+            }),
+        );
+
+        expect(getModelsDevInterleavedField("opencode-go", "kimi-k2.6")).toBe("reasoning_content");
+        expect(getModelsDevInterleavedField("opencode-go", "plain-model")).toBeUndefined();
+    });
+
+    test("API cache exposes interleaved reasoning metadata", async () => {
+        const mockClient = {
+            config: {
+                providers: async () => ({
+                    data: {
+                        providers: [
+                            {
+                                id: "opencode-go",
+                                models: {
+                                    "kimi-k2.6": {
+                                        limit: { context: 262144 },
+                                        capabilities: {
+                                            interleaved: { field: "reasoning_content" },
+                                        },
+                                    },
+                                    "plain-model": {
+                                        limit: { context: 262144 },
+                                        capabilities: { interleaved: false },
+                                    },
+                                },
+                            },
+                        ],
+                    },
+                }),
+            },
+        };
+        await refreshModelLimitsFromApi(mockClient);
+
+        expect(getModelsDevInterleavedField("opencode-go", "kimi-k2.6")).toBe("reasoning_content");
+        expect(getModelsDevInterleavedField("opencode-go", "plain-model")).toBeUndefined();
+    });
+
     test("refreshModelLimitsFromApi tolerates empty/malformed responses", async () => {
         // Undefined data.
-        // @ts-expect-error mock narrow shape
         await refreshModelLimitsFromApi({
             config: { providers: async () => ({ data: undefined }) },
         });
         expect(getModelsDevCacheState().apiLoaded).toBe(false);
 
         // Non-array providers.
-        // @ts-expect-error mock narrow shape
         await refreshModelLimitsFromApi({
             config: { providers: async () => ({ data: { providers: "not an array" } }) },
         });
         expect(getModelsDevCacheState().apiLoaded).toBe(false);
 
         // Thrown error.
-        // @ts-expect-error mock narrow shape
         await refreshModelLimitsFromApi({
             config: {
                 providers: async () => {
@@ -330,7 +382,6 @@ describe("models-dev-cache", () => {
                 }),
             },
         };
-        // @ts-expect-error mock narrow shape
         await refreshModelLimitsFromApi(mockClient);
 
         // API-only key comes from API.

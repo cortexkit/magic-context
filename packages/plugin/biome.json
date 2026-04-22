@@ -55,6 +55,16 @@
                     }
                 }
             }
+        },
+        {
+            "includes": ["src/hooks/magic-context/image-token-estimate.ts"],
+            "linter": {
+                "rules": {
+                    "style": {
+                        "noNonNullAssertion": "off"
+                    }
+                }
+            }
         }
     ]
 }

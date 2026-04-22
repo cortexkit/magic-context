@@ -90,6 +90,17 @@ interface RunPostTransformPhaseArgs {
     watermark: number;
     forceMaterializationPercentage: number;
     hasRecentReduceCall: boolean;
+    /**
+     * Providers with `capabilities.interleaved.field` require typed reasoning
+     * parts to survive until OpenCode lifts them into a top-level
+     * `reasoning_content`/`reasoning_details` wire field. When true, skip the
+     * rewrite-and-remove cleanup for typed reasoning parts only.
+     *
+     * Inline `<thinking>...</thinking>` text is intentionally NOT gated. It
+     * lives inside ordinary text parts and does not participate in the typed
+     * provider contract that triggered Moonshot/Kimi's rejection.
+     */
+    skipTypedReasoningCleanup: boolean;
     projectPath?: string;
     /** Experimental auto-search: when enabled, runs ctx_search on the latest
      *  user prompt and appends a compact fragment hint. */
@@ -254,8 +265,9 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
                 args.reasoningByMessage,
                 args.messageTagNumbers,
                 args.clearReasoningAge,
+                args.skipTypedReasoningCleanup,
             );
-            stripClearedReasoning(args.messages);
+            stripClearedReasoning(args.messages, args.skipTypedReasoningCleanup);
             const strippedInline = stripInlineThinking(
                 args.messages,
                 args.messageTagNumbers,
@@ -274,6 +286,7 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
                     updateSessionMeta(args.db, args.sessionId, {
                         clearedReasoningThroughTag: newWatermark,
                     });
+                    args.sessionMeta.clearedReasoningThroughTag = newWatermark;
                     sessionLog(
                         args.sessionId,
                         `reasoning cleanup: cleared=${clearedReasoning} inlineStripped=${strippedInline} watermark=${currentWatermark}→${newWatermark}`,
