@@ -254,6 +254,71 @@ function ConfigForm(props: {
     ok: boolean;
     message: string;
   } | null>(null);
+
+  /**
+   * Structured outcome returned by the Rust probe (mirrors the `EmbeddingProbeOutcome`
+   * enum in `src-tauri/src/embedding_probe.rs`, serialized via serde with
+   * `tag = "kind"` + `rename_all = "snake_case"`). Each variant carries the
+   * fields needed to render provider-specific guidance instead of a raw
+   * HTTP status.
+   */
+  type EmbeddingProbeOutcome =
+    | { kind: "ok"; status: number; dimensions: number | null }
+    | { kind: "auth_failed"; status: number; preview: string }
+    | { kind: "endpoint_unsupported"; status: number; preview: string }
+    | { kind: "http_error"; status: number; preview: string }
+    | { kind: "network_error"; message: string }
+    | { kind: "timeout"; timeout_ms: number }
+    | { kind: "invalid_scheme"; endpoint: string }
+    | { kind: "unresolved_token"; field: string; token: string };
+
+  /** Render the probe outcome as `{ ok, message }` for the inline UI. The
+   *  wording mirrors doctor's output so a user who runs both tools sees
+   *  consistent guidance. */
+  function formatProbeOutcome(outcome: EmbeddingProbeOutcome): {
+    ok: boolean;
+    message: string;
+  } {
+    switch (outcome.kind) {
+      case "ok":
+        return {
+          ok: true,
+          message: `✓ Connected (${outcome.status}, ${outcome.dimensions ?? "?"}-dim vectors)`,
+        };
+      case "auth_failed":
+        return {
+          ok: false,
+          message: `Credentials rejected (${outcome.status}) — check your API key`,
+        };
+      case "endpoint_unsupported":
+        return {
+          ok: false,
+          message: `Endpoint does not support embeddings (${outcome.status}) — provider may not offer an embeddings API or the URL points at the wrong route`,
+        };
+      case "http_error":
+        return {
+          ok: false,
+          message: `HTTP ${outcome.status}: ${outcome.preview.slice(0, 120)}`,
+        };
+      case "network_error":
+        return { ok: false, message: `Connection failed: ${outcome.message}` };
+      case "timeout":
+        return {
+          ok: false,
+          message: `Endpoint did not respond within ${outcome.timeout_ms}ms — check URL and network`,
+        };
+      case "invalid_scheme":
+        return {
+          ok: false,
+          message: `Endpoint must start with http:// or https:// (got: ${outcome.endpoint})`,
+        };
+      case "unresolved_token":
+        return {
+          ok: false,
+          message: `${outcome.field} still contains ${outcome.token} — the referenced variable is not set in this process. Launch OpenCode from a terminal (where your shell exports the var) or run \`doctor\` to validate from the shell.`,
+        };
+    }
+  }
   const models = () => props.models;
 
   // Reset form data when content prop changes
@@ -683,15 +748,22 @@ function ConfigForm(props: {
                                       setEmbeddingTestResult({ ok: false, message: "Testing..." });
                                       try {
                                         const { invoke } = await import("@tauri-apps/api/core");
-                                        const result = await invoke<string>(
+                                        // Rust returns the structured outcome directly (not
+                                        // `Result<T, String>` anymore). Any thrown error from
+                                        // `invoke` itself is a tauri infrastructure failure
+                                        // (e.g., command not registered) rather than a probe
+                                        // classification — we surface that unchanged.
+                                        const outcome = await invoke<EmbeddingProbeOutcome>(
                                           "test_embedding_endpoint",
                                           { endpoint, model, apiKey: apiKey || null },
                                         );
-                                        setEmbeddingTestResult({ ok: true, message: result });
+                                        setEmbeddingTestResult(formatProbeOutcome(outcome));
                                       } catch (e: unknown) {
                                         setEmbeddingTestResult({
                                           ok: false,
-                                          message: String(e?.message || e),
+                                          message: String(
+                                            (e as { message?: string })?.message ?? e,
+                                          ),
                                         });
                                       }
                                     }}

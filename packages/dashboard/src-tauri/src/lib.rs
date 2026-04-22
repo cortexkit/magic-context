@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod config;
 pub mod db;
+pub mod embedding_probe;
 pub mod log_parser;
 
 use std::path::PathBuf;

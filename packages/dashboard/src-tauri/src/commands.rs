@@ -1,3 +1,6 @@
+use crate::embedding_probe::{
+    probe_embedding_endpoint, substitute_value, EmbeddingProbeOptions, EmbeddingProbeOutcome,
+};
 use crate::{config, db, log_parser, AppState};
 use tauri::State;
 
@@ -388,53 +391,83 @@ pub async fn get_available_models() -> Vec<String> {
 
 // ── Embedding test ──────────────────────────────────────────
 
+/// Probe an OpenAI-compatible embedding endpoint and classify the outcome.
+///
+/// This mirrors `doctor`'s behavior (see
+/// packages/plugin/src/cli/doctor.ts > checkEmbeddingConfig). The frontend
+/// uses the structured outcome kind to render provider-specific guidance
+/// rather than a raw HTTP status. Key behaviors:
+///
+/// 1. `{env:VAR}` / `{file:path}` substitution runs on endpoint, model, and
+///    api_key before the probe so users who stored their API key as
+///    `{env:EMBED_KEY}` in `magic-context.jsonc` get the same result in the
+///    dashboard as they do in doctor. If a token doesn't resolve (the env
+///    var isn't set in the dashboard's process environment, which on macOS
+///    often differs from the terminal environment), we return
+///    `UnresolvedToken` with the failing token so the UI can point users to
+///    launch OpenCode from the shell or run `doctor`.
+///
+/// 2. Body inspection on 2xx — `data[0].embedding` must be a non-empty float
+///    array. OpenRouter and similar proxies return 200 for `/embeddings` but
+///    with a chat-style body; we classify that as `EndpointUnsupported`
+///    instead of falsely reporting success.
+///
+/// 3. 401/403 → `AuthFailed` (specific "credentials rejected" message).
+///    404/405 → `EndpointUnsupported` (wrong URL / no embeddings API).
 #[tauri::command]
 pub async fn test_embedding_endpoint(
     endpoint: String,
     model: String,
     api_key: Option<String>,
-) -> Result<String, String> {
-    let url = format!("{}/embeddings", endpoint.trim_end_matches('/'));
-
-    let body = serde_json::json!({
-        "model": model,
-        "input": "test connection"
-    });
-
-    // Validate URL scheme
-    if !url.starts_with("https://") && !url.starts_with("http://") {
-        return Err("Endpoint must start with http:// or https://".to_string());
-    }
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("Failed to create client: {}", e))?;
-    let mut req = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(&body);
-
-    if let Some(key) = api_key.as_deref() {
-        if !key.is_empty() {
-            req = req.header("Authorization", format!("Bearer {}", key));
+) -> EmbeddingProbeOutcome {
+    // Substitute each field. None of these values are emitted to logs, so
+    // resolved values are safe to carry through the probe. We deliberately
+    // pass `None` for config_dir because the dashboard renders parsed form
+    // values that have already stripped JSONC context — relative file paths
+    // therefore resolve against cwd, which is the best we can do without
+    // knowing which config file the values came from.
+    let (endpoint, endpoint_residual) = substitute_value(&endpoint, None);
+    let (model, model_residual) = substitute_value(&model, None);
+    let (api_key_val, api_key_residual) = match api_key.as_deref() {
+        Some(s) => {
+            let (v, r) = substitute_value(s, None);
+            (Some(v), r)
         }
+        None => (None, None),
+    };
+
+    // If any residual tokens survived substitution, surface the first one
+    // so the user sees exactly which variable is missing. The dashboard may
+    // be running from a GUI launcher (e.g., macOS Dock) whose environment
+    // doesn't inherit shell rc files — users setting EMBED_API_KEY in
+    // ~/.zshrc won't see it in the dashboard process unless they launch
+    // OpenCode from the terminal.
+    if let Some(token) = endpoint_residual {
+        return EmbeddingProbeOutcome::UnresolvedToken {
+            field: "endpoint".to_string(),
+            token,
+        };
+    }
+    if let Some(token) = model_residual {
+        return EmbeddingProbeOutcome::UnresolvedToken {
+            field: "model".to_string(),
+            token,
+        };
+    }
+    if let Some(token) = api_key_residual {
+        return EmbeddingProbeOutcome::UnresolvedToken {
+            field: "api_key".to_string(),
+            token,
+        };
     }
 
-    match req.send().await {
-        Ok(resp) => {
-            let status = resp.status();
-            if status.is_success() {
-                Ok(format!("✓ Connected ({})", status))
-            } else {
-                let body = resp.text().await.unwrap_or_default();
-                // Safe string truncation (avoid panic on multi-byte chars)
-                let preview: String = body.chars().take(120).collect();
-                Err(format!("{}: {}", status, preview))
-            }
-        }
-        Err(e) => Err(format!("Connection failed: {}", e)),
-    }
+    probe_embedding_endpoint(EmbeddingProbeOptions {
+        endpoint,
+        model,
+        api_key: api_key_val,
+        timeout_ms: 10_000,
+    })
+    .await
 }
 
 // ── User Memory commands ────────────────────────────────────
