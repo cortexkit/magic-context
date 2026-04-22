@@ -18,6 +18,7 @@ import { getActiveCompartmentRun } from "./compartment-runner";
 import { dropStaleReduceCalls } from "./drop-stale-reduce-calls";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import {
+    getVisibleMemoryIds,
     type PreparedCompartmentInjection,
     renderCompartmentInjection,
 } from "./inject-compartments";
@@ -579,6 +580,13 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
     // appending to the user's own turn is cache-safe (user message hasn't
     // been cached yet) and useful across subagent sessions too.
     if (args.autoSearch?.enabled && args.projectPath) {
+        // Resolve memory ids currently rendered in the <session-history>
+        // block. The auto-search runner drops hint fragments for memories the
+        // agent already sees in message[0] so the hint stays "vague recall"
+        // for content not already in context.
+        const visibleMemoryIds =
+            getVisibleMemoryIds(args.db, args.sessionId) ?? undefined;
+
         try {
             await runAutoSearchHint({
                 sessionId: args.sessionId,
@@ -592,9 +600,7 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
                     memoryEnabled: args.autoSearch.memoryEnabled,
                     embeddingEnabled: args.autoSearch.embeddingEnabled,
                     gitCommitsEnabled: args.autoSearch.gitCommitsEnabled,
-                    // Future: pass memory ids already rendered in <session-history>
-                    // so the hint doesn't duplicate. For now the agent sees the
-                    // full set and can decide.
+                    visibleMemoryIds,
                 },
             });
         } catch (error) {

@@ -7,7 +7,7 @@
  * ctx_search for full context, not to provide the answer itself.
  *
  * Compression strategy per source:
- *   - memory / fact → caveman-ultra via `cavemanCompress()` (token-dense)
+ *   - memory → caveman-ultra via `cavemanCompress()` (token-dense)
  *   - git_commit → raw commit subject (already terse); prefixed with SHA + age
  *   - message → caveman-ultra, role tag
  *
@@ -54,8 +54,7 @@ function formatAge(committedAtMs: number): string {
 
 function renderFragment(result: UnifiedSearchResult, charCap: number): string {
     switch (result.source) {
-        case "memory":
-        case "fact": {
+        case "memory": {
             const compressed = cavemanCompress(result.content, "ultra");
             return truncate(compressed, charCap);
         }

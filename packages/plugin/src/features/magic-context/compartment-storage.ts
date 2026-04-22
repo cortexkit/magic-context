@@ -232,10 +232,12 @@ export function replaceSessionFacts(
         db.prepare("DELETE FROM session_facts WHERE session_id = ?").run(sessionId);
         insertFactRows(db, sessionId, facts, now);
         // Clear cached injection block so next pass renders fresh — preserve memory_block_count
-        // because memories didn't change (only facts), and the dashboard reads count between busts
-        db.prepare("UPDATE session_meta SET memory_block_cache = '' WHERE session_id = ?").run(
-            sessionId,
-        );
+        // because memories didn't change (only facts), and the dashboard reads count between busts.
+        // Clear memory_block_ids alongside so ctx_search's visible-memory filter doesn't use stale IDs
+        // during the short window between invalidation and the next render.
+        db.prepare(
+            "UPDATE session_meta SET memory_block_cache = '', memory_block_ids = '' WHERE session_id = ?",
+        ).run(sessionId);
     })();
 }
 
@@ -262,10 +264,11 @@ export function replaceAllCompartmentState(
         insertFactRows(db, sessionId, facts, now);
 
         // Clear cached injection block so next pass renders fresh — preserve memory_block_count
-        // because memories didn't change (only compartments/facts), and the dashboard reads count between busts
-        db.prepare("UPDATE session_meta SET memory_block_cache = '' WHERE session_id = ?").run(
-            sessionId,
-        );
+        // because memories didn't change (only compartments/facts), and the dashboard reads count between busts.
+        // Clear memory_block_ids alongside so the visible-memory filter doesn't use stale IDs.
+        db.prepare(
+            "UPDATE session_meta SET memory_block_cache = '', memory_block_ids = '' WHERE session_id = ?",
+        ).run(sessionId);
     })();
 }
 
@@ -439,8 +442,10 @@ export function promoteRecompStaging(
  */
 export function invalidateAllMemoryBlockCaches(db: Database): void {
     try {
+        // Clear both memory_block_cache and memory_block_ids so ctx_search's
+        // visible-memory filter can't use stale IDs either.
         db.prepare(
-            "UPDATE session_meta SET memory_block_cache = '' WHERE memory_block_cache != ''",
+            "UPDATE session_meta SET memory_block_cache = '', memory_block_ids = '' WHERE memory_block_cache != '' OR memory_block_ids != ''",
         ).run();
     } catch {
         // Best-effort — session_meta may not exist in test environments

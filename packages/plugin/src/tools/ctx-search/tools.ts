@@ -1,12 +1,15 @@
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import { getLastCompartmentEndMessage } from "../../features/magic-context/compartment-storage";
 import { type UnifiedSearchResult, unifiedSearch } from "../../features/magic-context/search";
+import { getVisibleMemoryIds } from "../../hooks/magic-context/inject-compartments";
 import {
     CTX_SEARCH_DESCRIPTION,
     CTX_SEARCH_TOOL_NAME,
     DEFAULT_CTX_SEARCH_LIMIT,
 } from "./constants";
-import type { CtxSearchArgs, CtxSearchToolDeps } from "./types";
+import type { CtxSearchArgs, CtxSearchSource, CtxSearchToolDeps } from "./types";
+
+const VALID_SOURCES: ReadonlySet<CtxSearchSource> = new Set(["memory", "message", "git_commit"]);
 
 function normalizeLimit(limit?: number): number {
     if (typeof limit !== "number" || !Number.isFinite(limit)) {
@@ -14,6 +17,27 @@ function normalizeLimit(limit?: number): number {
     }
 
     return Math.max(1, Math.floor(limit));
+}
+
+/** Validate and normalize the `sources` arg. Drops unknown strings (the enum
+ *  constraint catches them at the schema layer, but we still want a safe
+ *  runtime check for plugins/tests that call this directly). Returns
+ *  `undefined` when no `sources` were provided so unifiedSearch falls back to
+ *  its default (all sources). */
+function normalizeSources(sources?: string[]): CtxSearchSource[] | undefined {
+    if (!sources || sources.length === 0) return undefined;
+    const result: CtxSearchSource[] = [];
+    const seen = new Set<CtxSearchSource>();
+    for (const source of sources) {
+        if (VALID_SOURCES.has(source as CtxSearchSource)) {
+            const typed = source as CtxSearchSource;
+            if (!seen.has(typed)) {
+                seen.add(typed);
+                result.push(typed);
+            }
+        }
+    }
+    return result.length > 0 ? result : undefined;
 }
 
 function formatAge(committedAtMs: number): string {
@@ -38,13 +62,6 @@ function formatResult(result: UnifiedSearchResult, index: number): string {
         ].join("\n");
     }
 
-    if (result.source === "fact") {
-        return [
-            `[${index}] [fact] score=${result.score.toFixed(2)} category=${result.factCategory} id=${result.factId}`,
-            result.content,
-        ].join("\n");
-    }
-
     if (result.source === "git_commit") {
         return [
             `[${index}] [git_commit] score=${result.score.toFixed(2)} sha=${result.shortSha} ${formatAge(result.committedAtMs)} match=${result.matchType}`,
@@ -63,7 +80,7 @@ function formatResult(result: UnifiedSearchResult, index: number): string {
 
 function formatSearchResults(query: string, results: UnifiedSearchResult[]): string {
     if (results.length === 0) {
-        return `No results found for "${query}" across memories, session facts, or message history.`;
+        return `No results found for "${query}" across memories, git commits, or message history.`;
     }
 
     const body = results.map((result, index) => formatResult(result, index + 1)).join("\n\n");
@@ -76,11 +93,19 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
         args: {
             query: tool.schema
                 .string()
-                .describe("Search query across memories, facts, and conversation history."),
+                .describe(
+                    "Search query. Matches against memory content, git commit messages, and raw user/assistant message text.",
+                ),
             limit: tool.schema
                 .number()
                 .optional()
                 .describe("Maximum results to return (default: 10)"),
+            sources: tool.schema
+                .array(tool.schema.enum(["memory", "message", "git_commit"]))
+                .optional()
+                .describe(
+                    'Optional. Restrict to specific sources. Examples: ["git_commit"] for "when did we change X", ["memory"] for naming conventions, ["message"] for "did we discuss this earlier", ["git_commit","message"] for regression hunts. Omit for a broad search across all enabled sources.',
+                ),
         },
         async execute(args: CtxSearchArgs, toolContext) {
             const query = args.query?.trim();
@@ -91,6 +116,11 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
             // Only search message history up to the last compartment boundary —
             // anything after that is still in the live context and already visible to the agent.
             const lastCompartmentEnd = getLastCompartmentEndMessage(deps.db, toolContext.sessionID);
+
+            // Hard-filter memories already rendered in <session-history>.
+            // They're visible in message[0], so returning them wastes output
+            // tokens and crowds out high-signal raw-history hits.
+            const visibleMemoryIds = getVisibleMemoryIds(deps.db, toolContext.sessionID);
 
             const results = await unifiedSearch(
                 deps.db,
@@ -104,6 +134,8 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
                     readMessages: deps.readMessages,
                     maxMessageOrdinal: lastCompartmentEnd >= 0 ? lastCompartmentEnd : undefined,
                     gitCommitsEnabled: deps.gitCommitsEnabled ?? false,
+                    sources: normalizeSources(args.sources),
+                    visibleMemoryIds,
                 },
             );
 

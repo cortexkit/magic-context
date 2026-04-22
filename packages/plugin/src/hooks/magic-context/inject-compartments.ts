@@ -38,6 +38,37 @@ export function clearInjectionCache(sessionId: string): void {
     injectionCache.delete(sessionId);
 }
 
+/**
+ * Return the set of memory ids currently rendered in the cached
+ * <session-history> block for this session, if any. Used by ctx_search
+ * to hard-filter memories the agent already sees in context — retrieving
+ * them from search wastes tokens and pushes high-signal raw-history hits
+ * further down the ranking.
+ *
+ * Returns null when no cache exists or the JSON payload is malformed
+ * (callers should treat null as "don't filter" — the worst case is a
+ * redundant memory result, not a correctness issue).
+ */
+export function getVisibleMemoryIds(db: Database, sessionId: string): Set<number> | null {
+    try {
+        const row = db
+            .prepare("SELECT memory_block_ids FROM session_meta WHERE session_id = ?")
+            .get(sessionId) as { memory_block_ids: string | null } | null;
+        if (!row?.memory_block_ids) return null;
+        const parsed = JSON.parse(row.memory_block_ids) as unknown;
+        if (!Array.isArray(parsed)) return null;
+        const ids = new Set<number>();
+        for (const value of parsed) {
+            if (typeof value === "number" && Number.isFinite(value)) {
+                ids.add(value);
+            }
+        }
+        return ids.size > 0 ? ids : null;
+    } catch {
+        return null;
+    }
+}
+
 export interface CompartmentInjectionResult {
     injected: boolean;
     compartmentEndMessage: number;
@@ -221,6 +252,10 @@ export function prepareCompartmentInjection(
             }
             memoryCount = memories.length;
             memoryBlock = renderMemoryBlock(memories) ?? undefined;
+            // Capture ids of memories actually rendered in the block. Stored in
+            // session_meta.memory_block_ids as JSON so ctx_search can hard-filter
+            // them out of search results (the agent already sees them in <session-history>).
+            const renderedIds = memories.map((m) => m.id);
 
             // Snapshot so subsequent turns reuse the same block without cache bust.
             // Swallow SQLITE_BUSY: the cache is a pure optimization (the block itself
@@ -231,8 +266,13 @@ export function prepareCompartmentInjection(
             // Issue: https://github.com/cortexkit/opencode-magic-context/issues/23
             try {
                 db.prepare(
-                    "UPDATE session_meta SET memory_block_cache = ?, memory_block_count = ? WHERE session_id = ?",
-                ).run(memoryBlock ?? "", memoryCount, sessionId);
+                    "UPDATE session_meta SET memory_block_cache = ?, memory_block_count = ?, memory_block_ids = ? WHERE session_id = ?",
+                ).run(
+                    memoryBlock ?? "",
+                    memoryCount,
+                    JSON.stringify(renderedIds),
+                    sessionId,
+                );
             } catch (error) {
                 const code = (error as { code?: string } | null)?.code;
                 if (code === "SQLITE_BUSY") {

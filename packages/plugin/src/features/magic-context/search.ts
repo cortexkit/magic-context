@@ -16,7 +16,6 @@ import { cosineSimilarity } from "./memory/cosine-similarity";
 import { embedText, isEmbeddingEnabled } from "./memory/embedding";
 import { sanitizeFtsQuery } from "./memory/storage-memory-fts";
 import { ensureMessagesIndexed } from "./message-index";
-import { getSessionFacts, type SessionFact } from "./storage";
 
 type PreparedStatement = ReturnType<Database["prepare"]>;
 
@@ -26,12 +25,16 @@ const SEMANTIC_WEIGHT = 0.7;
 const FTS_WEIGHT = 0.3;
 const SINGLE_SOURCE_PENALTY = 0.8;
 const RESULT_PREVIEW_LIMIT = 220;
-/** Source boost multipliers for unified ranking — higher-signal sources get a mild score boost. */
+/** Source boost multipliers for unified ranking.
+ *
+ * Memories are curated, hand-written summaries — strongest signal.
+ * Git commits are terse human-written descriptions — high signal.
+ * Messages are raw history that survived compression — boosted above baseline
+ * (1.15 in this release, up from 1.0) because by definition these are the
+ * specific details the historian didn't preserve as memories or compartments,
+ * which is exactly what ctx_search is most useful for. */
 const MEMORY_SOURCE_BOOST = 1.3;
-const FACT_SOURCE_BOOST = 1.15;
-const MESSAGE_SOURCE_BOOST = 1.0;
-/** Git commits boost — slightly below memories because commit messages are
- *  terser by nature. Ranks above raw history but below curated memory. */
+const MESSAGE_SOURCE_BOOST = 1.15;
 const GIT_COMMIT_SOURCE_BOOST = 1.2;
 
 interface MessageSearchRow {
@@ -42,6 +45,8 @@ interface MessageSearchRow {
 }
 
 const messageSearchStatements = new WeakMap<Database, PreparedStatement>();
+
+export type SearchSource = "memory" | "message" | "git_commit";
 
 export interface UnifiedSearchOptions {
     limit?: number;
@@ -55,6 +60,17 @@ export interface UnifiedSearchOptions {
     /** Include indexed git commits in the result set. Default false — the
      *  feature is gated behind experimental.git_commit_indexing config. */
     gitCommitsEnabled?: boolean;
+    /** Restrict results to these sources. Omit or pass undefined to search all
+     *  enabled sources. Empty array is treated as "no sources enabled" → [].
+     *  Facts are NOT a source — they're already always rendered in the
+     *  <session-history> block injected into message[0]. */
+    sources?: SearchSource[];
+    /** Hard-filter memories already rendered in <session-history>. The agent
+     *  can see them in message[0] — surfacing them via ctx_search wastes
+     *  tokens and crowds out high-signal raw-history hits. Pass null or omit
+     *  to disable filtering (for callers outside the transform context that
+     *  can't resolve the visible set). */
+    visibleMemoryIds?: Set<number> | null;
 }
 
 export interface MemorySearchResult {
@@ -64,14 +80,6 @@ export interface MemorySearchResult {
     memoryId: number;
     category: string;
     matchType: "semantic" | "fts" | "hybrid";
-}
-
-export interface FactSearchResult {
-    source: "fact";
-    content: string;
-    score: number;
-    factId: number;
-    factCategory: string;
 }
 
 export interface MessageSearchResult {
@@ -94,11 +102,7 @@ export interface GitCommitSearchResult {
     matchType: "semantic" | "fts" | "hybrid";
 }
 
-export type UnifiedSearchResult =
-    | MemorySearchResult
-    | FactSearchResult
-    | MessageSearchResult
-    | GitCommitSearchResult;
+export type UnifiedSearchResult = MemorySearchResult | MessageSearchResult | GitCommitSearchResult;
 
 function normalizeLimit(limit?: number): number {
     if (typeof limit !== "number" || !Number.isFinite(limit)) {
@@ -121,46 +125,6 @@ function previewText(text: string): string {
         return normalized;
     }
     return `${normalized.slice(0, RESULT_PREVIEW_LIMIT - 1).trimEnd()}…`;
-}
-
-function tokenizeQuery(query: string): string[] {
-    return Array.from(
-        new Set(
-            query
-                .toLowerCase()
-                .split(/\s+/)
-                .map((token) => token.trim())
-                .filter((token) => token.length > 0),
-        ),
-    );
-}
-
-function scoreTextMatch(content: string, query: string, extraText = ""): number {
-    const tokens = tokenizeQuery(query);
-    if (tokens.length === 0) {
-        return 0;
-    }
-
-    const haystack = `${content} ${extraText}`.toLowerCase();
-    const queryLower = query.trim().toLowerCase();
-    let matchedTokens = 0;
-
-    for (const token of tokens) {
-        if (haystack.includes(token)) {
-            matchedTokens++;
-        }
-    }
-
-    if (matchedTokens === 0) {
-        return 0;
-    }
-
-    let score = matchedTokens / tokens.length;
-    if (queryLower.length > 0 && haystack.includes(queryLower)) {
-        score += 0.35;
-    }
-
-    return Math.min(1, score);
 }
 
 function getMessageSearchStatement(db: Database): PreparedStatement {
@@ -275,12 +239,20 @@ function mergeMemoryResults(args: {
     semanticScores: Map<number, number>;
     ftsScores: Map<number, number>;
     limit: number;
+    visibleMemoryIds?: Set<number> | null;
 }): MemorySearchResult[] {
     const memoryById = new Map(args.memories.map((memory) => [memory.id, memory]));
     const candidateIds = new Set<number>([...args.semanticScores.keys(), ...args.ftsScores.keys()]);
     const results: MemorySearchResult[] = [];
 
     for (const id of candidateIds) {
+        // Hard-filter: memory is already rendered in <session-history>, so the
+        // agent sees it in message[0]. Returning it from ctx_search wastes
+        // output tokens and displaces high-signal raw-history hits.
+        if (args.visibleMemoryIds?.has(id)) {
+            continue;
+        }
+
         const memory = memoryById.get(id);
         if (!memory) {
             continue;
@@ -335,6 +307,7 @@ async function searchMemories(args: {
     embeddingEnabled: boolean;
     embedQuery: (text: string) => Promise<Float32Array | null>;
     isEmbeddingRuntimeEnabled: () => boolean;
+    visibleMemoryIds?: Set<number> | null;
 }): Promise<MemorySearchResult[]> {
     if (!args.memoryEnabled) {
         return [];
@@ -372,35 +345,22 @@ async function searchMemories(args: {
         semanticScores,
         ftsScores,
         limit: args.limit,
+        visibleMemoryIds: args.visibleMemoryIds,
     });
 }
 
-function searchFacts(args: {
-    db: Database;
-    sessionId: string;
-    query: string;
-    limit: number;
-}): FactSearchResult[] {
-    return getSessionFacts(args.db, args.sessionId)
-        .map((fact: SessionFact) => ({
-            fact,
-            score: scoreTextMatch(fact.content, args.query, fact.category),
-        }))
-        .filter((candidate) => candidate.score > 0)
-        .sort((left, right) => {
-            if (right.score !== left.score) {
-                return right.score - left.score;
-            }
-            return left.fact.id - right.fact.id;
-        })
-        .slice(0, args.limit)
-        .map(({ fact, score }) => ({
-            source: "fact",
-            content: previewText(fact.content),
-            score,
-            factId: fact.id,
-            factCategory: fact.category,
-        }));
+/** Linear decay message scoring.
+ *
+ * The old formula (1 / (rank+1)) collapsed quickly: rank-0 = 1.0, rank-1 = 0.5,
+ * rank-2 = 0.33, rank-5 = 0.17. In practice only the #1 message hit could
+ * compete with boosted memories, so all secondary message matches got buried.
+ *
+ * Linear decay (1 - rank/limit) keeps signal across the returned window:
+ * rank-0 = 1.0, rank-1 = 0.9, rank-2 = 0.8, rank-9 = 0.1. Combined with the
+ * bumped MESSAGE_SOURCE_BOOST this lets raw-history hits actually compete. */
+function linearDecayScore(rank: number, total: number): number {
+    if (total <= 0) return 0;
+    return Math.max(0, 1 - rank / total);
 }
 
 function searchMessages(args: {
@@ -428,8 +388,8 @@ function searchMessages(args: {
 
     const cutoff = args.maxOrdinal != null && args.maxOrdinal >= 0 ? args.maxOrdinal : null;
 
-    return rows
-        .map((row, rank) => {
+    const filtered = rows
+        .map((row) => {
             const messageOrdinal = getMessageOrdinal(row.messageOrdinal);
             if (
                 messageOrdinal === null ||
@@ -446,24 +406,40 @@ function searchMessages(args: {
             }
 
             return {
-                source: "message" as const,
-                content: previewText(row.content),
-                score: 1 / (rank + 1),
                 messageOrdinal,
                 messageId: row.messageId,
                 role: row.role,
+                content: row.content,
             };
         })
-        .filter((result): result is MessageSearchResult => result !== null)
+        .filter(
+            (
+                result,
+            ): result is {
+                messageOrdinal: number;
+                messageId: string;
+                role: string;
+                content: string;
+            } => result !== null,
+        )
         .slice(0, args.limit);
+
+    // Score with linear decay over the final returned count (not the raw
+    // FTS fetch count) so a small result set still gets strong scores.
+    return filtered.map((row, rank) => ({
+        source: "message" as const,
+        content: previewText(row.content),
+        score: linearDecayScore(rank, filtered.length),
+        messageOrdinal: row.messageOrdinal,
+        messageId: row.messageId,
+        role: row.role,
+    }));
 }
 
 function getSourceBoost(result: UnifiedSearchResult): number {
     switch (result.source) {
         case "memory":
             return MEMORY_SOURCE_BOOST;
-        case "fact":
-            return FACT_SOURCE_BOOST;
         case "message":
             return MESSAGE_SOURCE_BOOST;
         case "git_commit":
@@ -481,10 +457,6 @@ function compareUnifiedResults(left: UnifiedSearchResult, right: UnifiedSearchRe
 
     if (left.source === "memory" && right.source === "memory") {
         return left.memoryId - right.memoryId;
-    }
-
-    if (left.source === "fact" && right.source === "fact") {
-        return left.factId - right.factId;
     }
 
     if (left.source === "message" && right.source === "message") {
@@ -541,6 +513,22 @@ async function searchGitCommitsAsync(args: {
     return hits.map(toGitCommitResult);
 }
 
+function resolveSources(sources: SearchSource[] | undefined): Set<SearchSource> {
+    if (sources === undefined) {
+        // Default: search all three sources. Facts are deliberately NOT a
+        // source — they're always rendered in <session-history> so searching
+        // them returns content the agent already sees.
+        return new Set<SearchSource>(["memory", "message", "git_commit"]);
+    }
+    const set = new Set<SearchSource>();
+    for (const source of sources) {
+        if (source === "memory" || source === "message" || source === "git_commit") {
+            set.add(source);
+        }
+    }
+    return set;
+}
+
 export async function unifiedSearch(
     db: Database,
     sessionId: string,
@@ -560,30 +548,39 @@ export async function unifiedSearch(
     const embedQuery = options.embedQuery ?? embedText;
     const isEmbeddingRuntimeEnabled = options.isEmbeddingRuntimeEnabled ?? isEmbeddingEnabled;
     const gitCommitsEnabled = options.gitCommitsEnabled ?? false;
+    const activeSources = resolveSources(options.sources);
 
-    const [memoryResults, factResults, messageResults, gitCommitResults] = await Promise.all([
-        searchMemories({
-            db,
-            projectPath,
-            query: trimmedQuery,
-            limit: tierLimit,
-            memoryEnabled: options.memoryEnabled ?? true,
-            embeddingEnabled,
-            embedQuery,
-            isEmbeddingRuntimeEnabled,
-        }),
-        Promise.resolve(searchFacts({ db, sessionId, query: trimmedQuery, limit: tierLimit })),
-        Promise.resolve(
-            searchMessages({
-                db,
-                sessionId,
-                query: trimmedQuery,
-                limit: tierLimit,
-                readMessages: options.readMessages ?? readRawSessionMessages,
-                maxOrdinal: options.maxMessageOrdinal,
-            }),
-        ),
-        gitCommitsEnabled
+    const runMemory = activeSources.has("memory") && (options.memoryEnabled ?? true);
+    const runMessages = activeSources.has("message");
+    const runGitCommits = activeSources.has("git_commit") && gitCommitsEnabled;
+
+    const [memoryResults, messageResults, gitCommitResults] = await Promise.all([
+        runMemory
+            ? searchMemories({
+                  db,
+                  projectPath,
+                  query: trimmedQuery,
+                  limit: tierLimit,
+                  memoryEnabled: true,
+                  embeddingEnabled,
+                  embedQuery,
+                  isEmbeddingRuntimeEnabled,
+                  visibleMemoryIds: options.visibleMemoryIds,
+              })
+            : Promise.resolve([] as MemorySearchResult[]),
+        runMessages
+            ? Promise.resolve(
+                  searchMessages({
+                      db,
+                      sessionId,
+                      query: trimmedQuery,
+                      limit: tierLimit,
+                      readMessages: options.readMessages ?? readRawSessionMessages,
+                      maxOrdinal: options.maxMessageOrdinal,
+                  }),
+              )
+            : Promise.resolve([] as MessageSearchResult[]),
+        runGitCommits
             ? searchGitCommitsAsync({
                   db,
                   projectPath,
@@ -596,7 +593,7 @@ export async function unifiedSearch(
             : Promise.resolve([] as GitCommitSearchResult[]),
     ]);
 
-    const results = [...memoryResults, ...factResults, ...messageResults, ...gitCommitResults]
+    const results = [...memoryResults, ...messageResults, ...gitCommitResults]
         .sort(compareUnifiedResults)
         .slice(0, limit);
 

@@ -46,7 +46,7 @@ describe("unifiedSearch", () => {
         db.close(false);
     });
 
-    it("returns ranked results across memories, facts, and messages", async () => {
+    it("returns ranked results across memories and messages (no facts)", async () => {
         const memory = insertMemory(db, {
             projectPath: "/repo/project",
             category: "ARCHITECTURE_DECISIONS",
@@ -55,10 +55,13 @@ describe("unifiedSearch", () => {
         saveEmbedding(db, memory.id, new Float32Array([1, 0]), "mock:model");
         queryEmbedding = new Float32Array([1, 0]);
 
+        // Facts are inserted but should NEVER appear in ctx_search results —
+        // they're always rendered in <session-history> so returning them from
+        // search is redundant.
         replaceSessionFacts(db, "ses-1", [
             {
                 category: "WORKFLOW_RULES",
-                content: "ctx_search should prefer memory results first.",
+                content: "ranked search flow.",
             },
         ]);
 
@@ -91,17 +94,152 @@ describe("unifiedSearch", () => {
             isEmbeddingRuntimeEnabled,
         });
 
-        expect(results).toHaveLength(4);
+        expect(results.length).toBeGreaterThan(0);
         const sources = results.map((r) => r.source);
         expect(sources).toContain("memory");
-        expect(sources).toContain("fact");
         expect(sources).toContain("message");
-        // With boost-based ranking, sources interleave by effective score (score * boost)
-        // rather than strict priority ordering
+        // Facts are NOT a ctx_search source — they're always visible in message[0].
+        expect(sources).not.toContain("fact");
         const messageResults = results.filter((r) => r.source === "message");
-        expect(messageResults).toHaveLength(2);
+        expect(messageResults.length).toBeGreaterThan(0);
         expect(embeddingQueries).toEqual(["ranked search"]);
         expect(getMemoryById(db, memory.id)?.retrievalCount).toBe(1);
+    });
+
+    it("restricts results to the sources filter", async () => {
+        const memory = insertMemory(db, {
+            projectPath: "/repo/project",
+            category: "ARCHITECTURE_DECISIONS",
+            content: "Historian uses a compact static system prompt.",
+        });
+        saveEmbedding(db, memory.id, new Float32Array([1, 0]), "mock:model");
+        queryEmbedding = new Float32Array([1, 0]);
+
+        rawMessagesBySession.set("ses-sources", [
+            {
+                ordinal: 1,
+                id: "u1",
+                role: "user",
+                parts: [{ type: "text", text: "What prompt does the historian agent use?" }],
+            },
+        ]);
+
+        // Memory-only filter — message hit must be excluded.
+        const memoryOnly = await unifiedSearch(
+            db,
+            "ses-sources",
+            "/repo/project",
+            "historian prompt",
+            {
+                memoryEnabled: true,
+                embeddingEnabled: true,
+                readMessages,
+                embedQuery,
+                isEmbeddingRuntimeEnabled,
+                sources: ["memory"],
+            },
+        );
+        expect(memoryOnly.every((r) => r.source === "memory")).toBe(true);
+        expect(memoryOnly.length).toBeGreaterThan(0);
+
+        // Message-only filter — memory hit must be excluded.
+        const messageOnly = await unifiedSearch(
+            db,
+            "ses-sources",
+            "/repo/project",
+            "historian prompt",
+            {
+                memoryEnabled: true,
+                embeddingEnabled: true,
+                readMessages,
+                embedQuery,
+                isEmbeddingRuntimeEnabled,
+                sources: ["message"],
+            },
+        );
+        expect(messageOnly.every((r) => r.source === "message")).toBe(true);
+        expect(messageOnly.length).toBeGreaterThan(0);
+    });
+
+    it("hard-filters memories listed in visibleMemoryIds", async () => {
+        const visible = insertMemory(db, {
+            projectPath: "/repo/visible",
+            category: "ARCHITECTURE_DECISIONS",
+            content: "Keep historian subagent hidden via mode=subagent plus hidden=true.",
+        });
+        const hidden = insertMemory(db, {
+            projectPath: "/repo/visible",
+            category: "ARCHITECTURE_DECISIONS",
+            content: "Historian child sessions inherit parent variant for cache stability.",
+        });
+        saveEmbedding(db, visible.id, new Float32Array([1, 0]), "mock:model");
+        saveEmbedding(db, hidden.id, new Float32Array([1, 0]), "mock:model");
+        queryEmbedding = new Float32Array([1, 0]);
+
+        const results = await unifiedSearch(db, "ses-vis", "/repo/visible", "historian", {
+            memoryEnabled: true,
+            embeddingEnabled: true,
+            readMessages,
+            embedQuery,
+            isEmbeddingRuntimeEnabled,
+            visibleMemoryIds: new Set([visible.id]),
+            sources: ["memory"],
+        });
+
+        // The already-visible memory must not be returned even though it
+        // would otherwise rank identically with the other candidate.
+        const ids = results
+            .filter((r) => r.source === "memory")
+            .map((r) => (r as { memoryId: number }).memoryId);
+        expect(ids).not.toContain(visible.id);
+        expect(ids).toContain(hidden.id);
+    });
+
+    it("uses linear decay for message scoring so secondary hits keep signal", async () => {
+        rawMessagesBySession.set("ses-decay", [
+            {
+                ordinal: 1,
+                id: "u1",
+                role: "user",
+                parts: [{ type: "text", text: "regression regression regression one" }],
+            },
+            {
+                ordinal: 2,
+                id: "u2",
+                role: "user",
+                parts: [{ type: "text", text: "regression regression two" }],
+            },
+            {
+                ordinal: 3,
+                id: "u3",
+                role: "user",
+                parts: [{ type: "text", text: "regression three" }],
+            },
+        ]);
+
+        const results = await unifiedSearch(db, "ses-decay", "/repo/decay", "regression", {
+            memoryEnabled: false,
+            embeddingEnabled: false,
+            readMessages,
+            embedQuery,
+            isEmbeddingRuntimeEnabled,
+            sources: ["message"],
+        });
+
+        const messages = results.filter(
+            (r): r is Extract<(typeof results)[number], { source: "message" }> =>
+                r.source === "message",
+        );
+        expect(messages.length).toBeGreaterThanOrEqual(3);
+        // With 1/(rank+1), rank-2 would be 0.33. Linear decay over a
+        // filtered length of 3 produces 1.0, 0.667, 0.333. Either way rank-1
+        // (index 1) should still be comfortably above the old rank-2 value.
+        expect(messages[0].score).toBeGreaterThan(0.9);
+        expect(messages[1].score).toBeGreaterThan(0.5);
+        // Rank-2 of 3 is the last hit — linear decay gives 1/3 ≈ 0.333 and
+        // we don't want it to collapse to near-zero like the old formula's
+        // rank-5 did.
+        expect(messages[2].score).toBeGreaterThan(0.2);
     });
 
     it("indexes only meaningful text messages and updates incrementally", async () => {

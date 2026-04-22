@@ -226,7 +226,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       historian_last_failure_at INTEGER DEFAULT NULL,
       system_prompt_hash TEXT DEFAULT '',
       memory_block_cache TEXT DEFAULT '',
-      memory_block_count INTEGER DEFAULT 0
+      memory_block_count INTEGER DEFAULT 0,
+      memory_block_ids TEXT DEFAULT ''
     );
 
     CREATE INDEX IF NOT EXISTS idx_tags_session_tag_number ON tags(session_id, tag_number);
@@ -291,6 +292,11 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "memory_embeddings", "model_id", "TEXT");
     ensureColumn(db, "session_meta", "memory_block_cache", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "memory_block_count", "INTEGER DEFAULT 0");
+    // JSON array of memory ids currently rendered in the cached <session-history>
+    // memory block. Used by ctx_search to hard-filter memories the agent can
+    // already see in context — they're wasted tokens and crowd out high-signal
+    // raw-history hits.
+    ensureColumn(db, "session_meta", "memory_block_ids", "TEXT DEFAULT ''");
     ensureColumn(db, "dream_queue", "retry_count", "INTEGER DEFAULT 0");
     ensureColumn(db, "tags", "reasoning_byte_size", "INTEGER DEFAULT 0");
     ensureColumn(db, "tags", "drop_mode", "TEXT DEFAULT 'full'");
@@ -344,6 +350,7 @@ function healNullTextColumns(db: Database): void {
         ["system_prompt_hash", ""],
         ["stripped_placeholder_ids", ""],
         ["memory_block_cache", ""],
+        ["memory_block_ids", ""],
         ["compaction_marker_state", ""],
         ["key_files", ""],
     ];

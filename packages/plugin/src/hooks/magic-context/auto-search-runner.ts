@@ -134,6 +134,10 @@ export async function runAutoSearchHint(args: {
             memoryEnabled: options.memoryEnabled,
             embeddingEnabled: options.embeddingEnabled,
             gitCommitsEnabled: options.gitCommitsEnabled,
+            // Hard-filter memories already rendered in <session-history>.
+            // unifiedSearch applies this during memory merging so ranking
+            // can't be distorted by already-visible hits.
+            visibleMemoryIds: options.visibleMemoryIds ?? null,
             // Don't restrict by last compartment end — auto-search should see
             // everything available, including raw-history FTS. unifiedSearch
             // already defaults to searching all sources.
@@ -155,18 +159,7 @@ export async function runAutoSearchHint(args: {
         return;
     }
 
-    // Drop memory fragments that are already visible in <session-history>.
-    const filtered = results.filter((result) => {
-        if (result.source !== "memory") return true;
-        if (!options.visibleMemoryIds) return true;
-        return !options.visibleMemoryIds.has(result.memoryId);
-    });
-    if (filtered.length === 0) {
-        sessionLog(sessionId, "auto-search: all top results already visible in session-history");
-        return;
-    }
-
-    const hintText = buildAutoSearchHint(filtered);
+    const hintText = buildAutoSearchHint(results);
     if (!hintText) return;
 
     // Prefix with double newline so the hint is a separate block, not glued
@@ -176,7 +169,7 @@ export async function runAutoSearchHint(args: {
     appendReminderToUserMessageById(messages, userMsgId, payload);
     sessionLog(
         sessionId,
-        `auto-search: attached hint to ${userMsgId} (${filtered.length} fragments, top score ${results[0].score.toFixed(3)})`,
+        `auto-search: attached hint to ${userMsgId} (${results.length} fragments, top score ${results[0].score.toFixed(3)})`,
     );
 }
 
