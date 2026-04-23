@@ -155,7 +155,7 @@ describe("createTransform heuristic cleanup persistence", () => {
             dropToolStructure: true,
             client: undefined,
             directory: testDirectory,
-            historianChunkTokens: 20_000,
+            getHistorianChunkTokens: () => 20_000,
         });
 
         await transform({}, { messages: buildMessages() });
@@ -209,7 +209,7 @@ describe("createTransform heuristic cleanup persistence", () => {
             dropToolStructure: true,
             client: undefined,
             directory: testDirectory,
-            historianChunkTokens: 20_000,
+            getHistorianChunkTokens: () => 20_000,
         });
 
         await transform({}, { messages: buildInjectionOnlyMessages() });
@@ -219,14 +219,18 @@ describe("createTransform heuristic cleanup persistence", () => {
         const executePass = buildInjectionOnlyMessages();
         await transform({}, { messages: executePass });
 
+        // Sentinel-based stripping preserves array length; the injection-only
+        // message is kept in the array but neutralized to a single empty-text
+        // sentinel so OpenCode's upstream filter drops it from the wire.
         const executeInjection = getMessage(executePass, "m-injection-only");
-        expect(executeInjection).toBeUndefined();
+        expect(executeInjection?.parts).toEqual([{ type: "text", text: "" }]);
 
         schedulerDecision.mockImplementation(() => "defer");
         const deferPass = buildInjectionOnlyMessages();
         await transform({}, { messages: deferPass });
 
+        // Replay on defer: same neutralization persists without re-mutating array.
         const deferredInjection = getMessage(deferPass, "m-injection-only");
-        expect(deferredInjection).toBeUndefined();
+        expect(deferredInjection?.parts).toEqual([{ type: "text", text: "" }]);
     });
 });

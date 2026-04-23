@@ -31,6 +31,7 @@ import {
 import { reinjectNudgeAtAnchor } from "./nudge-injection";
 import type { NudgePlacementStore } from "./nudge-placement-store";
 import type { ContextNudge } from "./nudger";
+import { replaySentinelByMessageIds } from "./sentinel";
 import {
     clearOldReasoning,
     stripClearedReasoning,
@@ -362,88 +363,66 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
         }
     }
 
-    // Remove messages that are nothing but [dropped §N§] placeholders.
-    // These shells waste tokens — there is no recall mechanism to use them.
+    // Neutralize messages that are nothing but [dropped §N§] placeholders,
+    // plus system-injected messages (notifications, reminders, internal markers).
+    // Both produce IDENTICAL empty-text-sentinel replacements that preserve array
+    // length between passes — cache-stable for both Anthropic-native (where
+    // OpenCode's upstream filter drops the empty parts at the wire) and proxy
+    // providers that hash the serialized message array.
+    //
     // MUST run AFTER compartment injection: renderCompartmentInjection checks whether
     // messages[0] is a dropped placeholder to decide if it needs a synthetic carrier message.
     //
-    // Cache-safe: replay previously-stripped IDs on every pass, only detect new
-    // empty shells on cache-busting passes. Persist the set so defer passes
-    // produce the same message array as the bust pass that discovered them.
+    // Cache-safe: replay previously-neutralized IDs on every pass, only detect new
+    // matches on cache-busting passes. Persist the merged set (placeholder + system-
+    // injected) so defer passes produce the same message shape as the bust pass.
     {
         const persistedIds = getStrippedPlaceholderIds(args.db, args.sessionId);
 
-        // Step 1: Replay — remove messages whose IDs were stripped on a prior bust pass.
+        // Step 1: Replay — re-apply sentinel to messages whose IDs were neutralized
+        // on a prior bust pass. Preserves array length — no splice.
         if (persistedIds.size > 0) {
-            let replayed = 0;
-            for (let i = args.messages.length - 1; i >= 0; i--) {
-                const msgId = args.messages[i].info.id;
-                if (msgId && persistedIds.has(msgId)) {
-                    args.messages.splice(i, 1);
-                    replayed++;
-                }
-            }
+            const { replayed, missingIds } = replaySentinelByMessageIds(
+                args.messages,
+                persistedIds,
+            );
             if (replayed > 0) {
                 sessionLog(
                     args.sessionId,
-                    `placeholder replay: removed ${replayed} previously-stripped messages`,
+                    `sentinel replay: neutralized ${replayed} previously-stripped messages`,
                 );
+            }
+            // Prune IDs that no longer appear in the live message set (e.g., after
+            // compaction trimmed them out entirely). Don't prune if they're present
+            // but already sentinel — those are working as intended.
+            if (missingIds.length > 0) {
+                for (const id of missingIds) persistedIds.delete(id);
+                setStrippedPlaceholderIds(args.db, args.sessionId, persistedIds);
             }
         }
 
-        // Step 2: Detect — only on cache-busting passes, find NEW empty shells.
+        // Step 2: Detect — only on cache-busting passes, find NEW eligible messages
+        // and persist their IDs so future defer passes can replay.
         if (isCacheBustingPass) {
-            // Snapshot IDs before stripping so we can diff after.
-            const preStripIds = new Set<string>();
-            for (const msg of args.messages) {
-                if (msg.info.id) preStripIds.add(msg.info.id);
-            }
+            const droppedResult = stripDroppedPlaceholderMessages(args.messages);
+            const protectedTailStart = Math.max(0, args.messages.length - args.protectedTags * 2);
+            const systemInjectedResult = stripSystemInjectedMessages(
+                args.messages,
+                protectedTailStart,
+            );
 
-            const strippedDropped = stripDroppedPlaceholderMessages(args.messages);
-            if (strippedDropped > 0) {
-                // Find IDs that disappeared — those are the newly stripped messages.
-                const postStripIds = new Set<string>();
-                for (const msg of args.messages) {
-                    if (msg.info.id) postStripIds.add(msg.info.id);
-                }
-                let newlyStrippedCount = 0;
-                for (const id of preStripIds) {
-                    if (!postStripIds.has(id)) {
-                        persistedIds.add(id);
-                        newlyStrippedCount++;
-                    }
-                }
-                // Prune persisted IDs that no longer appear in the live message set
-                // (e.g., after compaction or history trimming removes old messages).
-                for (const id of persistedIds) {
-                    if (!preStripIds.has(id) && !postStripIds.has(id)) {
-                        persistedIds.delete(id);
-                    }
-                }
+            const newlyNeutralized =
+                droppedResult.sentineledIds.length + systemInjectedResult.sentineledIds.length;
+
+            if (newlyNeutralized > 0) {
+                for (const id of droppedResult.sentineledIds) persistedIds.add(id);
+                for (const id of systemInjectedResult.sentineledIds) persistedIds.add(id);
                 setStrippedPlaceholderIds(args.db, args.sessionId, persistedIds);
                 sessionLog(
                     args.sessionId,
-                    `stripped ${strippedDropped} placeholder messages (${newlyStrippedCount} new, ${persistedIds.size} total persisted)`,
+                    `neutralized ${droppedResult.stripped} dropped + ${systemInjectedResult.stripped} system-injected messages (${newlyNeutralized} new, ${persistedIds.size} total persisted)`,
                 );
             }
-        }
-    }
-
-    // Remove system-injected messages (notifications, reminders, internal markers)
-    // that are OUTSIDE the protected tail. Only strip on cache-busting passes because
-    // the dynamic protected tail boundary can shift as conversation grows, which would
-    // remove previously-cached messages on defer passes (Finding 5).
-    if (isCacheBustingPass) {
-        const protectedTailStart = Math.max(0, args.messages.length - args.protectedTags * 2);
-        const strippedSystemInjected = stripSystemInjectedMessages(
-            args.messages,
-            protectedTailStart,
-        );
-        if (strippedSystemInjected > 0) {
-            sessionLog(
-                args.sessionId,
-                `stripped ${strippedSystemInjected} system-injected messages (notifications/reminders)`,
-            );
         }
     }
 

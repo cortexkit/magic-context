@@ -1,4 +1,5 @@
 import { isRecord } from "../../shared/record-type-guard";
+import { isSentinel, makeSentinel } from "./sentinel";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
 
 const DROPPED_PLACEHOLDER_PATTERN = /^\[dropped §\d+§\]$/;
@@ -24,24 +25,40 @@ function isSystemInjectedText(text: string): boolean {
 }
 
 /**
- * Remove messages that are system-injected (notifications, reminders, internal markers).
+ * Neutralize system-injected messages (notifications, reminders, internal markers).
  * These are internal plumbing messages that should never reach the LLM.
- * Only strips messages BEFORE `protectedTailStart` — recent messages in the
+ * Only neutralizes messages BEFORE `protectedTailStart` — recent messages in the
  * protected tail may contain actionable info (e.g., background task completion
  * notifications with task IDs the agent needs for background_output).
+ *
+ * Returns both the count of neutralized messages and the set of their IDs so
+ * callers can persist-and-replay the decision across defer passes (cache-safe
+ * — OpenCode rebuilds messages from its DB every turn, so the sentinel needs
+ * to be re-applied each transform).
+ *
+ * Cache safety: replaces each matched message's parts with a single empty-text
+ * sentinel instead of splicing the message out of the array. Preserves array
+ * length so proxy providers that hash message-array structure see a stable
+ * prefix. For Anthropic/Bedrock, the provider's upstream filter drops
+ * empty-content messages on the wire anyway — same effective behavior, no
+ * mid-pipeline array mutation.
  */
 export function stripSystemInjectedMessages(
     messages: MessageLike[],
     protectedTailStart: number,
-): number {
+): { stripped: number; sentineledIds: string[] } {
     let stripped = 0;
-    for (let i = messages.length - 1; i >= 0; i--) {
-        // Don't strip messages in the protected tail — they may contain
+    const sentineledIds: string[] = [];
+    for (let i = 0; i < messages.length; i++) {
+        // Don't neutralize messages in the protected tail — they may contain
         // actionable info like background task IDs
         if (i >= protectedTailStart) continue;
 
         const msg = messages[i];
         if (msg.parts.length === 0) continue;
+
+        // Skip messages already reduced to a lone sentinel — idempotent on replay
+        if (msg.parts.length === 1 && isSentinel(msg.parts[0])) continue;
 
         let hasContentPart = false;
         let allContentIsSystemInjection = true;
@@ -77,11 +94,13 @@ export function stripSystemInjectedMessages(
         }
 
         if (hasContentPart && allContentIsSystemInjection) {
-            messages.splice(i, 1);
+            msg.parts.length = 0;
+            msg.parts.push(makeSentinel(undefined));
             stripped++;
+            if (typeof msg.info.id === "string") sentineledIds.push(msg.info.id);
         }
     }
-    return stripped;
+    return { stripped, sentineledIds };
 }
 
 // OpenCode messages can have metadata parts alongside content parts.
@@ -106,32 +125,49 @@ const METADATA_PART_TYPES = new Set([
 ]);
 
 /**
- * Remove messages that consist entirely of [dropped §N§] placeholders.
- * These are leftover shells after ctx_reduce drops their content — keeping them
- * wastes tokens without providing any value since there is no recall mechanism.
+ * Neutralize messages that consist entirely of [dropped §N§] placeholders.
+ * These are leftover shells after ctx_reduce drops their content — keeping
+ * their original text wastes tokens without providing any value since there
+ * is no recall mechanism.
  *
- * User-role messages are NEVER stripped, even if their only text is a dropped
- * placeholder. Removing a user message between two assistants collapses the
- * turn boundary, which causes the AI SDK's Anthropic adapter to merge
- * consecutive assistants into a single "latest assistant" block containing
- * signed thinking. The merged block's signature no longer matches the
- * original, triggering:
+ * User-role messages are NEVER neutralized, even if their only text is a
+ * dropped placeholder. Removing (or emptying) a user message between two
+ * assistants collapses the turn boundary, which causes the AI SDK's Anthropic
+ * adapter to merge consecutive assistants into a single "latest assistant"
+ * block containing signed thinking. The merged block's signature no longer
+ * matches the original, triggering:
  *   "thinking or redacted_thinking blocks in the latest assistant message
  *    cannot be modified"
  *
  * For user messages whose content the agent wanted to drop, apply-operations
  * emits a `[truncated §N§]` preview instead of a full `[dropped §N§]`, which
  * keeps the shell visible and preserves the turn boundary.
+ *
+ * Cache safety: replaces matched messages' parts with a single empty-text
+ * sentinel instead of splicing the messages out of the array. Preserves array
+ * length so proxy providers that hash message-array structure see a stable
+ * prefix. For Anthropic/Bedrock, OpenCode's upstream filter drops empty
+ * content messages on the wire — same effective behavior, no mid-pipeline
+ * array mutation.
+ *
+ * Returns both count and sentineled IDs so callers can persist-and-replay.
  */
-export function stripDroppedPlaceholderMessages(messages: MessageLike[]): number {
+export function stripDroppedPlaceholderMessages(messages: MessageLike[]): {
+    stripped: number;
+    sentineledIds: string[];
+} {
     let stripped = 0;
-    for (let i = messages.length - 1; i >= 0; i--) {
+    const sentineledIds: string[] = [];
+    for (let i = 0; i < messages.length; i++) {
         const msg = messages[i];
         if (msg.parts.length === 0) continue;
 
-        // Never strip user-role messages — they anchor turn boundaries that
-        // AI SDK depends on to avoid merging consecutive assistants.
+        // Never neutralize user-role messages — they anchor turn boundaries
+        // that AI SDK depends on to avoid merging consecutive assistants.
         if (msg.info.role === "user") continue;
+
+        // Skip messages already reduced to a lone sentinel — idempotent on replay
+        if (msg.parts.length === 1 && isSentinel(msg.parts[0])) continue;
 
         let hasContentPart = false;
         let hasNonDroppedContent = false;
@@ -187,11 +223,13 @@ export function stripDroppedPlaceholderMessages(messages: MessageLike[]): number
         }
 
         if (hasContentPart && !hasNonDroppedContent) {
-            messages.splice(i, 1);
+            msg.parts.length = 0;
+            msg.parts.push(makeSentinel(undefined));
             stripped++;
+            if (typeof msg.info.id === "string") sentineledIds.push(msg.info.id);
         }
     }
-    return stripped;
+    return { stripped, sentineledIds };
 }
 
 /**
@@ -307,6 +345,21 @@ function findMaxTag(messageTagNumbers: Map<MessageLike, number>): number {
 
 const CLEARED_REASONING_TYPES = new Set(["thinking", "reasoning"]);
 
+/**
+ * Neutralize cleared reasoning parts (those with thinking or text set to
+ * "[cleared]" by clearOldReasoning). Replaces them in place with empty-text
+ * sentinels so message.parts length stays constant between passes.
+ *
+ * See strip-structural-noise.ts for the cache-safety rationale. For
+ * Anthropic/Bedrock, OpenCode's provider/transform.ts:65 drops empty text
+ * parts before the wire, so the sentinel never reaches the provider — same
+ * effective wire shape as the previous filter-based behavior but no
+ * mid-pipeline array mutation.
+ *
+ * Gate: `skipTypedReasoningCleanup=true` short-circuits for providers whose
+ * capability.interleaved.field requires typed reasoning_content on the wire
+ * (Moonshot/Kimi).
+ */
 export function stripClearedReasoning(
     messages: MessageLike[],
     skipTypedReasoningCleanup = false,
@@ -315,11 +368,11 @@ export function stripClearedReasoning(
     let stripped = 0;
     for (const message of messages) {
         if (message.info.role !== "assistant") continue;
-        const originalLength = message.parts.length;
-        const kept = message.parts.filter((part) => {
-            if (!isRecord(part)) return true;
+        for (let i = 0; i < message.parts.length; i++) {
+            const part = message.parts[i];
+            if (!isRecord(part)) continue;
             const partType = part.type as string;
-            if (!CLEARED_REASONING_TYPES.has(partType)) return true;
+            if (!CLEARED_REASONING_TYPES.has(partType)) continue;
             // Defense-in-depth: if neither `thinking` nor `text` is present on
             // the part, we cannot tell whether it's a cleared shell — keep it.
             // This protects edge-case thinking shapes (e.g., future providers
@@ -328,18 +381,15 @@ export function stripClearedReasoning(
             // the latest assistant message to be replayed unchanged, and an
             // undefined-fields part cannot be known to be cleared, so it is
             // not safe to strip it.
-            if (!("thinking" in part) && !("text" in part)) return true;
+            if (!("thinking" in part) && !("text" in part)) continue;
             const thinking = "thinking" in part ? (part.thinking as string | undefined) : undefined;
             const text = "text" in part ? (part.text as string | undefined) : undefined;
-            return (
-                (thinking !== undefined && thinking !== "[cleared]") ||
-                (text !== undefined && text !== "[cleared]")
-            );
-        });
-        if (kept.length < originalLength) {
-            message.parts.length = 0;
-            message.parts.push(...kept);
-            stripped += originalLength - kept.length;
+            const isCleared =
+                (thinking === undefined || thinking === "[cleared]") &&
+                (text === undefined || text === "[cleared]");
+            if (!isCleared) continue;
+            message.parts[i] = makeSentinel(part);
+            stripped++;
         }
     }
     return stripped;
@@ -486,6 +536,15 @@ export function stripReasoningFromMergedAssistants(messages: MessageLike[]): num
         // run. Only eligible: the first assistant in a run, no reasoning
         // kept yet, AND the first non-metadata content part is a
         // reasoning/thinking/redacted_thinking part.
+        //
+        // Sentinels (from stripStructuralNoise and other in-place strips) are
+        // `{type:"text", text:""}` and occupy positions previously held by
+        // structural-noise parts. They are invisible on the wire (OpenCode's
+        // provider transform drops empty text) so the "first non-metadata" rule
+        // must treat them as equivalent to the structural parts they replaced
+        // — otherwise a reasoning part that would have been first-after-strip
+        // is wrongly considered non-first and gets neutralized, stripping the
+        // last thinking from a run that has one eligible to keep.
         let keepIndex = -1;
         if (firstInRun && !keptReasoningInRun) {
             for (let i = 0; i < message.parts.length; i++) {
@@ -494,6 +553,8 @@ export function stripReasoningFromMergedAssistants(messages: MessageLike[]): num
                 const partType = part.type as string;
                 if (REASONING_IGNORED_PART_TYPES.has(partType)) continue;
                 if (part.ignored === true) continue;
+                // Skip sentinels — see comment above.
+                if (isSentinel(part)) continue;
                 // First non-metadata part found — is it reasoning-like?
                 if (REASONING_PART_TYPES.has(partType)) {
                     keepIndex = i;
@@ -502,10 +563,16 @@ export function stripReasoningFromMergedAssistants(messages: MessageLike[]): num
             }
         }
 
-        // Backward pass: strip all reasoning/thinking/redacted_thinking parts
-        // except the one we decided to keep (if any). Splice from the tail so
-        // indices ahead stay valid.
-        for (let i = message.parts.length - 1; i >= 0; i--) {
+        // Forward pass: neutralize all reasoning/thinking/redacted_thinking
+        // parts except the one we decided to keep (if any). Replace in place
+        // with empty-text sentinels so message.parts length stays constant
+        // across passes — preserving cache-prefix stability for proxy
+        // providers that hash the message array. For Anthropic, OpenCode's
+        // provider/transform.ts:65 drops empty text parts before the wire,
+        // so the "thinking-block must be at index 0" rule the AI SDK cares
+        // about is still satisfied (the kept reasoning part is the only
+        // non-empty content at its position, empty sentinels vanish).
+        for (let i = 0; i < message.parts.length; i++) {
             const part = message.parts[i];
             if (!isRecord(part)) continue;
             if (!REASONING_PART_TYPES.has(part.type as string)) continue;
@@ -513,7 +580,7 @@ export function stripReasoningFromMergedAssistants(messages: MessageLike[]): num
                 keptReasoningInRun = true;
                 continue;
             }
-            message.parts.splice(i, 1);
+            message.parts[i] = makeSentinel(part);
             stripped++;
         }
 
@@ -523,6 +590,13 @@ export function stripReasoningFromMergedAssistants(messages: MessageLike[]): num
     return stripped;
 }
 
+/**
+ * Neutralize large image-data-URL file parts on already-processed user
+ * messages. Replaces them in place with empty-text sentinels so message
+ * parts length stays constant between passes — cache-prefix stability on
+ * proxy providers, unchanged wire shape on Anthropic/Bedrock where
+ * OpenCode's upstream filter drops empty text parts.
+ */
 export function stripProcessedImages(
     messages: MessageLike[],
     watermark: number,
@@ -546,7 +620,7 @@ export function stripProcessedImages(
             continue;
         }
 
-        for (let j = msg.parts.length - 1; j >= 0; j--) {
+        for (let j = 0; j < msg.parts.length; j++) {
             const part = msg.parts[j];
             if (!isRecord(part) || part.type !== "file") {
                 continue;
@@ -559,7 +633,7 @@ export function stripProcessedImages(
                 part.url.startsWith("data:") &&
                 part.url.length > 200
             ) {
-                msg.parts.splice(j, 1);
+                msg.parts[j] = makeSentinel(part);
                 stripped++;
             }
         }

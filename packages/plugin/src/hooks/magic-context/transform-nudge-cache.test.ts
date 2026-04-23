@@ -163,8 +163,10 @@ describe("createTransform nudge cache handling", () => {
         //#when
         await transform({}, { messages: secondPass });
 
-        //#then — assistant (tag 2) is stripped; only user at index 0
-        expect(secondPass).toHaveLength(1);
+        //#then — sentinel replacement preserves array length; assistant (tag 2) is
+        // neutralized to an empty-text sentinel instead of spliced out.
+        expect(secondPass).toHaveLength(2);
+        expect(secondPass[1]?.parts).toEqual([{ type: "text", text: "" }]);
         expect(getPersistedNudgePlacement(db, "ses-1")).toBeNull();
     });
 

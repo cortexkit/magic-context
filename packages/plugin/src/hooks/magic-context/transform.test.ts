@@ -396,12 +396,16 @@ describe("createTransform", () => {
         //#when
         await transform({}, { messages });
 
-        //#then
+        //#then — with sentinel stripping, the carrier + 2 uncovered messages survive:
+        // [synthetic-history-carrier, m-4 (sentineled because it was dropped), m-5].
         expect(text(messages[0]!, 0)).toContain("<session-history>");
         expect(text(messages[0]!, 0)).toContain("Summarized earlier work.");
         expect(messages[0]?.info.id).toBeUndefined();
-        expect(messages).toHaveLength(2);
-        expect(text(messages[1]!, 0)).toContain("new 5");
+        expect(messages).toHaveLength(3);
+        // m-4 was dropped; its assistant text now carries the sentinel shape.
+        expect(messages[1]?.info.id).toBe("m-4");
+        expect(messages[1]?.parts).toEqual([{ type: "text", text: "" }]);
+        expect(text(messages[2]!, 0)).toContain("new 5");
     });
 
     it("creates a synthetic history carrier when all visible messages are already covered", async () => {
@@ -659,9 +663,16 @@ describe("createTransform", () => {
         //#when
         await transform({}, { messages });
 
-        //#then
-        expect(messages[1].parts).toHaveLength(1);
+        //#then — sentinel replacement preserves array length;
+        // empty-text sentinels are dropped at the wire by OpenCode's provider/transform.
+        expect(messages[1].parts).toHaveLength(5);
+        // The live text part survives unchanged
         expect(text(messages[1], 0)).toContain("visible answer");
+        // Structural noise parts are replaced with empty-text sentinels
+        const sentineledParts = (
+            messages[1].parts as Array<{ type: string; text?: string }>
+        ).filter((p) => p.type === "text" && p.text === "");
+        expect(sentineledParts).toHaveLength(4);
     });
 
     it("applies pending drop operations when scheduler executes", async () => {
@@ -791,9 +802,12 @@ describe("createTransform", () => {
         //#when
         await transform({}, { messages: secondPass });
 
-        //#then
-        expect(secondPass).toHaveLength(1);
+        //#then — sentinel replacement preserves array length;
+        // the user message stays, assistant message neutralized to an empty sentinel.
+        expect(secondPass).toHaveLength(2);
         expect(text(secondPass[0], 0)).toStartWith("\u00a71\u00a7 ");
+        // Assistant message (previously dropped) now carries a single sentinel part.
+        expect(secondPass[1].parts).toEqual([{ type: "text", text: "" }]);
     });
 
     it("keeps reduced magic-context support for subagent sessions", async () => {
@@ -1003,8 +1017,10 @@ describe("createTransform", () => {
 
         await transform({}, { messages: secondPass });
 
-        expect(secondPass).toHaveLength(1);
+        // Sentinel replacement preserves array length.
+        expect(secondPass).toHaveLength(2);
         expect(text(secondPass[0], 0)).toBe("§1§ keep this");
+        expect(secondPass[1].parts).toEqual([{ type: "text", text: "" }]);
         expect(getPendingOps(db, "ses-sub-drop")).toHaveLength(0);
     });
 
@@ -1188,9 +1204,11 @@ describe("createTransform", () => {
         //#when
         await transform({}, { messages: secondPass });
 
-        //#then — thinking part is cleared; text becomes [dropped §2§]; entire message stripped
-        expect(secondPass).toHaveLength(1);
+        //#then — thinking part becomes sentinel; text becomes [dropped §2§];
+        // assistant message neutralized to a lone sentinel (array length preserved).
+        expect(secondPass).toHaveLength(2);
         expect(text(secondPass[0], 0)).toContain("user prompt");
+        expect(secondPass[1].parts).toEqual([{ type: "text", text: "" }]);
     });
 
     it("fails open when session meta lookup throws", async () => {
