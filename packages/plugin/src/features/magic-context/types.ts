@@ -9,6 +9,14 @@ export interface TagEntry {
     byteSize: number;
     reasoningByteSize: number;
     sessionId: string;
+    /**
+     * Caveman compression depth applied to this tag's text part. 0 = none,
+     * 1 = lite, 2 = full, 3 = ultra. Only meaningful for `type: "message"`;
+     * tool/file tags stay at 0. Used by experimental age-tier caveman
+     * heuristic to avoid re-compressing text that already matches the
+     * target depth for its age band.
+     */
+    cavemanDepth: number;
 }
 
 export interface PendingOp {

@@ -20,6 +20,7 @@ function createTestDb(): Database {
       byte_size INTEGER,
       tag_number INTEGER NOT NULL,
       reasoning_byte_size INTEGER NOT NULL DEFAULT 0,
+      caveman_depth INTEGER NOT NULL DEFAULT 0,
       UNIQUE(session_id, tag_number)
     );
 

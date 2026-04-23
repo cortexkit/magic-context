@@ -82,6 +82,10 @@ describe("MagicContextConfigSchema", () => {
                         score_threshold: 0.55,
                         min_prompt_chars: 20,
                     },
+                    caveman_text_compression: {
+                        enabled: false,
+                        min_chars: 500,
+                    },
                 },
                 embedding: {
                     provider: "openai-compatible",

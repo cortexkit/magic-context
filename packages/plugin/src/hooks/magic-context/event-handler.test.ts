@@ -430,6 +430,7 @@ describe("createEventHandler", () => {
                 byteSize: 64,
                 reasoningByteSize: 0,
                 sessionId: "ses-removed",
+                cavemanDepth: 0,
             },
         ]);
         // Full FTS reindex on next search: clearIndexedMessages wipes ALL FTS rows

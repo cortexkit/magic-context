@@ -89,6 +89,7 @@ export {
     getTagsBySession,
     getTopNBySize,
     insertTag,
+    updateCavemanDepth,
     updateTagDropMode,
     updateTagMessageId,
     updateTagStatus,

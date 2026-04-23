@@ -181,6 +181,29 @@
 - Triggers: Plugin initialization.
 - Responsibilities: Open storage, normalize arg schemas, and expose the supported tool set.
 
+## Session Modes
+
+Magic Context runs in three effective modes depending on `ctx_reduce_enabled` and whether the session is a subagent. The mode decides which of the heavier features (historian, nudges, prompt-adjunct injections) run for that session, while tag/drop/heuristic plumbing stays on everywhere so any subsequent manual or automated reduction still works.
+
+| Feature | Primary + `ctx_reduce_enabled: true` | Primary + `ctx_reduce_enabled: false` | Subagents (any `ctx_reduce_enabled`) |
+|---|---|---|---|
+| Tag DB records | ✓ | ✓ | ✓ |
+| `§N§` tag prefix injection in message text | ✓ | ✗ | ✗ |
+| `ctx_reduce` tool | ✓ | ✗ | ✗ |
+| Historian / compartments / compressor | ✓ | ✓ | ✗ |
+| Compartment injection (`<session-history>`) | ✓ | ✓ | ✗ |
+| `<project-docs>`, `<user-profile>`, `<key-files>` system-prompt blocks | ✓ | ✓ | ✗ |
+| Rolling / tool-heavy / sticky / deferred-note nudges | ✓ | ✗ | ✗ |
+| Heuristic tool drops at execute threshold | ✓ | ✓ | ✓ |
+| Heuristic reasoning clearing | ✓ | ✓ | ✓ |
+| 85 % force-materialization | ✓ | ✓ | ✗ |
+| 95 % block + emergency recovery | ✓ | ✓ | ✗ |
+| Experimental age-tier caveman text compression | ✗ | opt-in | ✗ |
+
+**Subagent rationale:** subagents are driven by a parent agent, have bounded lifetimes, and often run in parallel (council, historian, sidekick, dreamer child sessions). They still benefit from automatic heuristic drops on their own context at execute passes, but turning on historian, nudges, or prompt-adjunct injections in each subagent would create redundant work and per-agent cache churn. Subagents that run into overflow fall back to the existing `overflow-detection.ts` path rather than Magic Context's own 85/95 thresholds.
+
+**`ctx_reduce_enabled: false` rationale:** removes agent-facing reduction machinery (the tool itself, nudges asking the agent to use it, and `§N§` prefix injection the agent can't act on) while keeping the deterministic parts (historian, heuristic drops, compartment injection, memory). Users who want a fully automatic pipeline can opt in and optionally enable caveman age-tier compression to recover most of the win that manual `ctx_reduce` gives for long user / assistant text parts.
+
 ## Error Handling
 
 **Strategy:** Fail closed when persistent storage is unavailable in `src/plugin/tool-registry.ts` and `src/hooks/magic-context/hook.ts`; fail open inside per-turn handlers by logging and skipping unsafe mutations; stop OpenCode command fallthrough with sentinel errors from `src/hooks/magic-context/command-handler.ts`.

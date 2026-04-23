@@ -94,6 +94,7 @@ interface TagRow {
     reasoning_byte_size: number;
     session_id: string;
     tag_number: number;
+    caveman_depth: number | null;
 }
 
 interface TagNumberRow {
@@ -134,6 +135,12 @@ function toTagEntry(row: TagRow): TagEntry {
         byteSize: row.byte_size,
         reasoningByteSize: row.reasoning_byte_size ?? 0,
         sessionId: row.session_id,
+        // ensureColumn adds DEFAULT 0 but SQLite leaves NULL on pre-existing
+        // rows. Coerce to 0 so downstream callers never see NaN arithmetic.
+        cavemanDepth:
+            typeof row.caveman_depth === "number" && Number.isFinite(row.caveman_depth)
+                ? row.caveman_depth
+                : 0,
     };
 }
 
@@ -196,6 +203,26 @@ export function updateTagDropMode(
     getUpdateTagDropModeStatement(db).run(dropMode, sessionId, tagNumber);
 }
 
+/**
+ * Set the caveman compression depth for a tag.
+ *
+ * Only message tags are expected to receive non-zero depth; callers enforce
+ * that. Persisted so later transform passes and restarts can resume without
+ * re-compressing text that already matches its target age-tier depth.
+ */
+export function updateCavemanDepth(
+    db: Database,
+    sessionId: string,
+    tagNumber: number,
+    depth: number,
+): void {
+    db.prepare("UPDATE tags SET caveman_depth = ? WHERE session_id = ? AND tag_number = ?").run(
+        depth,
+        sessionId,
+        tagNumber,
+    );
+}
+
 export function updateTagMessageId(
     db: Database,
     sessionId: string,
@@ -239,7 +266,7 @@ export function getMaxTagNumberBySession(db: Database, sessionId: string): numbe
 export function getTagsBySession(db: Database, sessionId: string): TagEntry[] {
     const rows = db
         .prepare(
-            "SELECT id, message_id, type, status, drop_mode, tool_name, input_byte_size, byte_size, reasoning_byte_size, session_id, tag_number FROM tags WHERE session_id = ? ORDER BY tag_number ASC, id ASC",
+            "SELECT id, message_id, type, status, drop_mode, tool_name, input_byte_size, byte_size, reasoning_byte_size, session_id, tag_number, caveman_depth FROM tags WHERE session_id = ? ORDER BY tag_number ASC, id ASC",
         )
         .all(sessionId)
         .filter(isTagRow);
@@ -250,7 +277,7 @@ export function getTagsBySession(db: Database, sessionId: string): TagEntry[] {
 export function getTagById(db: Database, sessionId: string, tagId: number): TagEntry | null {
     const result = db
         .prepare(
-            "SELECT id, message_id, type, status, drop_mode, tool_name, input_byte_size, byte_size, reasoning_byte_size, session_id, tag_number FROM tags WHERE session_id = ? AND tag_number = ?",
+            "SELECT id, message_id, type, status, drop_mode, tool_name, input_byte_size, byte_size, reasoning_byte_size, session_id, tag_number, caveman_depth FROM tags WHERE session_id = ? AND tag_number = ?",
         )
         .get(sessionId, tagId);
 
@@ -268,7 +295,7 @@ export function getTopNBySize(db: Database, sessionId: string, n: number): TagEn
 
     const rows = db
         .prepare(
-            "SELECT id, message_id, type, status, drop_mode, tool_name, input_byte_size, byte_size, reasoning_byte_size, session_id, tag_number FROM tags WHERE session_id = ? AND status = 'active' ORDER BY byte_size DESC, tag_number ASC LIMIT ?",
+            "SELECT id, message_id, type, status, drop_mode, tool_name, input_byte_size, byte_size, reasoning_byte_size, session_id, tag_number, caveman_depth FROM tags WHERE session_id = ? AND status = 'active' ORDER BY byte_size DESC, tag_number ASC LIMIT ?",
         )
         .all(sessionId, n)
         .filter(isTagRow);

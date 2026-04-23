@@ -306,6 +306,13 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "tags", "drop_mode", "TEXT DEFAULT 'full'");
     ensureColumn(db, "tags", "tool_name", "TEXT");
     ensureColumn(db, "tags", "input_byte_size", "INTEGER DEFAULT 0");
+    // Caveman compression depth applied to a tag's text part (user/assistant).
+    // 0 = untouched, 1 = lite, 2 = full, 3 = ultra. Used by age-tier caveman
+    // heuristic (experimental.caveman_text_compression). Source of truth for
+    // the ORIGINAL pre-caveman text is source_contents.content — caveman
+    // always compresses from the original, never from an already-cavemaned
+    // intermediate, so repeated tier shifts converge to the target depth.
+    ensureColumn(db, "tags", "caveman_depth", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "system_prompt_tokens", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "compaction_marker_state", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "key_files", "TEXT DEFAULT ''");

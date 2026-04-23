@@ -503,6 +503,34 @@ Run ctx_search to retrieve full context if relevant.
 
 **Tokens.** Hints are hard-capped at ~200 tokens (3 fragments × ~20-40 tokens each plus framing). Well under the cost of full-content injection (~500+ tokens), while still giving the agent enough signal to decide whether to search.
 
+### `experimental.caveman_text_compression`
+
+| Key | Type | Default |
+|-----|------|---------|
+| `experimental.caveman_text_compression.enabled` | `boolean` | `false` |
+| `experimental.caveman_text_compression.min_chars` | `number` | `500` |
+
+**Only active when `ctx_reduce_enabled: false`.** This is the opt-in successor to agent-driven text dropping for users who run without the `ctx_reduce` tool. When the flag is on, each execute-threshold heuristic pass caveman-compresses long user and assistant text parts in place based on their position in the eligible tag window.
+
+**Age-tier partitioning.** Eligible tags (active, message-type, outside protected tail, text part ≥ `min_chars`) are sorted oldest-first and bucketed:
+
+| Position (oldest → newest) | Target caveman level |
+|---|---|
+| Oldest 20 % | **Ultra** — symbol connectives (`→`, `+`, `//`, `\|`), common-term abbreviations |
+| Next 20 % | **Full** — drop articles and most auxiliaries; fragments OK |
+| Next 20 % | **Lite** — drop filler and hedging; keep grammar |
+| Newest 40 % | Untouched |
+
+Tier boundaries are hardcoded to keep behavior predictable and prevent cache-busting storms from user tweaking.
+
+**Always compressed from the original.** The pristine pre-caveman text is persisted in `source_contents` per tag. When a tag shifts deeper (lite → full → ultra), caveman compresses the ORIGINAL text at the new target depth rather than the already-cavemaned intermediate, so repeated tier shifts converge to exactly the same output as direct compression at the final depth.
+
+**Cache safety.** Runs only on execute-threshold heuristic passes (same gate as automatic tool drops), so the single cache-busting pass materializes both tool drops and caveman compression together. Defer passes don't run caveman, and tier assignments are persisted in `tags.caveman_depth` so the next pass re-compresses only the tags that have shifted tiers.
+
+**What it replaces.** With `ctx_reduce` on, agents can manually drop user/assistant text parts when they judge the content is no longer needed. With `ctx_reduce: false`, agents can't do that — this heuristic fills the gap by automatically aging long text toward ever-denser caveman compression. Tool drops and reasoning clearing still handle their own content regardless.
+
+**When to enable.** Enable alongside `ctx_reduce_enabled: false` if you find historian/heuristics insufficient for your workload — typically sessions with very long pasted content or verbose agent explanations that the automatic pipeline doesn't reach. Leaves `ctx_reduce_enabled: true` sessions untouched.
+
 ## Commands
 
 | Command | Description |

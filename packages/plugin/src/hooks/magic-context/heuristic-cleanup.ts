@@ -7,6 +7,7 @@ import {
 } from "../../features/magic-context/storage";
 import type { TagEntry } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared";
+import { applyCavemanCleanup, type CavemanCleanupConfig } from "./caveman-cleanup";
 import { stripSystemInjection } from "./system-injection-stripper";
 import type { MessageLike, TagTarget } from "./tag-messages";
 import { stripTagPrefix } from "./tag-part-guards";
@@ -33,9 +34,20 @@ export function applyHeuristicCleanup(
         dropToolStructure: boolean;
         protectedTags: number;
         dropAllTools?: boolean;
+        /**
+         * Age-tier caveman text compression settings. Only honored when the
+         * session is running with ctx_reduce_enabled=false — caller is
+         * responsible for zeroing this out when ctx_reduce is on.
+         */
+        caveman?: CavemanCleanupConfig;
     },
     preloadedTags?: TagEntry[],
-): { droppedTools: number; deduplicatedTools: number; droppedInjections: number } {
+): {
+    droppedTools: number;
+    deduplicatedTools: number;
+    droppedInjections: number;
+    compressedTextTags: number;
+} {
     const tags = preloadedTags ?? getTagsBySession(db, sessionId);
     const maxTag = tags.reduce((max, t) => Math.max(max, t.tagNumber), 0);
     const toolAgeCutoff = maxTag - config.autoDropToolAge;
@@ -167,7 +179,24 @@ export function applyHeuristicCleanup(
         );
     }
 
-    return { droppedTools, deduplicatedTools, droppedInjections };
+    // Age-tier caveman text compression. Runs LAST so tool drops and
+    // injection stripping above can shrink the message set before we pick
+    // text tags to compress. Caller guarantees config.caveman is provided
+    // only when ctx_reduce_enabled=false; we still defensively check enabled.
+    let compressedTextTags = 0;
+    if (config.caveman?.enabled) {
+        const cavemanResult = applyCavemanCleanup(sessionId, db, targets, tags, {
+            enabled: true,
+            minChars: config.caveman.minChars,
+            protectedTags: config.protectedTags,
+        });
+        compressedTextTags =
+            cavemanResult.compressedToLite +
+            cavemanResult.compressedToFull +
+            cavemanResult.compressedToUltra;
+    }
+
+    return { droppedTools, deduplicatedTools, droppedInjections, compressedTextTags };
 }
 
 function extractToolInfo(

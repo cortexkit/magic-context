@@ -16,7 +16,8 @@ function createTestDb(): Database {
       byte_size INTEGER NOT NULL DEFAULT 0,
       session_id TEXT NOT NULL,
       tag_number INTEGER NOT NULL,
-      reasoning_byte_size INTEGER NOT NULL DEFAULT 0
+      reasoning_byte_size INTEGER NOT NULL DEFAULT 0,
+      caveman_depth INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE pending_ops (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

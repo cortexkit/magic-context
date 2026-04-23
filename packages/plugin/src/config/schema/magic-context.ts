@@ -222,6 +222,24 @@ export interface MagicContextConfig {
             /** Minimum user message length in characters (skip short prompts). */
             min_prompt_chars: number;
         };
+        /**
+         * Age-tier caveman compression for long user/assistant text parts.
+         *
+         * Only active when `ctx_reduce_enabled: false`. Buckets eligible
+         * (outside-protected-tail) messages into four age tiers by tag
+         * position — oldest 20% → ultra, next 20% → full, next 20% → lite,
+         * newest 40% → untouched — and rewrites the text part in place.
+         * Always compresses from the original source (source_contents), so
+         * tier shifts produce the same result as if the target depth were
+         * applied directly to the original text.
+         *
+         * Disabled by default because it rewrites agent-visible history.
+         */
+        caveman_text_compression: {
+            enabled: boolean;
+            /** Text parts shorter than this (characters) are left untouched. */
+            min_chars: number;
+        };
     };
     embedding: EmbeddingConfig;
     memory: {
@@ -395,11 +413,25 @@ export const MagicContextConfigSchema = z
                         min_prompt_chars: z.number().min(5).max(500).default(20),
                     })
                     .default({ enabled: false, score_threshold: 0.55, min_prompt_chars: 20 }),
+                /** Age-tier caveman compression for long user/assistant text
+                 *  parts. Only active when ctx_reduce_enabled is false.
+                 *  Oldest 20% of eligible tags (outside protected tail) go to
+                 *  ultra, next 20% to full, next 20% to lite, newest 40%
+                 *  untouched. Default: disabled. */
+                caveman_text_compression: z
+                    .object({
+                        enabled: z.boolean().default(false),
+                        /** Text parts shorter than this (characters) stay untouched.
+                         *  Min 100, max 10000. Default: 500. */
+                        min_chars: z.number().min(100).max(10000).default(500),
+                    })
+                    .default({ enabled: false, min_chars: 500 }),
             })
             .default({
                 temporal_awareness: false,
                 git_commit_indexing: { enabled: false, since_days: 365, max_commits: 2000 },
                 auto_search: { enabled: false, score_threshold: 0.55, min_prompt_chars: 20 },
+                caveman_text_compression: { enabled: false, min_chars: 500 },
             }),
         /** Cross-session memory configuration */
         memory: z
