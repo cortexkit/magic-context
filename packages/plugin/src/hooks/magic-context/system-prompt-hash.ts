@@ -150,6 +150,23 @@ export function createSystemPromptHashHandler(deps: {
         }
 
         // ── Step 1.5: Inject dreamer-maintained project docs ──
+        //
+        // `isCacheBusting` here is FLUSH-ONLY (`flushedSessions.has(sessionId)`),
+        // NOT flush-OR-execute. This asymmetry is intentional — see also
+        // `inject-compartments.ts` which uses the same flush-only rule, versus
+        // `transform-postprocess-phase.ts` which uses flush-OR-execute.
+        //
+        // Why flush-only here: system-prompt adjuncts (docs, user profile,
+        // sticky date) are disk/config-derived state, not pending-op state. A
+        // scheduler "execute" pass applies queued drops but does NOT touch any
+        // of this state. Treating it as cache-busting would trigger an
+        // unnecessary re-read of every adjunct on every execute pass, even
+        // though nothing adjunct-related has changed. Flush-only ensures this
+        // state only refreshes on explicit user-driven events (ctx-flush,
+        // variant/model switch, historian publication via
+        // `flushedSessions.add`).
+        //
+        // See council Finding #12 for the full design rationale.
         const isCacheBusting = deps.flushedSessions.has(sessionId);
 
         if (shouldInjectDocs) {

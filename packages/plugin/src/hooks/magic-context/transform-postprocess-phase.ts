@@ -164,6 +164,23 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
         (args.schedulerDecision === "execute" || isExplicitFlush || forceMaterialization) &&
         (!compartmentRunning || emergencyBypassCompartmentGate);
     // Central cache-busting gate used by all mutation paths below.
+    //
+    // `isCacheBustingPass` here is FLUSH-OR-EXECUTE (via `shouldApplyPendingOps`
+    // which includes `schedulerDecision === "execute"`), NOT flush-only. This
+    // asymmetry versus `system-prompt-hash.ts` and `inject-compartments.ts`
+    // (which use flush-only) is intentional — see council Finding #12.
+    //
+    // Why flush-OR-execute here: message-level mutations (pending ops, stripped
+    // placeholder registration, tool-drop finalization) run on scheduler
+    // "execute" passes because that's when queued user drops get materialized.
+    // System-prompt adjuncts (docs, profile, sticky date) are unrelated to
+    // queued ops, so they stay flush-only. Running execute passes through the
+    // adjunct path would refresh disk-backed state for no reason and leak that
+    // refresh into cached `message[0]` injection.
+    //
+    // Summary: mutation passes = flush-OR-execute. Adjunct/injection state =
+    // flush-only. Historian publication bridges the two via
+    // `flushedSessions.add` (see council Finding #9, fixed in v0.14.1).
     const isCacheBustingPass = isExplicitFlush || shouldApplyPendingOps;
     const shouldRunHeuristics =
         args.fullFeatureMode &&
