@@ -16,6 +16,7 @@ import {
     getPersistedNudgePlacement,
     getPersistedReasoningWatermark,
     getPersistedStickyTurnReminder,
+    recordDetectedContextLimit,
     recordOverflowDetected,
     removeStrippedPlaceholderId,
     setPersistedReasoningWatermark,
@@ -224,9 +225,23 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 // normal event pipeline; that's the right recovery surface.
                 const sessionMeta = getOrCreateSessionMeta(deps.db, errInfo.sessionID);
                 if (sessionMeta.isSubagent) {
+                    // Subagents can't run historian, so we skip the recovery
+                    // flag — but the reported limit is still useful data for
+                    // pressure math (consumed by resolveContextLimit via
+                    // getOverflowState). Record it without arming recovery.
+                    if (
+                        typeof detection.reportedLimit === "number" &&
+                        detection.reportedLimit > 0
+                    ) {
+                        recordDetectedContextLimit(
+                            deps.db,
+                            errInfo.sessionID,
+                            detection.reportedLimit,
+                        );
+                    }
                     sessionLog(
                         errInfo.sessionID,
-                        `overflow detected on subagent: reportedLimit=${detection.reportedLimit ?? "unknown"} pattern=${detection.matchedPattern ?? "n/a"} — skipping recovery flag (subagents cannot run historian)`,
+                        `overflow detected on subagent: reportedLimit=${detection.reportedLimit ?? "unknown"} pattern=${detection.matchedPattern ?? "n/a"} — recorded limit only (subagents cannot run historian)`,
                     );
                     return;
                 }
@@ -283,9 +298,22 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     try {
                         const metaForOverflow = getOrCreateSessionMeta(deps.db, info.sessionID);
                         if (metaForOverflow.isSubagent) {
+                            // Still record the detected limit (useful for
+                            // pressure math), but don't arm recovery — see
+                            // session.error path above.
+                            if (
+                                typeof detection.reportedLimit === "number" &&
+                                detection.reportedLimit > 0
+                            ) {
+                                recordDetectedContextLimit(
+                                    deps.db,
+                                    info.sessionID,
+                                    detection.reportedLimit,
+                                );
+                            }
                             sessionLog(
                                 info.sessionID,
-                                `overflow detected on subagent via message.updated: reportedLimit=${detection.reportedLimit ?? "unknown"} pattern=${detection.matchedPattern ?? "n/a"} — skipping recovery flag`,
+                                `overflow detected on subagent via message.updated: reportedLimit=${detection.reportedLimit ?? "unknown"} pattern=${detection.matchedPattern ?? "n/a"} — recorded limit only`,
                             );
                         } else {
                             recordOverflowDetected(

@@ -17,6 +17,7 @@ export {
     incrementHistorianFailure,
     loadPersistedUsage,
     type PersistedOverflowState,
+    recordDetectedContextLimit,
     recordOverflowDetected,
     removeStrippedPlaceholderId,
     setNoteLastReadAt,

@@ -491,6 +491,27 @@ export function recordOverflowDetected(
     })();
 }
 
+/**
+ * Record the real provider-reported context limit WITHOUT arming emergency
+ * recovery. Used for subagent overflow: the limit is useful data for accurate
+ * pressure math (consumed by `resolveContextLimit()` via `getOverflowState()`),
+ * but subagents can't run historian so the recovery flag would be orphan state.
+ */
+export function recordDetectedContextLimit(
+    db: Database,
+    sessionId: string,
+    reportedLimit: number,
+): void {
+    if (!(reportedLimit > 0)) return;
+    db.transaction(() => {
+        ensureSessionMetaRow(db, sessionId);
+        db.prepare("UPDATE session_meta SET detected_context_limit = ? WHERE session_id = ?").run(
+            reportedLimit,
+            sessionId,
+        );
+    })();
+}
+
 /** Clear the recovery flag. Keeps the detected limit (valuable even after recovery). */
 export function clearEmergencyRecovery(db: Database, sessionId: string): void {
     db.transaction(() => {
