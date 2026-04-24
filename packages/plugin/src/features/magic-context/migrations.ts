@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { log } from "../../shared/logger";
+import { healAllNullColumns } from "./storage-db";
 
 /**
  * Versioned migration framework for magic-context's SQLite database.
@@ -215,6 +216,29 @@ const MIGRATIONS: Migration[] = [
                     VALUES (NEW.sha, NEW.project_path, NEW.message);
                 END;
             `);
+        },
+    },
+    {
+        version: 5,
+        description: "One-shot heal of NULL session_meta columns",
+        // Previous releases ran healNullTextColumns/healNullIntegerColumns/
+        // healMissingMemoryBlockIds on every plugin startup — ~25 no-op UPDATE
+        // statements per launch, each acquiring a write lock for zero rows on
+        // DBs that had already been healed.
+        //
+        // Moving the heal into the versioned migration system means it runs
+        // exactly once: on the v4 → v5 upgrade for existing users, and as part
+        // of first-boot schema setup for brand-new DBs (fresh DBs have no NULL
+        // columns to heal — the heals are best-effort and short-circuit cheaply
+        // when there's nothing to fix, so running v5 on a fresh DB is a no-op).
+        //
+        // Future schema changes that ADD new columns to session_meta should
+        // add a follow-up heal migration if those columns risk NULL on
+        // pre-existing rows. ensureColumn() in initializeDatabase() is still
+        // the source of truth for column existence; this migration only fixes
+        // legacy NULL data.
+        up: (db: Database) => {
+            healAllNullColumns(db);
         },
     },
 ];

@@ -80,12 +80,10 @@ export function initializeDatabase(db: Database): void {
       updated_at INTEGER NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS session_notes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id TEXT NOT NULL,
-      content TEXT NOT NULL,
-      created_at INTEGER NOT NULL
-    );
+    -- session_notes and smart_notes were merged into the unified notes table
+    -- by migration v1 (see features/magic-context/migrations.ts). The old tables
+    -- are never recreated; fresh DBs create only notes, upgraded DBs have
+    -- their old tables migrated and dropped by the migration runner.
 
     CREATE TABLE IF NOT EXISTS memories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -149,20 +147,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     );
     CREATE INDEX IF NOT EXISTS idx_dream_runs_project ON dream_runs(project_path, finished_at DESC);
 
-    CREATE TABLE IF NOT EXISTS smart_notes (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      project_path TEXT NOT NULL,
-      content TEXT NOT NULL,
-      surface_condition TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending',
-      created_session_id TEXT,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      last_checked_at INTEGER,
-      ready_at INTEGER,
-      ready_reason TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_smart_notes_project_status ON smart_notes(project_path, status);
+    -- (smart_notes: see note above; merged into unified notes table by migration v1)
 
     CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
       content,
@@ -262,7 +247,6 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     CREATE INDEX IF NOT EXISTS idx_session_facts_session ON session_facts(session_id);
     CREATE INDEX IF NOT EXISTS idx_recomp_compartments_session ON recomp_compartments(session_id);
     CREATE INDEX IF NOT EXISTS idx_recomp_facts_session ON recomp_facts(session_id);
-    CREATE INDEX IF NOT EXISTS idx_session_notes_session ON session_notes(session_id);
     CREATE INDEX IF NOT EXISTS idx_memories_project_status_category ON memories(project_path, status, category);
     CREATE INDEX IF NOT EXISTS idx_memories_project_status_expires ON memories(project_path, status, expires_at);
     CREATE INDEX IF NOT EXISTS idx_memories_project_category_hash ON memories(project_path, category, normalized_hash);
@@ -343,16 +327,35 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // Cleared once recovery succeeds.
     ensureColumn(db, "session_meta", "needs_emergency_recovery", "INTEGER DEFAULT 0");
 
-    // One-time heal: when ensureColumn adds a new TEXT DEFAULT '' or
-    // INTEGER DEFAULT N column, SQLite leaves pre-existing rows with NULL
-    // instead of applying the DEFAULT. isSessionMetaRow used to check
-    // `typeof === "string"` / `"number"` strictly (null fails), so rows
-    // with NULL columns were rejected → getOrCreateSessionMeta returned
-    // defaults (lastResponseTime=0, cacheTtl="5m") → scheduler always
-    // returned "execute" → applyPendingOperations re-ran forever → each
-    // execute pass mutated message content → sustained cache-bust cascade.
-    // The defensive validator now accepts null, but we also heal the data
-    // for good measure (belt and suspenders — failures here are non-fatal).
+    // NULL-column healing runs as migration v5 (one-shot at schema upgrade).
+    // Previously it ran on every plugin startup — each heal function issued
+    // ~25 no-op UPDATE statements (one per column) against session_meta,
+    // acquiring a write lock each time for zero rows on healed DBs. Moving
+    // the heal into the versioned migration system means it runs exactly
+    // once on affected DBs (v4 → v5 upgrade) and never again.
+    // See features/magic-context/migrations.ts.
+}
+
+/**
+ * Heal NULL columns added via ensureColumn against pre-existing rows.
+ *
+ * SQLite does NOT backfill column defaults when ALTER TABLE ADD COLUMN runs
+ * on an already-populated table — old rows get NULL regardless of the
+ * DEFAULT clause. isSessionMetaRow used to require strict typeof === "string"
+ * / "number", which NULL fails, so rows with NULL columns were rejected,
+ * getOrCreateSessionMeta returned zeroed defaults (lastResponseTime=0,
+ * cacheTtl="5m"), the scheduler returned "execute" forever, and every
+ * execute pass mutated message content — a sustained cache-bust cascade.
+ *
+ * The validator now tolerates NULL, but we normalize the data too so every
+ * code path sees well-formed values. Each UPDATE is best-effort: if a column
+ * doesn't exist yet (migration ran on a DB older than the ensureColumn call),
+ * the UPDATE throws and we move on — the next schema upgrade runs ensureColumn
+ * first, then this heal again.
+ *
+ * Exported so migration v5 can call it. Not exported from any barrel.
+ */
+export function healAllNullColumns(db: Database): void {
     healNullTextColumns(db);
     healNullIntegerColumns(db);
     healMissingMemoryBlockIds(db);
