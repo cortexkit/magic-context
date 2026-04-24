@@ -181,7 +181,7 @@ export function createSystemPromptHashHandler(deps: {
         // See council Finding #12 for the full design rationale.
         const isCacheBusting = deps.flushedSessions.has(sessionId);
 
-        if (shouldInjectDocs) {
+        if (shouldInjectDocs && !isSubagentSession) {
             const hasCached = cachedDocsBySession.has(sessionId);
 
             if (!hasCached || isCacheBusting) {
@@ -202,7 +202,7 @@ export function createSystemPromptHashHandler(deps: {
         }
 
         // ── Step 1.6: Inject stable user memories as user profile ──
-        if (deps.experimentalUserMemories) {
+        if (deps.experimentalUserMemories && !isSubagentSession) {
             const hasCachedProfile = cachedUserProfileBySession.has(sessionId);
 
             if (!hasCachedProfile || isCacheBusting) {
@@ -228,7 +228,7 @@ export function createSystemPromptHashHandler(deps: {
         }
 
         // ── Step 1.7: Inject pinned key files ──
-        if (deps.experimentalPinKeyFiles) {
+        if (deps.experimentalPinKeyFiles && !isSubagentSession) {
             const hasCachedKeyFiles = cachedKeyFilesBySession.has(sessionId);
 
             if (!hasCachedKeyFiles || isCacheBusting) {

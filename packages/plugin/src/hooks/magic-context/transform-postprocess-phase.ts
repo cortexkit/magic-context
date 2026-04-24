@@ -473,7 +473,24 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
         }
     }
 
-    const pendingUserTurnReminder = getPersistedStickyTurnReminder(args.db, args.sessionId);
+    // Sticky turn reminder replay is primary-only: subagents never CREATE
+    // this state (gated in hook-handlers.ts), but a session that was briefly
+    // misclassified as primary (race before session.created processes) could
+    // leave stale state behind. On a cache-busting pass for a subagent, clear
+    // any leftover state so it doesn't replay forever.
+    const pendingUserTurnReminder = args.fullFeatureMode
+        ? getPersistedStickyTurnReminder(args.db, args.sessionId)
+        : null;
+    if (!args.fullFeatureMode && isCacheBustingPass) {
+        const stale = getPersistedStickyTurnReminder(args.db, args.sessionId);
+        if (stale) {
+            clearPersistedStickyTurnReminder(args.db, args.sessionId);
+            sessionLog(
+                args.sessionId,
+                "sticky turn reminder cleared — subagent should not have this state (cache-busting pass)",
+            );
+        }
+    }
     if (pendingUserTurnReminder) {
         // Only clear the reminder when the pass is already cache-busting (execute/flush).
         // Clearing on a cache-safe pass would remove text from an anchored user message,

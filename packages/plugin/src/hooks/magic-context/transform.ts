@@ -621,7 +621,14 @@ export function createTransform(deps: TransformDeps) {
             const sawCommitLastPass = deps.commitSeenLastPass?.get(sessionId) ?? false;
             // Only trigger on NEW commits — not on first pass after restart where
             // we have no baseline. First pass establishes the baseline silently.
-            if (hadPriorCommitState && result.hasRecentCommit && !sawCommitLastPass) {
+            // Subagents never deliver note nudges (gated in postprocess), so skip
+            // accumulating orphan trigger state.
+            if (
+                fullFeatureMode &&
+                hadPriorCommitState &&
+                result.hasRecentCommit &&
+                !sawCommitLastPass
+            ) {
                 onNoteTrigger(db, sessionId, "commit_detected");
             }
             deps.commitSeenLastPass?.set(sessionId, result.hasRecentCommit);

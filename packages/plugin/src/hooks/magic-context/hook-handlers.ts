@@ -261,7 +261,12 @@ export function createToolExecuteAfterHook(args: {
                 todos.length > 0 &&
                 todos.every((t) => t.status === "completed" || t.status === "cancelled")
             ) {
-                onNoteTrigger(args.db, typedInput.sessionID, "todos_complete");
+                // Subagents never deliver note nudges (gated in postprocess), so don't
+                // accumulate orphan trigger state for them.
+                const sessionMeta = getOrCreateSessionMeta(args.db, typedInput.sessionID);
+                if (!sessionMeta.isSubagent) {
+                    onNoteTrigger(args.db, typedInput.sessionID, "todos_complete");
+                }
             }
         }
         if (typedInput.tool === "ctx_note") {
