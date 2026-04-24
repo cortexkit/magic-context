@@ -34,7 +34,7 @@ Use \`ctx_memory\` to manage cross-session project memories. Write new memories 
 - Discovered a non-obvious build/test command → \`ctx_memory(action="write", category="WORKFLOW_RULES", content="Always use scripts/release.sh for releases")\`
 - Learned a constraint the hard way → \`ctx_memory(action="write", category="CONSTRAINTS", content="Dashboard Tauri build needs RGBA PNGs, not grayscale")\`
 Use \`ctx_search\` to search across project memories, session facts, and conversation history from one query.
-Use \`ctx_expand\` to decompress a compartment range to see the original conversation transcript. Use \`start\`/\`end\` from \`<compartment start=N end=M>\` attributes. Returns the compacted U:/A: transcript for that message range, capped at ~15K tokens.
+Use \`ctx_expand\` to decompress a compartment range to see the original conversation transcript. Use \`start\`/\`end\` from \`<compartment start="N" end="M">\` attributes. Returns the compacted U:/A: transcript for that message range, capped at ~15K tokens.
 **Search before asking the user**: If you can't remember or don't know something that might have been discussed before or stored in project memory, use \`ctx_search\` before asking the user. Examples:
 - Can't remember where a related codebase or dependency lives → \`ctx_search(query="opencode source code path")\`
 - Forgot a prior architectural decision or constraint → \`ctx_search(query="why did we choose SQLite over postgres")\`
@@ -48,18 +48,21 @@ NEVER drop user messages — they are short and will be summarized by compartmen
 NEVER drop assistant text messages unless they are exceptionally large. Your conversation messages are lightweight; only large tool outputs are worth dropping.
 Before your turn finishes, consider using \`ctx_reduce\` to drop large tool outputs you no longer need.`;
 
-/** Intro when ctx_reduce is disabled — no drop guidance, no ctx_reduce references. */
+/** Intro when ctx_reduce is disabled — no drop guidance, no ctx_reduce references,
+ *  and no tag system description. When `ctx_reduce_enabled: false`, transform.ts
+ *  skips §N§ prefix injection entirely, so the agent never sees tags — describing
+ *  a tagging system they can't observe just wastes tokens and (empirically) primes
+ *  some models to emit malformed `§N">§` tokens at the start of their own text. */
 const BASE_INTRO_NO_REDUCE = (
     dropToolStructure: boolean,
-): string => `Messages and tool outputs are tagged with §N§ identifiers (e.g., §1§, §42§).
-Use \`ctx_note\` for deferred intentions — things to tackle later, not right now. NOT for task tracking (use todos). Notes survive context compression and you'll be reminded at natural work boundaries (after commits, historian runs, todo completion).
+): string => `Use \`ctx_note\` for deferred intentions — things to tackle later, not right now. NOT for task tracking (use todos). Notes survive context compression and you'll be reminded at natural work boundaries (after commits, historian runs, todo completion).
 Use \`ctx_memory\` to manage cross-session project memories. Write new memories or delete stale ones. Memories persist across sessions and are automatically injected into new sessions.
 **Save to memory proactively**: If you spent multiple turns finding something (a file path, a DB location, a config pattern, a workaround), save it with \`ctx_memory\` so future sessions don't repeat the search. Examples:
 - Found a project's source code path after searching → \`ctx_memory(action="write", category="ENVIRONMENT", content="OpenCode source is at ~/Work/OSS/opencode")\`
 - Discovered a non-obvious build/test command → \`ctx_memory(action="write", category="WORKFLOW_RULES", content="Always use scripts/release.sh for releases")\`
 - Learned a constraint the hard way → \`ctx_memory(action="write", category="CONSTRAINTS", content="Dashboard Tauri build needs RGBA PNGs, not grayscale")\`
 Use \`ctx_search\` to search across project memories, session facts, and conversation history from one query.
-Use \`ctx_expand\` to decompress a compartment range to see the original conversation transcript. Use \`start\`/\`end\` from \`<compartment start=N end=M>\` attributes. Returns the compacted U:/A: transcript for that message range, capped at ~15K tokens.
+Use \`ctx_expand\` to decompress a compartment range to see the original conversation transcript. Use \`start\`/\`end\` from \`<compartment start="N" end="M">\` attributes. Returns the compacted U:/A: transcript for that message range, capped at ~15K tokens.
 **Search before asking the user**: If you can't remember or don't know something that might have been discussed before or stored in project memory, use \`ctx_search\` before asking the user. Examples:
 - Can't remember where a related codebase or dependency lives → \`ctx_search(query="opencode source code path")\`
 - Forgot a prior architectural decision or constraint → \`ctx_search(query="why did we choose SQLite over postgres")\`
