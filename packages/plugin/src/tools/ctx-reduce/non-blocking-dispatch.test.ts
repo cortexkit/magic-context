@@ -1,10 +1,10 @@
-import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, it } from "bun:test";
+import { Database } from "../../shared/sqlite";
 import { createCtxReduceTools } from "./tools";
 
 function createDb(): Database {
     const db = new Database(":memory:");
-    db.run(`
+    db.exec(`
     CREATE TABLE tags (
       id INTEGER PRIMARY KEY,
       message_id TEXT NOT NULL,

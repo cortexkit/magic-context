@@ -1,9 +1,7 @@
-import type { Database } from "bun:sqlite";
 import { HARNESS } from "../../shared/harness";
 import { sessionLog } from "../../shared/logger";
+import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import type { PendingOp } from "./types";
-
-type PreparedStatement = ReturnType<Database["prepare"]>;
 
 const queuePendingOpStatements = new WeakMap<Database, PreparedStatement>();
 const getPendingOpsStatements = new WeakMap<Database, PreparedStatement>();

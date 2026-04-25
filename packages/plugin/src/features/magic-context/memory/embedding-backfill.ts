@@ -1,5 +1,5 @@
-import type { Database } from "bun:sqlite";
 import { log } from "../../../shared/logger";
+import type { Database } from "../../../shared/sqlite";
 import { embedBatch, getEmbeddingModelId, isEmbeddingEnabled } from "./embedding";
 import { saveEmbedding } from "./storage-memory-embeddings";
 import type { Memory } from "./types";

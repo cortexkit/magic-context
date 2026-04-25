@@ -1,6 +1,5 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,6 +11,8 @@ import {
     queuePendingOp,
 } from "../../features/magic-context/storage";
 import type { SessionMeta } from "../../features/magic-context/types";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import { checkCompartmentTrigger } from "./compartment-trigger";
 
 const tempDirs: string[] = [];
@@ -40,7 +41,7 @@ function createOpenCodeDb(
     mkdirSync(dirname(dbPath), { recursive: true });
     const db = new Database(dbPath);
     try {
-        db.run(`
+        db.exec(`
       CREATE TABLE IF NOT EXISTS message (
         id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,
@@ -85,7 +86,7 @@ function createOpenCodeDb(
             }
         });
     } finally {
-        db.close(false);
+        closeQuietly(db);
     }
 }
 

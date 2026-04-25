@@ -1,4 +1,3 @@
-import type { Database } from "bun:sqlite";
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import { parseRangeString } from "../../features/magic-context/range-parser";
 import {
@@ -9,6 +8,7 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import { getErrorMessage } from "../../shared/error-message";
+import type { Database } from "../../shared/sqlite";
 import { CTX_REDUCE_DESCRIPTION } from "./constants";
 import type { CtxReduceArgs } from "./types";
 

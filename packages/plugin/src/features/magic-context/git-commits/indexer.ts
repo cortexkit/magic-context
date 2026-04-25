@@ -10,9 +10,9 @@
  * sweeps of the same project.
  */
 
-import type { Database } from "bun:sqlite";
 import type { EmbeddingConfig } from "../../../config/schema/magic-context";
 import { log } from "../../../shared/logger";
+import type { Database } from "../../../shared/sqlite";
 import { embedBatch, getEmbeddingModelId, isEmbeddingEnabled } from "../memory/embedding";
 import { readGitCommits } from "./git-log-reader";
 import {

@@ -1,7 +1,7 @@
-import type { Database } from "bun:sqlite";
 import { queuePendingOp } from "../../features/magic-context/storage-ops";
 import { getTagsBySession } from "../../features/magic-context/storage-tags";
 import { sessionLog } from "../../shared/logger";
+import type { Database } from "../../shared/sqlite";
 import { getRawSessionTagKeysThrough } from "./read-session-chunk";
 
 export function queueDropsForCompartmentalizedMessages(

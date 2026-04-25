@@ -1,11 +1,11 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeReadOnlySessionDb } from "../../hooks/magic-context/read-session-db";
+import { Database } from "../../shared/sqlite";
 import { resolveIsSubagentFromOpenCodeDb } from "./resolve-subagent-fallback";
 
 /**

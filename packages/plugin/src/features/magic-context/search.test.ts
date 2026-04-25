@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { Database } from "../../shared/sqlite";
 
 let queryEmbedding: Float32Array | null = null;
 const embeddingQueries: string[] = [];
@@ -10,6 +10,7 @@ const rawMessagesBySession = new Map<
     Array<{ ordinal: number; id: string; role: string; parts: unknown[] }>
 >();
 
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import { replaceSessionFacts } from "./compartment-storage";
 import { getMemoryById, insertMemory, resetEmbeddingCacheForTests, saveEmbedding } from "./memory";
 import { unifiedSearch } from "./search";
@@ -43,7 +44,7 @@ describe("unifiedSearch", () => {
     });
 
     afterEach(() => {
-        db.close(false);
+        closeQuietly(db);
     });
 
     it("returns ranked results across memories and messages (no facts)", async () => {

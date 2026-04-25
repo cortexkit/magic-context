@@ -9,7 +9,7 @@
  * Run: bun scripts/backfill-embeddings.ts [--project <path>]
  *   --project  Only backfill memories for this project_path (default: all).
  */
-import { Database } from "bun:sqlite";
+import { Database } from "../src/shared/sqlite";
 import { readFileSync } from "node:fs";
 import { parseJsonc } from "../src/shared/jsonc-parser";
 import { MagicContextConfigSchema } from "../src/config/schema/magic-context";
@@ -48,7 +48,7 @@ async function main() {
         : null;
 
     const db = new Database(DB_PATH);
-    db.run("PRAGMA journal_mode=WAL");
+    db.exec("PRAGMA journal_mode=WAL");
     const embeddingConfig = loadEmbeddingConfigFromUserFile();
     initializeEmbedding(embeddingConfig);
 

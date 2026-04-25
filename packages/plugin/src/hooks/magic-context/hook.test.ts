@@ -155,7 +155,7 @@ describe("magic-context hook", () => {
         const db = openDatabase();
 
         const table = db
-            .query<{ name: string }, []>(
+            .prepare<[], { name: string }>(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'dream_queue'",
             )
             .get();

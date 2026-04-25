@@ -1,9 +1,10 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
 import { setNoteLastReadAt } from "../../features/magic-context/storage-meta-persisted";
 import { addNote } from "../../features/magic-context/storage-notes";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     clearNoteNudgeState,
     getNoteNudgeText,
@@ -17,14 +18,14 @@ const dbs: Database[] = [];
 
 afterEach(() => {
     for (const db of dbs) {
-        db.close(false);
+        closeQuietly(db);
     }
     dbs.length = 0;
 });
 
 function makeDb(): Database {
     const db = new Database(":memory:");
-    db.run(`
+    db.exec(`
         CREATE TABLE session_meta (
             session_id TEXT PRIMARY KEY,
             last_response_time INTEGER DEFAULT 0,

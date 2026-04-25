@@ -13,7 +13,6 @@
  * It does NOT include note content — just a count and "use ctx_note read" hint.
  */
 
-import type { Database } from "bun:sqlite";
 import {
     clearPersistedNoteNudge,
     getNoteLastReadAt,
@@ -28,6 +27,7 @@ import {
     type Note,
 } from "../../features/magic-context/storage-notes";
 import { sessionLog } from "../../shared/logger";
+import type { Database } from "../../shared/sqlite";
 
 export type NoteNudgeTrigger = "historian_complete" | "commit_detected" | "todos_complete";
 

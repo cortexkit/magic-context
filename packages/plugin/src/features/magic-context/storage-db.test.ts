@@ -1,10 +1,11 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import { closeDatabase, isDatabasePersisted, openDatabase } from "./storage-db";
 
 const tempDirs: string[] = [];
@@ -154,7 +155,7 @@ describe("storage-db", () => {
       harness TEXT NOT NULL DEFAULT 'opencode'
     );
       `);
-            legacyDb.close(false);
+            closeQuietly(legacyDb);
 
             const db = openDatabase();
             const columns = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{
@@ -209,7 +210,7 @@ describe("storage-db", () => {
           embedding BLOB NOT NULL
         );
       `);
-            legacyDb.close(false);
+            closeQuietly(legacyDb);
 
             const db = openDatabase();
             const columns = db.prepare("PRAGMA table_info(memory_embeddings)").all() as Array<{

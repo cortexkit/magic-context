@@ -1,8 +1,9 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { afterAll, afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import type { PluginContext } from "../../../plugin/types";
+import { Database } from "../../../shared/sqlite";
+import { closeQuietly } from "../../../shared/sqlite-helpers";
 
 const { initializeDatabase } = await import("../storage-db");
 const { runMigrations } = await import("../migrations");
@@ -61,7 +62,7 @@ function createDreamClient(
 }
 
 function createTestDb(): Database {
-    const database = Database.open(":memory:");
+    const database = new Database(":memory:");
     initializeDatabase(database);
     runMigrations(database);
     return database;
@@ -70,7 +71,7 @@ function createTestDb(): Database {
 afterEach(() => {
     if (db) {
         try {
-            db.close(false);
+            closeQuietly(db);
         } catch {
         } finally {
             db = null;
@@ -182,7 +183,7 @@ describe("dreamer", () => {
 
             expect(result?.tasks.map((task) => task.name)).toEqual(["consolidate"]);
             const row = db
-                .query<{ count: number }, []>("SELECT COUNT(*) AS count FROM dream_queue")
+                .prepare<[], { count: number }>("SELECT COUNT(*) AS count FROM dream_queue")
                 .get();
             expect(row?.count).toBe(0);
         });

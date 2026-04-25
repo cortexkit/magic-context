@@ -1,4 +1,3 @@
-import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { DREAMER_AGENT } from "../../../agents/dreamer";
@@ -9,6 +8,8 @@ import { extractLatestAssistantText } from "../../../shared/assistant-message-ex
 import { getDataDir } from "../../../shared/data-path";
 import { getErrorMessage } from "../../../shared/error-message";
 import { log } from "../../../shared/logger";
+import { Database } from "../../../shared/sqlite";
+import { closeQuietly } from "../../../shared/sqlite-helpers";
 import {
     applyKeyFileResults,
     buildKeyFilesPrompt,
@@ -343,7 +344,7 @@ async function identifyKeyFilesForSession(args: {
     } finally {
         if (openCodeDb) {
             try {
-                openCodeDb.close(false);
+                closeQuietly(openCodeDb);
             } catch (error) {
                 log(
                     `[key-files][${args.sessionId}] failed to close OpenCode DB: ${getErrorMessage(error)}`,

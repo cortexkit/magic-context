@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { Database } from "../../shared/sqlite";
 import { clearCompressionDepth } from "./compression-depth-storage";
 import { clearIndexedMessages } from "./message-index";
 import { resolveIsSubagentFromOpenCodeDb } from "./resolve-subagent-fallback";

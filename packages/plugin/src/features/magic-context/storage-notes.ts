@@ -1,5 +1,5 @@
-import type { Database } from "bun:sqlite";
 import { HARNESS } from "../../shared/harness";
+import type { Database } from "../../shared/sqlite";
 
 export type NoteType = "session" | "smart";
 export type NoteStatus = "active" | "pending" | "ready" | "dismissed";

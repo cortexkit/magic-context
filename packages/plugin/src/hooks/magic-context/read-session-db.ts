@@ -1,7 +1,8 @@
-import { Database } from "bun:sqlite";
 import { join } from "node:path";
 import { getDataDir } from "../../shared/data-path";
 import { log } from "../../shared/logger";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 
 interface RawCountRow {
     count?: number;
@@ -19,7 +20,7 @@ function closeCachedReadOnlyDb(): void {
     }
 
     try {
-        cachedReadOnlyDb.db.close(false);
+        closeQuietly(cachedReadOnlyDb.db);
     } catch (error) {
         log("[magic-context] failed to close cached OpenCode read-only DB:", error);
     } finally {

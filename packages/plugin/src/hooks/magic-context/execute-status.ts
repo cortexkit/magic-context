@@ -1,4 +1,3 @@
-import type { Database } from "bun:sqlite";
 import {
     DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
     DEFAULT_NUDGE_INTERVAL_TOKENS,
@@ -10,6 +9,7 @@ import { getOrCreateSessionMeta } from "../../features/magic-context/storage-met
 import { getTagsBySession } from "../../features/magic-context/storage-tags";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
+import type { Database } from "../../shared/sqlite";
 import {
     getProactiveCompartmentTriggerPercentage,
     POST_DROP_TARGET_RATIO,

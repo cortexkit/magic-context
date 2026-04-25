@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite"
+import { Database } from "../../src/shared/sqlite"
 import { applyTransforms } from "./apply-transforms"
 import { buildDumpStats } from "./metrics"
 import { createDumpFilePath, resolveContextDatabasePath, resolveOpenCodeDatabasePath } from "./database-paths"
@@ -158,7 +158,7 @@ export async function runContextDump(sessionId: string): Promise<ContextDumpResu
 			compartmentInjection,
 		})
 	} finally {
-		contextDb.close(false)
+		contextDb.close()
 	}
 
 	const timestamp = new Date().toISOString()

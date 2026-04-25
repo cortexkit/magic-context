@@ -1,4 +1,3 @@
-import type { Database } from "bun:sqlite";
 import type { DreamerConfig, SidekickConfig } from "../../config/schema/magic-context";
 import {
     type DreamRunResult,
@@ -10,6 +9,7 @@ import { getCompartments } from "../../features/magic-context/storage";
 import type { PluginContext } from "../../plugin/types";
 import { sessionLog } from "../../shared";
 import { isTuiConnected, pushNotification } from "../../shared/rpc-notifications";
+import type { Database } from "../../shared/sqlite";
 import {
     type PartialRecompRange,
     snapRangeToCompartments,

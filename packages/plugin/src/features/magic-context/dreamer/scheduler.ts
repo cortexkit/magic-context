@@ -1,5 +1,5 @@
-import type { Database } from "bun:sqlite";
 import { log } from "../../../shared/logger";
+import type { Database } from "../../../shared/sqlite";
 import { enqueueDream } from "./queue";
 import { getDreamState } from "./storage-dream-state";
 
@@ -61,7 +61,7 @@ export function isInScheduleWindow(schedule: string, now: Date = new Date()): bo
 export function findProjectsNeedingDream(db: Database): string[] {
     // Get all active project paths from memories and smart notes
     const projectRows = db
-        .query<{ project_path: string }, []>(
+        .prepare<[], { project_path: string }>(
             `SELECT DISTINCT project_path FROM memories WHERE status = 'active'
              UNION
              SELECT DISTINCT project_path FROM notes
@@ -86,14 +86,14 @@ export function findProjectsNeedingDream(db: Database): string[] {
         }
 
         const updatedMemories = db
-            .query<{ cnt: number }, [string, number]>(
+            .prepare<[string, number], { cnt: number }>(
                 `SELECT COUNT(*) as cnt FROM memories
                  WHERE project_path = ? AND status = 'active' AND updated_at > ?`,
             )
             .get(row.project_path, lastDreamAt);
 
         const pendingSmartNotes = db
-            .query<{ cnt: number }, [string]>(
+            .prepare<[string], { cnt: number }>(
                 `SELECT COUNT(*) as cnt FROM notes
                  WHERE project_path = ? AND type = 'smart' AND status = 'pending'`,
             )

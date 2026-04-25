@@ -25,10 +25,11 @@
  *       whose parentID matches that user message's id
  */
 
-import { Database } from "bun:sqlite";
 import { join } from "node:path";
 import { getDataDir } from "../../shared/data-path";
 import { log } from "../../shared/logger";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 
 // ── ID Generation ────────────────────────────────────────────────
 
@@ -149,7 +150,7 @@ function getWritableOpenCodeDb(): Database {
     }
     if (cachedWriteDb) {
         try {
-            cachedWriteDb.db.close(false);
+            closeQuietly(cachedWriteDb.db);
         } catch {
             // ignore
         }
@@ -165,7 +166,7 @@ function getWritableOpenCodeDb(): Database {
 export function closeCompactionMarkerDb(): void {
     if (cachedWriteDb) {
         try {
-            cachedWriteDb.db.close(false);
+            closeQuietly(cachedWriteDb.db);
         } catch {
             // ignore
         }

@@ -1,4 +1,3 @@
-import type { Database } from "bun:sqlite";
 import {
     clearPersistedStickyTurnReminder,
     getPendingOps,
@@ -7,6 +6,7 @@ import {
 } from "../../features/magic-context/storage";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
+import type { Database } from "../../shared/sqlite";
 
 export function executeFlush(db: Database, sessionId: string): string {
     try {

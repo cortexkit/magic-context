@@ -1,5 +1,5 @@
-import type { Database } from "bun:sqlite";
 import type { MemorySourceType } from "../../features/magic-context/memory";
+import type { Database } from "../../shared/sqlite";
 
 export const CTX_MEMORY_ACTIONS = ["write", "delete"] as const;
 

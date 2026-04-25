@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { Database } from "../../../shared/sqlite";
 import { deleteDreamState, getDreamState, setDreamState } from "./storage-dream-state";
 
 const LEASE_HOLDER_KEY = "dreaming_lease_holder";

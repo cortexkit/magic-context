@@ -1,7 +1,5 @@
-import type { Database } from "bun:sqlite";
 import { HARNESS } from "../../shared/harness";
-
-type PreparedStatement = ReturnType<Database["prepare"]>;
+import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 
 const insertCompartmentStatements = new WeakMap<Database, PreparedStatement>();
 const insertFactStatements = new WeakMap<Database, PreparedStatement>();

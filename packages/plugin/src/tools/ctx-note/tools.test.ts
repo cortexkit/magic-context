@@ -1,10 +1,10 @@
-import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, it } from "bun:test";
+import { Database } from "../../shared/sqlite";
 import { createCtxNoteTools } from "./tools";
 
 function createTestDb(): Database {
     const db = new Database(":memory:");
-    db.run(`
+    db.exec(`
     CREATE TABLE notes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       type TEXT NOT NULL DEFAULT 'session',

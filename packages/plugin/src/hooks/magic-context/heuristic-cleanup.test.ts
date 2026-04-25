@@ -1,13 +1,14 @@
 /// <reference types="bun-types" />
-import { Database } from "bun:sqlite";
+
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { getTagsBySession, insertTag, updateTagStatus } from "../../features/magic-context/storage";
+import { Database } from "../../shared/sqlite";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import type { MessageLike, TagTarget } from "./tag-messages";
 
 function makeMemoryDatabase(): Database {
     const d = new Database(":memory:");
-    d.run(`
+    d.exec(`
     CREATE TABLE IF NOT EXISTS tags (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT,

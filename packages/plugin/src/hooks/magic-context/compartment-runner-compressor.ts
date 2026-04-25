@@ -1,4 +1,3 @@
-import type { Database } from "bun:sqlite";
 import {
     COMPRESSOR_MERGE_RATIO_BY_DEPTH,
     DEFAULT_COMPRESSOR_GRACE_COMPARTMENTS,
@@ -20,6 +19,7 @@ import { normalizeSDKResponse, promptSyncWithModelSuggestionRetry } from "../../
 import { extractLatestAssistantText } from "../../shared/assistant-message-extractor";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
+import type { Database } from "../../shared/sqlite";
 import type { CavemanLevel } from "./caveman";
 import { cavemanCompress } from "./caveman";
 import { parseCompartmentOutput } from "./compartment-parser";

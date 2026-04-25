@@ -1,7 +1,8 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import { runMigrations } from "./migrations";
 import { initializeDatabase } from "./storage-db";
 
@@ -50,7 +51,7 @@ describe("harness column", () => {
             expect(harness?.notnull).toBe(1);
         }
 
-        db.close(false);
+        closeQuietly(db);
     });
 
     it("legacy notes rows get harness='opencode' via migration v6", () => {
@@ -104,6 +105,6 @@ describe("harness column", () => {
             | undefined;
         expect(row?.harness).toBe("opencode");
 
-        db.close(false);
+        closeQuietly(db);
     });
 });

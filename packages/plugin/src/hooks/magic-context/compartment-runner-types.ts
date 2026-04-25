@@ -1,5 +1,5 @@
-import type { Database } from "bun:sqlite";
 import type { PluginContext } from "../../plugin/types";
+import type { Database } from "../../shared/sqlite";
 import type { NotificationParams } from "./send-session-notification";
 
 export interface CompartmentRunnerDeps {

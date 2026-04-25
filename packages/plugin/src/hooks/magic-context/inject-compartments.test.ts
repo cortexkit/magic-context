@@ -1,10 +1,10 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
 import { replaceAllCompartmentState } from "../../features/magic-context/compartment-storage";
 import { insertMemory } from "../../features/magic-context/memory/storage-memory";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { Database } from "../../shared/sqlite";
 import {
     clearInjectionCache,
     prepareCompartmentInjection,
@@ -18,7 +18,7 @@ const PROJECT_PATH = "/tmp/test-inject-project";
 let db: Database;
 
 function makeDb(): Database {
-    const d = Database.open(":memory:");
+    const d = new Database(":memory:");
     initializeDatabase(d);
     // session_meta row must exist for memory_block_cache writes
     d.prepare("INSERT INTO session_meta (session_id) VALUES (?)").run(SESSION_ID);

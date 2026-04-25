@@ -1,6 +1,7 @@
-import { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { getMemoriesByProject, getMemoryById, insertMemory } from "../../features/magic-context";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 
 mock.module("../../features/magic-context/memory/embedding", () => ({
     embedText: async (_text: string) => null,
@@ -12,7 +13,7 @@ const { createCtxMemoryTools } = await import("./tools");
 
 function createTestDb(): Database {
     const db = new Database(":memory:");
-    db.run(`
+    db.exec(`
         CREATE TABLE IF NOT EXISTS memories
         (
             id                      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,7 +100,7 @@ describe("createCtxMemoryTools", () => {
     });
 
     afterEach(() => {
-        db.close(false);
+        closeQuietly(db);
     });
 
     describe("#given write action", () => {

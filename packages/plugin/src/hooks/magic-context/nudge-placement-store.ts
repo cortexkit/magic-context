@@ -1,9 +1,9 @@
-import type { Database } from "bun:sqlite";
 import {
     clearPersistedNudgePlacement,
     getPersistedNudgePlacement,
     setPersistedNudgePlacement,
 } from "../../features/magic-context/storage";
+import type { Database } from "../../shared/sqlite";
 
 interface NudgePlacement {
     messageId: string;

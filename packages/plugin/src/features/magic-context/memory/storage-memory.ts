@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { Database, Statement as PreparedStatement } from "../../../shared/sqlite";
 import { invalidateMemory, invalidateProject } from "./embedding-cache";
 import { computeNormalizedHash } from "./normalize-hash";
 import type {
@@ -9,8 +9,6 @@ import type {
     MemoryStatus,
     VerificationStatus,
 } from "./types";
-
-type PreparedStatement = ReturnType<Database["prepare"]>;
 
 export const COLUMN_MAP: Record<keyof Memory, string> = {
     id: "id",

@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { Database } from "../../shared/sqlite";
 
 /**
  * SQLite-backed message bus for TUI ↔ server plugin communication.

@@ -1,5 +1,5 @@
-import type { Database } from "bun:sqlite";
 import { sessionLog } from "../../../shared/logger";
+import type { Database } from "../../../shared/sqlite";
 import { CATEGORY_DEFAULT_TTL, PROMOTABLE_CATEGORIES } from "./constants";
 import { embedText, getEmbeddingModelId } from "./embedding";
 import { computeNormalizedHash } from "./normalize-hash";

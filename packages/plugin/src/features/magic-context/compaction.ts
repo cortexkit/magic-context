@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { Database } from "../../shared/sqlite";
 import { updateSessionMeta } from "./storage";
 
 interface CompactionHandler {

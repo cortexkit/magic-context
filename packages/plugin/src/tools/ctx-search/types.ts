@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { Database } from "../../shared/sqlite";
 
 /** Sources the agent can narrow ctx_search to. Facts are intentionally NOT a
  *  source — they're always rendered in <session-history> in message[0], so

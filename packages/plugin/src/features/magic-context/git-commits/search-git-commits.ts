@@ -5,14 +5,12 @@
  * the existing merged ranking with source boosts.
  */
 
-import type { Database } from "bun:sqlite";
 import { log } from "../../../shared/logger";
+import type { Database, Statement as PreparedStatement } from "../../../shared/sqlite";
 import { cosineSimilarity } from "../memory/cosine-similarity";
 import { sanitizeFtsQuery } from "../memory/storage-memory-fts";
 import { loadProjectCommitEmbeddings } from "./storage-git-commit-embeddings";
 import type { StoredGitCommit } from "./storage-git-commits";
-
-type PreparedStatement = ReturnType<Database["prepare"]>;
 
 const ftsStatements = new WeakMap<Database, PreparedStatement>();
 const ftsPlainStatements = new WeakMap<Database, PreparedStatement>();

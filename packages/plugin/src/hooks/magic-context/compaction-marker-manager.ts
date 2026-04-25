@@ -11,8 +11,6 @@
  * transform receives only the live tail.
  */
 
-import type { Database } from "bun:sqlite";
-import { Database as SqliteDb } from "bun:sqlite";
 import { join } from "node:path";
 import {
     closeCompactionMarkerDb,
@@ -25,6 +23,9 @@ import {
 } from "../../features/magic-context/storage-meta-persisted";
 import { getDataDir } from "../../shared/data-path";
 import { log, sessionLog } from "../../shared/logger";
+import type { Database } from "../../shared/sqlite";
+import { Database as SqliteDb } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 
 /** Static placeholder — the real session-history comes from transform injection. */
 const MARKER_SUMMARY_TEXT =
@@ -239,7 +240,7 @@ export function checkCompactionMarkerConsistency(db: Database): void {
         );
     } finally {
         try {
-            opencodeDb.close(false);
+            closeQuietly(opencodeDb);
         } catch {
             // ignore
         }

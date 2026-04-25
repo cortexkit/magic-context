@@ -19,13 +19,13 @@
  *     message is a fresh turn anyway, no provider cache to preserve yet.
  */
 
-import type { Database } from "bun:sqlite";
 import type {
     UnifiedSearchOptions,
     UnifiedSearchResult,
 } from "../../features/magic-context/search";
 import { unifiedSearch } from "../../features/magic-context/search";
 import { log, sessionLog } from "../../shared/logger";
+import type { Database } from "../../shared/sqlite";
 import { buildAutoSearchHint } from "./auto-search-hint";
 import { appendReminderToUserMessageById } from "./transform-message-helpers";
 import type { MessageLike } from "./transform-operations";

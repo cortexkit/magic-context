@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { Database } from "../../../shared/sqlite";
 
 export interface DreamQueueEntry {
     id: number;
@@ -10,7 +10,7 @@ export interface DreamQueueEntry {
 }
 
 export function ensureDreamQueueTable(db: Database): void {
-    db.run(`
+    db.exec(`
         CREATE TABLE IF NOT EXISTS dream_queue (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             project_path TEXT NOT NULL,
@@ -20,10 +20,10 @@ export function ensureDreamQueueTable(db: Database): void {
             retry_count INTEGER DEFAULT 0
         )
     `);
-    db.run("CREATE INDEX IF NOT EXISTS idx_dream_queue_project ON dream_queue(project_path)");
-    db.run(
+    db.exec("CREATE INDEX IF NOT EXISTS idx_dream_queue_project ON dream_queue(project_path)");
+    db.prepare(
         "CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, enqueued_at)",
-    );
+    ).run();
 }
 
 /** Enqueue a project for dreaming. Skips if the same project already has any queue entry (queued or running). */
@@ -37,13 +37,12 @@ export function enqueueDream(
         // Clean stale started entries before checking — prevents post-crash permanent "already queued"
         // Use 2h threshold to avoid deleting entries for long-running dreams (max runtime is configurable, up to 120min)
         const staleThresholdMs = 120 * 60 * 1000; // 2 hours
-        db.run(
+        db.prepare(
             "DELETE FROM dream_queue WHERE project_path = ? AND started_at IS NOT NULL AND started_at < ?",
-            [projectIdentity, now - staleThresholdMs],
-        );
+        ).run([projectIdentity, now - staleThresholdMs]);
 
         const existing = db
-            .query<{ id: number }, [string]>("SELECT id FROM dream_queue WHERE project_path = ?")
+            .prepare<[string], { id: number }>("SELECT id FROM dream_queue WHERE project_path = ?")
             .get(projectIdentity);
 
         if (existing) {
@@ -67,7 +66,7 @@ export function enqueueDream(
 /** Peek at the next unstarted entry without claiming it. */
 export function peekQueue(db: Database): DreamQueueEntry | null {
     const row = db
-        .query<{ id: number; project_path: string; reason: string; enqueued_at: number }, []>(
+        .prepare<[], { id: number; project_path: string; reason: string; enqueued_at: number }>(
             "SELECT id, project_path, reason, enqueued_at FROM dream_queue WHERE started_at IS NULL ORDER BY enqueued_at ASC LIMIT 1",
         )
         .get();
@@ -114,7 +113,7 @@ export function resetDreamEntry(db: Database, id: number): void {
 /** Get the retry count for a queue entry. */
 export function getEntryRetryCount(db: Database, id: number): number {
     const row = db
-        .query<{ retry_count: number | null }, [number]>(
+        .prepare<[number], { retry_count: number | null }>(
             "SELECT retry_count FROM dream_queue WHERE id = ?",
         )
         .get(id);

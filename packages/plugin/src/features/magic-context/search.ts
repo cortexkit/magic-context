@@ -1,7 +1,7 @@
-import type { Database } from "bun:sqlite";
 import { readRawSessionMessages } from "../../hooks/magic-context/read-session-chunk";
 import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
 import { log } from "../../shared/logger";
+import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { type GitCommitSearchHit, searchGitCommitsSync } from "./git-commits";
 import {
     ensureMemoryEmbeddings,
@@ -16,8 +16,6 @@ import { cosineSimilarity } from "./memory/cosine-similarity";
 import { embedText, isEmbeddingEnabled } from "./memory/embedding";
 import { sanitizeFtsQuery } from "./memory/storage-memory-fts";
 import { ensureMessagesIndexed } from "./message-index";
-
-type PreparedStatement = ReturnType<Database["prepare"]>;
 
 const DEFAULT_UNIFIED_SEARCH_LIMIT = 10;
 const FTS_SEMANTIC_CANDIDATE_LIMIT = 50;

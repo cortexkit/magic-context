@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import {
@@ -376,7 +377,9 @@ export function createSystemPromptHashHandler(deps: {
 
         // Use hex digest — numeric strings get coerced by SQLite INTEGER column affinity,
         // causing precision loss on read-back and infinite hash-change flushes.
-        const currentHash = new Bun.CryptoHasher("md5").update(systemContent).digest("hex");
+        // node:crypto MD5 produces identical digests to Bun.CryptoHasher("md5"),
+        // so persisted hashes remain stable across the Bun→Node runtime swap.
+        const currentHash = createHash("md5").update(systemContent).digest("hex");
 
         // Reuse sessionMetaEarly from Step 1 — no code path between that read
         // and here mutates session_meta for this session, so a second DB read

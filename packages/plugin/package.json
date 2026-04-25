@@ -32,7 +32,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target bun --format esm --external @opencode-ai/plugin --external @huggingface/transformers && bun build src/cli/index.ts --outfile dist/cli.js --target node --format esm && tsc --emitDeclarationOnly",
+    "build": "bun build src/index.ts --outdir dist --target node --format esm --external @opencode-ai/plugin --external @huggingface/transformers --external better-sqlite3 --external bun:sqlite && bun build src/cli/index.ts --outfile dist/cli.js --target node --format esm --external better-sqlite3 --external bun:sqlite && tsc --emitDeclarationOnly",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
     "test": "bun test",
     "lint": "biome check .",
@@ -48,14 +48,16 @@
     "@opencode-ai/plugin": "^1.2.26",
     "@opencode-ai/sdk": "^1.2.26",
     "ai-tokenizer": "^1.0.6",
+    "better-sqlite3": "^12.9.0",
     "comment-json": "^4.6.2",
     "zod": "^4.1.8"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.7",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
     "bun-types": "^1.3.10",
-    "typescript": "^5.8.0",
-    "@biomejs/biome": "^2.4.7"
+    "typescript": "^5.8.0"
   },
   "exports": {
     ".": {

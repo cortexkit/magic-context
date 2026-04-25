@@ -1,7 +1,8 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
+import { Database } from "../../../shared/sqlite";
+import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { initializeDatabase } from "../storage-db";
 import {
     getProjectEmbeddings,
@@ -25,7 +26,7 @@ function toNumbers(embedding: Float32Array | undefined): number[] {
 
 afterEach(() => {
     resetEmbeddingCacheForTests();
-    db?.close(false);
+    closeQuietly(db);
     db = null;
 });
 

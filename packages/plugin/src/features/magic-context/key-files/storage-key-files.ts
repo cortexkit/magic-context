@@ -1,5 +1,5 @@
-import type { Database } from "bun:sqlite";
 import { sessionLog } from "../../../shared/logger";
+import type { Database } from "../../../shared/sqlite";
 
 export interface KeyFileEntry {
     filePath: string;

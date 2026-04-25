@@ -1,4 +1,4 @@
-import type { Database } from "bun:sqlite";
+import type { Database } from "../../../shared/sqlite";
 import { loadAllEmbeddings } from "./storage-memory-embeddings";
 
 interface ProjectEmbeddingCacheEntry {

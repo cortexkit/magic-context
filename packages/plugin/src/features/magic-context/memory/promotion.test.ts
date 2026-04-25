@@ -1,7 +1,8 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { Database } from "../../../shared/sqlite";
+import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { CATEGORY_DEFAULT_TTL } from "./constants";
 import { computeNormalizedHash } from "./normalize-hash";
 
@@ -15,6 +16,7 @@ mock.module("./embedding", () => ({
 
 mock.module("../../../shared/logger", () => ({
     log: mockLog,
+    sessionLog: mockLog,
     getLogFilePath: () => "/tmp/test.log",
 }));
 
@@ -26,8 +28,8 @@ const { promoteSessionFactsToMemory } = await import("./promotion");
 let db: Database | null = null;
 
 function makeMemoryDatabase(): Database {
-    const database = Database.open(":memory:");
-    database.run(`
+    const database = new Database(":memory:");
+    database.exec(`
     CREATE TABLE IF NOT EXISTS memories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       project_path TEXT NOT NULL,
@@ -93,7 +95,7 @@ beforeEach(() => {
 afterEach(() => {
     if (db) {
         try {
-            db.close(false);
+            closeQuietly(db);
         } catch {
         } finally {
             db = null;
@@ -323,7 +325,7 @@ describe("promotion", () => {
         it("does not throw when DB write fails", () => {
             const closedDb = makeMemoryDatabase();
             db = closedDb;
-            closedDb.close(false);
+            closeQuietly(closedDb);
 
             expect(() =>
                 promoteSessionFactsToMemory(closedDb, "ses-1", "/repo/project", [
@@ -335,7 +337,7 @@ describe("promotion", () => {
         it("logs error when promotion fails", () => {
             const closedDb = makeMemoryDatabase();
             db = closedDb;
-            closedDb.close(false);
+            closeQuietly(closedDb);
             db = null;
 
             promoteSessionFactsToMemory(closedDb, "ses-1", "/repo/project", [
@@ -344,9 +346,14 @@ describe("promotion", () => {
 
             expect(mockLog).toHaveBeenCalledTimes(1);
             const loggedMessages = mockLog.mock.calls.map((call) => call.join(" "));
+            // Note: mock receives raw sessionLog args (sessionId + message + error), without
+            // the "[magic-context][sessionId]" prefix that the real sessionLog would prepend.
+            // This test verifies the promotion code passes the right session id and message.
             expect(
-                loggedMessages.some((message) =>
-                    message.includes("[magic-context][ses-1] memory promotion failed for fact"),
+                loggedMessages.some(
+                    (message) =>
+                        message.startsWith("ses-1 memory promotion failed for fact") &&
+                        message.includes("This write will fail"),
                 ),
             ).toBe(true);
         });

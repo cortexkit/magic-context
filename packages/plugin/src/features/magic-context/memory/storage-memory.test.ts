@@ -1,7 +1,8 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
+import { Database } from "../../../shared/sqlite";
+import { closeQuietly } from "../../../shared/sqlite-helpers";
 import {
     archiveMemory,
     clearEmbeddingsForProject,
@@ -29,8 +30,8 @@ import { computeNormalizedHash } from "./normalize-hash";
 let db: Database;
 
 function makeMemoryDatabase(): Database {
-    const database = Database.open(":memory:");
-    database.run(`
+    const database = new Database(":memory:");
+    database.exec(`
     CREATE TABLE IF NOT EXISTS memories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       project_path TEXT NOT NULL,
@@ -89,7 +90,7 @@ function makeMemoryDatabase(): Database {
 afterEach(() => {
     resetEmbeddingCacheForTests();
     if (db) {
-        db.close(false);
+        closeQuietly(db);
     }
 });
 

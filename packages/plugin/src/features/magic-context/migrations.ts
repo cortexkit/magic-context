@@ -1,5 +1,5 @@
-import type { Database } from "bun:sqlite";
 import { log } from "../../shared/logger";
+import type { Database } from "../../shared/sqlite";
 import { healAllNullColumns } from "./storage-db";
 
 /**

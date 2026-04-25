@@ -1,5 +1,5 @@
-import type { Database } from "bun:sqlite";
 import { HARNESS } from "../../shared/harness";
+import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { getMaxTagNumberBySession, getTagNumberByMessageId, insertTag } from "./storage-tags";
 import type { TagEntry } from "./types";
 export interface Tagger {
@@ -56,8 +56,6 @@ const UPSERT_COUNTER_SQL = `
   VALUES (?, ?, ?)
   ON CONFLICT(session_id) DO UPDATE SET counter = MAX(session_meta.counter, excluded.counter)
 `;
-
-type PreparedStatement = ReturnType<Database["prepare"]>;
 
 const upsertCounterStatements = new WeakMap<Database, PreparedStatement>();
 

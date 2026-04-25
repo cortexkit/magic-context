@@ -1,4 +1,3 @@
-import { Database } from "bun:sqlite";
 import { copyFileSync, cpSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -7,6 +6,8 @@ import {
 } from "../../shared/data-path";
 import { getErrorMessage } from "../../shared/error-message";
 import { log } from "../../shared/logger";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import { runMigrations } from "./migrations";
 
 const databases = new Map<string, Database>();
@@ -74,10 +75,10 @@ function migrateLegacyStorageIfNeeded(targetDbPath: string, targetDbDir: string)
 }
 
 export function initializeDatabase(db: Database): void {
-    db.run("PRAGMA journal_mode=WAL");
-    db.run("PRAGMA busy_timeout=5000");
-    db.run("PRAGMA foreign_keys=ON");
-    db.run(`
+    db.exec("PRAGMA journal_mode=WAL");
+    db.exec("PRAGMA busy_timeout=5000");
+    db.exec("PRAGMA foreign_keys=ON");
+    db.exec(`
     CREATE TABLE IF NOT EXISTS tags (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT,
@@ -557,7 +558,7 @@ function ensureColumn(db: Database, table: string, column: string, definition: s
     if (rows.some((row) => row.name === column)) {
         return;
     }
-    db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
 function createFallbackDatabase(): Database {
@@ -625,7 +626,7 @@ export function getDatabasePersistenceError(db: Database): string | null {
 export function closeDatabase(): void {
     for (const [key, db] of databases) {
         try {
-            db.close(false);
+            closeQuietly(db);
         } catch (error) {
             log("[magic-context] storage error:", error);
         } finally {

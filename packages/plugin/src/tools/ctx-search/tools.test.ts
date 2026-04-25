@@ -1,6 +1,7 @@
-import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createCtxSearchTools } from "./tools";
 
 const toolContext = (sessionID = "ses-search") => ({ sessionID }) as never;
@@ -19,7 +20,7 @@ describe("createCtxSearchTools", () => {
     });
 
     afterEach(() => {
-        db.close(false);
+        closeQuietly(db);
     });
 
     it("validates required query", async () => {

@@ -13,11 +13,9 @@
  * cleans all three tables.
  */
 
-import type { Database } from "bun:sqlite";
 import { log } from "../../../shared/logger";
+import type { Database, Statement as PreparedStatement } from "../../../shared/sqlite";
 import type { GitCommit } from "./git-log-reader";
-
-type PreparedStatement = ReturnType<Database["prepare"]>;
 
 export interface StoredGitCommit extends GitCommit {
     projectPath: string;

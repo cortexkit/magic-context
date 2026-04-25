@@ -1,6 +1,4 @@
-import type { Database } from "bun:sqlite";
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
-
 import {
     addNote,
     dismissNote,
@@ -11,6 +9,7 @@ import {
     setNoteLastReadAt,
     updateNote,
 } from "../../features/magic-context/storage";
+import type { Database } from "../../shared/sqlite";
 import { CTX_NOTE_DESCRIPTION } from "./constants";
 import type { CtxNoteArgs, CtxNoteReadFilter } from "./types";
 

@@ -1,4 +1,3 @@
-import type { Database } from "bun:sqlite";
 import {
     cleanUserText,
     extractTexts,
@@ -6,10 +5,9 @@ import {
 } from "../../hooks/magic-context/read-session-chunk";
 import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
 import { HARNESS } from "../../shared/harness";
+import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { removeSystemReminders } from "../../shared/system-directive";
 import { clearCompressionDepth } from "./compression-depth-storage";
-
-type PreparedStatement = ReturnType<Database["prepare"]>;
 
 interface MessageHistoryIndexRow {
     last_indexed_ordinal?: number;

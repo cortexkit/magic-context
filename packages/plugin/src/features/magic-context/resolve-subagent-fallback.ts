@@ -22,9 +22,9 @@
  *   directly from its SQLite DB when we first create a session_meta row.
  */
 
-import type { Database } from "bun:sqlite";
 import { withReadOnlySessionDb } from "../../hooks/magic-context/read-session-db";
 import { log } from "../../shared/logger";
+import type { Database } from "../../shared/sqlite";
 
 interface SessionParentRow {
     parent_id: string | null;

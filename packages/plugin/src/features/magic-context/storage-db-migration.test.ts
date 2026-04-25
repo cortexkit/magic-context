@@ -1,9 +1,10 @@
-import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 // readFileSync and writeFileSync are used by the model-cache and (partially) the WAL test.
 import * as os from "node:os";
 import { join } from "node:path";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import { closeDatabase, openDatabase } from "./storage-db";
 
 /**
@@ -53,7 +54,7 @@ describe("storage-db legacy migration", () => {
 
         // Schema must be initialized
         const tables = db
-            .query("SELECT name FROM sqlite_master WHERE type='table'")
+            .prepare("SELECT name FROM sqlite_master WHERE type='table'")
             .all() as Array<{
             name: string;
         }>;
@@ -71,7 +72,7 @@ describe("storage-db legacy migration", () => {
         const seed = new Database(legacyDbPath);
         seed.run("CREATE TABLE migration_canary (id INTEGER PRIMARY KEY, payload TEXT)");
         seed.run("INSERT INTO migration_canary (payload) VALUES ('legacy-data')");
-        seed.close(false);
+        closeQuietly(seed);
 
         const sharedDbPath = join(tmpRoot, "cortexkit", "magic-context", "context.db");
         expect(existsSync(sharedDbPath)).toBe(false); // pre-condition
@@ -81,7 +82,7 @@ describe("storage-db legacy migration", () => {
         expect(existsSync(sharedDbPath)).toBe(true);
 
         // The canary row must have survived migration
-        const rows = db.query("SELECT payload FROM migration_canary").all() as Array<{
+        const rows = db.prepare("SELECT payload FROM migration_canary").all() as Array<{
             payload: string;
         }>;
         expect(rows).toHaveLength(1);
@@ -99,7 +100,7 @@ describe("storage-db legacy migration", () => {
         const sharedSeed = new Database(sharedDbPath);
         sharedSeed.run("CREATE TABLE source_marker (which TEXT)");
         sharedSeed.run("INSERT INTO source_marker VALUES ('shared')");
-        sharedSeed.close(false);
+        closeQuietly(sharedSeed);
 
         const legacyDir = join(tmpRoot, "opencode", "storage", "plugin", "magic-context");
         mkdirSync(legacyDir, { recursive: true });
@@ -107,10 +108,10 @@ describe("storage-db legacy migration", () => {
         const legacySeed = new Database(legacyDbPath);
         legacySeed.run("CREATE TABLE source_marker (which TEXT)");
         legacySeed.run("INSERT INTO source_marker VALUES ('legacy')");
-        legacySeed.close(false);
+        closeQuietly(legacySeed);
 
         const db = openDatabase();
-        const rows = db.query("SELECT which FROM source_marker").all() as Array<{
+        const rows = db.prepare("SELECT which FROM source_marker").all() as Array<{
             which: string;
         }>;
         expect(rows).toHaveLength(1);
@@ -165,7 +166,7 @@ describe("storage-db legacy migration", () => {
         const legacyDbPath = join(legacyDir, "context.db");
         const seed = new Database(legacyDbPath);
         seed.run("CREATE TABLE x (id INTEGER)");
-        seed.close(false);
+        closeQuietly(seed);
         writeFileSync(join(legacyModelsDir, "model-1.onnx"), "fake-onnx-bytes");
         mkdirSync(join(legacyModelsDir, "vocab"), { recursive: true });
         writeFileSync(join(legacyModelsDir, "vocab", "tokens.txt"), "vocab-data");
@@ -185,11 +186,11 @@ describe("storage-db legacy migration", () => {
         const seed = new Database(legacyDbPath);
         seed.run("CREATE TABLE marker (n INTEGER)");
         seed.run("INSERT INTO marker VALUES (1)");
-        seed.close(false);
+        closeQuietly(seed);
 
         // First open: migration happens.
         const db1 = openDatabase();
-        const beforeWrite = db1.query("SELECT n FROM marker").get() as { n: number };
+        const beforeWrite = db1.prepare("SELECT n FROM marker").get() as { n: number };
         expect(beforeWrite.n).toBe(1);
 
         // Add a row via the live DB to prove subsequent opens don't re-migrate
@@ -199,7 +200,7 @@ describe("storage-db legacy migration", () => {
 
         // Second open: must reuse the migrated DB, NOT re-copy from legacy.
         const db2 = openDatabase();
-        const rows = db2.query("SELECT n FROM marker ORDER BY n").all() as Array<{ n: number }>;
+        const rows = db2.prepare("SELECT n FROM marker ORDER BY n").all() as Array<{ n: number }>;
         expect(rows).toHaveLength(2);
         expect(rows[0].n).toBe(1);
         expect(rows[1].n).toBe(2);

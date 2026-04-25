@@ -23,7 +23,7 @@
  * Output: local-ignore/embedding-baseline/<safeModelId>-<iso>.json
  */
 
-import { Database } from "bun:sqlite";
+import { Database } from "../src/shared/sqlite";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";

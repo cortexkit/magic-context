@@ -1,8 +1,8 @@
-import type { Database } from "bun:sqlite";
 import { getLastCompartmentEndMessage } from "../../features/magic-context/compartment-storage";
 import { getPendingOps, getTagsBySession } from "../../features/magic-context/storage";
 import type { ContextUsage, SessionMeta } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared/logger";
+import type { Database } from "../../shared/sqlite";
 import {
     getProtectedTailStartOrdinal,
     getRawSessionMessageCount,

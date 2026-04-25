@@ -1,8 +1,9 @@
-import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import { runMigrations } from "./migrations";
 import {
     addNote,
@@ -123,7 +124,7 @@ describe("magic-context storage", () => {
         expect(top[0]?.tagNumber).toBe(tagB);
         expect(pending.map((op) => op.operation)).toEqual(["drop", "drop"]);
         expect(getPendingOps(db, sessionId)).toEqual([]);
-        db.close(false);
+        closeQuietly(db);
     });
 
     it("updates session meta and clears session-scoped state", () => {
@@ -152,7 +153,7 @@ describe("magic-context storage", () => {
         clearSession(db, sessionId);
         expect(getTagsBySession(db, sessionId)).toEqual([]);
         expect(getSessionNotes(db, sessionId)).toEqual([]);
-        db.close(false);
+        closeQuietly(db);
     });
 
     it("stores and replaces session notes by session", () => {
@@ -186,7 +187,7 @@ describe("magic-context storage", () => {
 
         //#then
         expect(getSessionNotes(db, sessionId)).toEqual([]);
-        db.close(false);
+        closeQuietly(db);
     });
 
     it("stores smart notes in the unified notes table and filters by status", () => {
@@ -222,7 +223,7 @@ describe("magic-context storage", () => {
 
         //#then
         expect(getSmartNotes(db, "git:test-project")).toEqual([]);
-        db.close(false);
+        closeQuietly(db);
     });
 
     it("persists and clears nudge anchors by session", () => {
@@ -244,7 +245,7 @@ describe("magic-context storage", () => {
 
         //#then
         expect(getPersistedNudgePlacement(db, sessionId)).toBeNull();
-        db.close(false);
+        closeQuietly(db);
     });
 
     it("persists and clears sticky turn reminders by session", () => {
@@ -275,7 +276,7 @@ describe("magic-context storage", () => {
 
         //#then
         expect(getPersistedStickyTurnReminder(db, sessionId)).toBeNull();
-        db.close(false);
+        closeQuietly(db);
     });
 
     it("escapes XML-sensitive compartment body content", () => {
@@ -360,7 +361,7 @@ describe("magic-context storage", () => {
         //#then
         expect(ops).toHaveLength(1);
         expect(ops[0].operation).toBe("drop");
-        db.close(false);
+        closeQuietly(db);
     });
 
     it("filters out malformed rows from getTagsBySession and getTopNBySize", () => {
@@ -377,7 +378,7 @@ describe("magic-context storage", () => {
         expect(tags).toHaveLength(1);
         expect(tags[0].messageId).toBe("m-1");
         expect(top).toHaveLength(1);
-        db.close(false);
+        closeQuietly(db);
     });
 
     it("returns defaults for malformed session meta row", () => {
@@ -392,7 +393,7 @@ describe("magic-context storage", () => {
         expect(meta.sessionId).toBe("ses-bad");
         expect(meta.counter).toBe(0);
         expect(meta.cacheTtl).toBe("5m");
-        db.close(false);
+        closeQuietly(db);
     });
 
     it("preserves numeric columns when text columns are NULL (regression: cache bust cascade)", () => {
@@ -435,7 +436,7 @@ describe("magic-context storage", () => {
         expect(meta.lastContextPercentage).toBe(25.5);
         expect(meta.lastInputTokens).toBe(250000);
         expect(meta.lastTransformError).toBeNull();
-        db.close(false);
+        closeQuietly(db);
     });
 
     it("getTopNBySize only returns tags with active status", () => {
@@ -450,6 +451,6 @@ describe("magic-context storage", () => {
         expect(top).toHaveLength(1);
         expect(top[0].tagNumber).toBe(activeTag);
         expect(top[0].status).toBe("active");
-        db.close(false);
+        closeQuietly(db);
     });
 });

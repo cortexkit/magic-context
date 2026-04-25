@@ -1,6 +1,4 @@
-import type { Database } from "bun:sqlite";
-
-type PreparedStatement = ReturnType<Database["prepare"]>;
+import type { Database, Statement as PreparedStatement } from "../../../shared/sqlite";
 
 const getDreamStateStatements = new WeakMap<Database, PreparedStatement>();
 const setDreamStateStatements = new WeakMap<Database, PreparedStatement>();

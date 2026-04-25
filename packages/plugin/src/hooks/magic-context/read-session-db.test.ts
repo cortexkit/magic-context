@@ -1,10 +1,11 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import { closeReadOnlySessionDb, findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 
 const tempDirs: string[] = [];
@@ -41,7 +42,7 @@ function createOpenCodeDb(rows: MessageRow[]): void {
     mkdirSync(dirname(dbPath), { recursive: true });
     const db = new Database(dbPath);
     try {
-        db.run(`
+        db.exec(`
             CREATE TABLE IF NOT EXISTS message (
                 id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -67,7 +68,7 @@ function createOpenCodeDb(rows: MessageRow[]): void {
             );
         }
     } finally {
-        db.close(false);
+        closeQuietly(db);
     }
 }
 

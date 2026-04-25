@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, it } from "bun:test";
+import { Database } from "../../shared/sqlite";
 import {
     clearEmergencyRecovery,
     getOverflowState,

@@ -1,7 +1,7 @@
-import type { Database } from "bun:sqlite";
 import type { EmbeddingConfig } from "../../../config/schema/magic-context";
 import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "../../../config/schema/magic-context";
 import { log } from "../../../shared/logger";
+import type { Database, Statement as PreparedStatement } from "../../../shared/sqlite";
 import { cosineSimilarity } from "./cosine-similarity";
 import { LocalEmbeddingProvider } from "./embedding-local";
 import { OpenAICompatibleEmbeddingProvider } from "./embedding-openai";
@@ -16,8 +16,6 @@ const DEFAULT_EMBEDDING_CONFIG: EmbeddingConfig = {
 
 let embeddingConfig: EmbeddingConfig = DEFAULT_EMBEDDING_CONFIG;
 let provider: EmbeddingProvider | null = null;
-
-type PreparedStatement = ReturnType<Database["prepare"]>;
 
 interface UnembeddedMemoryRow {
     id: number;

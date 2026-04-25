@@ -1,6 +1,4 @@
-import type { Database } from "bun:sqlite";
-
-type PreparedStatement = ReturnType<Database["prepare"]>;
+import type { Database, Statement as PreparedStatement } from "../../../shared/sqlite";
 
 export interface DreamRunTaskSummary {
     name: string;

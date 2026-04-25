@@ -1,7 +1,6 @@
-import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-
 import * as searchModule from "../../features/magic-context/search";
+import { Database } from "../../shared/sqlite";
 import { _resetAutoSearchCache, runAutoSearchHint } from "./auto-search-runner";
 import type { MessageLike } from "./transform-operations";
 

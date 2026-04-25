@@ -1,5 +1,5 @@
-import type { Database } from "bun:sqlite";
 import { HARNESS } from "../../shared/harness";
+import type { Database } from "../../shared/sqlite";
 import type { SessionMeta } from "./types";
 
 export interface SessionMetaRow {

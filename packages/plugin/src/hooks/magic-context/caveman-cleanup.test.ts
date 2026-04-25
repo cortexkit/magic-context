@@ -8,7 +8,7 @@
  *  - Repeated tier shifts compress from ORIGINAL, never from cavemaned text
  *  - tags.caveman_depth is persisted so later passes can skip already-done tags
  */
-import { Database } from "bun:sqlite";
+
 import { describe, expect, test } from "bun:test";
 import {
     getTagsBySession,
@@ -16,6 +16,7 @@ import {
     saveSourceContent,
 } from "../../features/magic-context/storage";
 import { initializeDatabase, type openDatabase } from "../../features/magic-context/storage-db";
+import { Database } from "../../shared/sqlite";
 import { cavemanCompress } from "./caveman";
 import {
     applyCavemanCleanup,

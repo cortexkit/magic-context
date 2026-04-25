@@ -1,6 +1,5 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -30,6 +29,8 @@ import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import type { PluginContext } from "../../plugin/types";
 import { clearModelsDevCache } from "../../shared/models-dev-cache";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createNudgePlacementStore, createTransform } from "./transform";
 
 type TextPart = { type: "text"; text: string };
@@ -1724,7 +1725,7 @@ function createOpenCodeDbForTransform(
     mkdirSync(dirname(dbPath), { recursive: true });
     const db = new Database(dbPath);
     try {
-        db.run(`
+        db.exec(`
       CREATE TABLE IF NOT EXISTS message (
         id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,
@@ -1765,7 +1766,7 @@ function createOpenCodeDbForTransform(
             );
         });
     } finally {
-        db.close(false);
+        closeQuietly(db);
     }
 }
 

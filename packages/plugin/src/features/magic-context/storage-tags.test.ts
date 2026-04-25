@@ -1,7 +1,8 @@
 /// <reference types="bun-types" />
 
-import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     getTagById,
     getTagsBySession,
@@ -15,7 +16,7 @@ let db: Database;
 
 function makeMemoryDatabase(): Database {
     const d = new Database(":memory:");
-    d.run(`
+    d.exec(`
     CREATE TABLE IF NOT EXISTS tags (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT,
@@ -68,7 +69,7 @@ function makeMemoryDatabase(): Database {
 }
 
 afterEach(() => {
-    if (db) db.close(false);
+    if (db) closeQuietly(db);
 });
 
 describe("storage-tags", () => {

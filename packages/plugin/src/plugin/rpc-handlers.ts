@@ -2,10 +2,9 @@
  * Server-side RPC handlers. Queries the server's own SQLite DB
  * and returns typed responses for TUI consumption.
  */
-import type { Database } from "bun:sqlite";
 import type { MagicContextConfig } from "../config/schema/magic-context";
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
-import { openDatabase } from "../features/magic-context/storage";
+import { type ContextDatabase as Database, openDatabase } from "../features/magic-context/storage";
 import { getMeasuredToolDefinitionTokens } from "../features/magic-context/tool-definition-tokens";
 import { resolveExecuteThresholdDetail } from "../hooks/magic-context/event-resolvers";
 import { getLiveNotificationParams } from "../hooks/magic-context/hook-handlers";
@@ -102,7 +101,7 @@ function buildSidebarSnapshot(
         const projectIdentity = resolveProjectIdentity(directory);
 
         const meta = db
-            .query<Record<string, unknown>, [string]>(
+            .prepare<[string], Record<string, unknown>>(
                 "SELECT * FROM session_meta WHERE session_id = ?",
             )
             .get(sessionId);
@@ -125,14 +124,14 @@ function buildSidebarSnapshot(
         const memoryBlockCount = meta ? Number(meta.memory_block_count ?? 0) : 0;
 
         const compartmentRow = db
-            .query<{ count: number }, [string]>(
+            .prepare<[string], { count: number }>(
                 "SELECT COUNT(*) as count FROM compartments WHERE session_id = ?",
             )
             .get(sessionId);
         const compartmentCount = compartmentRow?.count ?? 0;
 
         const factRow = db
-            .query<{ count: number }, [string]>(
+            .prepare<[string], { count: number }>(
                 "SELECT COUNT(*) as count FROM session_facts WHERE session_id = ?",
             )
             .get(sessionId);
@@ -141,7 +140,7 @@ function buildSidebarSnapshot(
         let memoryCount = 0;
         if (projectIdentity) {
             const memRow = db
-                .query<{ count: number }, [string]>(
+                .prepare<[string], { count: number }>(
                     "SELECT COUNT(*) as count FROM memories WHERE project_path = ? AND status = 'active'",
                 )
                 .get(projectIdentity);
@@ -151,7 +150,7 @@ function buildSidebarSnapshot(
         let pendingOpsCount = 0;
         try {
             const pendingRow = db
-                .query<{ count: number }, [string]>(
+                .prepare<[string], { count: number }>(
                     "SELECT COUNT(*) as count FROM pending_ops WHERE session_id = ?",
                 )
                 .get(sessionId);
@@ -163,7 +162,7 @@ function buildSidebarSnapshot(
         let sessionNoteCount = 0;
         try {
             const noteRow = db
-                .query<{ count: number }, [string]>(
+                .prepare<[string], { count: number }>(
                     "SELECT COUNT(*) as count FROM notes WHERE session_id = ? AND type = 'session' AND status = 'active'",
                 )
                 .get(sessionId);
@@ -176,7 +175,7 @@ function buildSidebarSnapshot(
         if (projectIdentity) {
             try {
                 const smartRow = db
-                    .query<{ count: number }, [string]>(
+                    .prepare<[string], { count: number }>(
                         "SELECT COUNT(*) as count FROM notes WHERE project_path = ? AND type = 'smart' AND status = 'ready'",
                     )
                     .get(projectIdentity);
@@ -192,9 +191,9 @@ function buildSidebarSnapshot(
         let memoryTokens = 0;
         try {
             const compRows = db
-                .query<
-                    { content: string; title: string; start_message: number; end_message: number },
-                    [string]
+                .prepare<
+                    [string],
+                    { content: string; title: string; start_message: number; end_message: number }
                 >(
                     "SELECT content, title, start_message, end_message FROM compartments WHERE session_id = ?",
                 )
@@ -209,7 +208,7 @@ function buildSidebarSnapshot(
         }
         try {
             const factRows = db
-                .query<{ content: string }, [string]>(
+                .prepare<[string], { content: string }>(
                     "SELECT content FROM session_facts WHERE session_id = ?",
                 )
                 .all(sessionId);
@@ -230,7 +229,7 @@ function buildSidebarSnapshot(
         if (projectIdentity) {
             try {
                 const dreamRow = db
-                    .query<{ value: string }, [string]>(
+                    .prepare<[string], { value: string }>(
                         "SELECT value FROM dream_state WHERE key = ?",
                     )
                     .get(`last_dream_at:${projectIdentity}`);
@@ -367,7 +366,7 @@ function buildStatusDetail(
 
     try {
         const meta = db
-            .query<Record<string, unknown>, [string]>(
+            .prepare<[string], Record<string, unknown>>(
                 "SELECT * FROM session_meta WHERE session_id = ?",
             )
             .get(sessionId);
@@ -385,14 +384,14 @@ function buildStatusDetail(
         // Tags
         try {
             const activeRow = db
-                .query<{ count: number; bytes: number }, [string]>(
+                .prepare<[string], { count: number; bytes: number }>(
                     "SELECT COUNT(*) as count, COALESCE(SUM(byte_size), 0) as bytes FROM tags WHERE session_id = ? AND status = 'active'",
                 )
                 .get(sessionId);
             detail.activeTags = activeRow?.count ?? 0;
             detail.activeBytes = activeRow?.bytes ?? 0;
             const droppedRow = db
-                .query<{ count: number }, [string]>(
+                .prepare<[string], { count: number }>(
                     "SELECT COUNT(*) as count FROM tags WHERE session_id = ? AND status = 'dropped'",
                 )
                 .get(sessionId);
@@ -405,7 +404,7 @@ function buildStatusDetail(
         // Pending ops
         try {
             const ops = db
-                .query<{ tag_id: number; operation: string }, [string]>(
+                .prepare<[string], { tag_id: number; operation: string }>(
                     "SELECT tag_id, operation FROM pending_ops WHERE session_id = ?",
                 )
                 .all(sessionId);
@@ -472,15 +471,15 @@ function buildStatusDetail(
         // History compression
         try {
             const compartments = db
-                .query<
-                    { content: string; title: string; start_message: number; end_message: number },
-                    [string]
+                .prepare<
+                    [string],
+                    { content: string; title: string; start_message: number; end_message: number }
                 >(
                     "SELECT content, title, start_message, end_message FROM compartments WHERE session_id = ?",
                 )
                 .all(sessionId);
             const facts = db
-                .query<{ content: string }, [string]>(
+                .prepare<[string], { content: string }>(
                     "SELECT content FROM session_facts WHERE session_id = ?",
                 )
                 .all(sessionId);
@@ -572,7 +571,7 @@ export function registerRpcHandlers(
         if (!db || !sessionId) return { count: 0 };
         try {
             const row = db
-                .query<{ count: number }, [string]>(
+                .prepare<[string], { count: number }>(
                     "SELECT COUNT(*) as count FROM compartments WHERE session_id = ?",
                 )
                 .get(sessionId);

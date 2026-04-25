@@ -1,8 +1,6 @@
-import type { Database } from "bun:sqlite";
+import type { Database, Statement as PreparedStatement } from "../../../shared/sqlite";
 import { COLUMN_MAP, isMemoryRow, toMemory } from "./storage-memory";
 import type { Memory } from "./types";
-
-type PreparedStatement = ReturnType<Database["prepare"]>;
 
 const DEFAULT_SEARCH_LIMIT = 10;
 const searchStatements = new WeakMap<Database, PreparedStatement>();

@@ -3,7 +3,7 @@
  * Test semantic search against the memory DB.
  * Run: bun scripts/test-semantic-search.ts "your query"
  */
-import { Database } from "bun:sqlite";
+import { Database } from "../src/shared/sqlite";
 import { ensureEmbeddingModel, embedText } from "../src/features/magic-context/memory/embedding";
 import { loadAllEmbeddings } from "../src/features/magic-context/memory/storage-memory-embeddings";
 import { cosineSimilarity } from "../src/features/magic-context/memory/embedding";

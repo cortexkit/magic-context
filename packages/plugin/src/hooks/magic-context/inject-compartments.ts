@@ -1,4 +1,3 @@
-import type { Database } from "bun:sqlite";
 import {
     buildCompartmentBlock,
     type CompartmentDateRanges,
@@ -11,6 +10,7 @@ import { getMemoriesByProject } from "../../features/magic-context/memory/storag
 import type { Memory, MemoryCategory } from "../../features/magic-context/memory/types";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { sessionLog } from "../../shared/logger";
+import type { Database } from "../../shared/sqlite";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";

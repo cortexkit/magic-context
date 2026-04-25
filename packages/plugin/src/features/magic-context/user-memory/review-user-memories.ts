@@ -1,10 +1,10 @@
-import type { Database } from "bun:sqlite";
 import { DREAMER_AGENT } from "../../../agents/dreamer";
 import type { PluginContext } from "../../../plugin/types";
 import * as shared from "../../../shared";
 import { extractLatestAssistantText } from "../../../shared/assistant-message-extractor";
 import { getErrorMessage } from "../../../shared/error-message";
 import { log } from "../../../shared/logger";
+import type { Database } from "../../../shared/sqlite";
 import { renewLease } from "../dreamer/lease";
 import { DREAMER_SYSTEM_PROMPT } from "../dreamer/task-prompts";
 import {

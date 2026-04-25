@@ -1,8 +1,6 @@
-import type { Database } from "bun:sqlite";
 import { HARNESS } from "../../shared/harness";
+import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import type { TagEntry } from "./types";
-
-type PreparedStatement = ReturnType<Database["prepare"]>;
 
 const insertTagStatements = new WeakMap<Database, PreparedStatement>();
 const updateTagStatusStatements = new WeakMap<Database, PreparedStatement>();
