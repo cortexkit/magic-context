@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { HARNESS } from "../../shared/harness";
 
 type PreparedStatement = ReturnType<Database["prepare"]>;
 
@@ -19,7 +20,7 @@ function getIncrementDepthStatement(db: Database): PreparedStatement {
     let stmt = incrementDepthStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "INSERT INTO compression_depth (session_id, message_ordinal, depth) VALUES (?, ?, 1) ON CONFLICT(session_id, message_ordinal) DO UPDATE SET depth = depth + 1",
+            "INSERT INTO compression_depth (session_id, message_ordinal, depth, harness) VALUES (?, ?, 1, ?) ON CONFLICT(session_id, message_ordinal) DO UPDATE SET depth = depth + 1",
         );
         incrementDepthStatements.set(db, stmt);
     }
@@ -70,7 +71,7 @@ export function incrementCompressionDepth(
     db.transaction(() => {
         const stmt = getIncrementDepthStatement(db);
         for (let ordinal = startOrdinal; ordinal <= endOrdinal; ordinal += 1) {
-            stmt.run(sessionId, ordinal);
+            stmt.run(sessionId, ordinal, HARNESS);
         }
     })();
 }

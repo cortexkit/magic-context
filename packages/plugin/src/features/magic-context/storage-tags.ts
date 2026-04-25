@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { HARNESS } from "../../shared/harness";
 import type { TagEntry } from "./types";
 
 type PreparedStatement = ReturnType<Database["prepare"]>;
@@ -16,7 +17,7 @@ function getInsertTagStatement(db: Database): PreparedStatement {
     let stmt = insertTagStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "INSERT INTO tags (session_id, message_id, type, byte_size, reasoning_byte_size, tag_number, tool_name, input_byte_size) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO tags (session_id, message_id, type, byte_size, reasoning_byte_size, tag_number, tool_name, input_byte_size, harness) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         insertTagStatements.set(db, stmt);
     }
@@ -192,6 +193,7 @@ export function insertTag(
         tagNumber,
         toolName,
         inputByteSize,
+        HARNESS,
     );
 
     return tagNumber;

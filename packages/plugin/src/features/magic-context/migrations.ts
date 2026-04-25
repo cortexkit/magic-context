@@ -285,6 +285,27 @@ const MIGRATIONS: Migration[] = [
             ).run();
         },
     },
+    {
+        version: 7,
+        description: "Add harness column to notes table for cross-harness sharing",
+        // The unified `notes` table was created by migration v1. As of
+        // plugin v0.16+ we share `~/.local/share/cortexkit/magic-context/`
+        // between OpenCode and Pi, so every session-scoped table needs to
+        // record which harness wrote each row. All other session-scoped
+        // tables get the column via ensureColumn() in initializeDatabase()
+        // (which runs before this migration). `notes` is the only table
+        // initializeDatabase() can't touch — it doesn't exist yet at that
+        // point because v1 creates it. So we ALTER TABLE here.
+        //
+        // SQLite physically backfills NOT NULL DEFAULT on existing rows,
+        // so all pre-v0.16 notes transparently become harness='opencode'.
+        up: (db: Database) => {
+            const cols = db.prepare("PRAGMA table_info(notes)").all() as Array<{ name?: string }>;
+            if (!cols.some((c) => c.name === "harness")) {
+                db.exec("ALTER TABLE notes ADD COLUMN harness TEXT NOT NULL DEFAULT 'opencode'");
+            }
+        },
+    },
 ];
 
 function ensureMigrationsTable(db: Database): void {

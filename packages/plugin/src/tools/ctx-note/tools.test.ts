@@ -17,7 +17,8 @@ function createTestDb(): Database {
       updated_at INTEGER NOT NULL,
       last_checked_at INTEGER,
       ready_at INTEGER,
-      ready_reason TEXT
+      ready_reason TEXT,
+      harness TEXT NOT NULL DEFAULT 'opencode'
     );
   `);
     return db;

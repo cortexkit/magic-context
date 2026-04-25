@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { HARNESS } from "../../shared/harness";
 
 interface SourceContentRow {
     tag_id: number;
@@ -18,8 +19,8 @@ export function saveSourceContent(
     content: string,
 ): void {
     db.prepare(
-        "INSERT OR IGNORE INTO source_contents (tag_id, session_id, content, created_at) VALUES (?, ?, ?, ?)",
-    ).run(tagId, sessionId, content, Date.now());
+        "INSERT OR IGNORE INTO source_contents (tag_id, session_id, content, created_at, harness) VALUES (?, ?, ?, ?, ?)",
+    ).run(tagId, sessionId, content, Date.now(), HARNESS);
 }
 
 export function replaceSourceContent(
@@ -29,11 +30,11 @@ export function replaceSourceContent(
     content: string,
 ): void {
     db.prepare(
-        `INSERT INTO source_contents (tag_id, session_id, content, created_at)
-     VALUES (?, ?, ?, ?)
+        `INSERT INTO source_contents (tag_id, session_id, content, created_at, harness)
+     VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(session_id, tag_id)
      DO UPDATE SET content = excluded.content, created_at = excluded.created_at`,
-    ).run(tagId, sessionId, content, Date.now());
+    ).run(tagId, sessionId, content, Date.now(), HARNESS);
 }
 
 export function getSourceContents(

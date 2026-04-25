@@ -14,7 +14,8 @@ function makeMemoryDatabase(): Database {
       session_id TEXT,
       tag_id INTEGER,
       operation TEXT,
-      queued_at INTEGER
+      queued_at INTEGER,
+      harness TEXT NOT NULL DEFAULT 'opencode'
     );
   `);
     return d;

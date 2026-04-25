@@ -14,6 +14,7 @@ function createDb(): Database {
       session_id TEXT NOT NULL,
       content TEXT NOT NULL,
       created_at INTEGER NOT NULL,
+      harness TEXT NOT NULL DEFAULT 'opencode',
       PRIMARY KEY (session_id, tag_id)
     );
   `);

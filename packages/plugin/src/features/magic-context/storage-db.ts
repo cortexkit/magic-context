@@ -86,6 +86,7 @@ export function initializeDatabase(db: Database): void {
       status TEXT DEFAULT 'active',
       byte_size INTEGER,
       tag_number INTEGER,
+      harness TEXT NOT NULL DEFAULT 'opencode',
       UNIQUE(session_id, tag_number)
     );
 
@@ -94,7 +95,8 @@ export function initializeDatabase(db: Database): void {
       session_id TEXT,
       tag_id INTEGER,
       operation TEXT,
-      queued_at INTEGER
+      queued_at INTEGER,
+      harness TEXT NOT NULL DEFAULT 'opencode'
     );
 
     CREATE TABLE IF NOT EXISTS source_contents (
@@ -102,6 +104,7 @@ export function initializeDatabase(db: Database): void {
       session_id TEXT,
       content TEXT,
       created_at INTEGER,
+      harness TEXT NOT NULL DEFAULT 'opencode',
       PRIMARY KEY(session_id, tag_id)
     );
 
@@ -116,6 +119,7 @@ export function initializeDatabase(db: Database): void {
       title TEXT NOT NULL,
       content TEXT NOT NULL,
       created_at INTEGER NOT NULL,
+      harness TEXT NOT NULL DEFAULT 'opencode',
       UNIQUE(session_id, sequence)
     );
     CREATE INDEX IF NOT EXISTS idx_compartments_session ON compartments(session_id);
@@ -124,6 +128,7 @@ export function initializeDatabase(db: Database): void {
       session_id TEXT NOT NULL,
       message_ordinal INTEGER NOT NULL,
       depth INTEGER NOT NULL DEFAULT 0,
+      harness TEXT NOT NULL DEFAULT 'opencode',
       PRIMARY KEY(session_id, message_ordinal)
     );
     CREATE INDEX IF NOT EXISTS idx_compression_depth_session ON compression_depth(session_id);
@@ -134,7 +139,8 @@ export function initializeDatabase(db: Database): void {
       category TEXT NOT NULL,
       content TEXT NOT NULL,
       created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
+      updated_at INTEGER NOT NULL,
+      harness TEXT NOT NULL DEFAULT 'opencode'
     );
 
     -- session_notes and smart_notes were merged into the unified notes table
@@ -226,7 +232,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     CREATE TABLE IF NOT EXISTS message_history_index (
       session_id TEXT PRIMARY KEY,
       last_indexed_ordinal INTEGER NOT NULL DEFAULT 0,
-      updated_at INTEGER NOT NULL
+      updated_at INTEGER NOT NULL,
+      harness TEXT NOT NULL DEFAULT 'opencode'
     );
 
     CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
@@ -244,6 +251,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
 
     CREATE TABLE IF NOT EXISTS session_meta (
       session_id TEXT PRIMARY KEY,
+      harness TEXT NOT NULL DEFAULT 'opencode',
       last_response_time INTEGER,
       cache_ttl TEXT,
       counter INTEGER DEFAULT 0,
@@ -290,6 +298,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       content TEXT NOT NULL,
       pass_number INTEGER NOT NULL,
       created_at INTEGER NOT NULL,
+      harness TEXT NOT NULL DEFAULT 'opencode',
       UNIQUE(session_id, sequence)
     );
 
@@ -299,7 +308,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       category TEXT NOT NULL,
       content TEXT NOT NULL,
       pass_number INTEGER NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      harness TEXT NOT NULL DEFAULT 'opencode'
     );
 
     CREATE INDEX IF NOT EXISTS idx_session_facts_session ON session_facts(session_id);
@@ -392,6 +402,34 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // the heal into the versioned migration system means it runs exactly
     // once on affected DBs (v4 → v5 upgrade) and never again.
     // See features/magic-context/migrations.ts.
+
+    // Plugin v0.16+ — `harness` column on every session-scoped table.
+    // SQLite ALTER TABLE ADD COLUMN ... NOT NULL DEFAULT physically backfills
+    // existing rows with the default, so OpenCode users transparently get
+    // harness='opencode' on all pre-existing data. Pi will be added later
+    // by its own plugin entry, also writing to the same shared DB.
+    //
+    // We don't (yet) include harness in WHERE clauses — OpenCode session IDs
+    // never collide with Pi session IDs in practice (different ID formats).
+    // The column captures origin for the dashboard and unblocks future
+    // cross-harness session migration. Defensive query scoping by harness
+    // ships in a later commit once Pi can write to the same DB concurrently
+    // and we can validate the safety property end-to-end.
+    ensureColumn(db, "tags", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    ensureColumn(db, "pending_ops", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    ensureColumn(db, "source_contents", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    ensureColumn(db, "compartments", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    ensureColumn(db, "compression_depth", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    ensureColumn(db, "session_facts", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    ensureColumn(db, "session_meta", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    ensureColumn(db, "recomp_compartments", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    ensureColumn(db, "recomp_facts", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    ensureColumn(db, "message_history_index", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
+    // notes table is created by migration v1 (not initializeDatabase). It
+    // exists by the time runMigrations() returns, but ensureColumn's PRAGMA
+    // table_info check needs the table to exist. Order: initializeDatabase()
+    // runs before runMigrations(), so notes won't exist yet on a fresh DB
+    // here. Migration v6 handles `notes` separately (see migrations.ts).
 }
 
 /**

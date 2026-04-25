@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { HARNESS } from "../../shared/harness";
 
 export type NoteType = "session" | "smart";
 export type NoteStatus = "active" | "pending" | "ready" | "dismissed";
@@ -181,12 +182,12 @@ export function addNote(
         type === "session"
             ? db
                   .prepare(
-                      "INSERT INTO notes (type, status, content, session_id, created_at, updated_at) VALUES ('session', 'active', ?, ?, ?, ?) RETURNING *",
+                      "INSERT INTO notes (type, status, content, session_id, created_at, updated_at, harness) VALUES ('session', 'active', ?, ?, ?, ?, ?) RETURNING *",
                   )
-                  .get(options.content, (options as SessionNoteInput).sessionId, now, now)
+                  .get(options.content, (options as SessionNoteInput).sessionId, now, now, HARNESS)
             : db
                   .prepare(
-                      "INSERT INTO notes (type, status, content, session_id, project_path, surface_condition, created_at, updated_at) VALUES ('smart', 'pending', ?, ?, ?, ?, ?, ?) RETURNING *",
+                      "INSERT INTO notes (type, status, content, session_id, project_path, surface_condition, created_at, updated_at, harness) VALUES ('smart', 'pending', ?, ?, ?, ?, ?, ?, ?) RETURNING *",
                   )
                   .get(
                       options.content,
@@ -195,6 +196,7 @@ export function addNote(
                       (options as SmartNoteInput).surfaceCondition,
                       now,
                       now,
+                      HARNESS,
                   );
 
     if (!isNoteRow(result)) {
@@ -317,10 +319,10 @@ export function replaceAllSessionNotes(db: Database, sessionId: string, notes: s
     db.transaction(() => {
         db.prepare("DELETE FROM notes WHERE session_id = ? AND type = 'session'").run(sessionId);
         const insert = db.prepare(
-            "INSERT INTO notes (type, status, content, session_id, created_at, updated_at) VALUES ('session', 'active', ?, ?, ?, ?)",
+            "INSERT INTO notes (type, status, content, session_id, created_at, updated_at, harness) VALUES ('session', 'active', ?, ?, ?, ?, ?)",
         );
         for (const note of notes) {
-            insert.run(note, sessionId, now, now);
+            insert.run(note, sessionId, now, now, HARNESS);
         }
     })();
 }

@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { HARNESS } from "../../shared/harness";
 import type { SessionMeta } from "./types";
 
 export interface SessionMetaRow {
@@ -116,9 +117,10 @@ export function ensureSessionMetaRow(db: Database, sessionId: string): void {
     // Note-nudge persistence columns rely on session_meta defaults and are updated
     // through storage-meta-persisted helpers, not SessionMeta writes.
     db.prepare(
-        "INSERT OR IGNORE INTO session_meta (session_id, last_response_time, cache_ttl, counter, last_nudge_tokens, last_nudge_band, last_transform_error, is_subagent, last_context_percentage, last_input_tokens, times_execute_threshold_reached, compartment_in_progress, system_prompt_hash, cleared_reasoning_through_tag) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO session_meta (session_id, harness, last_response_time, cache_ttl, counter, last_nudge_tokens, last_nudge_band, last_transform_error, is_subagent, last_context_percentage, last_input_tokens, times_execute_threshold_reached, compartment_in_progress, system_prompt_hash, cleared_reasoning_through_tag) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ).run(
         sessionId,
+        HARNESS,
         defaults.lastResponseTime,
         defaults.cacheTtl,
         defaults.counter,

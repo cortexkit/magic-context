@@ -150,8 +150,9 @@ describe("storage-db", () => {
           historian_failure_count INTEGER DEFAULT 0,
           historian_last_error TEXT DEFAULT NULL,
           historian_last_failure_at INTEGER DEFAULT NULL,
-          cleared_reasoning_through_tag INTEGER DEFAULT 0
-        );
+          cleared_reasoning_through_tag INTEGER DEFAULT 0,
+      harness TEXT NOT NULL DEFAULT 'opencode'
+    );
       `);
             legacyDb.close(false);
 

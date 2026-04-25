@@ -50,8 +50,9 @@ function makeDb(): Database {
             note_nudge_sticky_text TEXT DEFAULT '',
             note_nudge_sticky_message_id TEXT DEFAULT '',
             note_last_read_at INTEGER DEFAULT 0,
-            cleared_reasoning_through_tag INTEGER DEFAULT 0
-        );
+            cleared_reasoning_through_tag INTEGER DEFAULT 0,
+      harness TEXT NOT NULL DEFAULT 'opencode'
+    );
 
         CREATE TABLE notes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,8 +66,9 @@ function makeDb(): Database {
             updated_at INTEGER NOT NULL,
             last_checked_at INTEGER,
             ready_at INTEGER,
-            ready_reason TEXT
-        );
+            ready_reason TEXT,
+      harness TEXT NOT NULL DEFAULT 'opencode'
+    );
     `);
     dbs.push(db);
     return db;

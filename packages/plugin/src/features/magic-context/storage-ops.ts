@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { HARNESS } from "../../shared/harness";
 import { sessionLog } from "../../shared/logger";
 import type { PendingOp } from "./types";
 
@@ -13,7 +14,7 @@ function getQueuePendingOpStatement(db: Database): PreparedStatement {
     let stmt = queuePendingOpStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "INSERT INTO pending_ops (session_id, tag_id, operation, queued_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO pending_ops (session_id, tag_id, operation, queued_at, harness) VALUES (?, ?, ?, ?, ?)",
         );
         queuePendingOpStatements.set(db, stmt);
     }
@@ -91,7 +92,7 @@ export function queuePendingOp(
     operation: PendingOp["operation"],
     queuedAt: number = Date.now(),
 ): void {
-    getQueuePendingOpStatement(db).run(sessionId, tagId, operation, queuedAt);
+    getQueuePendingOpStatement(db).run(sessionId, tagId, operation, queuedAt, HARNESS);
 }
 
 export function getPendingOps(db: Database, sessionId: string): PendingOp[] {
