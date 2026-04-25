@@ -22,7 +22,7 @@ import { createMessagesTransformHandler } from "./plugin/messages-transform";
 import { registerRpcHandlers } from "./plugin/rpc-handlers";
 import { createToolRegistry } from "./plugin/tool-registry";
 import { type ConflictResult, detectConflicts } from "./shared/conflict-detector";
-import { getOpenCodeStorageDir } from "./shared/data-path";
+import { getMagicContextStorageDir } from "./shared/data-path";
 import { log } from "./shared/logger";
 import { getAgentFallbackModels } from "./shared/model-requirements";
 import { refreshModelLimitsFromApi } from "./shared/models-dev-cache";
@@ -141,7 +141,7 @@ const plugin: Plugin = async (ctx) => {
         });
 
         // Start RPC server for TUI↔server communication (replaces SQLite plugin_messages bus)
-        const storageDir = `${getOpenCodeStorageDir()}/plugin/magic-context`;
+        const storageDir = getMagicContextStorageDir();
         const rpcServer = new MagicContextRpcServer(storageDir, ctx.directory);
         registerRpcHandlers(rpcServer, {
             directory: ctx.directory,

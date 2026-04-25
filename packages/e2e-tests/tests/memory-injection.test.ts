@@ -59,14 +59,8 @@ function computeDirIdentity(directory: string): string {
  * from the harness's read-only cached handle.
  */
 function seedMemory(h: TestHarness, projectIdentity: string, content: string): void {
-    const dbPath = join(
-        h.opencode.env.dataDir,
-        "opencode",
-        "storage",
-        "plugin",
-        "magic-context",
-        "context.db",
-    );
+    // Plugin v0.16+ — shared cortexkit/magic-context path.
+    const dbPath = join(h.opencode.env.dataDir, "cortexkit", "magic-context", "context.db");
     const db = new Database(dbPath);
     try {
         const now = Date.now();

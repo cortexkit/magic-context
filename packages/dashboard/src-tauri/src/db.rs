@@ -7,6 +7,12 @@ pub fn resolve_db_path() -> Option<PathBuf> {
     // The magic-context plugin uses XDG_DATA_HOME or ~/.local/share on ALL platforms
     // (see packages/plugin/src/shared/data-path.ts). On Windows this means
     // C:\Users\<user>\.local\share — NOT %APPDATA%.
+    //
+    // Plugin v0.16+ stores data at the shared cortexkit path (cross-harness:
+    // OpenCode + Pi share one DB). Older OpenCode-only installs lived under
+    // opencode/storage/plugin/magic-context. We prefer the new location and
+    // fall back to the legacy path so the dashboard keeps working when the
+    // user hasn't restarted OpenCode since the upgrade.
     let data_dir = std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
@@ -15,14 +21,23 @@ pub fn resolve_db_path() -> Option<PathBuf> {
                 .join(".local")
                 .join("share")
         });
-    let db_path = data_dir
+
+    let shared_path = data_dir
+        .join("cortexkit")
+        .join("magic-context")
+        .join("context.db");
+    if shared_path.exists() {
+        return Some(shared_path);
+    }
+
+    let legacy_path = data_dir
         .join("opencode")
         .join("storage")
         .join("plugin")
         .join("magic-context")
         .join("context.db");
-    if db_path.exists() {
-        Some(db_path)
+    if legacy_path.exists() {
+        Some(legacy_path)
     } else {
         None
     }

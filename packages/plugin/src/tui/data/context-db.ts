@@ -12,8 +12,12 @@ export type { SidebarSnapshot, StatusDetail };
 let rpcClient: MagicContextRpcClient | null = null;
 
 function getStorageDir(): string {
+    // Plugin v0.16+ uses the shared cortexkit/magic-context path so OpenCode
+    // and Pi can share state. The TUI just needs to point its RPC client at
+    // the same storage directory the server plugin uses for the lock-file
+    // discovery convention.
     const dataDir = process.env.XDG_DATA_HOME ?? path.join(os.homedir(), ".local", "share");
-    return path.join(dataDir, "opencode", "storage", "plugin", "magic-context");
+    return path.join(dataDir, "cortexkit", "magic-context");
 }
 
 /** Initialize the RPC client. Call once on TUI startup. */

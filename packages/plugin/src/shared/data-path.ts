@@ -10,6 +10,34 @@ export function getOpenCodeStorageDir(): string {
 }
 
 /**
+ * Resolve the shared magic-context storage directory.
+ *
+ * Magic-context's own data (compartments, facts, memories, embeddings, dream
+ * runs, notes, etc.) lives at this path regardless of which harness loaded the
+ * plugin (OpenCode or Pi). This enables:
+ *   - Shared project memories across harnesses
+ *   - Shared embedding cache
+ *   - Shared Dreamer runs (one per project per machine)
+ *   - Future cross-harness session migration
+ *
+ * Layout: <XDG_DATA_HOME>/cortexkit/magic-context/
+ */
+export function getMagicContextStorageDir(): string {
+    return path.join(getDataDir(), "cortexkit", "magic-context");
+}
+
+/**
+ * Legacy magic-context storage directory used by the OpenCode plugin before the
+ * shared cortexkit path. Used only for one-time migration of existing data into
+ * the new shared location. The legacy directory is left in place after copy so
+ * users can roll back if needed; manual cleanup is safe after one stable
+ * release.
+ */
+export function getLegacyOpenCodeMagicContextStorageDir(): string {
+    return path.join(getOpenCodeStorageDir(), "plugin", "magic-context");
+}
+
+/**
  * Resolve OpenCode's cache base directory.
  *
  * OpenCode uses the `xdg-basedir` package, which — on every platform, including

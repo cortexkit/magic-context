@@ -71,14 +71,8 @@ afterAll(async () => {
  * plugin-level state (pending_ops, nudge anchor, etc.). The shared
  * harness exposes only a read-only handle. */
 function openContextDbWritable(): Database {
-    const dbPath = join(
-        h.opencode.env.dataDir,
-        "opencode",
-        "storage",
-        "plugin",
-        "magic-context",
-        "context.db",
-    );
+    // Plugin v0.16+ — shared cortexkit/magic-context path.
+    const dbPath = join(h.opencode.env.dataDir, "cortexkit", "magic-context", "context.db");
     return new Database(dbPath, { readwrite: true });
 }
 

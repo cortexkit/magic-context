@@ -1,7 +1,10 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { getOpenCodeStorageDir } from "../../shared/data-path";
+import {
+    getLegacyOpenCodeMagicContextStorageDir,
+    getMagicContextStorageDir,
+} from "../../shared/data-path";
 import { getErrorMessage } from "../../shared/error-message";
 import { log } from "../../shared/logger";
 import { runMigrations } from "./migrations";
@@ -12,8 +15,62 @@ const persistenceByDatabase = new WeakMap<Database, boolean>();
 const persistenceErrorByDatabase = new WeakMap<Database, string>();
 
 function resolveDatabasePath(): { dbDir: string; dbPath: string } {
-    const dbDir = join(getOpenCodeStorageDir(), "plugin", "magic-context");
+    const dbDir = getMagicContextStorageDir();
     return { dbDir, dbPath: join(dbDir, "context.db") };
+}
+
+/**
+ * One-time migration of pre-cortexkit OpenCode plugin data into the shared
+ * cortexkit/magic-context location. Runs lazily on first openDatabase() call.
+ *
+ * Safety guarantees:
+ *   - Only runs when target DB does not yet exist (idempotent on subsequent
+ *     boots; never overwrites newer state).
+ *   - Only runs when legacy DB exists (no-op for fresh installs and Pi).
+ *   - Copies WAL/SHM sidecars too — WAL mode means uncheckpointed writes live
+ *     there, so omitting them would lose recent data.
+ *   - Copies the embedding model cache subdirectory if present, avoiding
+ *     re-download on first post-migration boot.
+ *   - Leaves legacy files in place as a manual rollback path. Manual cleanup
+ *     is safe after one stable release.
+ */
+function migrateLegacyStorageIfNeeded(targetDbPath: string, targetDbDir: string): void {
+    if (existsSync(targetDbPath)) return;
+
+    const legacyDir = getLegacyOpenCodeMagicContextStorageDir();
+    const legacyDbPath = join(legacyDir, "context.db");
+    if (!existsSync(legacyDbPath)) return;
+
+    log(
+        `[magic-context] migrating legacy plugin storage: ${legacyDir} -> ${targetDbDir} (legacy left in place as backup)`,
+    );
+    mkdirSync(targetDbDir, { recursive: true });
+
+    // Copy main DB + WAL/SHM sidecars. WAL mode keeps uncheckpointed writes in
+    // -wal; if the OpenCode plugin was running when the user upgraded, real
+    // data could be in -wal only. Same for -shm shared memory metadata.
+    for (const suffix of ["", "-wal", "-shm"]) {
+        const src = `${legacyDbPath}${suffix}`;
+        const dst = join(targetDbDir, `context.db${suffix}`);
+        if (existsSync(src)) {
+            try {
+                copyFileSync(src, dst);
+            } catch (error) {
+                log(`[magic-context] failed to copy ${src}:`, getErrorMessage(error));
+            }
+        }
+    }
+
+    // Copy the embedding model cache subdir to avoid re-downloading on first boot.
+    const legacyModelsDir = join(legacyDir, "models");
+    const targetModelsDir = join(targetDbDir, "models");
+    if (existsSync(legacyModelsDir) && !existsSync(targetModelsDir)) {
+        try {
+            cpSync(legacyModelsDir, targetModelsDir, { recursive: true });
+        } catch (error) {
+            log("[magic-context] failed to copy embedding model cache:", getErrorMessage(error));
+        }
+    }
 }
 
 export function initializeDatabase(db: Database): void {
@@ -489,6 +546,7 @@ export function openDatabase(): Database {
             return existing;
         }
 
+        migrateLegacyStorageIfNeeded(dbPath, dbDir);
         mkdirSync(dbDir, { recursive: true });
 
         const db = new Database(dbPath);

@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { open, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "../../../config/schema/magic-context";
-import { getOpenCodeStorageDir } from "../../../shared/data-path";
+import { getMagicContextStorageDir } from "../../../shared/data-path";
 import { log } from "../../../shared/logger";
 import type { EmbeddingProvider } from "./embedding-provider";
 
@@ -269,12 +269,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
                 // (e.g. ~\.cache\opencode\packages\...\node_modules\@huggingface\transformers\.cache)
                 // can be inaccessible or non-writable, causing "Unable to get model file path
                 // or buffer" failures. Using our own storage dir survives plugin updates too.
-                const modelCacheDir = join(
-                    getOpenCodeStorageDir(),
-                    "plugin",
-                    "magic-context",
-                    "models",
-                );
+                const modelCacheDir = join(getMagicContextStorageDir(), "models");
                 try {
                     mkdirSync(modelCacheDir, { recursive: true });
                     env.cacheDir = modelCacheDir;

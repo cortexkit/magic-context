@@ -146,7 +146,12 @@ function getPluginCacheInfo(): { path: string; cached?: string; latest?: string 
 
 function getStorageDir(): string {
     const dataHome = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
-    return join(dataHome, "opencode", "storage", "plugin", "magic-context");
+    // Plugin v0.16+ uses the shared cortexkit/magic-context path so OpenCode and
+    // Pi can share memory/embedding/dreamer state. doctor --issue diagnostics
+    // should report on the live storage location, not the legacy OpenCode-only
+    // path. (See packages/plugin/src/shared/data-path.ts for the canonical
+    // resolver.)
+    return join(dataHome, "cortexkit", "magic-context");
 }
 
 function fileSize(path: string): number {

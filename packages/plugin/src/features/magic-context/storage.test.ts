@@ -63,7 +63,8 @@ function useTempDataHome(prefix: string): string {
 }
 
 function resolveDbPath(dataHome: string): string {
-    return join(dataHome, "opencode", "storage", "plugin", "magic-context", "context.db");
+    // Plugin v0.16+ — shared cortexkit/magic-context path. See data-path.ts.
+    return join(dataHome, "cortexkit", "magic-context", "context.db");
 }
 
 function makeMemoryDatabase(): Database {
@@ -334,7 +335,11 @@ describe("magic-context storage", () => {
     it("fails open in openDatabase/closeDatabase when file path setup fails", () => {
         //#given
         const dataHome = useTempDataHome("context-storage-fail-open-");
-        writeFileSync(join(dataHome, "opencode"), "not-a-directory", "utf-8");
+        // Force mkdirSync to fail by creating a file at one of the expected
+        // parent directories (cortexkit). The new shared path is
+        // <dataHome>/cortexkit/magic-context/, so blocking the cortexkit
+        // segment forces openDatabase() into its in-memory fallback.
+        writeFileSync(join(dataHome, "cortexkit"), "not-a-directory", "utf-8");
         //#when
         const db = openDatabase();
         //#then

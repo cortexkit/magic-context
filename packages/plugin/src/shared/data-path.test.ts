@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getCacheDir, getDataDir, getOpenCodeCacheDir, getOpenCodeStorageDir } from "./data-path";
+import {
+    getCacheDir,
+    getDataDir,
+    getLegacyOpenCodeMagicContextStorageDir,
+    getMagicContextStorageDir,
+    getOpenCodeCacheDir,
+    getOpenCodeStorageDir,
+} from "./data-path";
 
 const savedEnv = {
     XDG_CACHE_HOME: process.env.XDG_CACHE_HOME,
@@ -65,5 +72,50 @@ describe("data-path", () => {
         expect(getOpenCodeStorageDir()).toBe(
             path.join(os.homedir(), ".local", "share", "opencode", "storage"),
         );
+    });
+
+    test("getMagicContextStorageDir uses cortexkit/magic-context layout", () => {
+        // Cross-harness shared path: both OpenCode and Pi plugins read/write here,
+        // unlike the legacy opencode/storage/plugin/magic-context location which
+        // was OpenCode-specific. See ARCHITECTURE_DECISIONS memory for rationale.
+        expect(getMagicContextStorageDir()).toBe(
+            path.join(os.homedir(), ".local", "share", "cortexkit", "magic-context"),
+        );
+    });
+
+    test("getMagicContextStorageDir honors XDG_DATA_HOME", () => {
+        process.env.XDG_DATA_HOME = "/tmp/custom-data";
+        expect(getMagicContextStorageDir()).toBe(
+            path.join("/tmp/custom-data", "cortexkit", "magic-context"),
+        );
+    });
+
+    test("getLegacyOpenCodeMagicContextStorageDir points at the pre-cortexkit OpenCode path", () => {
+        // Used only for one-time migration of pre-shared-storage data into the new
+        // location. Must remain stable so users with legacy installs can still
+        // have their data migrated forward across multiple plugin upgrades.
+        expect(getLegacyOpenCodeMagicContextStorageDir()).toBe(
+            path.join(
+                os.homedir(),
+                ".local",
+                "share",
+                "opencode",
+                "storage",
+                "plugin",
+                "magic-context",
+            ),
+        );
+    });
+
+    test("legacy storage dir distinct from new shared dir even with same XDG override", () => {
+        // Sanity check: even when XDG_DATA_HOME points the same place, the two
+        // resolvers must return different paths so the migration copy doesn't
+        // self-overwrite.
+        process.env.XDG_DATA_HOME = "/tmp/test-xdg";
+        const legacy = getLegacyOpenCodeMagicContextStorageDir();
+        const shared = getMagicContextStorageDir();
+        expect(legacy).not.toBe(shared);
+        expect(legacy).toContain("opencode");
+        expect(shared).toContain("cortexkit");
     });
 });

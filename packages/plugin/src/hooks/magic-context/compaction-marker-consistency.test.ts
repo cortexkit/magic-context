@@ -17,10 +17,11 @@ function useTempDataHome(prefix: string): string {
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
     // Match the getDataDir() layout the plugin expects. opencode.db lives
-    // alongside the storage/ tree, not inside it.
-    mkdirSync(join(dir, "opencode", "storage", "plugin", "magic-context"), {
-        recursive: true,
-    });
+    // under opencode/, while magic-context's own DB now lives at the shared
+    // cortexkit path. Create both parent directories so the OpenCode-side DB
+    // file write succeeds and openDatabase() finds a clean target.
+    mkdirSync(join(dir, "opencode"), { recursive: true });
+    mkdirSync(join(dir, "cortexkit", "magic-context"), { recursive: true });
     return dir;
 }
 
