@@ -1,4 +1,4 @@
-import { HARNESS } from "../../shared/harness";
+import { getHarness } from "../../shared/harness";
 import type { Database } from "../../shared/sqlite";
 import type { SessionMeta } from "./types";
 
@@ -120,7 +120,7 @@ export function ensureSessionMetaRow(db: Database, sessionId: string): void {
         "INSERT OR IGNORE INTO session_meta (session_id, harness, last_response_time, cache_ttl, counter, last_nudge_tokens, last_nudge_band, last_transform_error, is_subagent, last_context_percentage, last_input_tokens, times_execute_threshold_reached, compartment_in_progress, system_prompt_hash, cleared_reasoning_through_tag) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ).run(
         sessionId,
-        HARNESS,
+        getHarness(),
         defaults.lastResponseTime,
         defaults.cacheTtl,
         defaults.counter,

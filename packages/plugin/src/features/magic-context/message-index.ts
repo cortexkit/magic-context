@@ -4,7 +4,7 @@ import {
     hasMeaningfulUserText,
 } from "../../hooks/magic-context/read-session-chunk";
 import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
-import { HARNESS } from "../../shared/harness";
+import { getHarness } from "../../shared/harness";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { removeSystemReminders } from "../../shared/system-directive";
 import { clearCompressionDepth } from "./compression-depth-storage";
@@ -185,6 +185,6 @@ export function ensureMessagesIndexed(
             );
         }
 
-        getUpsertIndexStatement(db).run(sessionId, messages.length, now, HARNESS);
+        getUpsertIndexStatement(db).run(sessionId, messages.length, now, getHarness());
     })();
 }

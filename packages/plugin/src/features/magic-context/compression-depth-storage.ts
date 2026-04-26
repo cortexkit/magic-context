@@ -1,4 +1,4 @@
-import { HARNESS } from "../../shared/harness";
+import { getHarness } from "../../shared/harness";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 
 const incrementDepthStatements = new WeakMap<Database, PreparedStatement>();
@@ -69,7 +69,7 @@ export function incrementCompressionDepth(
     db.transaction(() => {
         const stmt = getIncrementDepthStatement(db);
         for (let ordinal = startOrdinal; ordinal <= endOrdinal; ordinal += 1) {
-            stmt.run(sessionId, ordinal, HARNESS);
+            stmt.run(sessionId, ordinal, getHarness());
         }
     })();
 }

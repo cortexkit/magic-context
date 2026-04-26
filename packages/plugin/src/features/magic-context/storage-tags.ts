@@ -1,4 +1,4 @@
-import { HARNESS } from "../../shared/harness";
+import { getHarness } from "../../shared/harness";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import type { TagEntry } from "./types";
 
@@ -191,7 +191,7 @@ export function insertTag(
         tagNumber,
         toolName,
         inputByteSize,
-        HARNESS,
+        getHarness(),
     );
 
     return tagNumber;

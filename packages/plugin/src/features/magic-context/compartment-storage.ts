@@ -1,4 +1,4 @@
-import { HARNESS } from "../../shared/harness";
+import { getHarness } from "../../shared/harness";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 
 const insertCompartmentStatements = new WeakMap<Database, PreparedStatement>();
@@ -128,7 +128,7 @@ function insertCompartmentRows(
             compartment.title,
             compartment.content,
             now,
-            HARNESS,
+            getHarness(),
         );
     }
 }
@@ -141,7 +141,7 @@ function insertFactRows(
 ): void {
     const stmt = getInsertFactStatement(db);
     for (const fact of facts) {
-        stmt.run(sessionId, fact.category, fact.content, now, now, HARNESS);
+        stmt.run(sessionId, fact.category, fact.content, now, now, getHarness());
     }
 }
 
@@ -356,7 +356,7 @@ export function saveRecompStagingPass(
                 c.content,
                 passNumber,
                 now,
-                HARNESS,
+                getHarness(),
             );
         }
 
@@ -364,7 +364,7 @@ export function saveRecompStagingPass(
             "INSERT INTO recomp_facts (session_id, category, content, pass_number, created_at, harness) VALUES (?, ?, ?, ?, ?, ?)",
         );
         for (const f of facts) {
-            factStmt.run(sessionId, f.category, f.content, passNumber, now, HARNESS);
+            factStmt.run(sessionId, f.category, f.content, passNumber, now, getHarness());
         }
     })();
 }

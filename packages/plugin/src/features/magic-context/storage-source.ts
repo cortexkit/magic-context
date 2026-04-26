@@ -1,4 +1,4 @@
-import { HARNESS } from "../../shared/harness";
+import { getHarness } from "../../shared/harness";
 import type { Database } from "../../shared/sqlite";
 
 interface SourceContentRow {
@@ -20,7 +20,7 @@ export function saveSourceContent(
 ): void {
     db.prepare(
         "INSERT OR IGNORE INTO source_contents (tag_id, session_id, content, created_at, harness) VALUES (?, ?, ?, ?, ?)",
-    ).run(tagId, sessionId, content, Date.now(), HARNESS);
+    ).run(tagId, sessionId, content, Date.now(), getHarness());
 }
 
 export function replaceSourceContent(
@@ -34,7 +34,7 @@ export function replaceSourceContent(
      VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(session_id, tag_id)
      DO UPDATE SET content = excluded.content, created_at = excluded.created_at`,
-    ).run(tagId, sessionId, content, Date.now(), HARNESS);
+    ).run(tagId, sessionId, content, Date.now(), getHarness());
 }
 
 export function getSourceContents(

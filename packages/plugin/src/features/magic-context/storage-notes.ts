@@ -1,4 +1,4 @@
-import { HARNESS } from "../../shared/harness";
+import { getHarness } from "../../shared/harness";
 import type { Database } from "../../shared/sqlite";
 
 export type NoteType = "session" | "smart";
@@ -184,7 +184,13 @@ export function addNote(
                   .prepare(
                       "INSERT INTO notes (type, status, content, session_id, created_at, updated_at, harness) VALUES ('session', 'active', ?, ?, ?, ?, ?) RETURNING *",
                   )
-                  .get(options.content, (options as SessionNoteInput).sessionId, now, now, HARNESS)
+                  .get(
+                      options.content,
+                      (options as SessionNoteInput).sessionId,
+                      now,
+                      now,
+                      getHarness(),
+                  )
             : db
                   .prepare(
                       "INSERT INTO notes (type, status, content, session_id, project_path, surface_condition, created_at, updated_at, harness) VALUES ('smart', 'pending', ?, ?, ?, ?, ?, ?, ?) RETURNING *",
@@ -196,7 +202,7 @@ export function addNote(
                       (options as SmartNoteInput).surfaceCondition,
                       now,
                       now,
-                      HARNESS,
+                      getHarness(),
                   );
 
     if (!isNoteRow(result)) {
@@ -322,7 +328,7 @@ export function replaceAllSessionNotes(db: Database, sessionId: string, notes: s
             "INSERT INTO notes (type, status, content, session_id, created_at, updated_at, harness) VALUES ('session', 'active', ?, ?, ?, ?, ?)",
         );
         for (const note of notes) {
-            insert.run(note, sessionId, now, now, HARNESS);
+            insert.run(note, sessionId, now, now, getHarness());
         }
     })();
 }

@@ -26,7 +26,7 @@
  * in `./sqlite-helpers.ts`.
  */
 
-const isBun = typeof globalThis.Bun !== "undefined";
+const isBun = typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
 
 // Function() defeats bundler static analysis. Both Bun (1.x) and Node (≥14.8)
 // support top-level await in ESM, which is the build target.

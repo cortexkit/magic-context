@@ -1,4 +1,4 @@
-import { HARNESS } from "../../shared/harness";
+import { getHarness } from "../../shared/harness";
 import { sessionLog } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import type { PendingOp } from "./types";
@@ -90,7 +90,7 @@ export function queuePendingOp(
     operation: PendingOp["operation"],
     queuedAt: number = Date.now(),
 ): void {
-    getQueuePendingOpStatement(db).run(sessionId, tagId, operation, queuedAt, HARNESS);
+    getQueuePendingOpStatement(db).run(sessionId, tagId, operation, queuedAt, getHarness());
 }
 
 export function getPendingOps(db: Database, sessionId: string): PendingOp[] {

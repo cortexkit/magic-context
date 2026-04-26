@@ -1,7 +1,8 @@
-import { HARNESS } from "../../shared/harness";
+import { getHarness } from "../../shared/harness";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { getMaxTagNumberBySession, getTagNumberByMessageId, insertTag } from "./storage-tags";
 import type { TagEntry } from "./types";
+
 export interface Tagger {
     assignTag(
         sessionId: string,
@@ -132,7 +133,7 @@ export function createTagger(): Tagger {
         if (value <= 0) return;
         const next = Math.max(counters.get(sessionId) ?? 0, value);
         counters.set(sessionId, next);
-        getUpsertCounterStatement(db).run(sessionId, next, HARNESS);
+        getUpsertCounterStatement(db).run(sessionId, next, getHarness());
     }
 
     function assignTag(
@@ -193,7 +194,7 @@ export function createTagger(): Tagger {
                         toolName,
                         inputByteSize,
                     );
-                    getUpsertCounterStatement(db).run(sessionId, next, HARNESS);
+                    getUpsertCounterStatement(db).run(sessionId, next, getHarness());
                 })();
             } catch (error: unknown) {
                 if (!isUniqueConstraintError(error)) {
@@ -252,7 +253,7 @@ export function createTagger(): Tagger {
         // monotonic upsert by using a dedicated statement.
         counters.set(sessionId, 0);
         assignments.delete(sessionId);
-        getResetCounterStatement(db).run(sessionId, HARNESS);
+        getResetCounterStatement(db).run(sessionId, getHarness());
     }
 
     function getCounter(sessionId: string): number {
