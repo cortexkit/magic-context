@@ -28,6 +28,8 @@ import { setHarness } from "@magic-context/core/shared/harness";
 import { log } from "@magic-context/core/shared/logger";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { buildMagicContextBlock } from "./system-prompt";
+import { registerMagicContextTools } from "./tools";
 
 const PREFIX = "[magic-context][pi]";
 
@@ -88,6 +90,42 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		`loaded v${PLUGIN_VERSION} | harness=pi | db=${dbPath} | ` +
 			`project=${projectIdentity} | dir=${projectDir}`,
 	);
+
+	// Register the agent-facing tools. Reuses the same business logic
+	// the OpenCode plugin uses (insertMemory, unifiedSearch, addNote, …)
+	// via the shared cortexkit DB. Cross-harness memory sharing is automatic
+	// because both plugins resolve the same project identity for the same
+	// directory.
+	registerMagicContextTools(pi, {
+		db,
+		// TODO(step 4b): wire to a real config loader. For the spike, ship
+		// with the same defaults the OpenCode plugin uses out of the box.
+		memoryEnabled: true,
+		embeddingEnabled: true,
+		gitCommitsEnabled: false,
+	});
+	info("registered tools: ctx_search, ctx_memory, ctx_note");
+
+	// Inject project memories and dreamer-maintained docs into the system
+	// prompt for every agent turn. This is the user-visible "memories show
+	// up" behavior — without it, the tools work but the agent has no
+	// background context until it explicitly calls ctx_search.
+	pi.on("before_agent_start", async (event, ctx) => {
+		try {
+			const block = buildMagicContextBlock({
+				db,
+				cwd: ctx.cwd,
+				memoryEnabled: true,
+				injectDocs: true,
+			});
+			if (!block) return;
+			return { systemPrompt: `${event.systemPrompt}\n\n${block}` };
+		} catch (error) {
+			warn("failed to build magic-context block:", error);
+			return;
+		}
+	});
+	info("registered before_agent_start system prompt injector");
 
 	// Close the shared DB on session shutdown. Other sessions in the same
 	// process keep their own handle and are unaffected.
