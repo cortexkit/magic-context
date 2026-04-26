@@ -12,6 +12,7 @@
  */
 
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import path from "node:path";
 
 // execSync is intentional here (audit #19): this runs once per unique directory per process
@@ -41,8 +42,13 @@ function getRootCommitHash(directory: string): string | undefined {
 function directoryFallback(directory: string): string {
     // Use a hash of the full canonical path to avoid collisions between
     // directories with the same basename (e.g. /tmp/api vs /work/api).
+    // Switched from Bun.hash to MD5 prefix when the storage layer moved off
+    // bun:sqlite — see commit d03e148. This is a one-time prefix change for
+    // non-git project memories: existing `dir:<wyhash>` rows become orphaned
+    // and any new memories use `dir:<md5-prefix>`. Most users are git-backed
+    // (unaffected). Doctor can be extended to re-key if needed.
     const canonical = path.resolve(directory);
-    const hash = Bun.hash(canonical).toString(16).slice(0, 12);
+    const hash = createHash("md5").update(canonical).digest("hex").slice(0, 12);
     return `dir:${hash}`;
 }
 
