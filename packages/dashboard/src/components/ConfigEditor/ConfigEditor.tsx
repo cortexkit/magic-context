@@ -1203,10 +1203,14 @@ function ConfigForm(props: {
                   </div>
                 </div>
               </div>
+            </div>
 
-              {/* User Memories + Key File Pinning — graduated from experimental in v0.14 */}
-              <div class="config-card-two-col">
-                <div class="config-card-content">
+            {/* User Memories + Key File Pinning — graduated from experimental in v0.14.
+                These render as a sibling 2-col grid below the main 2-col grid. They were
+                previously nested inside the outer grid, which made them inherit a 3rd grid
+                cell (rendering in only the left half with the right half empty). */}
+            <div class="config-card-two-col">
+              <div class="config-card-content">
                   <div class="config-field">
                     <div class="config-field-header">
                       <span class="config-field-label">User Memories</span>
@@ -1389,7 +1393,6 @@ function ConfigForm(props: {
                   </Show>
                 </div>
               </div>
-            </div>
           </div>
 
           {/* Sidekick Card */}
