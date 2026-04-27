@@ -36,7 +36,12 @@ import {
 	type PiSidekickConfig,
 	registerCtxAugCommand,
 } from "./commands/ctx-aug";
-import { registerPiContextHandler } from "./context-handler";
+import {
+	awaitInFlightHistorians,
+	type PiHistorianOptions,
+	registerPiContextHandler,
+} from "./context-handler";
+import { PiSubagentRunner } from "./subagent-runner";
 import { buildMagicContextBlock } from "./system-prompt";
 import { registerMagicContextTools } from "./tools";
 
@@ -107,6 +112,71 @@ function resolveSidekickConfig(): PiSidekickConfig | undefined {
 		return { model: envModel };
 	}
 	return undefined;
+}
+
+/**
+ * Step 4b.3b stop-gap historian config resolver. Returns config when
+ * `MAGIC_CONTEXT_PI_HISTORIAN_MODEL` env var is set; the historian
+ * subagent will be invoked when the compartment trigger fires.
+ *
+ * Same pattern as `resolveSidekickConfig`. Step 5b's full config
+ * loader will replace this with `magic-context.jsonc` discovery.
+ *
+ * Env vars supported:
+ *   - `MAGIC_CONTEXT_PI_HISTORIAN_MODEL` (required) — provider/model id
+ *   - `MAGIC_CONTEXT_PI_HISTORIAN_FALLBACKS` — comma-separated chain
+ *   - `MAGIC_CONTEXT_PI_HISTORIAN_CHUNK_TOKENS` — chunk budget; default 8000
+ *   - `MAGIC_CONTEXT_PI_HISTORIAN_TIMEOUT_MS` — per-call timeout
+ *   - `MAGIC_CONTEXT_PI_HISTORIAN_EXECUTE_THRESHOLD` — % (1-100); default 65
+ *   - `MAGIC_CONTEXT_PI_HISTORIAN_TRIGGER_BUDGET` — token target; default 8000
+ */
+function resolveHistorianConfig(): PiHistorianOptions | undefined {
+	const model = process.env.MAGIC_CONTEXT_PI_HISTORIAN_MODEL?.trim();
+	if (!model || model.length === 0) return undefined;
+
+	const fallbackEnv = process.env.MAGIC_CONTEXT_PI_HISTORIAN_FALLBACKS;
+	const fallbackModels = fallbackEnv
+		? fallbackEnv
+				.split(",")
+				.map((s) => s.trim())
+				.filter((s) => s.length > 0)
+		: undefined;
+
+	const chunkTokens = parsePositiveInt(
+		process.env.MAGIC_CONTEXT_PI_HISTORIAN_CHUNK_TOKENS,
+		8000,
+	);
+	const timeoutMs = parsePositiveInt(
+		process.env.MAGIC_CONTEXT_PI_HISTORIAN_TIMEOUT_MS,
+		120_000,
+	);
+	const executeThreshold = parsePositiveInt(
+		process.env.MAGIC_CONTEXT_PI_HISTORIAN_EXECUTE_THRESHOLD,
+		65,
+	);
+	const triggerBudget = parsePositiveInt(
+		process.env.MAGIC_CONTEXT_PI_HISTORIAN_TRIGGER_BUDGET,
+		8000,
+	);
+
+	return {
+		runner: new PiSubagentRunner(),
+		model,
+		fallbackModels,
+		historianChunkTokens: chunkTokens,
+		timeoutMs,
+		executeThresholdPercentage: executeThreshold,
+		triggerBudget,
+		// Conservative defaults — Step 5b config will surface these.
+		memoryEnabled: true,
+		autoPromote: true,
+	};
+}
+
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+	if (!value) return fallback;
+	const n = Number.parseInt(value, 10);
+	return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
 /**
@@ -291,10 +361,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	// against Pi sessions. ctx_reduce is exposed in the tool registry so
 	// agents can invoke it; ctx_reduce_enabled is hardcoded to `true`
 	// here pending the Step 5b config loader.
+	const historianConfig = resolveHistorianConfig();
 	registerPiContextHandler(pi, {
 		db,
 		ctxReduceEnabled: true,
+		historian: historianConfig,
 	});
+	info(
+		historianConfig
+			? `registered historian trigger (model=${historianConfig.model}, executeThreshold=${historianConfig.executeThresholdPercentage ?? 65}%)`
+			: "registered historian trigger: DISABLED (set MAGIC_CONTEXT_PI_HISTORIAN_MODEL to enable)",
+	);
 
 	// Register the /ctx-aug slash command. Sidekick is "off" by default
 	// for Step 5a — users opt in by writing a sidekick.model setting in
@@ -315,9 +392,29 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	// background context until it explicitly calls ctx_search.
 	pi.on("before_agent_start", async (event, ctx) => {
 		try {
+			// Pi exposes `sessionManager.getSessionId()` once a session is
+			// active. We resolve it here defensively because before_agent_start
+			// fires once per agent turn and the session ID is what scopes
+			// `<session-history>` (compartments + facts published by historian).
+			const sm = ctx.sessionManager;
+			let sessionId: string | undefined;
+			if (sm !== undefined) {
+				const getId = (sm as { getSessionId?: () => string | undefined })
+					.getSessionId;
+				if (typeof getId === "function") {
+					try {
+						const id = getId.call(sm);
+						if (typeof id === "string" && id.length > 0) sessionId = id;
+					} catch {
+						// Fail open — sessionId stays undefined, session-history is skipped.
+					}
+				}
+			}
+
 			const block = buildMagicContextBlock({
 				db,
 				cwd: ctx.cwd,
+				sessionId,
 				memoryEnabled: true,
 				injectDocs: true,
 			});
@@ -330,8 +427,35 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	});
 	info("registered before_agent_start system prompt injector");
 
-	// Close the shared DB on session shutdown. Other sessions in the same
-	// process keep their own handle and are unaffected.
+	// Best-effort wait for in-flight historian runs at agent_end.
+	//
+	// IMPORTANT LIMITATION: This works in interactive Pi sessions, where
+	// the process stays alive between turns and historian runs from a
+	// previous turn complete naturally before the next one starts. It
+	// does NOT work reliably in `pi --print` mode (single-turn, exits
+	// after agent_end). Pi's @mariozechner/pi-agent-core uses synchronous
+	// listener fanout (`agent.emit(e) { for (const l of listeners) l(e); }`)
+	// — async listeners return a Promise that the agent never awaits, so
+	// the parent process exits while our await chain is still pending and
+	// the spawned subprocess gets killed mid-run.
+	//
+	// Production users running interactive `pi` are unaffected. The fix
+	// for `--print` mode would either need pi-coding-agent to await async
+	// emit listeners (upstream patch) or magic-context to do its own
+	// process.exit gating (fragile). For now we keep the wait — it helps
+	// where it can, and is harmless where it can't.
+	pi.on("agent_end", async () => {
+		try {
+			await awaitInFlightHistorians();
+		} catch (err) {
+			warn("agent_end: awaitInFlightHistorians threw:", err);
+		}
+	});
+
+	// Close the shared DB on session shutdown (fires on reload). Other
+	// sessions in the same process keep their own handle and are
+	// unaffected. We don't need to await historians here because
+	// agent_end already did that on the way out.
 	pi.on("session_shutdown", async () => {
 		if (db) {
 			closeQuietly(db);

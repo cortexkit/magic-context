@@ -302,7 +302,29 @@ export class PiSubagentRunner implements SubagentRunner {
 	 * messages, so the user prompt must come last.
 	 */
 	private buildArgs(options: SubagentRunOptions): string[] {
-		const args: string[] = ["--print", "--mode", "json"];
+		const args: string[] = [
+			"--print",
+			"--mode",
+			"json",
+			// Disable extension/skill/template discovery in the spawned child
+			// for two reasons:
+			//   (1) Recursion: without this, every historian/sidekick/dreamer
+			//       subagent process loads the magic-context plugin again,
+			//       which itself can register its own historian trigger that
+			//       fires on the child's brief turn — leading to nested spawn
+			//       cycles that just waste API calls and tokens.
+			//   (2) Performance: skill/template discovery scans the filesystem
+			//       at startup. Subagents don't need any of that — they have
+			//       a focused system prompt and one user message.
+			"--no-extensions",
+			"--no-skills",
+			"--no-prompt-templates",
+			// --no-tools is intentionally NOT set: historian and dreamer use
+			// Pi's built-in tools (Edit, Write, etc.) for some maintenance
+			// tasks. Sidekick uses ctx_search, but that's exposed via a
+			// different mechanism. If we ever need to harden subagent tool
+			// surfaces this is the right toggle.
+		];
 
 		if (options.systemPrompt && options.systemPrompt.length > 0) {
 			// We intentionally use --system-prompt (replace) rather than

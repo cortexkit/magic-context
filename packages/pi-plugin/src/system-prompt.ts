@@ -4,33 +4,45 @@
  * Hooks `before_agent_start` to append a `<magic-context>` block to the
  * fully-assembled system prompt. The block carries:
  *
+ *   - `<session-history>`: compartments + session facts published by
+ *     historian for this Pi session (added in Step 4b.3b)
  *   - `<project-memory>`: project-scoped memories (categorized, budget-trimmed)
  *   - `<project-docs>`: dreamer-maintained ARCHITECTURE.md and STRUCTURE.md
  *     from the project root (when present)
  *
- * Spike scope (Step 4a): no compartments, no session facts, no key files,
- * no user profile. Those depend on the message-transform pipeline (Step 4b)
- * or pi-plugin dreamer/historian wiring (Step 5+). Cross-harness memory
- * sharing means a memory written from OpenCode in this project shows up
- * here on the next agent turn.
+ * Cross-harness memory sharing means a memory written from OpenCode in
+ * this project shows up here on the next agent turn — the
+ * `<session-history>` block is similarly cross-harness consistent for
+ * compartments/facts written by either OpenCode or Pi historian.
+ *
+ * # Where session-history goes
+ *
+ * OpenCode injects `<session-history>` into `message[0]` to keep it in
+ * Anthropic's prompt-cache prefix (cheap to keep, expensive to rebuild).
+ * Pi has no equivalent prompt-cache surface, and the system prompt is
+ * itself the natural place to put always-present project context, so
+ * we put `<session-history>` here alongside `<project-memory>` and
+ * `<project-docs>`. Same source data, same XML shape, different
+ * delivery mechanism.
  *
  * Cache stability is intentionally not a concern at this stage — Pi doesn't
  * use Anthropic-style prompt caching the same way OpenCode does. We re-read
- * docs and re-fetch memories each turn. If/when this becomes a real cost,
- * we can add cache-aware blocks similar to OpenCode's `memory_block_cache`.
+ * docs and re-fetch memories each turn.
  */
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+	buildCompartmentBlock,
+	getCompartments,
+	getSessionFacts,
+} from "@magic-context/core/features/magic-context/compartment-storage";
+import {
 	getMemoriesByProject,
 	type Memory,
 } from "@magic-context/core/features/magic-context/memory";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
-import type {
-	ContextDatabase,
-	SessionFact,
-} from "@magic-context/core/features/magic-context/storage";
+import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { renderMemoryBlock } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import { log } from "@magic-context/core/shared/logger";
 
@@ -96,6 +108,12 @@ function trimMemoriesByCharBudget(
 export interface BuildMagicContextBlockOptions {
 	db: ContextDatabase;
 	cwd: string;
+	/**
+	 * When provided, include `<session-history>` (compartments + facts) for
+	 * this session. Pass undefined to skip — typically when no session is
+	 * active yet (e.g. first context event before sessionManager is ready).
+	 */
+	sessionId?: string;
 	/** When true, include `<project-memory>` in the block. */
 	memoryEnabled: boolean;
 	/** When true, include `<project-docs>` (reads ARCHITECTURE.md / STRUCTURE.md from cwd). */
@@ -108,12 +126,36 @@ export interface BuildMagicContextBlockOptions {
  * Build the `<magic-context>...</magic-context>` block to append to the
  * system prompt for one Pi agent turn. Returns null if there's nothing to
  * inject.
+ *
+ * Block ordering: `<session-history>` first (most-narrative), then
+ * `<project-memory>`, then `<project-docs>`. Mirrors OpenCode's
+ * conceptual layering — recent session activity, then long-lived
+ * project knowledge, then immutable structural docs.
  */
 export function buildMagicContextBlock(
 	opts: BuildMagicContextBlockOptions,
 ): string | null {
 	const sections: string[] = [];
 
+	// 1. Session history (compartments + facts) — only if we have a session id
+	//    and historian has actually published something for it. Memory block
+	//    is rendered separately from project-scoped memories below; we don't
+	//    duplicate it inside session-history because Pi puts both in the
+	//    same system prompt anyway.
+	if (opts.sessionId) {
+		const compartments = getCompartments(opts.db, opts.sessionId);
+		const facts = getSessionFacts(opts.db, opts.sessionId);
+		if (compartments.length > 0 || facts.length > 0) {
+			// Pi-side rendering: compartments + facts only, no memory block,
+			// no temporal date ranges. The memory block lives in the
+			// `<project-memory>` section below; temporal date ranges depend
+			// on OpenCode-side message timestamps we don't have for Pi.
+			const block = buildCompartmentBlock(compartments, facts);
+			sections.push(`<session-history>\n${block}\n</session-history>`);
+		}
+	}
+
+	// 2. Project-scoped memories
 	if (opts.memoryEnabled) {
 		const projectIdentity = resolveProjectIdentity(opts.cwd);
 		const allMemories = getMemoriesByProject(opts.db, projectIdentity);
@@ -127,6 +169,7 @@ export function buildMagicContextBlock(
 		}
 	}
 
+	// 3. Project docs (ARCHITECTURE.md / STRUCTURE.md)
 	if (opts.injectDocs) {
 		const docsBlock = readProjectDocs(opts.cwd);
 		if (docsBlock) sections.push(docsBlock);
@@ -135,9 +178,4 @@ export function buildMagicContextBlock(
 	if (sections.length === 0) return null;
 
 	return `<magic-context>\n${sections.join("\n\n")}\n</magic-context>`;
-}
-
-// --- session facts helper, unused for now but exported for Step 4b ---
-export function _hasSessionFacts(facts: SessionFact[]): boolean {
-	return facts.length > 0;
 }

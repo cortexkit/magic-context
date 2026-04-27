@@ -36,6 +36,7 @@
 
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
+import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
 import {
 	createTagger,
 	type Tagger,
@@ -44,13 +45,55 @@ import {
 	applyFlushedStatuses,
 	applyPendingOperations,
 } from "@magic-context/core/hooks/magic-context/apply-operations";
-import { log } from "@magic-context/core/shared/logger";
+import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
+import { setRawMessageProvider } from "@magic-context/core/hooks/magic-context/read-session-chunk";
+import { log, sessionLog } from "@magic-context/core/shared/logger";
+import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
+import { runPiHistorian } from "./pi-historian-runner";
+import { readPiSessionMessages } from "./read-session-pi";
 import { createPiTranscript } from "./transcript-pi";
+
+/**
+ * Optional historian config. When provided, the context handler checks
+ * the compartment trigger after tagging and fires `runPiHistorian`
+ * asynchronously (fire-and-forget) when the trigger says shouldFire.
+ * When omitted, no historian invocation happens — useful for testing
+ * the transform pipeline in isolation or running Pi without a
+ * configured historian model.
+ */
+export interface PiHistorianOptions {
+	/** SubagentRunner instance (PiSubagentRunner). */
+	runner: SubagentRunner;
+	/** Historian provider/model id (e.g. `anthropic/claude-haiku-4-5`). */
+	model: string;
+	/** Optional ordered fallback chain. */
+	fallbackModels?: readonly string[];
+	/** Historian context window — used to derive chunk token budget. */
+	historianChunkTokens: number;
+	/** Optional per-call timeout (default 120s). */
+	timeoutMs?: number;
+	/** Cross-session memory feature gate (`memory.enabled`). */
+	memoryEnabled?: boolean;
+	/** Automatic-promotion gate (`memory.auto_promote`). */
+	autoPromote?: boolean;
+	/**
+	 * Execute-threshold percentage used by the trigger logic to compute
+	 * pressure-driven trigger points. Mirrors OpenCode's
+	 * `execute_threshold_percentage` config; defaults to 65 when omitted.
+	 */
+	executeThresholdPercentage?: number;
+	/**
+	 * Trigger budget (tokens) used by the commit-cluster and tail-size
+	 * triggers. Mirrors `compartment_token_budget` derived value in
+	 * OpenCode; defaults to 8000 when omitted.
+	 */
+	triggerBudget?: number;
+}
 
 export interface PiContextHandlerOptions {
 	db: ContextDatabase;
@@ -65,6 +108,13 @@ export interface PiContextHandlerOptions {
 	 * is registered. Step 5b's config loader will make it configurable.
 	 */
 	ctxReduceEnabled: boolean;
+	/**
+	 * Optional historian wiring (Step 4b.3b). When omitted, the trigger
+	 * check is skipped — context events still tag + drop normally, and
+	 * historian state stays untouched. When provided, the trigger fires
+	 * async after each tagging pass.
+	 */
+	historian?: PiHistorianOptions;
 }
 
 /**
@@ -147,6 +197,20 @@ export function registerPiContextHandler(
 			// rebuilds the mutated ones, all of which keep the same
 			// (or symmetric-text) shape — so this cast is safe at
 			// runtime even though TS can't see the relationship.
+
+			// After tagging+drops have committed, check whether historian
+			// should fire. Historian config is optional — tagging-only
+			// behavior is the Step 4b.2 contract, and historian is
+			// fire-and-forget so we never block the LLM call on it.
+			if (options.historian) {
+				maybeFireHistorian({
+					ctx,
+					sessionId,
+					db: options.db,
+					historian: options.historian,
+				});
+			}
+
 			return result as { messages: typeof event.messages };
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
@@ -163,6 +227,156 @@ export function registerPiContextHandler(
 	log("[magic-context][pi] registered context handler (tagging + drops)");
 }
 
+/**
+ * Track in-flight historian runs per session so we don't fire a second
+ * pass while the first is still running. The flag also exists in
+ * session_meta.compartment_in_progress (see `runPiHistorian` setting
+ * it), but that DB-side flag is durable across restarts and the
+ * trigger logic already inspects it; this in-memory map is a
+ * fast-path so we don't hit the DB just to dedupe per turn.
+ *
+ * We store the actual Promise (not just the session id) so the
+ * `session_shutdown` handler can `await` outstanding runs before Pi
+ * exits — critical for `pi --print` mode where the parent process
+ * exits as soon as `agent_end` fires, otherwise killing the historian
+ * subprocess mid-run.
+ */
+const inFlightHistorian = new Map<string, Promise<unknown>>();
+
+/**
+ * Wait for all in-flight historian runs to complete. Called from the
+ * Pi `session_shutdown` event handler so historian can finish writing
+ * compartments before the process exits. Returns immediately if no
+ * runs are in-flight.
+ */
+export async function awaitInFlightHistorians(): Promise<void> {
+	if (inFlightHistorian.size === 0) return;
+	const promises = Array.from(inFlightHistorian.values());
+	await Promise.allSettled(promises);
+}
+
+/**
+ * Trigger evaluation + fire-and-forget historian invocation. Runs
+ * after the synchronous tagging pass so trigger logic sees the
+ * just-assigned tags.
+ *
+ * The actual historian subagent spawn (`runPiHistorian`) is async
+ * and intentionally NOT awaited — the LLM call should never wait on
+ * historian. Errors are logged but never propagated; the user's
+ * agent turn continues regardless of historian outcome.
+ */
+function maybeFireHistorian(args: {
+	ctx: ExtensionContext;
+	sessionId: string;
+	db: ContextDatabase;
+	historian: PiHistorianOptions;
+}): void {
+	const { ctx, sessionId, db, historian } = args;
+
+	if (inFlightHistorian.has(sessionId)) {
+		sessionLog(sessionId, "pi-historian trigger eval: in-flight, skipping");
+		return;
+	}
+
+	// Pi exposes ctx.getContextUsage() returning { tokens, contextWindow,
+	// percent }. We map to OpenCode's ContextUsage shape ({ percentage,
+	// inputTokens }) used by the shared trigger.
+	let usage: { percentage: number; inputTokens: number };
+	try {
+		const piUsage = ctx.getContextUsage?.();
+		if (
+			!piUsage ||
+			piUsage.tokens === null ||
+			piUsage.percent === null ||
+			piUsage.contextWindow === 0
+		) {
+			sessionLog(
+				sessionId,
+				`pi-historian trigger eval: no usage info yet (tokens=${piUsage?.tokens ?? "<no piUsage>"}, percent=${piUsage?.percent ?? "<no piUsage>"}, contextWindow=${piUsage?.contextWindow ?? "<no piUsage>"})`,
+			);
+			return;
+		}
+		usage = {
+			percentage: piUsage.percent,
+			inputTokens: piUsage.tokens,
+		};
+		sessionLog(
+			sessionId,
+			`pi-historian trigger eval: usage=${usage.percentage.toFixed(1)}% (${usage.inputTokens} tokens), checking trigger...`,
+		);
+	} catch (err) {
+		sessionLog(
+			sessionId,
+			`pi-historian trigger eval: getContextUsage threw: ${err instanceof Error ? err.message : String(err)}`,
+		);
+		return;
+	}
+
+	// Register the Pi RawMessageProvider for this sessionId so the
+	// shared trigger logic + historian can read Pi session messages
+	// via the standard `readRawSessionMessages` etc. helpers. The
+	// provider stays registered while the historian runs and
+	// unregisters in finally.
+	const provider = {
+		readMessages: () => readPiSessionMessages(ctx),
+	};
+	const unregister = setRawMessageProvider(sessionId, provider);
+
+	let triggered = false;
+	try {
+		const sessionMeta = getOrCreateSessionMeta(db, sessionId);
+		const trigger = checkCompartmentTrigger(
+			db,
+			sessionId,
+			sessionMeta,
+			usage,
+			0, // _previousPercentage — unused by current trigger logic
+			historian.executeThresholdPercentage ?? 65,
+			historian.triggerBudget ?? 8000,
+		);
+
+		if (!trigger.shouldFire) {
+			sessionLog(
+				sessionId,
+				`pi-historian trigger eval: shouldFire=false (no trigger condition met)`,
+			);
+			return;
+		}
+
+		triggered = true;
+		sessionLog(
+			sessionId,
+			`pi-historian trigger fired (reason=${trigger.reason ?? "unknown"}) usage=${usage.percentage.toFixed(1)}% — spawning subagent`,
+		);
+
+		// Fire-and-forget for the user's LLM call: the parent agent
+		// turn never awaits this. But we DO track the Promise in
+		// inFlightHistorian so `awaitInFlightHistorians()` can wait
+		// at session_shutdown — without that, `pi --print` mode would
+		// kill the historian subprocess mid-run when the parent exits.
+		const runPromise = runPiHistorian({
+			db,
+			sessionId,
+			directory: ctx.cwd,
+			provider,
+			runner: historian.runner,
+			historianModel: historian.model,
+			fallbackModels: historian.fallbackModels,
+			historianChunkTokens: historian.historianChunkTokens,
+			historianTimeoutMs: historian.timeoutMs,
+			memoryEnabled: historian.memoryEnabled,
+			autoPromote: historian.autoPromote,
+		}).finally(() => {
+			inFlightHistorian.delete(sessionId);
+			unregister();
+		});
+		inFlightHistorian.set(sessionId, runPromise);
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		sessionLog(sessionId, `pi-historian trigger eval failed: ${message}`);
+		if (!triggered) unregister();
+	}
+}
 interface RunPipelineArgs {
 	db: ContextDatabase;
 	tagger: Tagger;
