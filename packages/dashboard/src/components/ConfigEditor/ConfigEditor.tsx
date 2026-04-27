@@ -1533,8 +1533,29 @@ function ConfigForm(props: {
             </div>
           </div>
 
+          {/* Tags & Cleanup — placed right after Sidekick so it fills the empty
+              right column of the grid (Sidekick is a regular-width card and was
+              otherwise leaving its right slot empty). Tags & Cleanup is also a
+              regular-width card, so the two pair naturally on one row before the
+              full-width Experimental card closes the form. */}
+          {(() => {
+            const tagsFields = sections().find(([name]) => name === "Tags & Cleanup");
+            if (!tagsFields) return null;
+            return (
+              <div class="config-card">
+                <div class="config-card-header">
+                  <span class="config-card-icon">🏷️</span>
+                  <span class="config-card-title">Tags & Cleanup</span>
+                </div>
+                <div class="config-card-content">
+                  <For each={tagsFields[1]}>{renderField}</For>
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Experimental — opt-in features gated behind `experimental.*` flags.
-              May change between releases. Rendered before Tags & Cleanup so the
+              May change between releases. Full-width and rendered last so the
               "advanced" surface stays at the bottom of the form. Each feature is
               a master toggle; child controls only appear when the feature is on,
               keeping the surface compact for users who never enable any of them. */}
@@ -1868,23 +1889,6 @@ function ConfigForm(props: {
                       />
                     </div>
                   </Show>
-                </div>
-              </div>
-            );
-          })()}
-
-          {/* Tags & Cleanup — rendered after agent cards */}
-          {(() => {
-            const tagsFields = sections().find(([name]) => name === "Tags & Cleanup");
-            if (!tagsFields) return null;
-            return (
-              <div class="config-card">
-                <div class="config-card-header">
-                  <span class="config-card-icon">🏷️</span>
-                  <span class="config-card-title">Tags & Cleanup</span>
-                </div>
-                <div class="config-card-content">
-                  <For each={tagsFields[1]}>{renderField}</For>
                 </div>
               </div>
             );
