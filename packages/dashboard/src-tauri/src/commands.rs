@@ -355,16 +355,32 @@ pub fn save_project_config(project_path: String, content: String) -> Result<(), 
 
 #[tauri::command]
 pub async fn get_available_models() -> Vec<String> {
-    // GUI apps on macOS don't inherit shell PATH; try common locations
+    // GUI apps on macOS don't inherit shell PATH; try common locations.
+    //
+    // The first candidate must be `~/.opencode/bin/opencode` because that's
+    // the path the official OpenCode installer (`curl -fsSL ... | bash`)
+    // writes to and it's NOT on the GUI launcher's $PATH on macOS. Without
+    // this candidate, every dashboard model dropdown silently returned
+    // empty for users with a stock OpenCode install — the historian /
+    // dreamer / sidekick fallback "Add fallback model" dropdown would show
+    // "No models found" because `props.models = []`, so `grouped()`
+    // returned no groups and the `<For fallback>` rendered.
+    //
+    // Additional fallback paths cover pre-CI installs, custom installs,
+    // Homebrew on Intel + ARM, and shell-PATH discovery for users who
+    // launched OpenCode from a terminal.
     let candidates = if cfg!(target_os = "windows") {
-        vec!["opencode".to_string()]
-    } else {
+        let home = std::env::var("USERPROFILE").unwrap_or_default();
         vec![
+            format!("{}\\.opencode\\bin\\opencode.exe", home),
             "opencode".to_string(),
-            format!(
-                "{}/.local/bin/opencode",
-                std::env::var("HOME").unwrap_or_default()
-            ),
+        ]
+    } else {
+        let home = std::env::var("HOME").unwrap_or_default();
+        vec![
+            format!("{}/.opencode/bin/opencode", home),
+            "opencode".to_string(),
+            format!("{}/.local/bin/opencode", home),
             "/usr/local/bin/opencode".to_string(),
             "/opt/homebrew/bin/opencode".to_string(),
         ]
