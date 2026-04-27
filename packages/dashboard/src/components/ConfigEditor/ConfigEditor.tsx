@@ -216,6 +216,30 @@ function setNestedValue(
   return clone;
 }
 
+/**
+ * Normalize a `fallback_models` value to a string array.
+ *
+ * The plugin's `AgentOverrideConfigSchema` accepts `fallback_models` as
+ * either a string (single model) or `string[]` (chain). When stored as a
+ * bare string, the dashboard's old `as string[]` cast caused two visible
+ * bugs:
+ *   1. The chip list iterated the string per-character ("o", "p", "e", ...).
+ *   2. The "Add fallback" dropdown filter ran `String.prototype.includes(m)`
+ *      against every available model, substring-matching aggressively (any
+ *      model containing "o" or "/" would be filtered out), leaving the
+ *      dropdown empty with "No models found".
+ *
+ * This helper coerces both shapes to a real array so all consumers can
+ * treat the value uniformly. Returns an empty array for `undefined`,
+ * `null`, or other unexpected shapes.
+ */
+function readFallbackModels(formData: Record<string, unknown>, path: string): string[] {
+  const raw = getNestedValue(formData, path);
+  if (typeof raw === "string") return raw.length > 0 ? [raw] : [];
+  if (Array.isArray(raw)) return raw.filter((v): v is string => typeof v === "string");
+  return [];
+}
+
 // ── Section icons ───────────────────────────────────────────
 
 const SECTION_ICONS: Record<string, string> = {
@@ -818,12 +842,8 @@ function ConfigForm(props: {
                             <div class="model-chain-list">
                               <Show
                                 when={
-                                  (
-                                    (getNestedValue(
-                                      formData(),
-                                      "historian.fallback_models",
-                                    ) as string[]) ?? []
-                                  ).length > 0
+                                  readFallbackModels(formData(), "historian.fallback_models")
+                                    .length > 0
                                 }
                                 fallback={
                                   <span class="model-chain-empty">
@@ -832,12 +852,10 @@ function ConfigForm(props: {
                                 }
                               >
                                 <For
-                                  each={
-                                    (getNestedValue(
-                                      formData(),
-                                      "historian.fallback_models",
-                                    ) as string[]) ?? []
-                                  }
+                                  each={readFallbackModels(
+                                    formData(),
+                                    "historian.fallback_models",
+                                  )}
                                 >
                                   {(model, index) => (
                                     <div class="model-chain-item">
@@ -848,16 +866,14 @@ function ConfigForm(props: {
                                         type="button"
                                         class="btn sm danger"
                                         onClick={() => {
-                                          const current =
-                                            (getNestedValue(
-                                              formData(),
-                                              "historian.fallback_models",
-                                            ) as string[]) ?? [];
+                                          const current = readFallbackModels(
+                                            formData(),
+                                            "historian.fallback_models",
+                                          );
+                                          const next = current.filter((_, i) => i !== index());
                                           handleFieldChange(
                                             "historian.fallback_models",
-                                            current.filter((_, i) => i !== index()).length > 0
-                                              ? current.filter((_, i) => i !== index())
-                                              : undefined,
+                                            next.length > 0 ? next : undefined,
                                           );
                                         }}
                                       >
@@ -872,21 +888,18 @@ function ConfigForm(props: {
                               <ModelSelect
                                 models={(models() ?? []).filter(
                                   (m) =>
-                                    !(
-                                      (getNestedValue(
-                                        formData(),
-                                        "historian.fallback_models",
-                                      ) as string[]) ?? []
+                                    !readFallbackModels(
+                                      formData(),
+                                      "historian.fallback_models",
                                     ).includes(m),
                                 )}
                                 value={undefined}
                                 onChange={(v) => {
                                   if (v) {
-                                    const current =
-                                      (getNestedValue(
-                                        formData(),
-                                        "historian.fallback_models",
-                                      ) as string[]) ?? [];
+                                    const current = readFallbackModels(
+                                      formData(),
+                                      "historian.fallback_models",
+                                    );
                                     handleFieldChange("historian.fallback_models", [...current, v]);
                                   }
                                 }}
@@ -1143,18 +1156,13 @@ function ConfigForm(props: {
                   <div class="model-chain-list">
                     <Show
                       when={
-                        ((getNestedValue(formData(), "dreamer.fallback_models") as string[]) ?? [])
-                          .length > 0
+                        readFallbackModels(formData(), "dreamer.fallback_models").length > 0
                       }
                       fallback={
                         <span class="model-chain-empty">Using built-in fallback chain</span>
                       }
                     >
-                      <For
-                        each={
-                          (getNestedValue(formData(), "dreamer.fallback_models") as string[]) ?? []
-                        }
-                      >
+                      <For each={readFallbackModels(formData(), "dreamer.fallback_models")}>
                         {(model, index) => (
                           <div class="model-chain-item">
                             <span class="mono" style={{ flex: 1 }}>
@@ -1164,11 +1172,10 @@ function ConfigForm(props: {
                               type="button"
                               class="btn sm danger"
                               onClick={() => {
-                                const current =
-                                  (getNestedValue(
-                                    formData(),
-                                    "dreamer.fallback_models",
-                                  ) as string[]) ?? [];
+                                const current = readFallbackModels(
+                                  formData(),
+                                  "dreamer.fallback_models",
+                                );
                                 const updated = current.filter((_, i) => i !== index());
                                 handleFieldChange(
                                   "dreamer.fallback_models",
@@ -1187,17 +1194,15 @@ function ConfigForm(props: {
                     <ModelSelect
                       models={(models() ?? []).filter(
                         (m) =>
-                          !(
-                            (getNestedValue(formData(), "dreamer.fallback_models") as string[]) ??
-                            []
-                          ).includes(m),
+                          !readFallbackModels(formData(), "dreamer.fallback_models").includes(m),
                       )}
                       value={undefined}
                       onChange={(v) => {
                         if (v) {
-                          const current =
-                            (getNestedValue(formData(), "dreamer.fallback_models") as string[]) ??
-                            [];
+                          const current = readFallbackModels(
+                            formData(),
+                            "dreamer.fallback_models",
+                          );
                           handleFieldChange("dreamer.fallback_models", [...current, v]);
                         }
                       }}
@@ -1470,17 +1475,10 @@ function ConfigForm(props: {
                 <span class="config-field-desc">Models to try if primary fails</span>
                 <div class="model-chain-list">
                   <Show
-                    when={
-                      ((getNestedValue(formData(), "sidekick.fallback_models") as string[]) ?? [])
-                        .length > 0
-                    }
+                    when={readFallbackModels(formData(), "sidekick.fallback_models").length > 0}
                     fallback={<span class="model-chain-empty">Using built-in fallback chain</span>}
                   >
-                    <For
-                      each={
-                        (getNestedValue(formData(), "sidekick.fallback_models") as string[]) ?? []
-                      }
-                    >
+                    <For each={readFallbackModels(formData(), "sidekick.fallback_models")}>
                       {(model, index) => (
                         <div class="model-chain-item">
                           <span class="mono" style={{ flex: 1 }}>
@@ -1490,11 +1488,10 @@ function ConfigForm(props: {
                             type="button"
                             class="btn sm danger"
                             onClick={() => {
-                              const current =
-                                (getNestedValue(
-                                  formData(),
-                                  "sidekick.fallback_models",
-                                ) as string[]) ?? [];
+                              const current = readFallbackModels(
+                                formData(),
+                                "sidekick.fallback_models",
+                              );
                               const updated = current.filter((_, i) => i !== index());
                               handleFieldChange(
                                 "sidekick.fallback_models",
@@ -1513,16 +1510,15 @@ function ConfigForm(props: {
                   <ModelSelect
                     models={(models() ?? []).filter(
                       (m) =>
-                        !(
-                          (getNestedValue(formData(), "sidekick.fallback_models") as string[]) ?? []
-                        ).includes(m),
+                        !readFallbackModels(formData(), "sidekick.fallback_models").includes(m),
                     )}
                     value={undefined}
                     onChange={(v) => {
                       if (v) {
-                        const current =
-                          (getNestedValue(formData(), "sidekick.fallback_models") as string[]) ??
-                          [];
+                        const current = readFallbackModels(
+                          formData(),
+                          "sidekick.fallback_models",
+                        );
                         handleFieldChange("sidekick.fallback_models", [...current, v]);
                       }
                     }}

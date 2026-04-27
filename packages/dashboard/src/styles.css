@@ -1182,6 +1182,15 @@ body {
   gap: 24px;
 }
 
+/* When two `.config-card-two-col` blocks are stacked as siblings inside the
+   same card (e.g. Dreamer's "Enabled/Schedule/Inject Docs vs Model/Fallbacks"
+   row above "User Memories vs Key File Pinning"), space them out vertically
+   to match the gap between fields in a column — otherwise the two rows
+   visually fuse into one unbroken block. */
+.config-card-two-col + .config-card-two-col {
+  margin-top: 24px;
+}
+
 @media (max-width: 900px) {
   .config-card-two-col {
     grid-template-columns: 1fr;
