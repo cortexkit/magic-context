@@ -5,6 +5,9 @@
 	"description": "Pi coding agent extension for Magic Context — cross-session memory and context management",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
+	"bin": {
+		"magic-context-pi": "dist/cli.js"
+	},
 	"license": "MIT",
 	"author": "ualtinok",
 	"keywords": [
@@ -27,7 +30,7 @@
 		"README.md"
 	],
 	"scripts": {
-		"build": "bun build src/index.ts --outdir dist --target node --format esm --external @mariozechner/pi-coding-agent --external @huggingface/transformers --external better-sqlite3",
+		"build": "bun build src/index.ts --outdir dist --target node --format esm --external @mariozechner/pi-coding-agent --external @huggingface/transformers --external better-sqlite3 && bun build src/cli/index.ts --outfile dist/cli.js --target node --format esm --external @clack/prompts",
 		"typecheck": "tsc --noEmit",
 		"test": "bun test",
 		"lint": "biome check src",
@@ -37,6 +40,7 @@
 		"prepublishOnly": "bun run build"
 	},
 	"dependencies": {
+		"@clack/prompts": "^1.1.0",
 		"@huggingface/transformers": "^4.1.0",
 		"ai-tokenizer": "^1.0.6",
 		"better-sqlite3": "^12.9.0",
@@ -46,13 +50,13 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.7",
-		"@mariozechner/pi-coding-agent": "*",
+		"@mariozechner/pi-coding-agent": "^0.70.5",
 		"@types/better-sqlite3": "^7.6.13",
 		"@types/node": "^22.0.0",
 		"typescript": "^5.8.0"
 	},
 	"peerDependencies": {
-		"@mariozechner/pi-coding-agent": "*"
+		"@mariozechner/pi-coding-agent": "^0.70.5"
 	},
 	"exports": {
 		".": {

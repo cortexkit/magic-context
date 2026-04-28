@@ -3,8 +3,9 @@
  *
  * Loaded once per Pi session via `pi.extensions` in package.json. Boots
  * Magic Context's shared SQLite store and registers session lifecycle
- * hooks. Tool registration, message transforms, and historian/dreamer/
- * sidekick wiring follow in later steps.
+ * hooks: tools, transform pipeline (tagging + drops), historian trigger,
+ * /ctx-aug command, system-prompt injection, dreamer scheduling, and
+ * agent_end cleanup.
  *
  * Storage: shares one SQLite database with the OpenCode plugin at
  *   ~/.local/share/cortexkit/magic-context/context.db
@@ -13,15 +14,19 @@
  * tables carry a `harness` column ('opencode' or 'pi') so per-session
  * data stays correctly attributed.
  *
- * Config: read from $project/.pi/magic-context.jsonc (project) and
- *   ~/.pi/agent/magic-context.jsonc (user) — Pi convention. Falls back to
- *   defaults when neither file exists.
+ * Config: read from $cwd/.pi/magic-context.jsonc (project) and
+ *   ~/.pi/agent/magic-context.jsonc (user) via `loadPiConfig()`. Falls
+ *   back to schema defaults when neither file exists.
  */
 
-import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import type {
+	DreamerConfig,
+	HistorianConfig,
+	MagicContextConfig,
+	SidekickConfig,
+} from "@magic-context/core/config/schema/magic-context";
 import { initializeEmbedding } from "@magic-context/core/features/magic-context/memory/embedding";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
@@ -31,11 +36,11 @@ import { setHarness } from "@magic-context/core/shared/harness";
 import { log } from "@magic-context/core/shared/logger";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { parse as parseJsonc } from "comment-json";
 import {
 	type PiSidekickConfig,
 	registerCtxAugCommand,
 } from "./commands/ctx-aug";
+import { loadPiConfig } from "./config";
 import {
 	awaitInFlightHistorians,
 	type PiAutoSearchHandlerOptions,
@@ -43,25 +48,14 @@ import {
 	type PiNudgeOptions,
 	registerPiContextHandler,
 } from "./context-handler";
+import {
+	awaitInFlightDreamers,
+	registerPiDreamerProject,
+	unregisterPiDreamerProject,
+} from "./dreamer";
 import { PiSubagentRunner } from "./subagent-runner";
 import { buildMagicContextBlock } from "./system-prompt";
 import { registerMagicContextTools } from "./tools";
-
-/**
- * Embedding config shape accepted by `initializeEmbedding`. We re-declare it
- * loosely here rather than importing the Zod-derived `EmbeddingConfig` type
- * because Step 5b will replace this whole resolver with a proper Pi config
- * loader that uses the schema directly.
- */
-type StopGapEmbeddingConfig =
-	| { provider: "local"; model: string }
-	| {
-			provider: "openai-compatible";
-			model: string;
-			endpoint: string;
-			api_key?: string;
-	  }
-	| { provider: "off" };
 
 const PREFIX = "[magic-context][pi]";
 
@@ -87,299 +81,125 @@ const PLUGIN_VERSION: string = (() => {
  * lock is idempotent and will throw only on a conflicting reset. */
 setHarness("pi");
 
-/**
- * Step 5a stop-gap config resolver for sidekick. The real config-loading
- * pipeline is wired in Step 5b (mirrors `magic-context.jsonc` discovery
- * from the OpenCode plugin's `src/config/`). Until then, two paths get the
- * `/ctx-aug` flow exercised in real environments without committing config
- * loading to a half-baked design:
- *
- *   1. `MAGIC_CONTEXT_PI_SIDEKICK_MODEL` env var — sets only the model.
- *      Useful for quick local tests: `MAGIC_CONTEXT_PI_SIDEKICK_MODEL=
- *      anthropic/claude-haiku-4-5 pi`.
- *   2. Returns undefined otherwise — `/ctx-aug` registers but reports
- *      "not configured" when invoked, which is the same behavior the
- *      OpenCode plugin has when sidekick is missing from config.
- *
- * Notes for Step 5b:
- * - This whole function should disappear once `loadPiConfig()` lands.
- * - The env-var stays valid as an explicit override for testing — that's
- *   how the OpenCode plugin treats env vars in dreamer/historian config.
- * - Add timeout + system-prompt overrides to the env-var path if needed
- *   for Step 5a debugging; for now the runner default of 30s is fine.
- */
-function resolveSidekickConfig(): PiSidekickConfig | undefined {
-	const envModel = process.env.MAGIC_CONTEXT_PI_SIDEKICK_MODEL?.trim();
-	if (envModel && envModel.length > 0) {
-		return { model: envModel };
-	}
-	return undefined;
+// ---------------------------------------------------------------------------
+// Config-driven resolvers
+//
+// Step 5b replaced the env-var stop-gaps with `loadPiConfig()` which reads
+// $cwd/.pi/magic-context.jsonc (project) + ~/.pi/agent/magic-context.jsonc
+// (user) and merges them through the shared Zod schema. The resolvers below
+// adapt the schema-shaped config into the Pi-specific options the various
+// registration helpers expect.
+//
+// Each resolver returns `undefined` when the relevant feature is disabled
+// in config, so the registration helpers can short-circuit cleanly.
+// ---------------------------------------------------------------------------
+
+function resolveSidekickFromConfig(
+	config: MagicContextConfig,
+): PiSidekickConfig | undefined {
+	const sidekick = config.sidekick as SidekickConfig | undefined;
+	if (!sidekick?.enabled) return undefined;
+	const model = sidekick.model?.trim();
+	if (!model || model.length === 0) return undefined;
+	// Pi's PiSidekickConfig is intentionally narrower than OpenCode's
+	// SidekickConfig — no fallback_models because PiSubagentRunner currently
+	// runs a single model (fallback chain handling would need a wrapper
+	// retry loop, see `subagent-runner.ts`). System prompt + timeout are
+	// supported.
+	return {
+		model,
+		systemPrompt: sidekick.system_prompt,
+		timeoutMs: sidekick.timeout_ms,
+	};
 }
 
-/**
- * Step 4b.3b stop-gap historian config resolver. Returns config when
- * `MAGIC_CONTEXT_PI_HISTORIAN_MODEL` env var is set; the historian
- * subagent will be invoked when the compartment trigger fires.
- *
- * Same pattern as `resolveSidekickConfig`. Step 5b's full config
- * loader will replace this with `magic-context.jsonc` discovery.
- *
- * Env vars supported:
- *   - `MAGIC_CONTEXT_PI_HISTORIAN_MODEL` (required) — provider/model id
- *   - `MAGIC_CONTEXT_PI_HISTORIAN_FALLBACKS` — comma-separated chain
- *   - `MAGIC_CONTEXT_PI_HISTORIAN_CHUNK_TOKENS` — chunk budget; default 8000
- *   - `MAGIC_CONTEXT_PI_HISTORIAN_TIMEOUT_MS` — per-call timeout
- *   - `MAGIC_CONTEXT_PI_HISTORIAN_EXECUTE_THRESHOLD` — % (1-100); default 65
- *   - `MAGIC_CONTEXT_PI_HISTORIAN_TRIGGER_BUDGET` — token target; default 8000
- */
-function resolveHistorianConfig(): PiHistorianOptions | undefined {
-	const model = process.env.MAGIC_CONTEXT_PI_HISTORIAN_MODEL?.trim();
+function resolveHistorianFromConfig(
+	config: MagicContextConfig,
+): PiHistorianOptions | undefined {
+	const historian = config.historian as HistorianConfig;
+	const model = historian.model?.trim();
 	if (!model || model.length === 0) return undefined;
 
-	const fallbackEnv = process.env.MAGIC_CONTEXT_PI_HISTORIAN_FALLBACKS;
-	const fallbackModels = fallbackEnv
-		? fallbackEnv
-				.split(",")
-				.map((s) => s.trim())
-				.filter((s) => s.length > 0)
-		: undefined;
+	// Trigger budget is derived from the OpenCode-style execute_threshold
+	// math but Pi sessions don't have provider-reported context limits at
+	// load time. Use a conservative default of 8000 tokens, matching the
+	// previous env-var stop-gap.
+	const triggerBudget = 8_000;
 
-	const chunkTokens = parsePositiveInt(
-		process.env.MAGIC_CONTEXT_PI_HISTORIAN_CHUNK_TOKENS,
-		8000,
-	);
-	const timeoutMs = parsePositiveInt(
-		process.env.MAGIC_CONTEXT_PI_HISTORIAN_TIMEOUT_MS,
-		120_000,
-	);
-	const executeThreshold = parsePositiveInt(
-		process.env.MAGIC_CONTEXT_PI_HISTORIAN_EXECUTE_THRESHOLD,
-		65,
-	);
-	const triggerBudget = parsePositiveInt(
-		process.env.MAGIC_CONTEXT_PI_HISTORIAN_TRIGGER_BUDGET,
-		8000,
-	);
+	const executeThreshold =
+		typeof config.execute_threshold_percentage === "number"
+			? config.execute_threshold_percentage
+			: (config.execute_threshold_percentage as { default: number }).default;
+
+	// Schema's `fallback_models` is `string | string[] | undefined`; Pi
+	// expects readonly `string[] | undefined`. Normalize a single-string
+	// fallback into a one-element array. (OpenCode does the same in its
+	// agent-override resolver — single-string is shorthand for one fallback.)
+	const fallbackModels: readonly string[] | undefined =
+		typeof historian.fallback_models === "string"
+			? [historian.fallback_models]
+			: historian.fallback_models;
 
 	return {
 		runner: new PiSubagentRunner(),
 		model,
 		fallbackModels,
-		historianChunkTokens: chunkTokens,
-		timeoutMs,
+		historianChunkTokens: triggerBudget,
+		timeoutMs: config.historian_timeout_ms,
 		executeThresholdPercentage: executeThreshold,
 		triggerBudget,
-		// Conservative defaults — Step 5b config will surface these.
-		memoryEnabled: true,
-		autoPromote: true,
+		memoryEnabled: config.memory.enabled,
+		autoPromote: config.memory.auto_promote,
 	};
 }
 
-function parsePositiveInt(value: string | undefined, fallback: number): number {
-	if (!value) return fallback;
-	const n = Number.parseInt(value, 10);
-	return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
-function parseFloat01(value: string | undefined, fallback: number): number {
-	if (!value) return fallback;
-	const n = Number.parseFloat(value);
-	return Number.isFinite(n) && n >= 0 && n <= 1 ? n : fallback;
-}
-
-function parseBoolEnv(value: string | undefined, fallback: boolean): boolean {
-	if (value === undefined) return fallback;
-	const v = value.trim().toLowerCase();
-	if (v === "1" || v === "true" || v === "yes") return true;
-	if (v === "0" || v === "false" || v === "no") return false;
-	return fallback;
-}
-
-/**
- * Step 4b.4 stop-gap nudge config resolver. Defaults match the OpenCode
- * plugin's defaults from `magic-context.ts` schema:
- *   protected_tags=10, nudge_interval_tokens=10000,
- *   iteration_nudge_threshold=10, execute_threshold_percentage=65.
- *
- * Returns config unconditionally (no opt-in env var) because nudges are
- * a low-risk, agent-friendly default in the OpenCode plugin too. Users
- * who want them off can set MAGIC_CONTEXT_PI_NUDGES=false. Step 5b's
- * config loader will replace this with `magic-context.jsonc` discovery.
- *
- * Env vars supported:
- *   - `MAGIC_CONTEXT_PI_NUDGES` ("false" disables entirely)
- *   - `MAGIC_CONTEXT_PI_PROTECTED_TAGS` (default 10)
- *   - `MAGIC_CONTEXT_PI_NUDGE_INTERVAL_TOKENS` (default 10000)
- *   - `MAGIC_CONTEXT_PI_ITERATION_NUDGE_THRESHOLD` (default 10)
- *   - `MAGIC_CONTEXT_PI_EXECUTE_THRESHOLD` (% 1-100; default 65)
- */
-function resolveNudgeConfig(): PiNudgeOptions | undefined {
-	if (!parseBoolEnv(process.env.MAGIC_CONTEXT_PI_NUDGES, true)) {
-		return undefined;
-	}
+function resolveNudgeFromConfig(
+	config: MagicContextConfig,
+): PiNudgeOptions | undefined {
+	if (!config.ctx_reduce_enabled) return undefined;
+	const executeThreshold =
+		typeof config.execute_threshold_percentage === "number"
+			? config.execute_threshold_percentage
+			: (config.execute_threshold_percentage as { default: number }).default;
 	return {
-		protectedTags: parsePositiveInt(
-			process.env.MAGIC_CONTEXT_PI_PROTECTED_TAGS,
-			10,
-		),
-		nudgeIntervalTokens: parsePositiveInt(
-			process.env.MAGIC_CONTEXT_PI_NUDGE_INTERVAL_TOKENS,
-			10_000,
-		),
-		iterationNudgeThreshold: parsePositiveInt(
-			process.env.MAGIC_CONTEXT_PI_ITERATION_NUDGE_THRESHOLD,
-			10,
-		),
-		executeThresholdPercentage: parsePositiveInt(
-			process.env.MAGIC_CONTEXT_PI_EXECUTE_THRESHOLD,
-			65,
-		),
+		protectedTags: config.protected_tags ?? 20,
+		nudgeIntervalTokens: config.nudge_interval_tokens,
+		iterationNudgeThreshold: config.iteration_nudge_threshold,
+		executeThresholdPercentage: executeThreshold,
 	};
 }
 
-/**
- * Step 4b.4 stop-gap auto-search config resolver. Defaults match the
- * OpenCode plugin's `experimental.auto_search` defaults:
- *   enabled=false, score_threshold=0.55, min_prompt_chars=20.
- *
- * Auto-search is opt-in (default disabled) because it costs an embedding
- * round-trip per user turn. Users running a fast local embedding endpoint
- * can flip it on with `MAGIC_CONTEXT_PI_AUTO_SEARCH=true`.
- *
- * Env vars supported:
- *   - `MAGIC_CONTEXT_PI_AUTO_SEARCH` ("true" enables; default false)
- *   - `MAGIC_CONTEXT_PI_AUTO_SEARCH_THRESHOLD` (0.0-1.0; default 0.55)
- *   - `MAGIC_CONTEXT_PI_AUTO_SEARCH_MIN_CHARS` (default 20)
- *   - `MAGIC_CONTEXT_PI_AUTO_SEARCH_GIT` ("true"/"false"; default true)
- */
-function resolveAutoSearchConfig(): PiAutoSearchHandlerOptions {
-	const enabled = parseBoolEnv(process.env.MAGIC_CONTEXT_PI_AUTO_SEARCH, false);
+function resolveAutoSearchFromConfig(
+	config: MagicContextConfig,
+): PiAutoSearchHandlerOptions {
+	const auto = config.experimental?.auto_search;
+	const enabled = auto?.enabled ?? false;
 	return {
 		enabled,
-		scoreThreshold: parseFloat01(
-			process.env.MAGIC_CONTEXT_PI_AUTO_SEARCH_THRESHOLD,
-			0.55,
-		),
-		minPromptChars: parsePositiveInt(
-			process.env.MAGIC_CONTEXT_PI_AUTO_SEARCH_MIN_CHARS,
-			20,
-		),
-		// Memory + embedding are required for the cross-harness recall
-		// design — Pi sees the same shared memories OpenCode injects.
-		memoryEnabled: true,
-		embeddingEnabled: true,
-		// Git commit indexing defaults to true so commits accumulated by
-		// OpenCode's dreamer surface in Pi auto-hints. Step 5b's config
-		// loader will read `experimental.git_commit_indexing.enabled`
-		// directly.
-		gitCommitsEnabled: parseBoolEnv(
-			process.env.MAGIC_CONTEXT_PI_AUTO_SEARCH_GIT,
-			true,
-		),
+		scoreThreshold: auto?.score_threshold ?? 0.55,
+		minPromptChars: auto?.min_prompt_chars ?? 20,
+		// Memory + embedding gates flow from the top-level config keys; the
+		// auto-search runner uses these to decide which sources to query.
+		memoryEnabled: config.memory.enabled,
+		embeddingEnabled: config.embedding.provider !== "off",
+		gitCommitsEnabled:
+			config.experimental?.git_commit_indexing?.enabled ?? false,
 	};
 }
 
-/**
- * Step 5a stop-gap: read the OpenCode plugin's `magic-context.jsonc` to
- * discover the user's existing embedding configuration so Pi initializes
- * compatible vector dimensions.
- *
- * Resolution order:
- *   1. Explicit Pi env vars (none defined yet — leave for Step 5b).
- *   2. `$XDG_CONFIG_HOME/opencode/magic-context.jsonc` or
- *      `~/.config/opencode/magic-context.jsonc`.
- *   3. Local default: `local` provider + `Xenova/all-MiniLM-L6-v2`.
- *
- * Why read OpenCode's config from a Pi plugin?
- * Because the shared cortexkit/magic-context SQLite DB stores embeddings
- * tagged with their model_id. If users run both OpenCode and Pi against
- * the same project (the explicit cross-harness goal), they need to use
- * the same embedding model — otherwise vectors live in different spaces
- * and cosine similarity is always 0. The OpenCode config is treated as
- * authoritative because:
- *   - It almost always exists (Magic Context users install OpenCode first).
- *   - Its embeddings are already in the shared DB.
- *   - Pi-only users (no OpenCode) fall through to the local default.
- *
- * Step 5b will replace this with a real Pi config loader that respects
- * `$project/.pi/magic-context.jsonc` and `~/.pi/agent/magic-context.jsonc`
- * with proper schema validation. For Step 5a we only parse the embedding
- * subtree because that's what blocks ctx_search.
- */
-function resolveEmbeddingConfig(): StopGapEmbeddingConfig {
-	const candidatePaths = [
-		process.env.XDG_CONFIG_HOME
-			? join(process.env.XDG_CONFIG_HOME, "opencode", "magic-context.jsonc")
-			: null,
-		join(homedir(), ".config", "opencode", "magic-context.jsonc"),
-	].filter((p): p is string => p !== null);
-
-	for (const path of candidatePaths) {
-		if (!existsSync(path)) continue;
-		try {
-			const raw = readFileSync(path, "utf-8");
-			const parsed = parseJsonc(raw) as { embedding?: unknown };
-			const emb = parsed?.embedding;
-			if (!emb || typeof emb !== "object") continue;
-			const e = emb as {
-				provider?: string;
-				model?: string;
-				endpoint?: string;
-				api_key?: string;
-			};
-
-			if (e.provider === "off") {
-				info(`embedding config: read provider=off from ${path}`);
-				return { provider: "off" };
-			}
-			if (
-				e.provider === "openai-compatible" &&
-				typeof e.model === "string" &&
-				typeof e.endpoint === "string" &&
-				e.model.length > 0 &&
-				e.endpoint.length > 0
-			) {
-				info(`embedding config: read openai-compatible from ${path}`);
-				return {
-					provider: "openai-compatible",
-					model: e.model,
-					endpoint: e.endpoint,
-					...(typeof e.api_key === "string" && e.api_key.length > 0
-						? { api_key: e.api_key }
-						: {}),
-				};
-			}
-			if (e.provider === "local" || e.provider === undefined) {
-				info(`embedding config: read local from ${path}`);
-				return {
-					provider: "local",
-					model:
-						typeof e.model === "string" && e.model.length > 0
-							? e.model
-							: "Xenova/all-MiniLM-L6-v2",
-				};
-			}
-		} catch (err) {
-			warn(
-				`failed to parse embedding config at ${path}: ${err instanceof Error ? err.message : String(err)} — falling back to default`,
-			);
-		}
-	}
-
-	info(
-		"embedding config: no OpenCode magic-context.jsonc found — using local default",
-	);
-	return { provider: "local", model: "Xenova/all-MiniLM-L6-v2" };
+function resolveDreamerFromConfig(
+	config: MagicContextConfig,
+): DreamerConfig | undefined {
+	return config.dreamer;
 }
 
 /**
  * Pi extension default export. Called once per Pi session.
  *
- * The extension registers itself synchronously, opens the shared SQLite
- * store, and hooks shutdown for orderly cleanup. Heavy work (tool
- * registration, transform pipeline, historian/dreamer) is deferred to
- * later steps so the spike can validate the architectural seams in
- * isolation.
+ * Registers the full Magic Context Pi runtime: tools, transform pipeline
+ * (tagging + drops), historian trigger, nudges, auto-search hint,
+ * /ctx-aug command, system-prompt injection, and dreamer scheduling.
+ * All driven by the user's `magic-context.jsonc` (Pi convention paths).
  */
 export default async function (pi: ExtensionAPI): Promise<void> {
 	const storageDir = getMagicContextStorageDir();
@@ -408,35 +228,49 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			`project=${projectIdentity} | dir=${projectDir}`,
 	);
 
+	// Step 5b: load the user's full magic-context.jsonc config. The loader
+	// reads $cwd/.pi/magic-context.jsonc and ~/.pi/agent/magic-context.jsonc
+	// (Pi convention), validates them through the shared Zod schema, falls
+	// back to defaults for invalid fields per-key, and returns merged
+	// config + warnings.
+	//
+	// We surface warnings via the standard `warn()` channel so users see
+	// them in the magic-context log. Loading never throws — bad config
+	// gracefully degrades to defaults.
+	const { config, warnings, loadedFromPaths } = loadPiConfig({
+		cwd: projectDir,
+	});
+	if (loadedFromPaths.length > 0) {
+		info(`config loaded from: ${loadedFromPaths.join(", ")}`);
+	} else {
+		info("config: no magic-context.jsonc found, using schema defaults");
+	}
+	for (const w of warnings) {
+		warn(`config: ${w}`);
+	}
+
+	// Top-level disable: when `enabled: false` is set in config, register
+	// nothing — same fail-closed posture the OpenCode plugin uses.
+	if (!config.enabled) {
+		info("plugin DISABLED via config (enabled: false) — skipping registration");
+		return;
+	}
+
 	// Initialize the embedding runtime BEFORE registering tools. Without this,
 	// `embedText()` returns null for every query, so semantic search produces
-	// zero candidates and only FTS runs. FTS uses AND-of-tokens semantics, so
-	// natural-language phrases like "what is the purpose of historian" return
-	// no matches even though semantically-related memories exist — exactly
-	// the failure mode hit during Step 5a /ctx-aug live testing.
+	// zero candidates and only FTS runs.
 	//
-	// CROSS-HARNESS COHERENCE REQUIREMENT:
-	// The shared cortexkit/magic-context DB stores memory embeddings tagged
-	// with their model_id. Memories embedded by the OpenCode plugin under
-	// (e.g.) qwen3-embedding-8b live in a 4096-dim space; if Pi initializes
-	// a 384-dim local MiniLM model, every cosine similarity against existing
-	// embeddings is 0 — so semantic search returns nothing for ALL queries
-	// even though the data is there. This was the actual root cause of the
-	// Step 5a "/ctx-aug returns no results" symptom.
-	//
-	// Step 5a stop-gap: read the OpenCode magic-context.jsonc embedding
-	// section if present and reuse it. Step 5b will replace this with a
-	// proper Pi-side config loader that respects $project/.pi/ and
-	// ~/.pi/agent/ overrides. For now the OpenCode config wins because:
-	//   - Magic Context users already have it configured.
-	//   - It's the source of the existing embeddings in the shared DB.
-	//   - Pi-only users (no OpenCode) get a sensible local default.
-	const embeddingConfig = resolveEmbeddingConfig();
-	initializeEmbedding(embeddingConfig);
+	// CROSS-HARNESS COHERENCE: The shared cortexkit/magic-context DB stores
+	// memory embeddings tagged with model_id. Pi must use the same embedding
+	// model as OpenCode for cosine similarity to work against existing
+	// vectors — otherwise every search returns 0 hits. The schema's
+	// `embedding` block is shared between harnesses, so users only need to
+	// set it once (typically in the user-level magic-context.jsonc).
+	initializeEmbedding(config.embedding);
 	info(
-		`initialized embedding runtime: provider=${embeddingConfig.provider}` +
-			(embeddingConfig.provider !== "off"
-				? ` model=${(embeddingConfig as { model?: string }).model ?? "(default)"}`
+		`initialized embedding runtime: provider=${config.embedding.provider}` +
+			(config.embedding.provider !== "off"
+				? ` model=${(config.embedding as { model?: string }).model ?? "(default)"}`
 				: ""),
 	);
 
@@ -447,30 +281,22 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	// directory.
 	registerMagicContextTools(pi, {
 		db,
-		// TODO(step 4b): wire to a real config loader. For the spike, ship
-		// with the same defaults the OpenCode plugin uses out of the box.
-		memoryEnabled: true,
-		embeddingEnabled: true,
-		gitCommitsEnabled: false,
+		memoryEnabled: config.memory.enabled,
+		embeddingEnabled: config.embedding.provider !== "off",
+		gitCommitsEnabled:
+			config.experimental?.git_commit_indexing?.enabled ?? false,
 	});
 	info("registered tools: ctx_search, ctx_memory, ctx_note");
 
-	// Register the per-LLM-call transform pipeline (Step 4b.2). Tags
-	// eligible message parts via the shared Tagger and applies queued
-	// drops from `pending_ops` so /ctx-flush and ctx_reduce both work
-	// against Pi sessions. ctx_reduce is exposed in the tool registry so
-	// agents can invoke it; ctx_reduce_enabled is hardcoded to `true`
-	// here pending the Step 5b config loader.
-	//
-	// Step 4b.4: nudge + auto-search config layered on top. Both default
-	// to OpenCode-equivalent defaults (rolling nudges on, auto-search off)
-	// so existing Pi users get the same baseline behavior as OpenCode.
-	const historianConfig = resolveHistorianConfig();
-	const nudgeConfig = resolveNudgeConfig();
-	const autoSearchConfig = resolveAutoSearchConfig();
+	// Register the per-LLM-call transform pipeline. Tags eligible message
+	// parts via the shared Tagger and applies queued drops from
+	// `pending_ops` so /ctx-flush and ctx_reduce work against Pi sessions.
+	const historianConfig = resolveHistorianFromConfig(config);
+	const nudgeConfig = resolveNudgeFromConfig(config);
+	const autoSearchConfig = resolveAutoSearchFromConfig(config);
 	registerPiContextHandler(pi, {
 		db,
-		ctxReduceEnabled: true,
+		ctxReduceEnabled: config.ctx_reduce_enabled,
 		historian: historianConfig,
 		nudge: nudgeConfig,
 		autoSearch: autoSearchConfig,
@@ -478,31 +304,51 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	info(
 		historianConfig
 			? `registered historian trigger (model=${historianConfig.model}, executeThreshold=${historianConfig.executeThresholdPercentage ?? 65}%)`
-			: "registered historian trigger: DISABLED (set MAGIC_CONTEXT_PI_HISTORIAN_MODEL to enable)",
+			: "registered historian trigger: DISABLED (set historian.model in magic-context.jsonc)",
 	);
 	info(
 		nudgeConfig
 			? `registered nudges (protected=${nudgeConfig.protectedTags}, interval=${nudgeConfig.nudgeIntervalTokens}, iter=${nudgeConfig.iterationNudgeThreshold})`
-			: "registered nudges: DISABLED (MAGIC_CONTEXT_PI_NUDGES=false)",
+			: "registered nudges: DISABLED (ctx_reduce_enabled=false)",
 	);
 	info(
 		autoSearchConfig.enabled
 			? `registered auto-search hint (threshold=${autoSearchConfig.scoreThreshold}, minChars=${autoSearchConfig.minPromptChars})`
-			: "registered auto-search hint: DISABLED (set MAGIC_CONTEXT_PI_AUTO_SEARCH=true to enable)",
+			: "registered auto-search hint: DISABLED (experimental.auto_search.enabled=false)",
 	);
 
-	// Register the /ctx-aug slash command. Sidekick is "off" by default
-	// for Step 5a — users opt in by writing a sidekick.model setting in
-	// magic-context.jsonc. When config loading lands in Step 4b/5b, we
-	// resolve the real config here. Until then, the command registers but
-	// surfaces a helpful "not configured" message when invoked.
-	const sidekickConfig: PiSidekickConfig | undefined = resolveSidekickConfig();
+	// Register the /ctx-aug slash command. Sidekick config is read straight
+	// from `config.sidekick` — when disabled or missing a model, the command
+	// surfaces a "not configured" message instead of attempting to run.
+	const sidekickConfig: PiSidekickConfig | undefined =
+		resolveSidekickFromConfig(config);
 	registerCtxAugCommand(pi, sidekickConfig);
 	info(
 		sidekickConfig
 			? `registered /ctx-aug (sidekick model=${sidekickConfig.model})`
-			: "registered /ctx-aug (sidekick disabled — set sidekick.model in config)",
+			: "registered /ctx-aug (sidekick disabled — set sidekick.enabled=true and sidekick.model in config)",
 	);
+
+	// Register Pi project with the singleton dreamer timer. When dreamer is
+	// disabled in config (default) this is a no-op. When enabled, the timer
+	// schedules dream runs based on config.dreamer.schedule and uses
+	// PiSubagentRunner to spawn child sessions for each task.
+	const dreamerConfig = resolveDreamerFromConfig(config);
+	if (dreamerConfig) {
+		registerPiDreamerProject({
+			db,
+			projectDir,
+			projectIdentity,
+			config: dreamerConfig,
+		});
+		info(
+			dreamerConfig.enabled
+				? `registered dreamer (schedule=${dreamerConfig.schedule}, tasks=[${dreamerConfig.tasks.join(",")}])`
+				: "registered dreamer: DISABLED (dreamer.enabled=false)",
+		);
+	} else {
+		info("registered dreamer: DISABLED (no dreamer config)");
+	}
 
 	// Inject project memories and dreamer-maintained docs into the system
 	// prompt for every agent turn. This is the user-visible "memories show
@@ -568,6 +414,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		} catch (err) {
 			warn("agent_end: awaitInFlightHistorians threw:", err);
 		}
+		try {
+			await awaitInFlightDreamers();
+		} catch (err) {
+			warn("agent_end: awaitInFlightDreamers threw:", err);
+		}
 	});
 
 	// Close the shared DB on session shutdown (fires on reload). Other
@@ -575,6 +426,14 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	// unaffected. We don't need to await historians here because
 	// agent_end already did that on the way out.
 	pi.on("session_shutdown", async () => {
+		// Unregister this project from the singleton dreamer timer first so
+		// the next 15-minute tick doesn't enqueue work for a session that's
+		// already shutting down.
+		try {
+			unregisterPiDreamerProject({ projectIdentity });
+		} catch (err) {
+			warn("shutdown: unregisterPiDreamerProject threw:", err);
+		}
 		if (db) {
 			closeQuietly(db);
 			info("shutdown: SQLite store closed");
