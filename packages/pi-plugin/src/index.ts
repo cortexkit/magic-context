@@ -39,7 +39,6 @@ import {
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { setHarness } from "@magic-context/core/shared/harness";
 import { log } from "@magic-context/core/shared/logger";
-import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
 	type PiSidekickConfig,
@@ -551,22 +550,24 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		}
 	});
 
-	// Close the shared DB on session shutdown (fires on reload). Other
-	// sessions in the same process keep their own handle and are
-	// unaffected. We don't need to await historians here because
-	// agent_end already did that on the way out.
+	// Unregister project from dreamer timer on session shutdown. Pi's
+	// `/reload` command tears down extensions and re-runs this default
+	// export — without unregistering, the dreamer timer would hold a
+	// stale reference to the previous extension instance.
+	//
+	// IMPORTANT: We do NOT close the SQLite handle here. `openDatabase()`
+	// caches handles in a process-lifetime Map keyed by path; closing
+	// the handle invalidates the cache entry, but the Map still returns
+	// the closed handle on the next `openDatabase()` call after reload,
+	// causing every tool/hook to fail with "database is not open". The
+	// DB handle is intentionally process-lifetime — Pi's `/reload`
+	// re-runs the extension code but keeps the host process alive, so
+	// the cached handle is still valid across reload boundaries.
 	pi.on("session_shutdown", async () => {
-		// Unregister this project from the singleton dreamer timer first so
-		// the next 15-minute tick doesn't enqueue work for a session that's
-		// already shutting down.
 		try {
 			unregisterPiDreamerProject({ projectIdentity });
 		} catch (err) {
 			warn("shutdown: unregisterPiDreamerProject threw:", err);
-		}
-		if (db) {
-			closeQuietly(db);
-			info("shutdown: SQLite store closed");
 		}
 	});
 }
