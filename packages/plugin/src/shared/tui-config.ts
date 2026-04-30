@@ -12,6 +12,29 @@ import { getOpenCodeConfigPaths } from "./opencode-config-dir";
 const PLUGIN_NAME = "@cortexkit/opencode-magic-context";
 const PLUGIN_ENTRY = `${PLUGIN_NAME}@latest`;
 
+/**
+ * Detect whether a tui.json plugin entry already references magic-context, in
+ * any form. Covers:
+ *   - Bare npm name: "@cortexkit/opencode-magic-context"
+ *   - Versioned npm: "@cortexkit/opencode-magic-context@latest" / "@0.15.7" / etc.
+ *   - Local dev directory path (absolute or relative): ".../opencode-magic-context"
+ *     or ".../opencode-magic-context/packages/plugin"
+ *   - file:// URLs pointing at the same paths
+ *   - Tarball paths ending in opencode-magic-context-*.tgz
+ *
+ * Without the path/URL detection, doctor/setup auto-injection adds the npm
+ * @latest entry on top of an existing dev path, double-loading the plugin.
+ */
+function isMagicContextEntry(entry: string): boolean {
+    if (!entry) return false;
+    if (entry === PLUGIN_NAME) return true;
+    if (entry.startsWith(`${PLUGIN_NAME}@`)) return true;
+    // Local directory paths: match anywhere in the string so the setup pattern
+    // (dir-only, dir + /packages/plugin, file:// + either) all qualify.
+    if (entry.includes("opencode-magic-context")) return true;
+    return false;
+}
+
 function resolveTuiConfigPath(): string {
     const configDir = getOpenCodeConfigPaths({ binary: "opencode" }).configDir;
     const jsoncPath = join(configDir, "tui.jsonc");
@@ -40,20 +63,23 @@ export function ensureTuiPluginEntry(): boolean {
             ? config.plugin.filter((p): p is string => typeof p === "string")
             : [];
 
-        const existingIdx = plugins.findIndex(
-            (p) => p === PLUGIN_NAME || p.startsWith(`${PLUGIN_NAME}@`),
-        );
+        const existingIdx = plugins.findIndex(isMagicContextEntry);
         if (existingIdx >= 0) {
-            if (plugins[existingIdx] === PLUGIN_ENTRY) {
+            const existing = plugins[existingIdx];
+            if (existing === PLUGIN_ENTRY) {
                 return false; // Already @latest
             }
-            // Only upgrade versionless entries (bare package name) to @latest.
-            // Pinned versions (e.g. @0.8.10) are left as-is — user chose them intentionally.
-            const existing = plugins[existingIdx];
+            // Only upgrade the bare versionless npm name to @latest.
+            // Pinned versions (e.g. @0.8.10), local dev paths
+            // (~/Work/OSS/opencode-magic-context/packages/plugin), and
+            // file:// URLs are all left as-is — the user chose them
+            // intentionally and overwriting their dev-loop entry would
+            // either double-load the plugin (npm + dev) or replace
+            // their working directory pointer.
             if (existing === PLUGIN_NAME) {
                 plugins[existingIdx] = PLUGIN_ENTRY;
             } else {
-                return false; // Pinned version — don't touch
+                return false;
             }
         } else {
             plugins.push(PLUGIN_ENTRY);

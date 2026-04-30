@@ -1,3 +1,4 @@
+import { getHarness } from "../../shared/harness";
 import type { Database } from "../../shared/sqlite";
 import { clearCompressionDepth } from "./compression-depth-storage";
 import { clearIndexedMessages } from "./message-index";
@@ -29,8 +30,15 @@ export function getOrCreateSessionMeta(db: Database, sessionId: string): Session
     // sessions default to `isSubagent: false` on their first transform pass,
     // triggering primary-mode behavior (§N§ prefixes, system adjuncts, etc.)
     // that then has to be corrected on the next pass — busting prompt-cache.
+    //
+    // Harness gate: this fallback opens OpenCode's opencode.db read-only to
+    // probe `session.parent_id`. Pi has no opencode.db and no concept of
+    // OpenCode-style subagents — calling the fallback there throws "unable
+    // to open database file" and floods the shared log. Skip on non-opencode
+    // harnesses; Pi sessions always default to isSubagent=false.
     const defaults = getDefaultSessionMeta(sessionId);
-    const fallbackSubagent = resolveIsSubagentFromOpenCodeDb(sessionId);
+    const fallbackSubagent =
+        getHarness() === "opencode" ? resolveIsSubagentFromOpenCodeDb(sessionId) : null;
     if (fallbackSubagent === true) {
         defaults.isSubagent = true;
     }
