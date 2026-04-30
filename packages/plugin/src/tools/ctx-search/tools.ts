@@ -72,9 +72,8 @@ function formatResult(result: UnifiedSearchResult, index: number): string {
     const expandStart = Math.max(1, result.messageOrdinal - 3);
     const expandEnd = result.messageOrdinal + 3;
     return [
-        `[${index}] [message] score=${result.score.toFixed(2)} ordinal=${result.messageOrdinal} role=${result.role}`,
+        `[${index}] [message] score=${result.score.toFixed(2)} ordinal=${result.messageOrdinal} range=${expandStart}-${expandEnd} role=${result.role}`,
         result.content,
-        `Expand with ctx_expand(start=${expandStart}, end=${expandEnd}).`,
     ].join("\n");
 }
 
@@ -83,7 +82,13 @@ function formatSearchResults(query: string, results: UnifiedSearchResult[]): str
         return `No results found for "${query}" across memories, git commits, or message history.`;
     }
 
-    const body = results.map((result, index) => formatResult(result, index + 1)).join("\n\n");
+    const bodyParts = results.map((result, index) => formatResult(result, index + 1));
+    if (results.some((result) => result.source === "message")) {
+        bodyParts.push(
+            "Use ctx_expand(start, end) with the range from any message result above to read the full conversation context.",
+        );
+    }
+    const body = bodyParts.join("\n\n");
     return `Found ${results.length} result${results.length === 1 ? "" : "s"} for "${query}":\n\n${body}`;
 }
 
