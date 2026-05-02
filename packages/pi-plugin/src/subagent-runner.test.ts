@@ -113,6 +113,11 @@ describe("subagent-runner pure helpers", () => {
 			"--print",
 			"--mode",
 			"json",
+			// `--no-session` keeps historian / sidekick / dreamer /
+			// recomp / compressor child sessions out of `pi resume`
+			// and the session picker (uses Pi's
+			// SessionManager.inMemory()).
+			"--no-session",
 			"--no-extensions",
 			"--no-skills",
 			"--no-prompt-templates",
@@ -122,6 +127,23 @@ describe("subagent-runner pure helpers", () => {
 			"anthropic/claude-sonnet",
 			"summarize this session",
 		]);
+	});
+
+	it("always includes --no-session so child sessions don't appear in pi resume", () => {
+		// Pinned-down regression: the user-visible promise of magic-context
+		// hidden subagents is that historian/sidekick/dreamer runs never
+		// pollute Pi's session list. If this assertion ever fails, the
+		// child sessions WILL show up in `pi resume` again.
+		const args = __test.buildArgs({
+			...baseOptions,
+			model: "anthropic/claude-sonnet",
+		});
+		expect(args).toContain("--no-session");
+		// And before --system-prompt / --model so they're parsed in the
+		// expected order alongside other startup-time flags.
+		const noSessionIdx = args.indexOf("--no-session");
+		const modelIdx = args.indexOf("--model");
+		expect(noSessionIdx).toBeLessThan(modelIdx);
 	});
 
 	it("builds --models when fallback models are provided", () => {
@@ -148,6 +170,46 @@ describe("subagent-runner pure helpers", () => {
 		if (!parsed.ok) {
 			expect(parsed.error).toContain("failed to parse event");
 			expect(parsed.error).toContain("line={not-json");
+		}
+	});
+
+	// Subagent extension entry loading. These tests verify the
+	// runner's argv contract for loading Magic Context's lean subagent
+	// extension (./subagent-entry.js) inside spawned Pi child processes.
+	// The bundle is only present after `bun run build`; in unit tests
+	// running source via Bun directly, the dev fallback (no `-x`) kicks
+	// in. Both shapes are valid and locked in.
+
+	it("dev mode (no bundle): does NOT pass -x flag, so subagents run without Magic Context tools", () => {
+		// In dev mode (running .ts source), there's no dist/subagent-entry.js
+		// next to subagent-runner.ts, so resolveSubagentEntryPath() returns
+		// undefined and we skip the -x flag. This matches the original
+		// pre-tools behavior where subagents ran with `--no-extensions`
+		// and no Magic Context tools at all.
+		const args = __test.buildArgs({
+			...baseOptions,
+			agent: "historian",
+			model: "anthropic/claude-sonnet",
+		});
+		// The `-x` flag should NOT appear when the bundle isn't built
+		// (this test runs the source, not the dist build). Pinning this
+		// is what lets us run unit tests without a build step.
+		const xIdx = args.indexOf("-x");
+		expect(xIdx).toBe(-1);
+		expect(args).not.toContain("--magic-context-dreamer-actions");
+	});
+
+	it("does not set --magic-context-dreamer-actions for non-dreamer agents", () => {
+		// Even if the bundle were present, only agent="dreamer" should
+		// see the elevated ctx_memory action surface. Historian, sidekick,
+		// compressor etc. get write/delete/list only.
+		for (const agent of ["historian", "sidekick", "compressor", "recomp"]) {
+			const args = __test.buildArgs({
+				...baseOptions,
+				agent,
+				model: "anthropic/claude-sonnet",
+			});
+			expect(args).not.toContain("--magic-context-dreamer-actions");
 		}
 	});
 });
@@ -392,6 +454,7 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 				"--print",
 				"--mode",
 				"json",
+				"--no-session",
 				"--no-extensions",
 				"--no-skills",
 				"--no-prompt-templates",

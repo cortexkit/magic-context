@@ -8,11 +8,10 @@
  *   2. Resolve session ID and project identity from the Pi extension context.
  *   3. Format results for the LLM the same way the OpenCode plugin does.
  *
- * Note: `ctx_expand` is intentionally NOT registered yet. It currently relies
- * on raw OpenCode message ordinals indexed via `message_history_index`. Pi
- * sessions are JSONL files, not OpenCode's `opencode.db`, so we'd need a
- * separate Pi-side message indexer before `ctx_expand` becomes meaningful.
- * Defer until the transform pipeline lands in Step 4b.
+ * `ctx_expand` is now registered alongside (see `./ctx-expand.ts`) — Pi
+ * sessions are JSONL files, but the shared `readSessionChunk` reads
+ * via the `RawMessageProvider` registry, so Pi just registers its own
+ * provider for the duration of an expand call.
  */
 
 import { getLastCompartmentEndMessage } from "@magic-context/core/features/magic-context/compartment-storage";

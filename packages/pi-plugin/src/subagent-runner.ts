@@ -1,10 +1,64 @@
 import * as childProcess from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, resolve as resolvePath } from "node:path";
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 import type {
 	SubagentRunner,
 	SubagentRunOptions,
 	SubagentRunResult,
 } from "@magic-context/core/shared/subagent-runner";
+
+/**
+ * Resolve the path to the lean subagent extension entry that gets loaded
+ * inside spawned Pi child processes. The bundle ships at
+ * `dist/subagent-entry.js` next to `dist/index.js` (this module). We use
+ * `import.meta.url` so the path resolves correctly regardless of where
+ * the npm package is installed (or where it's symlinked from in dev).
+ *
+ * Falls back to undefined if the file isn't found at the expected
+ * location — caller should treat that as a soft signal to skip the
+ * `-x` flag (subagent will run without Magic Context tools, which is
+ * what the original `--no-extensions` behavior gave us).
+ */
+function resolveSubagentEntryPath(): string | undefined {
+	try {
+		// Resolve from the current module's directory. In dev (running
+		// .ts via Bun) and in prod (running .js from dist/), this lands
+		// in the same directory as the runner itself.
+		const here = dirname(fileURLToPath(import.meta.url));
+		const candidate = resolvePath(here, "subagent-entry.js");
+		if (existsSync(candidate)) return candidate;
+
+		// Dev fallback: when running source from packages/pi-plugin/src/
+		// the .js bundle doesn't exist yet; skip the -x flag so tests
+		// running pre-build don't fail. Production builds always have
+		// the bundle.
+		return undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+const SUBAGENT_ENTRY_PATH = resolveSubagentEntryPath();
+
+/**
+ * Set of subagent agent ids that get the dreamer-only ctx_memory
+ * action surface (update/merge/archive). Mirrors OpenCode's
+ * `tool-registry.ts:114` allowedActions split: only the dreamer agent
+ * gets the elevated surface; everyone else (historian, sidekick,
+ * compressor, ad-hoc commands) gets write/delete/list only.
+ *
+ * Membership uses the SAME agent strings the Pi callers actually pass
+ * (see e.g. `dreamer/index.ts` passing `"magic-context-dreamer"`). If
+ * a new dreamer-equivalent caller is added, register its agent id
+ * here too. Mismatched agent strings silently disable the elevated
+ * action surface.
+ */
+const DREAMER_ACTION_AGENTS: ReadonlySet<string> = new Set([
+	"dreamer",
+	"magic-context-dreamer",
+]);
 
 /**
  * Pi-side implementation of `SubagentRunner`.
@@ -331,6 +385,16 @@ export function buildArgs(options: SubagentRunOptions): string[] {
 		"--print",
 		"--mode",
 		"json",
+		// `--no-session` makes Pi use SessionManager.inMemory() — no
+		// JSONL is written to ~/.pi/agent/sessions/<cwd>/, so historian /
+		// sidekick / dreamer / recomp / compressor child sessions never
+		// show up in `pi resume` or the session picker. We don't need
+		// the persisted JSONL anyway: the result comes back through the
+		// `agent_end` event on stdout (see extractFinalAssistant). Maps
+		// directly to OpenCode's "hidden subagent" pattern, which lets
+		// historian etc. stay invisible to the user even though they're
+		// real LLM rounds the user pays for.
+		"--no-session",
 		// Disable extension/skill/template discovery in the spawned child
 		// for two reasons:
 		//   (1) Recursion: without this, every historian/sidekick/dreamer
@@ -346,10 +410,32 @@ export function buildArgs(options: SubagentRunOptions): string[] {
 		"--no-prompt-templates",
 		// --no-tools is intentionally NOT set: historian and dreamer use
 		// Pi's built-in tools (Edit, Write, etc.) for some maintenance
-		// tasks. Sidekick uses ctx_search, but that's exposed via a
-		// different mechanism. If we ever need to harden subagent tool
-		// surfaces this is the right toggle.
+		// tasks. Sidekick uses ctx_search via the lean subagent extension
+		// loaded with `-x` below.
 	];
+
+	// Load Magic Context's lean subagent extension entry alongside
+	// `--no-extensions`. Verified at pi-coding-agent
+	// resource-loader.js:272-274: `--no-extensions` skips Pi's
+	// discovered-extensions scan but still loads explicit `-x` paths,
+	// so we get tools (ctx_search, ctx_memory, ctx_note, ctx_expand)
+	// without recursion risk (the lean entry never registers historian,
+	// dreamer, transform, or any other event handler that could spawn
+	// further subagents). When the bundle isn't present (e.g. running
+	// source from src/ without a build), skip the flag — the subagent
+	// will run without Magic Context tools, matching the original
+	// `--no-extensions` behavior.
+	if (SUBAGENT_ENTRY_PATH) {
+		args.push("-x", SUBAGENT_ENTRY_PATH);
+
+		// Only the dreamer subagent gets the elevated ctx_memory action
+		// surface (update/merge/archive). Mirrors OpenCode's
+		// tool-registry.ts:114 allowedActions split. The flag is read
+		// inside the subagent extension via `pi.getFlag(...)`.
+		if (DREAMER_ACTION_AGENTS.has(options.agent)) {
+			args.push("--magic-context-dreamer-actions");
+		}
+	}
 
 	if (options.systemPrompt && options.systemPrompt.length > 0) {
 		// We intentionally use --system-prompt (replace) rather than
