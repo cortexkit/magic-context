@@ -50,7 +50,10 @@ async function runHistorianWith(args: {
 	outputs: string[];
 	memoryEnabled?: boolean;
 	autoPromote?: boolean;
+	twoPass?: boolean;
 	onPublished?: () => void;
+	appendCompaction?: Parameters<typeof runPiHistorian>[0]["appendCompaction"];
+	readBranchEntries?: () => unknown[];
 }) {
 	const db = createTestDb();
 	const runner = runnerReturning([...args.outputs]);
@@ -62,9 +65,12 @@ async function runHistorianWith(args: {
 		runner,
 		historianModel: "test/model",
 		historianChunkTokens: 20_000,
+		twoPass: args.twoPass,
 		memoryEnabled: args.memoryEnabled,
 		autoPromote: args.autoPromote,
 		onPublished: args.onPublished,
+		appendCompaction: args.appendCompaction,
+		readBranchEntries: args.readBranchEntries,
 	});
 	return { db, runner };
 }
@@ -141,6 +147,35 @@ describe("runPiHistorian", () => {
 		}
 	});
 
+	it("appends a Pi-native compaction marker after publication", async () => {
+		const appendCompaction = mock(() => "compact-1");
+		const entries = Array.from({ length: 6 }, (_, index) => ({
+			type: "message",
+			id: `entry-${index + 1}`,
+			message: { role: index % 2 === 0 ? "user" : "assistant" },
+		}));
+		const { db } = await runHistorianWith({
+			outputs: [successXml()],
+			appendCompaction,
+			readBranchEntries: () => entries,
+		});
+		try {
+			expect(appendCompaction).toHaveBeenCalledTimes(1);
+			expect(appendCompaction).toHaveBeenCalledWith(
+				expect.stringContaining("Initial Pi slice"),
+				"entry-3",
+				expect.any(Number),
+				expect.objectContaining({
+					source: "magic-context",
+					lastCompactedOrdinal: 2,
+				}),
+				true,
+			);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("promotes memories only when memoryEnabled and autoPromote allow it", async () => {
 		const projectPath = resolveProjectIdentity(process.cwd());
 		const allowed = await runHistorianWith({
@@ -168,5 +203,79 @@ describe("runPiHistorian", () => {
 		} finally {
 			closeQuietly(blocked.db);
 		}
+	});
+
+	describe("historian.two_pass", () => {
+		it("does NOT run an editor pass when twoPass is false (default)", async () => {
+			const { db, runner } = await runHistorianWith({
+				outputs: [successXml()],
+				// twoPass omitted → defaults to undefined/false
+			});
+			try {
+				// One subagent run = first pass only.
+				expect(runner.run).toHaveBeenCalledTimes(1);
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it("runs the editor pass when twoPass=true and uses editor output", async () => {
+			const draftXml = successXml("Draft fact only.");
+			const editedXml = successXml("Edited fact replaced the draft.");
+			const { db, runner } = await runHistorianWith({
+				outputs: [draftXml, editedXml],
+				twoPass: true,
+			});
+			try {
+				// Two subagent runs = first pass + editor pass.
+				expect(runner.run).toHaveBeenCalledTimes(2);
+				// Editor output won — the persisted fact is from the editor.
+				expect(getSessionFacts(db, "ses-historian")).toEqual([
+					expect.objectContaining({
+						content: "Edited fact replaced the draft.",
+					}),
+				]);
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it("falls back to draft when editor output fails validation", async () => {
+			const draftXml = successXml("Original draft fact.");
+			// Editor returns garbage — validation fails, draft is preserved.
+			const { db, runner } = await runHistorianWith({
+				outputs: [draftXml, "not valid xml at all"],
+				twoPass: true,
+			});
+			try {
+				expect(runner.run).toHaveBeenCalledTimes(2);
+				// Draft fact is published despite editor failure (no data loss).
+				expect(getSessionFacts(db, "ses-historian")).toEqual([
+					expect.objectContaining({ content: "Original draft fact." }),
+				]);
+				// Compartments still persisted.
+				expect(getCompartments(db, "ses-historian")).toEqual([
+					expect.objectContaining({ title: "Initial Pi slice" }),
+				]);
+			} finally {
+				closeQuietly(db);
+			}
+		});
+
+		it("does NOT run editor pass when first-pass + repair both fail", async () => {
+			// First-pass and repair both invalid → editor pass should be
+			// skipped because there's no draft to refine.
+			const { db, runner } = await runHistorianWith({
+				outputs: ["not xml", "still not xml"],
+				twoPass: true,
+			});
+			try {
+				// Exactly 2 calls: first-pass + repair. NOT 3 (no editor).
+				expect(runner.run).toHaveBeenCalledTimes(2);
+				expect(getCompartments(db, "ses-historian")).toEqual([]);
+			} finally {
+				closeQuietly(db);
+			}
+		});
 	});
 });

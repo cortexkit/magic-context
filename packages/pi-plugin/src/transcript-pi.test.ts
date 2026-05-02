@@ -19,7 +19,12 @@ describe("createPiTranscript", () => {
 		transcript.commit();
 		const output = transcript.getOutputMessages();
 
-		expect(output).not.toBe(messages);
+		// commit() now syncs mutations from `working` back into source so
+		// downstream callers (e.g. `<session-history>` injection) can splice
+		// or unshift on the same array Pi sent us. Output is therefore the
+		// SAME reference as the source input, with mutations applied in
+		// place at the dirty indices.
+		expect(output).toBe(messages);
 		expect(textOf(output[0] as never)).toBe("hello tagged");
 		expect(textOf(output[1] as never)).toBe("world");
 	});

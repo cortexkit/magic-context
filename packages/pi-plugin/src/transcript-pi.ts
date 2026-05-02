@@ -176,15 +176,31 @@ export function createPiTranscript(
 		commit(): void {
 			if (committed) return;
 			committed = true;
-			// Mutations have already been applied to `working[i]` for
-			// each dirty index via the part proxies. Nothing left to do
-			// — we just lock in the result. The actual rebuild happens
-			// in writeBack* helpers when mutations fire.
+			// Sync mutations from `working` back into `source` so that
+			// any structural changes the caller applies to `source`
+			// directly (e.g. `<session-history>` injection's splice +
+			// message[0] prepend) compose correctly with our part-level
+			// mutations.
+			//
+			// Without this, source[i] still holds the pre-mutation
+			// shape (because part proxies wrote to `working[i]` only)
+			// and downstream callers that operate on source would
+			// either see stale content or skip mutated items entirely.
+			//
+			// The two arrays start identical (working = source.slice())
+			// so copying just the dirty indices is sufficient.
+			for (const idx of dirtyMessages) {
+				if (idx < source.length && idx < working.length) {
+					(source as unknown as PiAgentMessage[])[idx] = working[idx];
+				}
+			}
 		},
 		getOutputMessages(): unknown[] {
-			// If nothing changed, return source identity so Pi can
-			// detect the no-op case. Otherwise return the working copy.
-			return dirtyMessages.size > 0 ? working : source;
+			// After commit(), source has all part-level mutations
+			// applied AND any structural changes the caller made
+			// directly to source (splices, unshifts). Returning source
+			// is therefore authoritative.
+			return source;
 		},
 	};
 }
@@ -589,10 +605,41 @@ function createPiAssistantPart(
 			}
 			return { toolName: p.name, inputByteSize };
 		},
+		// Replace this assistant part's content with a sentinel placeholder.
+		//
+		// CRITICAL for toolCall parts: we MUST preserve `{ type: "toolCall",
+		// id, name }` so the Pi → provider serializer still emits a
+		// `function_call` / `tool_use` block with the original `call_id`.
+		// The corresponding `toolResult` message in the conversation
+		// references that same `call_id` (via `toolCallId`); breaking the
+		// pairing causes the provider to reject the request with
+		// errors like "No tool call found for function call output with
+		// call_id …" (Codex) or "tool_use blocks must be followed by
+		// matching tool_result blocks" (Anthropic).
+		//
+		// We therefore keep the toolCall shell with its id + name and
+		// reduce `arguments` to a tiny marker object. Bulk argument
+		// content is what we really want to drop; the structural shape
+		// stays intact so message-pair integrity holds across the
+		// API boundary.
+		//
+		// For non-toolCall assistant parts (text / thinking) we still
+		// fall back to a plain text-sentinel replacement — those have no
+		// pairing constraint and the bulk reduction is the only goal.
 		replaceWithSentinel(sentinelText: string): boolean {
 			const current = (working[messageIndex] as PiAssistantMessage).content;
+			const existing = current[partIndex];
 			const newContent = current.slice();
-			newContent[partIndex] = { type: "text", text: sentinelText };
+			if (existing && existing.type === "toolCall") {
+				newContent[partIndex] = {
+					type: "toolCall",
+					id: existing.id,
+					name: existing.name,
+					arguments: { __magic_context_dropped__: sentinelText },
+				};
+			} else {
+				newContent[partIndex] = { type: "text", text: sentinelText };
+			}
 			working[messageIndex] = {
 				...(working[messageIndex] as PiAssistantMessage),
 				content: newContent,

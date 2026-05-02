@@ -10,12 +10,8 @@ import { executeStatus } from "@magic-context/core/hooks/magic-context/execute-s
 import { formatBytes } from "@magic-context/core/hooks/magic-context/format-bytes";
 import { describeError } from "@magic-context/core/shared/error-message";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import {
-	CTX_STATUS_CUSTOM_TYPE,
-	type CtxStatusMessageContent,
-	resolveSessionId,
-	sendCtxStatusMessage,
-} from "./pi-command-utils";
+import { showStatusDialog } from "../dialogs/status-dialog";
+import { resolveSessionId, sendCtxStatusMessage } from "./pi-command-utils";
 
 export interface RegisterCtxStatusDeps {
 	db: ContextDatabase;
@@ -64,14 +60,6 @@ export function registerCtxStatusCommand(
 	pi: ExtensionAPI,
 	deps: RegisterCtxStatusDeps,
 ): void {
-	pi.registerMessageRenderer<CtxStatusMessageContent>(
-		CTX_STATUS_CUSTOM_TYPE,
-		(message) => {
-			void message;
-			return undefined;
-		},
-	);
-
 	pi.registerCommand("ctx-status", {
 		description: "Show Magic Context status for the current Pi session",
 		handler: async (_args, ctx) => {
@@ -86,6 +74,11 @@ export function registerCtxStatusCommand(
 			}
 
 			try {
+				if (ctx.hasUI) {
+					await showStatusDialog(pi, ctx, deps);
+					return;
+				}
+
 				const usage = ctx.getContextUsage?.();
 				const modelKey = ctx.model
 					? `${ctx.model.provider}/${ctx.model.id}`

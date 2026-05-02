@@ -53,7 +53,9 @@ import {
 import { updateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
 import {
 	buildCompartmentAgentPrompt,
+	buildHistorianEditorPrompt,
 	COMPARTMENT_AGENT_SYSTEM_PROMPT,
+	HISTORIAN_EDITOR_SYSTEM_PROMPT,
 } from "@magic-context/core/hooks/magic-context/compartment-prompt";
 import { queueDropsForCompartmentalizedMessages } from "@magic-context/core/hooks/magic-context/compartment-runner-drop-queue";
 import { buildExistingStateXml } from "@magic-context/core/hooks/magic-context/compartment-runner-state-xml";
@@ -120,12 +122,27 @@ export interface PiHistorianDeps {
 	historianChunkTokens: number;
 	/** Optional per-call timeout (default 120s). */
 	historianTimeoutMs?: number;
+	/** When true, run a second editor pass after a successful first pass to
+	 *  clean low-signal U: lines and cross-compartment duplicates. Mirrors
+	 *  OpenCode's `historian.two_pass` config. Editor validation falls back
+	 *  to the first-pass result on failure. Default: false. */
+	twoPass?: boolean;
 	/** Cross-session memory feature gate (`memory.enabled`). */
 	memoryEnabled?: boolean;
 	/** Automatic-promotion gate (`memory.auto_promote`). */
 	autoPromote?: boolean;
 	/** Optional callback invoked on successful publication for cache-bust signaling. */
 	onPublished?: () => void;
+	/** Optional Pi-native compaction append hook (`sessionManager.appendCompaction`). */
+	appendCompaction?: (
+		summary: string,
+		firstKeptEntryId: string,
+		tokensBefore: number,
+		details?: unknown,
+		fromHook?: boolean,
+	) => string | undefined;
+	/** Optional raw Pi branch entries used to map raw ordinals back to entry ids. */
+	readBranchEntries?: () => unknown[];
 	/** Optional callback for surfacing failure notices (Pi UI / logs). */
 	notifyIssue?: (message: string) => void | Promise<void>;
 }
@@ -141,9 +158,12 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		fallbackModels,
 		historianChunkTokens,
 		historianTimeoutMs = DEFAULT_HISTORIAN_TIMEOUT_MS,
+		twoPass,
 		memoryEnabled,
 		autoPromote,
 		onPublished,
+		appendCompaction,
+		readBranchEntries,
 		notifyIssue,
 	} = deps;
 
@@ -282,6 +302,17 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				priorCompartments,
 				sequenceOffset,
 			);
+			// Track which subagent run actually produced the validated
+			// draft. This matters for the optional two-pass editor refinement
+			// below: when first-pass validation fails but repair succeeds,
+			// the editor must refine the REPAIR draft (the one that
+			// validated), NOT the original first-pass text. Mirrors
+			// OpenCode parity in `compartment-runner-historian.ts`,
+			// which feeds `firstRun.result` or `repairRun.result` into
+			// `runEditorPassOrFallback` based on which run validated.
+			let validatedDraftText: string | null = firstResult.ok
+				? firstResult.assistantText
+				: null;
 
 			// Repair retry on validation failure (mirrors OpenCode behavior).
 			if (validatedPass.kind === "validation-failed") {
@@ -310,6 +341,13 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					priorCompartments,
 					sequenceOffset,
 				);
+				// If repair produced a valid result, that's the draft we
+				// want the editor to refine. (If repair also failed,
+				// validatedDraftText doesn't matter — we'll bail before
+				// the editor block.)
+				if (validatedPass.kind === "ok" && repairResult.ok) {
+					validatedDraftText = repairResult.assistantText;
+				}
 			}
 
 			if (validatedPass.kind !== "ok") {
@@ -323,6 +361,65 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				incrementHistorianFailure(db, sessionId, errorMsg);
 				await notify(`Historian failed: ${errorMsg}`);
 				return;
+			}
+
+			// Optional two-pass editor refinement. Mirrors OpenCode's
+			// `runEditorPassOrFallback` in `compartment-runner-historian.ts`.
+			// When `historian.two_pass` is enabled, the validated draft is
+			// fed back to the historian agent with the editor system
+			// prompt. The editor cleans low-signal U: lines and
+			// cross-compartment redundancy. If the editor pass fails or
+			// its output fails validation, we fall back to the draft.
+			if (twoPass && validatedPass.kind === "ok") {
+				// Feed the editor the draft that ACTUALLY validated. Without
+				// this fix, when first-pass spawn-failed and repair succeeded,
+				// the editor would silently get an empty string and skip the
+				// editor pass entirely (silent feature regression). When
+				// first-pass validation-failed (parsed but invalid) and repair
+				// succeeded, the editor would refine the BAD original draft
+				// instead of the repaired one. See parity audit Round 7.
+				const draftAssistantText = validatedDraftText ?? "";
+				if (draftAssistantText.trim().length > 0) {
+					sessionLog(
+						sessionId,
+						"pi-historian two-pass: running editor on draft",
+					);
+					const editorResult = await runner.run({
+						agent: HISTORIAN_AGENT_NAME,
+						systemPrompt: HISTORIAN_EDITOR_SYSTEM_PROMPT,
+						userMessage: buildHistorianEditorPrompt(draftAssistantText),
+						model: historianModel,
+						fallbackModels,
+						timeoutMs: historianTimeoutMs,
+						cwd: directory,
+					});
+					const editorPass = await validateHistorianResult(
+						editorResult,
+						sessionId,
+						chunk,
+						priorCompartments,
+						sequenceOffset,
+					);
+					if (editorPass.kind === "ok") {
+						sessionLog(
+							sessionId,
+							`pi-historian two-pass: editor accepted, replacing draft`,
+						);
+						validatedPass = editorPass;
+					} else {
+						const editorErr =
+							editorPass.kind === "validation-failed"
+								? editorPass.error
+								: editorPass.kind === "spawn-failed"
+									? `subagent run failed (${editorPass.reason}): ${editorPass.error}`
+									: "editor returned no usable text";
+						sessionLog(
+							sessionId,
+							`pi-historian two-pass: editor failed (${editorErr}), falling back to draft`,
+						);
+						// Keep validatedPass as the first-pass result.
+					}
+				}
 			}
 
 			const newCompartments = validatedPass.compartments;
@@ -345,6 +442,15 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				replaceSessionFacts(db, sessionId, validatedPass.facts ?? []);
 				clearHistorianFailureState(db, sessionId);
 			})();
+
+			appendPiNativeCompaction({
+				sessionId,
+				appendCompaction,
+				readBranchEntries,
+				lastCompactedOrdinal: lastNewEnd,
+				tokensBefore: chunk.tokenEstimate,
+				summary: buildPiCompactionSummary(newCompartments),
+			});
 
 			// Cache invalidation so the next transform rebuilds <session-history>.
 			clearInjectionCache(sessionId);
@@ -451,4 +557,89 @@ async function validateHistorianResult(
 		error: validation.error,
 		rawText: result.assistantText,
 	};
+}
+
+function buildPiCompactionSummary(
+	compartments: Array<{
+		title: string;
+		startMessage: number;
+		endMessage: number;
+	}>,
+): string {
+	if (compartments.length === 0)
+		return "Magic Context compacted prior history.";
+	const titles = compartments
+		.map((c) => c.title.trim())
+		.filter((title) => title.length > 0);
+	if (titles.length === 0) {
+		const first = compartments[0];
+		const last = compartments[compartments.length - 1];
+		return `Magic Context compacted messages ${first?.startMessage ?? "?"}-${last?.endMessage ?? "?"}.`;
+	}
+	return `Magic Context compacted: ${titles.join("; ")}`;
+}
+
+function appendPiNativeCompaction(args: {
+	sessionId: string;
+	appendCompaction?: PiHistorianDeps["appendCompaction"];
+	readBranchEntries?: () => unknown[];
+	lastCompactedOrdinal: number;
+	tokensBefore: number;
+	summary: string;
+}): void {
+	const { appendCompaction, readBranchEntries } = args;
+	if (!appendCompaction || !readBranchEntries) return;
+
+	try {
+		const firstKeptEntryId = findFirstKeptEntryId(
+			readBranchEntries(),
+			args.lastCompactedOrdinal,
+		);
+		if (!firstKeptEntryId) {
+			sessionLog(
+				args.sessionId,
+				`pi-historian: native compaction skipped; no firstKeptEntryId after ordinal ${args.lastCompactedOrdinal}`,
+			);
+			return;
+		}
+
+		appendCompaction(
+			args.summary,
+			firstKeptEntryId,
+			args.tokensBefore,
+			{
+				source: "magic-context",
+				lastCompactedOrdinal: args.lastCompactedOrdinal,
+			},
+			true,
+		);
+		sessionLog(
+			args.sessionId,
+			`pi-historian: appended native compaction firstKept=${firstKeptEntryId} tokensBefore=${args.tokensBefore}`,
+		);
+	} catch (error) {
+		sessionLog(
+			args.sessionId,
+			`pi-historian: native compaction append failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+}
+
+function findFirstKeptEntryId(
+	entries: unknown[],
+	lastCompactedOrdinal: number,
+): string | null {
+	let ordinal = 0;
+	for (const entry of entries) {
+		if (!entry || typeof entry !== "object") continue;
+		const e = entry as { type?: unknown; id?: unknown; message?: unknown };
+		if (e.type !== "message") continue;
+		const role = (e.message as { role?: unknown } | undefined)?.role;
+		if (role !== "user" && role !== "assistant") continue;
+		ordinal++;
+		if (ordinal === lastCompactedOrdinal + 1) {
+			return typeof e.id === "string" && e.id.length > 0 ? e.id : null;
+		}
+	}
+	return null;
 }

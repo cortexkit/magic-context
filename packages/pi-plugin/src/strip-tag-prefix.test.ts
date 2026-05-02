@@ -135,9 +135,7 @@ describe("stripTagPrefixFromAssistantMessage", () => {
 			content: [{ type: "text", text: "§4§   \n\nYes" }],
 		};
 		expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
-		expect((msg.content[0] as { type: string; text: string }).text).toBe(
-			"Yes",
-		);
+		expect((msg.content[0] as { type: string; text: string }).text).toBe("Yes");
 	});
 
 	it("strips multi-digit tag IDs", () => {

@@ -11,7 +11,13 @@ import { setRawMessageProvider } from "@magic-context/core/hooks/magic-context/r
 import { describeError } from "@magic-context/core/shared/error-message";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import {
+	signalPiHistoryRefresh,
+	signalPiPendingMaterialization,
+} from "../context-handler";
+import { clearPiCompressorState } from "../pi-compressor-runner";
 import { readPiSessionMessages } from "../read-session-pi";
+import { setMagicContextRecompActive, updateStatusLine } from "../status-line";
 import { resolveSessionId, sendCtxStatusMessage } from "./pi-command-utils";
 
 interface RecompConfirmation {
@@ -21,7 +27,6 @@ interface RecompConfirmation {
 
 const confirmationBySession = new Map<string, RecompConfirmation>();
 const RECOMP_CONFIRMATION_WINDOW_MS = 60_000;
-const DEFAULT_HISTORIAN_CHUNK_TOKENS = 8_000;
 
 export function registerCtxRecompCommand(
 	pi: ExtensionAPI,
@@ -29,6 +34,7 @@ export function registerCtxRecompCommand(
 		db: ContextDatabase;
 		runner: SubagentRunner;
 		historianModel: string | undefined;
+		historianChunkTokens: number;
 		historianFallbacks?: readonly string[];
 		historianTimeoutMs?: number;
 		memoryEnabled: boolean;
@@ -105,6 +111,11 @@ export function registerCtxRecompCommand(
 				readMessages: () => readPiSessionMessages(ctx),
 			} satisfies RawMessageProvider;
 			const unregister = setRawMessageProvider(sessionId, provider);
+			setMagicContextRecompActive(sessionId, true);
+			updateStatusLine(ctx, {
+				db: deps.db,
+				projectIdentity: ctx.cwd,
+			});
 			try {
 				const result = await executeContextRecomp(
 					{
@@ -124,7 +135,7 @@ export function registerCtxRecompCommand(
 						}) as never,
 						db: deps.db,
 						sessionId,
-						historianChunkTokens: DEFAULT_HISTORIAN_CHUNK_TOKENS,
+						historianChunkTokens: deps.historianChunkTokens,
 						directory: ctx.cwd,
 						historianTimeoutMs: deps.historianTimeoutMs,
 						memoryEnabled: deps.memoryEnabled,
@@ -137,6 +148,26 @@ export function registerCtxRecompCommand(
 					text: result,
 					level: inferLevel(result),
 				});
+				// Mirrors OpenCode `hook.ts:477-480`: recomp publishes
+				// fresh compartments + queues drops for the rebuilt
+				// range. Without these signals the next pass would
+				// render stale `<session-history>` until usage crossed
+				// execute, and the queued drops would sit in
+				// `pending_ops` until 85% force-materialization.
+				//
+				// We do NOT signal these on the catch path — a failed
+				// recomp didn't publish anything, so there's nothing
+				// for the next pass to refresh.
+				signalPiHistoryRefresh(sessionId);
+				signalPiPendingMaterialization(sessionId);
+				// Compressor-cooldown reset: the freshly rebuilt
+				// compartments may legitimately need compression on the
+				// next opportunity, but the in-memory cooldown timer
+				// would block the compressor from picking them up
+				// inside its 10-min window. Clearing the timer lets
+				// the compressor re-evaluate as if it had never run
+				// for this session.
+				clearPiCompressorState(sessionId);
 			} catch (error) {
 				sendCtxStatusMessage(pi, {
 					title: "/ctx-recomp",
@@ -144,6 +175,11 @@ export function registerCtxRecompCommand(
 					level: "error",
 				});
 			} finally {
+				setMagicContextRecompActive(sessionId, false);
+				updateStatusLine(ctx, {
+					db: deps.db,
+					projectIdentity: ctx.cwd,
+				});
 				unregister();
 			}
 		},

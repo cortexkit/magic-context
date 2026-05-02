@@ -2,7 +2,11 @@ import type {
 	DreamerConfig,
 	EmbeddingConfig,
 } from "@magic-context/core/config/schema/magic-context";
-import { registerDreamProjectDirectory } from "@magic-context/core/features/magic-context/dreamer";
+import {
+	processDreamQueue,
+	registerDreamProjectDirectory,
+} from "@magic-context/core/features/magic-context/dreamer";
+import type { DreamRunResult } from "@magic-context/core/features/magic-context/dreamer/runner";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { startDreamScheduleTimer } from "@magic-context/core/plugin/dream-timer";
 import { PiSubagentRunner } from "../subagent-runner";
@@ -51,6 +55,10 @@ type SessionDeleteArgs = SessionMessagesArgs;
 
 interface ProjectRegistration {
 	cleanup: () => void;
+	/** Run one dream cycle for this project IMMEDIATELY (mirrors OpenCode's
+	 *  `command-handler.ts:236-246` `processDreamQueue` invocation). The
+	 *  registered dreamer timer also calls this on its own schedule. */
+	runOnce: () => Promise<DreamRunResult | null>;
 }
 
 type PiSubagentRunnerFactory = () => PiSubagentRunner;
@@ -83,32 +91,88 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 
 	registerDreamProjectDirectory(opts.projectIdentity, opts.projectDir);
 
+	// Build the dreamer client ONCE so both the timer and the immediate
+	// /ctx-dream path share the same `inFlightDreams` accounting + the
+	// same module-private `sessionsById` table.
+	const client = createPiDreamerClient(opts);
+
+	const experimentalUserMemories = opts.config.user_memories.enabled
+		? {
+				enabled: true,
+				promotionThreshold: opts.config.user_memories.promotion_threshold,
+			}
+		: undefined;
+	const experimentalPinKeyFiles = opts.config.pin_key_files.enabled
+		? {
+				enabled: true,
+				token_budget: opts.config.pin_key_files.token_budget,
+				min_reads: opts.config.pin_key_files.min_reads,
+			}
+		: undefined;
+
 	const cleanup = startDreamScheduleTimer({
 		directory: opts.projectDir,
-		client: createPiDreamerClient(opts),
+		client,
 		dreamerConfig: opts.config,
 		embeddingConfig: opts.embeddingConfig,
 		memoryEnabled: opts.memoryEnabled,
-		experimentalUserMemories: opts.config.user_memories.enabled
-			? {
-					enabled: true,
-					promotionThreshold: opts.config.user_memories.promotion_threshold,
-				}
-			: undefined,
-		experimentalPinKeyFiles: opts.config.pin_key_files.enabled
-			? {
-					enabled: true,
-					token_budget: opts.config.pin_key_files.token_budget,
-					min_reads: opts.config.pin_key_files.min_reads,
-				}
-			: undefined,
+		experimentalUserMemories,
+		experimentalPinKeyFiles,
 	});
 
 	if (!cleanup) {
 		return;
 	}
 
-	registeredProjects.set(opts.projectIdentity, { cleanup });
+	// Pi parity for OpenCode `command-handler.ts:236-246` (`/ctx-dream`):
+	// after enqueueing, OpenCode immediately drains the queue via
+	// `processDreamQueue`. Pi previously relied on the 15-min timer tick,
+	// which made `/ctx-dream` feel broken (the user typed it but nothing
+	// observable happened). Capture the same per-project args so a single
+	// callback can run one cycle on demand.
+	const runOnce = async (): Promise<DreamRunResult | null> =>
+		processDreamQueue({
+			db: opts.db,
+			// processDreamQueue's PluginContext['client'] type comes from
+			// OpenCode's @opencode-ai/sdk. The DreamTimerClient we pass
+			// implements the same `session.{create,prompt,messages,delete}`
+			// surface processDreamQueue actually consumes — but TS can't
+			// see structural compatibility through the wrapper. Cast at the
+			// boundary; the runtime contract is the same one the timer uses.
+			client: client as never,
+			tasks: opts.config.tasks,
+			taskTimeoutMinutes: opts.config.task_timeout_minutes,
+			maxRuntimeMinutes: opts.config.max_runtime_minutes,
+			experimentalUserMemories,
+			experimentalPinKeyFiles,
+		});
+
+	registeredProjects.set(opts.projectIdentity, { cleanup, runOnce });
+}
+
+/**
+ * Run one dream cycle IMMEDIATELY for the given project, mirroring
+ * OpenCode's `/ctx-dream` behavior. Returns the run result, or `null`
+ * if there's nothing to dequeue (queue empty or another worker holds
+ * the lease — see `processDreamQueue` semantics). Throws if the project
+ * isn't registered (call `registerPiDreamerProject` first).
+ *
+ * The user-visible reason this exists: without it, the user types
+ * `/ctx-dream` and gets "queued, the timer will run it eventually" —
+ * which makes the command feel broken even though the queue entry is
+ * really there. Mirroring OpenCode's behavior lets us actually drain
+ * it on the same turn.
+ */
+export async function runPiDreamForProject(
+	projectIdentity: string,
+): Promise<DreamRunResult | null> {
+	const registration = registeredProjects.get(projectIdentity);
+	if (!registration) {
+		throw new Error(
+			`Pi dreamer not registered for project ${projectIdentity}; call registerPiDreamerProject() first`,
+		);
+	}
+	return registration.runOnce();
 }
 
 /** Cleanup hook — call from session_shutdown to deregister this project. */

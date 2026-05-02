@@ -4,60 +4,102 @@
  * Hooks `before_agent_start` to append a `<magic-context>` block to the
  * fully-assembled system prompt. The block carries:
  *
- *   - `<session-history>`: compartments + session facts published by
- *     historian for this Pi session (added in Step 4b.3b)
- *   - `<project-memory>`: project-scoped memories (categorized, budget-trimmed)
  *   - `<project-docs>`: dreamer-maintained ARCHITECTURE.md and STRUCTURE.md
- *     from the project root (when present)
+ *     from the project root (when `dreamer.inject_docs` is true)
+ *   - `<user-profile>`: stable user memories promoted by dreamer
+ *     (when `dreamer.user_memories.enabled` is true)
+ *   - `<key-files>`: pinned file content selected by dreamer based on
+ *     read patterns (when `dreamer.pin_key_files.enabled` is true), with
+ *     a token budget and path-traversal guards.
  *
- * Cross-harness memory sharing means a memory written from OpenCode in
- * this project shows up here on the next agent turn — the
- * `<session-history>` block is similarly cross-harness consistent for
- * compartments/facts written by either OpenCode or Pi historian.
+ * # What does NOT go here
  *
- * # Where session-history goes
+ * - `<session-history>`: injected into message[0] by `injectSessionHistoryIntoPi`
+ *   from `pi.on("context", ...)`. That path can also trim already-
+ *   compartmentalized raw history out of the message array, which the
+ *   system-prompt path can't.
  *
- * OpenCode injects `<session-history>` into `message[0]` to keep it in
- * Anthropic's prompt-cache prefix (cheap to keep, expensive to rebuild).
- * Pi has no equivalent prompt-cache surface, and the system prompt is
- * itself the natural place to put always-present project context, so
- * we put `<session-history>` here alongside `<project-memory>` and
- * `<project-docs>`. Same source data, same XML shape, different
- * delivery mechanism.
+ * - `<project-memory>`: project-scoped memories live INSIDE
+ *   `<session-history>` (via `buildCompartmentBlock`). Putting them
+ *   in the system prompt too would duplicate them on the wire.
  *
- * Cache stability is intentionally not a concern at this stage — Pi doesn't
- * use Anthropic-style prompt caching the same way OpenCode does. We re-read
- * docs and re-fetch memories each turn.
+ * # Cache stability
+ *
+ * Pi sessions hit ANY LLM provider, and every major provider has
+ * prompt/prefix cache (Anthropic prompt cache, OpenAI/Codex automatic
+ * prefix cache, etc.). The system prompt is the front of the cached
+ * prefix, so even small drift between turns busts the entire cache and
+ * the user pays full input price for the next call.
+ *
+ * Mitigations mirrored from OpenCode's `experimental.chat.system.transform`:
+ *
+ *   1. Sticky date: the live system prompt contains a `Today's date: ...`
+ *      line that flips at midnight. We freeze the first observed date
+ *      and replace any later drift with the frozen value, UNLESS this
+ *      turn is already cache-busting for another reason (signaled via
+ *      `systemPromptRefreshSessions`).
+ *
+ *   2. Per-session adjunct caching: `<project-docs>`, `<user-profile>`,
+ *      and `<key-files>` are computed once per session and reused on
+ *      every subsequent turn. Only refreshed when the session is in
+ *      `systemPromptRefreshSessions` (i.e. dreamer published new docs,
+ *      user memories were promoted, key files changed, /ctx-flush, or
+ *      hash-change detection on this very turn).
+ *
+ *   3. Hash detection: we MD5 the assembled system prompt and compare
+ *      to `session_meta.system_prompt_hash`. On change we signal all
+ *      three downstream sets (`historyRefreshSessions`,
+ *      `systemPromptRefreshSessions`, `pendingMaterializationSessions`)
+ *      so the very next `pi.on("context")` event rebuilds the
+ *      `<session-history>` injection cache, refreshes adjuncts, and
+ *      lets queued ops materialize. Mirrors
+ *      `system-prompt-hash.ts:399-411` in the OpenCode plugin.
+ *
+ * Cross-harness memory sharing: a memory written from OpenCode in this
+ * project shows up in Pi context — through both message[0]
+ * `<session-history>` and the `<user-profile>` block when its
+ * underlying user memories table updates.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import { buildMagicContextSection } from "@magic-context/core/agents/magic-context-prompt";
 import {
-	buildCompartmentBlock,
-	getCompartments,
-	getSessionFacts,
+	escapeXmlAttr,
+	escapeXmlContent,
 } from "@magic-context/core/features/magic-context/compartment-storage";
+import { getKeyFiles } from "@magic-context/core/features/magic-context/key-files/storage-key-files";
 import {
-	getMemoriesByProject,
-	type Memory,
-} from "@magic-context/core/features/magic-context/memory";
-import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
-import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
-import { renderMemoryBlock } from "@magic-context/core/hooks/magic-context/inject-compartments";
-import { log } from "@magic-context/core/shared/logger";
+	type ContextDatabase,
+	getOrCreateSessionMeta,
+	updateSessionMeta,
+} from "@magic-context/core/features/magic-context/storage";
+import { getActiveUserMemories } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
+import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
+import { log, sessionLog } from "@magic-context/core/shared/logger";
+
+const PROJECT_DOCS_MARKER = "<project-docs>";
+const USER_PROFILE_MARKER = "<user-profile>";
+const KEY_FILES_MARKER = "<key-files>";
+const MAGIC_CONTEXT_MARKER = "## Magic Context";
+
+/**
+ * Per-session adjunct caches. Module-scoped so `clearPiSystemPromptSession`
+ * (registered on Pi `session_shutdown`) can release entries when a session
+ * ends. Without cleanup these maps would accumulate one entry per Pi
+ * session over the lifetime of the plugin process.
+ */
+const stickyDateBySession = new Map<string, string>();
+const cachedDocsBySession = new Map<string, string | null>();
+const cachedUserProfileBySession = new Map<string, string | null>();
+const cachedKeyFilesBySession = new Map<string, string | null>();
 
 const DOC_FILES = ["ARCHITECTURE.md", "STRUCTURE.md"] as const;
 
-/** Approx ~4000 token budget for memories — matches OpenCode default. */
-const DEFAULT_MEMORY_BUDGET_CHARS = 4000 * 3.5;
-
-/**
- * Read project docs from `directory`. Returns the assembled XML block or null.
- */
+/** Read project docs from `directory`. Returns the assembled XML block or null. */
 function readProjectDocs(directory: string): string | null {
 	const sections: string[] = [];
-
 	for (const filename of DOC_FILES) {
 		const filePath = join(directory, filename);
 		try {
@@ -71,73 +113,122 @@ function readProjectDocs(directory: string): string | null {
 			log(`[magic-context-pi] failed to read ${filename}:`, error);
 		}
 	}
-
 	if (sections.length === 0) return null;
-	return `<project-docs>\n${sections.join("\n\n")}\n</project-docs>`;
+	return `${PROJECT_DOCS_MARKER}\n${sections.join("\n\n")}\n</project-docs>`;
 }
 
 /**
- * Trim memories by total content length so the injected `<project-memory>`
- * block stays under a rough char budget. This is intentionally simpler than
- * the OpenCode-side trimming logic — the spike just proves that memories
- * appear in Pi context. Real budget math, utility tiers, and cache
- * stability can move in once the Pi-side pipeline matures.
+ * Read the active stable user memories from the shared store and render them
+ * as a `<user-profile>` XML block. Mirrors OpenCode's Step 1.6 in
+ * `system-prompt-hash.ts:228-251`. Each line becomes a `- ${content}` bullet
+ * — same shape so dreamer's user-memory pipeline is harness-agnostic.
  */
-function trimMemoriesByCharBudget(
-	memories: Memory[],
-	budget: number,
-): Memory[] {
-	const sorted = [...memories].sort((a, b) => {
-		// permanent first
-		if (a.status === "permanent" && b.status !== "permanent") return -1;
-		if (b.status === "permanent" && a.status !== "permanent") return 1;
-		// shorter first (fit more)
-		return a.content.length - b.content.length;
-	});
+function buildUserProfileBlock(db: ContextDatabase): string | null {
+	const memories = getActiveUserMemories(db);
+	if (memories.length === 0) return null;
+	const items = memories.map((m) => `- ${m.content}`).join("\n");
+	return `${USER_PROFILE_MARKER}\n${items}\n</user-profile>`;
+}
 
-	const result: Memory[] = [];
-	let used = 0;
-	for (const m of sorted) {
-		const cost = m.content.length + 16; // rough overhead for "- " + tags amortized
-		if (used + cost > budget) break;
-		result.push(m);
-		used += cost;
+/**
+ * Read pinned key files and render them as a `<key-files>` block, enforcing
+ * the same path-traversal and token-budget guards as
+ * `system-prompt-hash.ts:254-342`:
+ *
+ *   - Resolved absolute path must stay inside `directory`.
+ *   - Symlink real-path (after `realpathSync`) must also stay inside
+ *     `directory` — a symlink could otherwise escape the project root.
+ *   - Total tokens across all files must stay under `tokenBudget`. Files
+ *     are processed in the order dreamer wrote them; first-fit greedy.
+ */
+function buildKeyFilesBlock(
+	db: ContextDatabase,
+	sessionId: string,
+	directory: string,
+	tokenBudget: number,
+): string | null {
+	const entries = getKeyFiles(db, sessionId);
+	if (entries.length === 0) return null;
+
+	const sections: string[] = [];
+	const projectRoot = resolve(directory);
+	let remainingBudgetTokens = tokenBudget;
+
+	for (const entry of entries) {
+		try {
+			const absPath = resolve(directory, entry.filePath);
+			if (!absPath.startsWith(projectRoot + sep) && absPath !== projectRoot) {
+				log(
+					`[magic-context-pi] key file path escapes project root, skipping: ${entry.filePath}`,
+				);
+				continue;
+			}
+			if (!existsSync(absPath)) continue;
+
+			let realPath: string;
+			try {
+				realPath = realpathSync(absPath);
+			} catch {
+				continue; // broken symlink
+			}
+			if (!realPath.startsWith(projectRoot + sep) && realPath !== projectRoot) {
+				log(
+					`[magic-context-pi] key file symlink escapes project root, skipping: ${entry.filePath} → ${realPath}`,
+				);
+				continue;
+			}
+
+			const content = readFileSync(realPath, "utf-8").trim();
+			if (content.length === 0) continue;
+
+			const fileTokens = estimateTokens(content);
+			if (fileTokens > remainingBudgetTokens) {
+				log(
+					`[magic-context-pi] key file ${entry.filePath} exceeds remaining budget (${fileTokens} > ${remainingBudgetTokens}), skipping`,
+				);
+				continue;
+			}
+			remainingBudgetTokens -= fileTokens;
+
+			sections.push(
+				`<file path="${escapeXmlAttr(entry.filePath)}">\n${escapeXmlContent(content)}\n</file>`,
+			);
+		} catch (error) {
+			log(
+				`[magic-context-pi] failed to read key file ${entry.filePath}:`,
+				error,
+			);
+		}
 	}
-	return result;
+
+	if (sections.length === 0) return null;
+	return `${KEY_FILES_MARKER}\n${sections.join("\n\n")}\n</key-files>`;
 }
 
 export interface BuildMagicContextBlockOptions {
 	db: ContextDatabase;
 	cwd: string;
 	/**
-	 * When provided, include `<session-history>` (compartments + facts) for
-	 * this session. Pass undefined to skip — typically when no session is
-	 * active yet (e.g. first context event before sessionManager is ready).
+	 * When provided and the user-profile / key-files features are
+	 * enabled, the rendered blocks scope to this session (only
+	 * `<key-files>` is per-session; `<user-profile>` is global). Pass
+	 * undefined to skip session-scoped adjuncts (typically when no
+	 * session is active yet).
 	 */
 	sessionId?: string;
-	/** When true, include `<project-memory>` in the block. */
+	/** Reserved for future use; currently unused since project memories
+	 *  live in `<session-history>` (message[0]), not in the system prompt. */
 	memoryEnabled: boolean;
 	/** When true, include `<project-docs>` (reads ARCHITECTURE.md / STRUCTURE.md from cwd). */
 	injectDocs: boolean;
-	/** Char budget for the rendered `<project-memory>` block. */
+	/** Reserved for future use. */
 	memoryBudgetChars?: number;
 	/**
 	 * When true (default), prepend the `## Magic Context` guidance section
-	 * that explains `§N§` tags, `ctx_*` tools, history caveats, etc. This
-	 * mirrors OpenCode's `experimental.chat.system.transform` injection.
-	 *
-	 * The guidance is what tells the agent NOT to mimic `§N§` prefixes in
-	 * its own output, NOT to fabricate tool calls based on compressed
-	 * history, and how to use `ctx_search`/`ctx_memory`/`ctx_note`.
-	 * Without it, weaker models will pattern-match on stored memory
-	 * content and emit `§4§ ...` at the start of responses.
+	 * that explains `§N§` tags, `ctx_*` tools, history caveats, etc.
 	 */
 	includeGuidance?: boolean;
-	/**
-	 * `protected_tags` from config — passed through to guidance for the
-	 * "last N tags are protected" line. Only used when `ctxReduceEnabled`
-	 * AND `includeGuidance` are both true.
-	 */
+	/** `protected_tags` from config — passed through to guidance. */
 	protectedTags?: number;
 	/** When true, include `ctx_reduce` guidance; when false, the no-reduce variant. */
 	ctxReduceEnabled?: boolean;
@@ -147,9 +238,26 @@ export interface BuildMagicContextBlockOptions {
 	dropToolStructure?: boolean;
 	/** When true, include temporal-awareness guidance. */
 	temporalAwarenessEnabled?: boolean;
-	/** When true (and ctx_reduce_enabled is false), inject "BEWARE: history compression is on"
-	 *  warning so the agent doesn't mimic its own caveman-compressed past output. */
+	/** When true, inject the "BEWARE: history compression is on" warning. */
 	cavemanTextCompressionEnabled?: boolean;
+	/** When true, render `<user-profile>` from active stable user memories. */
+	userMemoriesEnabled?: boolean;
+	/** When true, render `<key-files>` for the active session's pinned files. */
+	pinKeyFilesEnabled?: boolean;
+	/** Token budget for `<key-files>` content (default: 10000). */
+	pinKeyFilesTokenBudget?: number;
+	/**
+	 * When true, this turn is already busting the prefix cache (the system
+	 * prompt hash changed last turn, dreamer just published new docs,
+	 * user memories were promoted, /ctx-flush ran, etc.). When true,
+	 * cached adjunct values are dropped and re-read from disk / DB. When
+	 * false, the cached value (or first-time read on miss) is reused.
+	 *
+	 * Cache miss on a non-cache-busting turn — i.e. first time we ever
+	 * see this session — also forces a fresh read; only repeated turns
+	 * with stable session identity reuse the cache.
+	 */
+	isCacheBusting?: boolean;
 }
 
 /**
@@ -157,61 +265,63 @@ export interface BuildMagicContextBlockOptions {
  * system prompt for one Pi agent turn. Returns null if there's nothing to
  * inject.
  *
- * Block ordering: `<session-history>` first (most-narrative), then
- * `<project-memory>`, then `<project-docs>`. Mirrors OpenCode's
- * conceptual layering — recent session activity, then long-lived
- * project knowledge, then immutable structural docs.
+ * Block ordering matches OpenCode's `system-prompt-hash.ts`:
+ *   1. `## Magic Context` guidance (always emitted when `includeGuidance`)
+ *   2. `<project-docs>`
+ *   3. `<user-profile>`
+ *   4. `<key-files>`
+ *
+ * `<session-history>` and `<project-memory>` live in message[0], not here.
  */
 export function buildMagicContextBlock(
 	opts: BuildMagicContextBlockOptions,
 ): string | null {
 	const sections: string[] = [];
+	const sessionId = opts.sessionId;
+	const isCacheBusting = opts.isCacheBusting ?? false;
 
-	// 1. Session history (compartments + facts) — only if we have a session id
-	//    and historian has actually published something for it. Memory block
-	//    is rendered separately from project-scoped memories below; we don't
-	//    duplicate it inside session-history because Pi puts both in the
-	//    same system prompt anyway.
-	if (opts.sessionId) {
-		const compartments = getCompartments(opts.db, opts.sessionId);
-		const facts = getSessionFacts(opts.db, opts.sessionId);
-		if (compartments.length > 0 || facts.length > 0) {
-			// Pi-side rendering: compartments + facts only, no memory block,
-			// no temporal date ranges. The memory block lives in the
-			// `<project-memory>` section below; temporal date ranges depend
-			// on OpenCode-side message timestamps we don't have for Pi.
-			const block = buildCompartmentBlock(compartments, facts);
-			sections.push(`<session-history>\n${block}\n</session-history>`);
-		}
-	}
-
-	// 2. Project-scoped memories
-	if (opts.memoryEnabled) {
-		const projectIdentity = resolveProjectIdentity(opts.cwd);
-		const allMemories = getMemoriesByProject(opts.db, projectIdentity);
-		if (allMemories.length > 0) {
-			const trimmed = trimMemoriesByCharBudget(
-				allMemories,
-				opts.memoryBudgetChars ?? DEFAULT_MEMORY_BUDGET_CHARS,
-			);
-			const memoryBlock = renderMemoryBlock(trimmed);
-			if (memoryBlock) sections.push(memoryBlock);
-		}
-	}
-
-	// 3. Project docs (ARCHITECTURE.md / STRUCTURE.md)
+	// 1. Project docs (ARCHITECTURE.md / STRUCTURE.md from the project root).
 	if (opts.injectDocs) {
-		const docsBlock = readProjectDocs(opts.cwd);
+		const docsBlock = readCachedAdjunct({
+			cache: cachedDocsBySession,
+			sessionId,
+			isCacheBusting,
+			compute: () => readProjectDocs(opts.cwd),
+			describe: "project docs",
+		});
 		if (docsBlock) sections.push(docsBlock);
 	}
 
-	// Build the data block (compartments + memory + docs) and the guidance
-	// section separately, then concatenate. We always emit guidance when
-	// requested (default true) — even if the data block is empty — because
-	// the guidance is what teaches the agent how to use ctx_search /
-	// ctx_memory / ctx_note even when those tools have no project data
-	// to operate on yet. This mirrors OpenCode's behavior, where the
-	// guidance is always injected via experimental.chat.system.transform.
+	// 2. Stable user memories as <user-profile>.
+	if (opts.userMemoriesEnabled) {
+		const profileBlock = readCachedAdjunct({
+			cache: cachedUserProfileBySession,
+			sessionId,
+			isCacheBusting,
+			compute: () => buildUserProfileBlock(opts.db),
+			describe: "user profile",
+		});
+		if (profileBlock) sections.push(profileBlock);
+	}
+
+	// 3. Pinned key files as <key-files>.
+	if (opts.pinKeyFilesEnabled && sessionId) {
+		const keyFilesBlock = readCachedAdjunct({
+			cache: cachedKeyFilesBySession,
+			sessionId,
+			isCacheBusting,
+			compute: () =>
+				buildKeyFilesBlock(
+					opts.db,
+					sessionId,
+					opts.cwd,
+					opts.pinKeyFilesTokenBudget ?? 10_000,
+				),
+			describe: "key files",
+		});
+		if (keyFilesBlock) sections.push(keyFilesBlock);
+	}
+
 	const dataBlock =
 		sections.length > 0
 			? `<magic-context>\n${sections.join("\n\n")}\n</magic-context>`
@@ -222,10 +332,6 @@ export function buildMagicContextBlock(
 		return dataBlock;
 	}
 
-	// `agent` argument is null because Pi doesn't have OpenCode's named
-	// agent system (sisyphus, atlas, hephaestus, oracle, athena, ...). The
-	// generic guidance section applies — same fallback OpenCode uses for
-	// unrecognized agents.
 	const guidance = buildMagicContextSection(
 		null,
 		opts.protectedTags ?? 20,
@@ -241,3 +347,188 @@ export function buildMagicContextBlock(
 	}
 	return guidance;
 }
+
+/**
+ * Get an adjunct from a per-session cache, recomputing on first access or
+ * when this turn is already busting cache. Returns null when the
+ * compute function returns null and caches that null result so we don't
+ * hit the disk/DB on every subsequent turn for a session that has no
+ * docs / memories / key files.
+ */
+function readCachedAdjunct(args: {
+	cache: Map<string, string | null>;
+	sessionId: string | undefined;
+	isCacheBusting: boolean;
+	compute: () => string | null;
+	describe: string;
+}): string | null {
+	const { cache, sessionId, isCacheBusting, compute, describe } = args;
+	if (!sessionId) {
+		// No session id yet (first context event before sessionManager
+		// is ready). Compute once but don't cache — the next turn with
+		// a real session id will populate the cache.
+		return compute();
+	}
+
+	const hasCached = cache.has(sessionId);
+	if (!hasCached || isCacheBusting) {
+		const value = compute();
+		cache.set(sessionId, value);
+		if (value && !hasCached) {
+			sessionLog(sessionId, `loaded ${describe} (${value.length} chars)`);
+		} else if (value && isCacheBusting) {
+			sessionLog(sessionId, `refreshed ${describe} (cache-busting pass)`);
+		}
+		return value;
+	}
+	return cache.get(sessionId) ?? null;
+}
+
+/**
+ * Apply the sticky-date freeze and detect system-prompt hash changes.
+ *
+ * Returns the (possibly date-frozen) system prompt to use on this turn,
+ * along with whether a hash change was detected. The caller is
+ * responsible for emitting downstream signals on hash change.
+ *
+ * Mirrors OpenCode's Step 2 + Step 3 in `system-prompt-hash.ts:345-417`.
+ */
+export interface SystemPromptHashResult {
+	/** The system prompt to send to the LLM, possibly with date frozen. */
+	systemPrompt: string;
+	/** Whether the prompt content (ignoring any frozen-date replacement) changed vs persisted hash. */
+	hashChanged: boolean;
+	/** The new hash, persisted to session_meta.system_prompt_hash. */
+	currentHash: string;
+}
+
+const DATE_PATTERN = /Today's date: .+/;
+
+/**
+ * Process the assembled system prompt for cache stability:
+ *
+ *  1. Detect hash change vs persisted `session_meta.system_prompt_hash`.
+ *     If changed, the prefix cache is already busted on this turn — we
+ *     return `hashChanged=true` so the caller can signal downstream
+ *     refresh sets and let the rest of the pipeline rebuild.
+ *
+ *  2. Freeze `Today's date: ...` to the first observed value, UNLESS
+ *     this turn is already cache-busting (either the caller flagged
+ *     it via `isCacheBusting` OR we just detected a hash change). On a
+ *     real cache-busting turn we update the sticky date to the live
+ *     value so future stable turns freeze on the new date.
+ */
+export function processSystemPromptForCache(args: {
+	db: ContextDatabase;
+	sessionId: string;
+	systemPrompt: string;
+	/** When true, the caller has already determined this turn is busting cache. */
+	isCacheBusting: boolean;
+}): SystemPromptHashResult {
+	const { db, sessionId, systemPrompt, isCacheBusting } = args;
+
+	// Step 1: hash detection vs persisted value.
+	let sessionMeta:
+		| import("@magic-context/core/features/magic-context/types").SessionMeta
+		| undefined;
+	try {
+		sessionMeta = getOrCreateSessionMeta(db, sessionId);
+	} catch (error) {
+		sessionLog(
+			sessionId,
+			"system-prompt-hash session meta load failed:",
+			error,
+		);
+	}
+
+	// Hash the prompt BEFORE date freezing — we want to detect content
+	// changes that aren't just the date flipping at midnight. (Date
+	// drift will not cause a hash change because we apply freezing
+	// in step 2 below; the persisted hash is over the FROZEN prompt.)
+	const previousHash = sessionMeta?.systemPromptHash ?? "";
+	const isFirstHash = previousHash === "" || previousHash === "0";
+
+	// Step 2: sticky-date freeze.
+	let frozenPrompt = systemPrompt;
+	const dateMatch = systemPrompt.match(DATE_PATTERN);
+	const liveDate = dateMatch ? dateMatch[0] : null;
+	const stickyDate = stickyDateBySession.get(sessionId);
+
+	if (liveDate && !stickyDate) {
+		// First time seeing this session — store the date. Persisted
+		// prompt will use the live date.
+		stickyDateBySession.set(sessionId, liveDate);
+	} else if (liveDate && stickyDate && liveDate !== stickyDate) {
+		if (isCacheBusting) {
+			// Already busting cache — adopt the live date so future
+			// stable turns freeze on it.
+			stickyDateBySession.set(sessionId, liveDate);
+			sessionLog(
+				sessionId,
+				`system prompt date updated: ${stickyDate} → ${liveDate} (cache-busting pass)`,
+			);
+		} else {
+			// Defer-equivalent turn — replace the live date with the
+			// frozen one so the prefix cache survives.
+			frozenPrompt = systemPrompt.replace(DATE_PATTERN, stickyDate);
+			sessionLog(
+				sessionId,
+				`system prompt date frozen: real=${liveDate}, using=${stickyDate} (cache-stable pass)`,
+			);
+		}
+	}
+
+	// Hash the (possibly date-frozen) prompt — this matches what the
+	// LLM provider sees and what the cache prefix is keyed on.
+	const currentHash = createHash("md5").update(frozenPrompt).digest("hex");
+	const hashChanged = !isFirstHash && currentHash !== previousHash;
+
+	if (hashChanged) {
+		sessionLog(
+			sessionId,
+			`system prompt hash changed: ${previousHash} → ${currentHash} (len=${frozenPrompt.length})`,
+		);
+	} else if (isFirstHash) {
+		sessionLog(
+			sessionId,
+			`system prompt hash initialized: ${currentHash} (len=${frozenPrompt.length})`,
+		);
+	}
+
+	// Persist hash + token estimate so dashboard / status surfaces are
+	// up-to-date and the next turn can compare against this value.
+	const systemPromptTokens = estimateTokens(frozenPrompt);
+	if (sessionMeta) {
+		if (currentHash !== previousHash) {
+			updateSessionMeta(db, sessionId, {
+				systemPromptHash: currentHash,
+				systemPromptTokens,
+			});
+		} else if (
+			Math.abs(sessionMeta.systemPromptTokens - systemPromptTokens) > 50
+		) {
+			updateSessionMeta(db, sessionId, { systemPromptTokens });
+		}
+	}
+
+	return {
+		systemPrompt: frozenPrompt,
+		hashChanged,
+		currentHash,
+	};
+}
+
+/**
+ * Clear all per-session caches the system-prompt path maintains. Called
+ * from Pi `session_shutdown` so caches don't accumulate over plugin
+ * lifetime for ended sessions.
+ */
+export function clearPiSystemPromptSession(sessionId: string): void {
+	stickyDateBySession.delete(sessionId);
+	cachedDocsBySession.delete(sessionId);
+	cachedUserProfileBySession.delete(sessionId);
+	cachedKeyFilesBySession.delete(sessionId);
+}
+
+/** Test-only: confirm the magic-context guidance marker is present. */
+export const MAGIC_CONTEXT_GUIDANCE_MARKER = MAGIC_CONTEXT_MARKER;

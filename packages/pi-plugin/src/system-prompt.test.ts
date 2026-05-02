@@ -47,7 +47,11 @@ describe("buildMagicContextBlock", () => {
 		}
 	});
 
-	it("renders a project-memory block when memories exist", () => {
+	it("does NOT render project-memory in the system prompt — memories live inside <session-history> in message[0]", () => {
+		// OpenCode parity: project-scoped memories are emitted INSIDE the
+		// `<session-history>` block via `buildCompartmentBlock(compartments, facts,
+		// memoryBlock, …)` — NOT in the system prompt. Putting them here too
+		// would duplicate the same memory entries on the wire.
 		const db = createTestDb();
 		const cwd = tempDir("pi-memory-");
 		try {
@@ -67,9 +71,11 @@ describe("buildMagicContextBlock", () => {
 				includeGuidance: false,
 			});
 
-			expect(block).toContain("<magic-context>");
-			expect(block).toContain("<project-memory>");
-			expect(block).toContain("Always run Pi plugin tests");
+			// With memoryEnabled but no docs/no guidance, the data block is empty —
+			// memories no longer get rendered here. injectSessionHistoryIntoPi
+			// (called from pi.on("context", ...)) is responsible for emitting them
+			// inside the <session-history> block in message[0].
+			expect(block).toBeNull();
 		} finally {
 			closeQuietly(db);
 		}
@@ -107,7 +113,15 @@ describe("buildMagicContextBlock", () => {
 		}
 	});
 
-	it("renders session-history for compartments and facts", () => {
+	it("does NOT render session-history in the system prompt — that block is injected into message[0] instead", () => {
+		// session-history must live exactly once on the wire. We inject it into
+		// message[0] from `pi.on("context", ...)` (via injectSessionHistoryIntoPi)
+		// because that's the only place that can also trim already-compartmentalized
+		// raw history out of the message array. Including it ALSO in the system
+		// prompt block here would put the same XML on the wire twice. This test
+		// pins down the parity contract: with only compartments+facts available
+		// (no memory, no docs), buildMagicContextBlock returns null because there's
+		// no system-prompt-side content to inject.
 		const db = createTestDb();
 		try {
 			appendCompartments(db, "ses-history", [
@@ -137,16 +151,20 @@ describe("buildMagicContextBlock", () => {
 				includeGuidance: false,
 			});
 
-			expect(block).toContain("<session-history>");
-			expect(block).toContain('<compartment start="1" end="2" title="Setup">');
-			expect(block).toContain("Configured Pi historian.");
-			expect(block).toContain("Do not spawn pi subprocesses");
+			// No memory, no docs, no guidance → null (session-history is NOT
+			// emitted here, only memories/docs/guidance).
+			expect(block).toBeNull();
 		} finally {
 			closeQuietly(db);
 		}
 	});
 
-	it("trims memories by the configured character budget", () => {
+	it("memoryBudgetChars option is now a no-op for the system-prompt block (memories live in <session-history>)", () => {
+		// Kept as an assertion that future regressions don't accidentally
+		// re-introduce memory rendering in the system prompt block. The
+		// memoryBudgetChars trimming logic that used to live here was moved
+		// alongside memory injection itself — into prepareCompartmentInjection,
+		// which has its own budget via injectionBudgetTokens.
 		const db = createTestDb();
 		const cwd = tempDir("pi-memory-budget-");
 		const projectPath = resolveProjectIdentity(cwd);
@@ -154,13 +172,7 @@ describe("buildMagicContextBlock", () => {
 			insertMemory(db, {
 				projectPath,
 				category: "CONSTRAINTS",
-				content: "short keep",
-				sourceType: "user",
-			});
-			insertMemory(db, {
-				projectPath,
-				category: "WORKFLOW_RULES",
-				content: "x".repeat(200),
+				content: "should not appear in system prompt",
 				sourceType: "user",
 			});
 
@@ -173,8 +185,8 @@ describe("buildMagicContextBlock", () => {
 				includeGuidance: false,
 			});
 
-			expect(block).toContain("short keep");
-			expect(block).not.toContain("x".repeat(80));
+			// Even with memory data in the DB, the system-prompt block stays empty.
+			expect(block).toBeNull();
 		} finally {
 			closeQuietly(db);
 		}
@@ -208,20 +220,19 @@ describe("buildMagicContextBlock", () => {
 	it("concatenates guidance and data block when both present", () => {
 		const db = createTestDb();
 		const cwd = tempDir("pi-combo-");
+		mkdirSync(cwd, { recursive: true });
+		writeFileSync(
+			join(cwd, "ARCHITECTURE.md"),
+			"# Architecture\nPi loads at process start.",
+			"utf-8",
+		);
 		try {
-			insertMemory(db, {
-				projectPath: resolveProjectIdentity(cwd),
-				category: "ARCHITECTURE_DECISIONS",
-				content: "Pi loads at process start.",
-				sourceType: "user",
-			});
-
 			const block = buildMagicContextBlock({
 				db,
 				cwd,
 				sessionId: "ses-combo",
-				memoryEnabled: true,
-				injectDocs: false,
+				memoryEnabled: false,
+				injectDocs: true,
 				includeGuidance: true,
 			});
 
