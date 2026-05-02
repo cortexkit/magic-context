@@ -384,11 +384,14 @@ export function buildCompressorPrompt(
 export function buildCompartmentAgentPrompt(
     existingState: string,
     inputSource: string,
-    options?: { userMemoriesEnabled?: boolean },
+    options?: { userMemoriesEnabled?: boolean; stateFilePath?: string },
 ): string {
+    const existingStateBlock = options?.stateFilePath
+        ? `Read the existing session state from this file before proceeding:\n${options.stateFilePath}\n\nThe file contains the full XML existing state (compartments, facts, memories). Read it first, then process the new messages below.`
+        : existingState;
     return [
         "Existing state (read-only context for continuity and fact normalization — do NOT re-emit these compartments):",
-        existingState,
+        existingStateBlock,
         "",
         "<new_messages>",
         inputSource,

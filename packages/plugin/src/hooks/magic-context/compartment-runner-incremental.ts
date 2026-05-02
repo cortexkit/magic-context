@@ -1,9 +1,48 @@
+import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
     appendCompartments,
     getCompartments,
     getSessionFacts,
     replaceSessionFacts,
 } from "../../features/magic-context/compartment-storage";
+
+/** Inline existing-state threshold (chars). Above this, write to a temp file. */
+const HISTORIAN_STATE_INLINE_THRESHOLD = 30_000;
+const HISTORIAN_STATE_DIR = join(tmpdir(), "magic-context-historian");
+
+/**
+ * When existingState is large, write it to a temp file and return the path.
+ * The caller must delete the file in finally{} via cleanupHistorianStateFile().
+ * Returns undefined when existingState is small enough to inline.
+ */
+export function maybeWriteHistorianStateFile(
+    sessionId: string,
+    existingState: string,
+): string | undefined {
+    if (existingState.length <= HISTORIAN_STATE_INLINE_THRESHOLD) return undefined;
+    try {
+        mkdirSync(HISTORIAN_STATE_DIR, { recursive: true });
+        const path = join(HISTORIAN_STATE_DIR, `state-${sessionId}-${Date.now()}.xml`);
+        writeFileSync(path, existingState, "utf8");
+        return path;
+    } catch {
+        // Fall back to inline if we can't write the file
+        return undefined;
+    }
+}
+
+/** Delete a previously written state file. Safe to call with undefined. */
+export function cleanupHistorianStateFile(path: string | undefined): void {
+    if (!path) return;
+    try {
+        unlinkSync(path);
+    } catch {
+        // best-effort cleanup
+    }
+}
+
 import { promoteSessionFactsToMemory } from "../../features/magic-context/memory";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { getMemoriesByProject } from "../../features/magic-context/memory/storage-memory";
@@ -60,6 +99,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
     } = deps;
     let completedSuccessfully = false;
     let issueNotified = false;
+    let stateFilePath: string | undefined;
 
     const notifyHistorianIssue = async (message: string): Promise<void> => {
         issueNotified = true;
@@ -130,9 +170,21 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                   ? `${memoryBlock}\n\nThis is your first run. No existing compartments or facts.`
                   : "This is your first run. No existing state.";
 
+        // Write large existing state to a temp file so the prompt body stays
+        // within HTTP/SDK serialization limits. Historian reads the file via
+        // its built-in Read tool. File is deleted in finally{}.
+        stateFilePath = maybeWriteHistorianStateFile(sessionId, existingState);
+        if (stateFilePath) {
+            sessionLog(
+                sessionId,
+                `historian: existing state offloaded to file (${existingState.length} chars) → ${stateFilePath}`,
+            );
+        }
+
         const prompt = buildCompartmentAgentPrompt(
             existingState,
             `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunk.text}`,
+            { stateFilePath },
         );
 
         // Intentional: session.get failure is non-fatal — we fall back to deps.directory
@@ -311,5 +363,6 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         if (!completedSuccessfully) {
             updateSessionMeta(db, sessionId, { compartmentInProgress: false });
         }
+        cleanupHistorianStateFile(stateFilePath);
     }
 }

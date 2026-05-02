@@ -17,6 +17,10 @@ import { buildCompartmentAgentPrompt } from "./compartment-prompt";
 import { runCompressionPassIfNeeded } from "./compartment-runner-compressor";
 import { queueDropsForCompartmentalizedMessages } from "./compartment-runner-drop-queue";
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
+import {
+    cleanupHistorianStateFile,
+    maybeWriteHistorianStateFile,
+} from "./compartment-runner-incremental";
 import { buildExistingStateXml } from "./compartment-runner-state-xml";
 import type { CandidateCompartment, CompartmentRunnerDeps } from "./compartment-runner-types";
 import {
@@ -43,6 +47,8 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         getNotificationParams,
     } = deps;
     const notifParams = () => getNotificationParams?.() ?? {};
+    // State file for the current pass — hoisted to be accessible in finally{}
+    let currentStateFilePath: string | undefined;
     updateSessionMeta(db, sessionId, { compartmentInProgress: true });
 
     try {
@@ -187,9 +193,14 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                       ? `${memoryBlock}\n\nThis is your first run. No existing compartments or facts.`
                       : "This is your first run. No existing state.";
 
+            // Clean up previous pass's state file before writing the new one
+            cleanupHistorianStateFile(currentStateFilePath);
+            currentStateFilePath = maybeWriteHistorianStateFile(sessionId, existingState);
+
             const prompt = buildCompartmentAgentPrompt(
                 existingState,
                 `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunk.text}`,
+                { stateFilePath: currentStateFilePath },
             );
 
             await sendIgnoredMessage(
@@ -354,5 +365,6 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         return `## Magic Recomp — Failed\n\nRecomp failed unexpectedly: ${message}\n\nStaging data preserved for resume on next attempt.`;
     } finally {
         updateSessionMeta(db, sessionId, { compartmentInProgress: false });
+        cleanupHistorianStateFile(currentStateFilePath);
     }
 }
