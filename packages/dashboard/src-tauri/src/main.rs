@@ -38,6 +38,10 @@ fn main() {
             commands::bulk_delete_memory,
             // Sessions
             commands::get_sessions,
+            commands::list_sessions,
+            commands::get_session_detail,
+            commands::get_session_cache_events,
+            commands::enumerate_projects,
             commands::get_compartments,
             commands::get_session_facts,
             commands::get_session_notes,
@@ -65,6 +69,9 @@ fn main() {
             commands::save_config,
             commands::get_project_configs,
             commands::save_project_config,
+            magic_context_dashboard_lib::config::read_pi_config,
+            magic_context_dashboard_lib::config::write_pi_config,
+            magic_context_dashboard_lib::config::pi_config_path,
             // Models
             commands::get_available_models,
             commands::test_embedding_endpoint,

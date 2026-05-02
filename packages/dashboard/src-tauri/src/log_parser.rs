@@ -5,7 +5,7 @@ use std::path::PathBuf;
 /// Resolves the log file path.
 /// Default: /tmp/magic-context.log (same as the plugin writes to)
 pub fn resolve_log_path() -> PathBuf {
-    PathBuf::from(std::env::temp_dir()).join("magic-context.log")
+    std::env::temp_dir().join("magic-context.log")
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -267,7 +267,7 @@ fn detect_bust_cause(entries: &[LogEntry], event_idx: usize) -> String {
     let event = &entries[event_idx];
 
     // Look at surrounding log entries for context
-    let window_start = if event_idx > 10 { event_idx - 10 } else { 0 };
+    let window_start = event_idx.saturating_sub(10);
     let window_end = std::cmp::min(event_idx + 3, entries.len());
 
     let mut causes = Vec::new();

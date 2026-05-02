@@ -9,6 +9,23 @@ pub fn resolve_user_config_path() -> PathBuf {
     config_dir.join("opencode").join("magic-context.jsonc")
 }
 
+fn resolve_home_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(home) = std::env::var_os("MAGIC_CONTEXT_DASHBOARD_TEST_HOME") {
+        return PathBuf::from(home);
+    }
+
+    dirs::home_dir().unwrap_or_default()
+}
+
+/// Resolves the Pi user-level magic-context config path.
+pub fn resolve_pi_config_path() -> PathBuf {
+    resolve_home_dir()
+        .join(".pi")
+        .join("agent")
+        .join("magic-context.jsonc")
+}
+
 /// Resolve the active magic-context config path for a project.
 /// Checks root first, then `.opencode/` alt path. Returns the first that exists,
 /// or root path as default for new config creation.
@@ -35,6 +52,8 @@ pub struct ConfigFile {
     pub source: String, // "user" or "project"
 }
 
+pub type ConfigFileResponse = ConfigFile;
+
 pub fn read_config(path: &PathBuf, source: &str) -> ConfigFile {
     let exists = path.exists();
     let content = if exists {
@@ -58,6 +77,23 @@ pub fn write_config(path: &PathBuf, content: &str) -> Result<(), String> {
     }
     std::fs::write(path, content).map_err(|e| format!("Failed to write config: {}", e))?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn read_pi_config() -> Result<ConfigFileResponse, String> {
+    let path = resolve_pi_config_path();
+    Ok(read_config(&path, "pi"))
+}
+
+#[tauri::command]
+pub fn write_pi_config(content: String) -> Result<(), String> {
+    let path = resolve_pi_config_path();
+    write_config(&path, &content)
+}
+
+#[tauri::command]
+pub fn pi_config_path() -> String {
+    resolve_pi_config_path().to_string_lossy().to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -150,4 +186,35 @@ pub fn discover_project_configs() -> Vec<ProjectConfigEntry> {
     }
 
     entries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pi_config_path_and_read_cover_missing_and_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("MAGIC_CONTEXT_DASHBOARD_TEST_HOME", dir.path());
+
+        let expected = dir.path().join(".pi/agent/magic-context.jsonc");
+        assert_eq!(resolve_pi_config_path(), expected);
+        assert_eq!(pi_config_path(), expected.to_string_lossy());
+
+        let missing = read_pi_config().unwrap();
+        assert_eq!(missing.path, expected.to_string_lossy());
+        assert!(!missing.exists);
+        assert_eq!(missing.content, "");
+        assert_eq!(missing.source, "pi");
+
+        let content = "{\n  \"enabled\": true\n}";
+        write_pi_config(content.to_string()).unwrap();
+
+        let existing = read_pi_config().unwrap();
+        assert!(existing.exists);
+        assert_eq!(existing.content, content);
+        assert_eq!(existing.source, "pi");
+
+        std::env::remove_var("MAGIC_CONTEXT_DASHBOARD_TEST_HOME");
+    }
 }

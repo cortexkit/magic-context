@@ -4,15 +4,16 @@ import {
   bulkDeleteMemory,
   bulkUpdateMemoryStatus,
   deleteMemory,
+  enumerateProjects,
   formatRelativeTime,
   getMemories,
   getMemoryStats,
-  getProjects,
   truncate,
   updateMemoryContent,
   updateMemoryStatus,
 } from "../../lib/api";
 import type { Memory } from "../../lib/types";
+import HarnessBadge from "../HarnessBadge";
 import FilterSelect from "../shared/FilterSelect";
 import MemoryDetail from "./MemoryDetail";
 
@@ -57,7 +58,7 @@ export default function MemoryBrowser() {
   );
   createEffect(() => saveCollapsedCategories(collapsedCategories()));
 
-  const [projects] = createResource(getProjects);
+  const [projects] = createResource(enumerateProjects);
 
   const fetchParams = () => ({
     project: projectFilter() || undefined,
@@ -347,7 +348,17 @@ export default function MemoryBrowser() {
           align="left"
           options={[
             { value: "", label: "All projects" },
-            ...(projects() ?? []).map((p) => ({ value: p.identity, label: p.label })),
+            ...(projects() ?? []).map((p) => ({
+              value: p.identity,
+              label: (
+                <span style={{ display: "inline-flex", "align-items": "center", gap: "6px" }}>
+                  <span>{p.display_name}</span>
+                  <span style={{ display: "inline-flex", gap: "3px" }}>
+                    <For each={p.harnesses}>{(harness) => <HarnessBadge harness={harness} />}</For>
+                  </span>
+                </span>
+              ),
+            })),
           ]}
         />
         <input

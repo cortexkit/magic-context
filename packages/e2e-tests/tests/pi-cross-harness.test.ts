@@ -63,26 +63,18 @@ describe("pi cross harness", () => {
         insertMemory(dbPath, projectIdentity, ocSession, fromOpenCode);
 
         pi.mock.reset();
-        pi.mock.script([
-            {
-                content: [
-                    {
-                        type: "tool_use",
-                        id: "toolu_pi_search_oc",
-                        name: "ctx_search",
-                        input: { query: "flagship search", sources: ["memory"], limit: 5 },
-                    },
-                ],
-                stop_reason: "tool_use",
-                usage: { input_tokens: 120, output_tokens: 5, cache_creation_input_tokens: 120 },
-            },
-            {
-                text: "Pi found OpenCode memory",
-                usage: { input_tokens: 140, output_tokens: 10, cache_creation_input_tokens: 140 },
-            },
-        ]);
-        const searchTurn = await pi.sendPrompt("search for flagship memory", { timeoutMs: 60_000 });
-        expect(searchTurn.stdout).toContain(fromOpenCode);
+        pi.mock.setDefault({
+            text: "Pi sees OpenCode memory",
+            usage: { input_tokens: 140, output_tokens: 10, cache_creation_input_tokens: 140 },
+        });
+        await pi.sendPrompt("read flagship memory from pi", { timeoutMs: 60_000 });
+        // Pi now injects shared project memories into <session-history>
+        // (parity with OpenCode), so the cross-harness check is on the
+        // outbound provider request body, not on `ctx_search` output —
+        // visible memories are intentionally filtered from search results
+        // to avoid duplicate context. Mirrors the OpenCode-side assertion
+        // below.
+        expect(JSON.stringify(pi.mock.lastRequest()!.body)).toContain(fromOpenCode);
 
         const fromPi = "Pi wrote this memory for OpenCode injection";
         insertMemory(dbPath, piProjectIdentity, piTurn.sessionId, fromPi);

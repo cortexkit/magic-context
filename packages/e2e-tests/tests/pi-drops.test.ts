@@ -7,7 +7,19 @@ import { PiTestHarness } from "../src/pi-harness";
 let h: PiTestHarness;
 
 beforeAll(async () => {
-    h = await PiTestHarness.create({ magicContextConfig: { protected_tags: 1 } });
+    // Pi pipeline now gates pending_ops application to execute/force passes
+    // (mirrors OpenCode's transform-postprocess-phase.ts:172-186 gating: only
+    // mutate tag state on execute / flush / force-materialization, never on
+    // plain defer passes — mutation otherwise busts provider prompt cache on
+    // every tool call once we cross threshold).
+    //
+    // To make this test reliably trigger execute on the second turn, shrink
+    // the context window to 200 tokens and lower threshold to 20%. The mock
+    // returns 110 input tokens, so 110/200 = 55% > 20% execute threshold.
+    h = await PiTestHarness.create({
+        modelContextLimit: 200,
+        magicContextConfig: { protected_tags: 1, execute_threshold_percentage: 20 },
+    });
 });
 
 afterAll(async () => {

@@ -6,29 +6,46 @@ import {
   dismissNote,
   formatDateTime,
   formatRelativeTime,
-  getCompartments,
-  getContextTokenBreakdown,
   getProjects,
-  getSessionFacts,
-  getSessionMeta,
-  getSessionNotes,
-  getSessions,
+  getSessionCacheEvents,
+  getSessionDetail,
   getSmartNotes,
+  listSessions,
   truncate,
   updateNote,
   updateSessionFact,
 } from "../../lib/api";
-import type { SessionFact } from "../../lib/types";
+import type { DbCacheEvent, Harness, SessionFact, SessionFilter } from "../../lib/types";
+import HarnessBadge from "../HarnessBadge";
 import FilterSelect from "../shared/FilterSelect";
 
+const PROJECT_FILTER_KEY = "mc_sessions_project_filter";
+const HARNESS_FILTER_KEY = "mc_sessions_harness_filter";
+
+type ActiveTab = "messages" | "compartments" | "facts" | "notes" | "tokens" | "cache";
+type HarnessFilter = "all" | Harness;
+type SelectedSession = { harness: Harness; sessionId: string };
+
+function loadStoredValue(key: string): string {
+  try {
+    return localStorage.getItem(key) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function loadHarnessFilter(): HarnessFilter {
+  const stored = loadStoredValue(HARNESS_FILTER_KEY);
+  return stored === "opencode" || stored === "pi" ? stored : "all";
+}
+
 export default function SessionViewer() {
-  const [selectedSession, setSelectedSession] = createSignal<string | null>(null);
-  const [activeTab, setActiveTab] = createSignal<
-    "compartments" | "facts" | "notes" | "meta" | "tokens"
-  >("compartments");
+  const [selectedSession, setSelectedSession] = createSignal<SelectedSession | null>(null);
+  const [activeTab, setActiveTab] = createSignal<ActiveTab>("messages");
   const [expandedCompartment, setExpandedCompartment] = createSignal<number | null>(null);
   const [searchQuery, setSearchQuery] = createSignal("");
-  const [projectFilter, setProjectFilter] = createSignal("");
+  const [projectFilter, setProjectFilterSignal] = createSignal(loadStoredValue(PROJECT_FILTER_KEY));
+  const [harnessFilter, setHarnessFilterSignal] = createSignal<HarnessFilter>(loadHarnessFilter());
   const [showSubagents, setShowSubagents] = createSignal(false);
   const [editingFact, setEditingFact] = createSignal<number | null>(null);
   const [editFactContent, setEditFactContent] = createSignal("");
@@ -36,22 +53,46 @@ export default function SessionViewer() {
   const [editNoteContent, setEditNoteContent] = createSignal("");
 
   const [projects] = createResource(getProjects);
-  const [sessions] = createResource(getSessions);
+  const setProjectFilter = (value: string) => {
+    setProjectFilterSignal(value);
+    try {
+      value ? localStorage.setItem(PROJECT_FILTER_KEY, value) : localStorage.removeItem(PROJECT_FILTER_KEY);
+    } catch {}
+  };
+
+  const setHarnessFilter = (value: HarnessFilter) => {
+    setHarnessFilterSignal(value);
+    try {
+      value === "all"
+        ? localStorage.removeItem(HARNESS_FILTER_KEY)
+        : localStorage.setItem(HARNESS_FILTER_KEY, value);
+    } catch {}
+  };
+
+  const sessionFilter = createMemo<SessionFilter>(() => {
+    const filter: SessionFilter = {};
+    const harness = harnessFilter();
+    if (harness !== "all") filter.harness = harness;
+    if (projectFilter()) filter.project_identity = projectFilter();
+    if (searchQuery()) filter.search = searchQuery();
+    return filter;
+  });
+
+  const [sessions] = createResource(sessionFilter, listSessions);
+
+  const detailKey = createMemo(() => selectedSession());
+  const [sessionDetail, { refetch: refetchSessionDetail }] = createResource(detailKey, async (selected) => {
+    if (!selected) return null;
+    return getSessionDetail(selected.harness, selected.sessionId);
+  });
+
+  const [cacheEvents] = createResource(detailKey, async (selected) => {
+    if (!selected) return [];
+    return getSessionCacheEvents(selected.harness, selected.sessionId);
+  });
 
   const filteredSessions = createMemo(() => {
     let list = sessions() ?? [];
-    const query = searchQuery().toLowerCase();
-    const project = projectFilter();
-    if (query) {
-      list = list.filter(
-        (s) =>
-          (s.title ?? "").toLowerCase().includes(query) ||
-          s.session_id.toLowerCase().includes(query),
-      );
-    }
-    if (project) {
-      list = list.filter((s) => s.project_identity === project);
-    }
     if (!showSubagents()) {
       list = list.filter((s) => !s.is_subagent);
     }
@@ -64,41 +105,83 @@ export default function SessionViewer() {
     searchTimeout = setTimeout(() => setSearchQuery(value), 300) as unknown as number;
   };
 
-  const [compartments] = createResource(selectedSession, async (sid) => {
-    if (!sid) return [];
-    return getCompartments(sid);
-  });
+  const messages = () => sessionDetail()?.messages ?? [];
+  const compartments = () => sessionDetail()?.compartments ?? [];
+  const facts = () => sessionDetail()?.facts ?? [];
+  const notes = () => sessionDetail()?.notes ?? [];
+  const meta = () => sessionDetail()?.meta ?? null;
+  const tokenBreakdown = () => sessionDetail()?.token_breakdown ?? null;
+  const piCompactions = () => sessionDetail()?.pi_compaction_entries ?? [];
 
-  const [facts, { refetch: refetchFacts }] = createResource(selectedSession, async (sid) => {
-    if (!sid) return [];
-    return getSessionFacts(sid);
-  });
+  const selectedRow = () => {
+    const selected = selectedSession();
+    if (!selected) return null;
+    return (
+      sessions()?.find(
+        (s) => s.session_id === selected.sessionId && s.harness === selected.harness,
+      ) ?? null
+    );
+  };
 
-  const [notes, { refetch: refetchNotes }] = createResource(selectedSession, async (sid) => {
-    if (!sid) return [];
-    return getSessionNotes(sid);
-  });
+  const displayTitle = () =>
+    sessionDetail()?.title || selectedRow()?.title || truncate(selectedSession()?.sessionId ?? "", 20);
+
+  const roleClass = (role: string) => {
+    switch (role.toLowerCase()) {
+      case "user":
+        return "blue";
+      case "assistant":
+        return "green";
+      case "system":
+        return "gray";
+      default:
+        return "purple";
+    }
+  };
+
+  const cacheHitRatio = (event: DbCacheEvent) => {
+    const total = event.cache_read + event.cache_write + event.input_tokens;
+    return total > 0 ? event.cache_read / total : 0;
+  };
+
+  const severityIcon = (severity: string) => {
+    switch (severity) {
+      case "stable":
+        return "🟢";
+      case "info":
+        return "🔵";
+      case "warning":
+        return "🟡";
+      case "bust":
+        return "🔴";
+      case "full_bust":
+        return "⚫";
+      default:
+        return "⚪";
+    }
+  };
+
+  const severityBarClass = (ratio: number) => {
+    if (ratio >= 0.9) return "green";
+    if (ratio >= 0.5) return "amber";
+    return "red";
+  };
+
+  const hitColor = (ratio: number) =>
+    ratio >= 0.9 ? "var(--green)" : ratio >= 0.5 ? "var(--amber)" : "var(--red)";
+
+  const refetchFacts = () => refetchSessionDetail();
+  const refetchNotes = () => refetchSessionDetail();
 
   const [smartNotes, { refetch: refetchSmartNotes }] = createResource(
-    selectedSession,
-    async (sid) => {
-      if (!sid) return [];
-      // Get project identity from the selected session
-      const session = sessions()?.find((s) => s.session_id === sid);
-      if (!session?.project_identity) return [];
-      return getSmartNotes(session.project_identity);
+    () => sessionDetail(),
+    async (detail) => {
+      if (!detail) return [];
+      const project = detail.project_path ?? detail.project_identity;
+      if (!project) return [];
+      return getSmartNotes(project);
     },
   );
-
-  const [meta] = createResource(selectedSession, async (sid) => {
-    if (!sid) return null;
-    return getSessionMeta(sid);
-  });
-
-  const [tokenBreakdown] = createResource(selectedSession, async (sid) => {
-    if (!sid) return null;
-    return getContextTokenBreakdown(sid);
-  });
 
   const toggleCompartment = (id: number) => {
     const isOpening = expandedCompartment() !== id;
@@ -115,7 +198,7 @@ export default function SessionViewer() {
 
   // Grouped facts by category
   const groupedFacts = () => {
-    const f = facts() ?? [];
+    const f = facts();
     const groups: Record<string, SessionFact[]> = {};
     for (const fact of f) {
       if (!groups[fact.category]) groups[fact.category] = [];
@@ -126,7 +209,7 @@ export default function SessionViewer() {
 
   // Total message range across all compartments for proportional timeline widths
   const totalRange = createMemo(() => {
-    const comps = compartments() ?? [];
+    const comps = compartments();
     if (comps.length === 0) return 1;
     const minStart = Math.min(...comps.map((c) => c.start_message));
     const maxEnd = Math.max(...comps.map((c) => c.end_message));
@@ -146,8 +229,12 @@ export default function SessionViewer() {
             >
               ←
             </button>
-            {sessions()?.find((s) => s.session_id === selectedSession())?.title ||
-              truncate(selectedSession() ?? "", 20)}
+            <span style={{ display: "inline-flex", "align-items": "center", gap: "8px" }}>
+              <Show when={sessionDetail() ?? selectedRow()}>
+                {(session) => <HarnessBadge harness={session().harness} />}
+              </Show>
+              {displayTitle()}
+            </span>
           </Show>
         </h1>
       </div>
@@ -170,6 +257,17 @@ export default function SessionViewer() {
             type="text"
             placeholder="Search sessions..."
             onInput={(e) => handleSearch(e.currentTarget.value)}
+          />
+          <FilterSelect
+            value={harnessFilter()}
+            onChange={(value) => setHarnessFilter(value as HarnessFilter)}
+            placeholder="Harness"
+            align="right"
+            options={[
+              { value: "all", label: "Harness: All" },
+              { value: "opencode", label: "OpenCode" },
+              { value: "pi", label: "Pi" },
+            ]}
           />
           <label
             style={{
@@ -205,12 +303,16 @@ export default function SessionViewer() {
                       type="button"
                       class="card"
                       style={{ cursor: "pointer", "text-align": "left", width: "100%" }}
-                      onClick={() => setSelectedSession(session.session_id)}
+                      onClick={() => {
+                        setSelectedSession({ harness: session.harness, sessionId: session.session_id });
+                        setActiveTab("messages");
+                      }}
                     >
                       <div
                         class="card-title"
                         style={{ display: "flex", "align-items": "center", gap: "8px" }}
                       >
+                        <HarnessBadge harness={session.harness} />
                         <span>{session.title || truncate(session.session_id, 20)}</span>
                         <Show when={session.is_subagent}>
                           <span class="pill gray">subagent</span>
@@ -225,19 +327,11 @@ export default function SessionViewer() {
                         </Show>
                       </div>
                       <div class="card-meta">
-                        <span>{session.compartment_count} compartments</span>
+                        <span>{session.message_count} messages</span>
                         <span>·</span>
-                        <span>{session.fact_count} facts</span>
+                        <span>{session.project_display}</span>
                         <span>·</span>
-                        <span>{session.note_count} notes</span>
-                        <Show when={session.last_response_time}>
-                          {(t) => (
-                            <>
-                              <span>·</span>
-                              <span>Last active: {formatRelativeTime(t())}</span>
-                            </>
-                          )}
-                        </Show>
+                        <span>Last active: {formatRelativeTime(session.last_activity_ms)}</span>
                       </div>
                     </button>
                   );
@@ -253,31 +347,35 @@ export default function SessionViewer() {
         <div class="tab-pills">
           <button
             type="button"
+            class={`tab-pill ${activeTab() === "messages" ? "active" : ""}`}
+            onClick={() => setActiveTab("messages")}
+          >
+            Messages ({messages().length}
+            <Show when={piCompactions().length > 0}>
+              <span>, +{piCompactions().length} compaction</span>
+            </Show>
+            )
+          </button>
+          <button
+            type="button"
             class={`tab-pill ${activeTab() === "compartments" ? "active" : ""}`}
             onClick={() => setActiveTab("compartments")}
           >
-            Compartments ({compartments()?.length ?? 0})
+            Compartments ({compartments().length})
           </button>
           <button
             type="button"
             class={`tab-pill ${activeTab() === "facts" ? "active" : ""}`}
             onClick={() => setActiveTab("facts")}
           >
-            Facts ({facts()?.length ?? 0})
+            Facts ({facts().length})
           </button>
           <button
             type="button"
             class={`tab-pill ${activeTab() === "notes" ? "active" : ""}`}
             onClick={() => setActiveTab("notes")}
           >
-            Notes ({(notes()?.length ?? 0) + (smartNotes()?.length ?? 0)})
-          </button>
-          <button
-            type="button"
-            class={`tab-pill ${activeTab() === "meta" ? "active" : ""}`}
-            onClick={() => setActiveTab("meta")}
-          >
-            Meta
+            Notes ({notes().length + (smartNotes()?.length ?? 0)})
           </button>
           <button
             type="button"
@@ -286,13 +384,40 @@ export default function SessionViewer() {
           >
             Tokens
           </button>
+          <button
+            type="button"
+            class={`tab-pill ${activeTab() === "cache" ? "active" : ""}`}
+            onClick={() => setActiveTab("cache")}
+          >
+            Cache ({cacheEvents()?.length ?? 0})
+          </button>
         </div>
 
+        <Show when={sessionDetail()}>
+          {(detail) => (
+            <div class="card" style={{ margin: "0 20px 12px", padding: "10px 14px" }}>
+              <div style={{ display: "flex", "align-items": "center", gap: "8px", "margin-bottom": "4px" }}>
+                <HarnessBadge harness={detail().harness} />
+                <span class="card-title" style={{ margin: 0 }}>{detail().project_display}</span>
+              </div>
+              <div class="card-meta">
+                <span class="mono">{detail().session_id}</span>
+                <Show when={detail().pi_jsonl_path}>
+                  {(path) => <span class="mono">JSONL: {path()}</span>}
+                </Show>
+                <Show when={detail().opencode_session_json}>
+                  <span class="pill gray">OpenCode session JSON available</span>
+                </Show>
+              </div>
+            </div>
+          )}
+        </Show>
+
         {/* Timeline bar - fixed outside scroll, aligned with scroll content */}
-        <Show when={activeTab() === "compartments" && (compartments() ?? []).length > 0}>
+        <Show when={activeTab() === "compartments" && (compartments()).length > 0}>
           <div style={{ padding: "0 28px 12px 20px" }}>
             <div class="timeline-bar">
-              <For each={compartments() ?? []}>
+              <For each={compartments()}>
                 {(comp) => {
                   const range = comp.end_message - comp.start_message;
                   const width = () => Math.max(0.5, (range / totalRange()) * 100);
@@ -323,10 +448,67 @@ export default function SessionViewer() {
 
         <div class="scroll-area">
           {/* Compartments tab */}
+          <Show when={activeTab() === "messages"}>
+            <Show when={!sessionDetail.loading} fallback={<div class="empty-state">Loading...</div>}>
+              <div class="list-gap">
+                <Show when={piCompactions().length > 0}>
+                  <div class="card" style={{ "border-left": "3px solid var(--purple)" }}>
+                    <div class="card-title">Pi compaction markers: {piCompactions().length}</div>
+                    <div class="card-meta">
+                      <For each={piCompactions()}>
+                        {(entry) => (
+                          <span>
+                            before {truncate(entry.first_kept_entry_id, 12)} summarized · {entry.tokens_before.toLocaleString()} tokens
+                          </span>
+                        )}
+                      </For>
+                    </div>
+                  </div>
+                </Show>
+                <Show
+                  when={messages().length > 0}
+                  fallback={<div class="empty-state"><span class="empty-state-icon">💬</span>No messages</div>}
+                >
+                  <For each={messages()}>
+                    {(message) => (
+                      <div class="card">
+                        <div style={{ display: "flex", "align-items": "center", gap: "8px", "margin-bottom": "6px" }}>
+                          <span class={`pill ${roleClass(message.role)}`}>{message.role}</span>
+                          <span class="mono" style={{ "font-size": "11px", color: "var(--text-secondary)" }}>
+                            {formatDateTime(message.timestamp_ms)}
+                          </span>
+                          <span class="mono" style={{ "font-size": "10px", color: "var(--text-muted)" }}>
+                            {truncate(message.message_id, 16)}
+                          </span>
+                        </div>
+                        <div
+                          style={{
+                            "font-size": "12px",
+                            "line-height": "1.6",
+                            "white-space": "pre-wrap",
+                            color: ["user", "assistant", "system"].includes(message.role.toLowerCase())
+                              ? "var(--text-primary)"
+                              : "var(--text-secondary)",
+                            "font-style": ["user", "assistant", "system"].includes(message.role.toLowerCase())
+                              ? "normal"
+                              : "italic",
+                          }}
+                        >
+                          {message.text_preview || "—"}
+                        </div>
+                      </div>
+                    )}
+                  </For>
+                </Show>
+              </div>
+            </Show>
+          </Show>
+
+          {/* Compartments tab */}
           <Show when={activeTab() === "compartments"}>
-            <Show when={!compartments.loading} fallback={<div class="empty-state">Loading...</div>}>
+            <Show when={!sessionDetail.loading} fallback={<div class="empty-state">Loading...</div>}>
               <Show
-                when={(compartments() ?? []).length > 0}
+                when={(compartments()).length > 0}
                 fallback={
                   <div class="empty-state">
                     <span class="empty-state-icon">📜</span>No compartments
@@ -334,7 +516,7 @@ export default function SessionViewer() {
                 }
               >
                 <div class="list-gap">
-                  <For each={compartments() ?? []}>
+                  <For each={compartments()}>
                     {(comp) => (
                       <button
                         type="button"
@@ -421,7 +603,7 @@ export default function SessionViewer() {
           {/* Facts tab */}
           <Show when={activeTab() === "facts"}>
             <Show
-              when={(facts() ?? []).length > 0}
+              when={(facts()).length > 0}
               fallback={
                 <div class="empty-state">
                   <span class="empty-state-icon">📝</span>No facts
@@ -550,7 +732,7 @@ export default function SessionViewer() {
             <div class="list-gap">
               {/* Session Notes */}
               <Show
-                when={(notes() ?? []).length > 0}
+                when={notes().length > 0}
                 fallback={
                   <div class="empty-state">
                     <span class="empty-state-icon">📌</span>No session notes
@@ -558,7 +740,7 @@ export default function SessionViewer() {
                 }
               >
                 <div class="list-gap">
-                  <For each={notes() ?? []}>
+                  <For each={notes()}>
                     {(note) => (
                       <div class="card">
                         <Show
@@ -788,8 +970,8 @@ export default function SessionViewer() {
             </div>
           </Show>
 
-          {/* Meta tab */}
-          <Show when={activeTab() === "meta"}>
+          {/* OpenCode meta table shown inside Tokens tab */}
+          <Show when={activeTab() === "tokens" && meta()}>
             <Show when={meta()} fallback={<div class="empty-state">No meta data</div>}>
               {(metaData) => (
                 <table class="kv-table">
@@ -826,10 +1008,12 @@ export default function SessionViewer() {
                       <td>Execute hits</td>
                       <td>{metaData().times_execute_threshold_reached}</td>
                     </tr>
-                    <tr>
-                      <td>Subagent</td>
-                      <td>{metaData().is_subagent ? "Yes" : "No"}</td>
-                    </tr>
+                    <Show when={sessionDetail()?.harness !== "pi"}>
+                      <tr>
+                        <td>Subagent</td>
+                        <td>{metaData().is_subagent ? "Yes" : "No"}</td>
+                      </tr>
+                    </Show>
                     <tr>
                       <td>Compartment WIP</td>
                       <td>{metaData().compartment_in_progress ? "Yes" : "No"}</td>
@@ -1213,6 +1397,88 @@ export default function SessionViewer() {
                   </div>
                 );
               }}
+            </Show>
+          </Show>
+
+          {/* Cache tab */}
+          <Show when={activeTab() === "cache"}>
+            <Show when={!cacheEvents.loading} fallback={<div class="empty-state">Loading cache events...</div>}>
+              <Show
+                when={(cacheEvents() ?? []).length > 0}
+                fallback={
+                  <div class="empty-state">
+                    <span class="empty-state-icon">📊</span>
+                    <span>No cache data yet</span>
+                  </div>
+                }
+              >
+                <div class="list-gap">
+                  <div class="chart-container">
+                    <div
+                      style={{
+                        "font-size": "11px",
+                        color: "var(--text-secondary)",
+                        "margin-bottom": "8px",
+                        display: "flex",
+                        "justify-content": "space-between",
+                      }}
+                    >
+                      <span>Cache Hit Timeline</span>
+                      <span>{cacheEvents()?.length ?? 0} events</span>
+                    </div>
+                    <div class="chart-bars">
+                      <For each={cacheEvents() ?? []}>
+                        {(event) => {
+                          const ratio = () => cacheHitRatio(event);
+                          return (
+                            <div
+                              class={`chart-bar ${ratio() === 0 ? "black" : severityBarClass(ratio())}`}
+                              style={{ height: `${Math.max(3, ratio() * 100)}%` }}
+                              title={`${formatDateTime(event.timestamp)}\nHit: ${(ratio() * 100).toFixed(1)}%\nPrompt: ${(event.cache_read + event.cache_write + event.input_tokens).toLocaleString()}\nCached: ${event.cache_read.toLocaleString()}\nNew: ${event.cache_write.toLocaleString()}\nUncached: ${event.input_tokens.toLocaleString()}${event.cause ? `\nCause: ${event.cause}` : ""}`}
+                            />
+                          );
+                        }}
+                      </For>
+                    </div>
+                  </div>
+
+                  <For each={[...(cacheEvents() ?? [])].reverse()}>
+                    {(event) => {
+                      const ratio = cacheHitRatio(event);
+                      const totalPrompt = event.cache_read + event.cache_write + event.input_tokens;
+                      return (
+                        <div class="card">
+                          <div style={{ display: "flex", "align-items": "center", gap: "8px", "margin-bottom": "4px" }}>
+                            <span>{severityIcon(event.severity)}</span>
+                            <span class="mono" style={{ "font-size": "11px", color: "var(--text-secondary)" }}>
+                              {formatDateTime(event.timestamp)}
+                            </span>
+                            <span class={`pill ${event.severity === "stable" ? "green" : event.severity === "info" ? "blue" : event.severity === "warning" ? "amber" : "red"}`}>
+                              {event.severity === "full_bust" ? "FULL BUST" : event.severity.toUpperCase()}
+                            </span>
+                          </div>
+                          <div class="card-meta" style={{ gap: "12px" }}>
+                            <span class="mono" style={{ color: hitColor(ratio), "font-weight": "600" }}>
+                              {(ratio * 100).toFixed(1)}%
+                            </span>
+                            <span class="mono">prompt={totalPrompt.toLocaleString()}</span>
+                            <span class="mono">cached={event.cache_read.toLocaleString()}</span>
+                            <span class="mono">new={event.cache_write.toLocaleString()}</span>
+                            <div class="cache-bar">
+                              <div class={`cache-bar-fill ${severityBarClass(ratio)}`} style={{ width: `${ratio * 100}%` }} />
+                            </div>
+                          </div>
+                          <Show when={event.cause}>
+                            <div style={{ "margin-top": "6px", "font-size": "11px", color: "var(--amber)" }}>
+                              Cause: {event.cause}
+                            </div>
+                          </Show>
+                        </div>
+                      );
+                    }}
+                  </For>
+                </div>
+              </Show>
             </Show>
           </Show>
         </div>

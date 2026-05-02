@@ -53,17 +53,19 @@
       "devDependencies": {
         "@biomejs/biome": "^2.4.7",
         "@mariozechner/pi-coding-agent": "^0.70.5",
+        "@mariozechner/pi-tui": "^0.70.5",
         "@types/better-sqlite3": "^7.6.13",
         "@types/node": "^22.0.0",
         "typescript": "^5.8.0",
       },
       "peerDependencies": {
         "@mariozechner/pi-coding-agent": "^0.70.5",
+        "@mariozechner/pi-tui": "^0.70.5",
       },
     },
     "packages/plugin": {
       "name": "@cortexkit/opencode-magic-context",
-      "version": "0.15.5",
+      "version": "0.15.7",
       "bin": {
         "opencode-magic-context": "dist/cli.js",
       },

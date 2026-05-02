@@ -1,8 +1,8 @@
-import { createSignal, For, onCleanup, Show } from "solid-js";
+import { createSignal, For, type JSX, onCleanup, Show } from "solid-js";
 
 interface FilterOption {
   value: string;
-  label: string;
+  label: JSX.Element;
 }
 
 interface FilterSelectProps {

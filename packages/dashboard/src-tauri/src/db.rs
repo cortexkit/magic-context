@@ -1,7 +1,10 @@
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+
+use crate::pi_sessions;
+use crate::project_identity::{basename, resolve_project_identity};
 
 pub fn resolve_db_path() -> Option<PathBuf> {
     // The magic-context plugin uses XDG_DATA_HOME or ~/.local/share on ALL platforms
@@ -141,6 +144,81 @@ pub struct SessionSummary {
     pub last_response_time: Option<i64>,
     pub last_context_percentage: Option<f64>,
     pub is_subagent: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum Harness {
+    Opencode,
+    Pi,
+}
+
+impl std::str::FromStr for Harness {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "opencode" => Ok(Self::Opencode),
+            "pi" => Ok(Self::Pi),
+            other => Err(format!("unknown harness: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct SessionFilter {
+    pub harness: Option<Harness>,
+    pub project_identity: Option<String>,
+    pub search: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SessionRow {
+    pub harness: Harness,
+    pub session_id: String,
+    pub title: String,
+    pub project_identity: String,
+    pub project_display: String,
+    pub message_count: u32,
+    pub last_activity_ms: i64,
+    pub is_subagent: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SessionMessageRow {
+    pub message_id: String,
+    pub timestamp_ms: i64,
+    pub role: String,
+    pub text_preview: String,
+    pub raw_json: serde_json::Value,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SessionDetail {
+    pub harness: Harness,
+    pub session_id: String,
+    pub title: String,
+    pub project_identity: String,
+    pub project_display: String,
+    pub project_path: Option<String>,
+    pub opencode_session_json: Option<serde_json::Value>,
+    pub pi_jsonl_path: Option<String>,
+    pub messages: Vec<SessionMessageRow>,
+    pub compartments: Vec<Compartment>,
+    pub facts: Vec<SessionFact>,
+    pub notes: Vec<Note>,
+    pub meta: Option<SessionMetaRow>,
+    pub token_breakdown: Option<ContextTokenBreakdown>,
+    pub pi_compaction_entries: Vec<pi_sessions::PiCompactionEntry>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ProjectRow {
+    pub identity: String,
+    pub display_name: String,
+    pub primary_path: String,
+    pub harnesses: Vec<Harness>,
+    pub session_count: u32,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -846,6 +924,80 @@ pub fn get_session_cache_stats_from_db(limit: usize) -> Vec<SessionCacheStats> {
     stats.into_iter().map(|(_, stat)| stat).collect()
 }
 
+pub fn get_session_cache_events(harness: Harness, session_id: &str) -> Vec<DbCacheEvent> {
+    match harness {
+        Harness::Opencode => get_opencode_session_cache_events(session_id),
+        Harness::Pi => get_pi_session_cache_events(session_id),
+    }
+}
+
+fn get_opencode_session_cache_events(session_id: &str) -> Vec<DbCacheEvent> {
+    let Some(opencode_db_path) = resolve_opencode_db_path() else {
+        return Vec::new();
+    };
+    let Ok(conn) = open_readonly(&opencode_db_path) else {
+        return Vec::new();
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT CAST(id AS TEXT), session_id, time_created,
+                COALESCE(CAST(json_extract(data, '$.tokens.input') AS INTEGER), 0),
+                COALESCE(CAST(json_extract(data, '$.tokens.cache.read') AS INTEGER), 0),
+                COALESCE(CAST(json_extract(data, '$.tokens.cache.write') AS INTEGER), 0),
+                COALESCE(CAST(json_extract(data, '$.tokens.total') AS INTEGER), 0),
+                CAST(json_extract(data, '$.agent') AS TEXT)
+         FROM message
+         WHERE session_id = ?1
+           AND json_extract(data, '$.role') = 'assistant'
+           AND COALESCE(CAST(json_extract(data, '$.tokens.total') AS INTEGER), 0) > 0
+         ORDER BY time_created ASC",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([session_id], |row| {
+        Ok(RawDbCacheEvent {
+            message_id: row.get(0)?,
+            session_id: row.get(1)?,
+            timestamp: row.get(2)?,
+            input_tokens: row.get(3)?,
+            cache_read: row.get(4)?,
+            cache_write: row.get(5)?,
+            total_tokens: row.get(6)?,
+            agent: row.get(7)?,
+        })
+    }) else {
+        return Vec::new();
+    };
+    build_db_cache_events(rows.flatten().collect(), true)
+}
+
+fn get_pi_session_cache_events(session_id: &str) -> Vec<DbCacheEvent> {
+    let Some(path) = pi_sessions::find_pi_session_path(session_id) else {
+        return Vec::new();
+    };
+    let Some(detail) = pi_sessions::read_pi_session_detail(&path) else {
+        return Vec::new();
+    };
+    let rows = detail
+        .messages
+        .into_iter()
+        .filter(|message| message.role == "assistant")
+        .filter_map(|message| {
+            let usage = message.usage?;
+            (usage.total > 0).then_some(RawDbCacheEvent {
+                message_id: message.entry_id,
+                session_id: session_id.to_string(),
+                timestamp: message.timestamp_ms,
+                input_tokens: usage.input as i64,
+                cache_read: usage.cache_read as i64,
+                cache_write: usage.cache_write as i64,
+                total_tokens: usage.total as i64,
+                agent: None,
+            })
+        })
+        .collect();
+    build_db_cache_events(rows, false)
+}
+
 // ── Project resolution ────────────────────────────────────────
 
 #[derive(Debug, Serialize, Clone)]
@@ -900,6 +1052,87 @@ pub fn get_projects(conn: &Connection) -> Result<Vec<ProjectInfo>, rusqlite::Err
         .collect();
 
     Ok(projects)
+}
+
+pub fn enumerate_projects() -> Vec<ProjectRow> {
+    #[derive(Default)]
+    struct ProjectAccum {
+        opencode_name: Option<String>,
+        opencode_path: Option<String>,
+        pi_path: Option<String>,
+        harnesses: HashSet<Harness>,
+        session_count: u32,
+    }
+
+    let mut groups: HashMap<String, ProjectAccum> = HashMap::new();
+
+    if let Some(opencode_db_path) = resolve_opencode_db_path() {
+        if let Ok(conn) = open_readonly(&opencode_db_path) {
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT p.name, p.worktree, COUNT(s.id)
+                 FROM project p LEFT JOIN session s ON s.project_id = p.id
+                 GROUP BY p.id, p.name, p.worktree",
+            ) {
+                if let Ok(rows) = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                }) {
+                    for (name, worktree, count) in rows.flatten() {
+                        let identity = resolve_project_identity(&worktree);
+                        let entry = groups.entry(identity).or_default();
+                        if !name.is_empty() {
+                            entry.opencode_name = Some(name);
+                        }
+                        entry.opencode_path = Some(worktree);
+                        entry.harnesses.insert(Harness::Opencode);
+                        entry.session_count = entry.session_count.saturating_add(count.max(0) as u32);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut pi_counts: HashMap<String, (String, u32)> = HashMap::new();
+    for meta in pi_sessions::scan_pi_session_dir() {
+        let identity = resolve_project_identity(&meta.cwd);
+        let entry = pi_counts.entry(identity).or_insert((meta.cwd, 0));
+        entry.1 = entry.1.saturating_add(1);
+    }
+    for (identity, (cwd, count)) in pi_counts {
+        let entry = groups.entry(identity).or_default();
+        entry.pi_path = Some(cwd);
+        entry.harnesses.insert(Harness::Pi);
+        entry.session_count = entry.session_count.saturating_add(count);
+    }
+
+    let mut rows: Vec<ProjectRow> = groups
+        .into_iter()
+        .map(|(identity, group)| {
+            let primary_path = group
+                .opencode_path
+                .clone()
+                .or(group.pi_path.clone())
+                .unwrap_or_default();
+            let display_name = group
+                .opencode_name
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| basename(&primary_path));
+            let mut harnesses: Vec<Harness> = group.harnesses.into_iter().collect();
+            harnesses.sort();
+            ProjectRow {
+                identity,
+                display_name,
+                primary_path,
+                harnesses,
+                session_count: group.session_count,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+    rows
 }
 
 /// Look up project names and worktrees from OpenCode's own database.
@@ -1496,6 +1729,297 @@ pub fn get_sessions(conn: &Connection) -> Result<Vec<SessionSummary>, rusqlite::
     Ok(sessions)
 }
 
+pub fn list_opencode_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
+    if filter.harness.is_some_and(|h| h != Harness::Opencode) {
+        return Vec::new();
+    }
+    let Some(opencode_db_path) = resolve_opencode_db_path() else {
+        return Vec::new();
+    };
+    let Ok(conn) = open_readonly(&opencode_db_path) else {
+        return Vec::new();
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT s.id, COALESCE(s.title, ''), COALESCE(p.name, ''), COALESCE(p.worktree, ''),
+                COUNT(m.id) AS message_count,
+                COALESCE(MAX(m.time_created), 0) AS last_activity
+         FROM session s
+         LEFT JOIN project p ON p.id = s.project_id
+         LEFT JOIN message m ON m.session_id = s.id
+         GROUP BY s.id, s.title, p.name, p.worktree",
+    ) else {
+        return Vec::new();
+    };
+
+    let rows = stmt.query_map([], |row| {
+        let session_id: String = row.get(0)?;
+        let title: String = row.get(1)?;
+        let project_name: String = row.get(2)?;
+        let worktree: String = row.get(3)?;
+        let message_count: i64 = row.get(4)?;
+        let last_activity_ms: i64 = row.get(5)?;
+        let identity = resolve_project_identity(&worktree);
+        Ok(SessionRow {
+            harness: Harness::Opencode,
+            session_id,
+            title,
+            project_identity: identity,
+            project_display: if project_name.is_empty() {
+                basename(&worktree)
+            } else {
+                project_name
+            },
+            message_count: message_count.max(0) as u32,
+            last_activity_ms,
+            is_subagent: false,
+        })
+    });
+
+    rows.map(|rows| rows.flatten().filter(|row| session_matches_filter(row, filter)).collect())
+        .unwrap_or_default()
+}
+
+pub fn list_pi_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
+    if filter.harness.is_some_and(|h| h != Harness::Pi) {
+        return Vec::new();
+    }
+    pi_sessions::scan_pi_session_dir()
+        .into_iter()
+        .map(|meta| {
+            let project_identity = resolve_project_identity(&meta.cwd);
+            SessionRow {
+                harness: Harness::Pi,
+                session_id: meta.session_id,
+                title: meta.session_name.unwrap_or(meta.first_message),
+                project_identity,
+                project_display: basename(&meta.cwd),
+                message_count: meta.message_count,
+                last_activity_ms: meta.modified,
+                is_subagent: false,
+            }
+        })
+        .filter(|row| session_matches_filter(row, filter))
+        .collect()
+}
+
+pub fn list_all_sessions(filter: SessionFilter) -> Vec<SessionRow> {
+    let mut rows = Vec::new();
+    rows.extend(list_opencode_sessions(&filter));
+    rows.extend(list_pi_sessions(&filter));
+    rows.sort_by(|a, b| b.last_activity_ms.cmp(&a.last_activity_ms));
+    rows
+}
+
+fn session_matches_filter(row: &SessionRow, filter: &SessionFilter) -> bool {
+    if let Some(identity) = filter.project_identity.as_deref() {
+        if row.project_identity != identity {
+            return false;
+        }
+    }
+    if let Some(search) = filter.search.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let search = search.to_ascii_lowercase();
+        let haystack = format!("{} {} {}", row.title, row.project_display, row.session_id)
+            .to_ascii_lowercase();
+        if !haystack.contains(&search) {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn get_session_detail(
+    conn: Option<&Connection>,
+    harness: Harness,
+    session_id: &str,
+) -> Result<Option<SessionDetail>, rusqlite::Error> {
+    match harness {
+        Harness::Opencode => get_opencode_session_detail(conn, session_id),
+        Harness::Pi => Ok(get_pi_session_detail(conn, session_id)),
+    }
+}
+
+pub fn get_opencode_session_detail(
+    conn: Option<&Connection>,
+    session_id: &str,
+) -> Result<Option<SessionDetail>, rusqlite::Error> {
+    let Some(opencode_db_path) = resolve_opencode_db_path() else {
+        return Ok(None);
+    };
+    let oc_conn = open_readonly(&opencode_db_path)?;
+    let row = oc_conn.query_row(
+        "SELECT s.id, COALESCE(s.title, ''), COALESCE(p.name, ''), COALESCE(p.worktree, ''),
+                COALESCE(json(s.data), '{}')
+         FROM session s LEFT JOIN project p ON p.id = s.project_id WHERE s.id = ?1",
+        [session_id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        },
+    );
+    let Ok((session_id, title, project_name, worktree, data_json)) = row else {
+        return Ok(None);
+    };
+
+    let messages = load_opencode_messages(&oc_conn, &session_id)?;
+    let compartments = conn
+        .map(|c| get_compartments(c, &session_id))
+        .transpose()?
+        .unwrap_or_default();
+    let facts = conn
+        .map(|c| get_session_facts(c, &session_id))
+        .transpose()?
+        .unwrap_or_default();
+    let notes = conn
+        .map(|c| get_session_notes(c, &session_id))
+        .transpose()?
+        .unwrap_or_default();
+    let meta = conn
+        .map(|c| get_session_meta(c, &session_id))
+        .transpose()?
+        .flatten();
+    let token_breakdown = conn
+        .map(|c| get_context_token_breakdown(c, &session_id))
+        .transpose()?
+        .flatten();
+
+    Ok(Some(SessionDetail {
+        harness: Harness::Opencode,
+        session_id,
+        title,
+        project_identity: resolve_project_identity(&worktree),
+        project_display: if project_name.is_empty() {
+            basename(&worktree)
+        } else {
+            project_name
+        },
+        project_path: (!worktree.is_empty()).then_some(worktree),
+        opencode_session_json: serde_json::from_str(&data_json).ok(),
+        pi_jsonl_path: None,
+        messages,
+        compartments,
+        facts,
+        notes,
+        meta,
+        token_breakdown,
+        pi_compaction_entries: Vec::new(),
+    }))
+}
+
+fn load_opencode_messages(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<SessionMessageRow>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT CAST(id AS TEXT), time_created, COALESCE(CAST(json_extract(data, '$.role') AS TEXT), ''), data
+         FROM message WHERE session_id = ?1 ORDER BY time_created ASC",
+    )?;
+    let rows = stmt.query_map([session_id], |row| {
+        let raw_string: String = row.get(3)?;
+        let raw_json: serde_json::Value = serde_json::from_str(&raw_string).unwrap_or_default();
+        Ok(SessionMessageRow {
+            message_id: row.get(0)?,
+            timestamp_ms: row.get(1)?,
+            role: row.get(2)?,
+            text_preview: preview_from_json(&raw_json),
+            raw_json,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn get_pi_session_detail(
+    conn: Option<&Connection>,
+    session_id: &str,
+) -> Option<SessionDetail> {
+    let path = pi_sessions::find_pi_session_path(session_id)?;
+    let detail = pi_sessions::read_pi_session_detail(&path)?;
+    let title = detail
+        .meta
+        .session_name
+        .clone()
+        .unwrap_or_else(|| detail.meta.first_message.clone());
+    let compartments = conn
+        .and_then(|c| get_compartments(c, session_id).ok())
+        .unwrap_or_default();
+    let facts = conn
+        .and_then(|c| get_session_facts(c, session_id).ok())
+        .unwrap_or_default();
+    let notes = conn
+        .and_then(|c| get_session_notes(c, session_id).ok())
+        .unwrap_or_default();
+    let meta = conn.and_then(|c| get_session_meta(c, session_id).ok()).flatten();
+    let token_breakdown = conn
+        .and_then(|c| get_context_token_breakdown(c, session_id).ok())
+        .flatten();
+    let project_identity = resolve_project_identity(&detail.meta.cwd);
+    Some(SessionDetail {
+        harness: Harness::Pi,
+        session_id: detail.meta.session_id.clone(),
+        title,
+        project_identity,
+        project_display: basename(&detail.meta.cwd),
+        project_path: (!detail.meta.cwd.is_empty()).then_some(detail.meta.cwd.clone()),
+        opencode_session_json: None,
+        pi_jsonl_path: Some(detail.meta.jsonl_path.to_string_lossy().to_string()),
+        messages: detail
+            .messages
+            .iter()
+            .map(|message| SessionMessageRow {
+                message_id: message.entry_id.clone(),
+                timestamp_ms: message.timestamp_ms,
+                role: message.role.clone(),
+                text_preview: message.text_preview.clone(),
+                raw_json: message.raw_json.clone(),
+            })
+            .collect(),
+        compartments,
+        facts,
+        notes,
+        meta,
+        token_breakdown,
+        pi_compaction_entries: detail.compaction_entries,
+    })
+}
+
+fn preview_from_json(value: &serde_json::Value) -> String {
+    fn content_text(value: &serde_json::Value) -> String {
+        if let Some(text) = value.as_str() {
+            return text.to_string();
+        }
+        if let Some(parts) = value.as_array() {
+            return parts
+                .iter()
+                .filter_map(|part| {
+                    part.get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToString::to_string)
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+        }
+        String::new()
+    }
+    let text = value
+        .get("content")
+        .map(content_text)
+        .or_else(|| value.get("parts").map(content_text))
+        .unwrap_or_default();
+    text.chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(500)
+        .collect()
+}
+
 /// Look up session titles and project IDs from OpenCode's database.
 /// Returns HashMap<session_id, (title, project_id)>.
 fn resolve_session_info(
@@ -1940,8 +2464,7 @@ pub fn get_user_memories(
             promoted_at: row.get(3)?,
             source_candidate_ids: source_candidate_ids
                 .as_deref()
-                .map(|s| serde_json::from_str(s).ok())
-                .flatten(),
+                .and_then(|s| serde_json::from_str(s).ok()),
             created_at: row.get(5)?,
             updated_at: row.get(6)?,
         })

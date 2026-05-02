@@ -1,10 +1,35 @@
-import { createMemo, createResource, createSignal, For, type JSX, Show } from "solid-js";
-import { getConfig, getProjectConfigs, saveConfig, saveProjectConfig } from "../../lib/api";
+import { createEffect, createMemo, createResource, createSignal, For, type JSX, Show } from "solid-js";
+import {
+  getConfig,
+  getPiConfig,
+  getProjectConfigs,
+  saveConfig,
+  savePiConfig,
+  saveProjectConfig,
+} from "../../lib/api";
 import type { ProjectConfigEntry } from "../../lib/types";
 import ModelSelect from "./ModelSelect";
 import PerModelField from "./PerModelField";
 
 // ── JSONC helpers ───────────────────────────────────────────
+
+const CONFIG_TAB_STORAGE_KEY = "magic-context-dashboard.config-tab";
+const MAGIC_CONTEXT_SCHEMA_URL =
+  "https://raw.githubusercontent.com/cortexkit/opencode-magic-context/master/assets/magic-context.schema.json";
+const PI_DEFAULT_CONFIG = `{
+  "$schema": "${MAGIC_CONTEXT_SCHEMA_URL}",
+  "enabled": true
+}`;
+
+type UserConfigTab = "opencode" | "pi";
+
+function loadUserConfigTab(): UserConfigTab {
+  try {
+    return localStorage.getItem(CONFIG_TAB_STORAGE_KEY) === "pi" ? "pi" : "opencode";
+  } catch {
+    return "opencode";
+  }
+}
 
 // Minimal JSONC parser: strip comments while respecting string literals, then parse.
 function parseJsonc(text: string): Record<string, unknown> {
@@ -347,6 +372,7 @@ function ConfigForm(props: {
 
   // Reset form data when content prop changes
   const parsed = createMemo(() => parseJsonc(props.content));
+  createEffect(() => setFormData(parsed()));
 
   const hasChanges = createMemo(() => {
     return JSON.stringify(formData()) !== JSON.stringify(parsed());
@@ -1957,7 +1983,7 @@ function ProjectConfigDetail(props: {
       </table>
       <Show when={config()} fallback={<div class="empty-state">Loading...</div>}>
         <ConfigForm
-          content={config()?.content}
+          content={config()?.content ?? ""}
           onSave={handleSave}
           saveStatus={saveStatus()}
           models={props.models}
@@ -1971,21 +1997,48 @@ function ProjectConfigDetail(props: {
 
 export default function ConfigEditor(props: { models: string[] }) {
   const [tab, setTab] = createSignal<"user" | "projects">("user");
+  const [userConfigTab, setUserConfigTab] = createSignal<UserConfigTab>(loadUserConfigTab());
   const [userConfig, { refetch: refetchUser }] = createResource(() => getConfig("user"));
+  const [piConfig, { refetch: refetchPi }] = createResource(getPiConfig);
   const [projectConfigs, { refetch: refetchProjects }] = createResource(getProjectConfigs);
   const [saveStatus, setSaveStatus] = createSignal<string | null>(null);
   const [selectedProject, setSelectedProject] = createSignal<ProjectConfigEntry | null>(null);
 
+  const activeUserConfig = () => (userConfigTab() === "pi" ? piConfig() : userConfig());
+  const activeUserConfigLoading = () =>
+    userConfigTab() === "pi" ? piConfig.loading : userConfig.loading;
+
+  const selectUserConfigTab = (next: UserConfigTab) => {
+    setUserConfigTab(next);
+    try {
+      localStorage.setItem(CONFIG_TAB_STORAGE_KEY, next);
+    } catch {
+      // Ignore localStorage failures; in-memory tab selection still works.
+    }
+    setSaveStatus(null);
+    if (next === "pi") refetchPi();
+    else refetchUser();
+  };
+
   const handleUserSave = async (content: string) => {
     try {
-      await saveConfig("user", content);
+      if (userConfigTab() === "pi") {
+        await savePiConfig(content);
+        refetchPi();
+      } else {
+        await saveConfig("user", content);
+        refetchUser();
+      }
       setSaveStatus("✓ Saved");
-      refetchUser();
       setTimeout(() => setSaveStatus(null), 2000);
     } catch (err) {
       setSaveStatus(`✕ Error: ${err}`);
       setTimeout(() => setSaveStatus(null), 4000);
     }
+  };
+
+  const handleCreatePiDefaults = async () => {
+    await handleUserSave(PI_DEFAULT_CONFIG);
   };
 
   return (
@@ -1998,6 +2051,7 @@ export default function ConfigEditor(props: { models: string[] }) {
             class="btn sm"
             onClick={() => {
               refetchUser();
+              refetchPi();
               refetchProjects();
             }}
           >
@@ -2036,8 +2090,24 @@ export default function ConfigEditor(props: { models: string[] }) {
 
       <div class="scroll-area">
         <Show when={tab() === "user"}>
+          <div class="tab-pills" style={{ "margin-bottom": "12px" }}>
+            <button
+              type="button"
+              class={`tab-pill ${userConfigTab() === "opencode" ? "active" : ""}`}
+              onClick={() => selectUserConfigTab("opencode")}
+            >
+              OpenCode (~/.config/opencode/magic-context.jsonc)
+            </button>
+            <button
+              type="button"
+              class={`tab-pill ${userConfigTab() === "pi" ? "active" : ""}`}
+              onClick={() => selectUserConfigTab("pi")}
+            >
+              Pi (~/.pi/agent/magic-context.jsonc)
+            </button>
+          </div>
           <Show
-            when={!userConfig.loading}
+            when={!activeUserConfigLoading()}
             fallback={<div class="empty-state">Loading config...</div>}
           >
             <div style={{ "margin-bottom": "8px" }}>
@@ -2045,26 +2115,38 @@ export default function ConfigEditor(props: { models: string[] }) {
                 <tbody>
                   <tr>
                     <td>Path</td>
-                    <td style={{ "word-break": "break-all" }}>{userConfig()?.path ?? "—"}</td>
+                    <td style={{ "word-break": "break-all" }}>{activeUserConfig()?.path ?? "—"}</td>
                   </tr>
                 </tbody>
               </table>
             </div>
             <Show
-              when={userConfig()?.exists}
+              when={activeUserConfig()?.exists}
               fallback={
                 <div class="empty-state">
                   <span class="empty-state-icon">⚙️</span>
-                  <span>No user config found at {userConfig()?.path}</span>
-                  <span style={{ "font-size": "11px" }}>
-                    Run <code>bunx --bun @cortexkit/opencode-magic-context setup</code> to create
-                    one
-                  </span>
+                  <span>No {userConfigTab() === "pi" ? "Pi" : "OpenCode"} config found at {activeUserConfig()?.path}</span>
+                  <Show
+                    when={userConfigTab() === "pi"}
+                    fallback={
+                      <span style={{ "font-size": "11px" }}>
+                        Run <code>bunx --bun @cortexkit/opencode-magic-context setup</code> to
+                        create one
+                      </span>
+                    }
+                  >
+                    <button type="button" class="btn" onClick={handleCreatePiDefaults}>
+                      Create with defaults
+                    </button>
+                  </Show>
+                  <Show when={saveStatus()}>
+                    <span style={{ "font-size": "11px" }}>{saveStatus()}</span>
+                  </Show>
                 </div>
               }
             >
               <ConfigForm
-                content={userConfig()?.content}
+                content={activeUserConfig()?.content ?? ""}
                 onSave={handleUserSave}
                 saveStatus={saveStatus()}
                 models={props.models}

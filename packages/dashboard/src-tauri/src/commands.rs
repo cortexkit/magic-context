@@ -107,6 +107,40 @@ pub fn get_sessions(state: State<'_, AppState>) -> Result<Vec<db::SessionSummary
 }
 
 #[tauri::command]
+pub fn list_sessions(filter: Option<db::SessionFilter>) -> Vec<db::SessionRow> {
+    db::list_all_sessions(filter.unwrap_or_default())
+}
+
+#[tauri::command]
+pub fn get_session_detail(
+    state: State<'_, AppState>,
+    harness: String,
+    session_id: String,
+) -> Result<db::SessionDetail, String> {
+    let harness = harness.parse::<db::Harness>()?;
+    let conn = state
+        .get_db_path()
+        .ok()
+        .and_then(|path| db::open_readonly(&path).ok());
+    db::get_session_detail(conn.as_ref(), harness, &session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("session not found: {session_id}"))
+}
+
+#[tauri::command]
+pub fn get_session_cache_events(harness: String, session_id: String) -> Vec<db::DbCacheEvent> {
+    match harness.parse::<db::Harness>() {
+        Ok(harness) => db::get_session_cache_events(harness, &session_id),
+        Err(_) => Vec::new(),
+    }
+}
+
+#[tauri::command]
+pub fn enumerate_projects() -> Vec<db::ProjectRow> {
+    db::enumerate_projects()
+}
+
+#[tauri::command]
 pub fn get_compartments(
     state: State<'_, AppState>,
     session_id: String,

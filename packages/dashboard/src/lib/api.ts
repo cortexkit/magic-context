@@ -9,12 +9,17 @@ import type {
   DreamQueueEntry,
   DreamRun,
   DreamStateEntry,
+  Harness,
   LogEntry,
   Memory,
   MemoryStats,
   Note,
+  ProjectRow,
+  SessionDetail,
   SessionFact,
+  SessionFilter,
   SessionMetaRow,
+  SessionRow,
   SessionSummary,
   UserMemory,
   UserMemoryCandidate,
@@ -72,6 +77,35 @@ export async function bulkDeleteMemory(memoryIds: number[]): Promise<number> {
 
 export async function getSessions(): Promise<SessionSummary[]> {
   return invoke("get_sessions");
+}
+
+export async function listSessions(filter?: SessionFilter): Promise<SessionRow[]> {
+  const sanitized: SessionFilter = {};
+  if (filter?.harness) sanitized.harness = filter.harness;
+  if (filter?.project_identity) sanitized.project_identity = filter.project_identity;
+  if (filter?.search) sanitized.search = filter.search;
+
+  return invoke("list_sessions", {
+    filter: Object.keys(sanitized).length > 0 ? sanitized : null,
+  });
+}
+
+export async function getSessionDetail(
+  harness: Harness,
+  sessionId: string,
+): Promise<SessionDetail> {
+  return invoke("get_session_detail", { harness, sessionId });
+}
+
+export async function getSessionCacheEvents(
+  harness: Harness,
+  sessionId: string,
+): Promise<DbCacheEvent[]> {
+  return invoke("get_session_cache_events", { harness, sessionId });
+}
+
+export async function enumerateProjects(): Promise<ProjectRow[]> {
+  return invoke("enumerate_projects");
 }
 
 export async function getCompartments(sessionId: string): Promise<Compartment[]> {
@@ -181,6 +215,14 @@ export async function getConfig(source: string): Promise<ConfigFile> {
 
 export async function saveConfig(source: string, content: string): Promise<void> {
   return invoke("save_config", { source, content });
+}
+
+export async function getPiConfig(): Promise<ConfigFile> {
+  return invoke("read_pi_config");
+}
+
+export async function savePiConfig(content: string): Promise<void> {
+  return invoke("write_pi_config", { content });
 }
 
 // ── Health API ──────────────────────────────────────────────

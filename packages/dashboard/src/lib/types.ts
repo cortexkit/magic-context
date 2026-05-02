@@ -67,6 +67,70 @@ export interface SessionSummary {
   is_subagent: boolean;
 }
 
+export type Harness = "opencode" | "pi";
+
+export interface SessionFilter {
+  harness?: Harness;
+  project_identity?: string;
+  search?: string;
+}
+
+export interface SessionRow {
+  harness: Harness;
+  session_id: string;
+  title: string;
+  project_identity: string;
+  project_display: string;
+  message_count: number;
+  last_activity_ms: number;
+  is_subagent: boolean;
+}
+
+export interface SessionMessageRow {
+  message_id: string;
+  timestamp_ms: number;
+  role: string;
+  text_preview: string;
+  raw_json: unknown;
+}
+
+export interface PiCompactionEntry {
+  entry_id: string;
+  parent_id: string | null;
+  timestamp_ms: number;
+  summary: string;
+  first_kept_entry_id: string;
+  tokens_before: number;
+  from_hook: boolean;
+  raw_json?: unknown;
+}
+
+export interface SessionDetail {
+  harness: Harness;
+  session_id: string;
+  title: string;
+  project_identity: string;
+  project_display: string;
+  project_path: string | null;
+  opencode_session_json: unknown | null;
+  pi_jsonl_path: string | null;
+  messages: SessionMessageRow[];
+  compartments: Compartment[];
+  facts: SessionFact[];
+  notes: Note[];
+  meta: SessionMetaRow | null;
+  token_breakdown: ContextTokenBreakdown | null;
+  pi_compaction_entries: PiCompactionEntry[];
+}
+
+export interface ProjectRow {
+  identity: string;
+  display_name: string;
+  primary_path: string;
+  harnesses: Harness[];
+  session_count: number;
+}
+
 export interface Compartment {
   id: number;
   session_id: string;

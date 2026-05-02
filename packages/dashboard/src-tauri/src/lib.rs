@@ -3,6 +3,8 @@ pub mod config;
 pub mod db;
 pub mod embedding_probe;
 pub mod log_parser;
+pub mod pi_sessions;
+pub mod project_identity;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -26,5 +28,11 @@ impl AppState {
             .map_err(|_| "Lock poisoned".to_string())?
             .clone()
             .ok_or_else(|| "Database not found. Is the Magic Context plugin installed?".to_string())
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
     }
 }
