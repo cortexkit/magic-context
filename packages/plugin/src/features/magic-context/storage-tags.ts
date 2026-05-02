@@ -40,6 +40,61 @@ function getUpdateTagDropModeStatement(db: Database): PreparedStatement {
     return stmt;
 }
 
+const updateTagByteSizeStatements = new WeakMap<Database, PreparedStatement>();
+const updateTagInputByteSizeStatements = new WeakMap<Database, PreparedStatement>();
+
+function getUpdateTagByteSizeStatement(db: Database): PreparedStatement {
+    let stmt = updateTagByteSizeStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare("UPDATE tags SET byte_size = ? WHERE session_id = ? AND tag_number = ?");
+        updateTagByteSizeStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+function getUpdateTagInputByteSizeStatement(db: Database): PreparedStatement {
+    let stmt = updateTagInputByteSizeStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            "UPDATE tags SET input_byte_size = ? WHERE session_id = ? AND tag_number = ?",
+        );
+        updateTagInputByteSizeStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+/**
+ * Bump a tag's byte_size when a later occurrence of the same call_id
+ * carries a larger payload. Used by `tagTranscript` to record the
+ * tool-result payload size after the tool-use invocation already
+ * reserved the tag with the args size.
+ *
+ * No-op if newByteSize is not strictly larger than the stored value
+ * (caller should compare in memory and only call when necessary).
+ */
+export function updateTagByteSize(
+    db: Database,
+    sessionId: string,
+    tagNumber: number,
+    newByteSize: number,
+): void {
+    getUpdateTagByteSizeStatement(db).run(newByteSize, sessionId, tagNumber);
+}
+
+/**
+ * Bump a tag's input_byte_size when a tool_use occurrence is seen
+ * after the result occurrence (rare in practice; supports both
+ * orderings).
+ */
+export function updateTagInputByteSize(
+    db: Database,
+    sessionId: string,
+    tagNumber: number,
+    newInputByteSize: number,
+): void {
+    getUpdateTagInputByteSizeStatement(db).run(newInputByteSize, sessionId, tagNumber);
+}
+
 function getUpdateTagMessageIdStatement(db: Database): PreparedStatement {
     let stmt = updateTagMessageIdStatements.get(db);
     if (!stmt) {

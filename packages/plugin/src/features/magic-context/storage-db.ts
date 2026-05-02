@@ -11,7 +11,6 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import { runMigrations } from "./migrations";
 
 const databases = new Map<string, Database>();
-const FALLBACK_DATABASE_KEY = "__fallback__:memory:";
 const persistenceByDatabase = new WeakMap<Database, boolean>();
 const persistenceErrorByDatabase = new WeakMap<Database, string>();
 
@@ -561,30 +560,36 @@ function ensureColumn(db: Database, table: string, column: string, definition: s
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
-function createFallbackDatabase(): Database {
-    try {
-        const fallback = new Database(":memory:");
-        initializeDatabase(fallback);
-        runMigrations(fallback);
-        return fallback;
-    } catch (error) {
-        throw new Error(
-            `[magic-context] storage fatal: failed to initialize fallback database: ${getErrorMessage(error)}`,
-        );
-    }
-}
-
+/**
+ * Open the persistent Magic Context SQLite database.
+ *
+ * Fails closed: if the database cannot be opened (binary ABI mismatch,
+ * unwritable path, corrupted file, etc.), this throws. Magic Context CANNOT
+ * silently fall back to an in-memory database, because:
+ *   1. An in-memory DB has no project memories, no historian state, no
+ *      tag persistence — features that depend on durable storage become
+ *      silently broken instead of explicitly disabled.
+ *   2. More importantly, an in-memory DB across process restarts effectively
+ *      means "no Magic Context", but the plugin still tags messages and
+ *      tries to drive transforms. On Pi/OpenCode this can let the full
+ *      raw history reach the model and overflow the context window — the
+ *      exact failure mode that broke a real test session.
+ *
+ * Callers must catch this error and disable Magic Context for that run
+ * (server plugin: registers a startup warning + skips the runtime;
+ * Pi plugin: logs warning + skips the extension).
+ */
 export function openDatabase(): Database {
-    try {
-        const { dbDir, dbPath } = resolveDatabasePath();
-        const existing = databases.get(dbPath);
-        if (existing) {
-            if (!persistenceByDatabase.has(existing)) {
-                persistenceByDatabase.set(existing, true);
-            }
-            return existing;
+    const { dbDir, dbPath } = resolveDatabasePath();
+    const existing = databases.get(dbPath);
+    if (existing) {
+        if (!persistenceByDatabase.has(existing)) {
+            persistenceByDatabase.set(existing, true);
         }
+        return existing;
+    }
 
+    try {
         migrateLegacyStorageIfNeeded(dbPath, dbDir);
         mkdirSync(dbDir, { recursive: true });
 
@@ -596,22 +601,13 @@ export function openDatabase(): Database {
         persistenceErrorByDatabase.delete(db);
         return db;
     } catch (error) {
-        log("[magic-context] storage error:", error);
-        const errorMessage = getErrorMessage(error);
-        const existingFallback = databases.get(FALLBACK_DATABASE_KEY);
-        if (existingFallback) {
-            if (!persistenceByDatabase.has(existingFallback)) {
-                persistenceByDatabase.set(existingFallback, false);
-                persistenceErrorByDatabase.set(existingFallback, errorMessage);
-            }
-            return existingFallback;
-        }
-
-        const fallback = createFallbackDatabase();
-        databases.set(FALLBACK_DATABASE_KEY, fallback);
-        persistenceByDatabase.set(fallback, false);
-        persistenceErrorByDatabase.set(fallback, errorMessage);
-        return fallback;
+        const detail = getErrorMessage(error);
+        log(`[magic-context] storage fatal: failed to open ${dbPath}: ${detail}`);
+        // No silent in-memory fallback — see comment above. Caller must
+        // catch and disable Magic Context for this run.
+        throw new Error(
+            `[magic-context] storage unavailable: ${detail}. Magic Context is disabled for this run; check log for details.`,
+        );
     }
 }
 

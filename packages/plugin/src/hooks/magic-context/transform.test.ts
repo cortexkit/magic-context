@@ -1055,6 +1055,205 @@ describe("createTransform", () => {
         expect(getPendingOps(db, "ses-sub-drop")).toHaveLength(0);
     });
 
+    it("re-runs heuristic cleanup on every execute pass for subagents (Oracle-overflow regression)", async () => {
+        // Regression: subagent sessions like Oracle perform 100s of tool calls
+        // within a single user turn from the parent's POV. Before the fix, the
+        // once-per-turn `lastHeuristicsTurnId` guard let heuristics fire only
+        // ONCE per subagent run — typically when context first crossed the
+        // execute threshold (~50%) — and 200+ tool calls then accumulated to
+        // overflow without further drops. The fix bypasses the guard for
+        // subagents (`!fullFeatureMode`) so heuristics re-fire on every execute
+        // pass within the same turn. Cache stability matters less for subagents
+        // because they have no provider-cache reuse to protect (short-lived,
+        // one-shot, tool-call bursts already invalidate cache).
+        useTempDataHome("context-transform-subagent-rerun-");
+        const scheduler: Scheduler = { shouldExecute: mock(() => "execute" as const) };
+        const db = openDatabase();
+        updateSessionMeta(db, "ses-sub-rerun", { isSubagent: true });
+        // Shared `lastHeuristicsTurnId` map — same map across both passes,
+        // simulating the live runtime where this map is owned by the hook.
+        const lastHeuristicsTurnId = new Map<string, string>();
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler,
+            contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
+                [
+                    "ses-sub-rerun",
+                    { usage: { percentage: 70, inputTokens: 140_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            nudger: mock(() => null),
+            db,
+            nudgePlacements: createNudgePlacementStore(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId,
+            clearReasoningAge: 50,
+            protectedTags: 0,
+            // autoDropToolAge=1: aged tool becomes drop-eligible after ONE
+            // newer tag exists. Both tools below are eligible on second pass.
+            autoDropToolAge: 1,
+            dropToolStructure: true,
+        });
+
+        // First pass: user turn opens with one tool call. Heuristics runs at
+        // execute threshold and marks turn id in lastHeuristicsTurnId. The
+        // tool tag itself is too fresh to drop (no newer tag yet).
+        const firstPass: TestMessage[] = [
+            {
+                info: { id: "m-user-1", role: "user", sessionID: "ses-sub-rerun" },
+                parts: [{ type: "text", text: "user prompt" }],
+            },
+            {
+                info: { id: "m-assist-1", role: "assistant" },
+                parts: [
+                    {
+                        type: "tool",
+                        callID: "call-1",
+                        state: { output: "first tool output" },
+                    },
+                ],
+            },
+        ];
+        await transform({}, { messages: firstPass });
+        // Confirm turn id is set after first pass.
+        expect(lastHeuristicsTurnId.get("ses-sub-rerun")).toBe("m-user-1");
+
+        // Second pass: SAME user turn (`m-user-1` unchanged), assistant adds a
+        // second tool call. With autoDropToolAge=1, the first tool is now old
+        // enough to drop. With the once-per-turn bypass for subagents,
+        // heuristics MUST re-fire and drop the first tool's content to a
+        // sentinel. Without the bypass, the guard would block heuristics and
+        // the first tool's output would survive verbatim — that's the Oracle
+        // overflow bug.
+        const secondPass: TestMessage[] = [
+            {
+                info: { id: "m-user-1", role: "user", sessionID: "ses-sub-rerun" },
+                parts: [{ type: "text", text: "user prompt" }],
+            },
+            {
+                info: { id: "m-assist-1", role: "assistant" },
+                parts: [
+                    {
+                        type: "tool",
+                        callID: "call-1",
+                        state: { output: "first tool output" },
+                    },
+                ],
+            },
+            {
+                info: { id: "m-assist-2", role: "assistant" },
+                parts: [
+                    {
+                        type: "tool",
+                        callID: "call-2",
+                        state: { output: "second tool output" },
+                    },
+                ],
+            },
+        ];
+        await transform({}, { messages: secondPass });
+
+        // Tag for first tool was dropped on the second pass — proves
+        // heuristics re-fired even though turn id matched. Without the
+        // subagent bypass, the once-per-turn guard would have blocked
+        // the second cleanup pass and the tag would still be `active`.
+        const subagentTags = getTagsBySession(db, "ses-sub-rerun");
+        const firstToolTag = subagentTags.find((t) => t.messageId === "call-1");
+        expect(firstToolTag?.status).toBe("dropped");
+        // The second (newest) tool stays active (newest tag, no older neighbour).
+        const secondToolTag = subagentTags.find((t) => t.messageId === "call-2");
+        expect(secondToolTag?.status).toBe("active");
+    });
+
+    it("preserves once-per-turn guard for primary sessions (does NOT re-run heuristics within one turn)", async () => {
+        // Cache-stability regression: primary sessions MUST NOT re-run
+        // heuristics mid-turn because mid-turn rewrites bust Anthropic prompt
+        // cache across the user's tool-call sequence. Symmetric counterpart
+        // to the subagent rerun test above.
+        useTempDataHome("context-transform-primary-once-");
+        const scheduler: Scheduler = { shouldExecute: mock(() => "execute" as const) };
+        const db = openDatabase();
+        // No isSubagent override — defaults to primary session.
+        const lastHeuristicsTurnId = new Map<string, string>();
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler,
+            contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
+                [
+                    "ses-primary-once",
+                    { usage: { percentage: 70, inputTokens: 140_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            nudger: mock(() => null),
+            db,
+            nudgePlacements: createNudgePlacementStore(),
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId,
+            clearReasoningAge: 50,
+            protectedTags: 0,
+            autoDropToolAge: 1,
+            dropToolStructure: true,
+        });
+
+        const firstPass: TestMessage[] = [
+            {
+                info: { id: "m-user-1", role: "user", sessionID: "ses-primary-once" },
+                parts: [{ type: "text", text: "user prompt" }],
+            },
+            {
+                info: { id: "m-assist-1", role: "assistant" },
+                parts: [
+                    {
+                        type: "tool",
+                        callID: "call-1",
+                        state: { output: "first tool output" },
+                    },
+                ],
+            },
+        ];
+        await transform({}, { messages: firstPass });
+        expect(lastHeuristicsTurnId.get("ses-primary-once")).toBe("m-user-1");
+
+        const secondPass: TestMessage[] = [
+            {
+                info: { id: "m-user-1", role: "user", sessionID: "ses-primary-once" },
+                parts: [{ type: "text", text: "user prompt" }],
+            },
+            {
+                info: { id: "m-assist-1", role: "assistant" },
+                parts: [
+                    {
+                        type: "tool",
+                        callID: "call-1",
+                        state: { output: "first tool output" },
+                    },
+                ],
+            },
+            {
+                info: { id: "m-assist-2", role: "assistant" },
+                parts: [
+                    {
+                        type: "tool",
+                        callID: "call-2",
+                        state: { output: "second tool output" },
+                    },
+                ],
+            },
+        ];
+        await transform({}, { messages: secondPass });
+
+        // Primary session: once-per-turn guard MUST hold. The first tool's
+        // tag stays `active` even though it would be drop-eligible by age.
+        // This protects provider cache across the user's tool-call sequence.
+        const primaryTags = getTagsBySession(db, "ses-primary-once");
+        const firstPrimaryToolTag = primaryTags.find((t) => t.messageId === "call-1");
+        expect(firstPrimaryToolTag?.status).toBe("active");
+        const secondPrimaryToolTag = primaryTags.find((t) => t.messageId === "call-2");
+        expect(secondPrimaryToolTag?.status).toBe("active");
+    });
+
     it("tags content that was injected before the transform runs, verifying injector-before-tagger ordering", async () => {
         //#given
         // This test documents the required hook ordering:

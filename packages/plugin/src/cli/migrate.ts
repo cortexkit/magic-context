@@ -2,11 +2,28 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { getMagicContextStorageDir } from "../shared/data-path";
 import type { Database as DatabaseType } from "../shared/sqlite";
 import { Database } from "../shared/sqlite";
 
 export interface MigrateOpenCodeSessionToPiOptions {
+    /**
+     * OpenCode source DB handle. Read-only operations: session, message,
+     * part rows. Owns nothing about Magic Context state — that lives in
+     * the cortexkit DB below.
+     */
     db?: DatabaseLike;
+    /**
+     * Magic Context shared-DB handle (`~/.local/share/cortexkit/magic-context/context.db`).
+     * The migrator reads source compartments + facts under
+     * `harness='opencode'` keyed by source session_id and writes copies
+     * keyed by the new Pi session_id under `harness='pi'`. When omitted,
+     * the migrator opens the canonical path read-write.
+     *
+     * Pass `null` explicitly to skip the cortexkit copy entirely (the
+     * legacy V1 behavior — JSONL only).
+     */
+    cortexkitDb?: DatabaseLike | null;
     fs?: FileSystemLike;
     now?: Date;
     sessionId: string;
@@ -20,9 +37,19 @@ export interface MigrateOpenCodeSessionToPiOptions {
 
 export interface MigrationResult {
     outputPath: string;
+    piSessionId: string;
     messageCount: number;
     byteCount: number;
     sourceMessageCount: number;
+    /** Number of OpenCode compartments copied to the new Pi session_id. */
+    compartmentsCopied: number;
+    /** Number of OpenCode session_facts copied to the new Pi session_id. */
+    factsCopied: number;
+    /** Number of compartment boundaries that were nearest-at-or-before remapped (vs exact match). */
+    boundariesApproximated: number;
+    compactionMarkerWritten: boolean;
+    compactionBoundaryEntryId?: string;
+    compactionFirstKeptEntryId?: string;
     dryRun: boolean;
 }
 
@@ -34,7 +61,7 @@ export interface MigrateCliOptions {
     dryRun?: boolean;
 }
 
-type DatabaseLike = Pick<DatabaseType, "prepare" | "close">;
+type DatabaseLike = Pick<DatabaseType, "prepare" | "close" | "exec">;
 
 type FileSystemLike = {
     existsSync(path: string): boolean;
@@ -45,6 +72,7 @@ type FileSystemLike = {
 type StatementLike<T = unknown> = {
     get(...params: unknown[]): T | undefined;
     all(...params: unknown[]): T[];
+    run(...params: unknown[]): unknown;
 };
 
 type OpenCodeSessionRow = {
@@ -70,12 +98,21 @@ type OpenCodePartRow = {
 
 type PiJson = Record<string, unknown>;
 
+type OpenCodeMessageTokens = {
+    input?: number;
+    output?: number;
+    reasoning?: number;
+    total?: number;
+    cache?: { read?: number; write?: number };
+};
+
 type OpenCodeMessageData = {
     role?: string;
     time?: { created?: number };
     modelID?: string;
     providerID?: string;
     model?: { providerID?: string; modelID?: string };
+    tokens?: OpenCodeMessageTokens;
 };
 
 type OpenCodePartData = {
@@ -100,11 +137,35 @@ type OpenCodePartData = {
     metadata?: { anthropic?: { signature?: string } };
 };
 
+interface CortexkitCompartmentRow {
+    sequence: number;
+    start_message: number;
+    end_message: number;
+    start_message_id: string;
+    end_message_id: string;
+    title: string;
+    content: string;
+    created_at: number;
+}
+
+interface CortexkitSessionFactRow {
+    category: string;
+    content: string;
+    created_at: number;
+    updated_at: number;
+}
+
 const DEFAULT_PROVIDER = "openai-codex";
 const DEFAULT_MODEL = "gpt-5.5";
+const MIGRATION_COMPACTION_SUMMARY =
+    "Magic Context compacted prior conversation. See <session-history> block for the structured summary.";
 
 function defaultOpenCodeDbPath(): string {
     return join(homedir(), ".local", "share", "opencode", "opencode.db");
+}
+
+function defaultCortexkitDbPath(): string {
+    return join(getMagicContextStorageDir(), "context.db");
 }
 
 function defaultPiSessionsRoot(): string {
@@ -169,7 +230,19 @@ function roleFromMessage(row: OpenCodeMessageRow): "user" | "assistant" | undefi
     return data.role === "user" || data.role === "assistant" ? data.role : undefined;
 }
 
-function extractModel(rows: OpenCodeMessageRow[]): { provider: string; modelId: string } {
+function tokensFromMessage(row: OpenCodeMessageRow): OpenCodeMessageTokens {
+    try {
+        const data = parseJsonObject<OpenCodeMessageData>(row.data);
+        return data.tokens ?? {};
+    } catch {
+        return {};
+    }
+}
+
+function extractModel(rows: OpenCodeMessageRow[]): {
+    provider: string;
+    modelId: string;
+} {
     for (const row of rows) {
         try {
             const data = parseJsonObject<OpenCodeMessageData>(row.data);
@@ -202,21 +275,32 @@ function normalizeOpenCodeTool(part: OpenCodePartData): {
 }
 
 /**
- * Pi's interactive footer reads `entry.message.usage.input` on every assistant
- * message during render — without `usage`, it crashes the TUI. Real Pi sessions
- * always include this field (populated from provider response). For migrated
- * sessions we don't have real token counts, so emit a zero-filled stub. Pi's
- * footer aggregator is additive ( `totalInput += usage.input` ), so zeros are
- * benign — they just show "0 tokens" for migrated turns until new turns add
- * real provider usage.
+ * Build a Pi-shaped `usage` object from OpenCode `message.tokens`.
+ *
+ * OpenCode shape: `{ total, input, output, reasoning, cache: { read, write } }`.
+ * Pi shape: `{ input, output, cacheRead, cacheWrite, totalTokens, cost: {...} }`.
+ *
+ * Pi's interactive footer reads `entry.message.usage.input` on every
+ * assistant render. Without realistic numbers, `getContextUsage()` reports
+ * 0% of the model's window because Pi sums these per-turn input fields.
+ * Real numbers from the source session let the scheduler + historian
+ * trigger correctly the moment a migrated session loads.
+ *
+ * Cost is set to zeroes — recovering OpenCode pricing is non-trivial and
+ * Pi's footer aggregator handles missing cost gracefully.
  */
-function zeroUsage(): Record<string, unknown> {
+function tokensToPiUsage(tokens: OpenCodeMessageTokens | undefined): Record<string, unknown> {
+    const input = tokens?.input ?? 0;
+    const output = tokens?.output ?? 0;
+    const cacheRead = tokens?.cache?.read ?? 0;
+    const cacheWrite = tokens?.cache?.write ?? 0;
+    const total = tokens?.total ?? input + output + cacheRead + cacheWrite;
     return {
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 0,
+        input,
+        output,
+        cacheRead,
+        cacheWrite,
+        totalTokens: total,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
     };
 }
@@ -226,6 +310,7 @@ function makeMessageEntry(
     text: string,
     timestamp: string,
     parentId: string | null,
+    usage: Record<string, unknown>,
 ): PiJson {
     const message: Record<string, unknown> = {
         role,
@@ -233,7 +318,7 @@ function makeMessageEntry(
         timestamp: Date.parse(timestamp),
     };
     if (role === "assistant") {
-        message.usage = zeroUsage();
+        message.usage = usage;
     }
     return {
         type: "message",
@@ -244,7 +329,12 @@ function makeMessageEntry(
     };
 }
 
-function makeThinkingEntry(text: string, timestamp: string, parentId: string | null): PiJson {
+function makeThinkingEntry(
+    text: string,
+    timestamp: string,
+    parentId: string | null,
+    usage: Record<string, unknown>,
+): PiJson {
     return {
         type: "message",
         id: shortId(),
@@ -254,7 +344,7 @@ function makeThinkingEntry(text: string, timestamp: string, parentId: string | n
             role: "assistant",
             content: [{ type: "thinking", thinking: text, thinkingSignature: null }],
             timestamp: Date.parse(timestamp),
-            usage: zeroUsage(),
+            usage,
         },
     };
 }
@@ -263,6 +353,7 @@ function makeToolCallEntry(
     tool: { callId: string; name: string; input: unknown },
     timestamp: string,
     parentId: string | null,
+    usage: Record<string, unknown>,
 ): PiJson {
     return {
         type: "message",
@@ -272,10 +363,15 @@ function makeToolCallEntry(
         message: {
             role: "assistant",
             content: [
-                { type: "toolCall", id: tool.callId, name: tool.name, arguments: tool.input ?? {} },
+                {
+                    type: "toolCall",
+                    id: tool.callId,
+                    name: tool.name,
+                    arguments: tool.input ?? {},
+                },
             ],
             timestamp: Date.parse(timestamp),
-            usage: zeroUsage(),
+            usage,
         },
     };
 }
@@ -301,35 +397,69 @@ function makeToolResultEntry(
     };
 }
 
-function convertPartToEntries(
-    role: "user" | "assistant",
-    row: OpenCodePartRow,
-    timestamp: string,
-    parentId: string | null,
-): PiJson[] {
-    const part = parseJsonObject<OpenCodePartData>(row.data);
+interface ConvertPartContext {
+    role: "user" | "assistant";
+    row: OpenCodePartRow;
+    timestamp: string;
+    parentId: string | null;
+    usage: Record<string, unknown>;
+}
+
+function convertPartToEntries(ctx: ConvertPartContext): PiJson[] {
+    const part = parseJsonObject<OpenCodePartData>(ctx.row.data);
     switch (part.type) {
         case "step-start":
         case "step-finish":
         case "patch":
             return [];
         case "text":
-            return part.text ? [makeMessageEntry(role, part.text, timestamp, parentId)] : [];
+            return part.text
+                ? [makeMessageEntry(ctx.role, part.text, ctx.timestamp, ctx.parentId, ctx.usage)]
+                : [];
         case "reasoning":
-            return part.text ? [makeThinkingEntry(part.text, timestamp, parentId)] : [];
+            return part.text
+                ? [makeThinkingEntry(part.text, ctx.timestamp, ctx.parentId, ctx.usage)]
+                : [];
         case "tool": {
             const tool = normalizeOpenCodeTool(part);
-            const call = makeToolCallEntry(tool, timestamp, parentId);
-            const result = makeToolResultEntry(tool, timestamp, call.id as string);
+            const call = makeToolCallEntry(tool, ctx.timestamp, ctx.parentId, ctx.usage);
+            const result = makeToolResultEntry(tool, ctx.timestamp, call.id as string);
             return [call, result];
         }
         case "file": {
             const name = part.filename ?? part.name ?? "attachment";
-            return [makeMessageEntry(role, `<file omitted: ${name}>`, timestamp, parentId)];
+            return [
+                makeMessageEntry(
+                    ctx.role,
+                    `<file omitted: ${name}>`,
+                    ctx.timestamp,
+                    ctx.parentId,
+                    ctx.usage,
+                ),
+            ];
         }
         default:
             return [];
     }
+}
+
+interface BuildEntriesResult {
+    entries: PiJson[];
+    piSessionId: string;
+    /**
+     * Map from OpenCode message_id → the LAST Pi entry id derived from
+     * that source message. Compartment boundary remapping uses this:
+     * `start_message_id` / `end_message_id` reference OpenCode message
+     * ids, and we want the corresponding LAST Pi entry (which captures
+     * all parts of that source message).
+     */
+    messageIdToLastPiEntryId: Map<string, string>;
+    /**
+     * Source-message ids in chronological order. Used for nearest-at-or-before
+     * remapping when a compartment's start_message_id doesn't directly
+     * match (e.g. its part-only synthetic boundary).
+     */
+    orderedSourceMessageIds: string[];
 }
 
 function buildPiEntries(params: {
@@ -339,7 +469,7 @@ function buildPiEntries(params: {
     now: Date;
     provider: string;
     modelId: string;
-}): PiJson[] {
+}): BuildEntriesResult {
     const sessionUuid = generateUuidV7(params.now);
     const nowIso = params.now.toISOString();
     const entries: PiJson[] = [
@@ -360,11 +490,22 @@ function buildPiEntries(params: {
         },
     ];
 
+    // Migration boundary marker — appears as the first user message in
+    // the migrated session. This is intentionally stub usage (zeros)
+    // because no real LLM produced it; it's a synthetic marker only.
     const boundary = makeMessageEntry(
         "user",
         `<!-- migrated from OpenCode session ${params.session.id} at ${nowIso} -->\n\nThe following conversation was migrated from a different harness. Reasoning context from prior turns may be incomplete; tool calls reference tools that may not exist in this environment.`,
         nowIso,
         null,
+        {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
     );
     entries.push(boundary);
 
@@ -375,23 +516,46 @@ function buildPiEntries(params: {
         partsByMessage.set(part.message_id, list);
     }
 
+    const messageIdToLastPiEntryId = new Map<string, string>();
+    const orderedSourceMessageIds: string[] = [];
+
     let parentId = boundary.id as string;
     for (const message of params.messages) {
         const role = roleFromMessage(message);
         if (!role) continue;
         const timestamp = isoFromMs(message.time_created, params.now);
+        const tokens = tokensFromMessage(message);
+        const usage = tokensToPiUsage(tokens);
+
+        let lastEntryIdForMessage: string | null = null;
         for (const part of partsByMessage.get(message.id) ?? []) {
-            const newEntries = convertPartToEntries(role, part, timestamp, parentId);
+            const newEntries = convertPartToEntries({
+                role,
+                row: part,
+                timestamp,
+                parentId,
+                usage,
+            });
             for (const entry of newEntries) {
                 if (entry.parentId === undefined || entry.parentId === parentId)
                     entry.parentId = parentId;
                 entries.push(entry);
                 parentId = entry.id as string;
+                lastEntryIdForMessage = parentId;
             }
+        }
+        if (lastEntryIdForMessage !== null) {
+            messageIdToLastPiEntryId.set(message.id, lastEntryIdForMessage);
+            orderedSourceMessageIds.push(message.id);
         }
     }
 
-    return entries;
+    return {
+        entries,
+        piSessionId: sessionUuid,
+        messageIdToLastPiEntryId,
+        orderedSourceMessageIds,
+    };
 }
 
 function fetchRows(db: DatabaseLike, sessionId: string, maxMessages: number | undefined) {
@@ -423,6 +587,228 @@ function fetchRows(db: DatabaseLike, sessionId: string, maxMessages: number | un
         : [];
 
     return { session, sourceMessageCount, messages, parts };
+}
+
+/**
+ * Translate an OpenCode boundary id to the equivalent Pi entry id.
+ *
+ * Strategy (in order):
+ *   1. If the OpenCode message id maps directly to a Pi entry, use that.
+ *   2. Otherwise find the nearest source message whose chronological
+ *      position is at-or-before the missing one and use ITS Pi entry.
+ *      "At-or-before" is by index in `orderedSourceMessageIds`.
+ *   3. If no message at-or-before exists (boundary precedes the
+ *      earliest migrated message), return undefined and the caller
+ *      drops the compartment.
+ *
+ * Returns `{ piEntryId, exact }` so the caller can count approximations.
+ */
+function remapBoundaryId(
+    openCodeMessageId: string,
+    messageIdToLastPiEntryId: Map<string, string>,
+    orderedSourceMessageIds: readonly string[],
+): { piEntryId: string; exact: boolean } | undefined {
+    const direct = messageIdToLastPiEntryId.get(openCodeMessageId);
+    if (direct !== undefined) return { piEntryId: direct, exact: true };
+
+    // Boundary id wasn't a top-level message id — find nearest at-or-before.
+    // Use string comparison as a proxy for chronological order: OpenCode
+    // message ids are ULID-ish (`msg_${time}_${random}`), so lexicographic
+    // order matches creation order for messages in the same session.
+    let nearestAtOrBefore: string | undefined;
+    for (const id of orderedSourceMessageIds) {
+        if (id <= openCodeMessageId) {
+            nearestAtOrBefore = id;
+        } else {
+            break;
+        }
+    }
+    if (nearestAtOrBefore === undefined) return undefined;
+    const piEntryId = messageIdToLastPiEntryId.get(nearestAtOrBefore);
+    if (piEntryId === undefined) return undefined;
+    return { piEntryId, exact: false };
+}
+
+interface CopyMagicContextStateResult {
+    compartmentsCopied: number;
+    factsCopied: number;
+    boundariesApproximated: number;
+    lastCompartmentEndPiEntryId?: string;
+}
+
+interface CompactionMarkerResult {
+    written: boolean;
+    boundaryEntryId?: string;
+    firstKeptEntryId?: string;
+}
+
+function insertCompactionMarker(
+    entries: PiJson[],
+    boundaryEntryId: string | undefined,
+): CompactionMarkerResult {
+    if (boundaryEntryId === undefined) return { written: false };
+
+    const boundaryIndex = entries.findIndex((entry) => entry.id === boundaryEntryId);
+    if (boundaryIndex < 0) return { written: false };
+
+    const firstKept = entries[boundaryIndex + 1];
+    if (!firstKept?.id) return { written: false };
+
+    const compactedPrefixChars = entries
+        .slice(0, boundaryIndex + 1)
+        .reduce((total, entry) => total + JSON.stringify(entry.message ?? "").length, 0);
+    const compactionId = shortId();
+    const marker: PiJson = {
+        type: "compaction",
+        id: compactionId,
+        parentId: boundaryEntryId,
+        timestamp: String(entries[boundaryIndex].timestamp),
+        summary: MIGRATION_COMPACTION_SUMMARY,
+        firstKeptEntryId: firstKept.id,
+        tokensBefore: Math.ceil(compactedPrefixChars / 4),
+        fromHook: true,
+    };
+
+    firstKept.parentId = compactionId;
+    entries.splice(boundaryIndex + 1, 0, marker);
+    return {
+        written: true,
+        boundaryEntryId,
+        firstKeptEntryId: firstKept.id as string,
+    };
+}
+
+/**
+ * Copy compartments + session_facts from the source OpenCode session
+ * into a new Pi session keyed by the migrated session UUID. Boundary
+ * IDs are remapped from OpenCode message ids to Pi entry ids (the
+ * runtime path also stores entry.id; see read-session-pi.ts and
+ * inject-compartments-pi.ts for the consumer).
+ *
+ * The shared cortexkit DB is treated as already-initialized (Magic
+ * Context creates it on first plugin load). We only INSERT here —
+ * never CREATE TABLE — because the schema migration system owns that
+ * lifecycle.
+ *
+ * On dry runs we still read source state and compute the remap so the
+ * result counts are accurate, but we don't write anything to the DB.
+ */
+function copyMagicContextState(args: {
+    cortexkitDb: DatabaseLike;
+    sourceSessionId: string;
+    piSessionId: string;
+    messageIdToLastPiEntryId: Map<string, string>;
+    orderedSourceMessageIds: readonly string[];
+    now: number;
+    dryRun: boolean;
+}): CopyMagicContextStateResult {
+    const sourceCompartments = stmt<CortexkitCompartmentRow>(
+        args.cortexkitDb,
+        `SELECT sequence, start_message, end_message, start_message_id, end_message_id,
+              title, content, created_at
+         FROM compartments
+        WHERE session_id = ? AND harness = 'opencode'
+     ORDER BY sequence ASC`,
+    ).all(args.sourceSessionId);
+
+    const sourceFacts = stmt<CortexkitSessionFactRow>(
+        args.cortexkitDb,
+        `SELECT category, content, created_at, updated_at
+         FROM session_facts
+        WHERE session_id = ? AND harness = 'opencode'
+     ORDER BY category ASC, id ASC`,
+    ).all(args.sourceSessionId);
+
+    let boundariesApproximated = 0;
+    const remappedCompartments: Array<{
+        sequence: number;
+        start_message: number;
+        end_message: number;
+        start_message_id: string;
+        end_message_id: string;
+        title: string;
+        content: string;
+    }> = [];
+
+    for (const c of sourceCompartments) {
+        const startRemap = remapBoundaryId(
+            c.start_message_id,
+            args.messageIdToLastPiEntryId,
+            args.orderedSourceMessageIds,
+        );
+        const endRemap = remapBoundaryId(
+            c.end_message_id,
+            args.messageIdToLastPiEntryId,
+            args.orderedSourceMessageIds,
+        );
+        // If either boundary doesn't translate (precedes our migrated
+        // range entirely), skip that compartment. The remaining compartments
+        // still form a contiguous prefix from the perspective of the trim
+        // machinery, just shorter.
+        if (!startRemap || !endRemap) continue;
+        if (!startRemap.exact || !endRemap.exact) boundariesApproximated++;
+        remappedCompartments.push({
+            sequence: c.sequence,
+            start_message: c.start_message,
+            end_message: c.end_message,
+            start_message_id: startRemap.piEntryId,
+            end_message_id: endRemap.piEntryId,
+            title: c.title,
+            content: c.content,
+        });
+    }
+
+    if (args.dryRun) {
+        return {
+            compartmentsCopied: remappedCompartments.length,
+            factsCopied: sourceFacts.length,
+            boundariesApproximated,
+            lastCompartmentEndPiEntryId: remappedCompartments.at(-1)?.end_message_id,
+        };
+    }
+
+    // Insert compartments + facts under (harness='pi', session_id=<new>).
+    // The shared DB schema includes `harness TEXT NOT NULL DEFAULT 'opencode'`
+    // on both tables, and (session_id, sequence) is UNIQUE on compartments —
+    // new Pi session uuid means no conflict.
+    const insertCompartment = stmt(
+        args.cortexkitDb,
+        `INSERT INTO compartments (
+       session_id, sequence, start_message, end_message,
+       start_message_id, end_message_id, title, content,
+       created_at, harness
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pi')`,
+    );
+    for (const c of remappedCompartments) {
+        insertCompartment.run(
+            args.piSessionId,
+            c.sequence,
+            c.start_message,
+            c.end_message,
+            c.start_message_id,
+            c.end_message_id,
+            c.title,
+            c.content,
+            args.now,
+        );
+    }
+
+    const insertFact = stmt(
+        args.cortexkitDb,
+        `INSERT INTO session_facts (
+       session_id, category, content, created_at, updated_at, harness
+     ) VALUES (?, ?, ?, ?, ?, 'pi')`,
+    );
+    for (const f of sourceFacts) {
+        insertFact.run(args.piSessionId, f.category, f.content, f.created_at, f.updated_at);
+    }
+
+    return {
+        compartmentsCopied: remappedCompartments.length,
+        factsCopied: sourceFacts.length,
+        boundariesApproximated,
+        lastCompartmentEndPiEntryId: remappedCompartments.at(-1)?.end_message_id,
+    };
 }
 
 function ensureValidOptions(
@@ -460,6 +846,27 @@ export function migrateOpenCodeSessionToPi(
     const ownsDb = !opts.db;
     const db = opts.db ?? new Database(opencodeDbPath, { readonly: true });
 
+    // Cortexkit DB: when not provided explicitly, open the canonical
+    // shared DB read-write (we'll INSERT into compartments + session_facts).
+    // Pass null to skip the cortexkit copy entirely (legacy V1 behavior).
+    let cortexkitDb: DatabaseLike | null;
+    let ownsCortexkitDb = false;
+    if (opts.cortexkitDb === null) {
+        cortexkitDb = null;
+    } else if (opts.cortexkitDb !== undefined) {
+        cortexkitDb = opts.cortexkitDb;
+    } else {
+        try {
+            cortexkitDb = new Database(defaultCortexkitDbPath());
+            ownsCortexkitDb = true;
+        } catch {
+            // If the cortexkit DB doesn't exist yet (Magic Context never
+            // loaded on this machine), skip the copy gracefully — the
+            // migration still produces a usable Pi JSONL.
+            cortexkitDb = null;
+        }
+    }
+
     try {
         const { session, sourceMessageCount, messages, parts } = fetchRows(
             db,
@@ -471,12 +878,43 @@ export function migrateOpenCodeSessionToPi(
         const modelId = opts.modelId ?? model.modelId;
         const cwd = session.directory ?? session.path ?? process.cwd();
         const outputDir = join(piSessionsRoot, projectPathToPiDirSlug(cwd));
+        const buildResult = buildPiEntries({
+            session,
+            messages,
+            parts,
+            now,
+            provider,
+            modelId,
+        });
+        // Copy magic-context durable state (compartments + facts) to the
+        // new Pi session_id when the cortexkit DB is reachable.
+        let copyResult: CopyMagicContextStateResult = {
+            compartmentsCopied: 0,
+            factsCopied: 0,
+            boundariesApproximated: 0,
+        };
+        if (cortexkitDb !== null) {
+            copyResult = copyMagicContextState({
+                cortexkitDb,
+                sourceSessionId: session.id,
+                piSessionId: buildResult.piSessionId,
+                messageIdToLastPiEntryId: buildResult.messageIdToLastPiEntryId,
+                orderedSourceMessageIds: buildResult.orderedSourceMessageIds,
+                now: now.getTime(),
+                dryRun: Boolean(opts.dryRun),
+            });
+        }
+
+        const compactionMarker = insertCompactionMarker(
+            buildResult.entries,
+            copyResult.lastCompartmentEndPiEntryId,
+        );
+
         const outputPath = join(
             outputDir,
-            `${formatPiFilenameTimestamp(now)}_${generateUuidV7(now)}.jsonl`,
+            `${formatPiFilenameTimestamp(now)}_${buildResult.piSessionId}.jsonl`,
         );
-        const entries = buildPiEntries({ session, messages, parts, now, provider, modelId });
-        const jsonl = `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+        const jsonl = `${buildResult.entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
 
         if (!opts.dryRun) {
             if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
@@ -485,13 +923,21 @@ export function migrateOpenCodeSessionToPi(
 
         return {
             outputPath,
-            messageCount: entries.length - 2,
+            piSessionId: buildResult.piSessionId,
+            messageCount: buildResult.entries.length - 2,
             byteCount: Buffer.byteLength(jsonl, "utf8"),
             sourceMessageCount,
+            compartmentsCopied: copyResult.compartmentsCopied,
+            factsCopied: copyResult.factsCopied,
+            boundariesApproximated: copyResult.boundariesApproximated,
+            compactionMarkerWritten: compactionMarker.written,
+            compactionBoundaryEntryId: compactionMarker.boundaryEntryId,
+            compactionFirstKeptEntryId: compactionMarker.firstKeptEntryId,
             dryRun: Boolean(opts.dryRun),
         };
     } finally {
         if (ownsDb) db.close();
+        if (ownsCortexkitDb && cortexkitDb !== null) cortexkitDb.close();
     }
 }
 
@@ -520,7 +966,9 @@ export function printMigrateHelp(): void {
   Magic Context doctor migrate
   ─────────────────────────────
 
-  Copy OpenCode session message content into a new Pi JSONL session.
+  Copy OpenCode session message content into a new Pi JSONL session,
+  PLUS the source session's Magic Context state (compartments + facts)
+  into the shared cortexkit database under the new Pi session id.
 
   Supported pairs (V1):
     --from opencode --to pi
@@ -529,10 +977,16 @@ export function printMigrateHelp(): void {
     bunx --bun @cortexkit/opencode-magic-context@latest doctor migrate \\
       --from opencode --to pi --session ses_xxx [--max-messages N] [--dry-run]
 
-  Fidelity: text, reasoning text, tool calls, and tool results are preserved;
-  reasoning signatures are stripped; step-start/step-finish are skipped; file
-  bytes are replaced with <file omitted: name> markers. Magic Context durable
-  state is not migrated, so Pi re-tags from a clean slate.
+  Fidelity:
+    - text, reasoning text, tool calls, and tool results are preserved
+    - assistant 'usage' fields carry real input/output/cache token counts
+      from the source so Pi's getContextUsage() reports realistic numbers
+    - reasoning signatures are stripped; step-start/step-finish are skipped
+    - file bytes are replaced with <file omitted: name> markers
+    - compartments + session_facts are copied to the new Pi session_id;
+      compartment boundary message IDs are remapped to the corresponding
+      Pi entry IDs (nearest-at-or-before for boundaries that don't have
+      a direct message-level Pi entry)
 `);
 }
 
@@ -548,9 +1002,24 @@ export async function runMigrateCli(args: string[]): Promise<number> {
         const action = result.dryRun ? "Would write" : "Wrote";
         console.log(`${action} Pi session JSONL:`);
         console.log(`  path: ${result.outputPath}`);
+        console.log(`  pi session id: ${result.piSessionId}`);
         console.log(`  source messages: ${result.sourceMessageCount}`);
         console.log(`  migrated entries: ${result.messageCount}`);
         console.log(`  bytes: ${result.byteCount}`);
+        console.log(`  compartments copied: ${result.compartmentsCopied}`);
+        console.log(`  session facts copied: ${result.factsCopied}`);
+        console.log(
+            `  compaction marker: ${result.compactionMarkerWritten ? "yes" : "no"}${
+                result.compactionMarkerWritten
+                    ? ` (boundary: ${result.compactionBoundaryEntryId}, first kept: ${result.compactionFirstKeptEntryId})`
+                    : ""
+            }`,
+        );
+        if (result.boundariesApproximated > 0) {
+            console.log(
+                `  boundaries approximated: ${result.boundariesApproximated} (nearest-at-or-before)`,
+            );
+        }
         if (!result.dryRun) {
             console.log("Pi may need to be restarted to pick up the new session file.");
         }

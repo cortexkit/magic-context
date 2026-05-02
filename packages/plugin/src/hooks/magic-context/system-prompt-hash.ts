@@ -1,10 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
-import {
-    buildMagicContextSection,
-    detectAgentFromSystemPrompt,
-} from "../../agents/magic-context-prompt";
+import { buildMagicContextSection } from "../../agents/magic-context-prompt";
 import { escapeXmlAttr, escapeXmlContent } from "../../features/magic-context/compartment-storage";
 import { getKeyFiles } from "../../features/magic-context/key-files/storage-key-files";
 import {
@@ -78,11 +75,9 @@ function readProjectDocs(directory: string): string | null {
 /**
  * Handle system prompt via experimental.chat.system.transform:
  *
- * 1. Inject per-agent magic-context guidance into the system prompt.
- *    Detects known agents (Sisyphus, Atlas, etc.) from prompt content and
- *    injects tailored reduction guidance. Falls back to generic guidance
- *    for unknown agents. Skips injection if guidance is already present
- *    (e.g., baked into the agent prompt by oh-my-opencode).
+ * 1. Inject generic magic-context guidance into the system prompt.
+ *    Skips injection if guidance is already present (e.g., baked into the
+ *    agent prompt by oh-my-opencode).
  *
  * 2. Detect system prompt changes for cache-flush triggering.
  *    If the hash changes between turns, the Anthropic prompt-cache prefix is
@@ -165,9 +160,8 @@ export function createSystemPromptHashHandler(deps: {
         const effectiveCtxReduceEnabled = isSubagentSession ? false : deps.ctxReduceEnabled;
         const fullPrompt = output.system.join("\n");
         if (fullPrompt.length > 0 && !fullPrompt.includes(MAGIC_CONTEXT_MARKER)) {
-            const detectedAgent = detectAgentFromSystemPrompt(fullPrompt);
             const guidance = buildMagicContextSection(
-                detectedAgent,
+                null,
                 deps.protectedTags,
                 effectiveCtxReduceEnabled,
                 deps.dreamerEnabled,
@@ -178,7 +172,7 @@ export function createSystemPromptHashHandler(deps: {
             output.system.push(guidance);
             sessionLog(
                 sessionId,
-                `injected ${detectedAgent ?? "generic"} guidance into system prompt (ctxReduce=${effectiveCtxReduceEnabled}, subagent=${isSubagentSession})`,
+                `injected generic guidance into system prompt (ctxReduce=${effectiveCtxReduceEnabled}, subagent=${isSubagentSession})`,
             );
         }
 

@@ -106,22 +106,18 @@ describe("storage-db", () => {
             expect(db1).toBe(db2);
         });
 
-        it("#when file path setup fails #then falls back to in-memory DB", () => {
+        it("#when file path setup fails #then throws so callers fail closed (no in-memory fallback)", () => {
             const dataHome = useTempDataHome("storage-db-fallback-");
             // Block mkdirSync by planting a file at the cortexkit segment of
             // the new shared path. See storage.test.ts for the same pattern.
             writeFileSync(join(dataHome, "cortexkit"), "not-a-directory", "utf-8");
 
-            const db = openDatabase();
-
-            expect(db).toBeInstanceOf(Database);
-            expect(isDatabasePersisted(db)).toBe(false);
-            const tables = db
-                .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
-                .all() as Array<{ name: string }>;
-            expect(tables.map((t) => t.name)).toEqual(
-                expect.arrayContaining(["tags", "pending_ops", "source_contents", "session_meta"]),
-            );
+            // Failing closed is intentional. Falling back to :memory: silently
+            // disables persistent state (memories, historian compartments,
+            // tags) but keeps the transform running, which on Pi/OpenCode can
+            // let the full raw history reach the model and overflow context.
+            // Callers must catch this and disable Magic Context for the run.
+            expect(() => openDatabase()).toThrow(/storage unavailable/i);
         });
 
         it("#when an existing session_meta table lacks compartment_in_progress #then openDatabase adds the missing column", () => {

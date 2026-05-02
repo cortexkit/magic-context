@@ -14,8 +14,7 @@
  * Most of that is OpenCode-specific (cache stability across multi-pass
  * transforms, AI SDK part-id semantics, file part shapes). Pi's
  * `pi.on("context", ...)` fires once per LLM call with a complete
- * `AgentMessage[]`, so the cache-stability machinery doesn't apply and
- * we can use a much simpler tagging contract:
+ * `AgentMessage[]`, so we can use a simpler tagging contract:
  *
  *   1. Walk the transcript in order.
  *   2. For each tag-eligible part (text, tool_use, tool_result), assign
@@ -25,28 +24,18 @@
  *      `apply-operations.ts` can replace this part with a sentinel when
  *      a queued drop fires.
  *
- * What's deliberately NOT here:
+ * Tool drops aggregate by call_id across both invocation and result
+ * occurrences (mirrors OpenCode tag-messages.ts:196-220). When a drop
+ * fires for a tool tag, BOTH the assistant `toolCall`/`tool_use` part
+ * and the user `toolResult`/`tool_result` part are mutated together so
+ * the LLM sees consistent dropped state. Without this aggregation:
  *
- * - **Source-content persistence**. OpenCode needs it because parts can
- *   get re-tagged across cache-busting and cache-safe passes; Pi has
- *   no such pass distinction. If we ever need to "untag" or "restore
- *   original content" on Pi, we'd add it then.
- *
- * - **Tool-call indexing across split parts**. OpenCode separates
- *   `type:"tool"` (assistant invocation) from `type:"tool_result"` (next
- *   user message). Pi keeps tool calls inside the assistant message
- *   (kind: "tool_use") and tool results in separate ToolResultMessage
- *   entries surfaced as `kind: "tool_result"` parts via the adapter.
- *   We tag them independently — the historian/drop logic uses tag IDs
- *   not call IDs.
- *
- * - **Reasoning byte projection**. Pressure projection still works in
- *   the simplified Pi path; it just uses byteSize of the part text
- *   directly rather than splitting reasoning out separately.
- *
- * - **Recent reduce-call detection / commit detection**. Those are
- *   nudge-suppression heuristics. Pi's nudges land in 4b.4; for now
- *   we return `false` for both flags.
+ *   - Tool tag byte_size reflects only the args (~58 bytes for a `read`)
+ *     because the FIRST occurrence (invocation) is tagged first and
+ *     `assignTag` short-circuits the SECOND occurrence (result, ~4KB)
+ *     to the same tag without updating byte_size.
+ *   - Drops touch only the second occurrence (last write wins on
+ *     `targets.set`), leaving the first in original form.
  *
  * Reuses unchanged from the OpenCode path:
  *
@@ -54,14 +43,17 @@
  *   - `applyPendingOperations` (operates on `Map<number, TagTarget>`).
  *   - `applyFlushedStatuses` (same).
  *   - Tag prefix primitives (`prependTag`, `stripTagPrefix`, `byteSize`).
- *
- * Step 4b.2 ships this module + Pi `pi.on("context", ...)` wire-up.
- * Step 4b.3 builds the historian trigger on top of the same TagTargets.
  */
 
 import type { ContextDatabase } from "../features/magic-context/storage";
+import { saveSourceContent } from "../features/magic-context/storage-source";
+import { updateTagByteSize, updateTagInputByteSize } from "../features/magic-context/storage-tags";
 import type { Tagger } from "../features/magic-context/tagger";
-import { byteSize, prependTag } from "../hooks/magic-context/tag-content-primitives";
+import {
+    byteSize,
+    prependTag,
+    stripTagPrefix,
+} from "../hooks/magic-context/tag-content-primitives";
 import type { TagTarget } from "../hooks/magic-context/tag-messages";
 import type { Transcript, TranscriptPart } from "./transcript";
 
@@ -108,6 +100,34 @@ export interface TagTranscriptResult {
  *   - tool_result parts: id = ToolResultMessage.toolCallId
  *   - text parts: id = undefined → we synthesize from message+ordinal
  */
+/**
+ * Per-callId aggregation of tool occurrences across the transcript.
+ * Built up during the walk and used to:
+ *   1. Assign one tag per call_id with byte_size from the LARGEST
+ *      occurrence (typically the result, ~4KB) instead of the args
+ *      (~58 bytes). Without this, drop projection underestimates
+ *      reclaimable bytes by ~70× per tool.
+ *   2. Build a single aggregate TagTarget that mutates BOTH the
+ *      invocation and result occurrences atomically, so a queued drop
+ *      replaces both halves with a sentinel instead of last-write-wins.
+ */
+interface ToolOccurrence {
+    message: { info: { id?: string; role: string } };
+    part: TranscriptPart;
+    kind: "tool_use" | "tool_result";
+}
+
+interface ToolAggregate {
+    callId: string;
+    occurrences: ToolOccurrence[];
+    /** Largest byteSize seen across occurrences — used as the tag size. */
+    maxByteSize: number;
+    /** Tool name from the first occurrence we see one on. */
+    toolName: string | null;
+    /** Input byte size from the invocation occurrence (for storage projection). */
+    inputByteSize: number;
+}
+
 export function tagTranscript(
     sessionId: string,
     transcript: Transcript,
@@ -117,6 +137,14 @@ export function tagTranscript(
 ): TagTranscriptResult {
     const skipPrefixInjection = options.skipPrefixInjection === true;
     const targets = new Map<number, TagTarget>();
+
+    // Per-callId tool aggregation tracked across the single walk. Tags
+    // get allocated in transcript order (first occurrence reserves the
+    // tag number); subsequent occurrences reuse the same tag and merge
+    // their occurrence into the aggregate's TagTarget. This preserves
+    // chronological tag numbering while still aggregating drop behavior
+    // across both invocation and result.
+    const toolAggregates = new Map<string, ToolAggregate & { tagId: number }>();
 
     db.transaction(() => {
         for (let msgIndex = 0; msgIndex < transcript.messages.length; msgIndex += 1) {
@@ -158,18 +186,106 @@ export function tagTranscript(
 
                 if (part.kind === "tool_use" || part.kind === "tool_result") {
                     if (messageId === undefined) continue;
-                    tagToolPart({
-                        sessionId,
-                        message,
-                        messageId,
-                        msgIndex,
-                        partIndex,
-                        part,
-                        tagger,
-                        db,
-                        targets,
-                        skipPrefixInjection,
-                    });
+
+                    const callId = part.id;
+                    const text = part.getText() ?? "";
+                    const meta = part.getToolMetadata();
+
+                    if (typeof callId !== "string" || callId.length === 0) {
+                        // No stable callId to aggregate on. Tag independently.
+                        tagToolPart({
+                            sessionId,
+                            message,
+                            messageId,
+                            msgIndex,
+                            partIndex,
+                            part,
+                            tagger,
+                            db,
+                            targets,
+                            skipPrefixInjection,
+                        });
+                        continue;
+                    }
+
+                    const existing = toolAggregates.get(callId);
+                    if (existing) {
+                        // Second (or later) occurrence for this call_id.
+                        // Merge into the existing aggregate, update byte_size
+                        // in DB if larger, and rebuild the TagTarget so the
+                        // closures over `occurrences` see all parts.
+                        existing.occurrences.push({
+                            message,
+                            part,
+                            kind: part.kind,
+                        });
+                        const newByteSize = byteSize(text);
+                        if (newByteSize > existing.maxByteSize) {
+                            existing.maxByteSize = newByteSize;
+                            updateTagByteSize(db, sessionId, existing.tagId, newByteSize);
+                        }
+                        if (existing.toolName === null && meta.toolName) {
+                            existing.toolName = meta.toolName;
+                        }
+                        if (
+                            existing.inputByteSize === 0 &&
+                            part.kind === "tool_use" &&
+                            meta.inputByteSize > 0
+                        ) {
+                            existing.inputByteSize = meta.inputByteSize;
+                            updateTagInputByteSize(
+                                db,
+                                sessionId,
+                                existing.tagId,
+                                meta.inputByteSize,
+                            );
+                        }
+                        // Inject §N§ prefix into this tool_result occurrence
+                        // (matches OpenCode behavior — only result gets the prefix).
+                        if (!skipPrefixInjection && part.kind === "tool_result") {
+                            part.setText(prependTag(existing.tagId, text));
+                        }
+                        // Rebuild the aggregate target so it walks the now-
+                        // longer occurrences list.
+                        targets.set(
+                            existing.tagId,
+                            buildAggregateTarget(existing.tagId, existing.occurrences),
+                        );
+                    } else {
+                        // First occurrence — reserve the tag number.
+                        const tagId = tagger.assignTag(
+                            sessionId,
+                            callId,
+                            "tool",
+                            byteSize(text),
+                            db,
+                            0,
+                            meta.toolName ?? null,
+                            meta.inputByteSize,
+                        );
+                        const aggregate = {
+                            callId,
+                            tagId,
+                            occurrences: [
+                                {
+                                    message,
+                                    part,
+                                    kind: part.kind,
+                                },
+                            ],
+                            maxByteSize: byteSize(text),
+                            toolName: meta.toolName ?? null,
+                            inputByteSize: part.kind === "tool_use" ? meta.inputByteSize : 0,
+                        };
+                        toolAggregates.set(callId, aggregate);
+                        // Inject §N§ prefix into this occurrence's visible text
+                        // when it's a tool_result. (OpenCode parity: prefix
+                        // only goes on the result, not the invocation.)
+                        if (!skipPrefixInjection && part.kind === "tool_result") {
+                            part.setText(prependTag(tagId, text));
+                        }
+                        targets.set(tagId, buildAggregateTarget(tagId, aggregate.occurrences));
+                    }
                 }
                 // thinking, image, file, structural, unknown → skip.
             }
@@ -202,6 +318,22 @@ function tagTextPart(args: TagTextPartArgs): void {
         byteSize(text),
         args.db,
     );
+
+    // Persist the original (pre-tagged) source content so caveman
+    // compression and other "compress from original" heuristics have
+    // pristine text to read on later passes. saveSourceContent uses
+    // INSERT OR IGNORE — first write wins; later passes that re-tag
+    // the same (sessionId, tagId) pair from already-prefixed text won't
+    // overwrite the original. Cache-stable.
+    //
+    // We strip any existing §N§ prefix before saving in case a previous
+    // pass already injected one and the persisted source got lost
+    // (e.g. legacy session created before this code shipped). For new
+    // sessions stripTagPrefix is a no-op on the very first pass.
+    const sourceContent = stripTagPrefix(text);
+    if (sourceContent.trim().length > 0) {
+        saveSourceContent(args.db, args.sessionId, tagId, sourceContent);
+    }
 
     if (!args.skipPrefixInjection) {
         args.part.setText(prependTag(tagId, text));
@@ -254,6 +386,80 @@ function tagToolPart(args: TagToolPartArgs): void {
     }
 
     args.targets.set(tagId, buildToolTarget(args.part, args.message));
+}
+
+/**
+ * Build a TagTarget that walks ALL occurrences of a tool call (invocation
+ * + result) when mutating. This is the per-callId aggregate target used
+ * by `tagTranscript` so a single drop replaces both halves.
+ *
+ * The closures hold a reference to the same `occurrences` array stored
+ * on the aggregate, so when the array gets mutated (a second occurrence
+ * is pushed mid-walk), the next call to setContent/drop/truncate sees
+ * all occurrences automatically. Callers MUST rebuild the target after
+ * pushing a new occurrence so the targets map points to a fresh closure
+ * over the updated array — otherwise consumers that captured the target
+ * before the push won't see the new occurrence.
+ *
+ * Mirrors OpenCode's createToolDropTarget semantics in tool-drop-target.ts.
+ */
+function buildAggregateTarget(tagId: number, occurrences: ToolOccurrence[]): TagTarget {
+    const role = occurrences[0]?.message.info.role ?? "user";
+    const messageId = occurrences[0]?.message.info.id;
+
+    return {
+        setContent(content: string): boolean {
+            // Walk all occurrences; mutate every one. Return true if at
+            // least one occurrence's content actually changed (used to
+            // gate sentinel-replay re-writes).
+            let changed = false;
+            for (const occ of occurrences) {
+                // Try setToolOutput first (works on tool_result-shaped parts);
+                // fall back to setText so tool_use parts also get sentinelized.
+                if (occ.part.setToolOutput(content)) {
+                    changed = true;
+                } else if (occ.part.setText(content)) {
+                    changed = true;
+                }
+            }
+            return changed;
+        },
+        getContent(): string | null {
+            // Prefer the result occurrence's content (the bulky payload).
+            for (const occ of occurrences) {
+                if (occ.kind === "tool_result") {
+                    return occ.part.getText() ?? null;
+                }
+            }
+            return occurrences[0]?.part.getText() ?? null;
+        },
+        drop(): "removed" | "absent" {
+            // Replace BOTH halves with the dropped sentinel.
+            const sentinel = `[dropped \u00a7${tagId}\u00a7]`;
+            let any = false;
+            for (const occ of occurrences) {
+                if (occ.part.replaceWithSentinel(sentinel)) any = true;
+            }
+            return any ? "removed" : "absent";
+        },
+        truncate(): "truncated" | "absent" {
+            // Truncate BOTH halves. For tool_use, this typically truncates
+            // the args; for tool_result, the output. The sentinel string
+            // matches OpenCode's truncate sentinel exactly.
+            const sentinel = "[truncated]";
+            let any = false;
+            for (const occ of occurrences) {
+                if (occ.part.setToolOutput(sentinel) || occ.part.setText(sentinel)) {
+                    any = true;
+                }
+            }
+            return any ? "truncated" : "absent";
+        },
+        message: {
+            info: { id: messageId, role },
+            parts: [],
+        },
+    };
 }
 
 /**

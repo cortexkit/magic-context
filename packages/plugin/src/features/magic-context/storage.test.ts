@@ -333,19 +333,18 @@ describe("magic-context storage", () => {
         expect(() => getTopNBySize(failingDb, "ses-x", 2)).toThrow("boom");
     });
 
-    it("fails open in openDatabase/closeDatabase when file path setup fails", () => {
+    it("fails closed in openDatabase when file path setup fails (no in-memory fallback)", () => {
         //#given
-        const dataHome = useTempDataHome("context-storage-fail-open-");
+        const dataHome = useTempDataHome("context-storage-fail-closed-");
         // Force mkdirSync to fail by creating a file at one of the expected
         // parent directories (cortexkit). The new shared path is
         // <dataHome>/cortexkit/magic-context/, so blocking the cortexkit
-        // segment forces openDatabase() into its in-memory fallback.
+        // segment forces openDatabase() into its fail-closed branch.
         writeFileSync(join(dataHome, "cortexkit"), "not-a-directory", "utf-8");
-        //#when
-        const db = openDatabase();
-        //#then
-        expect(db).toBeInstanceOf(Database);
-        expect(() => closeDatabase()).not.toThrow();
+        //#when/#then
+        // openDatabase MUST throw — no silent in-memory fallback. See storage-db.ts.
+        expect(() => openDatabase()).toThrow(/storage unavailable/i);
+        // closeDatabase must remain safe even when no DB ever opened.
         expect(() => closeDatabase()).not.toThrow();
     });
 

@@ -194,11 +194,26 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
     // `forceMaterialization` remains gated by `fullFeatureMode` above (line ~125)
     // so subagents do NOT get 85% force-drop-all-tools or 95% block. Subagents
     // rely on normal overflow detection + clean failure if they exhaust context.
+    //
+    // Subagent once-per-turn bypass: a subagent's entire lifecycle is one user
+    // turn from the parent's POV. Heavy subagents (Oracle, Athena council, etc.)
+    // perform 100s of tool calls within that single turn. With the once-per-turn
+    // guard enforced, only ONE cleanup pass fires (typically when context first
+    // crosses the execute threshold ~50%), and subsequent tool calls accumulate
+    // unchecked until overflow. The guard exists for primary-session cache
+    // stability (mid-turn rewrites would bust Anthropic prompt cache across the
+    // user's tool-call sequence). Subagents have no provider-cache reuse to
+    // protect — they're short-lived, one-shot, and their tool-call bursts
+    // already invalidate cache constantly. So we let subagents re-run heuristics
+    // on every execute pass. The `schedulerDecision === "execute"` gate still
+    // prevents per-defer-pass thrash; only passes the scheduler explicitly
+    // approves for execution can fire heuristics.
     const shouldRunHeuristics =
         (!compartmentRunning || emergencyBypassCompartmentGate) &&
         (isExplicitFlush ||
             forceMaterialization ||
-            (args.schedulerDecision === "execute" && !alreadyRanThisTurn));
+            (args.schedulerDecision === "execute" &&
+                (!alreadyRanThisTurn || !args.fullFeatureMode)));
     // Central cache-busting gate used by all mutation paths below.
     //
     // Definition: TRUE only when this pass actually mutates message state —
@@ -220,17 +235,32 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
     // and history rebuild are decoupled from materialization timing.
     const isCacheBustingPass = shouldApplyPendingOps || shouldRunHeuristics;
     if (shouldRunHeuristics) {
+        const subagentRerun =
+            !args.fullFeatureMode &&
+            alreadyRanThisTurn &&
+            args.schedulerDecision === "execute" &&
+            !isExplicitFlush &&
+            !forceMaterialization;
         const reason = isExplicitFlush
             ? "explicit_flush"
             : forceMaterialization
               ? `force_materialization (${args.contextUsage.percentage.toFixed(1)}% >= ${args.forceMaterializationPercentage}%)`
-              : `scheduler_execute (pendingOps=${pendingOps.length}, scheduler=${args.schedulerDecision})`;
+              : subagentRerun
+                ? `scheduler_execute_subagent_rerun (pendingOps=${pendingOps.length}, scheduler=${args.schedulerDecision})`
+                : `scheduler_execute (pendingOps=${pendingOps.length}, scheduler=${args.schedulerDecision})`;
         sessionLog(
             args.sessionId,
             `heuristics WILL RUN — reason=${reason}, context=${args.contextUsage.percentage.toFixed(1)}%, turn=${args.currentTurnId}`,
         );
     }
-    if (alreadyRanThisTurn && args.schedulerDecision === "execute" && !isExplicitFlush) {
+    // Only show "skipping" log for primary sessions — subagents bypass the
+    // once-per-turn guard and DO re-run, so logging "skipping" would be wrong.
+    if (
+        alreadyRanThisTurn &&
+        args.schedulerDecision === "execute" &&
+        !isExplicitFlush &&
+        args.fullFeatureMode
+    ) {
         sessionLog(
             args.sessionId,
             `transform: skipping heuristics (already ran for turn ${args.currentTurnId})`,

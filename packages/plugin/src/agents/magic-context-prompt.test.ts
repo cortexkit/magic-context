@@ -4,6 +4,38 @@ import { buildMagicContextSection } from "./magic-context-prompt";
 const CAVEMAN_MARKER = "BEWARE";
 const CAVEMAN_PHRASE_TAIL = "consciously revert to full sentences";
 
+const KNOWN_AGENT_IDENTITIES = [
+    "sisyphus",
+    "atlas",
+    "hephaestus",
+    "sisyphus-junior",
+    "oracle",
+    "athena",
+    "athena-junior",
+] as const;
+
+describe("buildMagicContextSection — generic guidance", () => {
+    it("emits the same generic guidance for all known agent identities", () => {
+        const generic = buildMagicContextSection(null, 20, true, false, true, false, false);
+
+        for (const agent of KNOWN_AGENT_IDENTITIES) {
+            expect(buildMagicContextSection(agent, 20, true, false, true, false, false)).toBe(
+                generic,
+            );
+        }
+    });
+
+    it("does not emit legacy agent-tailored guidance", () => {
+        const out = buildMagicContextSection("atlas", 20, true, false, true, false, false);
+
+        expect(out).toContain("### Reduction Triggers");
+        expect(out).toContain("Your current task requirements and constraints");
+        expect(out).not.toContain("CRITICAL — you run long sessions");
+        expect(out).not.toContain("delegation tool outputs from completed waves");
+        expect(out).not.toContain("council member response outputs");
+    });
+});
+
 describe("buildMagicContextSection — caveman compression warning", () => {
     it("emits the warning when caveman is enabled AND ctx_reduce is disabled", () => {
         const out = buildMagicContextSection(

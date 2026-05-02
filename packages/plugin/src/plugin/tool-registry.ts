@@ -36,11 +36,24 @@ export function createToolRegistry(args: {
         return {};
     }
 
-    const db = openDatabase();
-    if (!isDatabasePersisted(db)) {
-        const reason = getDatabasePersistenceError(db);
+    // Storage failure (binary ABI mismatch, unwritable path, etc.) must
+    // disable Magic Context cleanly instead of silently degrading. We never
+    // expose ctx_* tools when storage isn't healthy — see openDatabase()
+    // for the reasoning.
+    let db: ReturnType<typeof openDatabase>;
+    try {
+        db = openDatabase();
+    } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
         // console.warn intentional: this runs during plugin init before the file logger is
         // guaranteed to be ready, and storage failure is user-visible enough to warrant stderr.
+        console.warn(
+            `[magic-context] persistent storage unavailable; disabling magic-context tools: ${reason}`,
+        );
+        return {};
+    }
+    if (!isDatabasePersisted(db)) {
+        const reason = getDatabasePersistenceError(db);
         console.warn(
             `[magic-context] persistent storage unavailable; disabling magic-context tools${reason ? `: ${reason}` : ""}`,
         );
