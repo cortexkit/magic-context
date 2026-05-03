@@ -1,5 +1,5 @@
 # Magic Context — Interactive Setup (Windows)
-# Usage: irm https://raw.githubusercontent.com/cortexkit/opencode-magic-context/master/scripts/install.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.ps1 | iex
 
 Write-Host ""
 Write-Host "  ✨ Magic Context — Setup" -ForegroundColor Cyan

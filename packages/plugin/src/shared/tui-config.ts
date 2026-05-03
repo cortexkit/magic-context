@@ -17,8 +17,8 @@ const PLUGIN_ENTRY = `${PLUGIN_NAME}@latest`;
  * any form. Covers:
  *   - Bare npm name: "@cortexkit/opencode-magic-context"
  *   - Versioned npm: "@cortexkit/opencode-magic-context@latest" / "@0.15.7" / etc.
- *   - Local dev directory path (absolute or relative): ".../opencode-magic-context"
- *     or ".../opencode-magic-context/packages/plugin"
+ *   - Local dev directory path (absolute or relative): ".../magic-context"
+ *     or ".../magic-context/packages/plugin"
  *   - file:// URLs pointing at the same paths
  *   - Tarball paths ending in opencode-magic-context-*.tgz
  *
@@ -71,7 +71,7 @@ export function ensureTuiPluginEntry(): boolean {
             }
             // Only upgrade the bare versionless npm name to @latest.
             // Pinned versions (e.g. @0.8.10), local dev paths
-            // (~/Work/OSS/opencode-magic-context/packages/plugin), and
+            // (~/Work/OSS/magic-context/packages/plugin), and
             // file:// URLs are all left as-is — the user chose them
             // intentionally and overwriting their dev-loop entry would
             // either double-load the plugin (npm + dev) or replace

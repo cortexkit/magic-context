@@ -1,8 +1,8 @@
 blank_issues_enabled: true
 contact_links:
   - name: Documentation
-    url: https://github.com/cortexkit/opencode-magic-context#readme
+    url: https://github.com/cortexkit/magic-context#readme
     about: Check the README for configuration, setup, and feature docs before filing an issue.
   - name: Configuration reference
-    url: https://github.com/cortexkit/opencode-magic-context/blob/master/CONFIGURATION.md
+    url: https://github.com/cortexkit/magic-context/blob/master/CONFIGURATION.md
     about: Full reference for magic-context.jsonc options.

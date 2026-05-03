@@ -7,13 +7,13 @@
 
 <p align="center">
   <a href="https://www.npmjs.com/package/@cortexkit/opencode-magic-context"><img src="https://img.shields.io/npm/v/@cortexkit/opencode-magic-context?color=blue&style=flat-square" alt="npm"></a>
-  <a href="https://github.com/cortexkit/opencode-magic-context/stargazers"><img src="https://img.shields.io/github/stars/cortexkit/opencode-magic-context?style=flat-square&color=yellow" alt="stars"></a>
-  <a href="https://github.com/cortexkit/opencode-magic-context/commits"><img src="https://img.shields.io/github/last-commit/cortexkit/opencode-magic-context?style=flat-square&color=green" alt="last commit"></a>
-  <a href="https://github.com/cortexkit/opencode-magic-context/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License"></a>
+  <a href="https://github.com/cortexkit/magic-context/stargazers"><img src="https://img.shields.io/github/stars/cortexkit/magic-context?style=flat-square&color=yellow" alt="stars"></a>
+  <a href="https://github.com/cortexkit/magic-context/commits"><img src="https://img.shields.io/github/last-commit/cortexkit/magic-context?style=flat-square&color=green" alt="last commit"></a>
+  <a href="https://github.com/cortexkit/magic-context/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License"></a>
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/cortexkit/opencode-magic-context/master/packages/plugin/docs/animation/out/optimized2.gif" alt="Magic Context in action" width="720">
+  <img src="https://raw.githubusercontent.com/cortexkit/magic-context/master/packages/plugin/docs/animation/out/optimized2.gif" alt="Magic Context in action" width="720">
 </p>
 
 <p align="center">
@@ -62,7 +62,7 @@ Keep using the **same session** for **weeks**, **months**, or even **years**. **
 
 ### 🧪 New Experimental Features
 
-**Age-tier caveman text compression (v0.15)** — opt-in companion to `ctx_reduce_enabled: false`. Older user/assistant text parts are progressively compressed using deterministic [caveman rules](https://github.com/cortexkit/opencode-magic-context/blob/master/packages/plugin/src/hooks/magic-context/caveman.ts) — the oldest 20% go to ultra-compressed, next 20% to full, next 20% to lite, newest 40% untouched. Tier shifts always recompress from the pristine original, never from an already-cavemaned intermediate, so the result is stable across passes. Cache-safe by design. Enable with `experimental.caveman_text_compression: { enabled: true }`. Only active when `ctx_reduce_enabled: false`.
+**Age-tier caveman text compression (v0.15)** — opt-in companion to `ctx_reduce_enabled: false`. Older user/assistant text parts are progressively compressed using deterministic [caveman rules](https://github.com/cortexkit/magic-context/blob/master/packages/plugin/src/hooks/magic-context/caveman.ts) — the oldest 20% go to ultra-compressed, next 20% to full, next 20% to lite, newest 40% untouched. Tier shifts always recompress from the pristine original, never from an already-cavemaned intermediate, so the result is stable across passes. Cache-safe by design. Enable with `experimental.caveman_text_compression: { enabled: true }`. Only active when `ctx_reduce_enabled: false`.
 
 **Temporal Awareness** — gives the agent real-time perception. Each user message gets a small `<!-- +5m -->`/`<!-- +2h 15m -->`/`<!-- +3d 4h -->` gap marker showing time since the previous message, and every compartment in `<session-history>` carries `start-date`/`end-date` attributes. Lets the agent reason correctly about how long a build ran, when a decision was made, or how stale a prior session is. Cache-safe — markers derive from immutable timestamps. Enable with `experimental.temporal_awareness: true`.
 
@@ -80,12 +80,12 @@ Run the interactive setup wizard — it detects your models, configures everythi
 
 **macOS / Linux:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/cortexkit/opencode-magic-context/master/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-irm https://raw.githubusercontent.com/cortexkit/opencode-magic-context/master/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/install.ps1 | iex
 ```
 
 **Or run directly (any OS):**
@@ -119,7 +119,7 @@ Create `magic-context.jsonc` in your project root, `.opencode/`, or `~/.config/o
 
 ```jsonc
 {
-  "$schema": "https://raw.githubusercontent.com/cortexkit/opencode-magic-context/master/assets/magic-context.schema.json",
+  "$schema": "https://raw.githubusercontent.com/cortexkit/magic-context/master/assets/magic-context.schema.json",
   "enabled": true,
 
   // Which model the historian uses for background compression, 
@@ -353,7 +353,7 @@ On startup, Magic Context checks for common configuration problems — OpenCode'
 A companion desktop app for browsing and managing Magic Context state outside of OpenCode.
 
 <p align="center">
-   <a href="https://github.com/cortexkit/opencode-magic-context/releases/tag/dashboard-v0.3.4"><strong>⬇️ Download for macOS · Windows · Linux</strong></a></p>
+   <a href="https://github.com/cortexkit/magic-context/releases/tag/dashboard-v0.3.4"><strong>⬇️ Download for macOS · Windows · Linux</strong></a></p>
 
 **Features:**
 - **Memory Browser** — search, filter, and edit project memories with category and project filtering
@@ -413,11 +413,11 @@ All durable states live in a local SQLite database. If the database can't be ope
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=cortexkit%2Fopencode-magic-context&type=date&legend=bottom-right">
+<a href="https://www.star-history.com/?repos=cortexkit%2Fmagic-context&type=date&legend=bottom-right">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=cortexkit/opencode-magic-context&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=cortexkit/opencode-magic-context&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=cortexkit/opencode-magic-context&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=cortexkit/magic-context&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=cortexkit/magic-context&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=cortexkit/magic-context&type=date&legend=top-left" />
  </picture>
 </a>
 

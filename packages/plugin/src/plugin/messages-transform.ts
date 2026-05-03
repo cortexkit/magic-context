@@ -20,7 +20,7 @@ type MessagesTransformOutput = { messages: MessageWithParts[] };
  * Top-level transform wrapper. Catches errors so OpenCode's prompt loop
  * always proceeds — without this guard, a transient DB contention event can
  * crash the user's turn through OpenCode's Effect pipeline. See issue #23:
- * https://github.com/cortexkit/opencode-magic-context/issues/23
+ * https://github.com/cortexkit/magic-context/issues/23
  *
  * Error handling is tiered:
  *

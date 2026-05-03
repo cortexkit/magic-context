@@ -702,7 +702,7 @@ function writeDefaultMagicContextConfig(path: string): void {
 	mkdirSync(dirname(path), { recursive: true });
 	const config = {
 		$schema:
-			"https://raw.githubusercontent.com/cortexkit/opencode-magic-context/master/assets/magic-context.schema.json",
+			"https://raw.githubusercontent.com/cortexkit/magic-context/master/assets/magic-context.schema.json",
 		...MagicContextConfigSchema.parse({}),
 	};
 	writeFileSync(path, `${stringifyJsonc(config, null, 2)}\n`);
@@ -810,7 +810,7 @@ async function runIssueFlow(options: {
 						"issue",
 						"create",
 						"-R",
-						"cortexkit/opencode-magic-context",
+						"cortexkit/magic-context",
 						"--title",
 						`[pi] ${title}`,
 						"--body-file",
@@ -835,7 +835,7 @@ async function runIssueFlow(options: {
 
 		console.log(bundled.bodyMarkdown);
 		options.prompts.log.info(
-			`Open https://github.com/cortexkit/opencode-magic-context/issues/new and attach ${bundled.path}`,
+			`Open https://github.com/cortexkit/magic-context/issues/new and attach ${bundled.path}`,
 		);
 		options.prompts.outro("Issue report ready");
 		return 0;

@@ -281,7 +281,7 @@ function collectPluginEntries(directory: string): string[] {
  * `oh-my-opencode-cli`, etc.) are intentionally NOT matched here — they
  * don't ship the `preemptive-compaction`, `context-window-monitor`, or
  * `anthropic-context-window-limit-recovery` hooks that conflict with
- * Magic Context. See https://github.com/cortexkit/opencode-magic-context/issues/43.
+ * Magic Context. See https://github.com/cortexkit/magic-context/issues/43.
  *
  * The legacy `@code-yeongyu/` scope is no longer used — both names are
  * unscoped on npm.

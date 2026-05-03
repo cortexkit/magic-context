@@ -81,7 +81,7 @@ function endpointFor(provider: string, auth: AuthEntry): ProviderEndpoint {
         case "openrouter":
             return {
                 url: "https://openrouter.ai/api/v1/chat/completions",
-                headers: { ...headers, "http-referer": "https://github.com/cortexkit/opencode-magic-context" },
+                headers: { ...headers, "http-referer": "https://github.com/cortexkit/magic-context" },
                 maxTokensField: "max_tokens",
                 supportsTools: true,
             };

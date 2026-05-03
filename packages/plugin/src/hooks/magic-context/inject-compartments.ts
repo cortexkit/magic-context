@@ -272,7 +272,7 @@ export function prepareCompartmentInjection(
             // past busy_timeout=5s — typically a concurrent dreamer/historian child
             // session or a second OpenCode process — we'd rather let the transform
             // proceed with a one-turn cache miss than crash the user's prompt.
-            // Issue: https://github.com/cortexkit/opencode-magic-context/issues/23
+            // Issue: https://github.com/cortexkit/magic-context/issues/23
             try {
                 db.prepare(
                     "UPDATE session_meta SET memory_block_cache = ?, memory_block_count = ?, memory_block_ids = ? WHERE session_id = ?",

@@ -30,9 +30,9 @@ describe("cavemanCompress", () => {
         });
 
         test("URLs preserved", () => {
-            const input = "See https://github.com/cortexkit/opencode-magic-context for details.";
+            const input = "See https://github.com/cortexkit/magic-context for details.";
             expect(cavemanCompress(input, "ultra")).toContain(
-                "https://github.com/cortexkit/opencode-magic-context",
+                "https://github.com/cortexkit/magic-context",
             );
         });
 

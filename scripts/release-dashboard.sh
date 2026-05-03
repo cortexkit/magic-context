@@ -129,7 +129,7 @@ echo ""
 
 echo "  ✓ Tagged and pushed $TAG"
 echo "  → CI is now building all platforms"
-echo "  → Watch: https://github.com/cortexkit/opencode-magic-context/actions"
+echo "  → Watch: https://github.com/cortexkit/magic-context/actions"
 echo ""
 
 # Step 6: Wait for CI
@@ -138,7 +138,7 @@ echo "  (checking every 30s for up to 60 minutes)"
 ATTEMPTS=0
 MAX_ATTEMPTS=120
 while [[ $ATTEMPTS -lt $MAX_ATTEMPTS ]]; do
-  RELEASE_STATE=$(gh release view "$TAG" --repo cortexkit/opencode-magic-context --json isDraft --jq '.isDraft' 2>/dev/null || echo "not_found")
+  RELEASE_STATE=$(gh release view "$TAG" --repo cortexkit/magic-context --json isDraft --jq '.isDraft' 2>/dev/null || echo "not_found")
   
   if [[ "$RELEASE_STATE" == "true" ]]; then
     echo "  ✓ Draft release found"
@@ -157,7 +157,7 @@ done
 
 if [[ $ATTEMPTS -ge $MAX_ATTEMPTS ]]; then
   echo "  ⚠ Timed out waiting for release. Check CI manually."
-  echo "  → https://github.com/cortexkit/opencode-magic-context/actions"
+  echo "  → https://github.com/cortexkit/magic-context/actions"
   exit 0
 fi
 
@@ -170,7 +170,7 @@ ASSET_ATTEMPTS=0
 ASSET_MAX=120
 ASSET_COUNT=0
 while [[ $ASSET_ATTEMPTS -lt $ASSET_MAX ]]; do
-  ASSET_COUNT=$(gh release view "$TAG" --repo cortexkit/opencode-magic-context --json assets --jq '.assets | length' 2>/dev/null || echo "0")
+  ASSET_COUNT=$(gh release view "$TAG" --repo cortexkit/magic-context --json assets --jq '.assets | length' 2>/dev/null || echo "0")
 
   if [[ "$ASSET_COUNT" -ge "$MIN_ASSETS" ]]; then
     echo "  ✓ Found $ASSET_COUNT assets — all platforms built"
@@ -210,11 +210,11 @@ done
 echo ""
 echo "→ Publishing release..."
 if [[ -n "$NOTES" ]]; then
-  gh release edit "$TAG" --repo cortexkit/opencode-magic-context --draft=false --notes "$NOTES"
+  gh release edit "$TAG" --repo cortexkit/magic-context --draft=false --notes "$NOTES"
 else
-  gh release edit "$TAG" --repo cortexkit/opencode-magic-context --draft=false
+  gh release edit "$TAG" --repo cortexkit/magic-context --draft=false
 fi
 
 echo ""
 echo "  ✓ Dashboard $TAG released!"
-echo "  → https://github.com/cortexkit/opencode-magic-context/releases/tag/$TAG"
+echo "  → https://github.com/cortexkit/magic-context/releases/tag/$TAG"

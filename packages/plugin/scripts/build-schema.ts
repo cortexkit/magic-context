@@ -8,7 +8,7 @@
 import * as path from "node:path";
 
 const SCHEMA_URL =
-    "https://raw.githubusercontent.com/cortexkit/opencode-magic-context/master/assets/magic-context.schema.json";
+    "https://raw.githubusercontent.com/cortexkit/magic-context/master/assets/magic-context.schema.json";
 
 function buildSchema(): Record<string, unknown> {
     const permissionValue = { type: "string", enum: ["ask", "allow", "deny"] };

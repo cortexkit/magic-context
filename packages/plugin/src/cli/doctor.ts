@@ -150,7 +150,7 @@ async function runIssueFlow(): Promise<number> {
                     "issue",
                     "create",
                     "-R",
-                    "cortexkit/opencode-magic-context",
+                    "cortexkit/magic-context",
                     "--title",
                     title,
                     "--body-file",
@@ -170,7 +170,7 @@ async function runIssueFlow(): Promise<number> {
             log.warn("gh CLI not found — falling back to browser");
         }
 
-        const url = `https://github.com/cortexkit/opencode-magic-context/issues/new?title=${encodeURIComponent(title)}&template=bug_report.yml`;
+        const url = `https://github.com/cortexkit/magic-context/issues/new?title=${encodeURIComponent(title)}&template=bug_report.yml`;
         log.info(
             `Open this URL and paste the contents of ${bundled.path} into the Diagnostics field:`,
         );

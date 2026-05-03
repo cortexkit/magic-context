@@ -15,7 +15,7 @@ import type { EmbeddingProvider } from "./embedding-provider";
  * `IoBinding` during cleanup when this happened, producing SIGBUS/SIGTRAP
  * crashes inside the worker thread and silently killing the TUI.
  *
- * See https://github.com/cortexkit/opencode-magic-context/issues/21.
+ * See https://github.com/cortexkit/magic-context/issues/21.
  *
  * Transformers v4 / onnxruntime-node 1.24.x ships a much newer native library
  * and is expected to handle this, but we add a belt-and-suspenders file lock
@@ -249,7 +249,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
                 // @huggingface/transformers at plugin load time. Desktop sidecar spawns
                 // hit ENOENT on JSDoc-referenced files inside transformers' webpack dist
                 // when the literal string triggers Bun's static module analysis.
-                // See: https://github.com/cortexkit/opencode-magic-context/issues/4
+                // See: https://github.com/cortexkit/magic-context/issues/4
                 const transformersSpec = `@huggingface/${"transformers"}`;
                 const transformersModule = (await import(transformersSpec)) as Record<
                     string,

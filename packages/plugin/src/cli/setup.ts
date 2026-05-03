@@ -112,7 +112,7 @@ function writeMagicContextConfig(
     // Always set $schema for editor autocomplete/validation
     if (!config.$schema) {
         config.$schema =
-            "https://raw.githubusercontent.com/cortexkit/opencode-magic-context/master/assets/magic-context.schema.json";
+            "https://raw.githubusercontent.com/cortexkit/magic-context/master/assets/magic-context.schema.json";
     }
 
     if (options.historianModel) {
@@ -390,13 +390,13 @@ export async function runSetup(): Promise<number> {
         try {
             const { execSync } = await import("node:child_process");
             execSync(
-                "gh api --silent --method PUT /user/starred/cortexkit/opencode-magic-context",
+                "gh api --silent --method PUT /user/starred/cortexkit/magic-context",
                 { stdio: "ignore", timeout: 10_000 },
             );
             log.success("Thanks for starring! ★");
         } catch {
             log.info(
-                "Couldn't star automatically. You can star manually:\n  https://github.com/cortexkit/opencode-magic-context",
+                "Couldn't star automatically. You can star manually:\n  https://github.com/cortexkit/magic-context",
             );
         }
     }

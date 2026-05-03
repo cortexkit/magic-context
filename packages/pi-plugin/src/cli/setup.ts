@@ -125,7 +125,7 @@ export function writeMagicContextConfig(
 
 	if (!config.$schema) {
 		config.$schema =
-			"https://raw.githubusercontent.com/cortexkit/opencode-magic-context/master/assets/magic-context.schema.json";
+			"https://raw.githubusercontent.com/cortexkit/magic-context/master/assets/magic-context.schema.json";
 	}
 
 	config.historian = compactObject({

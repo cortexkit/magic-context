@@ -8,7 +8,7 @@ Add `$schema` to your config file for autocomplete and validation in VS Code and
 
 ```jsonc
 {
-  "$schema": "https://raw.githubusercontent.com/cortexkit/opencode-magic-context/master/assets/magic-context.schema.json"
+  "$schema": "https://raw.githubusercontent.com/cortexkit/magic-context/master/assets/magic-context.schema.json"
 }
 ```
 

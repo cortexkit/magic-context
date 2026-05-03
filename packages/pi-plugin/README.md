@@ -76,7 +76,7 @@ Both are merged through a Zod schema. Invalid fields fall back to defaults — b
 
 ```jsonc
 {
-  "$schema": "https://raw.githubusercontent.com/cortexkit/opencode-magic-context/master/assets/magic-context.schema.json",
+  "$schema": "https://raw.githubusercontent.com/cortexkit/magic-context/master/assets/magic-context.schema.json",
   "enabled": true,
   "historian": {
     "model": "anthropic/claude-haiku-4-5"
@@ -87,7 +87,7 @@ Both are merged through a Zod schema. Invalid fields fall back to defaults — b
 }
 ```
 
-For the full configuration reference (including dreamer, sidekick, auto-search, and experimental features), see [CONFIGURATION.md](https://github.com/cortexkit/opencode-magic-context/blob/master/CONFIGURATION.md) in the main repository — the schema is shared between both plugins.
+For the full configuration reference (including dreamer, sidekick, auto-search, and experimental features), see [CONFIGURATION.md](https://github.com/cortexkit/magic-context/blob/master/CONFIGURATION.md) in the main repository — the schema is shared between both plugins.
 
 ---
 
@@ -161,7 +161,7 @@ For `--print` mode, the upstream fix is in progress: pi-coding-agent commit `902
 
 ## Architecture & implementation
 
-This package is part of the [opencode-magic-context monorepo](https://github.com/cortexkit/opencode-magic-context). The Pi extension shares the core implementation (~7,500 lines) with the OpenCode plugin via the `@magic-context/core` workspace dependency, exposing only the Pi-specific adapter layer:
+This package is part of the [magic-context monorepo](https://github.com/cortexkit/magic-context). The Pi extension shares the core implementation (~7,500 lines) with the OpenCode plugin via the `@magic-context/core` workspace dependency, exposing only the Pi-specific adapter layer:
 
 | Pi-specific module | Responsibility |
 |---|---|
@@ -174,10 +174,10 @@ This package is part of the [opencode-magic-context monorepo](https://github.com
 | `config/` | Pi-convention config loader (`$cwd/.pi/magic-context.jsonc` + `~/.pi/agent/magic-context.jsonc`) |
 | `cli/` | `magic-context-pi setup` and `magic-context-pi doctor` |
 
-For deeper architectural detail, see the main repo's [ARCHITECTURE.md](https://github.com/cortexkit/opencode-magic-context/blob/master/ARCHITECTURE.md).
+For deeper architectural detail, see the main repo's [ARCHITECTURE.md](https://github.com/cortexkit/magic-context/blob/master/ARCHITECTURE.md).
 
 ---
 
 ## License
 
-MIT — see [LICENSE](https://github.com/cortexkit/opencode-magic-context/blob/master/LICENSE).
+MIT — see [LICENSE](https://github.com/cortexkit/magic-context/blob/master/LICENSE).
