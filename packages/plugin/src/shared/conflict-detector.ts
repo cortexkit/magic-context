@@ -7,7 +7,8 @@ interface OpenCodeConfig {
         auto?: boolean;
         prune?: boolean;
     };
-    plugin?: string[];
+    // OpenCode allows plugins as plain strings or [name, options] tuples.
+    plugin?: Array<string | [string, unknown]>;
 }
 
 interface OmoConfig {
@@ -223,8 +224,27 @@ function matchesPackageName(entry: string, canonicalNames: Set<string>): boolean
     return canonicalNames.has(nameOnly);
 }
 
+/** Extract the package-name string from a plugin entry.
+ *  OpenCode supports two forms:
+ *   - plain string:        "@scope/pkg@latest"
+ *   - tuple [name, opts]:  ["@scope/pkg@latest", { ... }]
+ *  Returns null for any other shape (numbers, objects, etc.). */
+function extractPluginName(entry: string | [string, unknown]): string | null {
+    if (typeof entry === "string") return entry;
+    if (Array.isArray(entry) && typeof entry[0] === "string") return entry[0];
+    return null;
+}
+
 function collectPluginEntries(directory: string): string[] {
     const plugins: string[] = [];
+
+    const pushFrom = (entries: Array<string | [string, unknown]> | undefined) => {
+        if (!entries) return;
+        for (const entry of entries) {
+            const name = extractPluginName(entry);
+            if (name) plugins.push(name);
+        }
+    };
 
     // Project-level configs
     for (const configPath of [
@@ -234,9 +254,7 @@ function collectPluginEntries(directory: string): string[] {
         join(directory, "opencode.json"),
     ]) {
         const config = readJsoncFile<OpenCodeConfig>(configPath);
-        if (config?.plugin) {
-            plugins.push(...config.plugin);
-        }
+        pushFrom(config?.plugin);
     }
 
     // User-level config
@@ -244,9 +262,7 @@ function collectPluginEntries(directory: string): string[] {
         const paths = getOpenCodeConfigPaths({ binary: "opencode" });
         for (const configPath of [paths.configJsonc, paths.configJson]) {
             const config = readJsoncFile<OpenCodeConfig>(configPath);
-            if (config?.plugin) {
-                plugins.push(...config.plugin);
-            }
+            pushFrom(config?.plugin);
         }
     } catch {
         // best-effort

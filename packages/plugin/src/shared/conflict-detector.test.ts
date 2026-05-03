@@ -50,7 +50,7 @@ describe("detectConflicts", () => {
         rmSync(userConfigDir, { recursive: true, force: true });
     });
 
-    function writeProjectConfig(plugins: string[]): void {
+    function writeProjectConfig(plugins: Array<string | [string, unknown]>): void {
         writeFileSync(join(projectDir, "opencode.json"), JSON.stringify({ plugin: plugins }));
     }
 
@@ -185,5 +185,45 @@ describe("detectConflicts", () => {
         writeProjectConfig(["@cortexkit/opencode-magic-context@latest", "some-other-plugin"]);
         const result = detectConflicts(projectDir);
         expect(result.hasConflict).toBe(false);
+    });
+
+    // --- Tuple plugin entries (issue #49) ---
+    // OpenCode supports ["pkg@version", { ...options }] tuple form.
+    // The old code spread the raw array into the plugin list, causing
+    // matchesPackageName to receive an array instead of a string → crash.
+
+    describe("tuple plugin entries (issue #49)", () => {
+        it("does not crash when a plugin is defined as a [name, options] tuple", () => {
+            writeProjectConfig([
+                "@cortexkit/opencode-magic-context@latest",
+                ["@plannotator/opencode@latest", { workflow: "plan-agent" }],
+            ]);
+            expect(() => detectConflicts(projectDir)).not.toThrow();
+        });
+
+        it("detects DCP conflict when DCP is expressed as a tuple", () => {
+            writeProjectConfig([
+                "@cortexkit/opencode-magic-context@latest",
+                ["@tarquinen/opencode-dcp@latest", {}],
+            ]);
+            const result = detectConflicts(projectDir);
+            expect(result.conflicts.dcpPlugin).toBe(true);
+        });
+
+        it("detects OMO conflict when OMO is expressed as a tuple", () => {
+            writeProjectConfig([["oh-my-opencode@latest", {}]]);
+            const result = detectConflicts(projectDir);
+            expect(result.conflicts.omoPreemptiveCompaction).toBe(true);
+        });
+
+        it("does not crash on mixed string and tuple entries with unrelated packages", () => {
+            writeProjectConfig([
+                "oh-my-opencode-slim",
+                ["@plannotator/opencode@latest", { workflow: "plan-agent", planningAgents: ["plan"] }],
+                "@cortexkit/opencode-magic-context@latest",
+            ]);
+            const result = detectConflicts(projectDir);
+            expect(result.hasConflict).toBe(false);
+        });
     });
 });
