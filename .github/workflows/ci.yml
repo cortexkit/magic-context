@@ -9,8 +9,8 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  check:
-    name: Check
+  check-plugin:
+    name: Check (plugin)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,3 +33,28 @@ jobs:
 
       - name: Test
         run: bun run test
+
+  check-pi-plugin:
+    name: Check (pi-plugin)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: TypeScript typecheck
+        run: bun run --cwd packages/pi-plugin typecheck
+
+      - name: Lint
+        run: bun run --cwd packages/pi-plugin lint
+
+      - name: Build
+        run: bun run --cwd packages/pi-plugin build
+
+      - name: Test
+        run: bun run --cwd packages/pi-plugin test

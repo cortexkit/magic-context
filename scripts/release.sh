@@ -76,28 +76,46 @@ echo "→ Running pre-release checks..."
 echo ""
 
 PLUGIN_DIR="packages/plugin"
+PI_DIR="packages/pi-plugin"
 
-echo "  bun lint..."
-bun run --cwd "$PLUGIN_DIR" lint 2>&1 || { echo "Error: Lint failed"; exit 1; }
+echo "  [plugin] bun lint..."
+bun run --cwd "$PLUGIN_DIR" lint 2>&1 || { echo "Error: Plugin lint failed"; exit 1; }
 
-echo "  bun typecheck..."
-bun run --cwd "$PLUGIN_DIR" typecheck 2>&1 || { echo "Error: Typecheck failed"; exit 1; }
+echo "  [plugin] bun typecheck..."
+bun run --cwd "$PLUGIN_DIR" typecheck 2>&1 || { echo "Error: Plugin typecheck failed"; exit 1; }
 
-echo "  bun test..."
+echo "  [plugin] bun test..."
 # Bun has a known panic crash after tests complete (https://github.com/oven-sh/bun/issues/XXXXX).
 # All tests pass but the process exits non-zero. Check output for failures instead of exit code.
 TEST_OUTPUT=$(bun test --cwd "$PLUGIN_DIR" 2>&1 || true)
 echo "$TEST_OUTPUT"
 if echo "$TEST_OUTPUT" | grep -q "[1-9][0-9]* fail"; then
-  echo "Error: Tests failed"
+  echo "Error: Plugin tests failed"
   exit 1
 fi
 
-echo "  bun build..."
-bun run --cwd "$PLUGIN_DIR" build 2>&1 || { echo "Error: Build failed"; exit 1; }
+echo "  [plugin] bun build..."
+bun run --cwd "$PLUGIN_DIR" build 2>&1 || { echo "Error: Plugin build failed"; exit 1; }
 
 # Copy root README into plugin package for npm publishing
 cp README.md "$PLUGIN_DIR/README.md"
+
+echo "  [pi-plugin] bun lint..."
+bun run --cwd "$PI_DIR" lint 2>&1 || { echo "Error: Pi-plugin lint failed"; exit 1; }
+
+echo "  [pi-plugin] bun typecheck..."
+bun run --cwd "$PI_DIR" typecheck 2>&1 || { echo "Error: Pi-plugin typecheck failed"; exit 1; }
+
+echo "  [pi-plugin] bun test..."
+PI_TEST_OUTPUT=$(bun test --cwd "$PI_DIR" 2>&1 || true)
+echo "$PI_TEST_OUTPUT"
+if echo "$PI_TEST_OUTPUT" | grep -q "[1-9][0-9]* fail"; then
+  echo "Error: Pi-plugin tests failed"
+  exit 1
+fi
+
+echo "  [pi-plugin] bun build..."
+bun run --cwd "$PI_DIR" build 2>&1 || { echo "Error: Pi-plugin build failed"; exit 1; }
 
 echo "  ✓ All checks passed"
 echo ""

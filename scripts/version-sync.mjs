@@ -4,6 +4,7 @@
  * version-sync.mjs
  *
  * Synchronizes version in package.json from a git tag or explicit argument.
+ * Updates both packages/plugin and packages/pi-plugin to the same version.
  *
  * Usage:
  *   node scripts/version-sync.mjs 0.1.0           # set version to 0.1.0
@@ -16,7 +17,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const root = join(__dirname, "..", "packages", "plugin");
+const repoRoot = join(__dirname, "..");
+
+const PACKAGES = [
+    join(repoRoot, "packages", "plugin"),
+    join(repoRoot, "packages", "pi-plugin"),
+];
 
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[\w.]+)?(?:\+[\w.]+)?$/;
 
@@ -68,17 +74,20 @@ const { version, dryRun } = parseArgs(process.argv);
 
 console.log(`${dryRun ? "[DRY RUN] " : ""}Syncing version to ${version}\n`);
 
-const pkgPath = join(root, "package.json");
-const content = readFileSync(pkgPath, "utf-8");
-const pkg = JSON.parse(content);
+for (const pkgDir of PACKAGES) {
+    const pkgPath = join(pkgDir, "package.json");
+    const content = readFileSync(pkgPath, "utf-8");
+    const pkg = JSON.parse(content);
+    const label = pkgDir.replace(repoRoot + "/", "");
 
-if (pkg.version === version) {
-    console.log("package.json: (already at target version)");
-} else {
-    console.log(`package.json: ${pkg.version} → ${version}`);
-    pkg.version = version;
-    if (!dryRun) {
-        writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`, "utf-8");
+    if (pkg.version === version) {
+        console.log(`${label}/package.json: (already at target version)`);
+    } else {
+        console.log(`${label}/package.json: ${pkg.version} → ${version}`);
+        pkg.version = version;
+        if (!dryRun) {
+            writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`, "utf-8");
+        }
     }
 }
 

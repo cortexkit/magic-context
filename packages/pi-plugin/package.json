@@ -29,7 +29,7 @@
 		"README.md"
 	],
 	"scripts": {
-		"build": "bun build src/index.ts --outdir dist --target node --format esm --external @mariozechner/pi-coding-agent --external @mariozechner/pi-tui --external @huggingface/transformers --external better-sqlite3 && bun build src/cli/index.ts --outfile dist/cli.js --target node --format esm --external @clack/prompts",
+		"build": "bun build src/index.ts src/subagent-entry.ts --outdir dist --target node --format esm --external @mariozechner/pi-coding-agent --external @mariozechner/pi-tui --external @huggingface/transformers --external better-sqlite3 && bun build src/cli/index.ts --outfile dist/cli.js --target node --format esm --external @clack/prompts",
 		"typecheck": "tsc --noEmit",
 		"test": "bun test",
 		"lint": "biome check src",

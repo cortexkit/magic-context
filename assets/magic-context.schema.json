@@ -223,71 +223,110 @@
     "experimental": {
       "type": "object",
       "properties": {
-        "user_memories": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean",
-              "default": false,
-              "description": "Extract user behavior observations from historian runs and promote recurring patterns to stable user memories injected into all sessions. Requires dreamer."
-            },
-            "promotion_threshold": {
-              "type": "number",
-              "minimum": 2,
-              "maximum": 20,
-              "default": 3,
-              "description": "Minimum candidate observations before dreamer considers promotion to stable user memory"
-            }
-          },
-          "additionalProperties": false,
-          "default": {
-            "enabled": false,
-            "promotion_threshold": 3
-          },
-          "description": "User memory extraction and promotion (experimental)."
+        "temporal_awareness": {
+          "type": "boolean",
+          "default": false,
+          "description": "Inject HTML gap-time comments between messages (e.g. <!-- +12m -->) so the agent knows how much time elapsed between turns. Compartment start/end dates are also rendered in <session-history>."
         },
-        "pin_key_files": {
+        "git_commit_indexing": {
           "type": "object",
           "properties": {
             "enabled": {
               "type": "boolean",
               "default": false,
-              "description": "Pin frequently-read key files into the system prompt. Dreamer identifies key files per session based on read patterns. Requires dreamer."
+              "description": "Index HEAD git commits for ctx_search (git_commit source)."
             },
-            "token_budget": {
+            "since_days": {
               "type": "number",
-              "minimum": 2000,
-              "maximum": 30000,
-              "default": 10000,
-              "description": "Total token budget for all pinned key files"
+              "minimum": 1,
+              "default": 365,
+              "description": "How far back to index commits (in days)."
             },
-            "min_reads": {
+            "max_commits": {
               "type": "number",
-              "minimum": 2,
-              "maximum": 20,
-              "default": 4,
-              "description": "Minimum full-read count before a file is considered for pinning"
+              "minimum": 100,
+              "maximum": 10000,
+              "default": 2000,
+              "description": "Maximum number of commits to index."
             }
           },
           "additionalProperties": false,
           "default": {
             "enabled": false,
-            "token_budget": 10000,
-            "min_reads": 4
+            "since_days": 365,
+            "max_commits": 2000
           },
-          "description": "Pin frequently-read key files into system prompt (experimental)."
+          "description": "Index git commits so ctx_search can retrieve them."
+        },
+        "auto_search": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Automatically append a compact <ctx-search-hint> to eligible user messages when relevant memories or commits are found."
+            },
+            "min_prompt_chars": {
+              "type": "number",
+              "minimum": 5,
+              "default": 20,
+              "description": "Skip auto-search for user messages shorter than this character count."
+            },
+            "score_threshold": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "default": 0.6,
+              "description": "Minimum similarity score for a result to appear in the hint."
+            }
+          },
+          "additionalProperties": false,
+          "default": {
+            "enabled": false,
+            "min_prompt_chars": 20,
+            "score_threshold": 0.6
+          },
+          "description": "Auto-search hint injection on eligible user turns."
+        },
+        "caveman_text_compression": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Apply deterministic caveman-style text compression to old conversation text. Only active when ctx_reduce_enabled=false. Compresses user/assistant text in oldest-first tiers: ultra (oldest 20%), full, lite, untouched (newest 40%)."
+            },
+            "min_chars": {
+              "type": "number",
+              "minimum": 50,
+              "default": 500,
+              "description": "Minimum text length (chars) before caveman compression is applied to a part."
+            }
+          },
+          "additionalProperties": false,
+          "default": {
+            "enabled": false,
+            "min_chars": 500
+          },
+          "description": "Deterministic caveman-style text compression for ctx_reduce_enabled=false sessions."
         }
       },
       "additionalProperties": false,
       "default": {
-        "user_memories": {
+        "temporal_awareness": false,
+        "git_commit_indexing": {
           "enabled": false,
-          "promotion_threshold": 3
+          "since_days": 365,
+          "max_commits": 2000
         },
-        "pin_key_files": {
+        "auto_search": {
           "enabled": false,
-          "token_budget": 10000,
-          "min_reads": 4
+          "min_prompt_chars": 20,
+          "score_threshold": 0.6
+        },
+        "caveman_text_compression": {
+          "enabled": false,
+          "min_chars": 500
         }
       },
       "description": "Experimental features — gated behind flags, may change between releases."
