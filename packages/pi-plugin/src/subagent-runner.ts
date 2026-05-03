@@ -229,31 +229,98 @@ export class PiSubagentRunner implements SubagentRunner {
 			let lastEventType: string | null = null;
 			let lastEventTimestamp = 0;
 
+			// Accumulate every assistant message we see. Pi's print mode in
+			// JSON output emits `message_end` events for both intermediate
+			// (tool-call) and terminal turns, with the final assistant
+			// message carrying stopReason="stop" and no toolCall content.
+			//
+			// Why we accumulate instead of waiting for `agent_end`:
+			// Pi's print mode does NOT emit an `agent_end` event on stdout.
+			// That event exists in Pi's internal extension event channel
+			// only — the stdout JSON stream comes from `session.subscribe`,
+			// which receives only `message_start`/`message_end`/
+			// `tool_execution_*`/`compaction_*`/`session_info_changed`/
+			// `thinking_level_changed`/`queue_update`/`auto_retry_end`.
+			//
+			// We detect run completion the same way Pi itself does: watch
+			// `message_end` for the final assistant turn (stopReason="stop"
+			// + no toolCall content), then drain until natural child exit.
+			const accumulatedMessages: unknown[] = [];
+
 			rl.on("line", (line) => {
 				if (line.length === 0) return;
 				const parsed = parsePiEventLine(line);
 				if (!parsed.ok) {
 					// Malformed event line — record but don't abort yet,
-					// so we can still consume `agent_end` if it arrives
-					// intact later. If we never see one, this becomes parse_failed.
+					// so we can still consume the final message_end if it
+					// arrives intact later. If we never see one, this
+					// becomes parse_failed.
 					parseError = parsed.error;
 					return;
 				}
 				const event = parsed.event;
 
 				if (typeof event !== "object" || event === null) return;
-				const e = event as { type?: string; messages?: unknown };
+				const e = event as {
+					type?: string;
+					messages?: unknown;
+					message?: unknown;
+				};
 
 				eventCount += 1;
 				lastEventTimestamp = Date.now();
 				if (typeof e.type === "string") lastEventType = e.type;
 
+				// Backwards-compat: if Pi (or any pi-compatible runner) ever
+				// does emit `agent_end` with the full messages array, treat
+				// it as authoritative. Older Pi versions may have done this.
 				if (e.type === "agent_end" && Array.isArray(e.messages)) {
 					sawAgentEnd = true;
 					const result = extractFinalAssistant(e.messages);
 					finalAssistantText = result.text;
 					finalStopReason = result.stopReason;
 					finalErrorMessage = result.errorMessage;
+					return;
+				}
+
+				// Live path: accumulate every assistant/tool message Pi
+				// emits via session.subscribe. The terminal assistant turn
+				// is detected by stopReason="stop" + no toolCall content.
+				if (e.type === "message_end" && e.message) {
+					accumulatedMessages.push(e.message);
+					const m = e.message as {
+						role?: string;
+						content?: unknown;
+						stopReason?: string;
+						errorMessage?: string;
+					};
+					if (m.role === "assistant") {
+						const hasToolCall =
+							Array.isArray(m.content) &&
+							m.content.some(
+								(c) =>
+									typeof c === "object" &&
+									c !== null &&
+									(c as { type?: unknown }).type === "toolCall",
+							);
+						if (
+							typeof m.stopReason === "string" &&
+							(m.stopReason === "stop" ||
+								m.stopReason === "error" ||
+								m.stopReason === "aborted") &&
+							!hasToolCall
+						) {
+							sawAgentEnd = true;
+							const result = extractFinalAssistant(accumulatedMessages);
+							finalAssistantText = result.text;
+							finalStopReason = result.stopReason;
+							finalErrorMessage = result.errorMessage;
+						}
+					}
+				}
+
+				if (e.type === "tool_result_end" && e.message) {
+					accumulatedMessages.push(e.message);
 				}
 			});
 
