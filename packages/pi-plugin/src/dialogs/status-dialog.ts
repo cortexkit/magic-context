@@ -195,7 +195,12 @@ class StatusDialogComponent implements Component {
 	}
 
 	render(width: number): string[] {
-		const inner = renderInner(this.detail, this.props.theme);
+		// drawBorder reserves 2 chars for left/right border + 1 char padding
+		// each side, leaving width-4 for inner content. Pass this through to
+		// renderInner so the segmented bar can fill the available row width
+		// instead of being capped at a hardcoded 56 chars.
+		const innerWidth = Math.max(20, width - 4);
+		const inner = renderInner(this.detail, this.props.theme, innerWidth);
 		return drawBorder(inner, width, this.props.theme);
 	}
 
@@ -207,7 +212,11 @@ class StatusDialogComponent implements Component {
 	}
 }
 
-function renderInner(s: StatusDialogDetail, theme: Theme): string[] {
+function renderInner(
+	s: StatusDialogDetail,
+	theme: Theme,
+	innerWidth: number,
+): string[] {
 	const pctColor =
 		s.usagePercentage >= 80
 			? "error"
@@ -235,8 +244,8 @@ function renderInner(s: StatusDialogDetail, theme: Theme): string[] {
 		} tokens`,
 	);
 
-	// Segmented bar
-	lines.push(renderBar(s));
+	// Segmented bar (fills the full inner content width)
+	lines.push(renderBar(s, innerWidth));
 
 	// Legend
 	for (const seg of breakdownSegments(s)) {
@@ -610,8 +619,11 @@ function breakdownSegments(s: StatusDialogDetail): Array<{
 	return segs;
 }
 
-function renderBar(s: StatusDialogDetail): string {
-	const barWidth = 56;
+function renderBar(s: StatusDialogDetail, innerWidth: number): string {
+	// Fill the full inner content row. Clamp to a sensible minimum so
+	// extremely narrow terminals still render a visible bar instead of
+	// collapsing all segments to width 1.
+	const barWidth = Math.max(20, innerWidth);
 	const segs = breakdownSegments(s);
 	if (segs.length === 0) return "";
 	const widths = segs.map((seg) =>
