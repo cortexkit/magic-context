@@ -421,10 +421,27 @@
         },
         "variant": {
           "type": "string"
+        },
+        "two_pass": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run a second editor pass over historian output to clean low-signal U: lines and cross-compartment duplicates. Adds ~1 extra API call per historian run. Useful for models without extended thinking support."
+        },
+        "thinking_level": {
+          "type": "string",
+          "enum": [
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "description": "Pi only: explicit thinking level passed as --thinking <level> to Pi historian subagent invocations. Required for providers like GitHub Copilot that may apply bad defaults. OpenCode users set variant instead."
         }
       },
       "additionalProperties": false,
-      "description": "Historian agent configuration (model, fallback_models, variant, etc.)"
+      "description": "Historian agent configuration (model, fallback_models, variant, two_pass, thinking_level, etc.)"
     },
     "dreamer": {
       "type": "object",
@@ -602,6 +619,72 @@
           "type": "boolean",
           "default": true,
           "description": "Inject ARCHITECTURE.md and STRUCTURE.md into system prompt"
+        },
+        "user_memories": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Extract user behavior observations from historian runs and promote recurring patterns to stable user memories injected into all sessions."
+            },
+            "promotion_threshold": {
+              "type": "number",
+              "minimum": 2,
+              "maximum": 20,
+              "default": 3,
+              "description": "Minimum candidate observations before dreamer considers promotion to stable user memory"
+            }
+          },
+          "additionalProperties": false,
+          "default": {
+            "enabled": true,
+            "promotion_threshold": 3
+          },
+          "description": "User memory pipeline configuration"
+        },
+        "pin_key_files": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Pin frequently-read key files into the system prompt. Dreamer identifies key files per session based on read patterns."
+            },
+            "token_budget": {
+              "type": "number",
+              "minimum": 2000,
+              "maximum": 30000,
+              "default": 10000,
+              "description": "Total token budget for all pinned key files"
+            },
+            "min_reads": {
+              "type": "number",
+              "minimum": 2,
+              "maximum": 20,
+              "default": 4,
+              "description": "Minimum full-read count before a file is considered for pinning"
+            }
+          },
+          "additionalProperties": false,
+          "default": {
+            "enabled": false,
+            "token_budget": 10000,
+            "min_reads": 4
+          },
+          "description": "Key file pinning configuration"
+        },
+        "thinking_level": {
+          "type": "string",
+          "enum": [
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "description": "Pi only: explicit thinking level for dreamer subagent invocations. See historian.thinking_level."
         }
       },
       "additionalProperties": false,
@@ -809,6 +892,18 @@
         "system_prompt": {
           "type": "string",
           "description": "Custom system prompt for sidekick"
+        },
+        "thinking_level": {
+          "type": "string",
+          "enum": [
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "description": "Pi only: explicit thinking level for sidekick subagent invocations. See historian.thinking_level."
         }
       },
       "additionalProperties": false,

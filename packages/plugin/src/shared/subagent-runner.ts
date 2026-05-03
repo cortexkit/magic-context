@@ -67,6 +67,17 @@ export interface SubagentRunOptions {
     timeoutMs?: number | undefined;
     cwd?: string | undefined;
     signal?: AbortSignal | undefined;
+    /**
+     * Pi only: explicit thinking level, passed as `--thinking <level>` to the
+     * Pi subprocess. OpenCode ignores this field — thinking/reasoning is
+     * controlled via `variant` in the OpenCode agent config instead.
+     *
+     * Required when the configured historian/dreamer model supports reasoning
+     * (e.g. github-copilot/gpt-5.4) because Pi's own default resolution may
+     * pick a value the provider rejects. Set to "off" to disable thinking for
+     * speed (local models), or "medium"/"high" for better quality.
+     */
+    thinkingLevel?: string | undefined;
 }
 
 /**

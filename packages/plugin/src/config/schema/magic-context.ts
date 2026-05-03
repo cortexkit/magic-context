@@ -47,6 +47,14 @@ export const DEFAULT_DREAMER_TASKS: DreamingTask[] = [
     "improve",
 ];
 
+/** Valid thinking levels for Pi subagents. Maps to Pi's --thinking CLI flag.
+ *  Off: disable reasoning. Minimal/low/medium/high/xhigh: increasing reasoning depth.
+ *  Pi-only — OpenCode uses `variant` in agent config instead. */
+export const PiThinkingLevelSchema = z
+    .enum(["off", "minimal", "low", "medium", "high", "xhigh"])
+    .optional();
+export type PiThinkingLevel = z.infer<typeof PiThinkingLevelSchema>;
+
 /** Combined dreamer agent + scheduling configuration */
 export const DreamerConfigSchema = AgentOverrideConfigSchema.merge(
     z.object({
@@ -90,6 +98,8 @@ export const DreamerConfigSchema = AgentOverrideConfigSchema.merge(
                 min_reads: z.number().min(2).max(20).default(4),
             })
             .default({ enabled: false, token_budget: 10000, min_reads: 4 }),
+        /** Pi only: explicit thinking level for dreamer subagent tasks. See HistorianConfigSchema. */
+        thinking_level: PiThinkingLevelSchema,
     }),
 );
 export type DreamerConfig = z.infer<typeof DreamerConfigSchema>;
@@ -98,6 +108,8 @@ export const SidekickConfigSchema = AgentOverrideConfigSchema.extend({
     enabled: z.boolean().default(false),
     timeout_ms: z.number().default(30000),
     system_prompt: z.string().optional(),
+    /** Pi only: explicit thinking level for sidekick subagent. See HistorianConfigSchema. */
+    thinking_level: PiThinkingLevelSchema,
 }).optional();
 export type SidekickConfig = NonNullable<z.infer<typeof SidekickConfigSchema>>;
 
@@ -111,6 +123,12 @@ export const HistorianConfigSchema = AgentOverrideConfigSchema.extend({
      *  and cross-compartment duplicates. Adds ~1 extra API call and ~1.3x cost per
      *  historian run. Useful for models without extended thinking support. (default: false) */
     two_pass: z.boolean().default(false),
+    /** Pi only: explicit thinking level passed as --thinking <level> to Pi subagent
+     *  invocations. Required when using reasoning models (e.g. github-copilot/gpt-5.4)
+     *  because Pi's default thinking-level resolution can pick a value the provider
+     *  rejects. OpenCode users set `variant` instead.
+     *  Valid: off | minimal | low | medium | high | xhigh */
+    thinking_level: PiThinkingLevelSchema,
 }).optional();
 export type HistorianConfig = NonNullable<z.infer<typeof HistorianConfigSchema>>;
 

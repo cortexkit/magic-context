@@ -234,6 +234,7 @@ function createPiDreamerClient(opts: PiDreamerOptions): DreamTimerClient {
 				timeoutMs: opts.config.task_timeout_minutes * 60 * 1000,
 				cwd: dreamSession.directory,
 				signal: args.signal ?? undefined,
+				thinkingLevel: opts.config.thinking_level,
 			});
 			inFlightDreams.add(runPromise);
 			try {

@@ -37,6 +37,7 @@ export function registerCtxRecompCommand(
 		historianChunkTokens: number;
 		historianFallbacks?: readonly string[];
 		historianTimeoutMs?: number;
+		historianThinkingLevel?: string;
 		memoryEnabled: boolean;
 		autoPromote: boolean;
 	},
@@ -124,6 +125,7 @@ export function registerCtxRecompCommand(
 							model: deps.historianModel,
 							fallbackModels: deps.historianFallbacks,
 							timeoutMs: deps.historianTimeoutMs,
+							thinkingLevel: deps.historianThinkingLevel,
 							directory: ctx.cwd,
 							notify: (text) => {
 								sendCtxStatusMessage(pi, {
@@ -263,6 +265,7 @@ function createPiRecompClient(args: {
 	model: string;
 	fallbackModels?: readonly string[];
 	timeoutMs?: number;
+	thinkingLevel?: string;
 	directory: string;
 	notify: (text: string) => void;
 }) {
@@ -285,6 +288,7 @@ function createPiRecompClient(args: {
 			fallbackModels: args.fallbackModels,
 			timeoutMs: args.timeoutMs,
 			cwd: args.directory,
+			thinkingLevel: args.thinkingLevel,
 		});
 		if (!result.ok) {
 			throw new Error(

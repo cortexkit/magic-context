@@ -399,6 +399,10 @@ export interface PiHistorianOptions {
 	 *  clean low-signal U: lines and cross-compartment duplicates. Mirrors
 	 *  OpenCode's `historian.two_pass` config. */
 	twoPass?: boolean;
+	/** Pi only: explicit thinking level for historian/compressor subagent
+	 *  invocations (passed as --thinking <level>). When unset, Pi's own
+	 *  default resolution applies. See `historian.thinking_level` in config. */
+	thinkingLevel?: string;
 	/** Cross-session memory feature gate (`memory.enabled`). */
 	memoryEnabled?: boolean;
 	/** Automatic-promotion gate (`memory.auto_promote`). */
@@ -1349,6 +1353,7 @@ function maybeFireCompressor(args: {
 		fallbackModels: historian.fallbackModels,
 		historyBudgetTokens,
 		historianTimeoutMs: historian.timeoutMs,
+		thinkingLevel: historian.thinkingLevel,
 		minCompartmentRatio: compressor.minCompartmentRatio,
 		maxMergeDepth: compressor.maxMergeDepth,
 		maxCompartmentsPerPass: compressor.maxCompartmentsPerPass,
@@ -1449,6 +1454,7 @@ function spawnPiHistorianRun(args: {
 		historianChunkTokens: historian.historianChunkTokens,
 		historianTimeoutMs: historian.timeoutMs,
 		twoPass: historian.twoPass,
+		thinkingLevel: historian.thinkingLevel,
 		memoryEnabled: historian.memoryEnabled,
 		autoPromote: historian.autoPromote,
 		onPublished: () => {

@@ -174,6 +174,7 @@ function resolveSidekickFromConfig(
 		model,
 		systemPrompt: sidekick.system_prompt,
 		timeoutMs: sidekick.timeout_ms,
+		thinking_level: sidekick.thinking_level,
 	};
 }
 
@@ -231,6 +232,10 @@ function resolveHistorianFromConfig(
 		// historian round-trip's latency and token cost. Enable for
 		// long sessions where chunk dedupe matters more than speed.
 		twoPass: historian?.two_pass === true,
+		// Pi only: explicit thinking level for historian subagent invocations.
+		// When set, passed as --thinking <level> to Pi subprocess.
+		// Required for providers like GitHub Copilot that apply bad defaults.
+		thinkingLevel: historian?.thinking_level,
 		executeThresholdPercentage: config.execute_threshold_percentage,
 		triggerBudget,
 		historyBudgetPercentage: config.history_budget_percentage,
@@ -562,6 +567,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		),
 		historianFallbacks: historianConfig?.fallbackModels,
 		historianTimeoutMs: config.historian_timeout_ms,
+		historianThinkingLevel: historianConfig?.thinkingLevel,
 		memoryEnabled: config.memory.enabled,
 		autoPromote: config.memory.auto_promote,
 	});

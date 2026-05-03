@@ -125,11 +125,10 @@ describe("subagent-runner pure helpers", () => {
 			"system guidance",
 			"--model",
 			"anthropic/claude-sonnet",
-			// Explicit --thinking off prevents providers like GitHub Copilot
-			// from applying their own default reasoning_effort which may be
-			// unsupported by the target model (e.g. gpt-5.4 rejects "minimal").
-			"--thinking",
-			"off",
+			// No --thinking flag: thinkingLevel not set in baseOptions,
+			// so Pi's own resolution handles it (correct for Anthropic).
+			// Users on providers like GitHub Copilot should set
+			// historian.thinking_level in their Pi magic-context.jsonc.
 			"summarize this session",
 		]);
 	});
@@ -467,8 +466,7 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 				"system guidance",
 				"--models",
 				"anthropic/primary,openai/fallback",
-				"--thinking",
-				"off",
+				// No --thinking: thinkingLevel not set in options above.
 				"summarize this session",
 			],
 			expect.objectContaining({ cwd: "/workspace/project" }),

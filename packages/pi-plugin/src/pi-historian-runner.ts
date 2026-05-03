@@ -127,6 +127,10 @@ export interface PiHistorianDeps {
 	 *  OpenCode's `historian.two_pass` config. Editor validation falls back
 	 *  to the first-pass result on failure. Default: false. */
 	twoPass?: boolean;
+	/** Pi only: explicit thinking level passed as --thinking <level> to
+	 *  historian subagent invocations. When unset, Pi's own resolution runs
+	 *  (works for most providers; may fail for e.g. github-copilot/gpt-5.4). */
+	thinkingLevel?: string;
 	/** Cross-session memory feature gate (`memory.enabled`). */
 	memoryEnabled?: boolean;
 	/** Automatic-promotion gate (`memory.auto_promote`). */
@@ -159,6 +163,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		historianChunkTokens,
 		historianTimeoutMs = DEFAULT_HISTORIAN_TIMEOUT_MS,
 		twoPass,
+		thinkingLevel,
 		memoryEnabled,
 		autoPromote,
 		onPublished,
@@ -293,6 +298,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				fallbackModels,
 				timeoutMs: historianTimeoutMs,
 				cwd: directory,
+				thinkingLevel,
 			});
 
 			let validatedPass = await validateHistorianResult(
@@ -333,6 +339,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					fallbackModels,
 					timeoutMs: historianTimeoutMs,
 					cwd: directory,
+					thinkingLevel,
 				});
 				validatedPass = await validateHistorianResult(
 					repairResult,
@@ -392,6 +399,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						fallbackModels,
 						timeoutMs: historianTimeoutMs,
 						cwd: directory,
+						thinkingLevel,
 					});
 					const editorPass = await validateHistorianResult(
 						editorResult,

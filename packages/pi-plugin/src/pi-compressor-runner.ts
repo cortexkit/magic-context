@@ -57,6 +57,8 @@ export interface PiCompressorDeps {
 	fallbackModels?: readonly string[];
 	historyBudgetTokens: number;
 	historianTimeoutMs?: number;
+	/** Pi only: explicit thinking level for compressor subagent invocations. */
+	thinkingLevel?: string;
 	minCompartmentRatio?: number;
 	maxMergeDepth?: number;
 	maxCompartmentsPerPass?: number;
@@ -336,6 +338,7 @@ async function runCompressorPass(
 			fallbackModels: args.fallbackModels,
 			timeoutMs: args.historianTimeoutMs ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
 			cwd: args.directory,
+			thinkingLevel: args.thinkingLevel,
 		});
 		if (!result.ok) {
 			sessionLog(

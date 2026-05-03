@@ -58,6 +58,8 @@ export interface PiSidekickConfig {
 	systemPrompt?: string;
 	/** Hard timeout in ms. Defaults to 30s — sidekick is expected to be fast. */
 	timeoutMs?: number;
+	/** Pi only: explicit thinking level (--thinking <level>) for sidekick subagent. */
+	thinking_level?: string;
 }
 
 /**
@@ -134,6 +136,7 @@ export function registerCtxAugCommand(
 				timeoutMs: config.timeoutMs ?? 30_000,
 				cwd: ctx.cwd,
 				signal: ctx.signal,
+				thinkingLevel: config.thinking_level,
 			});
 
 			if (!result.ok) {
