@@ -77,7 +77,7 @@ describe("createCtxNoteTools", () => {
         tools = createCtxNoteTools({
             db,
             dreamerEnabled: true,
-            projectIdentity: "git:test-project",
+            resolveProjectPath: () => "git:test-project",
         });
 
         await tools.ctx_note.execute(

@@ -389,10 +389,10 @@ export async function runSetup(): Promise<number> {
     if (shouldStar) {
         try {
             const { execSync } = await import("node:child_process");
-            execSync(
-                "gh api --silent --method PUT /user/starred/cortexkit/magic-context",
-                { stdio: "ignore", timeout: 10_000 },
-            );
+            execSync("gh api --silent --method PUT /user/starred/cortexkit/magic-context", {
+                stdio: "ignore",
+                timeout: 10_000,
+            });
             log.success("Thanks for starring! ★");
         } catch {
             log.info(

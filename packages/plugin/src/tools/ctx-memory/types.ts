@@ -25,7 +25,18 @@ export interface CtxMemoryArgs {
 
 export interface CtxMemoryToolDeps {
     db: Database;
-    projectPath: string;
+    /**
+     * Resolve the project identity for the active session's directory.
+     *
+     * Why a function instead of a baked string: OpenCode's top-level
+     * `ctx.directory` is the directory the OpenCode process was started
+     * in (often `$HOME` when launched via `opencode -s <id>` from outside
+     * the project). The session's actual working directory is exposed
+     * per-call via `toolContext.directory`. Resolving here ensures
+     * `ctx_memory` operates on the session's project, not the launch
+     * directory's project.
+     */
+    resolveProjectPath: (directory: string) => string;
     memoryEnabled: boolean;
     embeddingEnabled: boolean;
     allowedActions?: CtxMemoryAction[];

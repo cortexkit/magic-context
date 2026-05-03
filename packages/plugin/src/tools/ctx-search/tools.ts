@@ -127,10 +127,16 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
             // tokens and crowds out high-signal raw-history hits.
             const visibleMemoryIds = getVisibleMemoryIds(deps.db, toolContext.sessionID);
 
+            // Resolve the session's actual project from `toolContext.directory`
+            // each call. OpenCode's top-level `ctx.directory` (the launch dir)
+            // can differ from the session's working directory when the user
+            // runs `opencode -s <id>` from outside the project.
+            const projectPath = deps.resolveProjectPath(toolContext.directory);
+
             const results = await unifiedSearch(
                 deps.db,
                 toolContext.sessionID,
-                deps.projectPath,
+                projectPath,
                 query,
                 {
                     limit: normalizeLimit(args.limit),

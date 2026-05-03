@@ -219,7 +219,10 @@ describe("detectConflicts", () => {
         it("does not crash on mixed string and tuple entries with unrelated packages", () => {
             writeProjectConfig([
                 "oh-my-opencode-slim",
-                ["@plannotator/opencode@latest", { workflow: "plan-agent", planningAgents: ["plan"] }],
+                [
+                    "@plannotator/opencode@latest",
+                    { workflow: "plan-agent", planningAgents: ["plan"] },
+                ],
                 "@cortexkit/opencode-magic-context@latest",
             ]);
             const result = detectConflicts(projectDir);

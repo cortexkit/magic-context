@@ -62,26 +62,37 @@ export function createToolRegistry(args: {
 
     const memoryEnabled = pluginConfig.memory?.enabled === true;
     initializeEmbedding(embeddingConfig);
-    const projectPath = resolveProjectIdentity(ctx.directory);
 
+    // Embedding-model mismatch check uses the launch-time directory because
+    // it's a one-shot startup wipe; it's accepted that on `opencode -s` from
+    // outside a project this might check the wrong project. The per-project
+    // dream timer rebuilds embeddings as needed, so a missed check here is
+    // self-healing.
+    const launchProjectPath = resolveProjectIdentity(ctx.directory);
     if (memoryEnabled) {
         const currentModelId = getEmbeddingModelId();
-        const storedModelId = getStoredModelId(db, projectPath);
+        const storedModelId = getStoredModelId(db, launchProjectPath);
         const hasEmbeddings =
             (db
                 .prepare(
                     "SELECT 1 FROM memory_embeddings me JOIN memories m ON me.memory_id = m.id WHERE m.project_path = ? LIMIT 1",
                 )
-                .get(projectPath) as { 1: number } | null) !== null;
+                .get(launchProjectPath) as { 1: number } | null) !== null;
 
         if (hasEmbeddings && storedModelId !== currentModelId) {
-            clearEmbeddingsForProject(db, projectPath);
+            clearEmbeddingsForProject(db, launchProjectPath);
             // console.warn intentional: embedding wipe is a rare, user-visible event during init.
             console.warn(
-                `[magic-context] embedding model changed from ${storedModelId} to ${currentModelId}; cleared embeddings for project ${projectPath}`,
+                `[magic-context] embedding model changed from ${storedModelId} to ${currentModelId}; cleared embeddings for project ${launchProjectPath}`,
             );
         }
     }
+
+    // Tools resolve project per-call from `toolContext.directory` because
+    // OpenCode's top-level `ctx.directory` reflects the launch dir, not the
+    // session's actual working directory (e.g. when launched via
+    // `opencode -s <id>` from outside the project).
+    const resolveProjectPath = (directory: string) => resolveProjectIdentity(directory);
 
     const ctxReduceEnabled = pluginConfig.ctx_reduce_enabled !== false;
     const allTools: Record<string, ToolDefinition> = {
@@ -95,11 +106,11 @@ export function createToolRegistry(args: {
         ...createCtxNoteTools({
             db,
             dreamerEnabled: pluginConfig.dreamer?.enabled === true,
-            projectIdentity: projectPath,
+            resolveProjectPath,
         }),
         ...createCtxSearchTools({
             db,
-            projectPath,
+            resolveProjectPath,
             memoryEnabled,
             embeddingEnabled: embeddingConfig.provider !== "off",
             gitCommitsEnabled: pluginConfig.experimental?.git_commit_indexing?.enabled === true,
@@ -108,7 +119,7 @@ export function createToolRegistry(args: {
             ? {
                   ...createCtxMemoryTools({
                       db,
-                      projectPath,
+                      resolveProjectPath,
                       memoryEnabled: true,
                       embeddingEnabled: embeddingConfig.provider !== "off",
                       allowedActions: ["write", "delete"],

@@ -14,7 +14,13 @@ export interface CtxSearchArgs {
 
 export interface CtxSearchToolDeps {
     db: Database;
-    projectPath: string;
+    /**
+     * Resolve the project identity for the session's directory at call time.
+     * See CtxMemoryToolDeps.resolveProjectPath for why this is a function:
+     * OpenCode's top-level `ctx.directory` reflects the launch dir, not the
+     * session's working directory.
+     */
+    resolveProjectPath: (directory: string) => string;
     memoryEnabled: boolean;
     embeddingEnabled: boolean;
     /** When true, ctx_search surfaces indexed git commits as a 3rd source. */

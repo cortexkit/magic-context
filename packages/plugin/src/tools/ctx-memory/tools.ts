@@ -219,6 +219,12 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 return `Error: Action '${args.action}' is not allowed in this context.`;
             }
 
+            // Resolve the session's actual project from `toolContext.directory`
+            // each call. OpenCode's top-level `ctx.directory` (the launch dir)
+            // can differ from the session's working directory when the user
+            // runs `opencode -s <id>` from outside the project.
+            const projectPath = deps.resolveProjectPath(toolContext.directory);
+
             if (args.action === "write") {
                 const content = args.content?.trim();
                 if (!content) {
@@ -237,7 +243,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
 
                 const existingMemory = getMemoryByHash(
                     deps.db,
-                    deps.projectPath,
+                    projectPath,
                     category,
                     computeNormalizedHash(content),
                 );
@@ -247,7 +253,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 }
 
                 const memory = insertMemory(deps.db, {
-                    projectPath: deps.projectPath,
+                    projectPath: projectPath,
                     category,
                     content,
                     sourceSessionId: toolContext.sessionID,
@@ -272,7 +278,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 }
 
                 const memory = getMemoryById(deps.db, args.id);
-                if (!memory || memory.projectPath !== deps.projectPath) {
+                if (!memory || memory.projectPath !== projectPath) {
                     return `Error: Memory with ID ${args.id} was not found.`;
                 }
 
@@ -285,7 +291,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 const limit = normalizeLimit(args.limit);
                 const category = normalizeCategory(args.category);
                 const memories = filterByCategory(
-                    getMemoriesByProject(deps.db, deps.projectPath),
+                    getMemoriesByProject(deps.db, projectPath),
                     category,
                 ).slice(0, limit);
 
@@ -303,14 +309,14 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 }
 
                 const memory = getMemoryById(deps.db, args.id);
-                if (!memory || memory.projectPath !== deps.projectPath) {
+                if (!memory || memory.projectPath !== projectPath) {
                     return `Error: Memory with ID ${args.id} was not found.`;
                 }
 
                 const normalizedHash = computeNormalizedHash(content);
                 const duplicate = getMemoryByHash(
                     deps.db,
-                    deps.projectPath,
+                    projectPath,
                     memory.category,
                     normalizedHash,
                 );
@@ -348,7 +354,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     return "Error: One or more source memories were not found.";
                 }
 
-                if (sourceMemories.some((memory) => memory.projectPath !== deps.projectPath)) {
+                if (sourceMemories.some((memory) => memory.projectPath !== projectPath)) {
                     return "Error: All memories to merge must belong to the current project.";
                 }
 
@@ -366,12 +372,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 }
 
                 const normalizedHash = computeNormalizedHash(content);
-                const duplicate = getMemoryByHash(
-                    deps.db,
-                    deps.projectPath,
-                    category,
-                    normalizedHash,
-                );
+                const duplicate = getMemoryByHash(deps.db, projectPath, category, normalizedHash);
                 const canonicalExisting =
                     duplicate && ids.includes(duplicate.id) ? duplicate : null;
                 if (duplicate && !canonicalExisting) {
@@ -416,7 +417,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     const nextCanonical =
                         canonicalExisting ??
                         insertMemory(deps.db, {
-                            projectPath: deps.projectPath,
+                            projectPath: projectPath,
                             category,
                             content,
                             sourceSessionId: toolContext.sessionID,
@@ -472,7 +473,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 }
 
                 const memory = getMemoryById(deps.db, args.id);
-                if (!memory || memory.projectPath !== deps.projectPath) {
+                if (!memory || memory.projectPath !== projectPath) {
                     return `Error: Memory with ID ${args.id} was not found.`;
                 }
 

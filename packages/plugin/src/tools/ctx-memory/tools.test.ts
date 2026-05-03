@@ -79,7 +79,7 @@ function createTestDb(): Database {
 }
 
 const toolContext = (sessionID = "ses-memory", agent = "general") =>
-    ({ sessionID, agent }) as never;
+    ({ sessionID, agent, directory: "/repo/project" }) as never;
 
 afterAll(() => {
     mock.restore();
@@ -93,7 +93,7 @@ describe("createCtxMemoryTools", () => {
         db = createTestDb();
         tools = createCtxMemoryTools({
             db,
-            projectPath: "/repo/project",
+            resolveProjectPath: () => "/repo/project",
             memoryEnabled: true,
             embeddingEnabled: false,
         });
@@ -322,7 +322,7 @@ describe("createCtxMemoryTools", () => {
         it("returns disabled message for all actions", async () => {
             const disabledTools = createCtxMemoryTools({
                 db,
-                projectPath: "/repo/project",
+                resolveProjectPath: () => "/repo/project",
                 memoryEnabled: false,
                 embeddingEnabled: false,
             });
@@ -346,7 +346,7 @@ describe("createCtxMemoryTools", () => {
         it("rejects dreamer-only actions for primary-agent tool instances", async () => {
             const primaryTools = createCtxMemoryTools({
                 db,
-                projectPath: "/repo/project",
+                resolveProjectPath: () => "/repo/project",
                 memoryEnabled: true,
                 embeddingEnabled: false,
                 allowedActions: ["write", "delete"],
@@ -365,7 +365,7 @@ describe("createCtxMemoryTools", () => {
             });
             const primaryTools = createCtxMemoryTools({
                 db,
-                projectPath: "/repo/project",
+                resolveProjectPath: () => "/repo/project",
                 memoryEnabled: true,
                 embeddingEnabled: false,
                 allowedActions: ["write", "delete"],

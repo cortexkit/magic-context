@@ -284,7 +284,36 @@ export function createTransform(deps: TransformDeps) {
 
         const reducedMode = sessionMeta.isSubagent;
         const fullFeatureMode = !reducedMode;
-        const compartmentDirectory = deps.directory ?? "";
+
+        // Resolve the *session's* working directory, not the OpenCode launch
+        // directory. When the user runs `opencode -s <id>` from outside the
+        // project, `deps.directory` (captured at plugin init) reflects the
+        // launch dir (often $HOME) while the session itself is bound to the
+        // project. Historian/dreamer/recomp child sessions and project-scoped
+        // memory all need the session's real directory.
+        //
+        // session.get failure is non-fatal — fall back to deps.directory so
+        // transform never blocks on an SDK call. Cache hits keep this cheap.
+        let sessionDirectory: string = deps.directory ?? "";
+        if (deps.client !== undefined) {
+            try {
+                const sessionResponse = await deps.client.session
+                    .get({ path: { id: sessionId } })
+                    .catch(() => null);
+                const sessionInfo = (sessionResponse as { data?: { directory?: string } } | null)
+                    ?.data;
+                if (
+                    sessionInfo &&
+                    typeof sessionInfo.directory === "string" &&
+                    sessionInfo.directory.length > 0
+                ) {
+                    sessionDirectory = sessionInfo.directory;
+                }
+            } catch {
+                // ignore; fallback already in place
+            }
+        }
+        const compartmentDirectory = sessionDirectory;
         const canRunCompartments =
             fullFeatureMode && deps.client !== undefined && compartmentDirectory.length > 0;
         const fallbackModelId = deps.getFallbackModelId?.(sessionId);
@@ -578,7 +607,7 @@ export function createTransform(deps: TransformDeps) {
         // directory but still does a cache lookup on each call, and the
         // first call per directory in a new process spawns `git rev-parse`.
         const projectIdentity = deps.memoryConfig?.enabled
-            ? resolveProjectIdentity(deps.directory ?? process.cwd())
+            ? resolveProjectIdentity(compartmentDirectory || process.cwd())
             : undefined;
 
         let pendingCompartmentInjection: PreparedCompartmentInjection | null = null;

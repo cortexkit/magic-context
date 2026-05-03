@@ -30,7 +30,7 @@ describe("createCtxSearchTools", () => {
     it("validates required query", async () => {
         const tools = createCtxSearchTools({
             db,
-            projectPath: "/repo/project",
+            resolveProjectPath: () => "/repo/project",
             memoryEnabled: false,
             embeddingEnabled: false,
             readMessages: () => [],
@@ -44,7 +44,7 @@ describe("createCtxSearchTools", () => {
     it("formats empty search results", async () => {
         const tools = createCtxSearchTools({
             db,
-            projectPath: "/repo/project",
+            resolveProjectPath: () => "/repo/project",
             memoryEnabled: false,
             embeddingEnabled: false,
             readMessages: () => [],
@@ -69,7 +69,7 @@ describe("createCtxSearchTools", () => {
         ]);
         const tools = createCtxSearchTools({
             db,
-            projectPath: "/repo/project",
+            resolveProjectPath: () => "/repo/project",
             memoryEnabled: false,
             embeddingEnabled: false,
             readMessages: () => [
@@ -108,7 +108,7 @@ describe("createCtxSearchTools", () => {
         });
         const tools = createCtxSearchTools({
             db,
-            projectPath: "/repo/project",
+            resolveProjectPath: () => "/repo/project",
             memoryEnabled: true,
             embeddingEnabled: false,
             readMessages: () => [],

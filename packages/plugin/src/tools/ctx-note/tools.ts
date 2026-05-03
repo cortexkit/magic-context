@@ -16,7 +16,13 @@ import type { CtxNoteArgs, CtxNoteReadFilter } from "./types";
 export interface CtxNoteToolDeps {
     db: Database;
     dreamerEnabled?: boolean;
-    projectIdentity?: string;
+    /**
+     * Resolve the project identity for the session's directory at call time.
+     * See CtxMemoryToolDeps.resolveProjectPath for why this is a function.
+     * Optional — when undefined, smart-note creation is rejected with an
+     * explanatory error.
+     */
+    resolveProjectPath?: (directory: string) => string;
 }
 
 function formatNoteLine(note: Note): string {
@@ -147,6 +153,12 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
             const sessionId = toolContext.sessionID;
             const action = args.action ?? (typeof args.content === "string" ? "write" : "read");
 
+            // Resolve the session's actual project from `toolContext.directory`
+            // each call. OpenCode's top-level `ctx.directory` (the launch dir)
+            // can differ from the session's working directory when the user
+            // runs `opencode -s <id>` from outside the project.
+            const projectIdentity = deps.resolveProjectPath?.(toolContext.directory);
+
             if (action === "write") {
                 const content = args.content?.trim();
                 if (!content) {
@@ -158,12 +170,12 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
                     if (!deps.dreamerEnabled) {
                         return "Error: Smart notes require dreamer to be enabled. Enable dreamer in magic-context.jsonc to use surface_condition.";
                     }
-                    if (!deps.projectIdentity) {
+                    if (!projectIdentity) {
                         return "Error: Could not resolve project identity for smart note.";
                     }
                     const note = addNote(deps.db, "smart", {
                         content,
-                        projectPath: deps.projectIdentity,
+                        projectPath: projectIdentity,
                         sessionId,
                         surfaceCondition: args.surface_condition.trim(),
                     });
@@ -212,7 +224,7 @@ function createCtxNoteTool(deps: CtxNoteToolDeps): ToolDefinition {
             const sections = buildReadSections({
                 db: deps.db,
                 filter: args.filter,
-                projectIdentity: deps.projectIdentity,
+                projectIdentity,
                 sessionId,
             });
 
