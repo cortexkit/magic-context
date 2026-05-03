@@ -44,6 +44,19 @@ function resolveSubagentEntryPath(): string | undefined {
 const SUBAGENT_ENTRY_PATH = resolveSubagentEntryPath();
 
 /**
+ * Grace period (ms) after we detect the terminal assistant message_end
+ * before we SIGTERM the Pi child. Pi's print mode often finishes the agent
+ * loop and emits agent_end / a clean stopReason but doesn't actually exit
+ * the process for many seconds (sometimes never on its own). Without this
+ * drain, every successful run would wait the full configured timeoutMs.
+ *
+ * 2s gives the child enough time to flush remaining stdout buffers and
+ * shut down its stdio writers cleanly on the happy path; on the (frequent)
+ * unhappy path we SIGTERM and recover the assembled result we already have.
+ */
+const TERMINAL_DRAIN_GRACE_MS = 2_000;
+
+/**
  * Set of subagent agent ids that get the dreamer-only ctx_memory
  * action surface (update/merge/archive). Mirrors OpenCode's
  * `tool-registry.ts:114` allowedActions split: only the dreamer agent
@@ -223,6 +236,12 @@ export class PiSubagentRunner implements SubagentRunner {
 			let sawAgentEnd = false;
 			let parseError: string | null = null;
 
+			// Terminal-drain state. Set when we detect the final assistant
+			// turn, used to short-circuit the full-timeout wait on Pi's
+			// often-doesn't-exit print-mode shutdown.
+			let drainTimerStarted = false;
+			let drainTimerHandle: ReturnType<typeof setTimeout> | undefined;
+
 			// child.stdout/stderr can be null only when the corresponding stdio
 			// slot is "ignore"/"inherit"/<fd>. We always pass "pipe" for both
 			// (above), so they're guaranteed Readable streams here. Still treat
@@ -383,6 +402,30 @@ export class PiSubagentRunner implements SubagentRunner {
 				if (e.type === "tool_result_end" && e.message) {
 					accumulatedMessages.push(e.message);
 				}
+
+				// Pi's print mode finishes the agent loop but does NOT always
+				// exit the child process cleanly afterwards — observed
+				// pattern: assistant message_end with stopReason="stop"
+				// arrives at ~30s, then the child sits idle until killed.
+				// This isn't unique to one provider; it appears to be a
+				// generic Pi print-mode shutdown gap.
+				//
+				// To avoid waiting on the full timeoutMs (typically 5+
+				// minutes) every time, start a short drain timer the moment
+				// we detect a terminal assistant turn. Give the child 2s
+				// grace to flush + exit naturally; if it's still alive,
+				// SIGTERM it. This matches the upstream pi-subagents
+				// drain-after-stop pattern.
+				if (sawAgentEnd && !drainTimerStarted) {
+					drainTimerStarted = true;
+					drainTimerHandle = setTimeout(() => {
+						if (settled) return;
+						terminateChild(child);
+					}, TERMINAL_DRAIN_GRACE_MS);
+					if (typeof drainTimerHandle.unref === "function") {
+						drainTimerHandle.unref();
+					}
+				}
 			});
 
 			// Hard timeout. We use SIGTERM first so the child can flush
@@ -433,6 +476,7 @@ export class PiSubagentRunner implements SubagentRunner {
 
 			child.on("error", (error) => {
 				if (timeoutHandle) clearTimeout(timeoutHandle);
+				if (drainTimerHandle) clearTimeout(drainTimerHandle);
 				options.signal?.removeEventListener("abort", onAbort);
 				settle({
 					ok: false,
@@ -444,6 +488,7 @@ export class PiSubagentRunner implements SubagentRunner {
 
 			child.on("close", (code, signal) => {
 				if (timeoutHandle) clearTimeout(timeoutHandle);
+				if (drainTimerHandle) clearTimeout(drainTimerHandle);
 				options.signal?.removeEventListener("abort", onAbort);
 				emitProgress({
 					type: "child_exit",
