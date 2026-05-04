@@ -5,14 +5,21 @@ import { doctor } from "./doctor";
 import { runSetup } from "./setup";
 
 function getVersion(): string {
-	try {
-		const req = createRequire(import.meta.url);
-		return (
-			(req("../../package.json") as { version?: string }).version ?? "0.0.0"
-		);
-	} catch {
-		return "0.0.0";
+	const req = createRequire(import.meta.url);
+	// In source layout (src/cli/index.ts) package.json is two levels up.
+	// In published layout (dist/cli.js) it's one level up. Try both so
+	// `--version` works regardless of how the binary was launched.
+	for (const relPath of ["../../package.json", "../package.json"]) {
+		try {
+			const pkg = req(relPath) as { version?: unknown };
+			if (typeof pkg.version === "string" && pkg.version.length > 0) {
+				return pkg.version;
+			}
+		} catch {
+			// Try next layout.
+		}
 	}
+	return "0.0.0";
 }
 
 function printUsage(): void {
