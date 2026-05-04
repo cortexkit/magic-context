@@ -125,11 +125,18 @@ export function getMagicContextLogPath(): string {
     return join(tmpdir(), "magic-context.log");
 }
 
-/** Cache directory used by OpenCode for installed plugin packages. */
+/**
+ * Cache directory used by OpenCode for installed plugin packages.
+ *
+ * OpenCode uses the `xdg-basedir` package, which — on every platform, including
+ * Windows — falls back to `<homedir>/.cache` when `XDG_CACHE_HOME` is unset.
+ * A previous Windows-specific branch that resolved to `%LOCALAPPDATA%` did not
+ * match OpenCode's own resolution and caused `doctor --force` to clear a
+ * non-existent directory while the real cache at `C:\Users\<user>\.cache`
+ * stayed untouched. The plugin runtime fixed the same bug in
+ * packages/plugin/src/shared/data-path.ts; this CLI helper must stay aligned.
+ */
 export function getOpenCodePluginCacheDir(): string {
-    if (process.platform === "win32") {
-        return join(homedir(), "AppData", "Local", "opencode", "Cache", "packages");
-    }
     const xdg = process.env.XDG_CACHE_HOME || join(homedir(), ".cache");
     return join(xdg, "opencode", "packages");
 }

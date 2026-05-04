@@ -924,6 +924,13 @@ export function migrateOpenCodeSessionToPi(
         return {
             outputPath,
             piSessionId: buildResult.piSessionId,
+            // entries.length - 2 subtracts the leading "session" + "model_change"
+            // entries that every Pi JSONL file starts with. The result counts
+            // every USER-VISIBLE entry: boundary marker, all migrated message
+            // entries, and (when present) the trailing compaction marker. This
+            // matches what users see as "migrated entries" in CLI output.
+            // Audit tools sometimes flag this as off-by-N because they don't
+            // know which entries are structural — that's a false positive.
             messageCount: buildResult.entries.length - 2,
             byteCount: Buffer.byteLength(jsonl, "utf8"),
             sourceMessageCount,

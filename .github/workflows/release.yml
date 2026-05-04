@@ -198,7 +198,11 @@ jobs:
   github-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [test, test-pi, test-cli]
+    # Wait for ALL three npm publishes to succeed before tagging the GitHub
+    # release. Previously this depended only on the test jobs, so a publish
+    # timeout or registry failure could leave a published release page on
+    # GitHub while one of the @cortexkit/* packages was missing from npm.
+    needs: [test, test-pi, test-cli, publish-npm, publish-npm-pi, publish-npm-cli]
     steps:
       - uses: actions/checkout@v4
 

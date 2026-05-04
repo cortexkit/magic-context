@@ -9,7 +9,7 @@
   <a href="https://www.npmjs.com/package/@cortexkit/magic-context"><img src="https://img.shields.io/npm/v/@cortexkit/magic-context?label=cli&color=orange&style=flat-square" alt="npm @cortexkit/magic-context"></a>
   <a href="https://www.npmjs.com/package/@cortexkit/opencode-magic-context"><img src="https://img.shields.io/npm/v/@cortexkit/opencode-magic-context?label=opencode&color=blue&style=flat-square" alt="npm @cortexkit/opencode-magic-context"></a>
   <a href="https://www.npmjs.com/package/@cortexkit/pi-magic-context"><img src="https://img.shields.io/npm/v/@cortexkit/pi-magic-context?label=pi&color=purple&style=flat-square" alt="npm @cortexkit/pi-magic-context"></a>
-  <a href="https://discord.gg/F2uWxjGnU"><img src="https://img.shields.io/discord/1488852091056295957?style=flat-square&logo=discord&logoColor=white&label=Discord&color=5865F2" alt="Discord"></a>
+  <a href="https://discord.gg/DSa65w8wuf"><img src="https://img.shields.io/discord/1488852091056295957?style=flat-square&logo=discord&logoColor=white&label=Discord&color=5865F2" alt="Discord"></a>
   <a href="https://github.com/cortexkit/magic-context/stargazers"><img src="https://img.shields.io/github/stars/cortexkit/magic-context?style=flat-square&color=yellow" alt="stars"></a>
   <a href="https://github.com/cortexkit/magic-context/commits"><img src="https://img.shields.io/github/last-commit/cortexkit/magic-context?style=flat-square&color=green" alt="last commit"></a>
   <a href="https://github.com/cortexkit/magic-context/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License"></a>
@@ -31,7 +31,7 @@
   <a href="#magic-context-app">🖥️ Desktop App</a> ·
   <a href="#commands">Commands</a> ·
   <a href="#configuration">Configuration</a> ·
-  <a href="https://discord.gg/F2uWxjGnU">💬 Discord</a>
+  <a href="https://discord.gg/DSa65w8wuf">💬 Discord</a>
 </p>
 
 ---

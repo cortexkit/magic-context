@@ -121,7 +121,15 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_PATH: ${{ runner.temp }}/apple-api-key.p8
 
-  # Deploy latest.json to gh-pages for the updater endpoint
+  # Deploy latest.json to gh-pages for the updater endpoint.
+  #
+  # Tauri's updater endpoint lives at https://cortexkit.github.io/magic-context/latest.json.
+  # That URL must keep serving the latest signed manifest after every dashboard
+  # release. We deploy ONLY latest.json by staging it in an isolated directory
+  # and pointing publish_dir at that directory — previous configs used
+  # `publish_dir: .` together with the (non-existent) `include_files` input,
+  # which silently published the entire repo checkout to gh-pages on every
+  # release.
   deploy-updater:
     name: Deploy updater manifest
     needs: build
@@ -129,25 +137,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Wait for release assets
-        run: sleep 30
-
-      - name: Download latest.json from release
+      - name: Download latest.json from release (with retry)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.ref_name }}"
-          # Try draft release first, then published
-          gh release download "$TAG" --pattern "latest.json" --output latest.json --clobber 2>/dev/null || \
-            gh release download "$TAG" --pattern "latest.json" --output latest.json --clobber
-          cat latest.json
+          mkdir -p _updater_publish
+          OUT=_updater_publish/latest.json
+          # Retry up to 20×15s (5 minutes) — first-time uploads of large
+          # platform binaries can take longer than a single fixed sleep,
+          # and tauri-action publishes assets in parallel.
+          for attempt in $(seq 1 20); do
+            if gh release download "$TAG" --pattern "latest.json" --output "$OUT" --clobber 2>/dev/null; then
+              echo "✓ downloaded latest.json on attempt $attempt"
+              cat "$OUT"
+              exit 0
+            fi
+            echo "attempt $attempt: latest.json not yet available, sleeping 15s…"
+            sleep 15
+          done
+          echo "::error::latest.json never became available on release $TAG"
+          exit 1
 
       - name: Deploy to gh-pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: .
+          # Publish ONLY the staging dir, which contains exactly one file:
+          # latest.json. Anything else in the workspace stays out of gh-pages.
+          publish_dir: ./_updater_publish
           publish_branch: gh-pages
-          keep_files: false
-          force_orphan: true
-          include_files: latest.json
+          # keep_files: true preserves any other files that already exist
+          # on gh-pages so we don't wipe the branch on each release.
+          keep_files: true
+          # force_orphan would discard gh-pages history; we keep history so
+          # the branch acts as a normal append-only artifact log.
+          force_orphan: false

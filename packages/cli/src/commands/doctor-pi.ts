@@ -576,7 +576,21 @@ async function runHealthChecks(options: {
         add(results, "pass", `Embedding provider: ${loadedConfig.config.embedding.provider}`);
     }
 
-    add(results, "pass", "No known conflicting Pi extensions detected");
+    // Conflict detection — Pi doesn't have known competing context-management
+    // extensions today, but we still check for self-conflicts that the user
+    // can hit (e.g. accidentally registering both an npm entry AND a local
+    // dev-path entry, which causes duplicate plugin loading).
+    const piEntries = packages.filter((entry) => hasPiPackage([entry]));
+    if (piEntries.length > 1) {
+        add(
+            results,
+            "fail",
+            `Multiple magic-context entries in Pi packages[] — this loads the plugin twice: ${piEntries.join(", ")}`,
+        );
+    } else {
+        add(results, "pass", "No conflicting magic-context entries in Pi packages[]");
+    }
+
     const otherExtensions = packages.filter((entry) => !hasPiPackage([entry]));
     if (otherExtensions.length > 0) {
         add(results, "info", `Other Pi extensions registered: ${otherExtensions.join(", ")}`);

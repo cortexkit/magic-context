@@ -240,15 +240,6 @@ export class OpenCodeAdapter implements HarnessAdapter {
 }
 
 /**
- * Match a plugin array entry against our plugin name. Plugin entries can be:
- *   - a string: "@cortexkit/opencode-magic-context@latest" or "@cortexkit/opencode-magic-context"
- *   - a tuple: ["@cortexkit/opencode-magic-context@latest", { ... options }]
- *   - a file URL: "file:///path/to/local/dev/checkout"
- *
- * For matching purposes we strip everything after `@` (after the first `@org/pkg`
- * segment) so versioned and unversioned entries are equivalent.
- */
-/**
  * Match a plugin entry that resolves to a local dev checkout of magic-context:
  *   - "file:///abs/path/.../opencode-magic-context"
  *   - "/abs/path/.../opencode-magic-context/packages/plugin"
@@ -259,8 +250,12 @@ export class OpenCodeAdapter implements HarnessAdapter {
  * Setup and doctor must detect these so they don't double-add @latest, but
  * must NEVER replace them — that would silently disable the developer's
  * local plugin instance.
+ *
+ * Exported because both `setup-opencode.ts` and `doctor-opencode.ts` need this
+ * exact same logic; previous duplication caused drift (e.g. one path matching
+ * `opencode-magic-context` only, the other also matching bare `magic-context`).
  */
-function isDevPathPluginEntry(entry: unknown): boolean {
+export function isDevPathPluginEntry(entry: unknown): boolean {
     let candidate: string | null = null;
     if (typeof entry === "string") candidate = entry;
     else if (Array.isArray(entry) && typeof entry[0] === "string") candidate = entry[0];
@@ -271,7 +266,21 @@ function isDevPathPluginEntry(entry: unknown): boolean {
     return candidate.includes("opencode-magic-context") || candidate.includes("magic-context");
 }
 
-function matchesPluginEntry(entry: unknown, pkgName: string): boolean {
+/**
+ * Match a plugin array entry against a package name. Plugin entries can be:
+ *   - a string: "@cortexkit/opencode-magic-context@latest" or "@cortexkit/opencode-magic-context"
+ *   - a tuple: ["@cortexkit/opencode-magic-context@latest", { ... options }]
+ *   - a file URL: "file:///path/to/local/dev/checkout"
+ *
+ * For matching purposes we strip everything after `@` (after the first `@org/pkg`
+ * segment) so versioned and unversioned entries are equivalent.
+ *
+ * Returns false for `file://` entries so dev paths are not classified as
+ * "the published plugin". Use `isDevPathPluginEntry` for that detection.
+ *
+ * Exported for reuse across setup and doctor flows.
+ */
+export function matchesPluginEntry(entry: unknown, pkgName: string): boolean {
     let candidate: string | null = null;
     if (typeof entry === "string") candidate = entry;
     else if (Array.isArray(entry) && typeof entry[0] === "string") candidate = entry[0];

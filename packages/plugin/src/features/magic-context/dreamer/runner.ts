@@ -276,7 +276,9 @@ async function identifyKeyFilesForSession(args: {
                     body: {
                         agent: DREAMER_AGENT,
                         system: KEY_FILES_SYSTEM_PROMPT,
-                        parts: [{ type: "text", text: prompt }],
+                        // synthetic: true hides the dreamer prompt from the TUI subagent
+                        // pane while still delivering it to the model. See issue #50.
+                        parts: [{ type: "text", text: prompt, synthetic: true }],
                     },
                 },
                 { timeoutMs: Math.min(remainingMs, 5 * 60 * 1000), signal: abortController.signal },
@@ -552,7 +554,9 @@ export async function runDream(args: {
                         body: {
                             agent: DREAMER_AGENT,
                             system: DREAMER_SYSTEM_PROMPT,
-                            parts: [{ type: "text", text: taskPrompt }],
+                            // synthetic: true hides the dreamer task prompt from the TUI
+                            // subagent pane while still delivering it to the model. See issue #50.
+                            parts: [{ type: "text", text: taskPrompt, synthetic: true }],
                         },
                     },
                     {
@@ -841,7 +845,9 @@ Only include notes whose conditions you could definitively evaluate. Skip notes 
                 body: {
                     agent: DREAMER_AGENT,
                     system: DREAMER_SYSTEM_PROMPT,
-                    parts: [{ type: "text", text: evaluationPrompt }],
+                    // synthetic: true hides the dreamer evaluation prompt from the TUI
+                    // subagent pane while still delivering it to the model. See issue #50.
+                    parts: [{ type: "text", text: evaluationPrompt, synthetic: true }],
                 },
             },
             { timeoutMs: Math.min(remainingMs, 5 * 60 * 1000), signal: abortController.signal },

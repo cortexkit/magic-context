@@ -142,7 +142,9 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
                 body: {
                     agent: DREAMER_AGENT,
                     system: DREAMER_SYSTEM_PROMPT,
-                    parts: [{ type: "text", text: prompt }],
+                    // synthetic: true hides the user-memory review prompt from the TUI
+                    // subagent pane while still delivering it to the model. See issue #50.
+                    parts: [{ type: "text", text: prompt, synthetic: true }],
                 },
             },
             { timeoutMs: Math.min(remainingMs, 5 * 60 * 1000), signal: abortController.signal },

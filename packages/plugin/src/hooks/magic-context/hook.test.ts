@@ -457,6 +457,9 @@ describe("magic-context hook", () => {
                         {
                             type: "text",
                             text: "Implement sidekick migration",
+                            // synthetic:true hides the prompt from the TUI
+                            // subagent pane while still feeding it to the LLM.
+                            synthetic: true,
                         },
                     ],
                 }),

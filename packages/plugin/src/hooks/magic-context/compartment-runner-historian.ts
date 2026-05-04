@@ -264,7 +264,12 @@ async function runHistorianPrompt(args: {
                             // registered system prompt.
                             agent: agentId,
                             ...(modelOverride ? { model: modelOverride } : {}),
-                            parts: [{ type: "text", text: prompt }],
+                            // synthetic: true keeps this big internal prompt out of the
+                            // OpenCode TUI subagent pane (would otherwise render as a huge
+                            // unreadable visible message — see issue #50). The historian
+                            // model still receives the part because toModelMessages only
+                            // filters `ignored`, not `synthetic`.
+                            parts: [{ type: "text", text: prompt, synthetic: true }],
                         },
                     },
                     { timeoutMs: timeoutMs ?? DEFAULT_HISTORIAN_TIMEOUT_MS },

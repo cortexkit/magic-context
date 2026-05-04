@@ -73,7 +73,11 @@ describe("runSidekick", () => {
                     agent: "sidekick",
                     system: expect.stringContaining('ctx_search(query="'),
                     parts: [
-                        { type: "text", text: "Implement sidekick and keep Bun workflow rules." },
+                        {
+                            type: "text",
+                            text: "Implement sidekick and keep Bun workflow rules.",
+                            synthetic: true,
+                        },
                     ],
                 },
             },

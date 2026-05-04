@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
 import { fixConflicts } from "@magic-context/core/shared/conflict-fixer";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
+import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
 import {
     buildModelSelection,
     getAvailableModels,
@@ -53,13 +54,23 @@ function addPluginToOpenCodeConfig(configPath: string, format: "json" | "jsonc" 
         return;
     }
 
-    // Add plugin if not present
-    const plugins = (existing.plugin as string[]) ?? [];
-    const hasPlugin = plugins.some((p) => p === PLUGIN_NAME || p.startsWith(`${PLUGIN_NAME}@`));
-    if (!hasPlugin) {
-        plugins.push(PLUGIN_ENTRY);
+    // Operate on the raw plugin array — entries can be:
+    //   • a string:  "@cortexkit/opencode-magic-context@latest"
+    //   • a tuple:   ["@pkg/name@latest", { ...options }]
+    //   • a dev URL: "file:///abs/path/.../packages/plugin"
+    // We preserve every entry shape; matchesPluginEntry / isDevPathPluginEntry
+    // safely accept both strings and tuples.
+    const rawPlugins: unknown[] = Array.isArray(existing.plugin) ? existing.plugin : [];
+    const hasNpmEntry = rawPlugins.some((p) => matchesPluginEntry(p, PLUGIN_NAME));
+    const hasDevEntry = rawPlugins.some((p) => isDevPathPluginEntry(p));
+
+    // Don't double-add if either an npm entry OR a local dev-path entry exists.
+    // Dev paths are intentionally NOT replaced — that would silently disable
+    // the developer's local plugin checkout.
+    if (!hasNpmEntry && !hasDevEntry) {
+        rawPlugins.push(PLUGIN_ENTRY);
     }
-    existing.plugin = plugins;
+    existing.plugin = rawPlugins;
 
     // Set compaction fields without replacing other compaction settings
     const compaction = (existing.compaction as Record<string, unknown>) ?? {};
@@ -84,13 +95,17 @@ function addPluginToTuiConfig(configPath: string, format: "json" | "jsonc" | "no
         return;
     }
 
-    const plugins = (existing.plugin as string[]) ?? [];
-    const hasPlugin = plugins.some((p) => p === PLUGIN_NAME || p.startsWith(`${PLUGIN_NAME}@`));
-    if (!hasPlugin) {
-        plugins.push(PLUGIN_ENTRY);
+    // Same rules as the main opencode config — preserve tuple entries and
+    // never replace dev-path entries.
+    const rawPlugins: unknown[] = Array.isArray(existing.plugin) ? existing.plugin : [];
+    const hasNpmEntry = rawPlugins.some((p) => matchesPluginEntry(p, PLUGIN_NAME));
+    const hasDevEntry = rawPlugins.some((p) => isDevPathPluginEntry(p));
+
+    if (!hasNpmEntry && !hasDevEntry) {
+        rawPlugins.push(PLUGIN_ENTRY);
     }
 
-    existing.plugin = plugins;
+    existing.plugin = rawPlugins;
     writeFileSync(configPath, `${stringifyJsonc(existing, null, 2)}\n`);
 }
 
@@ -341,6 +356,13 @@ export async function runSetup(): Promise<number> {
     log.success("TUI sidebar plugin added to tui.json");
 
     // ─── Step 8: Oh-My-OpenCode compatibility ───────────
+    // Intentional: this branch handles the FIRST-TIME-INSTALL case only.
+    // Existing users hit the same OMO conflict-fix logic via the
+    // `if (hadExistingSetup) detectConflicts/fixConflicts` block above
+    // (lines 231-257), which already covers omoPreemptiveCompaction,
+    // omoContextWindowMonitor, and omoAnthropicRecovery. Audit tools
+    // sometimes flag this `!hadExistingSetup` gate as "OMO check skipped
+    // for existing users" — that's a false positive.
     if (paths.omoConfig && !hadExistingSetup) {
         log.warn(`Found oh-my-opencode config: ${paths.omoConfig}`);
         log.message(

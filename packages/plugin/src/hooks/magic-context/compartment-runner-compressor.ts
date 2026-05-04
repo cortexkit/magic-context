@@ -673,7 +673,9 @@ async function runCompressorPass(args: CompressorPassArgs): Promise<Array<{
                 query: { directory },
                 body: {
                     agent: HISTORIAN_AGENT,
-                    parts: [{ type: "text", text: prompt }],
+                    // synthetic: true hides this internal prompt from the TUI subagent
+                    // pane while still delivering it to the model. See issue #50.
+                    parts: [{ type: "text", text: prompt, synthetic: true }],
                 },
             },
             { timeoutMs: historianTimeoutMs ?? DEFAULT_HISTORIAN_TIMEOUT_MS },

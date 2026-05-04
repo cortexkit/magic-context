@@ -18,6 +18,7 @@ import {
 import { Database } from "@magic-context/core/shared/sqlite";
 import { ensureTuiPluginEntry } from "@magic-context/core/shared/tui-config";
 import { parse, stringify } from "comment-json";
+import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
 import { collectDiagnostics } from "../lib/diagnostics-opencode";
 import { bundleIssueReport } from "../lib/logs-opencode";
 import { isOpenCodeInstalled } from "../lib/opencode-helpers";
@@ -689,64 +690,78 @@ export async function runDoctor(
         try {
             const raw = readFileSync(paths.opencodeConfig, "utf-8");
             const config = parse(raw) as Record<string, unknown>;
-            const plugins = Array.isArray(config?.plugin) ? config.plugin : [];
-            const pluginList = (plugins as unknown[]).filter(
-                (p): p is string => typeof p === "string",
-            );
-            // Detect any plugin entry that resolves to magic-context, including
-            // local dev paths (file://..., /abs/path, ./relative). Dev paths
-            // are recognized so we don't double-add an @latest entry on top,
-            // but they are NOT replaced — replacing a developer worktree
-            // path with `@latest` would make the dev plugin instance vanish
-            // from OpenCode.
-            const isDevPathEntry = (p: string): boolean =>
-                p.startsWith("file://") || p.startsWith("/") || p.startsWith("./");
-            const existingIdx = pluginList.findIndex(
-                (p) =>
-                    p === PLUGIN_NAME ||
-                    p.startsWith(`${PLUGIN_NAME}@`) ||
-                    (isDevPathEntry(p) && p.includes("opencode-magic-context")),
+            // Operate on the raw plugin array. Entries can be:
+            //   • a string  "@cortexkit/opencode-magic-context@latest"
+            //   • a tuple   ["@pkg/name@latest", { ...options }]
+            //   • a dev URL "file:///abs/path/.../packages/plugin"
+            // We MUST preserve every entry shape on write — filtering out
+            // tuples (or stripping options) would silently drop user config.
+            // matchesPluginEntry / isDevPathPluginEntry are imported from
+            // ../adapters/opencode and accept both strings and tuples.
+            const rawPlugins: unknown[] = Array.isArray(config?.plugin) ? config.plugin : [];
+            const existingIdx = rawPlugins.findIndex(
+                (entry) => matchesPluginEntry(entry, PLUGIN_NAME) || isDevPathPluginEntry(entry),
             );
             const configName =
                 paths.opencodeConfigFormat === "jsonc" ? "opencode.jsonc" : "opencode.json";
-            if (existingIdx >= 0 && pluginList[existingIdx] === PLUGIN_ENTRY_WITH_VERSION) {
+
+            // Helper: extract the plain string (or first element of a tuple) so
+            // we can compare against the desired @latest entry.
+            const entryAsString = (entry: unknown): string | null => {
+                if (typeof entry === "string") return entry;
+                if (Array.isArray(entry) && typeof entry[0] === "string") return entry[0];
+                return null;
+            };
+
+            if (existingIdx >= 0 && rawPlugins[existingIdx] === PLUGIN_ENTRY_WITH_VERSION) {
                 pass(`Plugin registered in ${configName}`);
             } else if (existingIdx >= 0) {
-                const oldEntry = pluginList[existingIdx];
+                const oldEntry = rawPlugins[existingIdx];
+                const oldEntryStr = entryAsString(oldEntry) ?? "";
 
                 // Dev-path entries (file://, absolute, relative) are detected
                 // so we don't double-add @latest, but we MUST NOT replace them
                 // — that would silently disable the developer's local plugin
                 // checkout. Always log as-is and leave the entry alone, even
                 // under --force.
-                if (isDevPathEntry(oldEntry)) {
-                    pass(`Plugin registered in ${configName} (dev path: ${oldEntry})`);
+                if (isDevPathPluginEntry(oldEntry)) {
+                    pass(`Plugin registered in ${configName} (dev path: ${oldEntryStr})`);
                 } else {
                     const isPinned =
-                        oldEntry !== PLUGIN_NAME &&
-                        oldEntry !== PLUGIN_ENTRY_WITH_VERSION &&
-                        /^@cortexkit\/opencode-magic-context@\d/.test(oldEntry);
+                        oldEntryStr !== PLUGIN_NAME &&
+                        oldEntryStr !== PLUGIN_ENTRY_WITH_VERSION &&
+                        /^@cortexkit\/opencode-magic-context@\d/.test(oldEntryStr);
 
                     if (isPinned && !options.force) {
                         // Warn but don't change — user intentionally pinned
                         warn(
-                            `Plugin pinned to ${oldEntry} in ${configName} — use 'doctor --force' to upgrade`,
+                            `Plugin pinned to ${oldEntryStr} in ${configName} — use 'doctor --force' to upgrade`,
                         );
                     } else {
-                        // Upgrade versionless entry to @latest, or --force upgrades pinned
-                        pluginList[existingIdx] = PLUGIN_ENTRY_WITH_VERSION;
-                        config.plugin = pluginList;
+                        // Upgrade versionless entry to @latest, or --force upgrades pinned.
+                        // If the existing entry is a tuple, preserve options by
+                        // updating only the package-name slot; otherwise replace
+                        // with the plain string entry.
+                        if (Array.isArray(oldEntry) && oldEntry.length >= 1) {
+                            const replacement = [...oldEntry];
+                            replacement[0] = PLUGIN_ENTRY_WITH_VERSION;
+                            rawPlugins[existingIdx] = replacement;
+                        } else {
+                            rawPlugins[existingIdx] = PLUGIN_ENTRY_WITH_VERSION;
+                        }
+                        config.plugin = rawPlugins;
                         writeFileSync(paths.opencodeConfig, `${stringify(config, null, 2)}\n`);
                         pass(
-                            `Upgraded plugin entry in ${configName}: ${oldEntry} → ${PLUGIN_ENTRY_WITH_VERSION}`,
+                            `Upgraded plugin entry in ${configName}: ${oldEntryStr} → ${PLUGIN_ENTRY_WITH_VERSION}`,
                         );
                         fixed++;
                     }
                 }
             } else {
-                // Auto-add plugin entry — preserves comments
-                pluginList.push(PLUGIN_ENTRY_WITH_VERSION);
-                config.plugin = pluginList;
+                // Auto-add plugin entry — preserves comments AND every existing
+                // tuple/options entry the user already had.
+                rawPlugins.push(PLUGIN_ENTRY_WITH_VERSION);
+                config.plugin = rawPlugins;
                 writeFileSync(paths.opencodeConfig, `${stringify(config, null, 2)}\n`);
                 pass(`Added plugin to ${configName}`);
                 fixed++;
@@ -784,32 +799,52 @@ export async function runDoctor(
         warn("Restart OpenCode to see the sidebar");
         fixed++;
     } else if (existsSync(paths.tuiConfig)) {
-        // Check for pinned version in tui config
+        // Check for pinned version in tui config. Same tuple/dev-path rules
+        // as the main opencode config — preserve every entry shape on write.
         try {
             const tuiRaw = readFileSync(paths.tuiConfig, "utf-8");
             const tuiConfig = parse(tuiRaw) as Record<string, unknown>;
-            const tuiPlugins = Array.isArray(tuiConfig?.plugin)
-                ? (tuiConfig.plugin as unknown[]).filter((p): p is string => typeof p === "string")
+            const tuiRawPlugins: unknown[] = Array.isArray(tuiConfig?.plugin)
+                ? tuiConfig.plugin
                 : [];
-            const tuiIdx = tuiPlugins.findIndex(
-                (p) => p === PLUGIN_NAME || p.startsWith(`${PLUGIN_NAME}@`),
+            const tuiIdx = tuiRawPlugins.findIndex(
+                (entry) => matchesPluginEntry(entry, PLUGIN_NAME) || isDevPathPluginEntry(entry),
             );
+            const tuiEntryAsString = (entry: unknown): string => {
+                if (typeof entry === "string") return entry;
+                if (Array.isArray(entry) && typeof entry[0] === "string") return entry[0];
+                return "";
+            };
             if (tuiIdx >= 0) {
-                const tuiEntry = tuiPlugins[tuiIdx];
-                const tuiPinned =
-                    tuiEntry !== PLUGIN_NAME &&
-                    tuiEntry !== PLUGIN_ENTRY_WITH_VERSION &&
-                    /^@cortexkit\/opencode-magic-context@\d/.test(tuiEntry);
-                if (tuiPinned && !options.force) {
-                    warn(`TUI plugin pinned to ${tuiEntry} — use 'doctor --force' to upgrade`);
-                } else if (tuiPinned && options.force) {
-                    tuiPlugins[tuiIdx] = PLUGIN_ENTRY_WITH_VERSION;
-                    tuiConfig.plugin = tuiPlugins;
-                    writeFileSync(paths.tuiConfig, `${stringify(tuiConfig, null, 2)}\n`);
-                    pass(`Upgraded TUI plugin: ${tuiEntry} → ${PLUGIN_ENTRY_WITH_VERSION}`);
-                    fixed++;
+                const tuiEntry = tuiRawPlugins[tuiIdx];
+                const tuiEntryStr = tuiEntryAsString(tuiEntry);
+                if (isDevPathPluginEntry(tuiEntry)) {
+                    pass(`TUI sidebar plugin configured (dev path: ${tuiEntryStr})`);
                 } else {
-                    pass("TUI sidebar plugin configured");
+                    const tuiPinned =
+                        tuiEntryStr !== PLUGIN_NAME &&
+                        tuiEntryStr !== PLUGIN_ENTRY_WITH_VERSION &&
+                        /^@cortexkit\/opencode-magic-context@\d/.test(tuiEntryStr);
+                    if (tuiPinned && !options.force) {
+                        warn(
+                            `TUI plugin pinned to ${tuiEntryStr} — use 'doctor --force' to upgrade`,
+                        );
+                    } else if (tuiPinned && options.force) {
+                        // Preserve tuple options when upgrading.
+                        if (Array.isArray(tuiEntry) && tuiEntry.length >= 1) {
+                            const replacement = [...tuiEntry];
+                            replacement[0] = PLUGIN_ENTRY_WITH_VERSION;
+                            tuiRawPlugins[tuiIdx] = replacement;
+                        } else {
+                            tuiRawPlugins[tuiIdx] = PLUGIN_ENTRY_WITH_VERSION;
+                        }
+                        tuiConfig.plugin = tuiRawPlugins;
+                        writeFileSync(paths.tuiConfig, `${stringify(tuiConfig, null, 2)}\n`);
+                        pass(`Upgraded TUI plugin: ${tuiEntryStr} → ${PLUGIN_ENTRY_WITH_VERSION}`);
+                        fixed++;
+                    } else {
+                        pass("TUI sidebar plugin configured");
+                    }
                 }
             } else {
                 pass("TUI sidebar plugin configured");

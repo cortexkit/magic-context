@@ -50,7 +50,9 @@ export async function runSidekick(deps: {
                         deps.config.system_prompt?.trim() ||
                         deps.config.prompt?.trim() ||
                         SIDEKICK_SYSTEM_PROMPT,
-                    parts: [{ type: "text", text: deps.userMessage }],
+                    // synthetic: true hides the sidekick prompt from the TUI subagent
+                    // pane while still delivering it to the model. See issue #50.
+                    parts: [{ type: "text", text: deps.userMessage, synthetic: true }],
                 },
             },
             { timeoutMs: deps.config.timeout_ms },
