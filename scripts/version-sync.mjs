@@ -4,7 +4,8 @@
  * version-sync.mjs
  *
  * Synchronizes version in package.json from a git tag or explicit argument.
- * Updates both packages/plugin and packages/pi-plugin to the same version.
+ * Updates packages/plugin, packages/pi-plugin, and packages/cli to the
+ * same version. All three release together on each tag.
  *
  * Usage:
  *   node scripts/version-sync.mjs 0.1.0           # set version to 0.1.0
@@ -22,6 +23,7 @@ const repoRoot = join(__dirname, "..");
 const PACKAGES = [
     join(repoRoot, "packages", "plugin"),
     join(repoRoot, "packages", "pi-plugin"),
+    join(repoRoot, "packages", "cli"),
 ];
 
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[\w.]+)?(?:\+[\w.]+)?$/;

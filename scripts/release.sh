@@ -77,6 +77,7 @@ echo ""
 
 PLUGIN_DIR="packages/plugin"
 PI_DIR="packages/pi-plugin"
+CLI_DIR="packages/cli"
 
 echo "  [plugin] bun lint..."
 bun run --cwd "$PLUGIN_DIR" lint 2>&1 || { echo "Error: Plugin lint failed"; exit 1; }
@@ -116,6 +117,23 @@ fi
 
 echo "  [pi-plugin] bun build..."
 bun run --cwd "$PI_DIR" build 2>&1 || { echo "Error: Pi-plugin build failed"; exit 1; }
+
+echo "  [cli] bun lint..."
+bun run --cwd "$CLI_DIR" lint 2>&1 || { echo "Error: CLI lint failed"; exit 1; }
+
+echo "  [cli] bun typecheck..."
+bun run --cwd "$CLI_DIR" typecheck 2>&1 || { echo "Error: CLI typecheck failed"; exit 1; }
+
+echo "  [cli] bun test..."
+CLI_TEST_OUTPUT=$(bun test --cwd "$CLI_DIR" 2>&1 || true)
+echo "$CLI_TEST_OUTPUT"
+if echo "$CLI_TEST_OUTPUT" | grep -q "[1-9][0-9]* fail"; then
+  echo "Error: CLI tests failed"
+  exit 1
+fi
+
+echo "  [cli] bun build..."
+bun run --cwd "$CLI_DIR" build 2>&1 || { echo "Error: CLI build failed"; exit 1; }
 
 echo "  ✓ All checks passed"
 echo ""

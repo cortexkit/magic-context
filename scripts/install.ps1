@@ -6,7 +6,7 @@ Write-Host "  ✨ Magic Context — Setup" -ForegroundColor Cyan
 Write-Host "  ────────────────────────"
 Write-Host ""
 
-$package = "@cortexkit/opencode-magic-context"
+$package = "@cortexkit/magic-context"
 # Always pin "@latest": without an explicit version, bun x / npx resolve from
 # their local on-disk cache rather than re-resolving the npm dist-tag, so a
 # user who already installed an older version would keep getting the cached

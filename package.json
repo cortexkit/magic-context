@@ -2,12 +2,12 @@
   "private": true,
   "workspaces": ["packages/*"],
   "scripts": {
-    "build": "bun run --cwd packages/plugin build && bun run --cwd packages/pi-plugin build",
-    "typecheck": "bun run --cwd packages/plugin typecheck && bun run --cwd packages/pi-plugin typecheck",
-    "test": "bun run --cwd packages/plugin test && bun run --cwd packages/pi-plugin test",
+    "build": "bun run --cwd packages/plugin build && bun run --cwd packages/pi-plugin build && bun run --cwd packages/cli build",
+    "typecheck": "bun run --cwd packages/plugin typecheck && bun run --cwd packages/pi-plugin typecheck && bun run --cwd packages/cli typecheck",
+    "test": "bun run --cwd packages/plugin test && bun run --cwd packages/pi-plugin test && bun run --cwd packages/cli test",
     "test:e2e": "bun run --cwd packages/e2e-tests test",
     "test:e2e-docker": "tests/docker/run-e2e.sh",
-    "lint": "bun run --cwd packages/plugin lint && bun run --cwd packages/pi-plugin lint",
+    "lint": "bun run --cwd packages/plugin lint && bun run --cwd packages/pi-plugin lint && bun run --cwd packages/cli lint",
     "lint:fix": "bun run --cwd packages/plugin lint:fix && bun run --cwd packages/pi-plugin lint:fix",
     "dev:dashboard": "bun run --cwd packages/dashboard dev"
   }

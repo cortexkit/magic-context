@@ -5,6 +5,22 @@
     "": {
       "name": "@cortexkit/magic-context-opencode",
     },
+    "packages/cli": {
+      "name": "@cortexkit/magic-context",
+      "version": "0.16.0",
+      "bin": {
+        "magic-context": "dist/index.js",
+      },
+      "dependencies": {
+        "@clack/prompts": "^1.1.0",
+        "comment-json": "^4.6.2",
+      },
+      "devDependencies": {
+        "@biomejs/biome": "^2.4.7",
+        "@types/node": "^22.0.0",
+        "typescript": "^5.8.0",
+      },
+    },
     "packages/dashboard": {
       "name": "@cortexkit/magic-context-dashboard",
       "version": "0.1.0",
@@ -37,16 +53,11 @@
     },
     "packages/pi-plugin": {
       "name": "@cortexkit/pi-magic-context",
-      "version": "0.1.0",
-      "bin": {
-        "magic-context-pi": "dist/cli.js",
-      },
+      "version": "0.16.0",
       "dependencies": {
-        "@clack/prompts": "^1.1.0",
         "@huggingface/transformers": "^4.1.0",
         "ai-tokenizer": "^1.0.6",
         "better-sqlite3": "^12.9.0",
-        "comment-json": "^4.6.2",
         "typebox": "^1.1.24",
         "zod": "^4.1.8",
       },
@@ -65,18 +76,13 @@
     },
     "packages/plugin": {
       "name": "@cortexkit/opencode-magic-context",
-      "version": "0.15.7",
-      "bin": {
-        "opencode-magic-context": "dist/cli.js",
-      },
+      "version": "0.16.0",
       "dependencies": {
-        "@clack/prompts": "^1.1.0",
         "@huggingface/transformers": "^4.1.0",
         "@opencode-ai/plugin": "^1.2.26",
         "@opencode-ai/sdk": "^1.2.26",
         "ai-tokenizer": "^1.0.6",
         "better-sqlite3": "^12.9.0",
-        "comment-json": "^4.6.2",
         "zod": "^4.1.8",
       },
       "devDependencies": {
@@ -227,6 +233,8 @@
     "@clack/core": ["@clack/core@1.1.0", "", { "dependencies": { "sisteransi": "^1.0.5" } }, "sha512-SVcm4Dqm2ukn64/8Gub2wnlA5nS2iWJyCkdNHcvNHPIeBTGojpdJ+9cZKwLfmqy7irD4N5qLteSilJlE0WLAtA=="],
 
     "@clack/prompts": ["@clack/prompts@1.1.0", "", { "dependencies": { "@clack/core": "1.1.0", "sisteransi": "^1.0.5" } }, "sha512-pkqbPGtohJAvm4Dphs2M8xE29ggupihHdy1x84HNojZuMtFsHiUlRvqD24tM2+XmI+61LlfNceM3Wr7U5QES5g=="],
+
+    "@cortexkit/magic-context": ["@cortexkit/magic-context@workspace:packages/cli"],
 
     "@cortexkit/magic-context-dashboard": ["@cortexkit/magic-context-dashboard@workspace:packages/dashboard"],
 
