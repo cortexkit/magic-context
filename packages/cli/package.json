@@ -42,7 +42,7 @@
 	"dependencies": {
 		"@clack/prompts": "^1.1.0",
 		"better-sqlite3": "^12.9.0",
-		"comment-json": "^4.6.2"
+		"comment-json": "^4.2.5"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.7",

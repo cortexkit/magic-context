@@ -1,74 +1,75 @@
 {
-  "name": "@cortexkit/opencode-magic-context",
-  "version": "0.16.0",
-  "type": "module",
-  "description": "OpenCode plugin for Magic Context — cross-session memory and context management",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "author": "ualtinok",
-  "license": "MIT",
-  "keywords": [
-    "opencode",
-    "plugin",
-    "context",
-    "memory",
-    "ai",
-    "llm",
-    "prompt-caching",
-    "session-history"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/cortexkit/magic-context",
-    "directory": "packages/plugin"
-  },
-  "files": [
-    "dist",
-    "src/tui",
-    "src/shared",
-    "README.md"
-  ],
-  "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target node --format esm --external @opencode-ai/plugin --external @huggingface/transformers --external better-sqlite3 --external bun:sqlite && tsc --emitDeclarationOnly",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
-    "test": "bun test",
-    "lint": "biome check .",
-    "lint:fix": "biome check --write .",
-    "format": "biome format --write .",
-    "format:check": "biome format .",
-    "clean": "rm -rf dist",
-    "prepublishOnly": "bun run build"
-  },
-  "dependencies": {
-    "@huggingface/transformers": "^4.1.0",
-    "@opencode-ai/plugin": "^1.2.26",
-    "@opencode-ai/sdk": "^1.2.26",
-    "ai-tokenizer": "^1.0.6",
-    "better-sqlite3": "^12.9.0",
-    "zod": "^4.1.8"
-  },
-  "devDependencies": {
-    "@biomejs/biome": "^2.4.7",
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^22.0.0",
-    "bun-types": "^1.3.10",
-    "typescript": "^5.8.0"
-  },
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    },
-    "./tui": {
-      "types": "./src/tui/index.tsx",
-      "import": "./src/tui/index.tsx"
-    }
-  },
-  "oc-plugin": [
-    "server",
-    "tui"
-  ],
-  "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.2.0"
-  }
+	"name": "@cortexkit/opencode-magic-context",
+	"version": "0.16.0",
+	"type": "module",
+	"description": "OpenCode plugin for Magic Context — cross-session memory and context management",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"author": "ualtinok",
+	"license": "MIT",
+	"keywords": [
+		"opencode",
+		"plugin",
+		"context",
+		"memory",
+		"ai",
+		"llm",
+		"prompt-caching",
+		"session-history"
+	],
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/cortexkit/magic-context",
+		"directory": "packages/plugin"
+	},
+	"files": [
+		"dist",
+		"src/tui",
+		"src/shared",
+		"README.md"
+	],
+	"scripts": {
+		"build": "bun build src/index.ts --outdir dist --target node --format esm --external @opencode-ai/plugin --external @huggingface/transformers --external better-sqlite3 --external bun:sqlite && tsc --emitDeclarationOnly",
+		"typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
+		"test": "bun test",
+		"lint": "biome check .",
+		"lint:fix": "biome check --write .",
+		"format": "biome format --write .",
+		"format:check": "biome format .",
+		"clean": "rm -rf dist",
+		"prepublishOnly": "bun run build"
+	},
+	"dependencies": {
+		"@huggingface/transformers": "^4.1.0",
+		"@opencode-ai/plugin": "^1.2.26",
+		"@opencode-ai/sdk": "^1.2.26",
+		"ai-tokenizer": "^1.0.6",
+		"better-sqlite3": "^12.9.0",
+		"comment-json": "^4.2.5",
+		"zod": "^4.1.8"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.4.7",
+		"@types/better-sqlite3": "^7.6.13",
+		"@types/node": "^22.0.0",
+		"bun-types": "^1.3.10",
+		"typescript": "^5.8.0"
+	},
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		},
+		"./tui": {
+			"types": "./src/tui/index.tsx",
+			"import": "./src/tui/index.tsx"
+		}
+	},
+	"oc-plugin": [
+		"server",
+		"tui"
+	],
+	"peerDependencies": {
+		"@opencode-ai/plugin": ">=1.2.0"
+	}
 }

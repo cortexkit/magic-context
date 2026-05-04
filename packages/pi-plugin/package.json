@@ -40,6 +40,7 @@
 		"@huggingface/transformers": "^4.1.0",
 		"ai-tokenizer": "^1.0.6",
 		"better-sqlite3": "^12.9.0",
+		"comment-json": "^4.2.5",
 		"typebox": "^1.1.24",
 		"zod": "^4.1.8"
 	},
