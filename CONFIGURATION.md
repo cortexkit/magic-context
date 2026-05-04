@@ -1,6 +1,36 @@
 # Configuration Reference
 
-All settings are flat top-level keys in `magic-context.jsonc`. Create the file in your project root, `.opencode/magic-context.jsonc`, or `~/.config/opencode/magic-context.jsonc` for user-wide defaults. Project config merges on top of user config.
+All settings are flat top-level keys in `magic-context.jsonc`. The schema is **shared between the OpenCode plugin and the Pi extension** — every setting documented here applies to both unless explicitly marked **Pi only** or **OpenCode only**.
+
+### Configuration locations
+
+**OpenCode** reads (in priority order, project overrides user):
+
+| Path | Scope |
+|---|---|
+| `<project>/magic-context.jsonc` | Project root |
+| `<project>/.opencode/magic-context.jsonc` | Project, alternate location |
+| `~/.config/opencode/magic-context.jsonc` | User-wide defaults |
+
+**Pi** reads (in priority order, project overrides user):
+
+| Path | Scope |
+|---|---|
+| `<project>/.pi/magic-context.jsonc` | Project root |
+| `~/.pi/agent/magic-context.jsonc` | User-wide defaults |
+
+Project config always merges on top of user config in both harnesses. The setup wizards (`magic-context-pi setup` for Pi, `bunx ... opencode-magic-context setup` for OpenCode) write the user-level file with sensible defaults.
+
+### Cross-harness scoping
+
+Both plugins write to the same SQLite database at `~/.local/share/cortexkit/magic-context/context.db`. Tables are scoped by:
+
+- `harness` column (`'opencode'` or `'pi'`) for **session-scoped** data — tags, compartments, session facts, notes
+- `project_path` (resolved git root) for **project-scoped** data — memories, embeddings, dreamer runs, key-file pins, smart notes
+
+So memories you write in OpenCode appear in Pi sessions for the same project (and vice versa), while per-session compartments and tags stay correctly attributed to their originating harness.
+
+For semantic search to work cross-harness, both plugins **must use the same embedding model**. Magic Context detects mismatch on startup and logs a warning; the easiest fix is to keep the `embedding` block identical in both config files.
 
 ### JSON Schema
 
@@ -12,17 +42,25 @@ Add `$schema` to your config file for autocomplete and validation in VS Code and
 }
 ```
 
-The setup wizard adds this automatically.
+Both setup wizards add this automatically.
 
 ### Doctor
 
-If something isn't working, run the doctor to auto-detect and fix common issues:
+If something isn't working, run the appropriate doctor to auto-detect and fix common issues:
 
 ```bash
+# OpenCode
 bunx --bun @cortexkit/opencode-magic-context@latest doctor
+
+# Pi
+bunx --bun @cortexkit/pi-magic-context@latest doctor
 ```
 
-Doctor checks: OpenCode installation, plugin registration, `magic-context.jsonc` existence, conflicts (compaction, DCP, OMO hooks), and TUI sidebar configuration. It auto-fixes what it can.
+The OpenCode doctor checks: installation, plugin registration, `magic-context.jsonc` existence, conflicts (compaction, DCP, OMO hooks), and TUI sidebar configuration.
+
+The Pi doctor checks: Pi binary + version (requires `>= 0.71.0`), settings registration, config validity, embedding endpoint reachability, shared-DB integrity, and stale Pi extension caches.
+
+Both auto-fix what they can with `--force` and produce sanitized issue reports with `--issue`.
 
 ---
 
@@ -246,7 +284,8 @@ Configures the background historian agent that compresses session history into c
 | `model` | `string` | Primary model. |
 | `fallback_models` | `string` or `string[]` | Models to try if the primary fails or is rate-limited. |
 | `temperature` | `number` (0–2) | Sampling temperature. |
-| `variant` | `string` | Agent variant. |
+| `variant` | `string` | **OpenCode only.** Agent variant — selects a thinking/reasoning preset configured in OpenCode itself. Pi uses `thinking_level` instead. |
+| `thinking_level` | `string` | **Pi only.** Explicit reasoning level passed to Pi when spawning the historian subagent (`off`, `low`, `medium`, `high`). Required for GitHub Copilot reasoning models on Pi — without it, Copilot injects `"minimal"` as a default and then rejects it (HTTP 400). The Pi setup wizard prompts for this when you pick a `github-copilot/*` model. |
 | `prompt` | `string` | Custom system prompt override. |
 | `two_pass` | `boolean` | Default `false`. When `true`, runs a second editor pass after each successful historian output. The editor (a separate hidden `historian-editor` agent using the same fallback chain) re-reads the draft and removes low-signal `U:` lines, redundant paraphrases, and cross-compartment duplicates, producing cleaner narrative-first summaries. Falls back to the draft if the editor call or its validation fails, so it can never regress behavior. Adds one extra historian-scale call per compartment publication. Recommended for non-reasoning models and open-weight local models where the single-pass draft is noisier. For models with extended thinking/reasoning enabled in OpenCode (Claude 4+, GPT-5.x reasoning variants), the single-pass output is usually already clean and `two_pass` can stay `false`. |
 
@@ -275,7 +314,8 @@ Configures the dreamer agent — both the model it uses and the maintenance task
 | `model` | `string` | Primary model. |
 | `fallback_models` | `string` or `string[]` | Fallback models. |
 | `temperature` | `number` (0–2) | Sampling temperature. |
-| `variant` | `string` | Agent variant. |
+| `variant` | `string` | **OpenCode only.** Agent variant — selects a thinking/reasoning preset. Pi uses `thinking_level` instead. |
+| `thinking_level` | `string` | **Pi only.** Explicit reasoning level (`off`/`low`/`medium`/`high`) passed to Pi for dreamer subagent runs. See `historian.thinking_level`. |
 | `prompt` | `string` | Custom system prompt override. |
 
 ### Operational fields
@@ -381,7 +421,8 @@ It is useful when starting a new session. It's better to choose a fast and cheap
 | `model` | `string` | Primary model. |
 | `fallback_models` | `string` or `string[]` | Fallback models. |
 | `temperature` | `number` (0–2) | Sampling temperature. |
-| `variant` | `string` | Agent variant. |
+| `variant` | `string` | **OpenCode only.** Agent variant — selects a thinking/reasoning preset. Pi uses `thinking_level` instead. |
+| `thinking_level` | `string` | **Pi only.** Explicit reasoning level (`off`/`low`/`medium`/`high`) passed to Pi for sidekick subagent runs. See `historian.thinking_level`. |
 | `prompt` | `string` | Persistent agent-level system prompt override. Applies to every sidekick run. |
 
 ### Operational fields

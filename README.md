@@ -2,14 +2,19 @@
 
 <p align="center">
   <strong>Cache-aware infinite context, cross-session memory, and background history compression for AI coding agents.</strong><br>
-  An <a href="https://github.com/anomalyco/opencode">OpenCode</a> plugin that keeps your agent's memory intact — no matter how long the session runs.
+  Keeps your agent's memory intact — no matter how long the session runs.
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/@cortexkit/opencode-magic-context"><img src="https://img.shields.io/npm/v/@cortexkit/opencode-magic-context?color=blue&style=flat-square" alt="npm"></a>
+  <a href="https://www.npmjs.com/package/@cortexkit/opencode-magic-context"><img src="https://img.shields.io/npm/v/@cortexkit/opencode-magic-context?label=opencode&color=blue&style=flat-square" alt="npm @cortexkit/opencode-magic-context"></a>
+  <a href="https://www.npmjs.com/package/@cortexkit/pi-magic-context"><img src="https://img.shields.io/npm/v/@cortexkit/pi-magic-context?label=pi&color=purple&style=flat-square" alt="npm @cortexkit/pi-magic-context"></a>
   <a href="https://github.com/cortexkit/magic-context/stargazers"><img src="https://img.shields.io/github/stars/cortexkit/magic-context?style=flat-square&color=yellow" alt="stars"></a>
   <a href="https://github.com/cortexkit/magic-context/commits"><img src="https://img.shields.io/github/last-commit/cortexkit/magic-context?style=flat-square&color=green" alt="last commit"></a>
   <a href="https://github.com/cortexkit/magic-context/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License"></a>
+</p>
+
+<p align="center">
+  Available for <a href="https://github.com/anomalyco/opencode">OpenCode</a> and the <a href="https://github.com/mariozechner/pi-mono">Pi coding agent</a>. Memories, embeddings, dreamer state, and project knowledge are <strong>shared across both</strong> — write a memory in OpenCode, retrieve it in Pi (and vice versa).
 </p>
 
 <p align="center">
@@ -171,6 +176,27 @@ Hit a real bug? Use `--issue` to collect environment, sanitized config, and the 
 
 ```bash
 bunx --bun @cortexkit/opencode-magic-context@latest doctor --issue
+```
+
+---
+
+## Pi coding agent (beta)
+
+Magic Context is also available as a [Pi](https://github.com/mariozechner/pi-mono) extension, sharing the **same SQLite database** as the OpenCode plugin. Project memories, embeddings, dreamer state, and key-file pins are pooled across both harnesses; per-session state (tags, compartments, facts, notes) stays harness-scoped.
+
+> ⚠️ The Pi extension is published as **beta** while it accumulates real-world usage. Core flows are validated with end-to-end tests; report issues at [github.com/cortexkit/magic-context/issues](https://github.com/cortexkit/magic-context/issues).
+
+```bash
+# Setup wizard for Pi (analogous to the OpenCode flow above)
+bunx --bun @cortexkit/pi-magic-context@latest setup
+```
+
+Requires Pi `>= 0.71.0`. The wizard handles registration with Pi (`packages` array in `~/.pi/agent/settings.json`), writes `~/.pi/agent/magic-context.jsonc`, and prompts for historian/dreamer/sidekick model picks. Pi-specific docs and config notes live in [`packages/pi-plugin/README.md`](https://github.com/cortexkit/magic-context/blob/master/packages/pi-plugin/README.md).
+
+For health checks:
+
+```bash
+bunx --bun @cortexkit/pi-magic-context@latest doctor
 ```
 
 ---
