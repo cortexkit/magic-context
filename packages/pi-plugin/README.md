@@ -28,10 +28,10 @@ Magic Context is a context engine that keeps long Pi sessions productive by:
 
 ## Installation
 
-The fastest path is the interactive setup wizard — it registers the extension with Pi, writes a sensible `magic-context.jsonc`, and verifies your model picks against Pi's CLI:
+The fastest path is the unified Magic Context CLI — `--harness pi` selects the Pi-specific setup pipeline (registers the extension with Pi, writes a sensible `magic-context.jsonc`, and verifies your model picks):
 
 ```bash
-bunx --bun @cortexkit/pi-magic-context@latest setup
+bunx --bun @cortexkit/magic-context@latest setup --harness pi
 ```
 
 This handles everything for you:
@@ -40,24 +40,18 @@ This handles everything for you:
 3. Prompts you for historian, dreamer, sidekick, and embedding model choices
 4. Warns about provider-specific gotchas (e.g. GitHub Copilot reasoning models need an explicit `thinking_level`)
 
-If you'd rather install the npm package globally first:
-
-```bash
-npm install -g @cortexkit/pi-magic-context@latest
-# or
-bun add -g @cortexkit/pi-magic-context@latest
-```
-
-Then either run `magic-context-pi setup` or register the extension manually with Pi's own installer:
+If you'd rather register the Pi extension package directly with Pi (skipping the wizard), use Pi's own installer:
 
 ```bash
 pi install npm:@cortexkit/pi-magic-context
 ```
 
+This adds the extension to `~/.pi/agent/settings.json` but won't write `magic-context.jsonc` for you — you'll need to create it manually (see Configuration below).
+
 To check installation health later:
 
 ```bash
-magic-context-pi doctor
+bunx --bun @cortexkit/magic-context@latest doctor --harness pi
 ```
 
 ---
@@ -161,7 +155,8 @@ This package is part of the [magic-context monorepo](https://github.com/cortexki
 | `dreamer/` | Pi-side adapter for the shared dreamer scheduler |
 | `system-prompt.ts` | Pi `before_agent_start` injector for `<session-history>`, `<project-memory>`, `<project-docs>` |
 | `config/` | Pi-convention config loader (`$cwd/.pi/magic-context.jsonc` + `~/.pi/agent/magic-context.jsonc`) |
-| `cli/` | `magic-context-pi setup` and `magic-context-pi doctor` |
+
+The CLI lives in the unified [`@cortexkit/magic-context`](https://www.npmjs.com/package/@cortexkit/magic-context) package — `setup --harness pi` and `doctor --harness pi` route to the Pi-specific code paths in `packages/cli/src/commands/`.
 
 For deeper architectural detail, see the main repo's [ARCHITECTURE.md](https://github.com/cortexkit/magic-context/blob/master/ARCHITECTURE.md).
 

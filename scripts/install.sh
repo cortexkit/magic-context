@@ -56,7 +56,7 @@ main() {
     # Bun is installed but Node is missing or too old. Force the bun runtime
     # as a last resort; interactive select prompts may not work under
     # curl | bash in this path. Users can re-run directly with:
-    #   bunx --bun @cortexkit/opencode-magic-context@latest setup
+    #   bunx --bun @cortexkit/magic-context@latest setup
     echo "  ⚠ Node $MIN_NODE_MAJOR.$MIN_NODE_MINOR+ is required for the piped installer."
     echo "    Falling back to Bun runtime — if the historian model picker freezes,"
     echo "    re-run directly:"

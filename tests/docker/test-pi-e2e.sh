@@ -3,7 +3,7 @@
 # Magic Context — Pi E2E test runner (runs inside Docker).
 #
 # Two scenarios:
-#   SETUP_SMOKE    — fresh-install path via `magic-context-pi doctor --force`
+#   SETUP_SMOKE    — fresh-install path via `magic-context doctor --harness pi --force`
 #   SESSION_SMOKE  — single-turn `pi --print --mode json` against aimock
 #
 # Both assertions check the shared SQLite DB at

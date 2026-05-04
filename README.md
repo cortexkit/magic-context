@@ -6,8 +6,10 @@
 </p>
 
 <p align="center">
+  <a href="https://www.npmjs.com/package/@cortexkit/magic-context"><img src="https://img.shields.io/npm/v/@cortexkit/magic-context?label=cli&color=orange&style=flat-square" alt="npm @cortexkit/magic-context"></a>
   <a href="https://www.npmjs.com/package/@cortexkit/opencode-magic-context"><img src="https://img.shields.io/npm/v/@cortexkit/opencode-magic-context?label=opencode&color=blue&style=flat-square" alt="npm @cortexkit/opencode-magic-context"></a>
   <a href="https://www.npmjs.com/package/@cortexkit/pi-magic-context"><img src="https://img.shields.io/npm/v/@cortexkit/pi-magic-context?label=pi&color=purple&style=flat-square" alt="npm @cortexkit/pi-magic-context"></a>
+  <a href="https://discord.gg/F2uWxjGnU"><img src="https://img.shields.io/badge/Discord-Join%20chat-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://github.com/cortexkit/magic-context/stargazers"><img src="https://img.shields.io/github/stars/cortexkit/magic-context?style=flat-square&color=yellow" alt="stars"></a>
   <a href="https://github.com/cortexkit/magic-context/commits"><img src="https://img.shields.io/github/last-commit/cortexkit/magic-context?style=flat-square&color=green" alt="last commit"></a>
   <a href="https://github.com/cortexkit/magic-context/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License"></a>
@@ -28,7 +30,8 @@
   <a href="#how-it-works">How It Works</a> ·
   <a href="#magic-context-app">🖥️ Desktop App</a> ·
   <a href="#commands">Commands</a> ·
-  <a href="#configuration">Configuration</a>
+  <a href="#configuration">Configuration</a> ·
+  <a href="https://discord.gg/F2uWxjGnU">💬 Discord</a>
 </p>
 
 ---
@@ -63,7 +66,7 @@ Keep using the **same session** for **weeks**, **months**, or even **years**. **
 
 **Key File Pinning (v0.14)** — under `dreamer.pin_key_files`, still opt-in. Dreamer analyzes which files your agent reads most frequently across the session. Core orientation files (architecture, config, types) that get re-read after every context drop are pinned into the system prompt as `<key-files>`, so the agent always has them without needing to re-read from disk. Files are read fresh on each cache-busting pass. Enable with `dreamer.pin_key_files.enabled: true`.
 
-> Migrating from an earlier version? Running `bunx --bun @cortexkit/opencode-magic-context@latest doctor` rewrites old `experimental.user_memories.*` and `experimental.pin_key_files.*` keys into their new `dreamer.*` homes, preserving any `enabled` state you had.
+> Migrating from an earlier version? Running `bunx --bun @cortexkit/magic-context@latest doctor` rewrites old `experimental.user_memories.*` and `experimental.pin_key_files.*` keys into their new `dreamer.*` homes, preserving any `enabled` state you had.
 
 ### 🧪 New Experimental Features
 
@@ -95,11 +98,13 @@ irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/ins
 
 **Or run directly (any OS):**
 ```bash
-bunx --bun @cortexkit/opencode-magic-context@latest setup
+bunx --bun @cortexkit/magic-context@latest setup
 ```
 
+The unified setup wizard auto-detects which harnesses you have installed (OpenCode, Pi, or both) and configures each one. Use `--harness opencode` or `--harness pi` to target a specific harness.
+
 The wizard will:
-1. Check your OpenCode installation and available models
+1. Detect installed harnesses and available models
 2. Add the plugin and disable built-in compaction
 3. Help you pick models for historian, dreamer, and sidekick
 4. Handle oh-my-opencode compatibility if needed
@@ -161,21 +166,23 @@ The setup wizard handles this automatically if it detects an oh-my-openagent or 
 Already installed but something isn't working? Run the doctor to check and auto-fix configuration issues:
 
 ```bash
-bunx --bun @cortexkit/opencode-magic-context@latest doctor
+bunx --bun @cortexkit/magic-context@latest doctor
 ```
 
-Doctor checks for conflicts (compaction, DCP, OMO hooks), ensures the TUI sidebar is configured, verifies the plugin is registered, and checks the npm cache — fixing what it can automatically.
+Doctor auto-detects installed harnesses and runs the right checks for each. Pass `--harness opencode` or `--harness pi` to target a specific harness when you have both installed.
+
+Doctor checks for conflicts (compaction, DCP, OMO hooks), ensures the TUI sidebar is configured (OpenCode), verifies the plugin is registered, validates the magic-context.jsonc, runs `PRAGMA integrity_check` on the shared SQLite DB, and checks the npm cache — fixing what it can automatically. The summary line reports `PASS X / WARN Y / FAIL Z` so you can scan results at a glance.
 
 Use `--force` to force-clear the plugin cache even when versions match (fixes broken transitive dependencies):
 
 ```bash
-bunx --bun @cortexkit/opencode-magic-context@latest doctor --force
+bunx --bun @cortexkit/magic-context@latest doctor --force
 ```
 
 Hit a real bug? Use `--issue` to collect environment, sanitized config, and the last 400 log lines into a ready-to-submit report. It can also open the issue directly via `gh` if you have it installed:
 
 ```bash
-bunx --bun @cortexkit/opencode-magic-context@latest doctor --issue
+bunx --bun @cortexkit/magic-context@latest doctor --issue
 ```
 
 ---
@@ -187,8 +194,8 @@ Magic Context is also available as a [Pi](https://github.com/mariozechner/pi-mon
 > ⚠️ The Pi extension is published as **beta** while it accumulates real-world usage. Core flows are validated with end-to-end tests; report issues at [github.com/cortexkit/magic-context/issues](https://github.com/cortexkit/magic-context/issues).
 
 ```bash
-# Setup wizard for Pi (analogous to the OpenCode flow above)
-bunx --bun @cortexkit/pi-magic-context@latest setup
+# Setup wizard for Pi (uses the same unified CLI as OpenCode)
+bunx --bun @cortexkit/magic-context@latest setup --harness pi
 ```
 
 Requires Pi `>= 0.71.0`. The wizard handles registration with Pi (`packages` array in `~/.pi/agent/settings.json`), writes `~/.pi/agent/magic-context.jsonc`, and prompts for historian/dreamer/sidekick model picks. Pi-specific docs and config notes live in [`packages/pi-plugin/README.md`](https://github.com/cortexkit/magic-context/blob/master/packages/pi-plugin/README.md).
@@ -196,7 +203,7 @@ Requires Pi `>= 0.71.0`. The wizard handles registration with Pi (`packages` arr
 For health checks:
 
 ```bash
-bunx --bun @cortexkit/pi-magic-context@latest doctor
+bunx --bun @cortexkit/magic-context@latest doctor --harness pi
 ```
 
 ---
@@ -358,7 +365,7 @@ The TUI plugin is configured automatically by the setup wizard and the `doctor` 
 
 ### Startup conflict detection
 
-On startup, Magic Context checks for common configuration problems — OpenCode's built-in compaction being enabled, DCP plugin being active alongside Magic Context, or conflicting oh-my-openagent hooks. When conflicts are detected, it warns the active session with a fix suggestion pointing to `bunx --bun @cortexkit/opencode-magic-context@latest doctor`.
+On startup, Magic Context checks for common configuration problems — OpenCode's built-in compaction being enabled, DCP plugin being active alongside Magic Context, or conflicting oh-my-openagent hooks. When conflicts are detected, it warns the active session with a fix suggestion pointing to `bunx --bun @cortexkit/magic-context@latest doctor`.
 
 ---
 

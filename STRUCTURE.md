@@ -75,7 +75,7 @@
 
 ## Key File Locations
 
-**Entry Points:** `src/index.ts`: Register the plugin, hidden agents, hooks, tools, and commands. `src/cli/index.ts`: CLI binary entry for `bunx --bun @cortexkit/opencode-magic-context setup`.
+**Entry Points:** `src/index.ts`: Register the plugin, hidden agents, hooks, tools, and commands. The CLI now lives in the separate `@cortexkit/magic-context` package (`packages/cli/`) — see `packages/cli/src/index.ts` for the unified setup/doctor/migrate entry.
 
 **Configuration:** `src/config/index.ts`: Load and merge config files; `src/config/schema/magic-context.ts`: define defaults and schema rules.
 

@@ -19,7 +19,7 @@ All settings are flat top-level keys in `magic-context.jsonc`. The schema is **s
 | `<project>/.pi/magic-context.jsonc` | Project root |
 | `~/.pi/agent/magic-context.jsonc` | User-wide defaults |
 
-Project config always merges on top of user config in both harnesses. The setup wizards (`magic-context-pi setup` for Pi, `bunx ... opencode-magic-context setup` for OpenCode) write the user-level file with sensible defaults.
+Project config always merges on top of user config in both harnesses. The unified setup wizard (`bunx --bun @cortexkit/magic-context@latest setup`) auto-detects which harnesses you have installed and writes the user-level file for each with sensible defaults; pass `--harness opencode` or `--harness pi` to target one.
 
 ### Cross-harness scoping
 
@@ -46,21 +46,22 @@ Both setup wizards add this automatically.
 
 ### Doctor
 
-If something isn't working, run the appropriate doctor to auto-detect and fix common issues:
+If something isn't working, run the unified doctor to auto-detect installed harnesses and fix common issues:
 
 ```bash
-# OpenCode
-bunx --bun @cortexkit/opencode-magic-context@latest doctor
+# Auto-detect installed harnesses; if both, picks the first or asks
+bunx --bun @cortexkit/magic-context@latest doctor
 
-# Pi
-bunx --bun @cortexkit/pi-magic-context@latest doctor
+# Target a specific harness explicitly
+bunx --bun @cortexkit/magic-context@latest doctor --harness opencode
+bunx --bun @cortexkit/magic-context@latest doctor --harness pi
 ```
 
-The OpenCode doctor checks: installation, plugin registration, `magic-context.jsonc` existence, conflicts (compaction, DCP, OMO hooks), and TUI sidebar configuration.
+The OpenCode doctor checks: installation, CLI version vs npm latest, plugin registration (preserves local dev paths), `magic-context.jsonc` parses + loads through the schema, conflicts (compaction, DCP, OMO hooks), TUI sidebar configuration, embedding endpoint, shared-DB existence + `PRAGMA integrity_check` + row counts, plugin npm cache, and historian debug dumps.
 
-The Pi doctor checks: Pi binary + version (requires `>= 0.71.0`), settings registration, config validity, embedding endpoint reachability, shared-DB integrity, and stale Pi extension caches.
+The Pi doctor checks: Pi binary + version (requires `>= 0.71.0`), CLI version vs npm latest, settings registration, config validity, embedding endpoint reachability, shared-DB integrity, stale Pi extension caches, and historian debug dumps.
 
-Both auto-fix what they can with `--force` and produce sanitized issue reports with `--issue`.
+Both report `PASS X / WARN Y / FAIL Z` summary counts. Use `--force` to auto-fix what doctor can (clears stale plugin cache, repairs config) and `--issue` to produce a sanitized issue report.
 
 ---
 
