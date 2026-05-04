@@ -1,0 +1,99 @@
+# Docker-based E2E tests for both Magic Context plugins.
+#
+# Runs on push to master and on PRs that touch packages/plugin,
+# packages/pi-plugin, or this workflow. Also runs on tag pushes
+# (vX.Y.Z) as a release-gate.
+#
+# Each job builds the matching Docker image and runs the in-image
+# test script, which installs the plugin from the locally-built dist,
+# runs `doctor --force` against a clean home, then runs a single
+# session turn against an aimock LLM and asserts that the plugin
+# loaded and persisted at least one tagged message in the shared
+# SQLite database.
+
+name: E2E (Docker)
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+    paths:
+      - "packages/plugin/**"
+      - "packages/pi-plugin/**"
+      - "tests/docker/**"
+      - ".github/workflows/e2e-docker.yml"
+  pull_request:
+    branches: [master]
+    paths:
+      - "packages/plugin/**"
+      - "packages/pi-plugin/**"
+      - "tests/docker/**"
+      - ".github/workflows/e2e-docker.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: e2e-docker-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  e2e-opencode:
+    name: OpenCode plugin E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install workspace deps
+        run: bun install --frozen-lockfile
+
+      - name: Build OpenCode plugin
+        run: bun run --cwd packages/plugin build
+
+      - name: Build E2E image
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            -f tests/docker/Dockerfile.opencode \
+            -t mc-e2e-opencode \
+            .
+
+      - name: Run E2E
+        run: docker run --rm --platform linux/amd64 mc-e2e-opencode
+
+  e2e-pi:
+    name: Pi plugin E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install workspace deps
+        run: bun install --frozen-lockfile
+
+      - name: Build Pi plugin
+        run: bun run --cwd packages/pi-plugin build
+
+      - name: Install Pi plugin runtime deps for Docker COPY
+        # The Pi Dockerfile COPYs node_modules to make better-sqlite3
+        # and transformers available at runtime without rebuilding
+        # native modules inside the image. Use --omit=dev because the
+        # image only needs runtime deps.
+        working-directory: packages/pi-plugin
+        run: npm install --omit=dev --no-audit --no-fund
+
+      - name: Build E2E image
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            -f tests/docker/Dockerfile.pi \
+            -t mc-e2e-pi \
+            .
+
+      - name: Run E2E
+        run: docker run --rm --platform linux/amd64 mc-e2e-pi
