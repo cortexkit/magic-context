@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync 
 import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { loadPluginConfig } from "@magic-context/core/config";
 import { substituteConfigVariables } from "@magic-context/core/config/variable";
 import {
     type EmbeddingProbeOutcome,
@@ -10,7 +11,11 @@ import {
 } from "@magic-context/core/features/magic-context/memory/embedding-probe";
 import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
 import { fixConflicts } from "@magic-context/core/shared/conflict-fixer";
-import { getOpenCodeCacheDir } from "@magic-context/core/shared/data-path";
+import {
+    getMagicContextStorageDir,
+    getOpenCodeCacheDir,
+} from "@magic-context/core/shared/data-path";
+import { Database } from "@magic-context/core/shared/sqlite";
 import { ensureTuiPluginEntry } from "@magic-context/core/shared/tui-config";
 import { parse, stringify } from "comment-json";
 import { collectDiagnostics } from "../lib/diagnostics-opencode";
@@ -21,6 +26,60 @@ import { confirm, intro, log, outro, spinner, text } from "../lib/prompts";
 
 const PLUGIN_NAME = "@cortexkit/opencode-magic-context";
 const PLUGIN_ENTRY_WITH_VERSION = `${PLUGIN_NAME}@latest`;
+const CLI_PACKAGE_NAME = "@cortexkit/magic-context";
+
+/**
+ * Fetch the latest version of an npm package from the registry. Returns null
+ * on any error so the doctor can report "check unavailable" rather than fail.
+ */
+async function fetchNpmLatest(pkg: string, timeoutMs = 5000): Promise<string | null> {
+    try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+            const res = await fetch(`https://registry.npmjs.org/${pkg}/latest`, {
+                signal: controller.signal,
+                headers: { Accept: "application/json" },
+            });
+            if (!res.ok) return null;
+            const body = (await res.json()) as { version?: unknown };
+            return typeof body.version === "string" ? body.version : null;
+        } finally {
+            clearTimeout(timer);
+        }
+    } catch {
+        return null;
+    }
+}
+
+/** Self-version with src/dist layout fallback. */
+function getSelfVersion(): string {
+    const req = createRequire(import.meta.url);
+    for (const relPath of ["../../package.json", "../package.json"]) {
+        try {
+            const pkg = req(relPath) as { version?: unknown };
+            if (typeof pkg.version === "string" && pkg.version.length > 0) return pkg.version;
+        } catch {
+            // try next
+        }
+    }
+    return "0.0.0";
+}
+
+/** Compare semver-like strings. Returns -1 if a<b, 0 if equal, 1 if a>b. */
+function compareVersions(a: string, b: string): number {
+    const pa = a.split(/[.-]/).map((s) => Number.parseInt(s, 10));
+    const pb = b.split(/[.-]/).map((s) => Number.parseInt(s, 10));
+    const len = Math.max(pa.length, pb.length);
+    for (let i = 0; i < len; i++) {
+        const x = pa[i] ?? 0;
+        const y = pb[i] ?? 0;
+        if (Number.isNaN(x) || Number.isNaN(y)) return 0;
+        if (x < y) return -1;
+        if (x > y) return 1;
+    }
+    return 0;
+}
 
 async function clearPluginCache(force = false): Promise<{
     action: "cleared" | "up_to_date" | "not_found" | "error";
@@ -373,30 +432,91 @@ export async function runDoctor(
 
     let issues = 0;
     let fixed = 0;
+    // Aligned with Pi doctor: emit a PASS/WARN/FAIL summary at the end so
+    // results are scannable.
+    let passCount = 0;
+    let warnCount = 0;
+    let failCount = 0;
+    const pass = (msg: string) => {
+        log.success(msg);
+        passCount++;
+    };
+    const warn = (msg: string) => {
+        log.warn(msg);
+        warnCount++;
+    };
+    const fail = (msg: string) => {
+        log.error(msg);
+        failCount++;
+        issues++;
+    };
 
     // 1. Check OpenCode is installed
     if (!isOpenCodeInstalled()) {
-        log.error("OpenCode is not installed or not in PATH");
+        fail("OpenCode is not installed or not in PATH");
         outro("Doctor failed — install OpenCode first");
         return 1;
     }
-    log.success("OpenCode installed");
+    pass("OpenCode installed");
+
+    // 1b. CLI vs npm latest
+    const selfVersion = getSelfVersion();
+    const npmLatest = await fetchNpmLatest(CLI_PACKAGE_NAME);
+    if (!npmLatest) {
+        log.info(`Magic Context CLI v${selfVersion}; npm latest check unavailable`);
+    } else if (compareVersions(selfVersion, npmLatest) < 0) {
+        warn(`Magic Context CLI v${selfVersion} is older than npm latest v${npmLatest}`);
+    } else {
+        pass(`Magic Context CLI v${selfVersion} is current (npm latest v${npmLatest})`);
+    }
 
     // 2. Check config paths exist
     const paths = detectConfigPaths();
 
     if (paths.opencodeConfigFormat === "none") {
-        log.error(`No opencode.json found at ${paths.opencodeConfig}`);
-        issues++;
+        fail(`No opencode.json found at ${paths.opencodeConfig}`);
     } else {
-        log.success(`OpenCode config: ${paths.opencodeConfig}`);
+        pass(`OpenCode config: ${paths.opencodeConfig}`);
     }
 
-    // 3. Check magic-context.jsonc exists
+    // 3. Check magic-context.jsonc exists + parses + loads through schema
     if (existsSync(paths.magicContextConfig)) {
-        log.success(`Magic Context config: ${paths.magicContextConfig}`);
+        pass(`Magic Context config: ${paths.magicContextConfig}`);
+        // 3a. Validate JSONC parses (with config-variable substitution)
+        try {
+            const raw = readFileSync(paths.magicContextConfig, "utf-8");
+            const substituted = substituteConfigVariables({
+                text: raw,
+                configPath: paths.magicContextConfig,
+            }).text;
+            parse(substituted);
+            pass("magic-context.jsonc parses as valid JSONC");
+        } catch (err) {
+            fail(
+                `magic-context.jsonc parse failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+        }
+        // 3b. Validate config loads through plugin schema. loadPluginConfig
+        // recovers from invalid leaf settings field-by-field and surfaces
+        // soft warnings via configWarnings, so we can ask the schema to
+        // load and report them without bailing on the doctor run.
+        try {
+            const result = loadPluginConfig(process.cwd());
+            const warnings = result.configWarnings ?? [];
+            if (warnings.length > 0) {
+                warn(
+                    `Magic Context config has ${warnings.length} warning(s) — see 'magic-context doctor --issue' for details`,
+                );
+            } else {
+                pass("Magic Context config loads successfully");
+            }
+        } catch (err) {
+            fail(
+                `Could not load Magic Context config: ${err instanceof Error ? err.message : String(err)}`,
+            );
+        }
     } else {
-        log.warn(`No magic-context.jsonc found — using defaults`);
+        warn(`No magic-context.jsonc found — using defaults`);
         log.info("  Run 'setup' to create one with model recommendations");
     }
 
@@ -590,7 +710,7 @@ export async function runDoctor(
             const configName =
                 paths.opencodeConfigFormat === "jsonc" ? "opencode.jsonc" : "opencode.json";
             if (existingIdx >= 0 && pluginList[existingIdx] === PLUGIN_ENTRY_WITH_VERSION) {
-                log.success(`Plugin registered in ${configName}`);
+                pass(`Plugin registered in ${configName}`);
             } else if (existingIdx >= 0) {
                 const oldEntry = pluginList[existingIdx];
 
@@ -600,7 +720,7 @@ export async function runDoctor(
                 // checkout. Always log as-is and leave the entry alone, even
                 // under --force.
                 if (isDevPathEntry(oldEntry)) {
-                    log.success(`Plugin registered in ${configName} (dev path: ${oldEntry})`);
+                    pass(`Plugin registered in ${configName} (dev path: ${oldEntry})`);
                 } else {
                     const isPinned =
                         oldEntry !== PLUGIN_NAME &&
@@ -609,7 +729,7 @@ export async function runDoctor(
 
                     if (isPinned && !options.force) {
                         // Warn but don't change — user intentionally pinned
-                        log.warn(
+                        warn(
                             `Plugin pinned to ${oldEntry} in ${configName} — use 'doctor --force' to upgrade`,
                         );
                     } else {
@@ -617,7 +737,7 @@ export async function runDoctor(
                         pluginList[existingIdx] = PLUGIN_ENTRY_WITH_VERSION;
                         config.plugin = pluginList;
                         writeFileSync(paths.opencodeConfig, `${stringify(config, null, 2)}\n`);
-                        log.success(
+                        pass(
                             `Upgraded plugin entry in ${configName}: ${oldEntry} → ${PLUGIN_ENTRY_WITH_VERSION}`,
                         );
                         fixed++;
@@ -628,11 +748,11 @@ export async function runDoctor(
                 pluginList.push(PLUGIN_ENTRY_WITH_VERSION);
                 config.plugin = pluginList;
                 writeFileSync(paths.opencodeConfig, `${stringify(config, null, 2)}\n`);
-                log.success(`Added plugin to ${configName}`);
+                pass(`Added plugin to ${configName}`);
                 fixed++;
             }
         } catch {
-            log.warn("Could not parse opencode config to verify plugin entry");
+            warn("Could not parse opencode config to verify plugin entry");
         }
     }
 
@@ -642,29 +762,26 @@ export async function runDoctor(
 
     if (conflictResult.hasConflict) {
         for (const reason of conflictResult.reasons) {
-            log.error(`Conflict: ${reason}`);
+            fail(`Conflict: ${reason}`);
         }
         // Auto-fix conflicts
         const actions = fixConflicts(cwd, conflictResult.conflicts);
         for (const action of actions) {
-            log.success(`Fixed: ${action}`);
+            pass(`Fixed: ${action}`);
             fixed++;
         }
-        // Only count unfixed conflicts as issues
-        issues += conflictResult.reasons.length - actions.length;
-
         if (actions.length > 0) {
-            log.warn("Restart OpenCode for conflict fixes to take effect");
+            warn("Restart OpenCode for conflict fixes to take effect");
         }
     } else {
-        log.success("No conflicts detected (compaction, DCP, OMO hooks)");
+        pass("No conflicts detected (compaction, DCP, OMO hooks)");
     }
 
     // 6. Check tui.json
     const tuiAdded = ensureTuiPluginEntry();
     if (tuiAdded) {
-        log.success("Added TUI sidebar plugin to tui.json");
-        log.warn("Restart OpenCode to see the sidebar");
+        pass("Added TUI sidebar plugin to tui.json");
+        warn("Restart OpenCode to see the sidebar");
         fixed++;
     } else if (existsSync(paths.tuiConfig)) {
         // Check for pinned version in tui config
@@ -684,24 +801,24 @@ export async function runDoctor(
                     tuiEntry !== PLUGIN_ENTRY_WITH_VERSION &&
                     /^@cortexkit\/opencode-magic-context@\d/.test(tuiEntry);
                 if (tuiPinned && !options.force) {
-                    log.warn(`TUI plugin pinned to ${tuiEntry} — use 'doctor --force' to upgrade`);
+                    warn(`TUI plugin pinned to ${tuiEntry} — use 'doctor --force' to upgrade`);
                 } else if (tuiPinned && options.force) {
                     tuiPlugins[tuiIdx] = PLUGIN_ENTRY_WITH_VERSION;
                     tuiConfig.plugin = tuiPlugins;
                     writeFileSync(paths.tuiConfig, `${stringify(tuiConfig, null, 2)}\n`);
-                    log.success(`Upgraded TUI plugin: ${tuiEntry} → ${PLUGIN_ENTRY_WITH_VERSION}`);
+                    pass(`Upgraded TUI plugin: ${tuiEntry} → ${PLUGIN_ENTRY_WITH_VERSION}`);
                     fixed++;
                 } else {
-                    log.success("TUI sidebar plugin configured");
+                    pass("TUI sidebar plugin configured");
                 }
             } else {
-                log.success("TUI sidebar plugin configured");
+                pass("TUI sidebar plugin configured");
             }
         } catch {
-            log.success("TUI sidebar plugin configured");
+            pass("TUI sidebar plugin configured");
         }
     } else {
-        log.success("TUI sidebar plugin configured (tui.json created)");
+        pass("TUI sidebar plugin configured (tui.json created)");
     }
 
     // 7. Check user memories + dreamer compatibility.
@@ -734,6 +851,67 @@ export async function runDoctor(
     // wrong provider issues before relying on semantic memory search.
     const embeddingCheck = await checkEmbeddingConfig(paths.magicContextConfig);
     issues += embeddingCheck.issues;
+    if (embeddingCheck.issues > 0) failCount += embeddingCheck.issues;
+    else passCount++;
+
+    // 7c. Shared context DB exists, opens, integrity_check, row counts.
+    // This catches corrupted DB files and misaligned storage paths early.
+    const dbPath = join(getMagicContextStorageDir(), "context.db");
+    if (!existsSync(dbPath)) {
+        log.info(`Shared context DB not yet created at ${dbPath} (will be created on first run)`);
+    } else {
+        pass(`Shared context DB exists at ${dbPath}`);
+        try {
+            const db = new Database(dbPath, { readonly: true });
+            try {
+                pass("openDatabase() opened the shared DB");
+                try {
+                    const integrity = db.prepare("PRAGMA integrity_check").get() as
+                        | { integrity_check?: string }
+                        | undefined;
+                    const result = integrity?.integrity_check ?? "unknown";
+                    if (result === "ok") pass("SQLite integrity_check: ok");
+                    else fail(`SQLite integrity_check reported: ${result}`);
+                } catch (err) {
+                    fail(
+                        `SQLite integrity_check failed: ${err instanceof Error ? err.message : String(err)}`,
+                    );
+                }
+
+                // Row counts across the major tables — informational, not pass/fail.
+                try {
+                    const counts: Record<string, number> = {};
+                    for (const table of [
+                        "tags",
+                        "compartments",
+                        "memories",
+                        "notes",
+                        "dream_runs",
+                    ]) {
+                        try {
+                            const row = db.prepare(`SELECT COUNT(*) as c FROM ${table}`).get() as
+                                | { c?: number }
+                                | undefined;
+                            counts[table] = row?.c ?? 0;
+                        } catch {
+                            // Table may not exist on a brand-new DB before migrations run
+                            counts[table] = 0;
+                        }
+                    }
+                    const summary = Object.entries(counts)
+                        .map(([k, v]) => `${k}=${v}`)
+                        .join(", ");
+                    log.info(`Shared DB row counts: ${summary}`);
+                } catch {
+                    // Don't fail the doctor on row-count introspection issues
+                }
+            } finally {
+                db.close();
+            }
+        } catch (err) {
+            fail(`Could not open shared DB: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    }
 
     // 8. Check plugin npm cache — clear only if outdated
     const cacheResult = await clearPluginCache(options.force);
@@ -741,19 +919,17 @@ export async function runDoctor(
         const versionInfo = cacheResult.cached
             ? ` (cached: ${cacheResult.cached}${cacheResult.latest ? `, latest: ${cacheResult.latest}` : ""})`
             : "";
-        log.success(
-            `Cleared outdated plugin cache${versionInfo} — latest will download on restart`,
-        );
+        pass(`Cleared outdated plugin cache${versionInfo} — latest will download on restart`);
         log.info(`  ${cacheResult.path}`);
         fixed++;
     } else if (cacheResult.action === "up_to_date") {
-        log.success(`Plugin cache up to date (v${cacheResult.cached})`);
+        pass(`Plugin cache up to date (v${cacheResult.cached})`);
     } else if (cacheResult.action === "error") {
-        log.warn(`Could not clear plugin cache: ${cacheResult.error}`);
+        warn(`Could not clear plugin cache: ${cacheResult.error}`);
         log.info(`  Manually delete: ${cacheResult.path}`);
         issues++;
     } else {
-        log.success("Plugin cache clean (no cached version found)");
+        pass("Plugin cache clean (no cached version found)");
     }
 
     // 9. Check for min-release-age / minimumReleaseAge restrictions
@@ -837,7 +1013,7 @@ export async function runDoctor(
                 }))
                 .sort((a, b) => b.mtime - a.mtime);
             if (dumps.length > 0) {
-                log.warn(`Historian debug dumps: ${dumps.length} file(s) in ${historianDumpDir}`);
+                warn(`Historian debug dumps: ${dumps.length} file(s) in ${historianDumpDir}`);
                 for (const dump of dumps.slice(0, 3)) {
                     const age = Math.round((Date.now() - dump.mtime) / 60000);
                     const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`;
@@ -857,8 +1033,9 @@ export async function runDoctor(
         log.info(`OMO config found: ${paths.omoConfig}`);
     }
 
-    // Summary
+    // Summary — aligned with Pi doctor format.
     console.log("");
+    log.message(`Summary: PASS ${passCount} / WARN ${warnCount} / FAIL ${failCount}`);
     if (issues === 0 && fixed === 0) {
         outro("Everything looks good! ✨");
     } else if (issues > 0 && fixed > 0) {

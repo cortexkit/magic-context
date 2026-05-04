@@ -598,13 +598,45 @@ async function runHealthChecks(options: {
 
     const logPath = join(tmpdir(), "magic-context.log");
     if (existsSync(logPath)) {
+        const stat = statSync(logPath);
+        const sizeKb = (stat.size / 1024).toFixed(0);
         const lines = readFileSync(logPath, "utf-8")
             .split(/\r?\n/)
             .map((line) => line.trim())
             .filter(Boolean);
+        add(results, "info", `Log file: ${logPath} (${sizeKb} KB)`);
         add(results, "info", `Last plugin log line: ${lines.at(-1) ?? "<empty log>"}`);
     } else {
         add(results, "info", `No plugin log file yet at ${logPath}`);
+    }
+
+    // Historian debug dumps — kept on disk after failed historian runs so
+    // users can attach them to bug reports. Aligned with OpenCode doctor.
+    const historianDumpDir = join(tmpdir(), "magic-context-historian");
+    if (existsSync(historianDumpDir)) {
+        try {
+            const dumps = readdirSync(historianDumpDir)
+                .filter((f) => f.endsWith(".xml"))
+                .map((f) => ({ name: f, mtime: statSync(join(historianDumpDir, f)).mtimeMs }))
+                .sort((a, b) => b.mtime - a.mtime);
+            if (dumps.length > 0) {
+                add(
+                    results,
+                    "warn",
+                    `Historian debug dumps: ${dumps.length} file(s) in ${historianDumpDir}`,
+                );
+                for (const dump of dumps.slice(0, 3)) {
+                    const age = Math.round((Date.now() - dump.mtime) / 60000);
+                    const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`;
+                    add(results, "info", `  ${dump.name} (${ageStr})`);
+                }
+                if (dumps.length > 3) {
+                    add(results, "info", `  ... and ${dumps.length - 3} more`);
+                }
+            }
+        } catch {
+            // Can't read dump directory — skip
+        }
     }
 
     if (!options.quiet) {
