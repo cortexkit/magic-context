@@ -2,7 +2,9 @@
 
 Cross-session memory and context management for [Pi coding agent](https://github.com/mariozechner/pi-mono). Shares the same SQLite database as the [OpenCode plugin](https://www.npmjs.com/package/@cortexkit/opencode-magic-context), so memories, embeddings, dreamer state, and project knowledge follow you across both harnesses.
 
-> **Status:** v0.1.0 — first release. Production-ready for interactive Pi sessions; `pi --print` mode has a known limitation (see below).
+> ⚠️ **Beta release.** The Pi extension is newer than the OpenCode plugin and is published as **beta**. Core flows (tagging, historian, memories, dreamer, `/ctx-aug`) are validated end-to-end on interactive `pi` sessions and `pi --print --mode json` subagents. Please [report issues](https://github.com/cortexkit/magic-context/issues) — every Pi-side rough edge is fixable.
+
+Requires `@mariozechner/pi-coding-agent` and `@mariozechner/pi-tui` `>= 0.71.0`.
 
 ---
 
@@ -26,34 +28,31 @@ Magic Context is a context engine that keeps long Pi sessions productive by:
 
 ## Installation
 
-```bash
-# Install via npm
-npm install -g @cortexkit/pi-magic-context
-
-# Or via Bun
-bun add -g @cortexkit/pi-magic-context
-```
-
-Add the extension to your Pi config (`~/.pi/agent/settings.json`):
-
-```jsonc
-{
-  "extensions": [
-    "@cortexkit/pi-magic-context"
-  ]
-}
-```
-
-Then run the interactive setup wizard:
+The fastest path is the interactive setup wizard — it registers the extension with Pi, writes a sensible `magic-context.jsonc`, and verifies your model picks against Pi's CLI:
 
 ```bash
-magic-context-pi setup
+bunx --bun @cortexkit/pi-magic-context@latest setup
 ```
 
-The wizard will:
-1. Create `~/.pi/agent/magic-context.jsonc` with sensible defaults
-2. Prompt you for historian, sidekick, and embedding model preferences
-3. Verify your model picks resolve correctly via Pi's CLI
+This handles everything for you:
+1. Adds `npm:@cortexkit/pi-magic-context` to Pi's `packages` array in `~/.pi/agent/settings.json` (the same place `pi install` writes to)
+2. Creates `~/.pi/agent/magic-context.jsonc` with defaults
+3. Prompts you for historian, dreamer, sidekick, and embedding model choices
+4. Warns about provider-specific gotchas (e.g. GitHub Copilot reasoning models need an explicit `thinking_level`)
+
+If you'd rather install the npm package globally first:
+
+```bash
+npm install -g @cortexkit/pi-magic-context@latest
+# or
+bun add -g @cortexkit/pi-magic-context@latest
+```
+
+Then either run `magic-context-pi setup` or register the extension manually with Pi's own installer:
+
+```bash
+pi install npm:@cortexkit/pi-magic-context
+```
 
 To check installation health later:
 
@@ -149,24 +148,14 @@ Easiest fix: configure `embedding` once in `~/.pi/agent/magic-context.jsonc` (Pi
 
 ---
 
-## Known limitation: `pi --print` mode
-
-Pi's `--print` mode is single-turn: the process exits immediately after `agent_end`. Magic Context fires historian as a background subagent (so the LLM call never blocks on summarization), but Pi's `agent_end` event uses synchronous listener fanout — the parent process exits while our async `await` is still pending, killing the spawned historian subprocess mid-run.
-
-**Production users running interactive `pi` are unaffected.** The historian started on turn N completes during turn N+1's user-think time, the same pattern OpenCode uses.
-
-For `--print` mode, the upstream fix is in progress: pi-coding-agent commit `9022a5b5 fix(agent): await subscribed event handlers` (shipped in `^0.70.5`). Once you're on that version, `--print` mode also works end-to-end.
-
----
-
 ## Architecture & implementation
 
-This package is part of the [magic-context monorepo](https://github.com/cortexkit/magic-context). The Pi extension shares the core implementation (~7,500 lines) with the OpenCode plugin via the `@magic-context/core` workspace dependency, exposing only the Pi-specific adapter layer:
+This package is part of the [magic-context monorepo](https://github.com/cortexkit/magic-context). The Pi extension shares the core implementation with the OpenCode plugin via the `@magic-context/core` workspace dependency, exposing only the Pi-specific adapter layer:
 
 | Pi-specific module | Responsibility |
 |---|---|
 | `context-handler.ts` | Pi `pi.on("context", ...)` adapter — tags, drops, runs nudges and auto-search |
-| `subagent-runner.ts` | Spawns `pi --print --mode json --no-extensions ...` for historian/sidekick/dreamer |
+| `subagent-runner.ts` | Spawns `pi --print --mode json --no-extensions --extension <lean-entry> ...` for historian/sidekick/dreamer subagents, with a 2-second drain after the terminal `message_end` so child processes don't keep the parent waiting |
 | `tools/` | Pi `pi.registerTool` wrappers around the shared tool implementations |
 | `commands/` | Pi `pi.registerCommand` wrappers for the five `/ctx-*` slash commands |
 | `dreamer/` | Pi-side adapter for the shared dreamer scheduler |

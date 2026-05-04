@@ -78,6 +78,29 @@ function compactObject<T extends Record<string, unknown>>(obj: T): T {
 	return obj;
 }
 
+/**
+ * Compare two semver-ish strings (X.Y.Z, ignores any pre-release or build
+ * suffix). Returns -1 if `a < b`, 0 if equal, 1 if `a > b`. Returns 0 when
+ * either string can't be parsed (we conservatively assume "good enough" so
+ * a parse failure doesn't block the user with a phantom upgrade prompt).
+ */
+function comparePiVersion(a: string, b: string): number {
+	const parse = (v: string): [number, number, number] | null => {
+		const match = v.match(/(\d+)\.(\d+)\.(\d+)/);
+		return match
+			? [Number(match[1]), Number(match[2]), Number(match[3])]
+			: null;
+	};
+	const left = parse(a);
+	const right = parse(b);
+	if (!left || !right) return 0;
+	for (let i = 0; i < 3; i += 1) {
+		if (left[i] < right[i]) return -1;
+		if (left[i] > right[i]) return 1;
+	}
+	return 0;
+}
+
 export function writePiSettingsPackage(
 	settingsPath: string,
 	packageSource = PI_PACKAGE_SOURCE,
@@ -230,6 +253,29 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
 			? `Pi ${version} detected at ${pi.path}`
 			: `Pi detected at ${pi.path}`,
 	);
+
+	// Pi 0.71.0 introduced the long-form `--extension` flag we use to load
+	// the lean subagent extension. Older Pi versions hard-fail with
+	// "Unknown option: -x" when subagents try to spawn, so warn loudly
+	// before the user wastes time on a setup that won't run subagents.
+	const MIN_PI_VERSION = "0.71.0";
+	if (version && comparePiVersion(version, MIN_PI_VERSION) < 0) {
+		prompts.log.warn(
+			`Pi ${version} is older than the required ${MIN_PI_VERSION}.\n` +
+				`Magic Context spawns subagents with \`--extension <path>\` (long form), ` +
+				`which Pi 0.71.0 introduced. Older Pi versions hard-fail with ` +
+				`"Unknown option" when historian/dreamer/sidekick tries to run.\n` +
+				`Run \`pi update\` (or \`npm install -g @mariozechner/pi-coding-agent@latest\`) before continuing.`,
+		);
+		const proceed = await prompts.confirm(
+			"Continue with setup anyway? (subagents will fail at runtime)",
+			false,
+		);
+		if (!proceed) {
+			prompts.outro("Setup cancelled — upgrade Pi and try again.");
+			return 0;
+		}
+	}
 
 	spinner.start("Fetching available Pi models");
 	const allModels = env.getAvailableModels(pi.path);

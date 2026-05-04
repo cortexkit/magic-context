@@ -44,7 +44,12 @@ import { type PromptIO, promptIO } from "./prompts";
 import { writePiSettingsPackage } from "./setup";
 
 const PACKAGE_NAME = "@cortexkit/pi-magic-context";
-const MIN_PI_VERSION_FOR_PRINT_HISTORIAN = "0.70.5";
+// Pi 0.71.0 introduced the `--extension` long-form flag (replacing `-x`).
+// Magic Context spawns subagents with `--extension <lean-entry>` to load
+// only the lean tool surface in subagents without recursive plugin loading,
+// so older Pi versions hard-fail with "Unknown option: -x". This is also
+// our peerDependency floor in package.json.
+const MIN_PI_VERSION = "0.71.0";
 const ROW_COUNT_TABLES = [
 	"tags",
 	"compartments",
@@ -394,15 +399,19 @@ async function runHealthChecks(options: {
 				? `Pi ${version} detected at ${pi.path}`
 				: `Pi detected at ${pi.path}`,
 		);
-		const compare = compareSemver(version, MIN_PI_VERSION_FOR_PRINT_HISTORIAN);
+		const compare = compareSemver(version, MIN_PI_VERSION);
 		if (compare !== null && compare < 0) {
 			add(
 				results,
-				"warn",
-				`Pi ${version} is older than ${MIN_PI_VERSION_FOR_PRINT_HISTORIAN}; pi --print historian support needs the await-async-emit fix`,
+				"fail",
+				`Pi ${version} is older than required ${MIN_PI_VERSION}. Subagents (historian/dreamer/sidekick) use the long-form \`--extension\` flag introduced in Pi 0.71.0; older versions hard-fail with "Unknown option". Run \`pi update\` (or \`npm install -g @mariozechner/pi-coding-agent@latest\`).`,
 			);
 		} else if (version) {
-			add(results, "pass", "Pi version includes the await-async-emit fix");
+			add(
+				results,
+				"pass",
+				`Pi version meets minimum ${MIN_PI_VERSION} requirement`,
+			);
 		}
 	}
 

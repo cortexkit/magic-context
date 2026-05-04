@@ -88,7 +88,7 @@ describe("runSetup", () => {
 
 		const env: SetupEnvironment = {
 			detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-			getPiVersion: () => "0.69.0",
+			getPiVersion: () => "0.71.0",
 			getAvailableModels: () => [
 				"anthropic/claude-haiku-4-5",
 				"anthropic/claude-sonnet-4-6",
@@ -143,7 +143,7 @@ describe("runSetup", () => {
 
 		const env: SetupEnvironment = {
 			detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-			getPiVersion: () => "0.69.0",
+			getPiVersion: () => "0.71.0",
 			// Only github-copilot model so buildModelSelection always picks it first
 			getAvailableModels: () => ["github-copilot/gpt-5.4"],
 			paths: {
@@ -189,5 +189,57 @@ describe("runSetup", () => {
 		expect(code).toBe(0);
 		expect(existsSync(agentDir)).toBe(false);
 		expect(prompts.messages.join("\n")).toContain("Pi not found");
+	});
+
+	it("warns and exits when Pi version is below 0.71.0 and user declines", async () => {
+		const root = makeTempRoot();
+		const agentDir = join(root, ".pi", "agent");
+		const env: SetupEnvironment = {
+			detectPiBinary: () => ({ path: "/usr/local/bin/pi", source: "path" }),
+			getPiVersion: () => "0.69.0",
+			getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+			paths: {
+				getPiAgentConfigDir: () => agentDir,
+				getPiUserConfigPath: () => join(agentDir, "magic-context.jsonc"),
+				getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
+			},
+		};
+		// One confirm: continue-anyway prompt → false (user declines)
+		const prompts = new MockPrompts({ confirms: [false] });
+
+		const code = await runSetup({ prompts, env });
+
+		expect(code).toBe(0);
+		const log = prompts.messages.join("\n");
+		expect(log).toContain("Pi 0.69.0 is older than the required 0.71.0");
+		expect(log).toContain("outro:Setup cancelled");
+		expect(existsSync(join(agentDir, "magic-context.jsonc"))).toBe(false);
+		expect(existsSync(join(agentDir, "settings.json"))).toBe(false);
+	});
+
+	it("continues setup when Pi version is below 0.71.0 and user opts in", async () => {
+		const root = makeTempRoot();
+		const agentDir = join(root, ".pi", "agent");
+		const env: SetupEnvironment = {
+			detectPiBinary: () => ({ path: "/usr/local/bin/pi", source: "path" }),
+			getPiVersion: () => "0.69.0",
+			getAvailableModels: () => ["anthropic/claude-haiku-4-5"],
+			paths: {
+				getPiAgentConfigDir: () => agentDir,
+				getPiUserConfigPath: () => join(agentDir, "magic-context.jsonc"),
+				getPiUserExtensionsPath: () => join(agentDir, "settings.json"),
+			},
+		};
+		// confirms: continue-anyway=true, configurePi=true,
+		//           dreamerEnabled=true, sidekickEnabled=false
+		const prompts = new MockPrompts({ confirms: [true, true, true, false] });
+
+		const code = await runSetup({ prompts, env });
+
+		expect(code).toBe(0);
+		expect(existsSync(join(agentDir, "magic-context.jsonc"))).toBe(true);
+		expect(prompts.messages.join("\n")).toContain(
+			"Pi 0.69.0 is older than the required 0.71.0",
+		);
 	});
 });

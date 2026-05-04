@@ -35,6 +35,7 @@
 		"lint": "biome check src",
 		"lint:fix": "biome check --write src",
 		"format": "biome format --write src",
+		"format:check": "biome format src",
 		"clean": "rm -rf dist",
 		"prepublishOnly": "bun run build"
 	},
