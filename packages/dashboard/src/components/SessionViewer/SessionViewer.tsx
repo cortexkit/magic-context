@@ -1,5 +1,5 @@
 import { ask } from "@tauri-apps/plugin-dialog";
-import { createMemo, createResource, createSignal, For, Index, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, Index, Show } from "solid-js";
 import {
   deleteNote,
   deleteSessionFact,
@@ -15,7 +15,7 @@ import {
   updateNote,
   updateSessionFact,
 } from "../../lib/api";
-import type { DbCacheEvent, Harness, SessionFact, SessionFilter } from "../../lib/types";
+import type { DbCacheEvent, Harness, SessionFact, SessionFilter, SessionRow } from "../../lib/types";
 import HarnessBadge from "../HarnessBadge";
 import FilterSelect from "../shared/FilterSelect";
 
@@ -25,6 +25,16 @@ const HARNESS_FILTER_KEY = "mc_sessions_harness_filter";
 type ActiveTab = "messages" | "compartments" | "facts" | "notes" | "tokens" | "cache";
 type HarnessFilter = "all" | Harness;
 type SelectedSession = { harness: Harness; sessionId: string };
+
+const sessionsCache = new Map<string, SessionRow[]>();
+
+function sessionFilterKey(filter: SessionFilter): string {
+  return JSON.stringify({
+    harness: filter.harness ?? null,
+    project_identity: filter.project_identity ?? null,
+    search: filter.search ?? null,
+  });
+}
 
 function loadStoredValue(key: string): string {
   try {
@@ -78,7 +88,33 @@ export default function SessionViewer() {
     return filter;
   });
 
-  const [sessions] = createResource(sessionFilter, listSessions);
+  const [sessions, setSessions] = createSignal<SessionRow[]>([]);
+  const [sessionsLoading, setSessionsLoading] = createSignal(false);
+  let sessionRequestId = 0;
+
+  createEffect(() => {
+    const filter = sessionFilter();
+    const key = sessionFilterKey(filter);
+    const cached = sessionsCache.get(key);
+    const requestId = ++sessionRequestId;
+
+    if (cached) {
+      setSessions(cached);
+      setSessionsLoading(false);
+    } else {
+      setSessions([]);
+      setSessionsLoading(true);
+    }
+
+    void listSessions(filter)
+      .then((fresh) => {
+        sessionsCache.set(key, fresh);
+        if (requestId === sessionRequestId) setSessions(fresh);
+      })
+      .finally(() => {
+        if (requestId === sessionRequestId) setSessionsLoading(false);
+      });
+  });
 
   const detailKey = createMemo(() => selectedSession());
   const [sessionDetail, { refetch: refetchSessionDetail }] = createResource(detailKey, async (selected) => {
@@ -106,6 +142,10 @@ export default function SessionViewer() {
   };
 
   const messages = () => sessionDetail()?.messages ?? [];
+  const visibleMessages = () =>
+    messages().filter(
+      (message) => message.role.toLowerCase() !== "assistant" || message.text_preview.trim().length > 0,
+    );
   const compartments = () => sessionDetail()?.compartments ?? [];
   const facts = () => sessionDetail()?.facts ?? [];
   const notes = () => sessionDetail()?.notes ?? [];
@@ -291,10 +331,7 @@ export default function SessionViewer() {
 
         {/* Session list */}
         <div class="scroll-area">
-          <Show
-            when={!sessions.loading}
-            fallback={<div class="empty-state">Loading sessions...</div>}
-          >
+          <Show when={!sessionsLoading()} fallback={<div class="empty-state">Loading sessions...</div>}>
             <div class="list-gap">
               <For each={filteredSessions()}>
                 {(session) => {
@@ -310,10 +347,20 @@ export default function SessionViewer() {
                     >
                       <div
                         class="card-title"
-                        style={{ display: "flex", "align-items": "center", gap: "8px" }}
+                        style={{ display: "flex", "align-items": "center", gap: "8px", "min-width": "0" }}
                       >
                         <HarnessBadge harness={session.harness} />
-                        <span>{session.title || truncate(session.session_id, 20)}</span>
+                        <span
+                          style={{
+                            flex: "1 1 auto",
+                            "min-width": "0",
+                            overflow: "hidden",
+                            "text-overflow": "ellipsis",
+                            "white-space": "nowrap",
+                          }}
+                        >
+                          {session.title || truncate(session.session_id, 20)}
+                        </span>
                         <Show when={session.is_subagent}>
                           <span class="pill gray">subagent</span>
                         </Show>
@@ -350,11 +397,7 @@ export default function SessionViewer() {
             class={`tab-pill ${activeTab() === "messages" ? "active" : ""}`}
             onClick={() => setActiveTab("messages")}
           >
-            Messages ({messages().length}
-            <Show when={piCompactions().length > 0}>
-              <span>, +{piCompactions().length} compaction</span>
-            </Show>
-            )
+            Messages ({visibleMessages().length})
           </button>
           <button
             type="button"
@@ -382,7 +425,7 @@ export default function SessionViewer() {
             class={`tab-pill ${activeTab() === "tokens" ? "active" : ""}`}
             onClick={() => setActiveTab("tokens")}
           >
-            Tokens
+            Meta
           </button>
           <button
             type="button"
@@ -466,10 +509,10 @@ export default function SessionViewer() {
                   </div>
                 </Show>
                 <Show
-                  when={messages().length > 0}
+                  when={visibleMessages().length > 0}
                   fallback={<div class="empty-state"><span class="empty-state-icon">💬</span>No messages</div>}
                 >
-                  <For each={messages()}>
+                  <For each={visibleMessages()}>
                     {(message) => (
                       <div class="card">
                         <div style={{ display: "flex", "align-items": "center", gap: "8px", "margin-bottom": "6px" }}>
@@ -494,7 +537,7 @@ export default function SessionViewer() {
                               : "italic",
                           }}
                         >
-                          {message.text_preview || "—"}
+                          {message.text_preview}
                         </div>
                       </div>
                     )}
@@ -970,7 +1013,7 @@ export default function SessionViewer() {
             </div>
           </Show>
 
-          {/* OpenCode meta table shown inside Tokens tab */}
+          {/* OpenCode meta table shown inside Meta tab */}
           <Show when={activeTab() === "tokens" && meta()}>
             <Show when={meta()} fallback={<div class="empty-state">No meta data</div>}>
               {(metaData) => (
@@ -1032,7 +1075,12 @@ export default function SessionViewer() {
             </Show>
           </Show>
 
-          {/* Tokens tab */}
+          {/* Spacer between Meta key-value table and the Context Token Breakdown card. */}
+          <Show when={activeTab() === "tokens"}>
+            <div style={{ height: "16px" }} />
+          </Show>
+
+          {/* Token breakdown shown inside Meta tab */}
           <Show when={activeTab() === "tokens"}>
             <Show
               when={tokenBreakdown()}

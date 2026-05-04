@@ -1,18 +1,25 @@
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { formatDateTime, getCacheEventsFromDb, getSessions, truncate } from "../../lib/api";
-import type { DbCacheEvent, SessionCacheStats } from "../../lib/types";
+import { formatDateTime, getCacheEventsFromDb, listSessions, truncate } from "../../lib/api";
+import type { DbCacheEvent, Harness, SessionCacheStats } from "../../lib/types";
+import HarnessBadge from "../HarnessBadge";
+import FilterSelect from "../shared/FilterSelect";
 
 // Module-level cache — survives component unmount/remount (page navigation)
 let cachedEvents: DbCacheEvent[] = [];
 let cachedWatermark: number | null = null;
 
+type HarnessFilter = "all" | Harness;
+type CacheSessionStats = SessionCacheStats & { harness: Harness };
+type SelectedSession = { harness: Harness; sessionId: string };
+
 export default function CacheDiagnostics() {
   const [events, setEvents] = createSignal<DbCacheEvent[]>(cachedEvents);
-  const [sessionStats, setSessionStats] = createSignal<SessionCacheStats[]>([]);
+  const [sessionStats, setSessionStats] = createSignal<CacheSessionStats[]>([]);
   const [sessionNames, setSessionNames] = createSignal<Record<string, string>>({});
   const [loading, setLoading] = createSignal(cachedEvents.length === 0);
   const [paused, setPaused] = createSignal(false);
-  const [selectedSession, setSelectedSession] = createSignal<string | null>(null);
+  const [selectedSession, setSelectedSession] = createSignal<SelectedSession | null>(null);
+  const [harnessFilter, setHarnessFilter] = createSignal<HarnessFilter>("all");
   const [hideSubagents, setHideSubagents] = createSignal(true);
   const [subagentIds, setSubagentIds] = createSignal<Set<string>>(new Set());
 
@@ -27,7 +34,7 @@ export default function CacheDiagnostics() {
     try {
       const [newEvents, sessions] = await Promise.all([
         getCacheEventsFromDb(PER_SESSION, cachedWatermark),
-        getSessions(),
+        listSessions(),
       ]);
 
       if (cachedWatermark === null) {
@@ -49,12 +56,22 @@ export default function CacheDiagnostics() {
       // Compute session stats client-side from cached events (no extra DB query)
       const statsMap = new Map<
         string,
-        { count: number; read: number; write: number; input: number; lastTs: number; busts: number }
+        {
+          count: number;
+          harness: Harness;
+          read: number;
+          write: number;
+          input: number;
+          lastTs: number;
+          busts: number;
+        }
       >();
       for (const e of allEvents) {
         if (!e.session_id) continue;
-        const s = statsMap.get(e.session_id) ?? {
+        const key = `${e.harness}:${e.session_id}`;
+        const s = statsMap.get(key) ?? {
           count: 0,
+          harness: e.harness,
           read: 0,
           write: 0,
           input: 0,
@@ -67,12 +84,14 @@ export default function CacheDiagnostics() {
         s.input += e.input_tokens;
         if (e.timestamp > s.lastTs) s.lastTs = e.timestamp;
         if (e.severity === "bust" || e.severity === "full_bust") s.busts++;
-        statsMap.set(e.session_id, s);
+        statsMap.set(key, s);
       }
       const stats = [...statsMap.entries()]
-        .map(([sid, s]) => {
+        .map(([key, s]) => {
+          const sid = key.slice(key.indexOf(":") + 1);
           const total = s.read + s.write + s.input;
           return {
+            harness: s.harness,
             session_id: sid,
             event_count: s.count,
             total_cache_read: s.read,
@@ -90,8 +109,9 @@ export default function CacheDiagnostics() {
       const names: Record<string, string> = {};
       const subs = new Set<string>();
       for (const s of sessions) {
-        if (s.title) names[s.session_id] = s.title;
-        if (s.is_subagent) subs.add(s.session_id);
+        const key = `${s.harness}:${s.session_id}`;
+        if (s.title) names[key] = s.title;
+        if (s.is_subagent) subs.add(key);
       }
       setSessionNames(names);
       setSubagentIds(subs);
@@ -100,7 +120,8 @@ export default function CacheDiagnostics() {
     }
   };
 
-  const resolveTitle = (sessionId: string) => sessionNames()[sessionId] || truncate(sessionId, 16);
+  const resolveTitle = (harness: Harness, sessionId: string) =>
+    sessionNames()[`${harness}:${sessionId}`] || truncate(sessionId, 16);
 
   onMount(() => {
     fetchData();
@@ -111,19 +132,25 @@ export default function CacheDiagnostics() {
   }, 15000);
   onCleanup(() => clearInterval(refreshInterval));
 
-  const isSubagent = (sessionId: string) => subagentIds().has(sessionId);
+  const isSubagent = (harness: Harness, sessionId: string) => subagentIds().has(`${harness}:${sessionId}`);
 
   const filteredStats = () => {
-    const stats = sessionStats();
-    const filtered = hideSubagents() ? stats.filter((s) => !isSubagent(s.session_id)) : stats;
+    const harness = harnessFilter();
+    let filtered = sessionStats();
+    if (harness !== "all") filtered = filtered.filter((s) => s.harness === harness);
+    if (hideSubagents()) filtered = filtered.filter((s) => !isSubagent(s.harness, s.session_id));
     return filtered.slice(0, 5);
   };
 
   const filteredEvents = () => {
-    const sid = selectedSession();
+    const selected = selectedSession();
+    const harness = harnessFilter();
     let all = events();
-    if (hideSubagents()) all = all.filter((e) => !isSubagent(e.session_id));
-    return sid ? all.filter((e) => e.session_id === sid) : all;
+    if (harness !== "all") all = all.filter((e) => e.harness === harness);
+    if (hideSubagents()) all = all.filter((e) => !isSubagent(e.harness, e.session_id));
+    return selected
+      ? all.filter((e) => e.session_id === selected.sessionId && e.harness === selected.harness)
+      : all;
   };
 
   const severityIcon = (severity: string) => {
@@ -157,6 +184,19 @@ export default function CacheDiagnostics() {
       <div class="section-header">
         <h1 class="section-title">Cache Diagnostics</h1>
         <div class="section-actions">
+          <FilterSelect
+            value={harnessFilter()}
+            onChange={(value) => {
+              setHarnessFilter(value as HarnessFilter);
+              setSelectedSession(null);
+            }}
+            placeholder="Harness"
+            options={[
+              { value: "all", label: "Harness: All" },
+              { value: "opencode", label: "OpenCode" },
+              { value: "pi", label: "Pi" },
+            ]}
+          />
           <Show when={!paused()}>
             <span style={{ color: "var(--green)", "font-size": "12px", "margin-right": "8px" }}>
               ● Live
@@ -201,7 +241,10 @@ export default function CacheDiagnostics() {
           <div style={{ display: "flex", gap: "8px", "flex-wrap": "wrap" }}>
             <For each={filteredStats()}>
               {(stat) => {
-                const isActive = () => selectedSession() === stat.session_id;
+                const isActive = () => {
+                  const selected = selectedSession();
+                  return selected?.sessionId === stat.session_id && selected.harness === stat.harness;
+                };
                 return (
                   <button
                     type="button"
@@ -214,7 +257,11 @@ export default function CacheDiagnostics() {
                       "border-color": isActive() ? "var(--accent)" : undefined,
                       "text-align": "left",
                     }}
-                    onClick={() => setSelectedSession(isActive() ? null : stat.session_id)}
+                    onClick={() =>
+                      setSelectedSession(
+                        isActive() ? null : { harness: stat.harness, sessionId: stat.session_id },
+                      )
+                    }
                   >
                     <div
                       style={{
@@ -226,7 +273,10 @@ export default function CacheDiagnostics() {
                         "white-space": "nowrap",
                       }}
                     >
-                      {resolveTitle(stat.session_id)}
+                      <span style={{ display: "inline-flex", "align-items": "center", gap: "6px" }}>
+                        <HarnessBadge harness={stat.harness} />
+                        <span>{resolveTitle(stat.harness, stat.session_id)}</span>
+                      </span>
                     </div>
                     <div
                       style={{
@@ -292,7 +342,7 @@ export default function CacheDiagnostics() {
               <div class="empty-state">
                 <span class="empty-state-icon">📊</span>
                 <span>No cache events found</span>
-                <span style={{ "font-size": "11px" }}>Cache data is read from OpenCode DB</span>
+                <span style={{ "font-size": "11px" }}>Cache data is read from OpenCode DB and Pi JSONL</span>
               </div>
             }
           >
@@ -311,6 +361,7 @@ export default function CacheDiagnostics() {
                         }}
                       >
                         <span>{severityIcon(event.severity)}</span>
+                        <HarnessBadge harness={event.harness} />
                         <span
                           class="mono"
                           style={{ "font-size": "11px", color: "var(--text-secondary)" }}
@@ -330,7 +381,7 @@ export default function CacheDiagnostics() {
                           class="mono"
                           style={{ "font-size": "10px", color: "var(--text-muted)" }}
                         >
-                          {resolveTitle(event.session_id)}
+                          {resolveTitle(event.harness, event.session_id)}
                         </span>
                       </div>
                       <div class="card-meta" style={{ gap: "12px" }}>

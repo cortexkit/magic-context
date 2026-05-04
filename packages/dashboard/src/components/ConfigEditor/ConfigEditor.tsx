@@ -22,6 +22,7 @@ const PI_DEFAULT_CONFIG = `{
 }`;
 
 type UserConfigTab = "opencode" | "pi";
+type ConfigTarget = UserConfigTab | "projects";
 
 function loadUserConfigTab(): UserConfigTab {
   try {
@@ -1996,33 +1997,36 @@ function ProjectConfigDetail(props: {
 // ── Main ConfigEditor ───────────────────────────────────────
 
 export default function ConfigEditor(props: { models: string[] }) {
-  const [tab, setTab] = createSignal<"user" | "projects">("user");
-  const [userConfigTab, setUserConfigTab] = createSignal<UserConfigTab>(loadUserConfigTab());
+  const [configTarget, setConfigTarget] = createSignal<ConfigTarget>(loadUserConfigTab());
   const [userConfig, { refetch: refetchUser }] = createResource(() => getConfig("user"));
   const [piConfig, { refetch: refetchPi }] = createResource(getPiConfig);
   const [projectConfigs, { refetch: refetchProjects }] = createResource(getProjectConfigs);
   const [saveStatus, setSaveStatus] = createSignal<string | null>(null);
   const [selectedProject, setSelectedProject] = createSignal<ProjectConfigEntry | null>(null);
 
-  const activeUserConfig = () => (userConfigTab() === "pi" ? piConfig() : userConfig());
+  const activeUserConfig = () => (configTarget() === "pi" ? piConfig() : userConfig());
   const activeUserConfigLoading = () =>
-    userConfigTab() === "pi" ? piConfig.loading : userConfig.loading;
+    configTarget() === "pi" ? piConfig.loading : userConfig.loading;
 
-  const selectUserConfigTab = (next: UserConfigTab) => {
-    setUserConfigTab(next);
+  const selectConfigTarget = (next: ConfigTarget) => {
+    setConfigTarget(next);
+    setSaveStatus(null);
+    if (next === "projects") {
+      setSelectedProject(null);
+      return;
+    }
     try {
       localStorage.setItem(CONFIG_TAB_STORAGE_KEY, next);
     } catch {
       // Ignore localStorage failures; in-memory tab selection still works.
     }
-    setSaveStatus(null);
     if (next === "pi") refetchPi();
     else refetchUser();
   };
 
   const handleUserSave = async (content: string) => {
     try {
-      if (userConfigTab() === "pi") {
+      if (configTarget() === "pi") {
         await savePiConfig(content);
         refetchPi();
       } else {
@@ -2063,21 +2067,22 @@ export default function ConfigEditor(props: { models: string[] }) {
       <div class="tab-pills">
         <button
           type="button"
-          class={`tab-pill ${tab() === "user" ? "active" : ""}`}
-          onClick={() => {
-            setTab("user");
-            setSelectedProject(null);
-          }}
+          class={`tab-pill ${configTarget() === "opencode" ? "active" : ""}`}
+          onClick={() => selectConfigTarget("opencode")}
         >
-          User Config
+          OpenCode Config
         </button>
         <button
           type="button"
-          class={`tab-pill ${tab() === "projects" ? "active" : ""}`}
-          onClick={() => {
-            setTab("projects");
-            setSelectedProject(null);
-          }}
+          class={`tab-pill ${configTarget() === "pi" ? "active" : ""}`}
+          onClick={() => selectConfigTarget("pi")}
+        >
+          Pi Config
+        </button>
+        <button
+          type="button"
+          class={`tab-pill ${configTarget() === "projects" ? "active" : ""}`}
+          onClick={() => selectConfigTarget("projects")}
         >
           Project Configs
           <Show when={(projectConfigs() ?? []).length > 0}>
@@ -2089,23 +2094,7 @@ export default function ConfigEditor(props: { models: string[] }) {
       </div>
 
       <div class="scroll-area">
-        <Show when={tab() === "user"}>
-          <div class="tab-pills" style={{ "margin-bottom": "12px" }}>
-            <button
-              type="button"
-              class={`tab-pill ${userConfigTab() === "opencode" ? "active" : ""}`}
-              onClick={() => selectUserConfigTab("opencode")}
-            >
-              OpenCode (~/.config/opencode/magic-context.jsonc)
-            </button>
-            <button
-              type="button"
-              class={`tab-pill ${userConfigTab() === "pi" ? "active" : ""}`}
-              onClick={() => selectUserConfigTab("pi")}
-            >
-              Pi (~/.pi/agent/magic-context.jsonc)
-            </button>
-          </div>
+        <Show when={configTarget() !== "projects"}>
           <Show
             when={!activeUserConfigLoading()}
             fallback={<div class="empty-state">Loading config...</div>}
@@ -2125,9 +2114,9 @@ export default function ConfigEditor(props: { models: string[] }) {
               fallback={
                 <div class="empty-state">
                   <span class="empty-state-icon">⚙️</span>
-                  <span>No {userConfigTab() === "pi" ? "Pi" : "OpenCode"} config found at {activeUserConfig()?.path}</span>
+                  <span>No {configTarget() === "pi" ? "Pi" : "OpenCode"} config found at {activeUserConfig()?.path}</span>
                   <Show
-                    when={userConfigTab() === "pi"}
+                    when={configTarget() === "pi"}
                     fallback={
                       <span style={{ "font-size": "11px" }}>
                         Run <code>bunx --bun @cortexkit/opencode-magic-context setup</code> to
@@ -2155,7 +2144,7 @@ export default function ConfigEditor(props: { models: string[] }) {
           </Show>
         </Show>
 
-        <Show when={tab() === "projects"}>
+        <Show when={configTarget() === "projects"}>
           <Show
             when={selectedProject()}
             fallback={

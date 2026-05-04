@@ -141,6 +141,13 @@ pub fn enumerate_projects() -> Vec<db::ProjectRow> {
 }
 
 #[tauri::command]
+pub fn enumerate_memory_projects(state: State<'_, AppState>) -> Result<Vec<db::ProjectRow>, String> {
+    let path = state.get_db_path()?;
+    let conn = db::open_readonly(&path).map_err(|e| e.to_string())?;
+    db::enumerate_memory_projects(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn get_compartments(
     state: State<'_, AppState>,
     session_id: String,

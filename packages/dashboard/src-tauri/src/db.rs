@@ -339,6 +339,7 @@ pub struct ContextTokenBreakdown {
 
 #[derive(Debug, Serialize, Clone)]
 pub struct DbCacheEvent {
+    pub harness: Harness,
     pub message_id: String,
     pub session_id: String,
     pub timestamp: i64,
@@ -354,6 +355,7 @@ pub struct DbCacheEvent {
 
 #[derive(Debug, Serialize, Clone)]
 pub struct SessionCacheStats {
+    pub harness: Harness,
     pub session_id: String,
     pub event_count: usize,
     pub total_cache_read: i64,
@@ -366,6 +368,7 @@ pub struct SessionCacheStats {
 
 #[derive(Debug, Clone)]
 struct RawDbCacheEvent {
+    harness: Harness,
     message_id: String,
     session_id: String,
     timestamp: i64,
@@ -698,6 +701,7 @@ fn load_raw_db_cache_events(
     let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
     let rows = stmt.query_map(params_refs.as_slice(), |row| {
         Ok(RawDbCacheEvent {
+            harness: Harness::Opencode,
             message_id: row.get(0)?,
             session_id: row.get(1)?,
             timestamp: row.get(2)?,
@@ -712,6 +716,60 @@ fn load_raw_db_cache_events(
     rows.collect()
 }
 
+/// Load Pi cache events from JSONL session files. Mirrors the per-session
+/// windowing the OpenCode SQL path does so a single noisy Pi session cannot
+/// monopolize the global view, and emits the same `RawDbCacheEvent` shape as
+/// OpenCode so downstream `build_db_cache_events` works unchanged.
+fn load_raw_pi_cache_events(limit: usize, since_timestamp: Option<i64>) -> Vec<RawDbCacheEvent> {
+    let per_session_limit = limit;
+    let global_cap = limit.saturating_mul(10);
+    let mut all_rows: Vec<RawDbCacheEvent> = Vec::new();
+
+    for meta in pi_sessions::scan_pi_session_dir() {
+        let Some(detail) = pi_sessions::read_pi_session_detail(&meta.jsonl_path) else {
+            continue;
+        };
+        // Pi message timestamps are ms-since-epoch; the OpenCode side uses ms too,
+        // so we keep them in the same unit and on the same time axis.
+        let mut session_rows: Vec<RawDbCacheEvent> = detail
+            .messages
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .filter_map(|message| {
+                let usage = message.usage.as_ref()?;
+                if usage.total == 0 {
+                    return None;
+                }
+                if let Some(since) = since_timestamp {
+                    if message.timestamp_ms <= since {
+                        return None;
+                    }
+                }
+                Some(RawDbCacheEvent {
+                    harness: Harness::Pi,
+                    message_id: message.entry_id.clone(),
+                    session_id: meta.session_id.clone(),
+                    timestamp: message.timestamp_ms,
+                    input_tokens: usage.input as i64,
+                    cache_read: usage.cache_read as i64,
+                    cache_write: usage.cache_write as i64,
+                    total_tokens: usage.total as i64,
+                    agent: None,
+                })
+            })
+            .collect();
+        // Per-session newest-first window so a long Pi session still surfaces
+        // its latest events on the merged timeline.
+        session_rows.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
+        session_rows.truncate(per_session_limit);
+        all_rows.extend(session_rows);
+    }
+
+    all_rows.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
+    all_rows.truncate(global_cap);
+    all_rows
+}
+
 fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec<DbCacheEvent> {
     let log_cause_candidates = if enrich_causes {
         build_log_cause_candidates()
@@ -721,11 +779,13 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
 
     // Build a map of earliest timestamp per session in our window so we can
     // detect whether an event is truly the session's first message vs just
-    // the oldest event in the current 200-event window.
-    let mut earliest_ts_in_window: HashMap<String, i64> = HashMap::new();
+    // the oldest event in the current 200-event window. Keyed by
+    // (harness, session_id) because OC and Pi may share short ID prefixes
+    // and must never alias each other in this analysis.
+    let mut earliest_ts_in_window: HashMap<(Harness, String), i64> = HashMap::new();
     for row in &rows {
         earliest_ts_in_window
-            .entry(row.session_id.clone())
+            .entry((row.harness, row.session_id.clone()))
             .and_modify(|ts| {
                 if row.timestamp < *ts {
                     *ts = row.timestamp;
@@ -734,18 +794,23 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
             .or_insert(row.timestamp);
     }
 
-    // Check which sessions truly have their first-ever assistant message in our
-    // window by computing each session's true-first assistant message timestamp
-    // in a single GROUP BY query, then comparing to our window's earliest. With
-    // N concurrent sessions this used to issue N sequential `EXISTS` queries
-    // (one per session) — now it's one CTE-style aggregate scan.
-    let true_first_sessions: HashSet<String> =
-        if !earliest_ts_in_window.is_empty() {
+    // OC-side: check which sessions truly have their first-ever assistant
+    // message in our window by computing each session's true-first assistant
+    // message timestamp in a single GROUP BY query, then comparing to our
+    // window's earliest. Pi sessions are excluded here because Pi cache rows
+    // come from JSONL files, not OpenCode's `message` table — Pi
+    // first-message detection is handled in `pi_true_first_sessions` below.
+    let oc_session_ids: Vec<String> = earliest_ts_in_window
+        .iter()
+        .filter(|((h, _), _)| matches!(h, Harness::Opencode))
+        .map(|((_, sid), _)| sid.clone())
+        .collect();
+    let true_first_sessions: HashSet<(Harness, String)> =
+        if !oc_session_ids.is_empty() {
             if let Some(opencode_db_path) = resolve_opencode_db_path() {
                 if let Ok(conn) = open_readonly(&opencode_db_path) {
                     // Build IN-clause with placeholders for each session_id we care about.
-                    let session_ids: Vec<String> = earliest_ts_in_window.keys().cloned().collect();
-                    let placeholders = vec!["?"; session_ids.len()].join(",");
+                    let placeholders = vec!["?"; oc_session_ids.len()].join(",");
                     let sql = format!(
                         "SELECT session_id, MIN(time_created) AS first_ts
                          FROM message
@@ -756,7 +821,7 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
                         placeholders
                     );
                     let session_id_refs: Vec<&dyn rusqlite::types::ToSql> =
-                        session_ids.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+                        oc_session_ids.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
                     if let Ok(mut stmt) = conn.prepare(&sql) {
                         let rows = stmt.query_map(session_id_refs.as_slice(), |row| {
                             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
@@ -768,11 +833,11 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
                             rows.filter_map(|r| r.ok())
                                 .filter(|(sid, db_earliest)| {
                                     earliest_ts_in_window
-                                        .get(sid)
+                                        .get(&(Harness::Opencode, sid.clone()))
                                         .map(|window_earliest| *window_earliest <= *db_earliest)
                                         .unwrap_or(false)
                                 })
-                                .map(|(sid, _)| sid)
+                                .map(|(sid, _)| (Harness::Opencode, sid))
                                 .collect()
                         } else {
                             HashSet::new()
@@ -790,7 +855,54 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
             HashSet::new()
         };
 
-    let mut seen_sessions = HashSet::new();
+    // Pi-side: a Pi session has its true-first assistant message in our window
+    // when our window-earliest timestamp for that Pi session is also the
+    // earliest assistant timestamp in the underlying JSONL file. Read each Pi
+    // session's first assistant timestamp once and compare.
+    let mut pi_true_first: HashSet<(Harness, String)> = HashSet::new();
+    let pi_sessions_in_window: Vec<String> = earliest_ts_in_window
+        .iter()
+        .filter(|((h, _), _)| matches!(h, Harness::Pi))
+        .map(|((_, sid), _)| sid.clone())
+        .collect();
+    if !pi_sessions_in_window.is_empty() {
+        // Build a lookup of Pi session_id -> jsonl path so we don't re-scan
+        // the directory per session.
+        let pi_meta_by_id: HashMap<String, std::path::PathBuf> = pi_sessions::scan_pi_session_dir()
+            .into_iter()
+            .map(|m| (m.session_id, m.jsonl_path))
+            .collect();
+        for sid in pi_sessions_in_window {
+            let Some(path) = pi_meta_by_id.get(&sid) else {
+                continue;
+            };
+            let Some(detail) = pi_sessions::read_pi_session_detail(path) else {
+                continue;
+            };
+            let db_earliest = detail
+                .messages
+                .iter()
+                .filter(|m| {
+                    m.role == "assistant" && m.usage.as_ref().map(|u| u.total > 0).unwrap_or(false)
+                })
+                .map(|m| m.timestamp_ms)
+                .min();
+            if let (Some(db_earliest), Some(window_earliest)) = (
+                db_earliest,
+                earliest_ts_in_window.get(&(Harness::Pi, sid.clone())),
+            ) {
+                if *window_earliest <= db_earliest {
+                    pi_true_first.insert((Harness::Pi, sid));
+                }
+            }
+        }
+    }
+    let true_first_sessions: HashSet<(Harness, String)> = true_first_sessions
+        .into_iter()
+        .chain(pi_true_first)
+        .collect();
+
+    let mut seen_sessions: HashSet<(Harness, String)> = HashSet::new();
     let mut chronological = Vec::with_capacity(rows.len());
 
     for row in rows.into_iter().rev() {
@@ -801,9 +913,10 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
             0.0
         };
 
-        let is_first_session_event = seen_sessions.insert(row.session_id.clone());
+        let session_key = (row.harness, row.session_id.clone());
+        let is_first_session_event = seen_sessions.insert(session_key.clone());
         let is_truly_first =
-            is_first_session_event && true_first_sessions.contains(&row.session_id);
+            is_first_session_event && true_first_sessions.contains(&session_key);
         let (severity, cause) = if is_truly_first {
             (
                 "info".to_string(),
@@ -833,6 +946,7 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
         };
 
         chronological.push(DbCacheEvent {
+            harness: row.harness,
             message_id: row.message_id,
             session_id: row.session_id,
             timestamp: row.timestamp,
@@ -851,17 +965,25 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
 }
 
 pub fn get_cache_events_from_db(limit: usize, since_timestamp: Option<i64>) -> Vec<DbCacheEvent> {
-    load_raw_db_cache_events(limit, since_timestamp)
-        .map(|rows| build_db_cache_events(rows, true))
-        .unwrap_or_default()
+    let mut rows = load_raw_db_cache_events(limit, since_timestamp).unwrap_or_default();
+    rows.extend(load_raw_pi_cache_events(limit, since_timestamp));
+    // Newest-first across both harnesses, then truncate to the same global cap
+    // the OpenCode-only path used so the merged feed never balloons unbounded.
+    rows.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
+    rows.truncate(limit.saturating_mul(10));
+    build_db_cache_events(rows, true)
 }
 
 pub fn get_session_cache_stats_from_db(limit: usize) -> Vec<SessionCacheStats> {
     // Reuse raw rows instead of re-querying + re-parsing logs
-    let events = load_raw_db_cache_events(200, None)
-        .map(|rows| build_db_cache_events(rows, false)) // skip log enrichment for stats
-        .unwrap_or_default();
-    let mut map: HashMap<String, (usize, i64, i64, i64, i64, usize)> = HashMap::new();
+    let mut rows = load_raw_db_cache_events(200, None).unwrap_or_default();
+    rows.extend(load_raw_pi_cache_events(200, None));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
+    rows.truncate(2000); // 200 per-session × ~10 sessions cap
+    let events = build_db_cache_events(rows, false); // skip log enrichment for stats
+    // Key by (harness, session_id) so OC and Pi sessions never collide on a
+    // shared short-prefix session ID.
+    let mut map: HashMap<(Harness, String), (usize, i64, i64, i64, i64, usize)> = HashMap::new();
 
     for event in events {
         if event.session_id.is_empty() {
@@ -869,7 +991,7 @@ pub fn get_session_cache_stats_from_db(limit: usize) -> Vec<SessionCacheStats> {
         }
 
         let entry = map
-            .entry(event.session_id.clone())
+            .entry((event.harness, event.session_id.clone()))
             .or_insert((0, 0, 0, 0, event.timestamp, 0));
         entry.0 += 1;
         entry.1 += event.cache_read;
@@ -885,7 +1007,7 @@ pub fn get_session_cache_stats_from_db(limit: usize) -> Vec<SessionCacheStats> {
         .into_iter()
         .map(
             |(
-                session_id,
+                (harness, session_id),
                 (
                     event_count,
                     total_cache_read,
@@ -905,6 +1027,7 @@ pub fn get_session_cache_stats_from_db(limit: usize) -> Vec<SessionCacheStats> {
                 (
                     last_timestamp,
                     SessionCacheStats {
+                        harness,
                         session_id,
                         event_count,
                         total_cache_read,
@@ -955,6 +1078,7 @@ fn get_opencode_session_cache_events(session_id: &str) -> Vec<DbCacheEvent> {
     };
     let Ok(rows) = stmt.query_map([session_id], |row| {
         Ok(RawDbCacheEvent {
+            harness: Harness::Opencode,
             message_id: row.get(0)?,
             session_id: row.get(1)?,
             timestamp: row.get(2)?,
@@ -984,6 +1108,7 @@ fn get_pi_session_cache_events(session_id: &str) -> Vec<DbCacheEvent> {
         .filter_map(|message| {
             let usage = message.usage?;
             (usage.total > 0).then_some(RawDbCacheEvent {
+                harness: Harness::Pi,
                 message_id: message.entry_id,
                 session_id: session_id.to_string(),
                 timestamp: message.timestamp_ms,
@@ -1055,6 +1180,24 @@ pub fn get_projects(conn: &Connection) -> Result<Vec<ProjectInfo>, rusqlite::Err
 }
 
 pub fn enumerate_projects() -> Vec<ProjectRow> {
+    enumerate_projects_filtered(None)
+}
+
+pub fn enumerate_memory_projects(conn: &Connection) -> Result<Vec<ProjectRow>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT project_path
+         FROM memories
+         WHERE status = 'active'
+         ORDER BY project_path",
+    )?;
+    let project_paths: HashSet<String> = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<HashSet<_>, _>>()?;
+
+    Ok(enumerate_projects_filtered(Some(&project_paths)))
+}
+
+fn enumerate_projects_filtered(project_paths_filter: Option<&HashSet<String>>) -> Vec<ProjectRow> {
     #[derive(Default)]
     struct ProjectAccum {
         opencode_name: Option<String>,
@@ -1081,6 +1224,11 @@ pub fn enumerate_projects() -> Vec<ProjectRow> {
                     ))
                 }) {
                     for (name, worktree, count) in rows.flatten() {
+                        if let Some(allowed_paths) = project_paths_filter {
+                            if !allowed_paths.contains(&worktree) {
+                                continue;
+                            }
+                        }
                         let identity = resolve_project_identity(&worktree);
                         let entry = groups.entry(identity).or_default();
                         if !name.is_empty() {
@@ -1097,10 +1245,25 @@ pub fn enumerate_projects() -> Vec<ProjectRow> {
 
     let mut pi_counts: HashMap<String, (String, u32)> = HashMap::new();
     for meta in pi_sessions::scan_pi_session_dir() {
+        if let Some(allowed_paths) = project_paths_filter {
+            if !allowed_paths.contains(&meta.cwd) {
+                continue;
+            }
+        }
         let identity = resolve_project_identity(&meta.cwd);
         let entry = pi_counts.entry(identity).or_insert((meta.cwd, 0));
         entry.1 = entry.1.saturating_add(1);
     }
+    if let Some(allowed_paths) = project_paths_filter {
+        for project_path in allowed_paths {
+            let identity = resolve_project_identity(project_path);
+            groups.entry(identity).or_insert_with(|| ProjectAccum {
+                opencode_path: Some(project_path.clone()),
+                ..ProjectAccum::default()
+            });
+        }
+    }
+
     for (identity, (cwd, count)) in pi_counts {
         let entry = groups.entry(identity).or_default();
         entry.pi_path = Some(cwd);
@@ -1848,7 +2011,7 @@ pub fn get_opencode_session_detail(
     let oc_conn = open_readonly(&opencode_db_path)?;
     let row = oc_conn.query_row(
         "SELECT s.id, COALESCE(s.title, ''), COALESCE(p.name, ''), COALESCE(p.worktree, ''),
-                COALESCE(json(s.data), '{}')
+                COALESCE(json_object('id', s.id, 'title', s.title, 'directory', s.directory), '{}')
          FROM session s LEFT JOIN project p ON p.id = s.project_id WHERE s.id = ?1",
         [session_id],
         |row| {

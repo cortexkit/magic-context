@@ -108,6 +108,10 @@ export async function enumerateProjects(): Promise<ProjectRow[]> {
   return invoke("enumerate_projects");
 }
 
+export async function enumerateMemoryProjects(): Promise<ProjectRow[]> {
+  return invoke("enumerate_memory_projects");
+}
+
 export async function getCompartments(sessionId: string): Promise<Compartment[]> {
   return invoke("get_compartments", { sessionId });
 }

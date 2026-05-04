@@ -4,7 +4,7 @@ import {
   bulkDeleteMemory,
   bulkUpdateMemoryStatus,
   deleteMemory,
-  enumerateProjects,
+  enumerateMemoryProjects,
   formatRelativeTime,
   getMemories,
   getMemoryStats,
@@ -58,7 +58,7 @@ export default function MemoryBrowser() {
   );
   createEffect(() => saveCollapsedCategories(collapsedCategories()));
 
-  const [projects] = createResource(enumerateProjects);
+  const [projects] = createResource(enumerateMemoryProjects);
 
   const fetchParams = () => ({
     project: projectFilter() || undefined,

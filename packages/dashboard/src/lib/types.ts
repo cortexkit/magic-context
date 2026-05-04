@@ -265,6 +265,7 @@ export interface CacheEvent {
 }
 
 export interface DbCacheEvent {
+  harness: Harness;
   message_id: string;
   session_id: string;
   timestamp: number;
