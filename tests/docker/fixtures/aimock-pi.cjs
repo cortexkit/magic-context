@@ -15,10 +15,13 @@ const port = parseInt(process.env.AIMOCK_PORT || "4010", 10);
 async function main() {
     const mock = new LLMock({ port });
 
+    // Catch-all fixture: respond to any chat-completion request with a
+    // short text reply. Predicate returns true unconditionally so we
+    // don't depend on sequenceIndex bookkeeping.
     mock.on(
-        { sequenceIndex: 0 },
+        { predicate: () => true },
         {
-            text: "hello",
+            content: "hello",
         },
     );
 

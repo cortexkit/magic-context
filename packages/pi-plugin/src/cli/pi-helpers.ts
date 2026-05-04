@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -61,12 +61,20 @@ export function detectPiBinary(): PiBinaryInfo | null {
 }
 
 export function getPiVersion(piPath: string): string | null {
+	// Pi >= 0.71.x writes `--version` output to stderr, not stdout. Use
+	// spawnSync (not execFileSync) so we get both streams back even on
+	// a clean exit. Prefer stdout when present so future Pi versions
+	// that switch back to stdout still work.
 	try {
-		return execFileSync(piPath, ["--version"], {
+		const result = spawnSync(piPath, ["--version"], {
 			encoding: "utf-8",
-			stdio: ["ignore", "pipe", "ignore"],
 			timeout: 10_000,
-		}).trim();
+		});
+		const stdout = result.stdout?.trim();
+		if (stdout) return stdout;
+		const stderr = result.stderr?.trim();
+		if (stderr) return stderr;
+		return null;
 	} catch {
 		return null;
 	}

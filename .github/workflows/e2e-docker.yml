@@ -79,15 +79,10 @@ jobs:
       - name: Build Pi plugin
         run: bun run --cwd packages/pi-plugin build
 
-      - name: Install Pi plugin runtime deps for Docker COPY
-        # The Pi Dockerfile COPYs node_modules to make better-sqlite3
-        # and transformers available at runtime without rebuilding
-        # native modules inside the image. Use --omit=dev because the
-        # image only needs runtime deps.
-        working-directory: packages/pi-plugin
-        run: npm install --omit=dev --no-audit --no-fund
-
       - name: Build E2E image
+        # The Pi Dockerfile installs runtime deps fresh inside the image
+        # (better-sqlite3 builds against linux/amd64), so no host-side
+        # `npm install` is needed.
         run: |
           docker build \
             --platform linux/amd64 \

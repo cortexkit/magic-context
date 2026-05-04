@@ -55,11 +55,9 @@ echo "Pre-building local dist artifacts..."
 bun run --cwd "$REPO_ROOT/packages/plugin" build
 bun run --cwd "$REPO_ROOT/packages/pi-plugin" build
 
-# pi-plugin needs node_modules baked into the image because its
-# CLI is a Node ESM bundle that requires its dependency tree at
-# runtime. Skip optional deps to keep the image small.
-echo "Installing pi-plugin runtime dependencies..."
-(cd "$REPO_ROOT/packages/pi-plugin" && bun install --production --frozen-lockfile 2>/dev/null || npm install --omit=dev --no-audit --no-fund)
+# pi-plugin runtime deps are installed inside the Pi Docker image
+# (see Dockerfile.pi) so better-sqlite3 builds against the correct
+# linux/amd64 platform — no host install needed.
 
 EXIT=0
 case "$TARGET" in

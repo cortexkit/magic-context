@@ -40,7 +40,11 @@ ENV PATH="/root/.opencode/bin:$PATH"
 
 # aimock provides the OpenAI-compatible mock LLM. AFT uses the same
 # package and it works well for deterministic multi-turn tests.
-RUN npm install -g @copilotkit/aimock
+# Install into /test so aimock-server.cjs (also in /test) can require()
+# it directly without NODE_PATH gymnastics.
+RUN mkdir -p /test && cd /test && \
+    npm init -y > /dev/null && \
+    npm install --silent --no-audit --no-fund @copilotkit/aimock
 
 # Test project — needs to be a git repo so Magic Context's project
 # identity resolution (git root commit hash) works the same way it

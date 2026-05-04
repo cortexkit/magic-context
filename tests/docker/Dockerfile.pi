@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     git \
     ca-certificates \
+    unzip \
     python3 \
     build-essential \
     sqlite3 \
@@ -41,35 +42,57 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
 RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:$PATH"
 
-# Pi coding agent. Pin to the >= 0.71.0 floor we declare in the Pi
-# extension's peer dependency.
-RUN npm install -g @mariozechner/pi-coding-agent@^0.71.0
+# Pi coding agent. Install the latest Pi >= 0.71.0 from the floor we
+# declare in the Pi extension's peer dependency. We use `latest` rather
+# than pinning ^0.71.0 because Pi 0.71.1's extension loader has known
+# dynamic-import issues that were fixed in 0.72.x; the peer dep floor
+# stays at 0.71.0 because that's the lowest version with the long-form
+# `--extension` flag we depend on for subagent spawning.
+RUN npm install -g @mariozechner/pi-coding-agent@latest
 
-# Configure Pi non-interactively. Pi reads ~/.pi/agent/auth.json for
-# provider auth (we only need the local aimock route, so a single
-# OpenAI-compatible entry pointed at 127.0.0.1:4010 is enough).
-RUN mkdir -p /root/.pi/agent && \
-    echo '{ \
-      "openai": { \
-        "apiKey": "sk-mock-e2e-test", \
-        "baseURL": "http://127.0.0.1:4010/v1" \
-      } \
-    }' > /root/.pi/agent/auth.json
+# Pi authentication and provider routing happens in the test script via
+# CLI flags (--api-key, --provider, --model). We don't write auth.json
+# here because the test only ever talks to a local aimock; using flags
+# is more transparent and avoids depending on Pi's evolving auth.json
+# schema.
+RUN mkdir -p /root/.pi/agent
 
-# aimock for the session smoke run.
-RUN npm install -g @copilotkit/aimock
+# aimock for the session smoke run. Install into /test so
+# aimock-server.cjs (also in /test) can require() it directly.
+RUN mkdir -p /test && cd /test && \
+    npm init -y > /dev/null && \
+    npm install --silent --no-audit --no-fund @copilotkit/aimock
 
 # Magic Context source — copy the locally-built Pi plugin dist plus
-# package.json so npm install can wire bin/extension paths.
+# package.json so we can install via `pi install` from a local path.
+# We do NOT copy host node_modules because Bun's monorepo install puts
+# symlinks pointing at host workspace paths that don't exist in the
+# container; `pi install` will resolve and install the right deps.
 COPY packages/pi-plugin/dist/ /test/mc-pi/dist/
 COPY packages/pi-plugin/package.json /test/mc-pi/package.json
 COPY packages/pi-plugin/README.md /test/mc-pi/README.md
-COPY packages/pi-plugin/node_modules/ /test/mc-pi/node_modules/
+
+# Install runtime deps with flat npm layout for the magic-context-pi
+# CLI binary itself. The CLI is invoked directly (not via Pi), so it
+# needs its own dependency tree. better-sqlite3 builds from source
+# here for the linux/amd64 runtime.
+RUN cd /test/mc-pi && \
+    npm install --omit=dev --no-audit --no-fund --workspaces=false \
+        --no-package-lock --legacy-peer-deps 2>&1 | tail -5
 
 # Symlink magic-context-pi onto PATH so `magic-context-pi doctor` works.
 # Mirrors what `npm install -g @cortexkit/pi-magic-context` would do.
 RUN chmod +x /test/mc-pi/dist/cli.js && \
     ln -s /test/mc-pi/dist/cli.js /usr/local/bin/magic-context-pi
+
+# Pre-install the Pi extension via Pi's own `pi install ./local/path`
+# flow. This mirrors how end users install from npm — Pi resolves the
+# package, installs deps into its own cache, and registers the
+# extension in ~/.pi/agent/settings.json so subsequent `pi --print`
+# runs auto-load it. Without this step the test would have to use the
+# raw `--extension <path>` flag which doesn't handle peer deps or
+# dynamic imports correctly.
+RUN pi install /test/mc-pi 2>&1 | tail -10
 
 # Test project (git repo so project identity resolution matches real users).
 RUN git config --global user.email "test@cortexkit.local" && \

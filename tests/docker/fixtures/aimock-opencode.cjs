@@ -15,11 +15,15 @@ const port = parseInt(process.env.AIMOCK_PORT || "4010", 10);
 async function main() {
     const mock = new LLMock({ port });
 
-    // Match any turn — this fixture is intentionally simple.
+    // Catch-all fixture: respond to any chat-completion request with a
+    // short text reply. Predicate returns true unconditionally so we
+    // don't depend on sequenceIndex bookkeeping (OpenCode may issue
+    // multiple requests per session: model-list probe, chat completion,
+    // possibly a follow-up).
     mock.on(
-        { sequenceIndex: 0 },
+        { predicate: () => true },
         {
-            text: "hello",
+            content: "hello",
         },
     );
 
