@@ -1,0 +1,1407 @@
+[
+  {
+    "name": "mcp_Question",
+    "description": "Use this tool when you need to ask the user questions during execution. This allows you to:\n1. Gather user preferences or requirements\n2. Clarify ambiguous instructions\n3. Get decisions on implementation choices as you work\n4. Offer choices to the user about what direction to take.\n\nUsage notes:\n- When `custom` is enabled (default), a \"Type your own answer\" option is added automatically; don't include \"Other\" or catch-all options\n- Answers are returned as arrays of labels; set `multiple: true` to allow selecting more than one\n- If you recommend a specific option, make that the first option in the list and add \"(Recommended)\" at the end of the label\n",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "questions": {
+          "description": "Questions to ask",
+          "type": "array",
+          "items": {
+            "ref": "QuestionPrompt",
+            "type": "object",
+            "properties": {
+              "question": {
+                "description": "Complete question",
+                "type": "string"
+              },
+              "header": {
+                "description": "Very short label (max 30 chars)",
+                "type": "string"
+              },
+              "options": {
+                "description": "Available choices",
+                "type": "array",
+                "items": {
+                  "ref": "QuestionOption",
+                  "type": "object",
+                  "properties": {
+                    "label": {
+                      "description": "Display text (1-5 words, concise)",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "Explanation of choice",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "label",
+                    "description"
+                  ]
+                }
+              },
+              "multiple": {
+                "description": "Allow selecting multiple choices",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "question",
+              "header",
+              "options"
+            ]
+          }
+        }
+      },
+      "required": [
+        "questions"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Bash",
+    "description": "Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.\n\nBe aware: OS: darwin, Shell: zsh\n\nAll commands run in the current working directory by default. Use the `workdir` parameter if you need to run a command in a different directory. AVOID using `cd <directory> && <command>` patterns - use `workdir` instead.\n\nIMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.\n\nBefore executing the command, please follow these steps:\n\n1. Directory Verification:\n   - If the command will create new directories or files, first use `ls` to verify the parent directory exists and is the correct location\n   - For example, before running \"mkdir foo/bar\", first use `ls foo` to check that \"foo\" exists and is the intended parent directory\n\n2. Command Execution:\n   - Always quote file paths that contain spaces with double quotes (e.g., rm \"path with spaces/file.txt\")\n   - Examples of proper quoting:\n     - mkdir \"/Users/name/My Documents\" (correct)\n     - mkdir /Users/name/My Documents (incorrect - will fail)\n     - python \"/path/with spaces/script.py\" (correct)\n     - python /path/with spaces/script.py (incorrect - will fail)\n   - After ensuring proper quoting, execute the command.\n   - Capture the output of the command.\n\nUsage notes:\n  - The command argument is required.\n  - You can specify an optional timeout in milliseconds. If not specified, commands will time out after 120000ms (2 minutes).\n  - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.\n  - If the output exceeds 2000 lines or 51200 bytes, it will be truncated and the full output will be written to a file. You can use Read with offset/limit to read specific sections or Grep to search the full content. Do NOT use `head`, `tail`, or other truncation commands to limit output; the full output will already be captured to a file for more precise searching.\n\n  - Avoid using Bash with the `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:\n    - File search: Use Glob (NOT find or ls)\n    - Content search: Use Grep (NOT grep or rg)\n    - Read files: Use Read (NOT cat/head/tail)\n    - Edit files: Use Edit (NOT sed/awk)\n    - Write files: Use Write (NOT echo >/cat <<EOF)\n    - Communication: Output text directly (NOT echo/printf)\n  - When issuing multiple commands:\n    - If the commands are independent and can run in parallel, make multiple Bash tool calls in a single message. For example, if you need to run \"git status\" and \"git diff\", send a single message with two Bash tool calls in parallel.\n    - If the commands depend on each other and must run sequentially, use a single Bash call with '&&' to chain them together (e.g., `git add . && git commit -m \"message\" && git push`). For instance, if one operation must complete before another starts (like mkdir before cp, Write before Bash for git operations, or git add before git commit), run these operations sequentially instead.\n    - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail\n    - DO NOT use newlines to separate commands (newlines are ok in quoted strings)\n  - AVOID using `cd <directory> && <command>`. Use the `workdir` parameter to change directories instead.\n    <good-example>\n    Use workdir=\"/foo/bar\" with command: pytest tests\n    </good-example>\n    <bad-example>\n    cd /foo/bar && pytest tests\n    </bad-example>\n\n# Committing changes with git\n\nOnly create commits when requested by the user. If unclear, ask first. When the user asks you to create a new git commit, follow these steps carefully:\n\nGit Safety Protocol:\n- NEVER update the git config\n- NEVER run destructive/irreversible git commands (like push --force, hard reset, etc) unless the user explicitly requests them\n- NEVER skip hooks (--no-verify, --no-gpg-sign, etc) unless the user explicitly requests it\n- NEVER run force push to main/master, warn the user if they request it\n- Avoid git commit --amend. ONLY use --amend when ALL conditions are met:\n  (1) User explicitly requested amend, OR the commit succeeded and pre-commit hooks auto-modified files that need including \u2014 verify by checking `git log` that HEAD is the new commit before amending\n  (2) HEAD commit was created by you in this conversation (verify: git log -1 --format='%an %ae')\n  (3) Commit has NOT been pushed to remote (verify: git status shows \"Your branch is ahead\")\n- CRITICAL: If commit FAILED or was REJECTED by hook, NEVER amend - fix the issue and create a NEW commit\n- CRITICAL: If you already pushed to remote, NEVER amend unless user explicitly requests it (requires force push)\n- NEVER commit changes unless the user explicitly asks you to. It is VERY IMPORTANT to only commit when explicitly asked, otherwise the user will feel that you are being too proactive.\n\n1. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run multiple tool calls in parallel for optimal performance. run the following bash commands in parallel, each using the Bash tool:\n  - Run a git status command to see all untracked files.\n  - Run a git diff command to see both staged and unstaged changes that will be committed.\n  - Run a git log command to see recent commit messages, so that you can follow this repository's commit message style.\n2. Analyze all staged changes (both previously staged and newly added) and draft a commit message:\n  - Summarize the nature of the changes (eg. new feature, enhancement to an existing feature, bug fix, refactoring, test, docs, etc.). Ensure the message accurately reflects the changes and their purpose (i.e. \"add\" means a wholly new feature, \"update\" means an enhancement to an existing feature, \"fix\" means a bug fix, etc.).\n  - Do not commit files that likely contain secrets (.env, credentials.json, etc.). Warn the user if they specifically request to commit those files\n  - Draft a concise (1-2 sentences) commit message that focuses on the \"why\" rather than the \"what\"\n  - Ensure it accurately reflects the changes and their purpose\n3. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run multiple tool calls in parallel for optimal performance. run the following commands:\n   - Add relevant untracked files to the staging area.\n   - Create the commit with a message\n   - Run git status after the commit completes to verify success.\n   Note: git status depends on the commit completing, so run it sequentially after the commit.\n4. If the commit fails due to pre-commit hook, fix the issue and create a NEW commit (see amend rules above)\n\nImportant notes:\n- NEVER run additional commands to read or explore code, besides git bash commands\n- NEVER use the TodoWrite or Task tools\n- DO NOT push to the remote repository unless the user explicitly asks you to do so\n- IMPORTANT: Never use git commands with the -i flag (like git rebase -i or git add -i) since they require interactive input which is not supported.\n- If there are no changes to commit (i.e., no untracked files and no modifications), do not create an empty commit\n\n# Creating pull requests\nUse the gh command via the Bash tool for ALL GitHub-related tasks including working with issues, pull requests, checks, and releases. If given a GitHub URL use the gh command to get the information needed.\n\nIMPORTANT: When the user asks you to create a pull request, follow these steps carefully:\n\n1. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run multiple tool calls in parallel for optimal performance. run the following bash commands in parallel using the Bash tool, in order to understand the current state of the branch since it diverged from the main branch:\n   - Run a git status command to see all untracked files\n   - Run a git diff command to see both staged and unstaged changes that will be committed\n   - Check if the current branch tracks a remote branch and is up to date with the remote, so you know if you need to push to the remote\n   - Run a git log command and `git diff [base-branch]...HEAD` to understand the full commit history for the current branch (from the time it diverged from the base branch)\n2. Analyze all changes that will be included in the pull request, making sure to look at all relevant commits (NOT just the latest commit, but ALL commits that will be included in the pull request!!!), and draft a pull request summary\n3. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run multiple tool calls in parallel for optimal performance. run the following commands in parallel:\n   - Create new branch if needed\n   - Push to remote with -u flag if needed\n   - Create PR using gh pr create with the format below. Use a HEREDOC to pass the body to ensure correct formatting.\n<example>\ngh pr create --title \"the pr title\" --body \"$(cat <<'EOF'\n## Summary\n<1-3 bullet points>\n</example>\n\nImportant:\n- DO NOT use the TodoWrite or Task tools\n- Return the PR URL when you're done, so the user can see it\n\n# Other common operations\n- View comments on a GitHub PR: gh api repos/foo/bar/pulls/123/comments\n",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "command": {
+          "description": "The command to execute",
+          "type": "string"
+        },
+        "timeout": {
+          "description": "Optional timeout in milliseconds",
+          "type": "number"
+        },
+        "workdir": {
+          "description": "The working directory to run the command in. Defaults to the current directory. Use this instead of 'cd' commands.",
+          "type": "string"
+        },
+        "description": {
+          "description": "Clear, concise description of what this command does in 5-10 words. Examples:\nInput: ls\nOutput: Lists files in current directory\n\nInput: git status\nOutput: Shows working tree status\n\nInput: npm install\nOutput: Installs package dependencies\n\nInput: mkdir foo\nOutput: Creates directory 'foo'",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "description"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Read",
+    "description": "Read file contents or list directory entries.\n\nUse either startLine/endLine OR offset/limit to read a section of a file.\n\nBehavior:\n- Returns line-numbered content (e.g., \"1: const x = 1\")\n- Lines longer than 2000 characters are truncated\n- Output capped at 50KB\n- Binary files are auto-detected and return a size-only message\n- Image files (.png, .jpg, .gif, .webp, etc.) and PDFs return a metadata string (format, size, path) \u2014 no file content is returned\n- Directories return sorted entries with trailing / for subdirectories\n\nExamples:\n  Read full file: { \"filePath\": \"src/app.ts\" }\n  Read lines 50-100: { \"filePath\": \"src/app.ts\", \"startLine\": 50, \"endLine\": 100 }\n  Read 30 lines from line 200: { \"filePath\": \"src/app.ts\", \"offset\": 200, \"limit\": 30 }\n  List directory: { \"filePath\": \"src/\" }\n\nReturns: Line-numbered file content string. For directories: newline-joined sorted entries. For binary files: size/message string.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "filePath": {
+          "description": "Path to file or directory (absolute or relative to project root)",
+          "type": "string"
+        },
+        "startLine": {
+          "description": "1-based line to start reading from",
+          "type": "number"
+        },
+        "endLine": {
+          "description": "1-based line to stop reading at (inclusive)",
+          "type": "number"
+        },
+        "limit": {
+          "description": "Max lines to return (default: 2000)",
+          "type": "number"
+        },
+        "offset": {
+          "description": "1-based line number to start reading from (use with limit). Ignored if startLine is provided",
+          "type": "number"
+        }
+      },
+      "required": [
+        "filePath"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Glob",
+    "description": "Find files matching a glob pattern. Returns matching file paths sorted by modification time.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pattern"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Grep",
+    "description": "Search file contents using regular expressions. Returns matching lines with file paths, line numbers, and context.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string"
+        },
+        "include": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pattern"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Edit",
+    "description": "Edit a file by finding and replacing text, or by targeting named symbols.\n\n**Modes** (determined by which parameters you provide):\n\nMode priority: operations > edits > symbol (without oldString) > oldString (find/replace) > content-only (write)\n\n1. **Multi-file transaction** \u2014 pass `operations` array\n   Edits across multiple files with checkpoint-based rollback on failure.\n   Each operation: `{ \"file\": \"path\", \"command\": \"edit_match\" | \"write\", ... }`.\n   For `edit_match`: include `match`, `replacement`. For `write`: include `content`.\n   Example: `{ \"operations\": [{ \"file\": \"a.ts\", \"command\": \"edit_match\", \"match\": \"old\", \"replacement\": \"new\" }, { \"file\": \"b.ts\", \"command\": \"write\", \"content\": \"...\" }] }`\n\n2. **Batch edits** \u2014 pass `filePath` + `edits` array\n   Multiple edits in one file atomically. Each edit is either:\n   - `{ \"oldString\": \"old\", \"newString\": \"new\" }` \u2014 find/replace\n   - `{ \"startLine\": 5, \"endLine\": 7, \"content\": \"new lines\" }` \u2014 replace line range (1-based, both inclusive)\n   Set content to empty string to delete lines.\n\n3. **Symbol replace** \u2014 pass `filePath` + `symbol` + `content`\n   Replaces an entire named symbol (function, class, type) with new content.\n   Includes decorators, attributes, and doc comments in the replacement range.\n   **Important:** You must NOT provide `oldString` when using symbol mode \u2014 if present, the tool silently falls back to find/replace mode.\n   Example: `{ \"filePath\": \"src/app.ts\", \"symbol\": \"handleRequest\", \"content\": \"function handleRequest() { ... }\" }`\n\n4. **Find and replace** \u2014 pass `filePath` + `oldString` + `newString`\n   Finds the exact text in `oldString` and replaces it with `newString`.\n   Supports fuzzy matching (handles whitespace differences automatically).\n   If multiple matches exist, specify which one with `occurrence` or use `replaceAll: true`.\n   Example: `{ \"filePath\": \"src/app.ts\", \"oldString\": \"const x = 1\", \"newString\": \"const x = 2\" }`\n\n5. **Replace all occurrences** \u2014 add `replaceAll: true`\n   Replaces every occurrence of `oldString` in the file.\n   Example: `{ \"filePath\": \"src/app.ts\", \"oldString\": \"oldName\", \"newString\": \"newName\", \"replaceAll\": true }`\n\n6. **Select specific occurrence** \u2014 add `occurrence: N` (0-indexed)\n   When multiple matches exist, select the Nth one (0 = first, 1 = second, etc.).\n   Example: `{ \"filePath\": \"src/app.ts\", \"oldString\": \"TODO\", \"newString\": \"DONE\", \"occurrence\": 0 }`\n\nNote: Modes 5 and 6 are options on mode 4 (find/replace) \u2014 they require `oldString`.\n\n**Behavior:**\n- Backs up files before editing (recoverable via aft_safety undo)\n- Auto-formats using project formatter if configured\n- Tree-sitter syntax validation on all edits\n- Symbol replace includes decorators, attributes, and doc comments in range\n- LSP error-level diagnostics are returned automatically after non-dry-run edits\n\nReturns: JSON string for the selected edit mode. Dry runs return diff data; non-dry-run edits may append inline LSP error lines.\n\nCommon response fields: success (boolean), diff (object with before/after), backup_id (string), syntax_valid (boolean). Exact fields vary by mode.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "filePath": {
+          "description": "Path to the file to edit (absolute or relative to project root). Required for all modes except 'operations' multi-file transactions",
+          "type": "string"
+        },
+        "oldString": {
+          "description": "Text to find (exact match, with fuzzy fallback)",
+          "type": "string"
+        },
+        "newString": {
+          "description": "Text to replace with (omit or set to empty string to delete the matched text)",
+          "type": "string"
+        },
+        "replaceAll": {
+          "description": "Replace all occurrences",
+          "type": "boolean"
+        },
+        "occurrence": {
+          "description": "0-indexed occurrence to replace when multiple matches exist",
+          "type": "number"
+        },
+        "symbol": {
+          "description": "Named symbol to replace (function, class, type)",
+          "type": "string"
+        },
+        "content": {
+          "description": "New content for symbol replace or file write",
+          "type": "string"
+        },
+        "edits": {
+          "description": "Batch edits \u2014 array of { oldString: string, newString: string } or { startLine: number (1-based), endLine: number (1-based, inclusive), content: string }",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          }
+        },
+        "operations": {
+          "description": "Transaction \u2014 array of { file: string, command: 'edit_match' | 'write', match?: string, replacement?: string, content?: string } for multi-file edits with rollback. Note: uses 'file'/'match'/'replacement' (not filePath/oldString/newString)",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {}
+          }
+        },
+        "dryRun": {
+          "description": "Preview changes without applying (returns diff, default: false)",
+          "type": "boolean"
+        }
+      }
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Write",
+    "description": "Write content to a file, creating it (and parent directories) if needed.\n\nAutomatically creates parent directories. Backs up existing files before overwriting.\nIf the project has a formatter configured (biome, prettier, rustfmt, etc.), the file\nis auto-formatted after writing. Returns inline LSP diagnostics when available.\n\n**Behavior:**\n- Creates parent directories automatically (no need to mkdir first)\n- Existing files are backed up before overwriting (recoverable via aft_safety undo)\n- Auto-formats using project formatter if configured (biome.json, .prettierrc, etc.)\n- Returns LSP error-level diagnostics inline if type errors are introduced\n- Use this for creating new files or completely replacing file contents\n- For partial edits (find/replace), use the `edit` tool instead\n\nReturns: Status message string (for example: \"Created new file. Auto-formatted.\") with optional inline LSP error lines.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "filePath": {
+          "description": "Path to the file to write (absolute or relative to project root)",
+          "type": "string"
+        },
+        "content": {
+          "description": "The full content to write to the file",
+          "type": "string"
+        }
+      },
+      "required": [
+        "filePath",
+        "content"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Task",
+    "description": "Spawn agent task with category-based or direct agent selection.\n  \n  \u26a0\ufe0f  CRITICAL: You MUST provide EITHER category OR subagent_type. Omitting BOTH will FAIL.\n  \n  **COMMON MISTAKE (DO NOT DO THIS):**\n  ```\n  task(description=\"...\", prompt=\"...\", run_in_background=false)  // \u274c FAILS - missing category AND subagent_type\n  ```\n  \n  **CORRECT - Using category:**\n  ```\n  task(category=\"quick\", load_skills=[], description=\"Fix type error\", prompt=\"...\", run_in_background=false)\n  ```\n  \n  **CORRECT - Using subagent_type:**\n  ```\n  task(subagent_type=\"explore\", load_skills=[], description=\"Find patterns\", prompt=\"...\", run_in_background=true)\n  ```\n  \n  REQUIRED: Provide ONE of:\n  - category: For task delegation (uses Sisyphus-Junior with category-optimized model)\n  - subagent_type: For direct agent invocation (explore, librarian, oracle, etc.)\n  \n  **DO NOT provide both.** If category is provided, subagent_type is ignored.\n  \n  - load_skills: ALWAYS REQUIRED. Pass [] if no skills needed, or [\"skill-1\", \"skill-2\"] for category tasks.\n  - category: Use predefined category \u2192 Spawns Sisyphus-Junior with category config\n    Available categories:\n    - visual-engineering: Frontend, UI/UX, design, styling, animation\n  - artistry: Complex problem-solving with unconventional, creative approaches - beyond standard patterns\n  - ultrabrain: Use ONLY for genuinely hard, logic-heavy tasks. Give clear goals only, not step-by-step instructions.\n  - deep: Goal-oriented autonomous problem-solving. Thorough research before action. For hairy problems requiring deep understanding.\n  - quick: Trivial tasks - single file changes, typo fixes, simple modifications\n  - unspecified-low: Tasks that don't fit other categories, low effort required\n  - unspecified-high: Tasks that don't fit other categories, high effort required\n  - writing: Documentation, prose, technical writing\n  - subagent_type: Use specific agent directly (explore, librarian, oracle, metis, momus)\n  - run_in_background: REQUIRED. true=async (returns task_id), false=sync (waits). Use background=true ONLY for parallel exploration with 5+ independent queries.\n  - task_id: Existing task to continue (from previous task output). Continues the same subagent session with FULL CONTEXT PRESERVED.\n  - command: The command that triggered this task (optional, for slash command tracking).\n  \n  **WHEN TO USE task_id:**\n  - Task failed/incomplete \u2192 task_id with \"fix: [specific issue]\"\n  - Need follow-up on previous result \u2192 task_id with additional question\n  - Multi-turn conversation with same agent \u2192 always task_id instead of new task\n  \n  Prompts MUST be in English.\nAvailable agent types and the tools they have access to:\n- Athena-Junior - Council: Non-interactive council orchestrator for programmatic multi-model synthesis. Returns structured <athena_council_result> JSON without user interaction. (Athena-Junior - OhMyOpenCode)\n- build: The default agent. Executes tools based on configured permissions.\n- Council: Bailan GLM 5: Council member: Bailan GLM 5 (bailian-coding-plan/glm-5). Independent read-only code analyst for Athena council. (OhMyOpenCode)\n- Council: Bailan Kimi 2.5: Council member: Bailan Kimi 2.5 (bailian-coding-plan/kimi-k2.5). Independent read-only code analyst for Athena council. (OhMyOpenCode)\n- Council: Bailan MiniMax 2.5: Council member: Bailan MiniMax 2.5 (bailian-coding-plan/MiniMax-M2.5). Independent read-only code analyst for Athena council. (OhMyOpenCode)\n- Council: Bailan QWEN3.5 Plus: Council member: Bailan QWEN3.5 Plus (bailian-coding-plan/qwen3.5-plus). Independent read-only code analyst for Athena council. (OhMyOpenCode)\n- Council: Gemini 3.1 PRO: Council member: Gemini 3.1 PRO (github-copilot/gemini-3.1-pro-preview). Independent read-only code analyst for Athena council. (OhMyOpenCode)\n- Council: GPT 5.4 high: Council member: GPT 5.4 high (github-copilot/gpt-5.4). Independent read-only code analyst for Athena council. (OhMyOpenCode)\n- Council: GPT 5.4 mini: Council member: GPT 5.4 mini (github-copilot/gpt-5.4-mini). Independent read-only code analyst for Athena council. (OhMyOpenCode)\n- Council: Minimax Free: Council member: Minimax Free (opencode/minimax-m2.5-free). Independent read-only code analyst for Athena council. (OhMyOpenCode)\n- Council: OpenCode GO GLM 5.1: Council member: OpenCode GO GLM 5.1 (opencode-go/glm-5.1). Independent read-only code analyst for Athena council. (OhMyOpenCode)\n- Council: OpenCode GO Kimi 2.6: Council member: OpenCode GO Kimi 2.6 (opencode-go/kimi-k2.6). Independent read-only code analyst for Athena council. (OhMyOpenCode)\n- Council: OpenCode GO MiniMax 2.7: Council member: OpenCode GO MiniMax 2.7 (opencode-go/minimax-m2.7). Independent read-only code analyst for Athena council. (OhMyOpenCode)\n- Council: OpenCode GO QWEN 3.6 Plus: Council member: OpenCode GO QWEN 3.6 Plus (opencode-go/qwen3.6-plus). Independent read-only code analyst for Athena council. (OhMyOpenCode)\n- Council: Opus: Council member: Opus (anthropic/claude-opus-4-7). Independent read-only code analyst for Athena council. (OhMyOpenCode)\n- Council: Sonnet Creative: Council member: Sonnet Creative (anthropic/claude-sonnet-4-6). Independent read-only code analyst for Athena council. (OhMyOpenCode)\n- dreamer: This subagent should only be called manually by the user.\n- explore: Contextual grep for codebases. Answers \"Where is X?\", \"Which file has Y?\", \"Find the code that does Z\". Fire multiple in parallel for broad searches. Specify thoroughness: \"quick\" for basic, \"medium\" for moderate, \"very thorough\" for comprehensive analysis. (Explore - OhMyOpenCode)\n- general: General-purpose agent for researching complex questions and executing multi-step tasks. Use this agent to execute multiple units of work in parallel.\n- historian: This subagent should only be called manually by the user.\n- historian-editor: This subagent should only be called manually by the user.\n- librarian: Specialized codebase understanding agent for multi-repository analysis, searching remote codebases, retrieving official documentation, and finding implementation examples using GitHub CLI, Context7, and Web Search. MUST BE USED when users ask to look up code in remote repositories, explain library internals, or find usage examples in open source. (Librarian - OhMyOpenCode)\n- Metis - Plan Consultant: Pre-planning consultant that analyzes requests to identify hidden intentions, ambiguities, and AI failure points. (Metis - OhMyOpenCode)\n- Momus - Plan Critic: Expert reviewer for evaluating work plans against rigorous clarity, verifiability, and completeness standards. (Momus - OhMyOpenCode)\n- multimodal-looker: Analyze media files (PDFs, images, diagrams) that require interpretation beyond raw text. Extracts specific information or summaries from documents, describes visual content. Use when you need analyzed/extracted data rather than literal file contents. (Multimodal-Looker - OhMyOpenCode)\n- OpenCode-Builder: Build agent (OpenCode default)\n- oracle: Read-only consultation agent. High-IQ reasoning specialist for debugging hard problems and high-difficulty architecture design. (Oracle - OhMyOpenCode)\n- plan: Plan mode. Disallows all edit tools.\n- sidekick: This subagent should only be called manually by the user.\n- Sisyphus-Junior: Focused task executor. Same discipline, no delegation. (Sisyphus-Junior - OhMyOpenCode)",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "load_skills": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Skill names to inject. REQUIRED - pass [] if no skills needed."
+        },
+        "description": {
+          "description": "Short task description (3-5 words). Auto-generated from prompt if omitted.",
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string",
+          "description": "Full detailed prompt for the agent"
+        },
+        "run_in_background": {
+          "type": "boolean",
+          "description": "REQUIRED. true=async (returns task_id), false=sync (waits). Use false for task delegation, true ONLY for parallel exploration."
+        },
+        "category": {
+          "description": "REQUIRED if subagent_type not provided. Do NOT provide both category and subagent_type.",
+          "type": "string"
+        },
+        "subagent_type": {
+          "description": "REQUIRED if category not provided. Do NOT provide both category and subagent_type.",
+          "type": "string"
+        },
+        "task_id": {
+          "description": "Existing task to continue. Canonical resume identifier.",
+          "type": "string"
+        },
+        "command": {
+          "description": "The command that triggered this task",
+          "type": "string"
+        },
+        "write_output_to_file": {
+          "description": "Write raw task output to file on completion",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "load_skills",
+        "prompt",
+        "run_in_background"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Webfetch",
+    "description": "- Fetches content from a specified URL\n- Takes a URL and optional format as input\n- Fetches the URL content, converts to requested format (markdown by default)\n- Returns the content in the specified format\n- Use this tool when you need to retrieve and analyze web content\n\nUsage notes:\n  - IMPORTANT: if another tool is present that offers better web fetching capabilities, is more targeted to the task, or has fewer restrictions, prefer using that tool instead of this one.\n  - The URL must be a fully-formed valid URL\n  - HTTP URLs will be automatically upgraded to HTTPS\n  - Format options: \"markdown\" (default), \"text\", or \"html\"\n  - This tool is read-only and does not modify any files\n  - Results may be summarized if the content is very large\n",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "url": {
+          "description": "The URL to fetch content from",
+          "type": "string"
+        },
+        "format": {
+          "description": "The format to return the content in (text, markdown, or html). Defaults to markdown.",
+          "default": "markdown",
+          "type": "string",
+          "enum": [
+            "text",
+            "markdown",
+            "html"
+          ]
+        },
+        "timeout": {
+          "description": "Optional timeout in seconds (max 120)",
+          "type": "number"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Todowrite",
+    "description": "Use this tool to create and manage a structured task list for your current coding session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.\nIt also helps the user understand the progress of the task and overall progress of their requests.\n\n## When to Use This Tool\nUse this tool proactively in these scenarios:\n\n1. Complex multistep tasks - When a task requires 3 or more distinct steps or actions\n2. Non-trivial and complex tasks - Tasks that require careful planning or multiple operations\n3. User explicitly requests todo list - When the user directly asks you to use the todo list\n4. User provides multiple tasks - When users provide a list of things to be done (numbered or comma-separated)\n5. After receiving new instructions - Immediately capture user requirements as todos. Feel free to edit the todo list based on new information.\n6. After completing a task - Mark it complete and add any new follow-up tasks\n7. When you start working on a new task, mark the todo as in_progress. Ideally you should only have one todo as in_progress at a time. Complete existing tasks before starting new ones.\n\n## When NOT to Use This Tool\n\nSkip using this tool when:\n1. There is only a single, straightforward task\n2. The task is trivial and tracking it provides no organizational benefit\n3. The task can be completed in less than 3 trivial steps\n4. The task is purely conversational or informational\n\nNOTE that you should not use this tool if there is only one trivial task to do. In this case you are better off just doing the task directly.\n\n## Examples of When to Use the Todo List\n\n<example>\nUser: I want to add a dark mode toggle to the application settings. Make sure you run the tests and build when you're done!\nAssistant: I'll help add a dark mode toggle to your application settings. Let me create a todo list to track this implementation.\n*Creates todo list with the following items:*\n1. Create dark mode toggle component in Settings page\n2. Add dark mode state management (context/store)\n3. Implement CSS-in-JS styles for dark theme\n4. Update existing components to support theme switching\n5. Run tests and build process, addressing any failures or errors that occur\n*Begins working on the first task*\n\n<reasoning>\nThe assistant used the todo list because:\n1. Adding dark mode is a multi-step feature requiring UI, state management, and styling changes\n2. The user explicitly requested tests and build be run afterward\n3. The assistant inferred that tests and build need to pass by adding \"Ensure tests and build succeed\" as the final task\n</reasoning>\n</example>\n\n<example>\nUser: Help me rename the function getCwd to getCurrentWorkingDirectory across my project\nAssistant: Let me first search through your codebase to find all occurrences of 'getCwd'.\n*Uses grep or search tools to locate all instances of getCwd in the codebase*\nAssistant: I've found 15 instances of 'getCwd' across 8 different files. Let me create a todo list to track these changes.\n*Creates todo list with specific items for each file that needs updating*\n\n<reasoning>\nThe assistant used the todo list because:\n1. First, the assistant searched to understand the scope of the task\n2. Upon finding multiple occurrences across different files, it determined this was a complex task with multiple steps\n3. The todo list helps ensure every instance is tracked and updated systematically\n4. This approach prevents missing any occurrences and maintains code consistency\n</reasoning>\n</example>\n\n\n<example>\nUser: I need to implement these features for my e-commerce site: user registration, product catalog, shopping cart, and checkout flow.\nAssistant: I'll help implement these features. First, let's add all the features to the todo list.\n*Creates a todo list breaking down each feature into specific tasks based on the project architecture*\nAssistant: Let's start with user registration. This will involve creating database models, API endpoints, and frontend forms that integrate with your existing authentication system.\n\n<reasoning>\nThe assistant used the todo list because:\n1. The user provided multiple complex features to implement in a comma separated list\n2. The todo list helps organize these large features into manageable tasks\n3. This approach allows for tracking progress across the entire implementation\n</reasoning>\n</example>\n\n<example>\nUser: Can you help optimize my React application? It's rendering slowly and has performance issues.</user>\nAssistant: I'll help optimize your React application. First, let me examine your codebase to identify potential performance bottlenecks.\n*Reviews component structure, render patterns, state management, and data fetching*\nAssistant: After analyzing your codebase, I've identified several performance issues. Let me create a todo list to track our optimization efforts.\n*Creates todo list with items like: 1) Implement memoization for expensive calculations in ProductList, 2) Add virtualization for long lists in Dashboard, 3) Optimize image loading in Gallery component, 4) Fix state update loops in ShoppingCart, 5) Review bundle size and implement code splitting*\nLet's start by implementing memoization for the expensive calculations in your ProductList component.</assistant>\n\n<reasoning>\nThe assistant used the todo list because:\n1. First, the assistant examined the codebase to identify specific performance issues\n2. Based on this analysis, it identified multiple optimization opportunities\n3. Performance optimization is a non-trivial task requiring multiple steps\n4. The todo list helps methodically track improvements across different components\n5. This systematic approach ensures all performance bottlenecks are addressed\n</reasoning>\n</example>\n\n## Examples of When NOT to Use the Todo List\n\n<example>\nUser: How do I print 'Hello World' in Python?\nAssistant: In Python, you can print \"Hello World\" with this simple code:\n\npython\nprint(\"Hello World\")\n\nThis will output the text \"Hello World\" to the console when executed.</assistant>\n\n<reasoning>\nThe assistant did not use the todo list because this is a single, trivial task that can be completed in one step. There's no need to track multiple tasks or steps for such a straightforward request.\n</reasoning>\n</example>\n\n<example>\nUser: What does the git status command do?\nAssistant: The git status command shows the current state of your working directory and staging area. It displays which changes have been staged, which haven't, and which files aren't being tracked by Git. This is a fundamental command for understanding the current state of your repository before making commits.\n\n<reasoning>\nThe assistant did not use the todo list because this is an informational request with no actual coding task to complete. The user is simply asking for an explanation, not for the assistant to perform multiple steps or tasks.\n</reasoning>\n</example>\n\n<example>\nUser: Can you add a comment to the calculateTotal function to explain what it does?\nAssistant: Sure, let me add a comment to the calculateTotal function to explain what it does.\n* Uses the Edit tool to add a comment to the calculateTotal function *\n\n<reasoning>\nThe assistant did not use the todo list because this is a single, straightforward task confined to one location in the code. Adding a comment doesn't require tracking multiple steps or systematic organization.\n</reasoning>\n</example>\n\n<example>\nUser: Run npm install for me and tell me what happens.\nAssistant: I'll run the npm install command for you.\n\n*Executes: npm install*\n\nThe command completed successfully. Here's the output:\n[Output of npm install command]\n\nAll dependencies have been installed according to your package.json file.\n\n<reasoning>\nThe assistant did not use the todo list because this is a single command execution with immediate results. There are no multiple steps to track or organize, making the todo list unnecessary for this straightforward task.\n</reasoning>\n</example>\n\n## Task States and Management\n\n1. **Task States**: Use these states to track progress:\n   - pending: Task not yet started\n   - in_progress: Currently working on (limit to ONE task at a time)\n   - completed: Task finished successfully\n   - cancelled: Task no longer needed\n\n2. **Task Management**:\n   - Update task status in real-time as you work\n   - Mark tasks complete IMMEDIATELY after finishing (don't batch completions)\n   - Only have ONE task in_progress at any time\n   - Complete current tasks before starting new ones\n   - Cancel tasks that become irrelevant\n\n3. **Task Breakdown**:\n   - Create specific, actionable items\n   - Break complex tasks into smaller, manageable steps\n   - Use clear, descriptive task names\n\nWhen in doubt, use this tool. Being proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully.\n\n",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "todos": {
+          "description": "The updated todo list",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "content": {
+                "description": "Brief description of the task",
+                "type": "string"
+              },
+              "status": {
+                "description": "Current status of the task: pending, in_progress, completed, cancelled",
+                "type": "string"
+              },
+              "priority": {
+                "description": "Priority level of the task: high, medium, low",
+                "type": "string"
+              }
+            },
+            "required": [
+              "content",
+              "status",
+              "priority"
+            ]
+          }
+        }
+      },
+      "required": [
+        "todos"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Skill",
+    "description": "Load a skill or execute a slash command to get detailed instructions for a specific task.\n\nSkills and commands provide specialized knowledge and step-by-step guidance.\nUse this when a task matches an available skill's or command's description.\n\n**How to use:**\n- Call with a skill name: name='review-work'\n- Call with a command name (without leading slash): name='publish'\n- The tool will return detailed instructions with your context applied.\n\n<available_items>\nPriority: project > user > opencode > builtin/plugin | Skills listed before commands\nInvoke via: skill(name=\"item-name\") - omit leading slash for commands.\n  <command>\n    <name>/playwright</name>\n    <description>(opencode - Skill) MUST USE for any browser-related tasks. Browser automation via Playwright MCP - verification, browsing, information gathering, web scraping, testing, screenshots, and all browser interactions.</description>\n    <scope>builtin</scope>\n  </command>\n  <command>\n    <name>/frontend-ui-ux</name>\n    <description>(opencode - Skill) Designer-turned-developer who crafts stunning UI/UX even without design mockups</description>\n    <scope>builtin</scope>\n  </command>\n  <command>\n    <name>/git-master</name>\n    <description>(opencode - Skill) MUST USE for ANY git operations. Atomic commits, rebase/squash, history search (blame, bisect, log -S). STRONGLY RECOMMENDED: Use with task(category='quick', load_skills=['git-master'], ...) to save context. Triggers: 'commit', 'rebase', 'squash', 'who wrote', 'when was X added', 'find the commit that'.</description>\n    <scope>builtin</scope>\n  </command>\n  <command>\n    <name>/dev-browser</name>\n    <description>(opencode - Skill) Browser automation with persistent page state. Use when users ask to navigate websites, fill forms, take screenshots, extract web data, test web apps, or automate browser workflows. Trigger phrases include 'go to [url]', 'click on', 'fill out the form', 'take a screenshot', 'scrape', 'automate', 'test the website', 'log into', or any browser interaction request.</description>\n    <scope>builtin</scope>\n  </command>\n  <command>\n    <name>/review-work</name>\n    <description>(opencode - Skill) Post-implementation review orchestrator. Launches 5 parallel background sub-agents: Oracle (goal/constraint verification), Oracle (code quality), Oracle (security), unspecified-high (hands-on QA execution), unspecified-high (context mining from GitHub/git/Slack/Notion). All must pass for review to pass. MUST USE after completing any significant implementation work. Triggers: 'review work', 'review my work', 'review changes', 'QA my work', 'verify implementation', 'check my work', 'validate changes', 'post-implementation review'.</description>\n    <scope>builtin</scope>\n  </command>\n  <command>\n    <name>/ai-slop-remover</name>\n    <description>(opencode - Skill) Removes AI-generated code smells from a SINGLE file while preserving functionality. For multiple files, call in PARALLEL per file.</description>\n    <scope>builtin</scope>\n  </command>\n  <command>\n    <name>/init-deep</name>\n    <description>(builtin) Initialize hierarchical AGENTS.md knowledge base</description>\n    <scope>builtin</scope>\n  </command>\n  <command>\n    <name>/ralph-loop</name>\n    <description>(builtin) Start self-referential development loop until completion</description>\n    <scope>builtin</scope>\n  </command>\n  <command>\n    <name>/ulw-loop</name>\n    <description>(builtin) Start ultrawork loop - continues until completion with ultrawork mode</description>\n    <scope>builtin</scope>\n  </command>\n  <command>\n    <name>/cancel-ralph</name>\n    <description>(builtin) Cancel active Ralph Loop</description>\n    <scope>builtin</scope>\n  </command>\n  <command>\n    <name>/refactor</name>\n    <description>(builtin) Intelligent refactoring command with LSP, AST-grep, architecture analysis, codemap, and TDD verification.</description>\n    <scope>builtin</scope>\n  </command>\n  <command>\n    <name>/start-work</name>\n    <description>(builtin) Start Sisyphus work session from Prometheus plan</description>\n    <scope>builtin</scope>\n  </command>\n  <command>\n    <name>/stop-continuation</name>\n    <description>(builtin) Stop all continuation mechanisms (ralph loop, todo continuation, boulder) for this session</description>\n    <scope>builtin</scope>\n  </command>\n  <command>\n    <name>/remove-ai-slops</name>\n    <description>(builtin) Remove AI-generated code smells from branch changes and critically review the results</description>\n    <scope>builtin</scope>\n  </command>\n  <command>\n    <name>/handoff</name>\n    <description>(builtin) Create a detailed context summary for continuing work in a new session</description>\n    <scope>builtin</scope>\n  </command>\n</available_items>\nLoad a specialized skill that provides domain-specific instructions and workflows.\n\nWhen you recognize that a task matches one of the available skills listed below, use this tool to load the full skill instructions.\n\nThe skill will inject detailed instructions, workflows, and access to bundled resources (scripts, references, templates) into the conversation context.\n\nTool output includes a `<skill_content name=\"...\">` block with the loaded content.\n\nThe following skills provide specialized sets of instructions for particular tasks\nInvoke this tool to load a skill when a task matches one of the available skills listed below:\n\n## Available Skills\n- **agent-browser**: Browser automation CLI for AI agents. Use when the user needs to interact with websites, including navigating pages, filling forms, clicking buttons, taking screenshots, extracting data, testing web apps, or automating any browser task. Triggers include requests to \"open a website\", \"fill out a form\", \"click a button\", \"take a screenshot\", \"scrape data from a page\", \"test this web app\", \"login to a site\", \"automate browser actions\", or any task requiring programmatic web interaction.\n- **gh**: Install and configure the GitHub CLI (gh) for AI agent environments where gh may not be pre-installed and git remotes use local proxies instead of github.com. Provides auto-install script with SHA256 verification and GITHUB_TOKEN auth with anonymous fallback. Use when gh command not found, shutil.which(\"gh\") returns None, need GitHub API access (issues, PRs, releases, workflow runs), or repository operations fail with \"failed to determine base repo\" error. Documents required -R flag for all gh commands in proxy environments. Includes project management: GitHub Projects V2 (gh project), milestones (REST API), issue stories (lifecycle and templates), and label taxonomy management.\n- **github-workflows**: Work with GitHub Actions CI/CD workflows - read live syntax, monitor runs, and debug failures. Use when writing, running, or debugging GitHub Actions workflows.\n- **remotion-best-practices**: Best practices for Remotion - Video creation in React",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The skill or command name (e.g., 'review-work' or 'publish'). Use without leading slash for commands."
+        },
+        "user_message": {
+          "description": "Optional arguments or context for command invocation. Example: name='publish', user_message='patch'",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Background_output",
+    "description": "Get output from background task. Use full_session=true to fetch session messages with filters. System notifies on completion, so block=true rarely needed. All timeouts are in milliseconds (ms), NOT seconds.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task ID to get output from"
+        },
+        "block": {
+          "description": "Wait for completion (default: false). System notifies when done, so blocking is rarely needed.",
+          "type": "boolean"
+        },
+        "timeout": {
+          "description": "Max wait time in ms (default: 60000, max: 600000)",
+          "type": "number"
+        },
+        "full_session": {
+          "description": "Return full session messages with filters (default: false)",
+          "type": "boolean"
+        },
+        "include_thinking": {
+          "description": "Include thinking/reasoning parts in full_session output (default: false)",
+          "type": "boolean"
+        },
+        "message_limit": {
+          "description": "Max messages to return (capped at 100)",
+          "type": "number"
+        },
+        "since_message_id": {
+          "description": "Return messages after this message ID (exclusive)",
+          "type": "string"
+        },
+        "include_tool_results": {
+          "description": "Include tool results in full_session output (default: false)",
+          "type": "boolean"
+        },
+        "thinking_max_chars": {
+          "description": "Max characters for thinking content (default: 2000)",
+          "type": "number"
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Background_cancel",
+    "description": "Cancel running background task(s). Use all=true to cancel ALL before final answer.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "taskId": {
+          "description": "Task ID to cancel (required if all=false)",
+          "type": "string"
+        },
+        "all": {
+          "description": "Cancel all running background tasks (default: false)",
+          "type": "boolean"
+        }
+      }
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Background_wait",
+    "description": "Wait for the next background task to complete from a set of task IDs. Returns as soon as ANY one finishes, with metadata-only completed_tasks array (task_id, description, status, duration_s, session_id, output_file_path). Use background_output to fetch full results. Call repeatedly with remaining IDs until all are done. All timeouts are in milliseconds (ms), NOT seconds \u2014 e.g. timeout=120000 for 2 minutes.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "task_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Task IDs to monitor \u2014 returns when ANY one reaches a terminal state"
+        },
+        "timeout": {
+          "description": "Max wait in ms. Default: 120000 (2 min). The tool returns immediately when any task finishes, so large values are fine.",
+          "type": "number"
+        }
+      },
+      "required": [
+        "task_ids"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Switch_agent",
+    "description": "Switch the active session agent. After calling this tool, the session will transition to the specified agent with the provided context as its starting prompt. Use this to route work to another agent (e.g., Atlas for fixes, Prometheus for planning). The switch executes when the current agent's turn completes.\n\nPermanent one-way handoff. Use ONLY when you're the wrong agent for the overall job, NEVER for subtasks (use task()). Targets: atlas, prometheus, sisyphus, hephaestus.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "type": "string",
+          "description": "Target agent name to switch to (e.g., 'atlas', 'prometheus')"
+        },
+        "context": {
+          "type": "string",
+          "description": "Context message for the target agent \u2014 include confirmed findings, the original question, and what action to take"
+        }
+      },
+      "required": [
+        "agent",
+        "context"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Look_at",
+    "description": "Extract basic information from media files (PDFs, images, diagrams) when a quick summary suffices over precise reading. Good for simple text-based content extraction without using the Read tool. NEVER use for visual precision, aesthetic evaluation, or exact accuracy - use Read tool instead for those cases.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "description": "Absolute path to the file to analyze",
+          "type": "string"
+        },
+        "image_data": {
+          "description": "Base64 encoded image data (for clipboard/pasted images)",
+          "type": "string"
+        },
+        "goal": {
+          "type": "string",
+          "description": "What specific information to extract from the file"
+        }
+      },
+      "required": [
+        "goal"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Ctx_reduce",
+    "description": "Reduce context by dropping tagged content you no longer need.\nUse \u00a7N\u00a7 identifiers visible in conversation. The `drop` param accepts ranges: \"3-5\", \"1,2,9\", \"1-5,8\".\n\nCRITICAL RULES:\n- NEVER blanket-drop large ranges (e.g., \"1-50\"). Always review what each tag contains first.\n- Only drop tool outputs you have already processed and no longer need.\n- Protected tags are accepted but deferred until they leave the last protected range.\n- Keep recent context \u2014 only reduce OLD content that is no longer relevant to current work.\n- Dropped content is gone forever.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "drop": {
+          "description": "Tag IDs to drop entirely. Ranges: '3-5', '1,2,9'",
+          "type": "string"
+        }
+      }
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Ctx_expand",
+    "description": "Decompress a compartment range to see the original conversation transcript. Use start/end from <compartment start=\"N\" end=\"M\"> attributes. Returns the compacted U:/A: transcript for that message range, capped at ~15K tokens.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "start": {
+          "description": "Start message ordinal (from compartment start attribute)",
+          "type": "number"
+        },
+        "end": {
+          "description": "End message ordinal (from compartment end attribute)",
+          "type": "number"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Ctx_note",
+    "description": "Save or inspect durable session notes that persist for this session.\nUse this for short goals, constraints, decisions, or reminders worth carrying forward.\n\nActions:\n- `write`: Append one note. Optionally provide `surface_condition` to create a smart note.\n- `read`: Show current notes. Defaults to active session notes + ready smart notes; use `filter` to inspect all, pending, ready, active, or dismissed notes.\n- `dismiss`: Dismiss a note by `note_id`.\n- `update`: Update a note by `note_id`.\n\n**Smart Notes**: When `surface_condition` is provided with `write`, the note becomes a project-scoped smart note.\nThe dreamer evaluates smart note conditions during nightly runs and surfaces them when conditions are met.\nExample: `ctx_note(action=\"write\", content=\"Implement X because Y\", surface_condition=\"When PR #42 is merged in this repo\")`\n\nHistorian reads these notes, deduplicates them, and rewrites the remaining useful notes over time.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "action": {
+          "description": "Operation to perform. Defaults to 'write' when content is provided, otherwise 'read'.",
+          "type": "string",
+          "enum": [
+            "write",
+            "read",
+            "dismiss",
+            "update"
+          ]
+        },
+        "content": {
+          "description": "Note text to store when action is 'write'.",
+          "type": "string"
+        },
+        "surface_condition": {
+          "description": "Open-ended condition for smart notes. When provided, creates a project-scoped smart note that the dreamer evaluates nightly. The note surfaces when the condition is met.",
+          "type": "string"
+        },
+        "filter": {
+          "description": "Optional read filter. Defaults to active session notes + ready smart notes. Use 'all' to inspect every status or 'pending' to inspect unsurfaced smart notes.",
+          "type": "string",
+          "enum": [
+            "all",
+            "active",
+            "pending",
+            "ready",
+            "dismissed"
+          ]
+        },
+        "note_id": {
+          "description": "Note ID (required for 'dismiss' and 'update' actions).",
+          "type": "number"
+        }
+      }
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Ctx_search",
+    "description": "Search across project memories, indexed git commits, and raw conversation history.\n\nSources:\n- memory: curated cross-session knowledge (highest-signal; already-visible ones are filtered out)\n- message: raw user/assistant messages from older compartmentalized history\n- git_commit: HEAD git commits (enabled when experimental.git_commit_indexing is on)\n\nNarrow via the `sources` param when the question maps to a specific channel:\n- \"was this working before / when did this break\" \u2192 [\"git_commit\", \"message\"]\n- \"when did we change this\" \u2192 [\"git_commit\"]\n- \"what is our naming convention\" \u2192 [\"memory\"]\n- \"did we discuss this earlier\" \u2192 [\"message\"]\nOmit sources for a broad search across all enabled channels.\n\nMemories already rendered in <session-history> are hard-filtered from results \u2014 the agent already sees them in context.\nSession facts are NOT a search source; they're always visible in <session-history>.\nMessage results include ordinals the agent can pass to ctx_expand for full context.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "query": {
+          "description": "Search query. Matches against memory content, git commit messages, and raw user/assistant message text.",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Maximum results to return (default: 10)",
+          "type": "number"
+        },
+        "sources": {
+          "description": "Optional. Restrict to specific sources. Examples: [\"git_commit\"] for \"when did we change X\", [\"memory\"] for naming conventions, [\"message\"] for \"did we discuss this earlier\", [\"git_commit\",\"message\"] for regression hunts. Omit for a broad search across all enabled sources.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "memory",
+              "message",
+              "git_commit"
+            ]
+          }
+        }
+      },
+      "required": [
+        "query"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Ctx_memory",
+    "description": "Manage cross-session project memories. Primary sessions can write new memories or delete stale ones. Dreamer sessions can also list, update, merge, and archive memories. Memories persist across sessions and are automatically injected into new sessions.\n\nSupported actions: write, delete, list, update, merge, archive.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "action": {
+          "description": "Action to perform on memories",
+          "type": "string",
+          "enum": [
+            "write",
+            "delete"
+          ]
+        },
+        "content": {
+          "description": "Memory content (required for write, update, merge)",
+          "type": "string"
+        },
+        "category": {
+          "description": "Memory category (required for write, optional filter for list, optional override for merge)",
+          "type": "string"
+        },
+        "id": {
+          "description": "Memory ID (required for delete, update, archive)",
+          "type": "number"
+        },
+        "ids": {
+          "description": "Memory IDs to merge (required for merge)",
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "limit": {
+          "description": "Maximum results to return for list (default: 10)",
+          "type": "number"
+        },
+        "reason": {
+          "description": "Archive reason (optional for archive)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Aft_delete",
+    "description": "Delete a file with backup.\n\nThe file content is backed up before deletion \u2014 use aft_safety undo to recover if needed.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "filePath": {
+          "description": "Path to file to delete",
+          "type": "string"
+        }
+      },
+      "required": [
+        "filePath"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Aft_move",
+    "description": "Move or rename a file with backup. Creates parent directories for destination automatically\nNote: This moves/renames files at the OS level.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "filePath": {
+          "description": "Source file path to move",
+          "type": "string"
+        },
+        "destination": {
+          "description": "Destination file path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "filePath",
+        "destination"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Aft_outline",
+    "description": "Structural outline of source code, documentation files, or remote URLs. For code, returns symbols (functions, classes, types) with line ranges. For Markdown and HTML, returns heading hierarchy. Use this to explore structure before reading specific sections with aft_zoom.\n\nProvide exactly ONE of: 'filePath', 'files', 'directory', or 'url'.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "filePath": {
+          "description": "Path to a single file to outline",
+          "type": "string"
+        },
+        "files": {
+          "description": "Array of file paths to outline in one call",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "directory": {
+          "description": "Directory to outline recursively (200 file limit)",
+          "type": "string"
+        },
+        "url": {
+          "description": "HTTP/HTTPS URL of an HTML or Markdown document to fetch and outline",
+          "type": "string"
+        }
+      }
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Aft_zoom",
+    "description": "Inspect code symbols or documentation sections. For code, returns the full source of a symbol with call-graph annotations (what it calls and what calls it). For Markdown and HTML, returns the section content under the given heading.\n\nProvide exactly ONE of 'filePath' or 'url'. Pass either 'symbol' for a single lookup or 'symbols' for multiple in one call.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "filePath": {
+          "description": "Path to file (absolute or relative to project root)",
+          "type": "string"
+        },
+        "url": {
+          "description": "HTTP/HTTPS URL of an HTML or Markdown document to fetch and zoom into",
+          "type": "string"
+        },
+        "symbol": {
+          "description": "Symbol name for code, or heading text for Markdown/HTML",
+          "type": "string"
+        },
+        "symbols": {
+          "description": "Array of symbol names or heading texts for a single batched call",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "contextLines": {
+          "description": "Lines of context before/after the symbol (default: 3)",
+          "type": "number"
+        }
+      }
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Aft_safety",
+    "description": "File safety and recovery operations.\n\nPer-file undo stack is capped at 20 entries (oldest evicted).\n\nOps:\n- 'undo': Undo the last edit to a file. Requires 'filePath'. Note: pops from the undo stack (irreversible, no redo). Use 'history' to inspect before undoing.\n- 'history': List all edit snapshots for a file. Requires 'filePath'.\n- 'checkpoint': Save a named snapshot of tracked files. Requires 'name'. Optional 'files' to snapshot specific files only.\n- 'restore': Restore files to a previously saved checkpoint. Requires 'name'.\n- 'list': List all available named checkpoints. No extra params needed.\n\nEach op requires specific parameters \u2014 see parameter descriptions for requirements.\n\nUse checkpoint before risky multi-file changes. Use undo for quick single-file rollback.\n\nReturns: undo { path, backup_id }. history { file, entries }. checkpoint { ok, name }. restore { ok, name }. list { checkpoints }.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "op": {
+          "description": "Safety operation",
+          "type": "string",
+          "enum": [
+            "undo",
+            "history",
+            "checkpoint",
+            "restore",
+            "list"
+          ]
+        },
+        "filePath": {
+          "description": "File path (required for undo, history). Absolute or relative to project root",
+          "type": "string"
+        },
+        "name": {
+          "description": "Checkpoint name (required for checkpoint, restore)",
+          "type": "string"
+        },
+        "files": {
+          "description": "Specific files to include in checkpoint (optional, defaults to all tracked files)",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "op"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Aft_import",
+    "description": "Language-aware import management. Supports TS, JS, TSX, Python, Rust, and Go.\n\nOps:\n- 'add': Add an import. Auto-detects group (stdlib/external/internal), deduplicates. Requires 'module'. Optional 'names', 'defaultImport', 'typeOnly'.\n- 'remove': Remove an import or a specific named import. Requires 'module'. Provide 'removeName' to remove a single named import; omit to remove the entire import.\n- 'organize': Re-sort and re-group all imports by language convention, deduplicate. Requires only 'filePath'.\n\nReturns:\n- Dry run (any op): { ok, dry_run, diff, syntax_valid? }\n- add: { file, added, module, group?, already_present?, formatted?, syntax_valid?, format_skipped_reason?, validation_errors?, validate_skipped_reason?, backup_id?, lsp_diagnostics? }\n- remove: { file, removed, module, name?, formatted, syntax_valid?, format_skipped_reason?, validation_errors?, validate_skipped_reason?, backup_id?, lsp_diagnostics? }\n- organize: { file, groups: [{ name, count }], removed_duplicates, formatted?, syntax_valid?, format_skipped_reason?, validation_errors?, validate_skipped_reason?, backup_id?, lsp_diagnostics? }",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "op": {
+          "description": "Import operation",
+          "type": "string",
+          "enum": [
+            "add",
+            "remove",
+            "organize"
+          ]
+        },
+        "filePath": {
+          "description": "Path to the file (absolute or relative to project root)",
+          "type": "string"
+        },
+        "module": {
+          "description": "Module path (required for add, remove \u2014 e.g. 'react', './utils', 'std::fmt')",
+          "type": "string"
+        },
+        "names": {
+          "description": "Named imports to add (e.g. ['useState', 'useEffect'])",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "defaultImport": {
+          "description": "Default import name (e.g. 'React')",
+          "type": "string"
+        },
+        "typeOnly": {
+          "description": "Type-only import (TS only, default: false)",
+          "type": "boolean"
+        },
+        "removeName": {
+          "description": "Named import to remove for 'remove' op; omit to remove entire import",
+          "type": "string"
+        },
+        "validate": {
+          "description": "Validation level: 'syntax' (default) or 'full'. Syntax = tree-sitter parse check only. Full = also runs LSP type-checking (slower, catches more errors)",
+          "type": "string",
+          "enum": [
+            "syntax",
+            "full"
+          ]
+        },
+        "dryRun": {
+          "description": "Preview without modifying the file (default: false)",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "op",
+        "filePath"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Aft_transform",
+    "description": "Scope-aware structural code transformations with correct indentation.\n\nLanguage-specific: add_derive (Rust), add_struct_tags (Go), add_decorator (Python), wrap_try_catch (TS/JS), add_member (any language).\n\nOps:\n- 'add_member': Insert method/field into class, struct, or impl block. Requires 'container' (container name) and 'code'. Optional 'position'.\n- 'add_derive': Add Rust derive macros to a struct/enum. Requires 'target' and 'derives' array. Deduplicates existing derives.\n- 'wrap_try_catch': Wrap a TS/JS function body in try/catch. Requires 'target' (function name). Optional 'catchBody'.\n- 'add_decorator': Add Python decorator to function/class. Requires 'target' and 'decorator' (without @). Optional 'position'.\n- 'add_struct_tags': Add/update Go struct field tags. Requires 'target' (struct name), 'field', 'tag', 'value'.\n\nEach op requires specific parameters \u2014 see parameter descriptions for requirements.\n\nReturns:\n- Dry run (any op): { ok, dry_run, diff, syntax_valid? }\n- add_member: { file, scope, position, formatted, syntax_valid?, format_skipped_reason?, validation_errors?, validate_skipped_reason?, backup_id?, lsp_diagnostics? }\n- add_derive: { file, target, derives, formatted, syntax_valid?, format_skipped_reason?, validation_errors?, validate_skipped_reason?, backup_id?, lsp_diagnostics? }\n- wrap_try_catch: { file, target, formatted, syntax_valid?, format_skipped_reason?, validation_errors?, validate_skipped_reason?, backup_id?, lsp_diagnostics? }\n- add_decorator: { file, target, decorator, formatted, syntax_valid?, format_skipped_reason?, validation_errors?, validate_skipped_reason?, backup_id?, lsp_diagnostics? }\n- add_struct_tags: { file, target, field, tag_string, formatted, syntax_valid?, format_skipped_reason?, validation_errors?, validate_skipped_reason?, backup_id?, lsp_diagnostics? }",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "op": {
+          "description": "Transformation operation",
+          "type": "string",
+          "enum": [
+            "add_member",
+            "add_derive",
+            "wrap_try_catch",
+            "add_decorator",
+            "add_struct_tags"
+          ]
+        },
+        "filePath": {
+          "description": "Path to the source file (absolute or relative to project root)",
+          "type": "string"
+        },
+        "container": {
+          "description": "Container name for add_member \u2014 the class, struct, or impl block to insert into. Appears as 'scope' in the response.",
+          "type": "string"
+        },
+        "code": {
+          "description": "Member code to insert (add_member)",
+          "type": "string"
+        },
+        "position": {
+          "description": "For add_member: 'first', 'last' (default), 'before:name', 'after:name'. For add_decorator: 'first' (default) or 'last' only.",
+          "type": "string"
+        },
+        "target": {
+          "description": "Target symbol name (add_derive: struct/enum, wrap_try_catch: function, add_decorator: function/class, add_struct_tags: struct)",
+          "type": "string"
+        },
+        "derives": {
+          "description": "Derive macro names (add_derive \u2014 e.g. ['Clone', 'Debug'])",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "catchBody": {
+          "description": "Catch block body (wrap_try_catch \u2014 default: 'throw error;')",
+          "type": "string"
+        },
+        "decorator": {
+          "description": "Decorator text without @ (add_decorator \u2014 e.g. 'staticmethod')",
+          "type": "string"
+        },
+        "field": {
+          "description": "Struct field name (add_struct_tags)",
+          "type": "string"
+        },
+        "tag": {
+          "description": "Tag key (add_struct_tags \u2014 e.g. 'json')",
+          "type": "string"
+        },
+        "value": {
+          "description": "Tag value (add_struct_tags \u2014 e.g. 'user_name,omitempty')",
+          "type": "string"
+        },
+        "validate": {
+          "description": "Validation level: 'syntax' (default) or 'full'. Syntax = tree-sitter parse check only. Full = also runs LSP type-checking (slower, catches more errors)",
+          "type": "string",
+          "enum": [
+            "syntax",
+            "full"
+          ]
+        },
+        "dryRun": {
+          "description": "Preview without modifying the file (default: false)",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "op",
+        "filePath"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Aft_navigate",
+    "description": "Navigate code structure across files using call graph analysis.\n\nOps:\n- 'call_tree': See what a function calls (forward traversal). Use to understand dependencies before modifying a function.\n- 'callers': Find all call sites of a symbol. Use before renaming or changing a function's signature.\n- 'trace_to': Trace how execution reaches a function from entry points (routes, exports, main). Use to understand context around deeply-nested code.\n- 'impact': Analyze what breaks if a symbol changes. Returns affected callers with signatures and entry point status.\n- 'trace_data': Follow a value through variable assignments and function parameters across files. Requires 'symbol' (scope to trace from) and 'expression'.\n\nAll ops require both 'filePath' and 'symbol'. The 'expression' parameter is additionally required for trace_data.\n\n",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "op": {
+          "description": "Navigation operation",
+          "type": "string",
+          "enum": [
+            "call_tree",
+            "callers",
+            "trace_to",
+            "impact",
+            "trace_data"
+          ]
+        },
+        "filePath": {
+          "description": "Path to the source file containing the symbol (absolute or relative to project root)",
+          "type": "string"
+        },
+        "symbol": {
+          "description": "Name of the symbol to analyze",
+          "type": "string"
+        },
+        "depth": {
+          "description": "Max traversal depth (default: call_tree=5, callers=1, trace_to=10, impact=5, trace_data=5)",
+          "type": "number"
+        },
+        "expression": {
+          "description": "Expression to track through data flow (required for trace_data op)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "filePath",
+        "symbol"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Ast_grep_search",
+    "description": "Search code patterns across filesystem using AST-aware matching. Supports 6 languages.\n\nUse meta-variables: $VAR matches a single AST node, $$$ matches multiple nodes (variadic).\nIMPORTANT: Patterns must be complete AST nodes (valid code fragments).\nFor functions, include params and body: 'export async function $NAME($$$) { $$$ }' not just 'export async function $NAME'.\n\nExamples: pattern='console.log($MSG)' lang='typescript', pattern='async function $NAME($$$) { $$$ }' lang='javascript', pattern='def $FUNC($$$): $$$' lang='python'\n\nReturns: Text summary \u2014 'Found N match(es) across M file(s)' followed by file:line blocks with matched text and captured meta-variables.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "description": "AST pattern with meta-variables ($VAR, $$$). Must be complete AST node.",
+          "type": "string"
+        },
+        "lang": {
+          "description": "Target language",
+          "type": "string",
+          "enum": [
+            "typescript",
+            "tsx",
+            "javascript",
+            "python",
+            "rust",
+            "go"
+          ]
+        },
+        "paths": {
+          "description": "Paths to search (default: ['.'])",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "globs": {
+          "description": "Include/exclude globs (prefix ! to exclude)",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "contextLines": {
+          "description": "Number of context lines to show around each match",
+          "type": "number"
+        }
+      },
+      "required": [
+        "pattern",
+        "lang"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Ast_grep_replace",
+    "description": "Replace code patterns across filesystem with AST-aware rewriting. Applies changes by default \u2014 set dryRun=true to preview.\n\nUse meta-variables in the rewrite pattern to preserve matched content from the pattern.\nIMPORTANT: Patterns must be complete AST nodes (valid code fragments).\n\nExample: pattern='console.log($MSG)' rewrite='logger.info($MSG)' lang='typescript' \u2014 replaces all console.log calls with logger.info across TypeScript files.\n\n**Warning: This tool modifies files directly.** Use dryRun=true to preview. Consider creating an aft_safety checkpoint before bulk replacements.\n\nReturns: Text summary \u2014 'Replaced N match(es) across M file(s)' (or '[DRY RUN] Would replace...') followed by file:line blocks with before/after text.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "description": "AST pattern with meta-variables ($VAR, $$$). Must be complete AST node.",
+          "type": "string"
+        },
+        "rewrite": {
+          "description": "Replacement pattern (can use $VAR from pattern)",
+          "type": "string"
+        },
+        "lang": {
+          "description": "Target language",
+          "type": "string",
+          "enum": [
+            "typescript",
+            "tsx",
+            "javascript",
+            "python",
+            "rust",
+            "go"
+          ]
+        },
+        "paths": {
+          "description": "Paths to search (default: ['.'])",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "globs": {
+          "description": "Include/exclude globs (prefix ! to exclude)",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "dryRun": {
+          "description": "Preview changes without applying (default: false)",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "pattern",
+        "rewrite",
+        "lang"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Aft_search",
+    "description": "Search code by meaning using semantic similarity. Use when you don't know the exact name or text \u2014 describe what you're looking for in natural language and get the most relevant symbols, functions, and types.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "topK": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "query"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Aft_refactor",
+    "description": "Workspace-wide refactoring operations that update imports and references across files.\n\nOps:\n- 'move': Move a top-level symbol to another file, updating all imports workspace-wide. Requires 'symbol', 'destination'. Creates a checkpoint before mutating. Only works on top-level exports (not nested functions or class methods).\n   Note: This moves code symbols between files. To rename/move an entire file, use aft_move instead.\n- 'extract': Extract a line range into a new function with auto-detected parameters. Requires 'name', 'startLine', 'endLine' (1-based, both inclusive). Supports TS/JS/TSX and Python.\n- 'inline': Replace a function call with the function's body, substituting args for params. Requires 'symbol', 'callSiteLine' (1-based). Validates single-return constraint.\n\nEach op requires specific parameters \u2014 see parameter descriptions for requirements.\n\nAll ops need 'filePath'. Use dryRun to preview before applying.\n\nReturns: move dry-run { ok, dry_run, diffs }; move apply { ok, files_modified, consumers_updated, checkpoint_name, results }. extract returns { file, name, parameters, return_type, syntax_valid, formatted, ... }. inline returns { file, symbol, call_context, substitutions, conflicts, syntax_valid, formatted, ... }.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "op": {
+          "description": "Refactoring operation",
+          "type": "string",
+          "enum": [
+            "move",
+            "extract",
+            "inline"
+          ]
+        },
+        "filePath": {
+          "description": "Path to the source file (absolute or relative to project root)",
+          "type": "string"
+        },
+        "symbol": {
+          "description": "Symbol name \u2014 required for 'move' and 'inline' ops",
+          "type": "string"
+        },
+        "destination": {
+          "description": "Target file path \u2014 required for 'move' op",
+          "type": "string"
+        },
+        "scope": {
+          "description": "Disambiguation scope for 'move' op \u2014 when multiple top-level symbols share the same name, specify the containing scope to disambiguate (e.g. 'MyClass'). Does NOT enable access to nested symbols or class methods.",
+          "type": "string"
+        },
+        "name": {
+          "description": "New function name \u2014 required for 'extract' op",
+          "type": "string"
+        },
+        "startLine": {
+          "description": "1-based start line \u2014 required for 'extract' op",
+          "type": "number"
+        },
+        "endLine": {
+          "description": "1-based end line (inclusive) \u2014 required for 'extract' op",
+          "type": "number"
+        },
+        "callSiteLine": {
+          "description": "1-based call site line \u2014 required for 'inline' op",
+          "type": "number"
+        },
+        "dryRun": {
+          "description": "Preview changes as diff without modifying files (default: false)",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "op",
+        "filePath"
+      ]
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Lsp_diagnostics",
+    "description": "Get errors, warnings, hints from a language server. Returns: { diagnostics: Array<{ file, line, column, end_line, end_column, severity, message, code }>, total: number, files_with_errors: number }.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "filePath": {
+          "description": "Path to file to get diagnostics for. Provide 'filePath' for a single file, 'directory' for all files under a path, or omit both for all tracked files",
+          "type": "string"
+        },
+        "directory": {
+          "description": "Path to directory to get diagnostics for all files under it. Mutually exclusive with 'filePath'",
+          "type": "string"
+        },
+        "severity": {
+          "description": "Filter by severity \u2014 'error', 'warning', 'information', 'hint', 'all' (default: 'all')",
+          "type": "string",
+          "enum": [
+            "error",
+            "warning",
+            "information",
+            "hint",
+            "all"
+          ]
+        },
+        "waitMs": {
+          "description": "Wait N ms for fresh diagnostics before returning (max 10000, default: 0). Use after edits to let the server re-analyze.",
+          "type": "number"
+        }
+      }
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Aft_conflicts",
+    "description": "Show all git merge conflicts across the repository \u2014 returns line-numbered conflict regions with context for every conflicted file in a single call.",
+    "input_schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {}
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Websearch_web_search_exa",
+    "description": "Search the web for any topic and get clean, ready-to-use content.\n\n      Best for: Finding current information, news, facts, people, companies, or answering questions about any topic.\n      Returns: Clean text content from top search results.\n\n      Query tips: \n      describe the ideal page, not keywords. \"blog post comparing React and Vue performance\" not \"React vs Vue\".\n      Use category:people / category:company to search through Linkedin profiles / companies respectively.\n      If highlights are insufficient, follow up with web_fetch_exa on the best URLs.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Natural language search query. Should be a semantically rich description of the ideal page, not just keywords. Optionally include category:<type> (company, people) to focus results \u2014 e.g. 'category:people John Doe software engineer'."
+        },
+        "numResults": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Number of search results to return (must be a number, default: 10)."
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Grep_app_searchGitHub",
+    "description": "Find real-world code examples from over a million public GitHub repositories to help answer programming questions.\n\n**IMPORTANT: This tool searches for literal code patterns (like grep), not keywords. Search for actual code that would appear in files:**\n- \u2705 Good: 'useState(', 'import React from', 'async function', '(?s)try {.*await'\n- \u274c Bad: 'react tutorial', 'best practices', 'how to use'\n\n**When to use this tool:**\n- When implementing unfamiliar APIs or libraries and need to see real usage patterns\n- When unsure about correct syntax, parameters, or configuration for a specific library\n- When looking for production-ready examples and best practices for implementation\n- When needing to understand how different libraries or frameworks work together\n\n**Perfect for questions like:**\n- \"How do developers handle authentication in Next.js apps?\" \u2192 Search: 'getServerSession' with language=['TypeScript', 'TSX']\n- \"What are common React error boundary patterns?\" \u2192 Search: 'ErrorBoundary' with language=['TSX']\n- \"Show me real useEffect cleanup examples\" \u2192 Search: '(?s)useEffect\\(\\(\\) => {.*removeEventListener' with useRegexp=true\n- \"How do developers handle CORS in Flask applications?\" \u2192 Search: 'CORS(' with matchCase=true and language=['Python']\n\nUse regular expressions with useRegexp=true for flexible patterns like '(?s)useState\\(.*loading' to find useState hooks with loading-related variables. Prefix the pattern with '(?s)' to match across multiple lines.\n\nFilter by language, repository, or file path to narrow results.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "The literal code pattern to search for (e.g., 'useState(', 'export function'). Use actual code that would appear in files, not keywords or questions."
+        },
+        "matchCase": {
+          "type": "boolean",
+          "description": "Whether the search should be case sensitive",
+          "default": false
+        },
+        "matchWholeWords": {
+          "type": "boolean",
+          "description": "Whether to match whole words only",
+          "default": false
+        },
+        "useRegexp": {
+          "type": "boolean",
+          "description": "Whether to interpret the query as a regular expression",
+          "default": false
+        },
+        "repo": {
+          "type": "string",
+          "description": "Filter by repository.\n            Examples: 'facebook/react', 'microsoft/vscode', 'vercel/ai'.\n            Can match partial names, for example 'vercel/' will find repositories in the vercel org."
+        },
+        "path": {
+          "type": "string",
+          "description": "Filter by file path.\n            Examples: 'src/components/Button.tsx', 'README.md'.\n            Can match partial paths, for example '/route.ts' will find route.ts files at any level."
+        },
+        "language": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Filter by programming language.\n            Examples: ['TypeScript', 'TSX'], ['JavaScript'], ['Python'], ['Java'], ['C#'], ['Markdown'], ['YAML']"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Context7_resolve-library-id",
+    "description": "Resolves a package/product name to a Context7-compatible library ID and returns matching libraries.\n\nYou MUST call this function before 'Query Documentation' tool to obtain a valid Context7-compatible library ID UNLESS the user explicitly provides a library ID in the format '/org/project' or '/org/project/version' in their query.\n\nEach result includes:\n- Library ID: Context7-compatible identifier (format: /org/project)\n- Name: Library or package name\n- Description: Short summary\n- Code Snippets: Number of available code examples\n- Source Reputation: Authority indicator (High, Medium, Low, or Unknown)\n- Benchmark Score: Quality indicator (100 is the highest score)\n- Versions: List of versions if available. Use one of those versions if the user provides a version in their query. The format of the version is /org/project/version.\n\nFor best results, select libraries based on name match, source reputation, snippet coverage, benchmark score, and relevance to your use case.\n\nSelection Process:\n1. Analyze the query to understand what library/package the user is looking for\n2. Return the most relevant match based on:\n- Name similarity to the query (exact matches prioritized)\n- Description relevance to the query's intent\n- Documentation coverage (prioritize libraries with higher Code Snippet counts)\n- Source reputation (consider libraries with High or Medium reputation more authoritative)\n- Benchmark Score: Quality indicator (100 is the highest score)\n\nResponse Format:\n- Return the selected library ID in a clearly marked section\n- Provide a brief explanation for why this library was chosen\n- If multiple good matches exist, acknowledge this but proceed with the most relevant one\n- If no good matches exist, clearly state this and suggest query refinements\n\nFor ambiguous queries, request clarification before proceeding with a best-guess match.\n\nIMPORTANT: Do not call this tool more than 3 times per question. If you cannot find what you need after 3 calls, use the best result you have.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "The question or task you need help with. This is used to rank library results by relevance to what the user is trying to accomplish. The query is sent to the Context7 API for processing. Do not include any sensitive or confidential information such as API keys, passwords, credentials, personal data, or proprietary code in your query."
+        },
+        "libraryName": {
+          "type": "string",
+          "description": "Library name to search for and retrieve a Context7-compatible library ID. Use the official library name with proper punctuation \u2014 e.g., 'Next.js' instead of 'nextjs', 'Customer.io' instead of 'customerio', 'Three.js' instead of 'threejs'."
+        }
+      },
+      "required": [
+        "query",
+        "libraryName"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false
+    },
+    "eager_input_streaming": true
+  },
+  {
+    "name": "mcp_Context7_query-docs",
+    "description": "Retrieves and queries up-to-date documentation and code examples from Context7 for any programming library or framework.\n\nYou must call 'Resolve Context7 Library ID' tool first to obtain the exact Context7-compatible library ID required to use this tool, UNLESS the user explicitly provides a library ID in the format '/org/project' or '/org/project/version' in their query.\n\nWorkflow: call first without researchMode. If that doesn't answer the question, retry with researchMode: true. Do not call each tool more than 3 times per question",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "libraryId": {
+          "type": "string",
+          "description": "Exact Context7-compatible library ID (e.g., '/mongodb/docs', '/vercel/next.js', '/supabase/supabase', '/vercel/next.js/v14.3.0-canary.87') retrieved from 'resolve-library-id' or directly from user query in the format '/org/project' or '/org/project/version'."
+        },
+        "query": {
+          "type": "string",
+          "description": "The question or task you need help with. Be specific and include relevant details. Good: 'How to set up authentication with JWT in Express.js' or 'React useEffect cleanup function examples'. Bad: 'auth' or 'hooks'. The query is sent to the Context7 API for processing. Do not include any sensitive or confidential information such as API keys, passwords, credentials, personal data, or proprietary code in your query."
+        },
+        "researchMode": {
+          "description": "Retry the query with deep research: spins up sandboxed agents that read the actual source repos and runs a live web search, then synthesizes a fresh answer. Set true on retry if you weren't satisfied with the first answer and want a more thorough one. Requires an API key \u2014 you can get one free at https://context7.com.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "libraryId",
+        "query"
+      ],
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false
+    },
+    "eager_input_streaming": true
+  }
+]

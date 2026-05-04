@@ -1,0 +1,56 @@
+{
+	"name": "@cortexkit/magic-context",
+	"version": "0.16.1",
+	"description": "Unified CLI for Magic Context — setup, doctor, and migration across OpenCode and Pi",
+	"keywords": [
+		"opencode",
+		"opencode-plugin",
+		"pi",
+		"pi-extension",
+		"magic-context",
+		"cli",
+		"setup",
+		"doctor"
+	],
+	"author": "Cortexkit",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/cortexkit/magic-context"
+	},
+	"homepage": "https://github.com/cortexkit/magic-context#readme",
+	"bugs": {
+		"url": "https://github.com/cortexkit/magic-context/issues"
+	},
+	"type": "module",
+	"bin": {
+		"magic-context": "dist/index.js"
+	},
+	"files": [
+		"dist",
+		"README.md"
+	],
+	"scripts": {
+		"build": "bun build src/index.ts --outfile dist/index.js --target node --format esm --external better-sqlite3",
+		"typecheck": "tsc --noEmit",
+		"test": "bun test",
+		"lint": "biome check src",
+		"format": "biome format --write src",
+		"format:check": "biome format src",
+		"prepublishOnly": "bun run build"
+	},
+	"dependencies": {
+		"@clack/prompts": "^1.1.0",
+		"better-sqlite3": "^12.9.0",
+		"comment-json": "^4.2.5"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.4.7",
+		"@types/better-sqlite3": "^7.6.13",
+		"@types/node": "^22.0.0",
+		"typescript": "^5.8.0"
+	},
+	"engines": {
+		"node": ">=20.12.0"
+	}
+}

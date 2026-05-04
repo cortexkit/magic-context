@@ -1,0 +1,110 @@
+#!/usr/bin/env node
+
+/**
+ * version-sync.mjs
+ *
+ * Synchronizes version in package.json from a git tag or explicit argument.
+ * Updates packages/plugin, packages/pi-plugin, and packages/cli to the
+ * same version. All three release together on each tag.
+ *
+ * Usage:
+ *   node scripts/version-sync.mjs 0.1.0           # set version to 0.1.0
+ *   node scripts/version-sync.mjs --from-tag       # read from GITHUB_REF_NAME (e.g. v0.1.0)
+ *   node scripts/version-sync.mjs 0.1.0 --dry-run  # preview changes without writing
+ */
+
+import { readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const repoRoot = join(__dirname, "..");
+
+const PACKAGES = [
+    join(repoRoot, "packages", "plugin"),
+    join(repoRoot, "packages", "pi-plugin"),
+    join(repoRoot, "packages", "cli"),
+];
+
+const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[\w.]+)?(?:\+[\w.]+)?$/;
+
+function parseArgs(argv) {
+    const args = argv.slice(2);
+    let version = null;
+    let fromTag = false;
+    let dryRun = false;
+
+    for (const arg of args) {
+        if (arg === "--from-tag") {
+            fromTag = true;
+        } else if (arg === "--dry-run") {
+            dryRun = true;
+        } else if (!version && !arg.startsWith("-")) {
+            version = arg;
+        } else {
+            console.error(`Unknown argument: ${arg}`);
+            process.exit(1);
+        }
+    }
+
+    if (fromTag) {
+        const ref = process.env.GITHUB_REF_NAME;
+        if (!ref) {
+            console.error("--from-tag requires GITHUB_REF_NAME environment variable");
+            process.exit(1);
+        }
+        version = ref.replace(/^v/, "");
+    }
+
+    if (!version) {
+        console.error(
+            "Usage: version-sync.mjs <version> [--dry-run]\n" +
+                "       version-sync.mjs --from-tag [--dry-run]",
+        );
+        process.exit(1);
+    }
+
+    if (!SEMVER_RE.test(version)) {
+        console.error(`Invalid semver version: '${version}'`);
+        process.exit(1);
+    }
+
+    return { version, dryRun };
+}
+
+const { version, dryRun } = parseArgs(process.argv);
+
+console.log(`${dryRun ? "[DRY RUN] " : ""}Syncing version to ${version}\n`);
+
+for (const pkgDir of PACKAGES) {
+    const pkgPath = join(pkgDir, "package.json");
+    const content = readFileSync(pkgPath, "utf-8");
+    const pkg = JSON.parse(content);
+    const label = pkgDir.replace(repoRoot + "/", "");
+
+    // Detect existing indent style so version bumps don't reformat the
+    // entire file. Tabs vs 2-space differ across our packages and we
+    // want to preserve whatever each owner picked.
+    const indent = detectIndent(content);
+
+    if (pkg.version === version) {
+        console.log(`${label}/package.json: (already at target version)`);
+    } else {
+        console.log(`${label}/package.json: ${pkg.version} → ${version}`);
+        pkg.version = version;
+        if (!dryRun) {
+            writeFileSync(pkgPath, `${JSON.stringify(pkg, null, indent)}\n`, "utf-8");
+        }
+    }
+}
+
+/** Detect whether the JSON file is indented with tabs or N-space indent. */
+function detectIndent(text) {
+    const m = text.match(/^\{\r?\n([ \t]+)"/);
+    if (!m) return 2;
+    const lead = m[1];
+    if (lead.startsWith("\t")) return "\t";
+    return lead.length || 2;
+}
+
+console.log(`\n${dryRun ? "[DRY RUN] " : ""}Done.`);

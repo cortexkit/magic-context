@@ -1,0 +1,94 @@
+# Magic Context — OpenCode E2E test image
+#
+# Two scenarios run in sequence inside this container:
+#   1. SETUP_SMOKE:    Fresh-install setup using `doctor --force` non-
+#                      interactively, then assert doctor reports no failures.
+#                      No LLM calls.
+#   2. SESSION_SMOKE:  Run `opencode run` against an aimock LLM, assert the
+#                      Magic Context plugin loaded and tagged at least one
+#                      message in the shared SQLite DB.
+#
+# Run locally:
+#   docker build --platform linux/amd64 -f tests/docker/Dockerfile.opencode -t mc-e2e-opencode .
+#   docker run --rm --platform linux/amd64 mc-e2e-opencode
+#
+# CI runs the same script via .github/workflows/e2e-docker.yml.
+
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    ca-certificates \
+    unzip \
+    sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node 24 (for OpenCode plugin runtime + aimock).
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Bun (for `bunx --bun` plugin invocations matching real-user paths).
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:$PATH"
+
+# OpenCode standalone install (matches the official curl|bash path).
+RUN curl -fsSL https://opencode.ai/install | bash
+ENV PATH="/root/.opencode/bin:$PATH"
+
+# aimock provides the OpenAI-compatible mock LLM. AFT uses the same
+# package and it works well for deterministic multi-turn tests.
+# Install into /test so aimock-server.cjs (also in /test) can require()
+# it directly without NODE_PATH gymnastics.
+RUN mkdir -p /test && cd /test && \
+    npm init -y > /dev/null && \
+    npm install --silent --no-audit --no-fund @copilotkit/aimock
+
+# Test project — needs to be a git repo so Magic Context's project
+# identity resolution (git root commit hash) works the same way it
+# does for real users.
+RUN git config --global user.email "test@cortexkit.local" && \
+    git config --global user.name "Magic Context CI" && \
+    mkdir -p /test/project && cd /test/project && git init -q && \
+    echo '{"name":"test","version":"1.0.0"}' > package.json && \
+    git add -A && git commit -q -m "init"
+
+# Magic Context source tree — copy locally-built plugin dist so we
+# test the actual code we'll publish, not whatever's on npm. The
+# Dockerfile assumes `bun run --cwd packages/plugin build` has
+# already produced packages/plugin/dist/.
+COPY packages/plugin/dist/ /test/mc-opencode/dist/
+COPY packages/plugin/package.json /test/mc-opencode/package.json
+# README is intentionally NOT copied — it's gitignored locally (regenerated
+# by scripts/release.sh from root README at publish time) and unused inside
+# the image. Pinning a COPY here would break CI on master where the file
+# doesn't exist on disk.
+
+# Magic Context CLI — install the unified CLI (since v0.16.1 the CLI
+# lives in @cortexkit/magic-context, separate from the plugin). The
+# E2E test script invokes `bunx --bun @cortexkit/magic-context doctor
+# --harness opencode --force` which needs build tools (python3, make,
+# g++) for better-sqlite3 to build from source on Linux x64 + Node 24
+# when no prebuilt binary matches.
+COPY packages/cli/dist/ /test/mc-cli/dist/
+COPY packages/cli/package.json /test/mc-cli/package.json
+RUN apt-get update && apt-get install -y python3 build-essential \
+    && rm -rf /var/lib/apt/lists/*
+RUN cd /test/mc-cli && \
+    npm install --omit=dev --no-audit --no-fund --workspaces=false \
+        --no-package-lock --legacy-peer-deps 2>&1 | tail -5
+# Symlink `magic-context` onto PATH so `magic-context doctor --harness
+# opencode` resolves the way it does after a global install.
+RUN chmod +x /test/mc-cli/dist/index.js && \
+    ln -s /test/mc-cli/dist/index.js /usr/local/bin/magic-context
+
+# Test scripts and aimock fixtures.
+COPY tests/docker/test-opencode-e2e.sh /test/test-opencode-e2e.sh
+COPY tests/docker/fixtures/aimock-opencode.cjs /test/aimock-server.cjs
+RUN chmod +x /test/test-opencode-e2e.sh
+
+WORKDIR /test/project
+
+ENTRYPOINT ["/test/test-opencode-e2e.sh"]

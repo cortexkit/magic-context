@@ -1,0 +1,37 @@
+[package]
+name = "magic-context-dashboard"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "magic_context_dashboard_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+notify = { version = "6", features = ["macos_fsevent"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+regex = "1"
+lazy_static = "1"
+tokio = { version = "1", features = ["fs", "io-util", "sync", "macros", "process"] }
+reqwest = { version = "0.12", features = ["json"] }
+md5 = "0.7"
+sha2 = "0.10"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+tauri-plugin-dialog = "2"
+image = { version = "0.25.6", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

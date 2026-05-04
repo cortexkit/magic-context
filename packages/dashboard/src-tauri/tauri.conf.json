@@ -1,0 +1,54 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicehash/tauri/dev/packages/tauri-utils/schema.json",
+  "productName": "Magic Context Dashboard",
+  "version": "0.4.1",
+  "identifier": "com.cortexkit.magic-context-dashboard",
+  "build": {
+    "beforeDevCommand": "bun run dev:frontend",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "bun run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "title": "Magic Context",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "decorations": true,
+        "transparent": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https:"
+    },
+    "macOSPrivateApi": true
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "entitlements": "./entitlements.plist"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY5MUNBMDIxNjUxMEM2MkYKUldRdnhoQmxJYUFjYVU0SlNNbzRWMGJ3MndKOENIVDR0N0N6b0Jyd1l6TUNFTlpZTzV3RXlRYkEK",
+      "endpoints": [
+        "https://cortexkit.github.io/magic-context/latest.json"
+      ]
+    }
+  }
+}

@@ -1,0 +1,137 @@
+{
+    "_comment": "Models to calibrate. Provider matches auth.json keys. modelId is the provider-native model identifier. tokenizerKey is the matching ai-tokenizer models.json entry (or null to fall back to base claude/o200k_base/etc encoding).",
+    "tests": [
+        {
+            "label": "anthropic/claude-opus-4-7",
+            "provider": "anthropic",
+            "modelId": "claude-opus-4-7",
+            "tokenizerKey": "anthropic/claude-opus-4.5"
+        },
+        {
+            "label": "anthropic/claude-opus-4-5",
+            "provider": "anthropic",
+            "modelId": "claude-opus-4-5",
+            "tokenizerKey": "anthropic/claude-opus-4.5"
+        },
+        {
+            "label": "anthropic/claude-sonnet-4-6",
+            "provider": "anthropic",
+            "modelId": "claude-sonnet-4-6",
+            "tokenizerKey": "anthropic/claude-sonnet-4.5"
+        },
+        {
+            "label": "anthropic/claude-sonnet-4-5",
+            "provider": "anthropic",
+            "modelId": "claude-sonnet-4-5",
+            "tokenizerKey": "anthropic/claude-sonnet-4.5"
+        },
+        {
+            "label": "anthropic/claude-haiku-4-5",
+            "provider": "anthropic",
+            "modelId": "claude-haiku-4-5",
+            "tokenizerKey": "anthropic/claude-3.5-haiku"
+        },
+        {
+            "label": "openai-codex/gpt-5.3-codex",
+            "provider": "openai",
+            "modelId": "gpt-5.3-codex",
+            "tokenizerKey": "openai/gpt-5"
+        },
+        {
+            "label": "openai-codex/gpt-5.4",
+            "provider": "openai",
+            "modelId": "gpt-5.4",
+            "tokenizerKey": "openai/gpt-5"
+        },
+        {
+            "label": "openai-codex/gpt-5.5",
+            "provider": "openai",
+            "modelId": "gpt-5.5",
+            "tokenizerKey": "openai/gpt-5"
+        },
+        {
+            "label": "github-copilot/claude-sonnet-4.6",
+            "provider": "github-copilot",
+            "modelId": "claude-sonnet-4.6",
+            "tokenizerKey": "anthropic/claude-sonnet-4.5"
+        },
+        {
+            "label": "github-copilot/claude-opus-4.7",
+            "provider": "github-copilot",
+            "modelId": "claude-opus-4.7",
+            "tokenizerKey": "anthropic/claude-opus-4.5"
+        },
+        {
+            "label": "github-copilot/gpt-5.4",
+            "provider": "github-copilot",
+            "modelId": "gpt-5.4",
+            "tokenizerKey": "openai/gpt-5"
+        },
+        {
+            "label": "xai/grok-4",
+            "provider": "xai",
+            "modelId": "grok-4-latest",
+            "tokenizerKey": "xai/grok-4"
+        },
+        {
+            "label": "xai/grok-code-fast-1",
+            "provider": "xai",
+            "modelId": "grok-code-fast-1",
+            "tokenizerKey": "xai/grok-code-fast-1"
+        },
+        {
+            "label": "cerebras/qwen-3-235b",
+            "provider": "cerebras",
+            "modelId": "qwen-3-235b-a22b-instruct-2507",
+            "tokenizerKey": "alibaba/qwen-3-235b"
+        },
+        {
+            "label": "cerebras/gpt-oss-120b",
+            "provider": "cerebras",
+            "modelId": "gpt-oss-120b",
+            "tokenizerKey": "openai/gpt-oss-120b"
+        },
+        {
+            "label": "cerebras/zai-glm-4.7",
+            "provider": "cerebras",
+            "modelId": "zai-glm-4.7",
+            "tokenizerKey": "zai/glm-4.5"
+        },
+        {
+            "label": "fireworks/glm-5.1",
+            "provider": "fireworks-ai",
+            "modelId": "accounts/fireworks/models/glm-5p1",
+            "tokenizerKey": "zai/glm-4.5"
+        },
+        {
+            "label": "fireworks/kimi-k2",
+            "provider": "fireworks-ai",
+            "modelId": "accounts/fireworks/models/kimi-k2-0905",
+            "tokenizerKey": "moonshotai/kimi-k2-0905"
+        },
+        {
+            "label": "fireworks/deepseek-v3p2",
+            "provider": "fireworks-ai",
+            "modelId": "accounts/fireworks/models/deepseek-v3p2",
+            "tokenizerKey": "deepseek/deepseek-v3.2-exp"
+        },
+        {
+            "label": "opencode-go/glm-5.1",
+            "provider": "opencode-go",
+            "modelId": "glm-5.1",
+            "tokenizerKey": "zai/glm-4.5"
+        },
+        {
+            "label": "opencode-go/kimi-k2.6",
+            "provider": "opencode-go",
+            "modelId": "kimi-k2.6",
+            "tokenizerKey": "moonshotai/kimi-k2-0905"
+        },
+        {
+            "label": "openrouter/anthropic-sonnet-4.6",
+            "provider": "openrouter",
+            "modelId": "anthropic/claude-sonnet-4.6",
+            "tokenizerKey": "anthropic/claude-sonnet-4.5"
+        }
+    ]
+}

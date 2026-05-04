@@ -1,0 +1,45 @@
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+.idea/
+.vscode/
+*.code-workspace
+
+.env
+.env.*
+!.env.example
+
+node_modules/
+dist/
+build/
+
+*.log
+coverage/
+.cache/
+tmp/
+
+.sisyphus/
+.opencode/
+.claude/
+local-ignore/
+.planning/
+
+# Dashboard build artifacts
+packages/dashboard/dist/
+packages/dashboard/node_modules/
+packages/dashboard/src-tauri/target/
+
+# Plugin README is copied from root at release time
+packages/plugin/README.md
+.bg-shell/
+
+# Keep only the final animation; iteration folders stay local
+packages/plugin/docs/animation[0-9]*/
+
+.pi/
+
+# Local agent task outputs / scratch state
+.alfonso/
