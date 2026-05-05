@@ -165,21 +165,17 @@ function getMessageOrdinal(value: number | string | undefined): number | null {
 async function getSemanticScores(args: {
     db: Database;
     projectPath: string;
-    query: string;
     memories: Memory[];
-    embeddingEnabled: boolean;
-    embedQuery: (text: string, signal?: AbortSignal) => Promise<Float32Array | null>;
-    isEmbeddingRuntimeEnabled: () => boolean;
-    signal?: AbortSignal;
+    /** Pre-computed query embedding. Pass `null` to skip semantic scoring
+     *  (e.g. embedding disabled, query embed failed, runtime not ready).
+     *  unifiedSearch is responsible for computing this once and passing the
+     *  same vector to memory + git-commit searches so we never embed the
+     *  same query twice in parallel. */
+    queryEmbedding: Float32Array | null;
 }): Promise<Map<number, number>> {
     const semanticScores = new Map<number, number>();
 
-    if (!args.embeddingEnabled || !args.isEmbeddingRuntimeEnabled() || args.memories.length === 0) {
-        return semanticScores;
-    }
-
-    const queryEmbedding = await args.embedQuery(args.query, args.signal);
-    if (!queryEmbedding) {
+    if (!args.queryEmbedding || args.memories.length === 0) {
         return semanticScores;
     }
 
@@ -198,7 +194,7 @@ async function getSemanticScores(args: {
 
         semanticScores.set(
             memory.id,
-            normalizeCosineScore(cosineSimilarity(queryEmbedding, memoryEmbedding)),
+            normalizeCosineScore(cosineSimilarity(args.queryEmbedding, memoryEmbedding)),
         );
     }
 
@@ -316,11 +312,11 @@ async function searchMemories(args: {
     query: string;
     limit: number;
     memoryEnabled: boolean;
-    embeddingEnabled: boolean;
-    embedQuery: (text: string, signal?: AbortSignal) => Promise<Float32Array | null>;
-    isEmbeddingRuntimeEnabled: () => boolean;
+    /** Pre-computed query embedding (or null if embedding is disabled / failed).
+     *  unifiedSearch embeds once and passes the same vector here and to
+     *  searchGitCommitsAsync — never embed twice for one query. */
+    queryEmbedding: Float32Array | null;
     visibleMemoryIds?: Set<number> | null;
-    signal?: AbortSignal;
 }): Promise<MemorySearchResult[]> {
     if (!args.memoryEnabled) {
         return [];
@@ -346,12 +342,8 @@ async function searchMemories(args: {
     const semanticScores = await getSemanticScores({
         db: args.db,
         projectPath: args.projectPath,
-        query: args.query,
         memories: semanticCandidates,
-        embeddingEnabled: args.embeddingEnabled,
-        embedQuery: args.embedQuery,
-        isEmbeddingRuntimeEnabled: args.isEmbeddingRuntimeEnabled,
-        signal: args.signal,
+        queryEmbedding: args.queryEmbedding,
     });
 
     return mergeMemoryResults({
@@ -498,32 +490,21 @@ function toGitCommitResult(hit: GitCommitSearchHit): GitCommitSearchResult {
     };
 }
 
-async function searchGitCommitsAsync(args: {
+function searchGitCommits(args: {
     db: Database;
     projectPath: string;
     query: string;
     limit: number;
-    embeddingEnabled: boolean;
-    embedQuery: (text: string, signal?: AbortSignal) => Promise<Float32Array | null>;
-    isEmbeddingRuntimeEnabled: () => boolean;
-    signal?: AbortSignal;
-}): Promise<GitCommitSearchResult[]> {
+    /** Pre-computed query embedding (or null if embedding is disabled / failed).
+     *  unifiedSearch embeds once and passes the same vector here and to
+     *  searchMemories — never embed twice for one query. */
+    queryEmbedding: Float32Array | null;
+}): GitCommitSearchResult[] {
     if (args.limit <= 0) return [];
-
-    let queryEmbedding: Float32Array | null = null;
-    if (args.embeddingEnabled && args.isEmbeddingRuntimeEnabled()) {
-        try {
-            queryEmbedding = await args.embedQuery(args.query, args.signal);
-        } catch (error) {
-            log(
-                `[search] git commit query embedding failed: ${error instanceof Error ? error.message : String(error)}`,
-            );
-        }
-    }
 
     const hits = searchGitCommitsSync(args.db, args.projectPath, args.query, {
         limit: args.limit,
-        queryEmbedding,
+        queryEmbedding: args.queryEmbedding,
     });
     return hits.map(toGitCommitResult);
 }
@@ -569,7 +550,60 @@ export async function unifiedSearch(
     const runMessages = activeSources.has("message");
     const runGitCommits = activeSources.has("git_commit") && gitCommitsEnabled;
 
-    const [memoryResults, messageResults, gitCommitResults] = await Promise.all([
+    // Embed the query ONCE at the top — both memory and git-commit searches
+    // need the same vector. Previously each search called `embedQuery`
+    // independently, producing two parallel HTTP requests for the same
+    // input text (visible in LMStudio logs as duplicate `/v1/embeddings`
+    // entries) which serialized at the model and doubled latency on
+    // single-GPU embedding endpoints.
+    //
+    // We start the embed BEFORE running the synchronous `searchMessages`
+    // path. JavaScript evaluates `Promise.all` arguments left-to-right, so
+    // any synchronous call inside an arg expression blocks the event loop
+    // and prevents in-flight `fetch()` work from being processed by the
+    // runtime — even though the request was technically dispatched. On
+    // long sessions `searchMessages` can do seconds of indexing work
+    // (`ensureMessagesIndexed` walks raw OpenCode session history); doing
+    // that BEFORE the embed call meant the embed fetch couldn't start
+    // until indexing finished.
+    const needsEmbedding =
+        (runMemory || runGitCommits) && embeddingEnabled && isEmbeddingRuntimeEnabled();
+
+    const queryEmbeddingPromise: Promise<Float32Array | null> = needsEmbedding
+        ? embedQuery(trimmedQuery, options.signal).catch((error) => {
+              log(
+                  `[search] query embedding failed: ${error instanceof Error ? error.message : String(error)}`,
+              );
+              return null;
+          })
+        : Promise.resolve(null);
+
+    // Yield to the event loop so the embed fetch's request gets a chance
+    // to be dispatched at the runtime level before we run any synchronous
+    // work. This is the crucial line that unblocks the auto-search 3-second
+    // delay observed in production: without it, `searchMessages` runs
+    // before the embed fetch is processed, and the embedding HTTP request
+    // doesn't actually leave the process until we await later.
+    await Promise.resolve();
+
+    // Run the synchronous message-FTS path now that the embed fetch is
+    // in flight. The message-search path doesn't depend on embeddings.
+    const messageResults: MessageSearchResult[] = runMessages
+        ? searchMessages({
+              db,
+              sessionId,
+              query: trimmedQuery,
+              limit: tierLimit,
+              readMessages: options.readMessages ?? readRawSessionMessages,
+              maxOrdinal: options.maxMessageOrdinal,
+          })
+        : [];
+
+    // Wait for the single embed call (if any) and then run the two
+    // embedding-dependent searches in parallel using the same vector.
+    const queryEmbedding = await queryEmbeddingPromise;
+
+    const [memoryResults, gitCommitResults] = await Promise.all([
         runMemory
             ? searchMemories({
                   db,
@@ -577,36 +611,20 @@ export async function unifiedSearch(
                   query: trimmedQuery,
                   limit: tierLimit,
                   memoryEnabled: true,
-                  embeddingEnabled,
-                  embedQuery,
-                  isEmbeddingRuntimeEnabled,
+                  queryEmbedding,
                   visibleMemoryIds: options.visibleMemoryIds,
-                  signal: options.signal,
               })
             : Promise.resolve([] as MemorySearchResult[]),
-        runMessages
+        runGitCommits
             ? Promise.resolve(
-                  searchMessages({
+                  searchGitCommits({
                       db,
-                      sessionId,
+                      projectPath,
                       query: trimmedQuery,
                       limit: tierLimit,
-                      readMessages: options.readMessages ?? readRawSessionMessages,
-                      maxOrdinal: options.maxMessageOrdinal,
+                      queryEmbedding,
                   }),
               )
-            : Promise.resolve([] as MessageSearchResult[]),
-        runGitCommits
-            ? searchGitCommitsAsync({
-                  db,
-                  projectPath,
-                  query: trimmedQuery,
-                  limit: tierLimit,
-                  embeddingEnabled,
-                  embedQuery,
-                  isEmbeddingRuntimeEnabled,
-                  signal: options.signal,
-              })
             : Promise.resolve([] as GitCommitSearchResult[]),
     ]);
 

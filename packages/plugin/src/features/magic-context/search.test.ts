@@ -13,6 +13,7 @@ const rawMessagesBySession = new Map<
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { replaceSessionFacts } from "./compartment-storage";
 import { getMemoryById, insertMemory, resetEmbeddingCacheForTests, saveEmbedding } from "./memory";
+import { runMigrations } from "./migrations";
 import { unifiedSearch } from "./search";
 import { initializeDatabase } from "./storage-db";
 
@@ -26,6 +27,11 @@ const isEmbeddingRuntimeEnabled = () => true;
 function createTestDb(): Database {
     const db = new Database(":memory:");
     initializeDatabase(db);
+    // runMigrations adds the git_commits + git_commits_fts tables that the
+    // dedup regression test exercises. Production code calls both functions
+    // back-to-back inside openDatabase(); the test path historically only
+    // called initializeDatabase() because no test needed the v4 schema.
+    runMigrations(db);
     return db;
 }
 
@@ -360,5 +366,42 @@ describe("unifiedSearch", () => {
         expect(memoryResults).toHaveLength(1);
         expect(memoryResults[0]?.memoryId).toBe(memory.id);
         expect(memoryResults[0]?.matchType).toBe("semantic");
+    });
+
+    /**
+     * Regression for the duplicate-embed bug observed in production LMStudio
+     * logs: when both memory and git-commit search ran in parallel, EACH
+     * branch independently called `embedQuery(trimmedQuery)`, producing two
+     * identical HTTP requests for the same input text. On a single-GPU
+     * embedding endpoint these serialized at the model and doubled latency.
+     *
+     * unifiedSearch must embed the query exactly once at the top, then pass
+     * the same vector to both consumers.
+     */
+    it("embeds the query exactly once even when memory + git_commit both need it", async () => {
+        const memory = insertMemory(db, {
+            projectPath: "/repo/project",
+            category: "ARCHITECTURE_DECISIONS",
+            content: "shared embed test.",
+        });
+        saveEmbedding(db, memory.id, new Float32Array([1, 0]), "mock:model");
+        queryEmbedding = new Float32Array([1, 0]);
+
+        await unifiedSearch(db, "ses-1", "/repo/project", "shared embed query", {
+            limit: 5,
+            memoryEnabled: true,
+            embeddingEnabled: true,
+            // Enable git-commits even though we have no commits indexed —
+            // searchGitCommits used to call embedQuery anyway, which is the
+            // exact behavior we're regressing against.
+            gitCommitsEnabled: true,
+            readMessages,
+            embedQuery,
+            isEmbeddingRuntimeEnabled,
+        });
+
+        // Even with two embed-needing branches active, the query is embedded
+        // exactly once. Pre-fix this would have been 2.
+        expect(embeddingQueries).toEqual(["shared embed query"]);
     });
 });
