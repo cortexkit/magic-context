@@ -159,12 +159,21 @@ const plugin: Plugin = async (ctx) => {
         // + derived experimental modes), so any model OpenCode knows the limit
         // for, we know too. Fire-and-forget: if it fails we fall through to the
         // disk-based loader in models-dev-cache.
+        //
+        // Refresh interval: 1 hour. The OpenCode-internal models.dev cache TTL
+        // is 5 minutes, but our use case (reading per-model context limits)
+        // doesn't benefit from refreshing that often. The github-copilot
+        // provider plugin in particular fetches `/models` on every
+        // `Provider.list()` call and its upstream API returns slightly
+        // different model sets between calls (model_picker_enabled toggles),
+        // so a 5-minute refresh produced confusing log churn for no real
+        // benefit. Limits for individual models are stable across days.
         void refreshModelLimitsFromApi(ctx.client);
         setInterval(
             () => {
                 void refreshModelLimitsFromApi(ctx.client);
             },
-            5 * 60 * 1000,
+            60 * 60 * 1000,
         );
     }
 

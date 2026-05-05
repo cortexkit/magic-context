@@ -356,6 +356,70 @@ describe("models-dev-cache", () => {
         expect(getModelsDevCacheState().apiLoaded).toBe(false);
     });
 
+    test("suppresses repeated logs when API count oscillates between known sizes", async () => {
+        // Simulates github-copilot's /models endpoint returning different model sets
+        // between calls. We want first sighting of each new size to log, but once a
+        // size has been seen before, further flips between known sizes should be
+        // silent (with one "oscillating" notice).
+        const sizeA = {
+            data: {
+                providers: [
+                    {
+                        id: "p",
+                        models: {
+                            m1: { limit: { context: 100 } },
+                            m2: { limit: { context: 100 } },
+                            m3: { limit: { context: 100 } },
+                        },
+                    },
+                ],
+            },
+        };
+        const sizeB = {
+            data: {
+                providers: [
+                    {
+                        id: "p",
+                        models: {
+                            m1: { limit: { context: 100 } },
+                            m2: { limit: { context: 100 } },
+                        },
+                    },
+                ],
+            },
+        };
+
+        const clientA = { config: { providers: async () => sizeA } };
+        const clientB = { config: { providers: async () => sizeB } };
+
+        // First sighting of size 3 → logs "loaded 3 entries".
+        await refreshModelLimitsFromApi(clientA);
+        expect(getModelsDevCacheState().apiCount).toBe(3);
+
+        // First sighting of size 2 → logs "loaded 2 entries (was 3)".
+        await refreshModelLimitsFromApi(clientB);
+        expect(getModelsDevCacheState().apiCount).toBe(2);
+
+        // Second sighting of size 3 → logs the "oscillating" notice once.
+        await refreshModelLimitsFromApi(clientA);
+        expect(getModelsDevCacheState().apiCount).toBe(3);
+
+        // Second sighting of size 2 → silent (no new log expected).
+        await refreshModelLimitsFromApi(clientB);
+        expect(getModelsDevCacheState().apiCount).toBe(2);
+
+        // Third sighting of size 3 → still silent.
+        await refreshModelLimitsFromApi(clientA);
+        expect(getModelsDevCacheState().apiCount).toBe(3);
+
+        // The cache itself still updates on every call (model contents are correct
+        // for whichever provider response just arrived). The suppression is purely
+        // a logging concern. Last call was clientA → all three models present.
+        expect(getModelsDevContextLimit("p", "m1")).toBe(100);
+        expect(getModelsDevContextLimit("p", "m2")).toBe(100);
+        expect(getModelsDevContextLimit("p", "m3")).toBe(100);
+    });
+
     test("falls back to file layer when API provider/model key is missing", async () => {
         const opencodeDir = join(tempDir, "opencode");
         mkdirSync(opencodeDir, { recursive: true });

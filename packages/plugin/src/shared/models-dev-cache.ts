@@ -45,6 +45,17 @@ type InterleavedConfig = boolean | { field?: string } | undefined;
 /** Populated async from OpenCode SDK. Primary source of truth when available. */
 let apiCache: Map<string, CachedModelMetadata> | null = null;
 let apiLoadedAt = 0;
+/**
+ * Recently-seen API cache sizes, used to detect oscillation between two
+ * stable values (typically caused by upstream provider plugins like
+ * github-copilot whose `/models` endpoint returns slightly different model
+ * sets between calls based on `model_picker_enabled` toggles). Once the
+ * same size has been observed before, we stop logging count changes —
+ * the count is a function of upstream behavior we can't control, and
+ * repeated logs only add noise.
+ */
+const recentlySeenApiSizes = new Set<number>();
+let oscillationLogged = false;
 
 /** Populated sync from disk as fallback. */
 let fileCache: Map<string, CachedModelMetadata> | null = null;
@@ -288,15 +299,34 @@ export async function refreshModelLimitsFromApi(client: OpencodeClientLike): Pro
         const previousSize = apiCache?.size ?? null;
         apiCache = map;
         apiLoadedAt = Date.now();
-        // Log only on first successful load or when the model count changes,
-        // so the 5-minute periodic refresh doesn't spam the log.
-        if (previousSize === null || previousSize !== map.size) {
+
+        // Log policy:
+        //   - Always log the first successful load.
+        //   - Log a count change once per new size we haven't seen before.
+        //   - When the count returns to a previously-seen size, log an
+        //     "oscillation" message exactly once explaining the cause, then
+        //     stay silent on further flips between known sizes.
+        if (previousSize === null) {
+            recentlySeenApiSizes.add(map.size);
             sessionLog(
                 "global",
-                `models-dev-cache: API layer loaded ${map.size} model metadata entries${
-                    previousSize !== null ? ` (was ${previousSize})` : ""
-                }`,
+                `models-dev-cache: API layer loaded ${map.size} model metadata entries`,
             );
+        } else if (previousSize !== map.size) {
+            const sizeAlreadySeen = recentlySeenApiSizes.has(map.size);
+            recentlySeenApiSizes.add(map.size);
+            if (!sizeAlreadySeen) {
+                sessionLog(
+                    "global",
+                    `models-dev-cache: API layer loaded ${map.size} model metadata entries (was ${previousSize})`,
+                );
+            } else if (!oscillationLogged) {
+                oscillationLogged = true;
+                sessionLog(
+                    "global",
+                    `models-dev-cache: API count oscillating between ${[...recentlySeenApiSizes].sort((a, b) => a - b).join(" ↔ ")} — likely upstream provider plugin returning slightly different model sets between calls (e.g. github-copilot's /models endpoint toggling model_picker_enabled). Suppressing further size-change logs.`,
+                );
+            }
         }
     } catch (error) {
         sessionLog(
@@ -366,6 +396,8 @@ export function getModelsDevInterleavedField(
 export function clearModelsDevCache(): void {
     apiCache = null;
     apiLoadedAt = 0;
+    recentlySeenApiSizes.clear();
+    oscillationLogged = false;
     fileCache = null;
     fileLastAttempt = 0;
 }
