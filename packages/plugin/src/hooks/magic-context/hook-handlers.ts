@@ -1,4 +1,9 @@
 import {
+    clearSessionTracking,
+    scheduleIncrementalIndex,
+    scheduleReconciliation,
+} from "../../features/magic-context/message-index-async";
+import {
     clearPersistedReasoningWatermark,
     getPersistedStickyTurnReminder,
     setPersistedStickyTurnReminder,
@@ -12,9 +17,14 @@ import { clearSidebarSnapshotCache } from "../../plugin/sidebar-snapshot-cache";
 import type { PluginContext } from "../../plugin/types";
 import { sessionLog } from "../../shared/logger";
 import { clearAutoSearchForSession } from "./auto-search-runner";
-import { getMessageUpdatedAssistantInfo, getSessionProperties } from "./event-payloads";
+import {
+    getMessageUpdatedAssistantInfo,
+    getMessageUpdatedInfo,
+    getSessionProperties,
+} from "./event-payloads";
 import { resolveSessionId as resolveEventSessionId } from "./event-resolvers";
 import { clearNoteNudgeState, onNoteTrigger } from "./note-nudger";
+import { readRawSessionMessageById, readRawSessionMessages } from "./read-session-chunk";
 
 const TOOL_HEAVY_TURN_REMINDER_THRESHOLD = 5;
 const TOOL_HEAVY_TURN_REMINDER_TEXT =
@@ -220,6 +230,23 @@ export function createEventHook(args: {
         await args.eventHandler(input);
 
         if (input.event.type === "message.updated") {
+            const messageInfo = getMessageUpdatedInfo(input.event.properties);
+            if (messageInfo?.messageID) {
+                const isTerminalUser = messageInfo.role === "user";
+                const isTerminalAssistant =
+                    messageInfo.role === "assistant" &&
+                    (typeof messageInfo.completedAt === "number" ||
+                        typeof messageInfo.finish === "string");
+                if (isTerminalUser || isTerminalAssistant) {
+                    scheduleIncrementalIndex(
+                        args.db,
+                        messageInfo.sessionID,
+                        messageInfo.messageID,
+                        readRawSessionMessageById,
+                    );
+                }
+            }
+
             const assistantInfo = getMessageUpdatedAssistantInfo(input.event.properties);
             if (assistantInfo?.providerID && assistantInfo?.modelID) {
                 const previous = args.liveModelBySession.get(assistantInfo.sessionID);
@@ -265,6 +292,10 @@ export function createEventHook(args: {
         const sessionId = resolveEventSessionId(properties);
         if (!sessionId) return;
 
+        if (input.event.type !== "session.deleted") {
+            scheduleReconciliation(args.db, sessionId, readRawSessionMessages);
+        }
+
         if (input.event.type === "session.deleted") {
             args.liveModelBySession.delete(sessionId);
             args.variantBySession.delete(sessionId);
@@ -280,6 +311,7 @@ export function createEventHook(args: {
             clearNoteNudgeState(args.db, sessionId);
             clearAutoSearchForSession(sessionId);
             clearSidebarSnapshotCache(sessionId);
+            clearSessionTracking(sessionId);
         }
 
         // Historical note: v0.14.1 removed the 80% "context emergency" nudge

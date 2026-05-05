@@ -41,6 +41,14 @@ export interface MessageUpdatedAssistantInfo {
     error?: unknown;
 }
 
+export interface MessageUpdatedInfo {
+    role: "user" | "assistant" | string;
+    sessionID: string;
+    messageID?: string;
+    finish?: string;
+    completedAt?: number;
+}
+
 export interface SessionErrorInfo {
     sessionID: string;
     error: unknown;
@@ -115,6 +123,27 @@ export function getMessageUpdatedAssistantInfo(
             },
         },
         error: info.error !== undefined ? info.error : undefined,
+    };
+}
+
+export function getMessageUpdatedInfo(properties: unknown): MessageUpdatedInfo | null {
+    const eventProps = getSessionProperties(properties);
+    if (!eventProps || !isRecord(eventProps.info)) {
+        return null;
+    }
+
+    const info = eventProps.info;
+    if (typeof info.role !== "string" || typeof info.sessionID !== "string") {
+        return null;
+    }
+
+    const time = isRecord(info.time) ? info.time : undefined;
+    return {
+        role: info.role,
+        sessionID: info.sessionID,
+        messageID: typeof info.id === "string" ? info.id : undefined,
+        finish: typeof info.finish === "string" ? info.finish : undefined,
+        completedAt: typeof time?.completed === "number" ? time.completed : undefined,
     };
 }
 

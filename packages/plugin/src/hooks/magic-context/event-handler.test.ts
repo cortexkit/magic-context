@@ -5,6 +5,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+    __resetMessageIndexAsyncForTests,
+    isSessionReconciled,
+} from "../../features/magic-context/message-index-async";
+import {
     closeDatabase,
     getHistorianFailureState,
     getMaxCompressionDepth,
@@ -33,6 +37,7 @@ const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
 afterEach(() => {
+    __resetMessageIndexAsyncForTests();
     closeDatabase();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
 
@@ -391,7 +396,6 @@ describe("createEventHandler", () => {
         useTempDataHome("context-event-message-removed-tags-");
         const deps = createDeps(new Map());
         const handler = createEventHandler(deps);
-
         insertTag(deps.db, "ses-removed", "msg-removed:p0", "message", 32, 1);
         insertTag(deps.db, "ses-removed", "msg-removed:file1", "file", 48, 2);
         insertTag(deps.db, "ses-removed", "msg-keep:p0", "message", 64, 3);
@@ -433,12 +437,12 @@ describe("createEventHandler", () => {
                 cavemanDepth: 0,
             },
         ]);
-        // Full FTS reindex on next search: clearIndexedMessages wipes ALL FTS rows
-        // and the tracking row to avoid stale positional ordinals after removal.
-        // The "keep" message will be re-indexed on the next ctx_search call.
+        // The removal path clears synchronously. Async reconciliation is scheduled
+        // separately, so searches during this tiny rebuild window see no message hits.
         expect(countIndexedMessages("ses-removed", "msg-removed")).toBe(0);
         expect(countIndexedMessages("ses-removed", "msg-keep")).toBe(0);
         expect(countMessageIndexRows("ses-removed")).toBe(0);
+        expect(isSessionReconciled("ses-removed")).toBe(false);
         expect(deps.tagger.cleanup).toHaveBeenCalledWith("ses-removed");
     });
 

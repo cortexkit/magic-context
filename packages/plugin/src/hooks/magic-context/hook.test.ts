@@ -4,10 +4,11 @@
 process.env.OPENCODE_CLIENT = "desktop";
 
 import { afterEach, describe, expect, it, mock } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
+import { __resetMessageIndexAsyncForTests } from "../../features/magic-context/message-index-async";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import {
     closeDatabase,
@@ -16,7 +17,9 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import type { Tagger } from "../../features/magic-context/tagger";
+import { Database } from "../../shared/sqlite";
 import { createMagicContextHook, type MagicContextDeps } from "./hook";
+import { closeReadOnlySessionDb } from "./read-session-db";
 
 type PromptMocks = {
     prompt?: ReturnType<typeof mock>;
@@ -37,6 +40,8 @@ function makeTempDir(prefix: string): string {
 }
 
 afterEach(() => {
+    __resetMessageIndexAsyncForTests();
+    closeReadOnlySessionDb();
     closeDatabase();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
 
@@ -127,7 +132,118 @@ function formatHm(date: Date): string {
     return `${hours}:${minutes}`;
 }
 
+function createOpenCodeDbForHook(
+    sessionId: string,
+    messages: Array<{ id: string; role: string; text: string }>,
+): void {
+    const dbPath = join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db");
+    mkdirSync(dirname(dbPath), { recursive: true });
+    const db = new Database(dbPath);
+    try {
+        db.exec(`
+            CREATE TABLE IF NOT EXISTS message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS part (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+        `);
+        const insertMessage = db.prepare(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+        );
+        const insertPart = db.prepare(
+            "INSERT INTO part (message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+        );
+        messages.forEach((message, index) => {
+            const timestamp = index + 1;
+            insertMessage.run(
+                message.id,
+                sessionId,
+                timestamp,
+                timestamp,
+                JSON.stringify({ id: message.id, role: message.role, sessionID: sessionId }),
+            );
+            insertPart.run(
+                message.id,
+                sessionId,
+                timestamp,
+                timestamp,
+                JSON.stringify({ type: "text", text: message.text }),
+            );
+        });
+    } finally {
+        db.close();
+    }
+}
+
+function countIndexedHookMessage(sessionId: string, messageId: string): number {
+    const row = openDatabase()
+        .prepare(
+            "SELECT COUNT(*) AS count FROM message_history_fts WHERE session_id = ? AND message_id = ?",
+        )
+        .get(sessionId, messageId) as { count?: number } | null;
+    return typeof row?.count === "number" ? row.count : 0;
+}
+
 describe("magic-context hook", () => {
+    it("indexes terminal message.updated events asynchronously", async () => {
+        process.env.XDG_DATA_HOME = makeTempDir("hook-message-index-");
+        createOpenCodeDbForHook("ses-index", [
+            { id: "u-1", role: "user", text: "index user text" },
+            { id: "a-1", role: "assistant", text: "index assistant text" },
+        ]);
+        const hook = requireHook(createMagicContextHook(createMockDeps()));
+
+        await hook.event!({
+            event: {
+                type: "message.updated",
+                properties: { info: { id: "u-1", role: "user", sessionID: "ses-index" } },
+            },
+        });
+        await hook.event!({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        id: "a-1",
+                        role: "assistant",
+                        sessionID: "ses-index",
+                        time: { completed: Date.now() },
+                    },
+                },
+            },
+        });
+        await new Promise((resolve) => setTimeout(resolve, 140));
+
+        expect(countIndexedHookMessage("ses-index", "u-1")).toBe(1);
+        expect(countIndexedHookMessage("ses-index", "a-1")).toBe(1);
+
+        createOpenCodeDbForHook("ses-index", [
+            { id: "a-streaming", role: "assistant", text: "not terminal yet" },
+        ]);
+        await hook.event!({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: { id: "a-streaming", role: "assistant", sessionID: "ses-index" },
+                },
+            },
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 140));
+
+        expect(countIndexedHookMessage("ses-index", "a-streaming")).toBe(0);
+    });
+
     it("returns the expected hook keys", () => {
         process.env.XDG_DATA_HOME = makeTempDir("hook-test-");
         const hook = requireHook(createMagicContextHook(createMockDeps()));

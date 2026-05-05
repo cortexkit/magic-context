@@ -10,11 +10,16 @@ export interface RawMessage {
 interface RawMessageRow {
     id: string;
     data: string;
+    time_created?: number;
 }
 
 interface RawPartRow {
     message_id: string;
     data: string;
+}
+
+interface OrdinalRow {
+    ordinal?: number;
 }
 
 function isRawMessageRow(row: unknown): row is RawMessageRow {
@@ -90,4 +95,51 @@ export function readRawSessionMessagesFromDb(db: Database, sessionId: string): R
             parts: partsByMessageId.get(row.id) ?? [],
         };
     });
+}
+
+export function readRawSessionMessageByIdFromDb(
+    db: Database,
+    sessionId: string,
+    messageId: string,
+): RawMessage | null {
+    const row = db
+        .prepare("SELECT id, data, time_created FROM message WHERE session_id = ? AND id = ?")
+        .get(sessionId, messageId) as RawMessageRow | null;
+    if (!row || !isRawMessageRow(row) || typeof row.time_created !== "number") {
+        return null;
+    }
+
+    const info = parseJsonRecord(row.data);
+    if (!info || (info.summary === true && info.finish === "stop")) {
+        return null;
+    }
+
+    const ordinalRow = db
+        .prepare(
+            `SELECT COUNT(*) AS ordinal FROM message
+             WHERE session_id = ?
+               AND NOT (COALESCE(json_extract(data, '$.summary'), 0) = 1
+                        AND COALESCE(json_extract(data, '$.finish'), '') = 'stop')
+               AND (time_created < ? OR (time_created = ? AND id <= ?))`,
+        )
+        .get(sessionId, row.time_created, row.time_created, messageId) as OrdinalRow | null;
+    const ordinal = typeof ordinalRow?.ordinal === "number" ? ordinalRow.ordinal : 0;
+    if (ordinal <= 0) {
+        return null;
+    }
+
+    const partRows = db
+        .prepare(
+            "SELECT message_id, data FROM part WHERE session_id = ? AND message_id = ? ORDER BY time_created ASC, id ASC",
+        )
+        .all(sessionId, messageId)
+        .filter(isRawPartRow);
+
+    const role = typeof info.role === "string" ? info.role : "unknown";
+    return {
+        ordinal,
+        id: row.id,
+        role,
+        parts: partRows.map((part) => parseJsonUnknown(part.data)),
+    };
 }

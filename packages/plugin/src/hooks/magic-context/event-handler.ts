@@ -1,4 +1,5 @@
 import type { createCompactionHandler } from "../../features/magic-context/compaction";
+import { scheduleClearAndReindex } from "../../features/magic-context/message-index-async";
 import { detectOverflow } from "../../features/magic-context/overflow-detection";
 import {
     clearHistorianFailureState,
@@ -44,6 +45,7 @@ import {
     resolveSessionId,
 } from "./event-resolvers";
 import { clearNoteNudgeState } from "./note-nudger";
+import { readRawSessionMessages } from "./read-session-chunk";
 import { clearMessageTokensCache, type NudgePlacementStore } from "./transform";
 import { clearCompressorCooldown } from "./transform-compartment-phase";
 
@@ -493,6 +495,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
 
             try {
                 const cleanup = cleanupRemovedMessageState(deps, info.sessionID, info.messageID);
+                scheduleClearAndReindex(deps.db, info.sessionID, readRawSessionMessages);
 
                 deps.tagger.cleanup(info.sessionID);
                 sessionLog(

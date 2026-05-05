@@ -14,7 +14,11 @@ import {
     normalizeText,
     type SessionChunkLine,
 } from "./read-session-formatting";
-import { type RawMessage, readRawSessionMessagesFromDb } from "./read-session-raw";
+import {
+    type RawMessage,
+    readRawSessionMessageByIdFromDb,
+    readRawSessionMessagesFromDb,
+} from "./read-session-raw";
 import { isFilePart, isTextPart, isToolPartWithOutput } from "./tag-part-guards";
 
 export { extractTexts, hasMeaningfulUserText } from "./read-session-formatting";
@@ -44,6 +48,7 @@ let activeRawMessageCache: Map<string, RawMessage[]> | null = null;
  */
 export interface RawMessageProvider {
     readMessages(): RawMessage[];
+    readMessageById?: (messageId: string) => RawMessage | null;
     /** Optional fast count path; falls back to readMessages().length. */
     getMessageCount?: () => number;
 }
@@ -137,6 +142,17 @@ export function readRawSessionMessages(sessionId: string): RawMessage[] {
     }
 
     return readRawSessionMessagesFromSource(sessionId);
+}
+
+export function readRawSessionMessageById(sessionId: string, messageId: string): RawMessage | null {
+    const provider = sessionProviders.get(sessionId);
+    if (provider?.readMessageById) {
+        return provider.readMessageById(messageId);
+    }
+    if (provider) {
+        return provider.readMessages().find((message) => message.id === messageId) ?? null;
+    }
+    return withReadOnlySessionDb((db) => readRawSessionMessageByIdFromDb(db, sessionId, messageId));
 }
 
 function readRawSessionMessagesFromSource(sessionId: string): RawMessage[] {
