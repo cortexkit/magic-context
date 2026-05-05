@@ -19,7 +19,7 @@ All settings are flat top-level keys in `magic-context.jsonc`. The schema is **s
 | `<project>/.pi/magic-context.jsonc` | Project root |
 | `~/.pi/agent/magic-context.jsonc` | User-wide defaults |
 
-Project config always merges on top of user config in both harnesses. The unified setup wizard (`bunx --bun @cortexkit/magic-context@latest setup`) auto-detects which harnesses you have installed and writes the user-level file for each with sensible defaults; pass `--harness opencode` or `--harness pi` to target one.
+Project config always merges on top of user config in both harnesses. The unified setup wizard (`npx @cortexkit/magic-context@latest setup`) auto-detects which harnesses you have installed and writes the user-level file for each with sensible defaults; pass `--harness opencode` or `--harness pi` to target one.
 
 ### Cross-harness scoping
 
@@ -50,11 +50,11 @@ If something isn't working, run the unified doctor to auto-detect installed harn
 
 ```bash
 # Auto-detect installed harnesses; if both, picks the first or asks
-bunx --bun @cortexkit/magic-context@latest doctor
+npx @cortexkit/magic-context@latest doctor
 
 # Target a specific harness explicitly
-bunx --bun @cortexkit/magic-context@latest doctor --harness opencode
-bunx --bun @cortexkit/magic-context@latest doctor --harness pi
+npx @cortexkit/magic-context@latest doctor --harness opencode
+npx @cortexkit/magic-context@latest doctor --harness pi
 ```
 
 The OpenCode doctor checks: installation, CLI version vs npm latest, plugin registration (preserves local dev paths), `magic-context.jsonc` parses + loads through the schema, conflicts (compaction, DCP, OMO hooks), TUI sidebar configuration, embedding endpoint, shared-DB existence + `PRAGMA integrity_check` + row counts, plugin npm cache, and historian debug dumps.
@@ -62,6 +62,14 @@ The OpenCode doctor checks: installation, CLI version vs npm latest, plugin regi
 The Pi doctor checks: Pi binary + version (requires `>= 0.71.0`), CLI version vs npm latest, settings registration, config validity, embedding endpoint reachability, shared-DB integrity, stale Pi extension caches, and historian debug dumps.
 
 Both report `PASS X / WARN Y / FAIL Z` summary counts. Use `--force` to auto-fix what doctor can (clears stale plugin cache, repairs config) and `--issue` to produce a sanitized issue report.
+
+### Electron native-binding cache
+
+When OpenCode Desktop (Electron) loads Magic Context for the first time, the plugin downloads an Electron-compatible `better-sqlite3` binary (~1 MB) from the upstream `WiseLibs/better-sqlite3` GitHub release and caches it under `~/.cache/cortexkit/native-bindings/`.
+
+This is needed because `better-sqlite3`'s shipped npm prebuilds target Node's `NODE_MODULE_VERSION` (137 for Node 22), but Electron 41 uses ABI 145 — so the bundled `.node` file is rejected with "compiled against a different Node.js version". The cache is keyed by `<pkgVersion>/electron-v<abi>-<platform>-<arch>` and self-heals across Electron upgrades. The OpenCode TUI (Bun) and Pi (Node CLI) paths are unaffected.
+
+**First-launch network requirement.** If GitHub is unreachable on the very first Electron Desktop launch (corp firewall, offline laptop), Magic Context will fail closed and disable itself for that run, with a clear log message. After one successful launch the cache is populated and offline use is fine. `doctor --force` clears the cache to force a re-fetch on the next launch.
 
 ---
 

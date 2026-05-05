@@ -46,6 +46,7 @@
 		"ai-tokenizer": "^1.0.6",
 		"better-sqlite3": "^12.9.0",
 		"comment-json": "^4.2.5",
+		"nanotar": "^0.3.0",
 		"zod": "^4.1.8"
 	},
 	"devDependencies": {

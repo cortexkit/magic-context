@@ -26,6 +26,12 @@
  * in `./sqlite-helpers.ts`.
  */
 
+// Type import only — better-sqlite3's runtime is loaded dynamically below.
+// @types/better-sqlite3 has richer definitions than @types/bun's bun:sqlite
+// types, and bun:sqlite is a structural superset for the API surface we use,
+// so calls typed against BetterSqlite3 work under both runtimes at runtime.
+import type BetterSqlite3 from "better-sqlite3";
+
 // Detect Bun via process.versions.bun. Both globalThis.Bun and
 // process.versions.bun are set by the Bun runtime, but process.versions
 // is a lower-level surface less likely to be sandboxed by host runtimes
@@ -50,6 +56,22 @@ const isBun = typeof process !== "undefined" && typeof process.versions?.bun ===
 // dynamic import — Pi's loader, esbuild, and bun build all accept it.
 const bunSpec = "bun:" + "sqlite";
 const betterSpec = "better-" + "sqlite3";
+
+// Under Electron, the npm-installed better-sqlite3 binary has the wrong ABI
+// (it's a Node prebuild but Electron embeds a different NODE_MODULE_VERSION).
+// resolveBetterSqliteNativeBinding() detects this and downloads + caches the
+// matching Electron prebuild, then returns its absolute path so we can pass
+// it to better-sqlite3 via the `nativeBinding` constructor option (a
+// documented public API). Returns null outside Electron OR when the on-disk
+// binary already matches the runtime ABI — in those cases the default
+// bindings() lookup just works.
+const electronNativeBinding = isBun
+    ? null
+    : await (async () => {
+          const mod = await import("./native-binding");
+          return mod.resolveBetterSqliteNativeBinding();
+      })();
+
 const sqliteModule = isBun
     ? await import(/* @vite-ignore */ bunSpec)
     : await import(/* @vite-ignore */ betterSpec);
@@ -57,21 +79,42 @@ const sqliteModule = isBun
 // Different export shapes between the two libraries:
 //   - bun:sqlite     → named export `Database`
 //   - better-sqlite3 → default export
-const DatabaseImpl = isBun ? sqliteModule.Database : sqliteModule.default;
+const RawDatabaseImpl = isBun ? sqliteModule.Database : sqliteModule.default;
 
-/**
- * Database constructor compatible with both bun:sqlite and better-sqlite3.
- *
- * The TypeScript type intentionally references @types/better-sqlite3 because
- * its definitions are richer than @types/bun's bun:sqlite types and bun:sqlite
- * is a structural superset for the API surface we use. Calls written against
- * this type work correctly under both runtimes at runtime.
- *
- * @types/better-sqlite3 uses `export = Database` (CommonJS interop), which
- * surfaces in TypeScript as `import Database = require("better-sqlite3")`.
- * We capture the DatabaseConstructor type from the namespace re-export.
- */
-import type BetterSqlite3 from "better-sqlite3";
+// When we resolved a non-default Electron-compatible native binding above,
+// transparently inject it into every `new Database(...)` call. This is the
+// public `nativeBinding` constructor option that better-sqlite3 ships
+// specifically for cross-runtime extension scenarios — it makes
+// better-sqlite3 `require()` the binary at the supplied path directly,
+// bypassing the default bindings() resolver.
+//
+// Subclassing keeps the call sites untouched: existing
+// `new Database(filename, { readonly: true })` invocations work as-is.
+// Callers can still override `nativeBinding` explicitly if they need to.
+//
+// The TypeScript type intentionally references @types/better-sqlite3 because
+// its definitions are richer than @types/bun's bun:sqlite types and bun:sqlite
+// is a structural superset for the API surface we use. Calls written against
+// this type work correctly under both runtimes at runtime.
+//
+// @types/better-sqlite3 uses `export = Database` (CommonJS interop), which
+// surfaces in TypeScript as `import Database = require("better-sqlite3")`.
+// We capture the DatabaseConstructor type from the namespace re-export.
+const DatabaseImpl: typeof BetterSqlite3 =
+    electronNativeBinding == null
+        ? (RawDatabaseImpl as typeof BetterSqlite3)
+        : (class DatabaseWithElectronBinding extends (RawDatabaseImpl as typeof BetterSqlite3) {
+              constructor(filename?: string | Buffer, options?: BetterSqlite3.Options) {
+                  // Type narrowing: the surrounding ternary already proved
+                  // electronNativeBinding is non-null in this branch, but
+                  // TypeScript can't follow that across the class boundary.
+                  const fallback = electronNativeBinding as string;
+                  super(filename, {
+                      ...options,
+                      nativeBinding: options?.nativeBinding ?? fallback,
+                  });
+              }
+          } as typeof BetterSqlite3);
 
 export const Database: typeof BetterSqlite3 = DatabaseImpl;
 
