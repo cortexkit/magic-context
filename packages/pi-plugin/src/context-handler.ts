@@ -1872,7 +1872,16 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// this is the cache-stable replay of mutations persisted on prior
 	// execute passes. Mirrors OpenCode's `applyFlushedStatuses` call
 	// at transform.ts:728.
-	applyFlushedStatuses(args.sessionId, args.db, targets);
+	//
+	// P0 perf: applyFlushedStatuses only ever mutates tags whose
+	// tag_number is in `targets`, so feed it just that slice instead
+	// of the whole session (~50k rows on long sessions). Without this
+	// pre-load it lazy-loads via getTagsBySession internally — exactly
+	// the full-table scan we eliminated in OpenCode's transform.
+	const flushedSliceTags = getTagsByNumbers(args.db, args.sessionId, [
+		...targets.keys(),
+	]);
+	applyFlushedStatuses(args.sessionId, args.db, targets, flushedSliceTags);
 
 	// 3b. Reasoning replay (cache-stable, runs on EVERY pass).
 	// Re-applies typed-reasoning [cleared] markers and inline
