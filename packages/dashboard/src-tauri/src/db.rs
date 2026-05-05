@@ -2077,22 +2077,68 @@ fn load_opencode_messages(
     conn: &Connection,
     session_id: &str,
 ) -> Result<Vec<SessionMessageRow>, rusqlite::Error> {
+    // OpenCode stores message metadata (role, time, agent, model) on the `message` table
+    // but the actual text content lives in the separate `part` table joined by `message_id`.
+    // Each part has its own JSON shape — `type=text` parts have a `text` field; other types
+    // (`tool`, `step-start`, `step-finish`, `reasoning`, `file`) are not user-visible content.
+    //
+    // We aggregate text parts per message via GROUP_CONCAT for a single round-trip query
+    // instead of N+1. Parts are ordered by `time_created` then `id` to preserve sequence.
+    //
+    // The `||` operator concatenates SQL strings; `||` with NULL produces NULL, so we wrap
+    // json_extract in COALESCE to handle non-text parts (which return NULL for `$.text`).
     let mut stmt = conn.prepare(
-        "SELECT CAST(id AS TEXT), time_created, COALESCE(CAST(json_extract(data, '$.role') AS TEXT), ''), data
-         FROM message WHERE session_id = ?1 ORDER BY time_created ASC",
+        "SELECT
+            CAST(m.id AS TEXT),
+            m.time_created,
+            COALESCE(CAST(json_extract(m.data, '$.role') AS TEXT), ''),
+            m.data,
+            COALESCE(
+                (SELECT GROUP_CONCAT(json_extract(p.data, '$.text'), ' ')
+                 FROM part p
+                 WHERE p.message_id = m.id
+                   AND json_extract(p.data, '$.type') = 'text'
+                   AND json_extract(p.data, '$.text') IS NOT NULL),
+                ''
+            ) AS aggregated_text
+         FROM message m
+         WHERE m.session_id = ?1
+         ORDER BY m.time_created ASC",
     )?;
     let rows = stmt.query_map([session_id], |row| {
         let raw_string: String = row.get(3)?;
         let raw_json: serde_json::Value = serde_json::from_str(&raw_string).unwrap_or_default();
+        let aggregated_text: String = row.get(4)?;
+        // Use aggregated parts text when present; fall back to legacy in-message content
+        // (covers any future schema variants where text might live on the message row).
+        let text_preview = if aggregated_text.is_empty() {
+            preview_from_json(&raw_json)
+        } else {
+            normalize_preview(&aggregated_text)
+        };
         Ok(SessionMessageRow {
             message_id: row.get(0)?,
             timestamp_ms: row.get(1)?,
             role: row.get(2)?,
-            text_preview: preview_from_json(&raw_json),
+            text_preview,
             raw_json,
         })
     })?;
     rows.collect()
+}
+
+/// Normalize and truncate text for preview: collapse whitespace, drop control characters,
+/// and cap at 500 chars. Mirrors `preview_from_json` final pass for consistency.
+fn normalize_preview(text: &str) -> String {
+    text.chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(500)
+        .collect()
 }
 
 pub fn get_pi_session_detail(
@@ -2753,5 +2799,233 @@ pub fn get_db_health(db_path: &PathBuf) -> DbHealth {
         size_bytes,
         wal_size_bytes,
         table_counts,
+    }
+}
+
+
+#[cfg(test)]
+mod load_messages_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    /// Build a minimal in-memory OpenCode-shaped DB so we can exercise
+    /// `load_opencode_messages` against the same schema OpenCode uses.
+    fn make_test_db() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            CREATE TABLE part (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )
+        .expect("create schema");
+        conn
+    }
+
+    fn insert_message(conn: &Connection, id: &str, role: &str, time: i64) {
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?1, 'ses_test', ?2, ?3)",
+            (id, time, format!(r#"{{"role":"{}","time":{{"created":{}}}}}"#, role, time)),
+        )
+        .expect("insert message");
+    }
+
+    fn insert_part(conn: &Connection, id: &str, message_id: &str, time: i64, data: &str) {
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data)
+             VALUES (?1, ?2, 'ses_test', ?3, ?3, ?4)",
+            (id, message_id, time, data),
+        )
+        .expect("insert part");
+    }
+
+    #[test]
+    fn aggregates_text_parts_into_preview() {
+        let conn = make_test_db();
+        insert_message(&conn, "msg_user_1", "user", 100);
+        insert_part(
+            &conn,
+            "prt_1",
+            "msg_user_1",
+            100,
+            r#"{"type":"text","text":"hello world"}"#,
+        );
+
+        let messages = load_opencode_messages(&conn, "ses_test").expect("load");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].text_preview, "hello world");
+    }
+
+    #[test]
+    fn concatenates_multiple_text_parts() {
+        let conn = make_test_db();
+        insert_message(&conn, "msg_assistant_1", "assistant", 200);
+        insert_part(
+            &conn,
+            "prt_a",
+            "msg_assistant_1",
+            200,
+            r#"{"type":"text","text":"first chunk"}"#,
+        );
+        insert_part(
+            &conn,
+            "prt_b",
+            "msg_assistant_1",
+            201,
+            r#"{"type":"text","text":"second chunk"}"#,
+        );
+
+        let messages = load_opencode_messages(&conn, "ses_test").expect("load");
+        assert_eq!(messages.len(), 1);
+        // GROUP_CONCAT does not guarantee order across SQLite versions; both
+        // halves must be present and joined by the configured separator.
+        assert!(
+            messages[0].text_preview.contains("first chunk"),
+            "preview missing first chunk: {:?}",
+            messages[0].text_preview
+        );
+        assert!(
+            messages[0].text_preview.contains("second chunk"),
+            "preview missing second chunk: {:?}",
+            messages[0].text_preview
+        );
+    }
+
+    #[test]
+    fn skips_non_text_parts() {
+        let conn = make_test_db();
+        insert_message(&conn, "msg_assistant_2", "assistant", 300);
+        insert_part(
+            &conn,
+            "prt_tool",
+            "msg_assistant_2",
+            300,
+            r#"{"type":"tool","callID":"x","tool":"read"}"#,
+        );
+        insert_part(
+            &conn,
+            "prt_step",
+            "msg_assistant_2",
+            301,
+            r#"{"type":"step-finish","reason":"tool-calls"}"#,
+        );
+        insert_part(
+            &conn,
+            "prt_reasoning",
+            "msg_assistant_2",
+            302,
+            r#"{"type":"reasoning","text":"internal thinking"}"#,
+        );
+        insert_part(
+            &conn,
+            "prt_text",
+            "msg_assistant_2",
+            303,
+            r#"{"type":"text","text":"public answer"}"#,
+        );
+
+        let messages = load_opencode_messages(&conn, "ses_test").expect("load");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text_preview, "public answer");
+        assert!(!messages[0].text_preview.contains("internal thinking"));
+        assert!(!messages[0].text_preview.contains("read"));
+    }
+
+    #[test]
+    fn empty_preview_when_no_text_parts() {
+        let conn = make_test_db();
+        insert_message(&conn, "msg_tool_only", "assistant", 400);
+        insert_part(
+            &conn,
+            "prt_tool_only",
+            "msg_tool_only",
+            400,
+            r#"{"type":"tool","callID":"x","tool":"read"}"#,
+        );
+
+        let messages = load_opencode_messages(&conn, "ses_test").expect("load");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text_preview, "");
+    }
+
+    #[test]
+    fn orders_messages_by_time_created() {
+        let conn = make_test_db();
+        insert_message(&conn, "msg_late", "user", 1000);
+        insert_message(&conn, "msg_early", "user", 100);
+        insert_part(
+            &conn,
+            "prt_late",
+            "msg_late",
+            1000,
+            r#"{"type":"text","text":"late"}"#,
+        );
+        insert_part(
+            &conn,
+            "prt_early",
+            "msg_early",
+            100,
+            r#"{"type":"text","text":"early"}"#,
+        );
+
+        let messages = load_opencode_messages(&conn, "ses_test").expect("load");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].text_preview, "early");
+        assert_eq!(messages[1].text_preview, "late");
+    }
+
+    #[test]
+    fn normalizes_whitespace_and_truncates_to_500_chars() {
+        let conn = make_test_db();
+        let long_text = "x".repeat(700);
+        insert_message(&conn, "msg_long", "user", 100);
+        insert_part(
+            &conn,
+            "prt_long",
+            "msg_long",
+            100,
+            &format!(r#"{{"type":"text","text":"{}"}}"#, long_text),
+        );
+
+        let messages = load_opencode_messages(&conn, "ses_test").expect("load");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text_preview.chars().count(), 500);
+    }
+
+    #[test]
+    fn ignores_parts_belonging_to_other_messages() {
+        let conn = make_test_db();
+        insert_message(&conn, "msg_a", "user", 100);
+        insert_message(&conn, "msg_b", "user", 200);
+        insert_part(
+            &conn,
+            "prt_a",
+            "msg_a",
+            100,
+            r#"{"type":"text","text":"text for a"}"#,
+        );
+        insert_part(
+            &conn,
+            "prt_b",
+            "msg_b",
+            200,
+            r#"{"type":"text","text":"text for b"}"#,
+        );
+
+        let messages = load_opencode_messages(&conn, "ses_test").expect("load");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].text_preview, "text for a");
+        assert_eq!(messages[1].text_preview, "text for b");
     }
 }
