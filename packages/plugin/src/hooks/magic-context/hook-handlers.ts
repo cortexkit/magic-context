@@ -198,6 +198,12 @@ export function createEventHook(args: {
     liveModelBySession: LiveModelBySession;
     variantBySession: VariantBySession;
     agentBySession: AgentBySession;
+    /**
+     * Cache of resolved session.directory values from `client.session.get(...)`.
+     * Cleaned on `session.deleted` to prevent leaks. See live-session-state.ts
+     * for the full doc-comment.
+     */
+    sessionDirectoryBySession: Map<string, string>;
     recentReduceBySession: RecentReduceBySession;
     toolUsageSinceUserTurn: ToolUsageSinceUserTurn;
     /** All three sets are cleaned on `session.deleted` to prevent leaks. */
@@ -263,6 +269,7 @@ export function createEventHook(args: {
             args.liveModelBySession.delete(sessionId);
             args.variantBySession.delete(sessionId);
             args.agentBySession.delete(sessionId);
+            args.sessionDirectoryBySession.delete(sessionId);
             args.recentReduceBySession.delete(sessionId);
             args.toolUsageSinceUserTurn.delete(sessionId);
             args.historyRefreshSessions.delete(sessionId);

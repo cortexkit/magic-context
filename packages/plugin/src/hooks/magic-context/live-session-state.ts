@@ -23,6 +23,19 @@ export interface LiveSessionState {
     historyRefreshSessions: Set<string>;
     systemPromptRefreshSessions: Set<string>;
     pendingMaterializationSessions: Set<string>;
+    /**
+     * Cache of resolved session.directory values from `client.session.get(...)`.
+     *
+     * The session→project binding is set at session create time and never
+     * changes (OpenCode source: `Session.directory` is read once from the
+     * session record, no migration path), so caching for the lifetime of the
+     * plugin process is safe. Without this, transform.ts hits OpenCode's
+     * local API on every transform pass — observed to be 1.5s+ for large
+     * sessions under Electron, accounting for the bulk of transform latency.
+     *
+     * Populated on first successful resolution; cleared on `session.deleted`.
+     */
+    sessionDirectoryBySession: Map<string, string>;
 }
 
 export function createLiveSessionState(): LiveSessionState {
@@ -33,5 +46,6 @@ export function createLiveSessionState(): LiveSessionState {
         historyRefreshSessions: new Set<string>(),
         systemPromptRefreshSessions: new Set<string>(),
         pendingMaterializationSessions: new Set<string>(),
+        sessionDirectoryBySession: new Map<string, string>(),
     };
 }

@@ -221,6 +221,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         deps.liveSessionState?.liveModelBySession ??
         new Map<string, { providerID: string; modelID: string }>();
     const agentBySession = deps.liveSessionState?.agentBySession ?? new Map<string, string>();
+    const sessionDirectoryBySession =
+        deps.liveSessionState?.sessionDirectoryBySession ?? new Map<string, string>();
     const recentReduceBySession = new Map<string, number>();
     const toolUsageSinceUserTurn = new Map<string, number>();
 
@@ -324,6 +326,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 ? undefined
                 : deps.config.compressor?.cooldown_ms,
         liveModelBySession,
+        sessionDirectoryBySession,
         autoSearch: deps.config.experimental?.auto_search?.enabled
             ? {
                   enabled: true,
@@ -571,6 +574,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         liveModelBySession,
         variantBySession,
         agentBySession,
+        sessionDirectoryBySession,
         recentReduceBySession,
         toolUsageSinceUserTurn,
         historyRefreshSessions,

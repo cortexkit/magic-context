@@ -220,6 +220,13 @@ export interface TransformDeps {
     /** Compressor cooldown in milliseconds. Controlled by `compressor.cooldown_ms` config. */
     compressorCooldownMs?: number;
     liveModelBySession?: LiveModelBySession;
+    /**
+     * Process-scoped cache of resolved session.directory values. When provided,
+     * we look up here before hitting OpenCode's API and populate after a
+     * successful lookup. The session→project binding is immutable in OpenCode,
+     * so this cache lives until the session is deleted.
+     */
+    sessionDirectoryBySession?: Map<string, string>;
     /** Experimental auto-search hint — transform-time ctx_search on each new
      *  user message; when top hit clears the threshold, append a compact
      *  fragment hint to the user message. Controlled by
@@ -292,10 +299,27 @@ export function createTransform(deps: TransformDeps) {
         // project. Historian/dreamer/recomp child sessions and project-scoped
         // memory all need the session's real directory.
         //
+        // We call `client.session.get(...)` (OpenCode's public SDK) once per
+        // session per plugin-process lifetime and cache the result in
+        // `liveSessionState.sessionDirectoryBySession`. The session→project
+        // binding is immutable in OpenCode (the `directory` field is set at
+        // session create time and never modified), so caching for the entire
+        // session lifetime is safe.
+        //
+        // Without the cache, this HTTP round trip ran on every transform pass
+        // and was observed to take 1.5s+ for large sessions under Electron
+        // Desktop, dominating transform latency. We deliberately keep using
+        // the public SDK rather than reading OpenCode's internal SQLite
+        // directly — the schema is OpenCode's private contract and could
+        // change without notice.
+        //
         // session.get failure is non-fatal — fall back to deps.directory so
-        // transform never blocks on an SDK call. Cache hits keep this cheap.
+        // transform never blocks on a permanent SDK error.
         let sessionDirectory: string = deps.directory ?? "";
-        if (deps.client !== undefined) {
+        const cachedDirectory = deps.sessionDirectoryBySession?.get(sessionId);
+        if (cachedDirectory && cachedDirectory.length > 0) {
+            sessionDirectory = cachedDirectory;
+        } else if (deps.client !== undefined) {
             try {
                 const sessionResponse = await deps.client.session
                     .get({ path: { id: sessionId } })
@@ -308,6 +332,11 @@ export function createTransform(deps: TransformDeps) {
                     sessionInfo.directory.length > 0
                 ) {
                     sessionDirectory = sessionInfo.directory;
+                    // Populate cache for future transforms in this session.
+                    // Don't cache the fallback (deps.directory) — it might be
+                    // wrong for `opencode -s <id>` launches from a different
+                    // cwd, and the next transform should retry the SDK lookup.
+                    deps.sessionDirectoryBySession?.set(sessionId, sessionDirectory);
                 }
             } catch {
                 // ignore; fallback already in place
