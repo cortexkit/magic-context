@@ -36,6 +36,11 @@
 
 import { getLastCompartmentEndMessage } from "@magic-context/core/features/magic-context/compartment-storage";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
+import {
+	clearSessionTracking,
+	scheduleIncrementalIndex,
+	scheduleReconciliation,
+} from "@magic-context/core/features/magic-context/message-index-async";
 import { createScheduler } from "@magic-context/core/features/magic-context/scheduler";
 import {
 	type ContextDatabase,
@@ -75,6 +80,7 @@ import { createNudger } from "@magic-context/core/hooks/magic-context/nudger";
 import {
 	getProtectedTailStartOrdinal,
 	getRawSessionMessageCount,
+	readRawSessionMessages,
 	setRawMessageProvider,
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { modelRequiresInterleavedReasoning } from "@magic-context/core/hooks/magic-context/reasoning-capability";
@@ -219,6 +225,16 @@ const recentReduceBySession = new Map<string, number>();
 const liveModelBySession = new Map<string, string>();
 const toolUsageSinceUserTurn = new Map<string, number>();
 const latestUserMessageBySession = new Map<string, string>();
+
+function readPiSessionMessageById(
+	ctx: ExtensionContext,
+	messageId: string,
+): ReturnType<typeof readPiSessionMessages>[number] | null {
+	return (
+		readPiSessionMessages(ctx).find((message) => message.id === messageId) ??
+		null
+	);
+}
 
 /**
  * Mark a Pi session as needing an injection-cache rebuild on its next
@@ -857,10 +873,24 @@ export function registerPiContextHandler(
 			}
 			sessionIdForError = sessionId;
 
+			const rawMessageProvider = {
+				readMessages: () => readPiSessionMessages(ctx),
+				readMessageById: (messageId: string) =>
+					readPiSessionMessageById(ctx, messageId),
+			};
+			setRawMessageProvider(sessionId, rawMessageProvider);
+			scheduleReconciliation(options.db, sessionId, readRawSessionMessages);
+
 			const latestUserId = findLatestUserMessageIdPi(
 				event.messages as PiAgentMessage[],
 			);
 			if (latestUserId) {
+				scheduleIncrementalIndex(
+					options.db,
+					sessionId,
+					latestUserId,
+					(_sessionId, messageId) => readPiSessionMessageById(ctx, messageId),
+				);
 				const previousUserId = latestUserMessageBySession.get(sessionId);
 				if (previousUserId !== latestUserId) {
 					onPiNewUserMessage({ db: options.db, sessionId });
@@ -2478,5 +2508,6 @@ export function clearContextHandlerSession(sessionId: string): void {
 	liveModelBySession.delete(sessionId);
 	toolUsageSinceUserTurn.delete(sessionId);
 	latestUserMessageBySession.delete(sessionId);
+	clearSessionTracking(sessionId);
 	clearPiCompressorState(sessionId);
 }

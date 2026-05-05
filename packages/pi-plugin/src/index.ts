@@ -29,6 +29,7 @@ import type {
 } from "@magic-context/core/config/schema/magic-context";
 import { initializeEmbedding } from "@magic-context/core/features/magic-context/memory/embedding";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
+import { scheduleIncrementalIndex } from "@magic-context/core/features/magic-context/message-index-async";
 import { detectOverflow } from "@magic-context/core/features/magic-context/overflow-detection";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import {
@@ -81,6 +82,7 @@ import {
 	registerPiDreamerProject,
 	unregisterPiDreamerProject,
 } from "./dreamer";
+import { readPiSessionMessages } from "./read-session-pi";
 import { registerStatusLine, updateStatusLine } from "./status-line";
 import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
 import { PiSubagentRunner } from "./subagent-runner";
@@ -942,6 +944,11 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				| undefined;
 			const sessionId = sm?.getSessionId?.();
 			if (typeof sessionId !== "string" || sessionId.length === 0) return;
+			const rawMessages = readPiSessionMessages(ctx);
+			const latest = rawMessages[rawMessages.length - 1];
+			if (latest?.role === "assistant" && latest.id.length > 0) {
+				scheduleIncrementalIndex(db, sessionId, latest.id, () => latest);
+			}
 			persistPiMessageEndModelMeta({
 				db,
 				sessionId,

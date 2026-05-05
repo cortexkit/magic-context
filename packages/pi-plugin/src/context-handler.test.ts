@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import {
+	__resetMessageIndexAsyncForTests,
+	isSessionReconciled,
+} from "@magic-context/core/features/magic-context/message-index-async";
 import * as searchModule from "@magic-context/core/features/magic-context/search";
 import {
 	addNote,
@@ -33,10 +37,35 @@ import {
 
 describe("registerPiContextHandler", () => {
 	afterEach(() => {
+		__resetMessageIndexAsyncForTests();
 		clearContextHandlerSession("ses-context");
 		clearContextHandlerSession("ses-sticky-context");
 		clearAutoSearchForPiSession("ses-context");
 		clearAutoSearchForPiSession("ses-sticky-context");
+	});
+
+	it("schedules first-touch message index reconciliation", async () => {
+		const db = createTestDb();
+		try {
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				ctxReduceEnabled: true,
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			const messages = [userMessage("hello", 1)] as never[];
+
+			await handler({ messages }, fakeContext("ses-context") as never);
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			await new Promise((resolve) => setTimeout(resolve, 0));
+
+			expect(isSessionReconciled("ses-context")).toBe(true);
+		} finally {
+			closeQuietly(db);
+		}
 	});
 
 	it("tags user, assistant, and toolResult messages through the Pi adapter", async () => {
