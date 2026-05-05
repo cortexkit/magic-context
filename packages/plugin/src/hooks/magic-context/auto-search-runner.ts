@@ -115,13 +115,62 @@ function hasStackedAugmentation(rawText: string): boolean {
     );
 }
 
+/**
+ * Depth-aware stripper for tags that can legitimately nest. The system-reminder
+ * tag is the canonical example: OpenCode and magic-context both wrap content
+ * in <system-reminder>…</system-reminder>, and when the inner content itself
+ * contains a system reminder (e.g. background-task notifications cited inside
+ * a parent reminder), a non-greedy regex matches from the outer open to the
+ * FIRST inner close, leaving the outer close tag and any text between the
+ * inner close and outer close behind.
+ *
+ * The non-greedy regex bug is observable in production embedding logs: the
+ * leaked tail "Please address this message and continue with your tasks.
+ * </system-reminder>" reaches the embedding endpoint as user-typed text.
+ *
+ * This parser walks the string once, tracking open/close depth. Anything
+ * inside ANY level of system-reminder is dropped. Orphan open/close tags
+ * (malformed input) are also dropped. Only text that lies entirely outside
+ * every system-reminder block is kept.
+ */
+function stripNestedSystemReminders(text: string): string {
+    const OPEN = "<system-reminder>";
+    const CLOSE = "</system-reminder>";
+    let result = "";
+    let depth = 0;
+    let i = 0;
+    while (i < text.length) {
+        if (text.startsWith(OPEN, i)) {
+            depth += 1;
+            i += OPEN.length;
+        } else if (text.startsWith(CLOSE, i)) {
+            // Orphan close tag (depth already 0) is dropped silently — we
+            // don't want a leaked closing tag from a malformed/cut input
+            // to bleed into the embedded text.
+            if (depth > 0) depth -= 1;
+            i += CLOSE.length;
+        } else if (depth === 0) {
+            result += text[i];
+            i += 1;
+        } else {
+            // Inside a system-reminder — skip the character.
+            i += 1;
+        }
+    }
+    return result;
+}
+
 function extractUserPromptText(message: MessageLike): string {
     // Strip all plugin-owned injections so the embedded prompt is just what
     // the user actually typed. Without this, every embedded query carries
     // "§NNN§ " tag prefixes, temporal markers, and prior nudges — noise that
     // distorts semantic similarity and leaks plugin noise into LMStudio logs.
+    //
+    // System-reminders go through a depth-aware parser (above) because they
+    // can legitimately nest. The other tags here are plugin-owned and don't
+    // nest in production, so a non-greedy regex is sufficient for them.
     return (
-        collectUserPromptParts(message)
+        stripNestedSystemReminders(collectUserPromptParts(message))
             // Magic Context tag prefix: "§123§ " at any position.
             .replace(/§\d+§\s*/g, "")
             // Temporal awareness gap markers: <!-- +5m -->, <!-- +1w 2d -->, etc.
@@ -129,8 +178,8 @@ function extractUserPromptText(message: MessageLike): string {
             .replace(/<!--\s*\+[\d\s.hmdw]+\s*-->/g, "")
             // OMO internal initiator markers and similar HTML-comment markers.
             .replace(/<!--\s*OMO_INTERNAL_INITIATOR[\s\S]*?-->/g, "")
-            // System reminders wrapped by OpenCode or magic-context.
-            .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "")
+            // ALFONSO internal initiator markers used by the Alfonso harness.
+            .replace(/<!--\s*ALFONSO_INTERNAL_INITIATOR[\s\S]*?-->/g, "")
             // Previously-appended plugin tags on this same user turn.
             .replace(/<ctx-search-hint>[\s\S]*?<\/ctx-search-hint>/g, "")
             .replace(/<ctx-search-auto>[\s\S]*?<\/ctx-search-auto>/g, "")

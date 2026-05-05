@@ -185,6 +185,98 @@ describe("auto-search-runner", () => {
         }
     });
 
+    /**
+     * Regression for the nested-system-reminder leak observed in production.
+     *
+     * Live LMStudio embedding logs showed the orphan tail
+     * `Please address this message and continue with your tasks.\n</system-reminder>`
+     * arriving as the embedded query. Root cause: the previous non-greedy regex
+     * matched from the OUTER open tag to the FIRST close tag (which was the
+     * INNER one), leaving the outer close tag and the text between the inner
+     * close and outer close as the "user prompt".
+     *
+     * The depth-aware parser must drop ALL nested system-reminder content,
+     * keeping only text outside every level.
+     */
+    test("strips nested system-reminders without leaking the outer reminder's tail or close tag", async () => {
+        let capturedPrompt = "";
+        const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(
+            async (_db, _s, _p, prompt) => {
+                capturedPrompt = prompt;
+                return [];
+            },
+        );
+        try {
+            // Mirrors the real-world structure: outer reminder wrapping an
+            // inner reminder whose content is a background-task notification,
+            // followed by the outer reminder's "Please address..." tail.
+            const rawText = [
+                "actual user typed text before the noise",
+                "<system-reminder>",
+                "The user sent the following message:",
+                "<system-reminder>",
+                "[BACKGROUND TASK COMPLETED]",
+                "**ID:** `bg_xyz`",
+                "</system-reminder>",
+                "",
+                "Please address this message and continue with your tasks.",
+                "</system-reminder>",
+                "more user text after",
+            ].join("\n");
+            const messages: MessageLike[] = [makeUserMsg("u-nested", rawText)];
+
+            await runAutoSearchHint({
+                sessionId: "s1",
+                db,
+                messages,
+                options: baseOptions,
+            });
+
+            // Both the inner reminder content AND the outer-reminder tail
+            // ("Please address this message...") must be dropped. Only text
+            // outside every reminder level survives.
+            expect(capturedPrompt).not.toContain("Please address this message");
+            expect(capturedPrompt).not.toContain("BACKGROUND TASK");
+            expect(capturedPrompt).not.toContain("</system-reminder>");
+            expect(capturedPrompt).not.toContain("<system-reminder>");
+            expect(capturedPrompt).toContain("actual user typed text before the noise");
+            expect(capturedPrompt).toContain("more user text after");
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    test("strips orphan system-reminder close tag (malformed input) without leaving it in the prompt", async () => {
+        let capturedPrompt = "";
+        const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(
+            async (_db, _s, _p, prompt) => {
+                capturedPrompt = prompt;
+                return [];
+            },
+        );
+        try {
+            // Malformed input: close tag with no matching open tag. The
+            // depth-aware parser must drop it silently rather than leaving
+            // it as embedded text.
+            const rawText =
+                "real user prompt</system-reminder> with a leftover close tag from a truncated parent";
+            const messages: MessageLike[] = [makeUserMsg("u-orphan", rawText)];
+
+            await runAutoSearchHint({
+                sessionId: "s1",
+                db,
+                messages,
+                options: baseOptions,
+            });
+
+            expect(capturedPrompt).not.toContain("</system-reminder>");
+            expect(capturedPrompt).toContain("real user prompt");
+            expect(capturedPrompt).toContain("leftover close tag from a truncated parent");
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
     test("strips week-format temporal markers (+Xw / +Xw Yd) before embedding", async () => {
         let capturedPrompt = "";
         const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(
