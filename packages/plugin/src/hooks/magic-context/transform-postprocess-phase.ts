@@ -290,12 +290,23 @@ export async function runPostTransformPhase(args: RunPostTransformPhaseArgs): Pr
             );
             const pendingCountBefore = pendingOps.length;
             const tApply = performance.now();
+            // P0 perf: don't pass `args.tags` here. applyPendingOperations
+            // genuinely needs the full tag set (including dropped/compacted
+            // rows it uses to skip already-processed pending ops), but the
+            // upstream `args.tags` is now active-only. Letting the function
+            // lazy-load via its own getTagsBySession() call inside the
+            // pending-ops transaction is the right behavior:
+            //   - Most passes have 0 pending ops and never reach this
+            //     branch, so the full-tags load is avoided entirely.
+            //   - When pending ops do exist (rare execute/flush passes),
+            //     the load runs once inside the same transaction the
+            //     mutations need, which is unavoidable.
             didMutateFromPendingOperations = applyPendingOperations(
                 args.sessionId,
                 args.db,
                 args.targets,
                 args.protectedTags,
-                args.tags,
+                undefined,
                 pendingOps,
             );
             const pendingCountAfter = getPendingOps(args.db, args.sessionId).length;

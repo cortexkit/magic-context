@@ -35,7 +35,8 @@
 
 import {
 	type ContextDatabase,
-	getTagsBySession,
+	getActiveTagsBySession,
+	getMaxTagNumberBySession,
 	replaceSourceContent,
 	updateTagDropMode,
 	updateTagStatus,
@@ -214,8 +215,14 @@ export function applyPiHeuristicCleanup(
 	config: PiHeuristicCleanupConfig,
 	preloadedTags?: TagEntry[],
 ): PiHeuristicCleanupResult {
-	const tags = preloadedTags ?? getTagsBySession(db, sessionId);
-	const maxTag = tags.reduce((max, t) => Math.max(max, t.tagNumber), 0);
+	// All work in this function short-circuits on `tag.status !== "active"`.
+	// See OpenCode `applyHeuristicCleanup` for the full P0 perf rationale.
+	const tags = preloadedTags ?? getActiveTagsBySession(db, sessionId);
+	// `maxTag` must reflect the true session max (including dropped/compacted)
+	// so the protected-cutoff window is anchored to the most recent tag
+	// regardless of status. `getMaxTagNumberBySession` resolves with a
+	// single backward index seek (O(log N)).
+	const maxTag = getMaxTagNumberBySession(db, sessionId);
 	const toolAgeCutoff = maxTag - config.autoDropToolAge;
 	const protectedCutoff = maxTag - config.protectedTags;
 

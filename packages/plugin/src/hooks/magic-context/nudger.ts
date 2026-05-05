@@ -1,7 +1,7 @@
 import {
+    getActiveTagsBySession,
     getOrCreateSessionMeta,
     getPendingOps,
-    getTagsBySession,
     type getTopNBySize,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
@@ -122,9 +122,11 @@ export function createNudger(config: {
 
         const largest = formatLargestTags(topNFn(db, sessionId, 3));
         const protectedCount = config.protected_tags;
-        const activeTags = (preloadedTags ?? getTagsBySession(db, sessionId)).filter(
-            (t) => t.status === "active",
-        );
+        // If a preload is provided, filter; otherwise load active-only directly
+        // (partial-index-backed scan over the active subset, not the whole table).
+        const activeTags = preloadedTags
+            ? preloadedTags.filter((t) => t.status === "active")
+            : getActiveTagsBySession(db, sessionId);
         const highestProtected = activeTags
             .map((t) => t.tagNumber)
             .sort((a, b) => b - a)
@@ -261,9 +263,9 @@ function estimateProjectedPercentage(
         return null;
     }
 
-    const activeTags = (preloadedTags ?? getTagsBySession(db, sessionId)).filter(
-        (t) => t.status === "active",
-    );
+    const activeTags = preloadedTags
+        ? preloadedTags.filter((t) => t.status === "active")
+        : getActiveTagsBySession(db, sessionId);
     const totalActiveBytes = activeTags.reduce((sum, t) => sum + t.byteSize, 0);
     if (totalActiveBytes === 0) {
         return null;

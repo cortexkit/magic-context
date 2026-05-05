@@ -1,6 +1,7 @@
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import {
-    getTagsBySession,
+    getActiveTagsBySession,
+    getMaxTagNumberBySession,
     replaceSourceContent,
     updateTagDropMode,
     updateTagStatus,
@@ -48,8 +49,18 @@ export function applyHeuristicCleanup(
     droppedInjections: number;
     compressedTextTags: number;
 } {
-    const tags = preloadedTags ?? getTagsBySession(db, sessionId);
-    const maxTag = tags.reduce((max, t) => Math.max(max, t.tagNumber), 0);
+    // All work in this function short-circuits on `tag.status !== "active"`,
+    // so callers can pass active-only tags without behavior change. When no
+    // preload is provided we now load active-only directly (the partial
+    // index makes this O(active rows) instead of O(all rows)).
+    const tags = preloadedTags ?? getActiveTagsBySession(db, sessionId);
+    // `maxTag` must reflect the true session max (including dropped/compacted
+    // rows) so the protected-cutoff window stays anchored to the most recent
+    // tag regardless of status. Previous code computed this from `tags`,
+    // which was correct only when `tags` was the full set; we now look up
+    // the authoritative max via an O(log N) backward index seek so the
+    // contract holds whether `tags` is full or active-only.
+    const maxTag = getMaxTagNumberBySession(db, sessionId);
     const toolAgeCutoff = maxTag - config.autoDropToolAge;
     const protectedCutoff = maxTag - config.protectedTags;
 

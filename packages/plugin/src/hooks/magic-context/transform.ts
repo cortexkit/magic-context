@@ -4,9 +4,11 @@ import type { Scheduler } from "../../features/magic-context/scheduler";
 
 import {
     type ContextDatabase,
+    getActiveTagsBySession,
     getHistorianFailureState,
+    getMaxDroppedTagNumber,
     getOrCreateSessionMeta,
-    getTagsBySession,
+    getTagsByNumbers,
     type getTopNBySize,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
@@ -768,9 +770,40 @@ export function createTransform(deps: TransformDeps) {
             }
         }
 
+        // P0 perf: replace single SELECT-everything load with three
+        // targeted queries. The hot transform path used to load every
+        // tag in the session (~50k rows on long-lived sessions) every
+        // pass; benchmark in scripts/benchmark-tag-queries.ts showed
+        // this single change recovers ~67ms per pass.
+        //
+        //   activeTags          → drives heuristic cleanup, nudger,
+        //                         caveman scope (active subset only;
+        //                         partial-index scan, ~0.6ms)
+        //   targetsSliceTags    → drives applyFlushedStatuses + caveman
+        //                         replay (visible target subset only;
+        //                         IN-list lookup against the existing
+        //                         (session_id, tag_number) index)
+        //   maxDroppedTagNumber → replaces the watermark for-loop with
+        //                         a single MAX() aggregate
+        //
+        // applyHeuristicCleanup and nudger both filter on
+        // status === "active" and short-circuit otherwise, so feeding
+        // them active-only is identical behavior. applyFlushedStatuses
+        // and caveman replay both filter to targets.has(tagNumber), so
+        // pre-filtering by tag_number is a no-op for correctness.
         const t1 = performance.now();
-        const tags = getTagsBySession(db, sessionId);
-        logTransformTiming(sessionId, "getTagsBySession", t1, `count=${tags.length}`);
+        const activeTags = getActiveTagsBySession(db, sessionId);
+        logTransformTiming(sessionId, "getActiveTagsBySession", t1, `count=${activeTags.length}`);
+
+        const t1b = performance.now();
+        const targetTagNumbers = [...targets.keys()];
+        const targetsSliceTags = getTagsByNumbers(db, sessionId, targetTagNumbers);
+        logTransformTiming(
+            sessionId,
+            "getTagsByNumbers",
+            t1b,
+            `targets=${targetTagNumbers.length} fetched=${targetsSliceTags.length}`,
+        );
 
         let didMutateFromFlushedStatuses = false;
         // Only run mutation stages when tagging succeeded. With targets={}
@@ -783,7 +816,12 @@ export function createTransform(deps: TransformDeps) {
         if (taggingSucceeded) {
             try {
                 const t2 = performance.now();
-                didMutateFromFlushedStatuses = applyFlushedStatuses(sessionId, db, targets, tags);
+                didMutateFromFlushedStatuses = applyFlushedStatuses(
+                    sessionId,
+                    db,
+                    targets,
+                    targetsSliceTags,
+                );
                 logTransformTiming(sessionId, "applyFlushedStatuses", t2);
                 batch?.finalize();
                 logTransformTiming(sessionId, "batchFinalize:flushed", t2);
@@ -846,9 +884,19 @@ export function createTransform(deps: TransformDeps) {
         // caveman_depth > 0 (early exit). Only forwarded when ctx_reduce
         // is disabled AND not a subagent — matches the gate that lets
         // applyCavemanCleanup deepen depth in the first place.
+        //
+        // We feed the targets-slice subset (already loaded above for
+        // applyFlushedStatuses) — replay only acts on tags whose
+        // tag_number is in `targets` anyway, so passing the wider list
+        // would just give it more rows to filter and discard.
         if (!deps.ctxReduceEnabled && !reducedMode && deps.cavemanTextCompression?.enabled) {
             const tCavemanReplay = performance.now();
-            const replayedCaveman = replayCavemanCompression(sessionId, db, targets, tags);
+            const replayedCaveman = replayCavemanCompression(
+                sessionId,
+                db,
+                targets,
+                targetsSliceTags,
+            );
             if (replayedCaveman > 0) {
                 sessionLog(sessionId, `caveman replay: re-applied ${replayedCaveman} text tags`);
             }
@@ -898,12 +946,11 @@ export function createTransform(deps: TransformDeps) {
             `strippedParts=${strippedMergedReasoning}`,
         );
 
-        let watermark = 0;
-        for (const tag of tags) {
-            if (tag.status === "dropped" && tag.tagNumber > watermark) {
-                watermark = tag.tagNumber;
-            }
-        }
+        // Watermark = highest dropped tag_number for this session. Backed by
+        // the partial index `idx_tags_dropped_session_tag_number` (migration
+        // v8) so SQLite resolves this with a single backward index seek
+        // instead of the full-array scan we used to do here.
+        const watermark = getMaxDroppedTagNumber(db, sessionId);
 
         // Reuse the early scheduler result — inputs haven't changed.
         const contextUsage = contextUsageEarly;
@@ -967,7 +1014,16 @@ export function createTransform(deps: TransformDeps) {
             sessionId,
             db,
             messages,
-            tags,
+            // P0 perf: pass active-only tags. The downstream consumers
+            // (applyHeuristicCleanup, nudger) both filter on
+            // status === "active" and short-circuit otherwise — feeding
+            // them active-only is identical behavior with much smaller
+            // input. applyPendingOperations is the only consumer that
+            // genuinely needs all statuses; it already handles a missing
+            // preload by lazy-loading via getTagsBySession() internally,
+            // and pending-op execution is the rare case (most passes have
+            // 0 pending ops and skip applyPendingOperations entirely).
+            tags: activeTags,
             targets,
             reasoningByMessage,
             messageTagNumbers,

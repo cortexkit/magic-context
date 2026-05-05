@@ -39,8 +39,9 @@ import { resolveProjectIdentity } from "@magic-context/core/features/magic-conte
 import { createScheduler } from "@magic-context/core/features/magic-context/scheduler";
 import {
 	type ContextDatabase,
+	getActiveTagsBySession,
 	getHistorianFailureState,
-	getTagsBySession,
+	getTagsByNumbers,
 	getTopNBySize,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
@@ -1928,7 +1929,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// is deterministic, so replay produces the exact text the original
 	// execute pass produced, regardless of how many times it runs.
 	try {
-		const tags = getTagsBySession(args.db, args.sessionId);
+		// P0 perf: caveman replay only acts on tags whose tag_number is in
+		// `targets`, so fetch just that slice instead of the whole session
+		// (~50k rows on long sessions).
+		const targetTagNumbers = [...targets.keys()];
+		const tags = getTagsByNumbers(args.db, args.sessionId, targetTagNumbers);
 		const replayed = replayCavemanCompression(
 			args.sessionId,
 			args.db,
@@ -2168,7 +2173,9 @@ function applyRollingNudge(args: {
 		contextLimit: piUsage.contextWindow,
 	};
 
-	const tags = getTagsBySession(db, sessionId);
+	// P0 perf: nudger filters to status === "active" anyway, so feed it
+	// active-only directly. Saves a full-table scan on long sessions.
+	const tags = getActiveTagsBySession(db, sessionId);
 	const messagesSinceLastUser = countMessagesSinceLastUserPi(messages);
 
 	const nudge = nudgerFn(
