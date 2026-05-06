@@ -19,7 +19,7 @@ const upsertIndexStatements = new WeakMap<Database, PreparedStatement>();
 const deleteFtsStatements = new WeakMap<Database, PreparedStatement>();
 const deleteIndexStatements = new WeakMap<Database, PreparedStatement>();
 const countIndexedMessageStatements = new WeakMap<Database, PreparedStatement>();
-const indexedMessageIdStatements = new WeakMap<Database, PreparedStatement>();
+
 
 function normalizeIndexText(text: string): string {
     return text.replace(/\s+/g, " ").trim();
@@ -87,23 +87,8 @@ function getCountIndexedMessageStatement(db: Database): PreparedStatement {
     return stmt;
 }
 
-function getIndexedMessageIdStatement(db: Database): PreparedStatement {
-    let stmt = indexedMessageIdStatements.get(db);
-    if (!stmt) {
-        stmt = db.prepare(
-            "SELECT message_id AS messageId FROM message_history_fts WHERE session_id = ?",
-        );
-        indexedMessageIdStatements.set(db, stmt);
-    }
-    return stmt;
-}
-
 interface CountRow {
     count: number;
-}
-
-interface IndexedMessageIdRow {
-    messageId?: string;
 }
 
 export function getLastIndexedOrdinal(db: Database, sessionId: string): number {
@@ -218,12 +203,21 @@ export function indexMessagesAfterOrdinal(
 ): number {
     const now = Date.now();
     let inserted = 0;
+
+    // Skip the bulk SELECT of existing-messageIds. The watermark
+    // semantics already encode "every ordinal <= lastIndexedOrdinal has
+    // been processed", so any message above the watermark is, by
+    // definition, not yet indexed. The old Set-based dedup loaded every
+    // indexed messageId for the session into memory inside a write
+    // transaction (~30k+ rows for long sessions) which both wasted
+    // memory and held the writer lock long enough to cause SQLITE_BUSY
+    // on concurrent transforms.
+    //
+    // Defense-in-depth: the table has UNIQUE(session_id, message_id),
+    // so a stray duplicate insert is rejected at the SQL layer. The
+    // outer transaction makes the whole pass atomic, so a partial
+    // failure rolls back cleanly.
     db.transaction(() => {
-        const existingMessageIds = new Set(
-            (getIndexedMessageIdStatement(db).all(sessionId) as IndexedMessageIdRow[])
-                .map((row) => row.messageId)
-                .filter((messageId): messageId is string => typeof messageId === "string"),
-        );
         const insertMessage = getInsertMessageStatement(db);
         for (const message of messages) {
             if (message.ordinal <= lastIndexedOrdinal) {
@@ -233,12 +227,24 @@ export function indexMessagesAfterOrdinal(
                 continue;
             }
             const content = getIndexableContent(message.role, message.parts);
-            if (content.length === 0 || existingMessageIds.has(message.id)) {
+            if (content.length === 0) {
                 continue;
             }
-            insertMessage.run(sessionId, message.ordinal, message.id, message.role, content);
-            existingMessageIds.add(message.id);
-            inserted++;
+            try {
+                insertMessage.run(sessionId, message.ordinal, message.id, message.role, content);
+                inserted++;
+            } catch (error) {
+                // UNIQUE-constraint violations are expected in rare cases
+                // where a prior partial reconciliation indexed this row
+                // without advancing the watermark. Treat them as "already
+                // indexed" and continue. Any other SqliteError still
+                // propagates so we don't mask schema/IO bugs.
+                const e = error as { code?: unknown; message?: unknown };
+                const isUnique =
+                    e?.code === "SQLITE_CONSTRAINT_UNIQUE" ||
+                    (typeof e?.message === "string" && /UNIQUE/.test(e.message));
+                if (!isUnique) throw error;
+            }
         }
         getUpsertIndexStatement(db).run(sessionId, finalWatermark, now, getHarness());
     })();

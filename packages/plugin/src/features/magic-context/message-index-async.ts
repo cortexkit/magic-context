@@ -9,6 +9,34 @@ import {
 } from "./message-index";
 
 /**
+ * Detect SQLite "database is locked" errors so the async indexer can
+ * downgrade them to a one-line warning instead of a stack trace.
+ *
+ * Why we tolerate them: incremental indexing is best-effort. Any BUSY
+ * conflict is fully recoverable by the next reconciliation pass (which
+ * re-reads `last_indexed_ordinal` and indexes everything missed). A
+ * single SQLITE_BUSY here just means another writer (concurrent
+ * transform on a different session, dreamer task, second OpenCode
+ * instance) held the WAL writer lock past our 5s `busy_timeout`.
+ * Throwing turns a normal busy-window into a stack trace in user logs
+ * without changing the eventual indexing outcome — reconciliation fills
+ * in any missed rows automatically the next time
+ * `scheduleReconciliation` runs.
+ */
+function isDatabaseLockedError(error: unknown): boolean {
+    if (!error || typeof error !== "object") return false;
+    const e = error as { code?: unknown; message?: unknown };
+    if (typeof e.code === "string") {
+        if (e.code === "SQLITE_BUSY" || e.code === "SQLITE_LOCKED") return true;
+    }
+    if (typeof e.message === "string") {
+        if (/database is locked/i.test(e.message)) return true;
+        if (/sqlite_(busy|locked)/i.test(e.message)) return true;
+    }
+    return false;
+}
+
+/**
  * Event-driven message-history FTS indexing.
  *
  * v0.17 removes indexing from the `searchMessages()` hot path. Search now only
@@ -77,6 +105,14 @@ function runWithSessionLock(
 }
 
 function logIndexingError(sessionId: string, action: string, error: unknown): void {
+    if (isDatabaseLockedError(error)) {
+        // Concise warning, no stack trace. Reconciliation catches up later.
+        sessionLog(
+            sessionId,
+            `message FTS async ${action} skipped (database busy; will retry on next reconciliation)`,
+        );
+        return;
+    }
     sessionLog(
         sessionId,
         `message FTS async ${action} failed: ${error instanceof Error ? error.message : String(error)}`,
