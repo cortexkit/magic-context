@@ -41,8 +41,8 @@
 	},
 	"dependencies": {
 		"@huggingface/transformers": "^4.1.0",
-		"@opencode-ai/plugin": "^1.2.26",
-		"@opencode-ai/sdk": "^1.2.26",
+		"@opencode-ai/plugin": "^1.14.39",
+		"@opencode-ai/sdk": "^1.14.39",
 		"ai-tokenizer": "^1.0.6",
 		"better-sqlite3": "^12.9.0",
 		"comment-json": "^4.2.5",
@@ -71,6 +71,6 @@
 		"tui"
 	],
 	"peerDependencies": {
-		"@opencode-ai/plugin": ">=1.2.0"
+		"@opencode-ai/plugin": ">=1.14.0"
 	}
 }

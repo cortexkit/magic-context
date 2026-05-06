@@ -7,7 +7,7 @@
         "test": "bun test --timeout 120000"
     },
     "dependencies": {
-        "@opencode-ai/sdk": "^1.2.26"
+        "@opencode-ai/sdk": "^1.14.39"
     },
     "devDependencies": {
         "@types/bun": "latest",
