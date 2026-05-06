@@ -13,6 +13,7 @@ import {
     loadToolDefinitionMeasurements,
     setDatabase as setToolDefinitionDatabase,
 } from "./tool-definition-tokens";
+import { runToolOwnerBackfill } from "./tool-owner-backfill";
 
 const databases = new Map<string, Database>();
 const persistenceByDatabase = new WeakMap<Database, boolean>();
@@ -608,6 +609,23 @@ export function openDatabase(): Database {
         const db = new Database(dbPath);
         initializeDatabase(db);
         runMigrations(db);
+        // Tool-owner backfill (plan v3.3.1, Layer B). Runs once per
+        // boot to populate tool_owner_message_id on legacy tool tags.
+        // The backfill module short-circuits when no work is needed
+        // (every session has either backfilled rows or is already
+        // marked completed/skipped), so re-running is cheap.
+        //
+        // The backfill is best-effort: missing OpenCode DB, transient
+        // SQLite errors, and per-session failures are logged but
+        // never fail-close the plugin. Lazy adoption (Layer C) covers
+        // any rows the backfill couldn't reach.
+        try {
+            runToolOwnerBackfill(db);
+        } catch (error) {
+            log(
+                `[magic-context] tool-owner backfill failed (continuing with lazy adoption fallback): ${getErrorMessage(error)}`,
+            );
+        }
         // Wire the persistence-backed tool-definition measurement store and
         // rehydrate the in-memory map from any prior writes. Doing this here
         // (after migrations) means migration v9 has already created the
