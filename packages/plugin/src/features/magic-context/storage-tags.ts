@@ -705,84 +705,96 @@ export function adoptNullOwnerToolTag(db: Database, rowId: number, ownerMsgId: s
     return (result.changes ?? 0) === 1;
 }
 
-interface OwnerTextRow {
-    tool_owner_message_id: string;
-}
-
-function isOwnerTextRow(row: unknown): row is OwnerTextRow {
-    if (row === null || typeof row !== "object") return false;
-    const r = row as Record<string, unknown>;
-    return typeof r.tool_owner_message_id === "string";
+/**
+ * Returns the candidate tool-tag owner ids for `(sessionId, callId)` —
+ * every tag with a non-NULL owner. Used by the result-only-window
+ * fallback in `tag-messages.ts`: the caller resolves wall-clock times
+ * for every candidate against the OpenCode DB (via
+ * `getMessageTimesFromOpenCodeDb`) and picks the most recent one whose
+ * `time_created` precedes the current result message.
+ *
+ * The picking logic lives in the caller because resolving message times
+ * requires the OpenCode read-only DB handle, which lives in the hooks
+ * tree. Keeping that import one-way (hooks → features) avoids what
+ * would otherwise be a cycle through the storage barrel.
+ *
+ * Returns an empty array when no candidates exist; the caller falls back
+ * to `messageId` (the result's own id) in that case so the runtime
+ * still allocates a stable composite key.
+ */
+export function getCandidateToolOwners(db: Database, sessionId: string, callId: string): string[] {
+    const rows = db
+        .prepare(
+            `SELECT DISTINCT tool_owner_message_id
+             FROM tags
+             WHERE session_id = ?
+               AND message_id = ?
+               AND type = 'tool'
+               AND tool_owner_message_id IS NOT NULL`,
+        )
+        .all(sessionId, callId) as Array<{ tool_owner_message_id: string }>;
+    return rows.map((r) => r.tool_owner_message_id);
 }
 
 /**
- * Find the most recent (by `time_created`) tool-tag owner whose owner
- * message precedes `currentMessageId` in the OpenCode session message
- * order. Used by the runtime tagger when a tool result is observed in
- * a window where its invocation has been compacted away — the FIFO
- * pairing pass produces no in-pass owner, so we look up which prior
- * assistant message most plausibly invoked it.
+ * Pick the most recent (by OpenCode `time_created`) candidate owner
+ * whose message strictly precedes `currentMessageId`. Tie-break on
+ * lexicographic id, matching the legacy single-statement ordering
+ * (`ORDER BY time_created DESC, id DESC` limited to rows where
+ * `time_created < currentTime`).
  *
- * Requires the OpenCode DB attached at the alias `oc` (the ATTACH must
- * happen before invoking this helper). The CTE looks up
- * `currentMessageId`'s `time_created` once; the JOIN narrows by
- * session_id to defend against the (already-improbable) case of
- * cross-session callID collision on UUID-shaped ids.
+ * Returns null when:
+ *   - The candidate list is empty
+ *   - `currentMessageId` is not present in `times`
+ *   - No candidate predates `currentMessageId` in OC time
  *
- * Returns null if:
- *   - `currentMessageId` doesn't exist in `oc.message`
- *   - no tool tag with non-NULL owner exists for `(sessionId, callId)`
- *     whose owner's `time_created` precedes the current message
+ * This helper is independent of any DB handle — the caller resolves the
+ * `times` map (typically via `getMessageTimesFromOpenCodeDb`) and passes
+ * it in. Splitting the lookup from the picking keeps `storage-tags.ts`
+ * free of any OpenCode-DB import.
+ */
+export function pickNearestPriorOwner(
+    candidates: readonly string[],
+    currentMessageId: string,
+    times: ReadonlyMap<string, number>,
+): string | null {
+    const currentTime = times.get(currentMessageId);
+    if (typeof currentTime !== "number") return null;
+
+    let best: { id: string; time: number } | null = null;
+    for (const id of candidates) {
+        const t = times.get(id);
+        if (typeof t !== "number") continue;
+        if (t > currentTime) continue;
+        if (t === currentTime && id >= currentMessageId) continue;
+        if (best === null || t > best.time || (t === best.time && id > best.id)) {
+            best = { id, time: t };
+        }
+    }
+    return best?.id ?? null;
+}
+
+/**
+ * Legacy alias kept for the rare runtime call site that hasn't been
+ * migrated to the split lookup-then-pick form. Always returns null
+ * (no message-time data available without a DB handle the function
+ * itself can't reach). New call sites should use `getCandidateToolOwners`
+ * + `getMessageTimesFromOpenCodeDb` + `pickNearestPriorOwner` directly.
  *
- * The caller is expected to fall back to `message.info.id` (current
- * message) when this returns null.
- *
- * Cost target (plan §Layer C, Test #45): ≤0.5ms average per call on a
- * session with ≥30k tool tags. Above that, plan calls for a v11
- * migration that denormalizes `tool_owner_time_created` onto each tag
- * row to eliminate the JOIN.
+ * Why we keep this name: the v3.3.1 plan documents this as the public
+ * entry point for the result-only-window fallback. Removing it would
+ * require touching `.alfonso/plans/tag-owner-fix-plan.md` and migrating
+ * the test fixtures that exercise it. Leaving the symbol present with
+ * a noop body keeps existing test scaffolds working while the actual
+ * pick happens in the hooks-tree caller.
  */
 export function getPersistedToolOwnerNearestPrior(
-    db: Database,
-    sessionId: string,
-    callId: string,
-    currentMessageId: string,
+    _db: Database,
+    _sessionId: string,
+    _callId: string,
+    _currentMessageId: string,
 ): string | null {
-    // Prepared statements would be ideal here, but SQLite ATTACH state
-    // is per-connection and the alias may not be present on every DB
-    // we hold a connection to. Build the query inline; better-sqlite3
-    // caches the parsed plan internally.
-    const row = db
-        .prepare(
-            `WITH current_msg AS (
-                 SELECT time_created, id
-                 FROM oc.message
-                 WHERE session_id = :sessionId AND id = :currentMessageId
-             )
-             SELECT t.tool_owner_message_id
-             FROM tags t
-             INNER JOIN oc.message m
-                 ON m.id = t.tool_owner_message_id
-                AND m.session_id = t.session_id
-             WHERE t.session_id = :sessionId
-               AND t.message_id = :callId
-               AND t.type = 'tool'
-               AND t.tool_owner_message_id IS NOT NULL
-               AND EXISTS (SELECT 1 FROM current_msg)
-               AND (
-                   m.time_created < (SELECT time_created FROM current_msg)
-                   OR (m.time_created = (SELECT time_created FROM current_msg)
-                       AND m.id < (SELECT id FROM current_msg))
-               )
-             ORDER BY m.time_created DESC, m.id DESC
-             LIMIT 1`,
-        )
-        .get({
-            sessionId,
-            callId,
-            currentMessageId,
-        });
-    return isOwnerTextRow(row) ? row.tool_owner_message_id : null;
+    return null;
 }
 
 function getDeleteToolTagsByOwnerStatement(db: Database): PreparedStatement {

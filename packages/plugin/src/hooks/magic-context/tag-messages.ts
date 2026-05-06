@@ -2,12 +2,14 @@ import type { ContextDatabase } from "../../features/magic-context/storage";
 import { getSourceContents, saveSourceContent } from "../../features/magic-context/storage";
 import {
     adoptNullOwnerToolTag,
+    getCandidateToolOwners,
     getNullOwnerToolTag,
-    getPersistedToolOwnerNearestPrior,
+    pickNearestPriorOwner,
 } from "../../features/magic-context/storage-tags";
 import { makeToolCompositeKey, type Tagger } from "../../features/magic-context/tagger";
 import { isRecord } from "../../shared/record-type-guard";
 import { isReduceToolPart } from "./drop-stale-reduce-calls";
+import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { byteSize, isThinkingPart, prependTag } from "./tag-content-primitives";
 import { createExistingTagResolver } from "./tag-id-fallback";
 import {
@@ -75,18 +77,27 @@ function deriveToolOwnerMessageId(
     // Result-only window: invocation was compacted away. Look up the
     // persisted nearest-prior owner whose time_created precedes the
     // current result's message.
+    //
+    // Two-phase lookup that splits the MC and OC reads:
+    //   1. `getCandidateToolOwners` queries the MC tags table for every
+    //      tag with a non-NULL owner under (sessionId, callId).
+    //   2. `getMessageTimesFromOpenCodeDb` resolves wall-clock times for
+    //      the candidates and the current message via the shared OC
+    //      read-only handle. Returns an empty map when the OC DB can't
+    //      be opened (Pi-only install, missing file).
+    //   3. `pickNearestPriorOwner` selects the most recent candidate
+    //      strictly preceding `messageId` in OC time.
+    //
+    // All three steps are fail-soft: any of them returning empty/null
+    // collapses to the `messageId` fallback below, which keeps the
+    // composite key stable even when the OC DB is unavailable.
     if (messageId) {
-        try {
-            const persisted = getPersistedToolOwnerNearestPrior(
-                db,
-                sessionId,
-                obs.callId,
-                messageId,
-            );
+        const candidates = getCandidateToolOwners(db, sessionId, obs.callId);
+        if (candidates.length > 0) {
+            const ids = [...candidates, messageId];
+            const times = getMessageTimesFromOpenCodeDb(sessionId, ids);
+            const persisted = pickNearestPriorOwner(candidates, messageId, times);
             if (persisted !== null) return persisted;
-        } catch {
-            // ATTACH alias `oc` may not be present in some test fixtures
-            // or in degraded states. Fall through to messageId fallback.
         }
         return messageId;
     }
