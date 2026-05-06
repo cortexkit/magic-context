@@ -16,7 +16,7 @@ function createTestDb(): Database {
     const db = new Database(":memory:");
     // initializeDatabase creates session_meta + tags etc., needed by older
     // migrations (v5 heal, v6 counter heal). Then runMigrations applies the
-    // versioned migrations including v10 (tool_definition_measurements).
+    // versioned migrations including v9 (tool_definition_measurements).
     initializeDatabase(db);
     runMigrations(db);
     return db;

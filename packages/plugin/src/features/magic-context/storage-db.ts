@@ -602,7 +602,7 @@ export function openDatabase(): Database {
         runMigrations(db);
         // Wire the persistence-backed tool-definition measurement store and
         // rehydrate the in-memory map from any prior writes. Doing this here
-        // (after migrations) means migration v10 has already created the
+        // (after migrations) means migration v9 has already created the
         // `tool_definition_measurements` table, so loadToolDefinitionMeasurements
         // never hits a missing-table failure path. See bug #2 in the v0.16+
         // sidebar regression report.

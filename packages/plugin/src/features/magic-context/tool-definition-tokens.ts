@@ -18,7 +18,7 @@
  * agentName)`. Returns `undefined` when the key has never been measured — the
  * caller is expected to fall back to residual math or show zero.
  *
- * Persistence (v10+): measurements are also written to SQLite so that a
+ * Persistence (v9+): measurements are also written to SQLite so that a
  * plugin restart can repopulate the in-memory map without waiting for the
  * next chat.message → tool.definition hook chain. The in-memory Map remains
  * the hot read path; SQLite is a write-through mirror that backs cold starts.

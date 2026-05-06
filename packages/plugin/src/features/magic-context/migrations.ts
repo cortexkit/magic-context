@@ -341,15 +341,12 @@ const MIGRATIONS: Migration[] = [
             db.exec("ANALYZE tags;");
         },
     },
-    // NOTE: version 9 is intentionally reserved for the tag-owner-fix work
-    // documented in `.alfonso/plans/tag-owner-fix-plan.md`. New migrations
-    // should use v10+ to avoid colliding with that reserved slot.
     {
-        version: 10,
+        version: 9,
         description: "Persist tool_definition_measurements across plugin restarts",
         // The `tool.definition` plugin hook fires once per tool per
         // `ToolRegistry.tools()` call and produces our per-tool token
-        // measurements. Pre-v10 these measurements lived only in an
+        // measurements. Pre-v9 these measurements lived only in an
         // in-process Map, so a plugin restart wiped them and the sidebar's
         // "Tool Defs" segment showed 0 tokens until the next chat.message
         // fired the hook chain again.
