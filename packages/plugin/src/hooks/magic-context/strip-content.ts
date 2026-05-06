@@ -243,9 +243,7 @@ export function replayClearedReasoning(
     reasoningByMessage: Map<MessageLike, ThinkingLikePart[]>,
     messageTagNumbers: Map<MessageLike, number>,
     persistedWatermark: number,
-    skipTypedReasoningCleanup = false,
 ): number {
-    if (skipTypedReasoningCleanup) return 0;
     if (persistedWatermark <= 0) return 0;
 
     let cleared = 0;
@@ -304,9 +302,7 @@ export function clearOldReasoning(
     reasoningByMessage: Map<MessageLike, ThinkingLikePart[]>,
     messageTagNumbers: Map<MessageLike, number>,
     clearReasoningAge: number,
-    skipTypedReasoningCleanup = false,
 ): number {
-    if (skipTypedReasoningCleanup) return 0;
     const maxTag = findMaxTag(messageTagNumbers);
     if (maxTag === 0) return 0;
 
@@ -356,15 +352,14 @@ const CLEARED_REASONING_TYPES = new Set(["thinking", "reasoning"]);
  * effective wire shape as the previous filter-based behavior but no
  * mid-pipeline array mutation.
  *
- * Gate: `skipTypedReasoningCleanup=true` short-circuits for providers whose
- * capability.interleaved.field requires typed reasoning_content on the wire
- * (Moonshot/Kimi).
+ * Providers with `capabilities.interleaved.field` (e.g. Moonshot/Kimi
+ * `reasoning_content`) used to need a special gate to keep typed reasoning
+ * intact. OpenCode PR #24146 (preserve empty reasoning_content for DeepSeek
+ * V4 thinking mode) made the provider/transform layer always emit the
+ * interleaved field — empty when no reasoning parts remain — so the gate
+ * is no longer needed here.
  */
-export function stripClearedReasoning(
-    messages: MessageLike[],
-    skipTypedReasoningCleanup = false,
-): number {
-    if (skipTypedReasoningCleanup) return 0;
+export function stripClearedReasoning(messages: MessageLike[]): number {
     let stripped = 0;
     for (const message of messages) {
         if (message.info.role !== "assistant") continue;

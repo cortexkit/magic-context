@@ -24,13 +24,12 @@
  *   - Inline `<thinking>...</thinking>` markup in text content is also
  *     stripped on every pass via the same watermark.
  *
- * Models with interleaved reasoning (Kimi K2.6, Anthropic
- * extended-thinking) MUST NOT have their typed reasoning cleared
- * because the provider rejects the request when the previous
- * assistant turns reference reasoning content that is no longer
- * present. The shared `modelSupportsInterleavedReasoning` check is
- * applied by the caller before invoking these functions, mirroring
- * OpenCode's transform.ts gating.
+ * Providers with `capabilities.interleaved.field` (e.g. Moonshot/Kimi
+ * `reasoning_content`) used to need a special bypass to keep typed
+ * reasoning intact. OpenCode PR #24146 (preserve empty reasoning_content
+ * for DeepSeek V4 thinking mode) made the provider transform always
+ * emit the interleaved field — empty when no reasoning parts remain —
+ * so the bypass is no longer needed.
  */
 
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
@@ -155,18 +154,9 @@ export function replayClearedReasoningPi(args: {
 	messages: unknown[];
 	messageIdToMaxTag: Map<string, number>;
 	piMessageStableId: (msg: unknown, index: number) => string | undefined;
-	skipTypedReasoningCleanup: boolean;
 }): number {
-	const {
-		db,
-		sessionId,
-		messages,
-		messageIdToMaxTag,
-		piMessageStableId,
-		skipTypedReasoningCleanup,
-	} = args;
-
-	if (skipTypedReasoningCleanup) return 0;
+	const { db, sessionId, messages, messageIdToMaxTag, piMessageStableId } =
+		args;
 
 	const meta = getOrCreateSessionMeta(db, sessionId);
 	const watermark = meta.clearedReasoningThroughTag ?? 0;

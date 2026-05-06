@@ -83,7 +83,7 @@ import {
 	readRawSessionMessages,
 	setRawMessageProvider,
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
-import { modelRequiresInterleavedReasoning } from "@magic-context/core/hooks/magic-context/reasoning-capability";
+
 import { log, sessionLog } from "@magic-context/core/shared/logger";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
@@ -135,26 +135,6 @@ const EMERGENCY_BLOCK_PERCENTAGE = 95;
 const TOOL_HEAVY_TURN_REMINDER_THRESHOLD = 5;
 const TOOL_HEAVY_TURN_REMINDER_TEXT =
 	'\n\n<instruction name="ctx_reduce_turn_cleanup">Also drop via `ctx_reduce` things you don\'t need anymore from the last turn before continuing.</instruction>';
-
-/**
- * Resolve `{ providerID, modelID }` from Pi's ExtensionContext for the
- * live `modelRequiresInterleavedReasoning` check. Pi exposes
- * `ctx.model: { provider, id }` (see commands/ctx-status.ts), but the
- * shape isn't formally exported, so we read it defensively.
- */
-function resolveLiveModelId(
-	ctx: ExtensionContext,
-): { providerID: string; modelID: string } | undefined {
-	const model = (ctx as { model?: { provider?: string; id?: string } }).model;
-	if (!model) return undefined;
-	const providerID = model.provider;
-	const modelID = model.id;
-	if (typeof providerID !== "string" || typeof modelID !== "string") {
-		return undefined;
-	}
-	if (providerID.length === 0 || modelID.length === 0) return undefined;
-	return { providerID, modelID };
-}
 
 /**
  * Default `clear_reasoning_age` when neither the Pi caller nor the user
@@ -1101,16 +1081,6 @@ export function registerPiContextHandler(
 				`pi transform: usage=${usagePercentage.toFixed(1)}% (${usageInputTokens} tokens, limit=${usageContextLimit ?? "?"}) decision=${schedulerDecision}${forceMaterialization ? " force=true" : ""}${isEmergency ? " EMERGENCY=true" : ""}${isCacheBusting ? " busting=true" : ""}`,
 			);
 
-			// Resolve `skipTypedReasoningCleanup` from the live model.
-			// Models with interleaved-reasoning protocols (Anthropic
-			// extended thinking, Kimi K2.6) MUST keep prior typed
-			// reasoning intact or the provider rejects the request.
-			// Mirrors OpenCode's transform.ts gate.
-			const liveModelId = resolveLiveModelId(ctx);
-			const skipTypedReasoningCleanup = liveModelId
-				? modelRequiresInterleavedReasoning(liveModelId)
-				: false;
-
 			// Resolve SessionEntry IDs for each AgentMessage in event.messages
 			// so the boundary lookup in `<session-history>` injection uses
 			// the same id format historian persists. Pi's
@@ -1144,7 +1114,6 @@ export function registerPiContextHandler(
 					clearReasoningAge:
 						options.heuristics?.clearReasoningAge ??
 						DEFAULT_CLEAR_REASONING_AGE,
-					skipTypedReasoningCleanup,
 				},
 				temporalAwareness: options.injection?.temporalAwareness === true,
 			});
@@ -1766,15 +1735,14 @@ interface RunPipelineArgs {
 	 * defer passes replay the cleared state. Mirrors OpenCode's
 	 * `clearOldReasoning` + `replayClearedReasoning` pair.
 	 *
-	 * Skipped entirely for models with interleaved reasoning — those
-	 * providers reject the request when prior reasoning content is
-	 * removed. The caller decides this via the shared
-	 * `modelSupportsInterleavedReasoning` check and passes the verdict
-	 * down here as `skipTypedReasoningCleanup`.
+	 * OpenCode PR #24146 (preserve empty reasoning_content for DeepSeek
+	 * V4 thinking mode) made the provider transform always emit the
+	 * interleaved field (e.g. Moonshot/Kimi `reasoning_content`) — empty
+	 * when no reasoning parts remain — so providers that previously
+	 * needed prior reasoning preserved no longer reject the request.
 	 */
 	reasoningClearing?: {
 		clearReasoningAge: number;
-		skipTypedReasoningCleanup: boolean;
 	};
 	/**
 	 * Whether to inject temporal `<!-- +Xm -->` markers into user
@@ -1931,8 +1899,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				messages: args.messages,
 				messageIdToMaxTag,
 				piMessageStableId,
-				skipTypedReasoningCleanup:
-					args.reasoningClearing.skipTypedReasoningCleanup,
 			});
 			const inlineReplay = replayStrippedInlineThinkingPi({
 				db: args.db,
@@ -2059,7 +2025,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// heuristic cleanup.
 	if (
 		args.reasoningClearing &&
-		!args.reasoningClearing.skipTypedReasoningCleanup &&
 		(args.schedulerDecision === "execute" || args.forceMaterialization === true)
 	) {
 		try {

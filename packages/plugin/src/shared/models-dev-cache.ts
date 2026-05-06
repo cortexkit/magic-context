@@ -14,10 +14,9 @@
  *      Used during cold starts before the API cache warms up and in any
  *      code path that cannot reach the SDK client.
  *
- * The public getters (`getModelsDevContextLimit()` and
- * `getModelsDevInterleavedField()`) are synchronous: they check the API cache
- * first, then the file cache. The plugin warms and refreshes the API cache
- * from `src/index.ts` at startup and on a timer.
+ * The public getter (`getModelsDevContextLimit()`) is synchronous: it checks
+ * the API cache first, then the file cache. The plugin warms and refreshes
+ * the API cache from `src/index.ts` at startup and on a timer.
  */
 
 import { createHash } from "node:crypto";
@@ -37,10 +36,7 @@ const RELOAD_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes, matches OpenCode's TTL
 
 interface CachedModelMetadata {
     limit?: number;
-    interleavedField?: string;
 }
-
-type InterleavedConfig = boolean | { field?: string } | undefined;
 
 /** Populated async from OpenCode SDK. Primary source of truth when available. */
 let apiCache: Map<string, CachedModelMetadata> | null = null;
@@ -121,47 +117,28 @@ function resolveLimit(limit: { context?: number; input?: number } | undefined): 
     return undefined;
 }
 
-function resolveInterleavedField(interleaved: InterleavedConfig): string | undefined {
-    if (
-        interleaved &&
-        typeof interleaved === "object" &&
-        typeof interleaved.field === "string" &&
-        interleaved.field.length > 0
-    ) {
-        return interleaved.field;
-    }
-    return undefined;
-}
-
 function setCachedModelMetadata(
     cache: Map<string, CachedModelMetadata>,
     key: string,
     model:
         | {
               limit?: { context?: number; input?: number };
-              capabilities?: { interleaved?: InterleavedConfig };
-              interleaved?: InterleavedConfig;
               experimental?: { modes?: Record<string, unknown> };
           }
         | undefined,
 ): void {
     const limit = resolveLimit(model?.limit);
-    const interleavedField =
-        resolveInterleavedField(model?.capabilities?.interleaved) ??
-        resolveInterleavedField(model?.interleaved);
 
-    if (limit === undefined && interleavedField === undefined) {
+    if (limit === undefined) {
         return;
     }
 
-    const value: CachedModelMetadata = {};
-    if (limit !== undefined) value.limit = limit;
-    if (interleavedField !== undefined) value.interleavedField = interleavedField;
+    const value: CachedModelMetadata = { limit };
     cache.set(key, value);
 
     // OpenCode creates derived model IDs from experimental.modes
     // e.g. gpt-5.4 + modes.fast → gpt-5.4-fast. These inherit the same
-    // context limit and interleaved-reasoning contract as the parent model.
+    // context limit as the parent model.
     const modes = model?.experimental?.modes;
     if (modes && typeof modes === "object") {
         for (const mode of Object.keys(modes)) {
@@ -187,8 +164,6 @@ function loadModelsDevMetadataFromFile(): Map<string, CachedModelMetadata> {
                         string,
                         {
                             limit?: { context?: number; input?: number };
-                            capabilities?: { interleaved?: InterleavedConfig };
-                            interleaved?: InterleavedConfig;
                             experimental?: { modes?: Record<string, unknown> };
                         }
                     >;
@@ -284,8 +259,6 @@ export async function refreshModelLimitsFromApi(client: OpencodeClientLike): Pro
                     string,
                     {
                         limit?: { context?: number; input?: number };
-                        capabilities?: { interleaved?: InterleavedConfig };
-                        interleaved?: InterleavedConfig;
                         experimental?: { modes?: Record<string, unknown> };
                     }
                 >;
@@ -362,34 +335,6 @@ export function getModelsDevContextLimit(providerID: string, modelID: string): n
         fileCache = loadModelsDevMetadataFromFile();
     }
     return fileCache.get(key)?.limit;
-}
-
-/**
- * Returns the provider-specific interleaved reasoning field when the model
- * requires one (for example `reasoning_content` for Moonshot/Kimi style
- * providers). Undefined means the cache has no such capability recorded.
- */
-export function getModelsDevInterleavedField(
-    providerID: string,
-    modelID: string,
-): string | undefined {
-    const key = `${providerID}/${modelID}`;
-
-    if (apiCache) {
-        const fromApi = apiCache.get(key)?.interleavedField;
-        if (typeof fromApi === "string" && fromApi.length > 0) {
-            return fromApi;
-        }
-    }
-
-    const now = Date.now();
-    if (!fileCache || now - fileLastAttempt > RELOAD_INTERVAL_MS) {
-        fileLastAttempt = now;
-        fileCache = loadModelsDevMetadataFromFile();
-    }
-
-    const fromFile = fileCache.get(key)?.interleavedField;
-    return typeof fromFile === "string" && fromFile.length > 0 ? fromFile : undefined;
 }
 
 /** Clear in-memory caches (for testing). */

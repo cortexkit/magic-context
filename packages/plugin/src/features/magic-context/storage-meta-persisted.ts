@@ -169,12 +169,9 @@ export function setPersistedReasoningWatermark(
 }
 
 /**
- * Reset the persisted reasoning watermark for a session.
- *
- * The watermark is model-specific because non-interleaved models may safely
- * rewrite/remove typed reasoning parts while providers that expose
- * `capabilities.interleaved.field` need those same parts to survive until
- * OpenCode's provider transform serializes them onto the wire.
+ * Reset the persisted reasoning watermark for a session. Used during model
+ * switches to make sure stale reasoning state from the previous model does
+ * not leak into pressure or replay decisions for the new one.
  */
 export function clearPersistedReasoningWatermark(db: Database, sessionId: string): void {
     setPersistedReasoningWatermark(db, sessionId, 0);

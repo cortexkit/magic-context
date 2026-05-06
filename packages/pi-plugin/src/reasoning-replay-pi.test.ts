@@ -177,39 +177,10 @@ describe("replayClearedReasoningPi", () => {
 			messages,
 			messageIdToMaxTag,
 			piMessageStableId,
-			skipTypedReasoningCleanup: false,
 		});
 		expect(cleared).toBe(1);
 		expect(messages[0].content[0]).toMatchObject({ thinking: "[cleared]" });
 		expect(messages[1].content[0]).toMatchObject({ thinking: "still visible" });
-	});
-
-	it("returns 0 when skipTypedReasoningCleanup=true (interleaved-reasoning model)", () => {
-		const db = makeDb();
-		const sessionId = "ses_replay_pi_2";
-		getOrCreateSessionMeta(db, sessionId);
-		updateSessionMeta(db, sessionId, { clearedReasoningThroughTag: 999 });
-
-		const messages = [
-			{
-				role: "assistant",
-				timestamp: 1,
-				content: [{ type: "thinking", thinking: "preserved" }],
-			},
-		];
-		const messageIdToMaxTag = new Map<string, number>([
-			[requireId(messages[0], 0), 1],
-		]);
-		const cleared = replayClearedReasoningPi({
-			db,
-			sessionId,
-			messages,
-			messageIdToMaxTag,
-			piMessageStableId,
-			skipTypedReasoningCleanup: true,
-		});
-		expect(cleared).toBe(0);
-		expect(messages[0].content[0]).toMatchObject({ thinking: "preserved" });
 	});
 });
 
