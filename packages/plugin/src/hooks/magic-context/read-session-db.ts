@@ -121,13 +121,14 @@ export function getMessageTimesFromOpenCodeDb(
 
 export function findLastAssistantModelFromOpenCodeDb(
     sessionId: string,
-): { providerID: string; modelID: string } | null {
+): { providerID: string; modelID: string; agent?: string } | null {
     try {
         return withReadOnlySessionDb((db) => {
             const row = db
                 .prepare(
                     `SELECT json_extract(data, '$.providerID') as providerID,
-                            json_extract(data, '$.modelID') as modelID
+                            json_extract(data, '$.modelID') as modelID,
+                            json_extract(data, '$.agent') as agent
                      FROM message
                      WHERE session_id = ?
                        AND json_extract(data, '$.role') = 'assistant'
@@ -136,11 +137,17 @@ export function findLastAssistantModelFromOpenCodeDb(
                      ORDER BY time_created DESC
                      LIMIT 1`,
                 )
-                .get(sessionId) as AssistantModelRow | null;
+                .get(sessionId) as (AssistantModelRow & { agent?: string | null }) | null;
             if (!row || typeof row.providerID !== "string" || typeof row.modelID !== "string") {
                 return null;
             }
-            return { providerID: row.providerID, modelID: row.modelID };
+            const agent =
+                typeof row.agent === "string" && row.agent.length > 0 ? row.agent : undefined;
+            return {
+                providerID: row.providerID,
+                modelID: row.modelID,
+                ...(agent ? { agent } : {}),
+            };
         });
     } catch (error) {
         log("[magic-context] failed to recover live model from OpenCode DB:", error);

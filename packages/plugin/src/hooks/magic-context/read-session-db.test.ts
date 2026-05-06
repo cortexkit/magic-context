@@ -34,6 +34,7 @@ interface MessageRow {
     role: "user" | "assistant";
     providerID?: string;
     modelID?: string;
+    agent?: string;
     timeCreated: number;
 }
 
@@ -59,6 +60,7 @@ function createOpenCodeDb(rows: MessageRow[]): void {
             const data: Record<string, unknown> = { role: row.role };
             if (row.providerID !== undefined) data.providerID = row.providerID;
             if (row.modelID !== undefined) data.modelID = row.modelID;
+            if (row.agent !== undefined) data.agent = row.agent;
             insert.run(
                 row.id,
                 row.sessionId,
@@ -197,5 +199,49 @@ describe("findLastAssistantModelFromOpenCodeDb", () => {
         useTempDataHome("read-session-db-missing-db-");
         // Do NOT create the DB. The helper should log and return null instead of throwing.
         expect(findLastAssistantModelFromOpenCodeDb("ses_A")).toBeNull();
+    });
+
+    it("includes agent name when present on the assistant message", () => {
+        useTempDataHome("read-session-db-agent-");
+        createOpenCodeDb([
+            {
+                id: "msg_agentic",
+                sessionId: "ses_A",
+                role: "assistant",
+                providerID: "anthropic",
+                modelID: "claude-opus-4-7",
+                agent: "Alfonso - CTO",
+                timeCreated: 1000,
+            },
+        ]);
+        expect(findLastAssistantModelFromOpenCodeDb("ses_A")).toEqual({
+            providerID: "anthropic",
+            modelID: "claude-opus-4-7",
+            agent: "Alfonso - CTO",
+        });
+    });
+
+    it("omits agent when missing or empty on the assistant message", () => {
+        useTempDataHome("read-session-db-no-agent-");
+        createOpenCodeDb([
+            {
+                id: "msg_default",
+                sessionId: "ses_A",
+                role: "assistant",
+                providerID: "anthropic",
+                modelID: "claude-opus-4-7",
+                // no agent
+                timeCreated: 1000,
+            },
+        ]);
+        const result = findLastAssistantModelFromOpenCodeDb("ses_A");
+        expect(result).toEqual({
+            providerID: "anthropic",
+            modelID: "claude-opus-4-7",
+        });
+        // Important: must not have an `agent` property at all (RPC handler
+        // checks `if (recovered.agent)` so undefined is fine, but presence
+        // of an empty string would break the agentBySession lookup).
+        expect((result as { agent?: string }).agent).toBeUndefined();
     });
 });

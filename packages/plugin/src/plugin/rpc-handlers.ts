@@ -14,6 +14,7 @@ import {
     trimMemoriesToBudget,
 } from "../hooks/magic-context/inject-compartments";
 import type { LiveSessionState } from "../hooks/magic-context/live-session-state";
+import { findLastAssistantModelFromOpenCodeDb } from "../hooks/magic-context/read-session-db";
 import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
 import {
     calibrateBuckets,
@@ -293,16 +294,35 @@ export function buildSidebarSnapshot(
         const toolCallsLocal = Math.max(0, toolCallTokensRaw);
 
         // Measured tool schema cost. Resolved via the live-session-state latch
-        // (session → agent/model). When the plugin hasn't fired tool.definition
-        // yet for this session's current agent+model (brand-new session before
-        // first turn, or post-restart before any flight), returns 0 and tool
-        // defs are excluded from calibration until the measurement lands.
+        // (session → agent/model). When the in-memory map is empty (post-restart,
+        // before this session's first chat.message has fired in this process)
+        // fall back to OpenCode's SQLite DB to recover provider/model/agent
+        // from the last assistant message, mirroring the model-recovery path
+        // already in place for hook.ts. Populate the cache so subsequent reads
+        // hit memory directly. This eliminates the "Tool Defs shows 0 until
+        // next chat.message" cold-start gap.
         let measuredToolDefTokens = 0;
         let activeProviderID: string | undefined;
         let activeModelID: string | undefined;
         if (liveSessionState) {
-            const model = liveSessionState.liveModelBySession.get(sessionId);
-            const agent = liveSessionState.agentBySession.get(sessionId);
+            let model = liveSessionState.liveModelBySession.get(sessionId);
+            let agent = liveSessionState.agentBySession.get(sessionId);
+            if (!model || !agent) {
+                const recovered = findLastAssistantModelFromOpenCodeDb(sessionId);
+                if (recovered) {
+                    if (!model) {
+                        model = {
+                            providerID: recovered.providerID,
+                            modelID: recovered.modelID,
+                        };
+                        liveSessionState.liveModelBySession.set(sessionId, model);
+                    }
+                    if (!agent && recovered.agent) {
+                        agent = recovered.agent;
+                        liveSessionState.agentBySession.set(sessionId, agent);
+                    }
+                }
+            }
             if (model) {
                 activeProviderID = model.providerID;
                 activeModelID = model.modelID;
