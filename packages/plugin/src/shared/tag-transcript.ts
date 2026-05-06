@@ -146,156 +146,156 @@ export function tagTranscript(
     // across both invocation and result.
     const toolAggregates = new Map<string, ToolAggregate & { tagId: number }>();
 
-    db.transaction(() => {
-        for (let msgIndex = 0; msgIndex < transcript.messages.length; msgIndex += 1) {
-            const message = transcript.messages[msgIndex];
-            if (message === undefined) continue;
-            const messageId = message.info.id;
+    // v3.3.1 Layer C (plan v3.3.1 Finding #16): the previous outer
+    // db.transaction() wrapper rolled back EVERY tag insert + savedSource
+    // when a single UNIQUE collision fired late in the walk. Per-tag
+    // SAVEPOINTs inside `assignToolTag` / `assignTag` already give us the
+    // atomicity we need. Removing the wrapper matches OpenCode's
+    // tag-messages.ts design — see the long comment there for the
+    // rationale (cache-bust amplifier story).
+    for (let msgIndex = 0; msgIndex < transcript.messages.length; msgIndex += 1) {
+        const message = transcript.messages[msgIndex];
+        if (message === undefined) continue;
+        const messageId = message.info.id;
 
-            let textOrdinal = 0;
+        let textOrdinal = 0;
 
-            for (let partIndex = 0; partIndex < message.parts.length; partIndex += 1) {
-                const part = message.parts[partIndex];
-                if (part === undefined) continue;
+        for (let partIndex = 0; partIndex < message.parts.length; partIndex += 1) {
+            const part = message.parts[partIndex];
+            if (part === undefined) continue;
 
-                if (part.kind === "text") {
-                    // Synthetic message ids (Pi tail synthetic user with
-                    // no id) cannot be tagged — there's no stable handle
-                    // to bind a tag to across passes. Pass through
-                    // untagged; this is rare (only happens for the
-                    // dangling tool-result tail case in Pi).
-                    if (messageId === undefined) {
-                        textOrdinal += 1;
-                        continue;
-                    }
-                    tagTextPart({
+            if (part.kind === "text") {
+                // Synthetic message ids (Pi tail synthetic user with
+                // no id) cannot be tagged — there's no stable handle
+                // to bind a tag to across passes. Pass through
+                // untagged; this is rare (only happens for the
+                // dangling tool-result tail case in Pi).
+                if (messageId === undefined) {
+                    textOrdinal += 1;
+                    continue;
+                }
+                tagTextPart({
+                    sessionId,
+                    message,
+                    messageId,
+                    msgIndex,
+                    textOrdinal,
+                    part,
+                    tagger,
+                    db,
+                    targets,
+                    skipPrefixInjection,
+                });
+                textOrdinal += 1;
+                continue;
+            }
+
+            if (part.kind === "tool_use" || part.kind === "tool_result") {
+                if (messageId === undefined) continue;
+
+                const callId = part.id;
+                const text = part.getText() ?? "";
+                const meta = part.getToolMetadata();
+
+                if (typeof callId !== "string" || callId.length === 0) {
+                    // No stable callId to aggregate on. Tag independently.
+                    tagToolPart({
                         sessionId,
                         message,
                         messageId,
                         msgIndex,
-                        textOrdinal,
+                        partIndex,
                         part,
                         tagger,
                         db,
                         targets,
                         skipPrefixInjection,
                     });
-                    textOrdinal += 1;
                     continue;
                 }
 
-                if (part.kind === "tool_use" || part.kind === "tool_result") {
-                    if (messageId === undefined) continue;
-
-                    const callId = part.id;
-                    const text = part.getText() ?? "";
-                    const meta = part.getToolMetadata();
-
-                    if (typeof callId !== "string" || callId.length === 0) {
-                        // No stable callId to aggregate on. Tag independently.
-                        tagToolPart({
-                            sessionId,
-                            message,
-                            messageId,
-                            msgIndex,
-                            partIndex,
-                            part,
-                            tagger,
-                            db,
-                            targets,
-                            skipPrefixInjection,
-                        });
-                        continue;
+                const existing = toolAggregates.get(callId);
+                if (existing) {
+                    // Second (or later) occurrence for this call_id.
+                    // Merge into the existing aggregate, update byte_size
+                    // in DB if larger, and rebuild the TagTarget so the
+                    // closures over `occurrences` see all parts.
+                    existing.occurrences.push({
+                        message,
+                        part,
+                        kind: part.kind,
+                    });
+                    const newByteSize = byteSize(text);
+                    if (newByteSize > existing.maxByteSize) {
+                        existing.maxByteSize = newByteSize;
+                        updateTagByteSize(db, sessionId, existing.tagId, newByteSize);
                     }
-
-                    const existing = toolAggregates.get(callId);
-                    if (existing) {
-                        // Second (or later) occurrence for this call_id.
-                        // Merge into the existing aggregate, update byte_size
-                        // in DB if larger, and rebuild the TagTarget so the
-                        // closures over `occurrences` see all parts.
-                        existing.occurrences.push({
-                            message,
-                            part,
-                            kind: part.kind,
-                        });
-                        const newByteSize = byteSize(text);
-                        if (newByteSize > existing.maxByteSize) {
-                            existing.maxByteSize = newByteSize;
-                            updateTagByteSize(db, sessionId, existing.tagId, newByteSize);
-                        }
-                        if (existing.toolName === null && meta.toolName) {
-                            existing.toolName = meta.toolName;
-                        }
-                        if (
-                            existing.inputByteSize === 0 &&
-                            part.kind === "tool_use" &&
-                            meta.inputByteSize > 0
-                        ) {
-                            existing.inputByteSize = meta.inputByteSize;
-                            updateTagInputByteSize(
-                                db,
-                                sessionId,
-                                existing.tagId,
-                                meta.inputByteSize,
-                            );
-                        }
-                        // Inject §N§ prefix into this tool_result occurrence
-                        // (matches OpenCode behavior — only result gets the prefix).
-                        if (!skipPrefixInjection && part.kind === "tool_result") {
-                            part.setText(prependTag(existing.tagId, text));
-                        }
-                        // Rebuild the aggregate target so it walks the now-
-                        // longer occurrences list.
-                        targets.set(
-                            existing.tagId,
-                            buildAggregateTarget(existing.tagId, existing.occurrences),
-                        );
-                    } else {
-                        // First occurrence — reserve the tag number.
-                        // v3.3.1 Layer C: Pi main aggregation path. Owner
-                        // is the Pi message hosting the tool aggregate.
-                        // Owner stays stable across passes because Pi
-                        // re-emits the full transcript each time and
-                        // message ids are durable.
-                        const tagId = tagger.assignToolTag(
-                            sessionId,
-                            callId,
-                            messageId,
-                            byteSize(text),
-                            db,
-                            0,
-                            meta.toolName ?? null,
-                            meta.inputByteSize,
-                        );
-                        const aggregate = {
-                            callId,
-                            tagId,
-                            occurrences: [
-                                {
-                                    message,
-                                    part,
-                                    kind: part.kind,
-                                },
-                            ],
-                            maxByteSize: byteSize(text),
-                            toolName: meta.toolName ?? null,
-                            inputByteSize: part.kind === "tool_use" ? meta.inputByteSize : 0,
-                        };
-                        toolAggregates.set(callId, aggregate);
-                        // Inject §N§ prefix into this occurrence's visible text
-                        // when it's a tool_result. (OpenCode parity: prefix
-                        // only goes on the result, not the invocation.)
-                        if (!skipPrefixInjection && part.kind === "tool_result") {
-                            part.setText(prependTag(tagId, text));
-                        }
-                        targets.set(tagId, buildAggregateTarget(tagId, aggregate.occurrences));
+                    if (existing.toolName === null && meta.toolName) {
+                        existing.toolName = meta.toolName;
                     }
+                    if (
+                        existing.inputByteSize === 0 &&
+                        part.kind === "tool_use" &&
+                        meta.inputByteSize > 0
+                    ) {
+                        existing.inputByteSize = meta.inputByteSize;
+                        updateTagInputByteSize(db, sessionId, existing.tagId, meta.inputByteSize);
+                    }
+                    // Inject §N§ prefix into this tool_result occurrence
+                    // (matches OpenCode behavior — only result gets the prefix).
+                    if (!skipPrefixInjection && part.kind === "tool_result") {
+                        part.setText(prependTag(existing.tagId, text));
+                    }
+                    // Rebuild the aggregate target so it walks the now-
+                    // longer occurrences list.
+                    targets.set(
+                        existing.tagId,
+                        buildAggregateTarget(existing.tagId, existing.occurrences),
+                    );
+                } else {
+                    // First occurrence — reserve the tag number.
+                    // v3.3.1 Layer C: Pi main aggregation path. Owner
+                    // is the Pi message hosting the tool aggregate.
+                    // Owner stays stable across passes because Pi
+                    // re-emits the full transcript each time and
+                    // message ids are durable.
+                    const tagId = tagger.assignToolTag(
+                        sessionId,
+                        callId,
+                        messageId,
+                        byteSize(text),
+                        db,
+                        0,
+                        meta.toolName ?? null,
+                        meta.inputByteSize,
+                    );
+                    const aggregate = {
+                        callId,
+                        tagId,
+                        occurrences: [
+                            {
+                                message,
+                                part,
+                                kind: part.kind,
+                            },
+                        ],
+                        maxByteSize: byteSize(text),
+                        toolName: meta.toolName ?? null,
+                        inputByteSize: part.kind === "tool_use" ? meta.inputByteSize : 0,
+                    };
+                    toolAggregates.set(callId, aggregate);
+                    // Inject §N§ prefix into this occurrence's visible text
+                    // when it's a tool_result. (OpenCode parity: prefix
+                    // only goes on the result, not the invocation.)
+                    if (!skipPrefixInjection && part.kind === "tool_result") {
+                        part.setText(prependTag(tagId, text));
+                    }
+                    targets.set(tagId, buildAggregateTarget(tagId, aggregate.occurrences));
                 }
-                // thinking, image, file, structural, unknown → skip.
             }
+            // thinking, image, file, structural, unknown → skip.
         }
-    })();
+    }
 
     return { targets };
 }

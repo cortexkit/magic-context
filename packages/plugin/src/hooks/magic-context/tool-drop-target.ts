@@ -216,8 +216,23 @@ export class ToolMutationBatch {
     }
 }
 
+/**
+ * Build a TagTarget for a single tool composite key
+ * (`<ownerMsgId>\x00<callId>`).
+ *
+ * v3.3.1 Layer C: pre-fix this took a bare `callId`. Two assistant turns
+ * reusing the same callId produced two TagTargets that both pointed at
+ * the same `index.get(callId)` entry — last-write-wins on `targets.set`
+ * silently merged them into one drop target, and a queued drop on the
+ * older tag would mutate the newer turn's content. Composite keys
+ * guarantee one TagTarget per (owner, callId) pair, so each turn's tag
+ * gets its own independent drop scope.
+ *
+ * The `index` map is keyed by composite key as well — see
+ * `tag-messages.ts` for the matching producer.
+ */
 export function createToolDropTarget(
-    callId: string,
+    compositeKey: string,
     thinkingParts: ThinkingLikePart[],
     index: ToolCallIndex,
     batch: ToolMutationBatch,
@@ -227,7 +242,7 @@ export function createToolDropTarget(
     truncate: () => ToolDropResult;
 } {
     const drop = (): ToolDropResult => {
-        const entry = index.get(callId);
+        const entry = index.get(compositeKey);
         if (!entry || entry.occurrences.length === 0) return "absent";
         if (!entry.hasResult) return "incomplete";
 
@@ -235,12 +250,12 @@ export function createToolDropTarget(
             batch.markForRemoval(occurrence);
         }
         clearThinkingParts(thinkingParts);
-        index.delete(callId);
+        index.delete(compositeKey);
         return "removed";
     };
 
     const truncate = (): ToolDropResult => {
-        const entry = index.get(callId);
+        const entry = index.get(compositeKey);
         if (!entry || entry.occurrences.length === 0) return "absent";
         if (!entry.hasResult) return "incomplete";
 
@@ -259,7 +274,7 @@ export function createToolDropTarget(
                 return true;
             }
 
-            const entry = index.get(callId);
+            const entry = index.get(compositeKey);
             if (!entry) return false;
 
             let changed = false;
