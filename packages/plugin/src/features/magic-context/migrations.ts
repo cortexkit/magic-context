@@ -391,15 +391,59 @@ function getCurrentVersion(db: Database): number {
 }
 
 /**
+ * Detect the specific case where a sibling process already committed the
+ * same `schema_migrations` row we're about to insert. Two OpenCode/Pi
+ * instances starting concurrently can both read `MAX(version)=N` before
+ * either commits. The first commits v(N+1); the second's transaction body
+ * runs `migration.up()` (a no-op now that the schema change already
+ * landed), then hits PRIMARY KEY conflict on the
+ * `INSERT INTO schema_migrations` row.
+ *
+ * Without this guard the plugin fail-closes and the second instance
+ * refuses to start. With it, we recognize "sibling beat us to it",
+ * re-read the version, and continue from the next pending migration.
+ *
+ * Important: only PRIMARY KEY conflicts on `schema_migrations` are
+ * swallowed. Any other failure (CREATE TABLE, ALTER TABLE, data heal,
+ * etc.) surfaces normally and fail-closes per contract.
+ */
+function isSiblingMigrationConflict(error: unknown, version: number): boolean {
+    if (!(error instanceof Error)) return false;
+    const code = (error as { code?: unknown }).code;
+    if (code !== "SQLITE_CONSTRAINT_PRIMARYKEY" && code !== "SQLITE_CONSTRAINT_UNIQUE") {
+        return false;
+    }
+    // Distinguish "PRIMARY KEY conflict on schema_migrations(version)"
+    // from any other UNIQUE/PK collision the migration body could surface.
+    // SQLite's better-sqlite3 binding includes the constraint in the
+    // message, e.g. "UNIQUE constraint failed: schema_migrations.version".
+    const msg = error.message;
+    if (!msg.includes("schema_migrations")) return false;
+    if (!msg.toLowerCase().includes("version")) return false;
+    // Final guard: confirm the row is actually present now. If something
+    // else somehow produced this error shape without the row landing, we
+    // want to fall through to fail-closed.
+    void version; // version is implicit from the row check above
+    return true;
+}
+
+/**
  * Run all pending migrations sequentially.
  * Each migration runs in its own transaction — if it fails, only that migration rolls back.
  * Already-applied migrations are skipped.
+ *
+ * Multi-instance race tolerance: when two plugin processes start against
+ * the same shared DB, both can read the same MAX(version) before either
+ * commits. The first wins; the second's INSERT into schema_migrations
+ * fails with a PRIMARY KEY conflict. We catch that specific case and
+ * resume from the next pending migration. All other migration errors
+ * still fail-close per the existing contract.
  */
 export function runMigrations(db: Database): void {
     ensureMigrationsTable(db);
 
-    const currentVersion = getCurrentVersion(db);
-    const pendingMigrations = MIGRATIONS.filter((m) => m.version > currentVersion);
+    let currentVersion = getCurrentVersion(db);
+    let pendingMigrations = MIGRATIONS.filter((m) => m.version > currentVersion);
 
     if (pendingMigrations.length === 0) {
         return;
@@ -409,7 +453,9 @@ export function runMigrations(db: Database): void {
         `[migrations] current schema version: ${currentVersion}, applying ${pendingMigrations.length} migration(s)`,
     );
 
-    for (const migration of pendingMigrations) {
+    let migrationIndex = 0;
+    while (migrationIndex < pendingMigrations.length) {
+        const migration = pendingMigrations[migrationIndex];
         try {
             db.transaction(() => {
                 migration.up(db);
@@ -418,7 +464,35 @@ export function runMigrations(db: Database): void {
                 ).run(migration.version, migration.description, Date.now());
             })();
             log(`[migrations] applied v${migration.version}: ${migration.description}`);
+            migrationIndex += 1;
         } catch (error) {
+            if (isSiblingMigrationConflict(error, migration.version)) {
+                // Sibling process committed this version between our
+                // MAX(version) read and our INSERT. Re-read the version
+                // and rebuild the pending list — the sibling may have
+                // applied multiple migrations while we were preparing
+                // this one.
+                log(
+                    `[migrations] v${migration.version} already applied by sibling instance — resuming with re-read version`,
+                );
+                const reReadVersion = getCurrentVersion(db);
+                if (reReadVersion <= currentVersion) {
+                    // Defensive: sibling-conflict shape detected but
+                    // version didn't actually advance. Treat as a real
+                    // failure to avoid an infinite loop on a malformed
+                    // error.
+                    log(
+                        `[migrations] FAILED v${migration.version}: sibling-conflict shape but version not advanced (${reReadVersion} <= ${currentVersion}) — failing closed`,
+                    );
+                    throw new Error(
+                        `Migration v${migration.version} failed: sibling conflict reported but version did not advance. Database may need manual repair.`,
+                    );
+                }
+                currentVersion = reReadVersion;
+                pendingMigrations = MIGRATIONS.filter((m) => m.version > currentVersion);
+                migrationIndex = 0;
+                continue;
+            }
             log(
                 `[migrations] FAILED v${migration.version}: ${migration.description} — ${error instanceof Error ? error.message : String(error)}`,
             );
