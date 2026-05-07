@@ -25,14 +25,31 @@
  * If `setDatabase()` hasn't been called yet (cold path before openDatabase
  * completes), `recordToolDefinition` still updates the in-memory map and
  * silently skips persistence — first measurement after init lands both.
+ *
+ * Hot-path optimization: `tool.definition` fires once per tool per LLM
+ * flight (~58 tools × 5–18ms SQLite write = ~1.4s of redundant work per
+ * flight on large MC databases). Tool descriptions and parameters almost
+ * never change between flights, so we keep a per-key content-fingerprint
+ * Map and bail out at the top of `recordToolDefinition` when the new fire
+ * carries the same fingerprint as the previous one. This collapses
+ * steady-state hook overhead from ~1.4s to <1ms while still re-measuring
+ * any tool whose description/schema actually changed (e.g. MCP server
+ * restart, OpenCode upgrade). Cached prepared statement avoids repeated
+ * `db.prepare()` compile cost on first-flight rebuilds.
  */
 
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
-import type { Database } from "../../shared/sqlite";
+import type { Database, Statement } from "../../shared/sqlite";
 
 // Inner map: toolID → measured tokens for that tool (description + params).
 // Outer map: composite key → per-tool breakdown.
 const measurements = new Map<string, Map<string, number>>();
+
+// Parallel structure: composite key → toolID → cheap content fingerprint
+// derived from the inputs of the previous fire. Used solely to short-circuit
+// repeated identical fires; the actual measurement still lives in the
+// `measurements` map above. Cleared together with `measurements` on reset.
+const fingerprints = new Map<string, Map<string, string>>();
 
 // Database reference for persistence. Set by setDatabase() once
 // openDatabase() has finished migrations. Until then, recordToolDefinition
@@ -40,9 +57,37 @@ const measurements = new Map<string, Map<string, number>>();
 // land in SQLite).
 let persistenceDb: Database | null = null;
 
+// Cached INSERT OR REPLACE statement — recompiling on every fire was a
+// significant share of the hot-path cost. Initialized lazily on first use
+// after `setDatabase()` and dropped on reset / DB rebind.
+let cachedInsertStmt: Statement | null = null;
+
 function keyFor(providerID: string, modelID: string, agentName: string | undefined): string {
     const agent = agentName && agentName.length > 0 ? agentName : "default";
     return `${providerID}/${modelID}/${agent}`;
+}
+
+/**
+ * Build a cheap fingerprint of the inputs that determine the measured value.
+ * Returns a short string we compare verbatim with the previous fire's
+ * fingerprint. Length-based: real description/schema changes virtually
+ * always change at least one length, and the cost of a rare false-positive
+ * skip is one stale measurement carrying over for one flight (no
+ * correctness impact — the value still represents a real recent tool set).
+ *
+ * We deliberately avoid hashing the full text because the whole point of
+ * the fingerprint is to be cheaper than `JSON.stringify` + `estimateTokens`.
+ * If we paid the stringify cost to hash, we'd lose most of the win.
+ */
+function fingerprintFor(description: string, parameters: unknown): string {
+    const descLen = description.length;
+    if (parameters === undefined) return `${descLen}:none`;
+    if (parameters === null) return `${descLen}:null`;
+    if (typeof parameters !== "object") return `${descLen}:${typeof parameters}`;
+    // Object: count top-level keys + a stable shallow signature. Cheaper than
+    // a full stringify but distinguishes most realistic schema edits.
+    const keys = Object.keys(parameters as Record<string, unknown>);
+    return `${descLen}:obj:${keys.length}:${keys.sort().join(",")}`;
 }
 
 /**
@@ -53,6 +98,9 @@ function keyFor(providerID: string, modelID: string, agentName: string | undefin
  */
 export function setDatabase(db: Database): void {
     persistenceDb = db;
+    // New DB binding invalidates any cached statement compiled against the
+    // previous handle.
+    cachedInsertStmt = null;
 }
 
 /**
@@ -93,6 +141,12 @@ export function loadToolDefinitionMeasurements(db: Database): void {
         }
         inner.set(row.tool_id, row.token_count);
     }
+    // Note: we deliberately do NOT seed `fingerprints` from DB here. The
+    // first fire after restart will compute a real fingerprint, find no
+    // entry, do the work once, and store both. This means the very first
+    // flight after restart pays full measurement cost (~1.4s on a large
+    // tool set) but every subsequent flight skips it — same steady-state
+    // behavior as before-restart.
 }
 
 /**
@@ -111,6 +165,14 @@ export function recordToolDefinition(
 ): void {
     if (!providerID || !modelID || !toolID) return;
     const key = keyFor(providerID, modelID, agentName);
+
+    // Fast-path skip: if this exact tool's last fire under this key carried
+    // an identical fingerprint, every downstream operation (stringify,
+    // tokenize, map write, SQLite write) would produce the same result.
+    // Bail out before doing any of them.
+    const fp = fingerprintFor(description ?? "", parameters);
+    let innerFp = fingerprints.get(key);
+    if (innerFp && innerFp.get(toolID) === fp) return;
 
     // Serialize parameters to match what the provider actually sees on the
     // wire. `JSON.stringify(undefined)` returns undefined, so guard that.
@@ -135,6 +197,16 @@ export function recordToolDefinition(
     }
     inner.set(toolID, tokens);
 
+    // Update fingerprint AFTER the in-memory map so a thrown error above
+    // doesn't poison the skip-check on the next fire. (Currently nothing
+    // above can throw post-guard, but the ordering is intentionally
+    // defensive.)
+    if (!innerFp) {
+        innerFp = new Map<string, string>();
+        fingerprints.set(key, innerFp);
+    }
+    innerFp.set(toolID, fp);
+
     // Write-through to SQLite so the value survives a plugin restart.
     // Skipped silently when the DB isn't wired yet (cold path before
     // openDatabase has finished init): the in-memory map still has the
@@ -142,18 +214,24 @@ export function recordToolDefinition(
     if (persistenceDb) {
         try {
             const agent = agentName && agentName.length > 0 ? agentName : "default";
-            persistenceDb
-                .prepare(
+            // Compile statement once per DB binding. `.run()` is reusable
+            // across calls with different bound values.
+            if (!cachedInsertStmt) {
+                cachedInsertStmt = persistenceDb.prepare(
                     `INSERT OR REPLACE INTO tool_definition_measurements
                      (provider_id, model_id, agent_name, tool_id, token_count, recorded_at)
                      VALUES (?, ?, ?, ?, ?, ?)`,
-                )
-                .run(providerID, modelID, agent, toolID, tokens, Date.now());
+                );
+            }
+            cachedInsertStmt.run(providerID, modelID, agent, toolID, tokens, Date.now());
         } catch {
             // Persistence is best-effort. A SQLITE_BUSY or transient write
             // failure must not break the live measurement: the in-memory
             // map already has the new value and the sidebar will display
             // it correctly until the next plugin restart.
+            // Drop the cached statement on error — if the DB connection
+            // went bad, recompiling on the next attempt is the safe move.
+            cachedInsertStmt = null;
         }
     }
 }
@@ -178,7 +256,9 @@ export function getMeasuredToolDefinitionTokens(
 /** Test helper: reset the store so suites don't leak measurements. */
 export function __resetToolDefinitionMeasurements(): void {
     measurements.clear();
+    fingerprints.clear();
     persistenceDb = null;
+    cachedInsertStmt = null;
 }
 
 /** Inspection helper: snapshot the current store (for debug logging/tests). */
