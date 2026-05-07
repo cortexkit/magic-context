@@ -4,8 +4,9 @@ set -euo pipefail
 # release-dashboard.sh — Tag and push a new dashboard release
 #
 # Usage:
-#   ./scripts/release-dashboard.sh 0.2.2        # release dashboard-v0.2.2
-#   ./scripts/release-dashboard.sh 0.2.2 --dry  # preview without committing/pushing
+#   ./scripts/release-dashboard.sh 0.2.2                           # release dashboard-v0.2.2
+#   ./scripts/release-dashboard.sh 0.2.2 --dry                     # preview without committing/pushing
+#   ./scripts/release-dashboard.sh 0.2.2 --notes-file NOTES.md     # release with notes non-interactively
 #
 # What it does:
 #   1. Validates the version is semver
@@ -15,15 +16,49 @@ set -euo pipefail
 #   5. Commits the version bump
 #   6. Creates a git tag (dashboard-v0.2.2)
 #   7. Pushes commit + tag to origin
-#   8. Waits for CI to build all platforms
-#   9. Publishes the draft release
-#  10. Adds release notes
+#   8. Waits for CI to build all platforms and finish the workflow
+#   9. Reads release notes from /dev/tty or --notes-file
+#  10. Publishes the draft release
 
-VERSION="${1:-}"
-DRY="${2:-}"
+VERSION=""
+DRY=""
+NOTES_FILE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry)
+      DRY="--dry"
+      shift
+      ;;
+    --notes-file)
+      NOTES_FILE="${2:-}"
+      if [[ -z "$NOTES_FILE" ]]; then
+        echo "Error: --notes-file requires a path"
+        exit 1
+      fi
+      shift 2
+      ;;
+    -*)
+      echo "Error: unknown option '$1'"
+      exit 1
+      ;;
+    *)
+      if [[ -n "$VERSION" ]]; then
+        echo "Error: unexpected argument '$1'"
+        exit 1
+      fi
+      VERSION="$1"
+      shift
+      ;;
+  esac
+done
+
+have_tty() {
+  [[ -e /dev/tty ]] && { : </dev/tty >/dev/tty; } 2>/dev/null
+}
 
 if [[ -z "$VERSION" ]]; then
-  echo "Usage: ./scripts/release-dashboard.sh <version> [--dry]"
+  echo "Usage: ./scripts/release-dashboard.sh <version> [--dry] [--notes-file FILE]"
   echo "  e.g. ./scripts/release-dashboard.sh 0.2.2"
   exit 1
 fi
@@ -31,6 +66,17 @@ fi
 if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?(\+[a-zA-Z0-9.]+)?$ ]]; then
   echo "Error: '$VERSION' is not valid semver (expected X.Y.Z)"
   exit 1
+fi
+
+if [[ -n "$NOTES_FILE" ]]; then
+  if [[ ! -r "$NOTES_FILE" ]]; then
+    echo "Error: notes file '$NOTES_FILE' is not readable"
+    exit 1
+  fi
+  if ! grep -q '[^[:space:]]' "$NOTES_FILE"; then
+    echo "Error: notes file '$NOTES_FILE' is empty"
+    exit 1
+  fi
 fi
 
 TAG="dashboard-v$VERSION"
@@ -77,7 +123,12 @@ if [[ "$DRY" == "--dry" ]]; then
   echo "  1. Update $TAURI_CONF version to $VERSION"
   echo "  2. Run cargo check"
   echo "  3. Commit, tag $TAG, push to origin"
-  echo "  4. Wait for CI, publish release, add notes"
+  echo "  4. Wait for CI and all platform builds to finish"
+  if [[ -n "$NOTES_FILE" ]]; then
+    echo "  5. Publish release with notes from $NOTES_FILE"
+  else
+    echo "  5. Prompt for release notes before publishing"
+  fi
   exit 0
 fi
 
@@ -173,7 +224,7 @@ while [[ $ASSET_ATTEMPTS -lt $ASSET_MAX ]]; do
   ASSET_COUNT=$(gh release view "$TAG" --repo cortexkit/magic-context --json assets --jq '.assets | length' 2>/dev/null || echo "0")
 
   if [[ "$ASSET_COUNT" -ge "$MIN_ASSETS" ]]; then
-    echo "  ✓ Found $ASSET_COUNT assets — all platforms built"
+    echo "  ✓ Found $ASSET_COUNT assets — minimum asset threshold reached"
     break
   fi
 
@@ -187,26 +238,81 @@ done
 
 if [[ "$ASSET_COUNT" -lt "$MIN_ASSETS" ]]; then
   echo "  ⚠ Only $ASSET_COUNT assets after waiting. Some platforms may have failed."
-  read -r -p "  Publish with $ASSET_COUNT assets? [y/N] " confirm </dev/tty
+  if have_tty; then
+    read -r -p "  Publish with $ASSET_COUNT assets? [y/N] " confirm </dev/tty
+  else
+    confirm=""
+  fi
   if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-    echo "  Skipping publish. Run manually: gh release edit $TAG --draft=false"
+    echo "  Skipping publish. Run manually: gh release edit $TAG --repo cortexkit/magic-context --draft=false"
     exit 0
   fi
 fi
 
-# Step 8: Prompt for release notes
+# Step 8: Wait for the release workflow to finish before publishing
 echo ""
-echo "→ Enter release notes (end with Ctrl-D or empty line):"
-echo "  (markdown supported)"
-echo ""
-NOTES=""
-while IFS= read -r line </dev/tty; do
-  [[ -z "$line" ]] && break
-  NOTES="$NOTES$line
-"
+echo "→ Waiting for Dashboard Release workflow to complete..."
+echo "  (checking every 30s for up to 60 minutes)"
+WORKFLOW_ATTEMPTS=0
+WORKFLOW_MAX=120
+RUN_ID=""
+while [[ $WORKFLOW_ATTEMPTS -lt $WORKFLOW_MAX ]]; do
+  RUN_INFO=$(gh run list --repo cortexkit/magic-context --workflow "Dashboard Release" --limit 20 --json databaseId,status,conclusion,headBranch --jq ".[] | select(.headBranch == \"$TAG\") | \"\(.databaseId) \(.status) \(.conclusion)\"" 2>/dev/null | head -n 1 || true)
+
+  if [[ -n "$RUN_INFO" ]]; then
+    read -r RUN_ID RUN_STATUS RUN_CONCLUSION <<<"$RUN_INFO"
+    if [[ "$RUN_STATUS" == "completed" ]]; then
+      if [[ "$RUN_CONCLUSION" == "success" ]]; then
+        echo "  ✓ Workflow completed successfully"
+        break
+      fi
+      echo "  ✗ Workflow completed with conclusion: $RUN_CONCLUSION"
+      echo "  → https://github.com/cortexkit/magic-context/actions/runs/$RUN_ID"
+      exit 1
+    fi
+  fi
+
+  WORKFLOW_ATTEMPTS=$((WORKFLOW_ATTEMPTS + 1))
+  if [[ $((WORKFLOW_ATTEMPTS % 4)) -eq 0 ]]; then
+    ELAPSED=$((WORKFLOW_ATTEMPTS * 30 / 60))
+    if [[ -n "$RUN_ID" ]]; then
+      echo "  ... workflow $RUN_STATUS (${ELAPSED}m elapsed)"
+    else
+      echo "  ... waiting for workflow run (${ELAPSED}m elapsed)"
+    fi
+  fi
+  sleep 30
 done
 
-# Step 9: Publish the release
+if [[ $WORKFLOW_ATTEMPTS -ge $WORKFLOW_MAX ]]; then
+  echo "  ⚠ Timed out waiting for workflow. Skipping publish."
+  echo "  → https://github.com/cortexkit/magic-context/actions"
+  exit 0
+fi
+
+# Step 9: Prompt for release notes
+echo ""
+NOTES=""
+if [[ -n "$NOTES_FILE" ]]; then
+  echo "→ Using release notes from $NOTES_FILE"
+  NOTES=$(cat "$NOTES_FILE")
+elif have_tty; then
+  echo "→ Enter release notes (end with Ctrl-D or empty line):"
+  echo "  (markdown supported)"
+  echo ""
+  while IFS= read -r line </dev/tty; do
+    [[ -z "$line" ]] && break
+    NOTES="$NOTES$line
+"
+  done
+else
+  echo "→ No tty available and no --notes-file provided."
+  echo "  Skipping publish so the release is not published with empty notes."
+  echo "  Run manually: gh release edit $TAG --repo cortexkit/magic-context --notes-file NOTES.md --draft=false"
+  exit 0
+fi
+
+# Step 10: Publish the release
 echo ""
 echo "→ Publishing release..."
 if [[ -n "$NOTES" ]]; then
