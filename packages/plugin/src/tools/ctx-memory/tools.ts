@@ -182,7 +182,13 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
     return tool({
         description: CTX_MEMORY_DESCRIPTION,
         args: {
-            action: tool.schema.enum(allowedActions).describe("Action to perform on memories"),
+            // The OpenCode plugin exposes one shared tool definition for all agents, so
+            // schema-level narrowing to `allowedActions` blocks dreamer child sessions
+            // before execute() can inspect `toolContext.agent`. Keep the full action
+            // schema visible to the runtime and enforce primary-session safety below.
+            action: tool.schema
+                .enum([...CTX_MEMORY_DREAMER_ACTIONS])
+                .describe("Action to perform on memories"),
             content: tool.schema
                 .string()
                 .optional()

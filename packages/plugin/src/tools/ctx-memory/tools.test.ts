@@ -343,6 +343,23 @@ describe("createCtxMemoryTools", () => {
     });
 
     describe("#given restricted actions", () => {
+        it("keeps dreamer actions in the schema so OpenCode can deliver them to execute", () => {
+            const primaryTools = createCtxMemoryTools({
+                db,
+                resolveProjectPath: () => "/repo/project",
+                memoryEnabled: true,
+                embeddingEnabled: false,
+                allowedActions: ["write", "delete"],
+            });
+
+            const actionSchema = primaryTools.ctx_memory.args.action as unknown as {
+                safeParse: (value: unknown) => { success: boolean };
+            };
+
+            expect(actionSchema.safeParse("list").success).toBe(true);
+            expect(actionSchema.safeParse("merge").success).toBe(true);
+        });
+
         it("rejects dreamer-only actions for primary-agent tool instances", async () => {
             const primaryTools = createCtxMemoryTools({
                 db,
