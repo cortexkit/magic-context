@@ -1,6 +1,7 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import {
     detectConfigPaths,
@@ -24,10 +25,31 @@ export class OpenCodeAdapter implements HarnessAdapter {
     readonly pluginPackageName = PLUGIN_NAME;
 
     isInstalled(): boolean {
-        // Stock OpenCode install location takes priority.
-        if (existsSync(`${process.env.HOME ?? ""}/.opencode/bin/opencode`)) return true;
+        // Stock OpenCode install location takes priority. Use os.homedir()
+        // (not process.env.HOME) and OS-specific binary name so this works
+        // on Windows where HOME is typically undefined and binaries end in
+        // `.exe`.
+        const isWindows = process.platform === "win32";
+        const stockBin = isWindows
+            ? join(homedir(), ".opencode", "bin", "opencode.exe")
+            : join(homedir(), ".opencode", "bin", "opencode");
+        if (existsSync(stockBin)) return true;
+
+        // Probe PATH. `command -v` is a Bash builtin that doesn't exist in
+        // PowerShell/CMD; use `where.exe opencode` on Windows. Both forms
+        // exit non-zero when the binary is absent, which is our cue.
+        const probe = isWindows
+            ? { cmd: "where", args: ["opencode"] }
+            : { cmd: "command", args: ["-v", "opencode"] };
         try {
-            execSync("command -v opencode", { stdio: "ignore" });
+            // Note: on POSIX, `command -v` is a shell builtin and execFileSync
+            // can't run it directly. Fall back to a real binary lookup via
+            // `which` instead.
+            if (!isWindows) {
+                execFileSync("which", ["opencode"], { stdio: "ignore" });
+            } else {
+                execFileSync(probe.cmd, probe.args, { stdio: "ignore" });
+            }
             return true;
         } catch {
             return false;
