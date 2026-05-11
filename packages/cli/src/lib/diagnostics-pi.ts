@@ -14,8 +14,11 @@ import {
     getPiUserExtensionsPath,
 } from "./paths";
 import { detectPiBinary, getPiVersion, PI_PACKAGE_SOURCE } from "./pi-helpers";
-
-const PACKAGE_NAME = "@cortexkit/pi-magic-context";
+import {
+    describePiPackageEntry,
+    hasPiMagicContextPackage,
+    isPiMagicContextPackageEntry,
+} from "./pi-package-entry";
 
 export interface PiConfigDiagnostic {
     path: string;
@@ -38,7 +41,7 @@ export interface PiDiagnosticReport {
         exists: boolean;
         parseError?: string;
         hasMagicContextPackage: boolean;
-        packages: string[];
+        packages: unknown[];
     };
     configPaths: {
         agentDir: string;
@@ -178,19 +181,8 @@ function readConfigDiagnostic(path: string): PiConfigDiagnostic {
     };
 }
 
-function packageEntries(settings: Record<string, unknown>): string[] {
-    return Array.isArray(settings.packages)
-        ? settings.packages.filter((entry): entry is string => typeof entry === "string")
-        : [];
-}
-
-function hasMagicContextPackage(packages: string[]): boolean {
-    return packages.some(
-        (entry) =>
-            entry === PI_PACKAGE_SOURCE ||
-            entry === PACKAGE_NAME ||
-            entry.includes("pi-magic-context"),
-    );
+function packageEntries(settings: Record<string, unknown>): unknown[] {
+    return Array.isArray(settings.packages) ? settings.packages : [];
 }
 
 export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnosticReport> {
@@ -205,7 +197,9 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
     const dbPath = join(storageDirPath, "context.db");
     const logPath = getMagicContextLogPath("pi");
     const logFileSize = existsSync(logPath) ? statSync(logPath).size : 0;
-    const otherPiExtensions = packages.filter((entry) => !hasMagicContextPackage([entry]));
+    const otherPiExtensions = packages
+        .filter((entry) => !isPiMagicContextPackageEntry(entry))
+        .map(describePiPackageEntry);
 
     return {
         timestamp: new Date().toISOString(),
@@ -220,8 +214,8 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
             path: settingsPath,
             exists: existsSync(settingsPath),
             ...(settingsParsed.parseError ? { parseError: settingsParsed.parseError } : {}),
-            hasMagicContextPackage: hasMagicContextPackage(packages),
-            packages: packages.map(sanitizeString),
+            hasMagicContextPackage: hasPiMagicContextPackage(packages),
+            packages: sanitizeValue(packages) as unknown[],
         },
         configPaths: {
             agentDir: getPiAgentConfigDir(),

@@ -197,6 +197,47 @@ describe("Pi doctor", () => {
         expect(output).toContain("Repair attempted; 2 item(s) changed");
     });
 
+    it("recognizes object-form Magic Context package and preserves object entries during repair", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("mc-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        const settingsPath = join(agentDir, "settings.json");
+        writeFileSync(
+            settingsPath,
+            JSON.stringify({
+                packages: [
+                    { name: "npm:@cortexkit/pi-magic-context", version: "1.2.3" },
+                    { name: "third-party-extension", version: "9.9.9", enabled: true },
+                    "npm:other-pi-extension",
+                ],
+            }),
+        );
+        writeFileSync(
+            join(agentDir, "magic-context.jsonc"),
+            JSON.stringify({ embedding: { provider: "local" } }),
+        );
+        writeFileSync(join(cwd, ".pi", "magic-context.jsonc"), JSON.stringify({ enabled: true }));
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({
+            ...baseOptions(root, cwd, prompts),
+            force: true,
+        });
+
+        expect(code).toBe(0);
+        const settings = parseJsonc(readFileSync(settingsPath, "utf-8")) as {
+            packages?: unknown[];
+        };
+        expect(settings.packages).toEqual([
+            { name: "npm:@cortexkit/pi-magic-context", version: "1.2.3" },
+            { name: "third-party-extension", version: "9.9.9", enabled: true },
+            "npm:other-pi-extension",
+        ]);
+        const output = prompts.messages.join("\n");
+        expect(output).toContain("PASS npm:@cortexkit/pi-magic-context is registered");
+        expect(output).not.toContain("Added npm:@cortexkit/pi-magic-context");
+    });
+
     it("generates a sanitized markdown report in --issue mode without calling gh create", async () => {
         const root = makeTempRoot();
         const cwd = makeTempRoot("mc-pi-doctor-cwd-");

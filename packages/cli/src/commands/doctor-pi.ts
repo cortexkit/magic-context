@@ -42,6 +42,11 @@ import {
     PI_PACKAGE_SOURCE,
     type PiBinaryInfo,
 } from "../lib/pi-helpers";
+import {
+    describePiPackageEntry,
+    hasPiMagicContextPackage,
+    isPiMagicContextPackageEntry,
+} from "../lib/pi-package-entry";
 import { type PromptIO, promptIO } from "../lib/prompts";
 import { writePiSettingsPackage } from "./setup-pi";
 
@@ -214,19 +219,8 @@ function readJsonc(path: string): {
     }
 }
 
-function packagesFrom(settings: Record<string, unknown>): string[] {
-    return Array.isArray(settings.packages)
-        ? settings.packages.filter((entry): entry is string => typeof entry === "string")
-        : [];
-}
-
-function hasPiPackage(packages: string[]): boolean {
-    return packages.some(
-        (entry) =>
-            entry === PI_PACKAGE_SOURCE ||
-            entry === PACKAGE_NAME ||
-            entry.includes("pi-magic-context"),
-    );
+function packagesFrom(settings: Record<string, unknown>): unknown[] {
+    return Array.isArray(settings.packages) ? settings.packages : [];
 }
 
 function projectConfigPath(cwd: string): string {
@@ -409,7 +403,7 @@ async function runHealthChecks(options: {
     }
 
     const settingsPath = getPiUserExtensionsPath();
-    let packages: string[] = [];
+    let packages: unknown[] = [];
     if (!existsSync(settingsPath)) {
         add(results, "warn", `Pi settings not found at ${settingsPath}`);
         repairPlan.addPackageEntry = true;
@@ -420,7 +414,7 @@ async function runHealthChecks(options: {
         } else {
             packages = packagesFrom(parsed.value);
             add(results, "pass", `Pi settings found at ${settingsPath}`);
-            if (hasPiPackage(packages)) {
+            if (hasPiMagicContextPackage(packages)) {
                 add(results, "pass", `${PI_PACKAGE_SOURCE} is registered in packages[]`);
             } else {
                 add(results, "warn", `${PI_PACKAGE_SOURCE} is missing from packages[]`);
@@ -586,7 +580,7 @@ async function runHealthChecks(options: {
     // extensions today, but we still check for self-conflicts that the user
     // can hit (e.g. accidentally registering both an npm entry AND a local
     // dev-path entry, which causes duplicate plugin loading).
-    const piEntries = packages.filter((entry) => hasPiPackage([entry]));
+    const piEntries = packages.filter(isPiMagicContextPackageEntry).map(describePiPackageEntry);
     if (piEntries.length > 1) {
         add(
             results,
@@ -597,7 +591,9 @@ async function runHealthChecks(options: {
         add(results, "pass", "No conflicting magic-context entries in Pi packages[]");
     }
 
-    const otherExtensions = packages.filter((entry) => !hasPiPackage([entry]));
+    const otherExtensions = packages
+        .filter((entry) => !isPiMagicContextPackageEntry(entry))
+        .map(describePiPackageEntry);
     if (otherExtensions.length > 0) {
         add(results, "info", `Other Pi extensions registered: ${otherExtensions.join(", ")}`);
     } else {

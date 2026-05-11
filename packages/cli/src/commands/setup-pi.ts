@@ -11,6 +11,7 @@ import {
     PI_PACKAGE_SOURCE,
 } from "../lib/pi-helpers";
 import type { PromptIO } from "../lib/prompts";
+import { hasPiMagicContextPackage } from "../lib/pi-package-entry";
 
 type EmbeddingChoice =
     | { provider: "local"; model: string }
@@ -104,16 +105,9 @@ export function writePiSettingsPackage(
     const settings: Record<string, unknown> = existsSync(settingsPath)
         ? (readJsonc(settingsPath) ?? {})
         : {};
-    const packages = Array.isArray(settings.packages)
-        ? settings.packages.filter((value): value is string => typeof value === "string")
-        : [];
+    const packages = Array.isArray(settings.packages) ? settings.packages : [];
 
-    const hasPackage = packages.some(
-        (source) =>
-            source === packageSource ||
-            source === packageSource.replace(/^npm:/, "") ||
-            source.includes("pi-magic-context"),
-    );
+    const hasPackage = hasPiMagicContextPackage(packages);
 
     if (!hasPackage) packages.push(packageSource);
     settings.packages = packages;
