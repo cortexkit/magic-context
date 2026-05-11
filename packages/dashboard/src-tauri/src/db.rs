@@ -241,6 +241,11 @@ pub struct Compartment {
     pub start_time: Option<i64>,
     /// Resolved from OpenCode DB using end_message_id
     pub end_time: Option<i64>,
+    /// Compression depth (max across the compartment's ordinal range).
+    /// 0 = uncompressed by the compressor, 1 = merged, 2 = caveman-lite,
+    /// 3 = caveman-full, 4 = caveman-ultra, 5 = title-only collapse.
+    /// Falls back to 0 when no `compression_depth` rows cover this range.
+    pub compression_depth: i64,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -2356,9 +2361,24 @@ pub fn get_compartments(
     conn: &Connection,
     session_id: &str,
 ) -> Result<Vec<Compartment>, rusqlite::Error> {
+    // Correlated subquery picks the MAX depth across the compartment's
+    // raw-ordinal range. In production the compressor updates depths in
+    // contiguous ranges, so MIN/MAX/AVG usually agree, but if any future
+    // partial-recomp leaves a mixed range the MAX is the right summary
+    // (it's the most heavily compressed slice the user should be aware of).
+    // COALESCE(..., 0) handles compartments that haven't been touched by
+    // the compressor at all — those have no `compression_depth` rows.
     let mut stmt = conn.prepare(
-        "SELECT id, session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at
-         FROM compartments WHERE session_id = ?1 ORDER BY sequence DESC",
+        "SELECT c.id, c.session_id, c.sequence, c.start_message, c.end_message,
+                c.start_message_id, c.end_message_id, c.title, c.content, c.created_at,
+                COALESCE((
+                  SELECT MAX(cd.depth) FROM compression_depth cd
+                  WHERE cd.session_id = c.session_id
+                    AND cd.message_ordinal BETWEEN c.start_message AND c.end_message
+                ), 0) AS compression_depth
+         FROM compartments c
+         WHERE c.session_id = ?1
+         ORDER BY c.sequence DESC",
     )?;
     let mut compartments: Vec<Compartment> = stmt
         .query_map(rusqlite::params![session_id], |row| {
@@ -2375,6 +2395,7 @@ pub fn get_compartments(
                 created_at: row.get(9)?,
                 start_time: None,
                 end_time: None,
+                compression_depth: row.get(10)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;

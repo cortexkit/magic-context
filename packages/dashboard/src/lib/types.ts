@@ -152,6 +152,12 @@ export interface Compartment {
   start_time?: number;
   /** Resolved from OpenCode DB — epoch ms */
   end_time?: number;
+  /**
+   * Compression depth (max across the compartment's ordinal range):
+   * 0 = uncompressed, 1 = merged, 2 = caveman-lite, 3 = caveman-full,
+   * 4 = caveman-ultra, 5 = title-only collapse.
+   */
+  compression_depth: number;
 }
 
 export interface SessionFact {

@@ -22,6 +22,63 @@ import FilterSelect from "../shared/FilterSelect";
 const PROJECT_FILTER_KEY = "mc_sessions_project_filter";
 const HARNESS_FILTER_KEY = "mc_sessions_harness_filter";
 
+/**
+ * Compression depth → user-facing label + `.pill` color variant.
+ *
+ * Maps Magic Context compressor tiers:
+ *   0 → no compression (uncompressed historian output)
+ *   1 → merge-only (no caveman text compression)
+ *   2 → caveman-lite
+ *   3 → caveman-full
+ *   4 → caveman-ultra
+ *   5 → title-only collapse (no LLM call, full body discarded)
+ *
+ * Returns `null` for depth 0 so callers can render nothing in the common case.
+ */
+function compressionDepthInfo(
+  depth: number,
+): { label: string; pillColor: "gray" | "blue" | "amber" | "red"; title: string } | null {
+  if (!depth || depth < 1) return null;
+  switch (depth) {
+    case 1:
+      return {
+        label: "merged",
+        pillColor: "blue",
+        title: "Depth 1 · merged with neighbors (no text compression yet)",
+      };
+    case 2:
+      return {
+        label: "lite",
+        pillColor: "gray",
+        title: "Depth 2 · caveman-lite text compression",
+      };
+    case 3:
+      return {
+        label: "full",
+        pillColor: "amber",
+        title: "Depth 3 · caveman-full text compression",
+      };
+    case 4:
+      return {
+        label: "ultra",
+        pillColor: "amber",
+        title: "Depth 4 · caveman-ultra text compression",
+      };
+    case 5:
+      return {
+        label: "title-only",
+        pillColor: "red",
+        title: "Depth 5 · title-only collapse (body discarded, no LLM call)",
+      };
+    default:
+      return {
+        label: `d${depth}`,
+        pillColor: "red",
+        title: `Depth ${depth} · beyond standard tier table`,
+      };
+  }
+}
+
 type ActiveTab = "messages" | "compartments" | "facts" | "notes" | "tokens" | "cache";
 type HarnessFilter = "all" | Harness;
 type SelectedSession = { harness: Harness; sessionId: string };
@@ -491,22 +548,28 @@ export default function SessionViewer() {
                 {(comp) => {
                   const range = comp.end_message - comp.start_message;
                   const width = () => Math.max(0.5, (range / totalRange()) * 100);
+                  // Fade saturation and lightness with depth so compressed
+                  // compartments visually recede on the timeline (depth 0 =
+                  // full color, depth 5 = nearly gray). Clamped so even the
+                  // most compressed segments stay visible.
+                  const isExpanded = () => expandedCompartment() === comp.id;
+                  const depth = comp.compression_depth ?? 0;
+                  const sat = Math.max(15, (isExpanded() ? 70 : 50) - depth * 8);
+                  const light = Math.max(28, (isExpanded() ? 55 : 40) - depth * 2);
+                  const depthInfo = compressionDepthInfo(depth);
+                  const titleSuffix = depthInfo ? ` · d${depth} ${depthInfo.label}` : "";
                   return (
                     <button
                       type="button"
                       class="timeline-segment"
                       style={{
                         width: `${width()}%`,
-                        background:
-                          expandedCompartment() === comp.id
-                            ? `hsl(${(comp.sequence * 37) % 360}, 70%, 55%)`
-                            : `hsl(${(comp.sequence * 37) % 360}, 50%, 40%)`,
-                        outline:
-                          expandedCompartment() === comp.id ? "2px solid var(--accent)" : "none",
+                        background: `hsl(${(comp.sequence * 37) % 360}, ${sat}%, ${light}%)`,
+                        outline: isExpanded() ? "2px solid var(--accent)" : "none",
                         border: "none",
                         padding: 0,
                       }}
-                      title={`#${comp.sequence}: ${comp.title}`}
+                      title={`#${comp.sequence}: ${comp.title}${titleSuffix}`}
                       onClick={() => toggleCompartment(comp.id)}
                     />
                   );
@@ -610,6 +673,18 @@ export default function SessionViewer() {
                               #{comp.sequence}
                             </span>
                             Messages {comp.start_message}–{comp.end_message}
+                            {(() => {
+                              const info = compressionDepthInfo(comp.compression_depth);
+                              return info ? (
+                                <span
+                                  class={`pill ${info.pillColor}`}
+                                  style={{ "margin-left": "8px" }}
+                                  title={info.title}
+                                >
+                                  d{comp.compression_depth} · {info.label}
+                                </span>
+                              ) : null;
+                            })()}
                             {comp.start_time && comp.end_time && (
                               <span
                                 style={{
