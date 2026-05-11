@@ -1,8 +1,13 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { parse, stringify } from "comment-json";
 
-import type { ConflictResult } from "./conflict-detector";
-import { readJsoncFile } from "./jsonc-parser";
+import {
+    DCP_PACKAGE_NAMES,
+    extractPluginName,
+    type ConflictResult,
+    matchesPackageName,
+} from "./conflict-detector";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";
 
 type JsonObject = Record<string, unknown>;
@@ -20,10 +25,6 @@ const OMO_CONFIG_NAMES = [
     "oh-my-opencode.json",
 ] as const;
 
-function ensureParentDir(filePath: string): void {
-    mkdirSync(dirname(filePath), { recursive: true });
-}
-
 function isRecord(value: unknown): value is JsonObject {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -36,18 +37,19 @@ function asStringArray(value: unknown): string[] {
 
 function readConfig(filePath: string): JsonObject | null {
     if (!existsSync(filePath)) {
-        return {};
+        return null;
     }
 
-    return readJsoncFile<JsonObject>(filePath);
+    try {
+        const parsed = parse(readFileSync(filePath, "utf-8"));
+        return isRecord(parsed) ? parsed : null;
+    } catch {
+        return null;
+    }
 }
 
-// Intentional: conflict-fixer uses JSON.stringify (not comment-json) because this module
-// is imported by the TUI process which loads raw source and cannot resolve npm dependencies.
-// Comment preservation for config writes is handled by the CLI paths (doctor.ts, setup.ts).
 function writeConfig(filePath: string, config: JsonObject): void {
-    ensureParentDir(filePath);
-    writeFileSync(filePath, `${JSON.stringify(config, null, 2)}\n`);
+    writeFileSync(filePath, `${stringify(config, null, 2)}\n`);
 }
 
 function resolveUserOpenCodeConfigPath(): string {
@@ -60,7 +62,9 @@ function collectOpenCodeConfigPaths(directory: string): string[] {
     const paths = new Set<string>();
     const userConfig = resolveUserOpenCodeConfigPath();
 
-    paths.add(userConfig);
+    if (existsSync(userConfig)) {
+        paths.add(userConfig);
+    }
 
     for (const filePath of [
         join(directory, ".opencode", "opencode.jsonc"),
@@ -93,11 +97,15 @@ function collectOmoConfigPaths(directory: string): string[] {
         }
     }
 
-    if (paths.size === 0) {
-        paths.add(join(configDir, "oh-my-openagent.json"));
-    }
-
     return [...paths];
+}
+
+function filterDcpPluginEntries(entries: unknown[]): { plugins: unknown[]; removed: boolean } {
+    const plugins = entries.filter((entry) => {
+        const name = extractPluginName(entry);
+        return name ? !matchesPackageName(name, DCP_PACKAGE_NAMES) : true;
+    });
+    return { plugins, removed: plugins.length !== entries.length };
 }
 
 export function fixConflicts(directory: string, conflicts: ConflictResult["conflicts"]): string[] {
@@ -116,7 +124,7 @@ export function fixConflicts(directory: string, conflicts: ConflictResult["confl
             let changed = false;
 
             if (conflicts.compactionAuto || conflicts.compactionPrune) {
-                const compaction = isRecord(config.compaction) ? { ...config.compaction } : {};
+                const compaction = isRecord(config.compaction) ? config.compaction : {};
 
                 if (compaction.auto !== false) {
                     compaction.auto = false;
@@ -134,13 +142,11 @@ export function fixConflicts(directory: string, conflicts: ConflictResult["confl
             }
 
             if (conflicts.dcpPlugin) {
-                const plugins = asStringArray(config.plugin);
-                const filteredPlugins = plugins.filter(
-                    (plugin) => !plugin.includes("opencode-dcp"),
-                );
+                const plugins = Array.isArray(config.plugin) ? config.plugin : [];
+                const filtered = filterDcpPluginEntries(plugins);
 
-                if (filteredPlugins.length !== plugins.length) {
-                    config.plugin = filteredPlugins;
+                if (filtered.removed) {
+                    config.plugin = filtered.plugins;
                     changed = true;
                     removedDcpPlugin = true;
                 }

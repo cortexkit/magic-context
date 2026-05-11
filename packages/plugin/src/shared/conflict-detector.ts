@@ -179,7 +179,7 @@ function readUserCompaction(): { auto: boolean; prune: boolean; resolved: boolea
  * forks/renames that don't ship the conflicting transform/system hooks are
  * intentionally NOT matched.
  */
-const DCP_PACKAGE_NAMES = new Set(["@tarquinen/opencode-dcp"]);
+export const DCP_PACKAGE_NAMES = new Set(["@tarquinen/opencode-dcp"]);
 
 function checkDcpPlugin(directory: string): boolean {
     const plugins = collectPluginEntries(directory);
@@ -202,7 +202,7 @@ function checkDcpPlugin(directory: string): boolean {
  * happens to contain a substring like "oh-my-opencode" (e.g. forks like
  * "oh-my-opencode-slim" published under a different package name).
  */
-function matchesPackageName(entry: string, canonicalNames: Set<string>): boolean {
+export function matchesPackageName(entry: string, canonicalNames: Set<string>): boolean {
     // Skip URL/path forms — only npm-style entries can be canonically matched.
     // (Local file:// checkouts of canonical plugins are rare; users running
     // those need to ensure the path itself doesn't match a fork's name.)
@@ -229,7 +229,7 @@ function matchesPackageName(entry: string, canonicalNames: Set<string>): boolean
  *   - plain string:        "@scope/pkg@latest"
  *   - tuple [name, opts]:  ["@scope/pkg@latest", { ... }]
  *  Returns null for any other shape (numbers, objects, etc.). */
-function extractPluginName(entry: string | [string, unknown]): string | null {
+export function extractPluginName(entry: unknown): string | null {
     if (typeof entry === "string") return entry;
     if (Array.isArray(entry) && typeof entry[0] === "string") return entry[0];
     return null;
@@ -286,7 +286,7 @@ function collectPluginEntries(directory: string): string[] {
  * The legacy `@code-yeongyu/` scope is no longer used — both names are
  * unscoped on npm.
  */
-const OMO_PACKAGE_NAMES = new Set(["oh-my-opencode", "oh-my-openagent"]);
+export const OMO_PACKAGE_NAMES = new Set(["oh-my-opencode", "oh-my-openagent"]);
 
 function checkOmoHooks(directory: string): {
     preemptiveCompaction: boolean;
