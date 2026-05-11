@@ -120,7 +120,11 @@ export interface SessionDetail {
   project_path: string | null;
   opencode_session_json: unknown | null;
   pi_jsonl_path: string | null;
-  messages: SessionMessageRow[];
+  // Cheap counts so the Messages and Cache tab badges render without paying
+  // the cost of the underlying lists. Messages are fetched lazily by
+  // `getSessionMessages`; cache events by `getSessionCacheEvents`.
+  messages_count: number;
+  cache_events_count: number;
   compartments: Compartment[];
   facts: SessionFact[];
   notes: Note[];

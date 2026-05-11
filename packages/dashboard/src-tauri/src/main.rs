@@ -40,6 +40,7 @@ fn main() {
             commands::get_sessions,
             commands::list_sessions,
             commands::get_session_detail,
+            commands::get_session_messages,
             commands::get_session_cache_events,
             commands::enumerate_projects,
             commands::enumerate_memory_projects,

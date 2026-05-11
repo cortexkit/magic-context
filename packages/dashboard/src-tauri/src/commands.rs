@@ -135,6 +135,17 @@ pub fn get_session_cache_events(harness: String, session_id: String) -> Vec<db::
     }
 }
 
+/// Lazy fetch for the Messages tab; see `db::get_session_messages` for why
+/// this is split from `get_session_detail`.
+#[tauri::command]
+pub fn get_session_messages(
+    harness: String,
+    session_id: String,
+) -> Result<Vec<db::SessionMessageRow>, String> {
+    let harness = harness.parse::<db::Harness>()?;
+    db::get_session_messages(harness, &session_id).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn enumerate_projects() -> Vec<db::ProjectRow> {
     db::enumerate_projects()

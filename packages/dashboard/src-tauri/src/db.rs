@@ -207,7 +207,13 @@ pub struct SessionDetail {
     pub project_path: Option<String>,
     pub opencode_session_json: Option<serde_json::Value>,
     pub pi_jsonl_path: Option<String>,
-    pub messages: Vec<SessionMessageRow>,
+    /// Cheap row counts so badges can render without paying the cost of the
+    /// underlying lists. Messages are pulled lazily by `get_session_messages`
+    /// when the user activates the Messages tab; cache events by
+    /// `get_session_cache_events` for the Cache tab. Both can be tens of
+    /// thousands of rows for a long-running session and dominate IPC time.
+    pub messages_count: i64,
+    pub cache_events_count: i64,
     pub compartments: Vec<Compartment>,
     pub facts: Vec<SessionFact>,
     pub notes: Vec<Note>,
@@ -2050,6 +2056,45 @@ fn load_subagent_map_for_harness(harness: Harness) -> std::collections::HashMap<
     map
 }
 
+/// Lazy message-list fetch for the Messages tab. Separated from
+/// `get_session_detail` so opening a session doesn't pay the cost of
+/// JSON-extracting role + aggregating `part` text for tens of thousands of
+/// rows when the user lands on Compartments. Pi side reuses the mtime-cached
+/// JSONL view, so a second call after `get_session_detail` is essentially free.
+pub fn get_session_messages(
+    harness: Harness,
+    session_id: &str,
+) -> Result<Vec<SessionMessageRow>, rusqlite::Error> {
+    match harness {
+        Harness::Opencode => {
+            let Some(opencode_db_path) = resolve_opencode_db_path() else {
+                return Ok(Vec::new());
+            };
+            let conn = open_readonly(&opencode_db_path)?;
+            load_opencode_messages(&conn, session_id)
+        }
+        Harness::Pi => {
+            let Some(path) = pi_sessions::find_pi_session_path(session_id) else {
+                return Ok(Vec::new());
+            };
+            let Some(detail) = pi_sessions::read_pi_session_detail(&path) else {
+                return Ok(Vec::new());
+            };
+            Ok(detail
+                .messages
+                .iter()
+                .map(|message| SessionMessageRow {
+                    message_id: message.entry_id.clone(),
+                    timestamp_ms: message.timestamp_ms,
+                    role: message.role.clone(),
+                    text_preview: message.text_preview.clone(),
+                    raw_json: message.raw_json.clone(),
+                })
+                .collect())
+        }
+    }
+}
+
 pub fn get_session_detail(
     conn: Option<&Connection>,
     harness: Harness,
@@ -2088,7 +2133,27 @@ pub fn get_opencode_session_detail(
         return Ok(None);
     };
 
-    let messages = load_opencode_messages(&oc_conn, &session_id)?;
+    // Cheap row counts for badge rendering. Both are O(rows-in-session) at
+    // worst but use only INTEGER aggregates (no JSON extraction or part-table
+    // join), so they're <20ms even for 37k-message sessions.
+    let messages_count: i64 = oc_conn
+        .query_row(
+            "SELECT COUNT(*) FROM message WHERE session_id = ?1",
+            [&session_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let cache_events_count: i64 = oc_conn
+        .query_row(
+            "SELECT COUNT(*) FROM message
+             WHERE session_id = ?1
+               AND json_extract(data, '$.role') = 'assistant'
+               AND COALESCE(CAST(json_extract(data, '$.tokens.total') AS INTEGER), 0) > 0",
+            [&session_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
     let compartments = conn
         .map(|c| get_compartments(c, &session_id))
         .transpose()?
@@ -2123,7 +2188,8 @@ pub fn get_opencode_session_detail(
         project_path: (!worktree.is_empty()).then_some(worktree),
         opencode_session_json: serde_json::from_str(&data_json).ok(),
         pi_jsonl_path: None,
-        messages,
+        messages_count,
+        cache_events_count,
         compartments,
         facts,
         notes,
@@ -2255,6 +2321,18 @@ pub fn get_pi_session_detail(
         .and_then(|c| get_context_token_breakdown(c, session_id).ok())
         .flatten();
     let project_identity = resolve_project_identity(&detail.meta.cwd);
+
+    // Counts come from the already-parsed (and mtime-cached) JSONL view, so
+    // they're free. `cache_events_count` matches `get_pi_session_cache_events`
+    // filter exactly: assistant messages with usage.total > 0.
+    let messages_count = detail.messages.len() as i64;
+    let cache_events_count = detail
+        .messages
+        .iter()
+        .filter(|m| m.role == "assistant")
+        .filter(|m| m.usage.as_ref().is_some_and(|u| u.total > 0))
+        .count() as i64;
+
     Some(SessionDetail {
         harness: Harness::Pi,
         session_id: detail.meta.session_id.clone(),
@@ -2264,17 +2342,8 @@ pub fn get_pi_session_detail(
         project_path: (!detail.meta.cwd.is_empty()).then_some(detail.meta.cwd.clone()),
         opencode_session_json: None,
         pi_jsonl_path: Some(detail.meta.jsonl_path.to_string_lossy().to_string()),
-        messages: detail
-            .messages
-            .iter()
-            .map(|message| SessionMessageRow {
-                message_id: message.entry_id.clone(),
-                timestamp_ms: message.timestamp_ms,
-                role: message.role.clone(),
-                text_preview: message.text_preview.clone(),
-                raw_json: message.raw_json.clone(),
-            })
-            .collect(),
+        messages_count,
+        cache_events_count,
         compartments,
         facts,
         notes,

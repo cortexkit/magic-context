@@ -18,6 +18,7 @@ import type {
   SessionDetail,
   SessionFact,
   SessionFilter,
+  SessionMessageRow,
   SessionMetaRow,
   SessionRow,
   SessionSummary,
@@ -107,6 +108,19 @@ export async function getSessionCacheEvents(
   sessionId: string,
 ): Promise<DbCacheEvent[]> {
   return invoke("get_session_cache_events", { harness, sessionId });
+}
+
+/**
+ * Lazy fetch for the Messages tab. Returns the full message list for a session
+ * (37k+ rows for long OpenCode sessions, ~28MB IPC payload). Only call this
+ * when the user activates the Messages tab; `getSessionDetail()` returns a
+ * cheap `messages_count` for the tab badge so we never pay this cost up front.
+ */
+export async function getSessionMessages(
+  harness: Harness,
+  sessionId: string,
+): Promise<SessionMessageRow[]> {
+  return invoke("get_session_messages", { harness, sessionId });
 }
 
 export async function enumerateProjects(): Promise<ProjectRow[]> {

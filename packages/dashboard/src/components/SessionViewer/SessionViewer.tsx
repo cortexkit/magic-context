@@ -9,13 +9,22 @@ import {
   getProjects,
   getSessionCacheEvents,
   getSessionDetail,
+  getSessionMessages,
   getSmartNotes,
   listSessions,
   truncate,
   updateNote,
   updateSessionFact,
 } from "../../lib/api";
-import type { DbCacheEvent, Harness, SessionFact, SessionFilter, SessionRow } from "../../lib/types";
+import type {
+  Compartment,
+  DbCacheEvent,
+  Harness,
+  SessionFact,
+  SessionFilter,
+  SessionMessageRow,
+  SessionRow,
+} from "../../lib/types";
 import HarnessBadge from "../HarnessBadge";
 import FilterSelect from "../shared/FilterSelect";
 
@@ -108,7 +117,10 @@ function loadHarnessFilter(): HarnessFilter {
 
 export default function SessionViewer() {
   const [selectedSession, setSelectedSession] = createSignal<SelectedSession | null>(null);
-  const [activeTab, setActiveTab] = createSignal<ActiveTab>("messages");
+  // Default to Compartments so opening a session doesn't pay the messages
+  // fetch cost up front (37k+ rows / ~28MB IPC for long sessions). Messages
+  // and Cache events both load lazily when the user activates their tab.
+  const [activeTab, setActiveTab] = createSignal<ActiveTab>("compartments");
   const [expandedCompartment, setExpandedCompartment] = createSignal<number | null>(null);
   const [searchQuery, setSearchQuery] = createSignal("");
   const [projectFilter, setProjectFilterSignal] = createSignal(loadStoredValue(PROJECT_FILTER_KEY));
@@ -185,10 +197,53 @@ export default function SessionViewer() {
     return getSessionDetail(selected.harness, selected.sessionId);
   });
 
-  const [cacheEvents] = createResource(detailKey, async (selected) => {
-    if (!selected) return [];
-    return getSessionCacheEvents(selected.harness, selected.sessionId);
+  // Lazy tab fetches. `messages` and `cache events` are each tens of
+  // thousands of rows on long sessions and only useful when their tab is
+  // open. We track "tab has been activated for the current selection" and
+  // keep that flag sticky across tab toggles, so flipping Messages → Cache
+  // → Messages doesn't refetch. Both flags reset whenever `selectedSession`
+  // changes.
+  const [messagesActivated, setMessagesActivated] = createSignal(false);
+  const [cacheActivated, setCacheActivated] = createSignal(false);
+  createEffect(() => {
+    // Reset activation state whenever the selected session changes (or is
+    // cleared). Re-running depends on `selectedSession()` reactivity.
+    selectedSession();
+    setMessagesActivated(false);
+    setCacheActivated(false);
   });
+  createEffect(() => {
+    if (activeTab() === "messages") setMessagesActivated(true);
+    else if (activeTab() === "cache") setCacheActivated(true);
+  });
+
+  // The resource source returns `null` until the tab has been activated for
+  // this selection. Once activated, source becomes the selected session and
+  // stays stable on tab switches — so `createResource` memoizes the result
+  // and doesn't refetch when switching to a different tab and back.
+  const messagesSource = createMemo<SelectedSession | null>(() => {
+    const selected = selectedSession();
+    return selected && messagesActivated() ? selected : null;
+  });
+  const [messagesResource] = createResource<SessionMessageRow[], SelectedSession | null>(
+    messagesSource,
+    async (selected) => {
+      if (!selected) return [];
+      return getSessionMessages(selected.harness, selected.sessionId);
+    },
+  );
+
+  const cacheSource = createMemo<SelectedSession | null>(() => {
+    const selected = selectedSession();
+    return selected && cacheActivated() ? selected : null;
+  });
+  const [cacheEvents] = createResource<DbCacheEvent[], SelectedSession | null>(
+    cacheSource,
+    async (selected) => {
+      if (!selected) return [];
+      return getSessionCacheEvents(selected.harness, selected.sessionId);
+    },
+  );
 
   // Subagent filtering now lives in `sessionFilter` (server-side) so result
   // limits never silently drop primary sessions in favor of subagents.
@@ -203,17 +258,140 @@ export default function SessionViewer() {
     searchTimeout = setTimeout(() => setSearchQuery(value), 300) as unknown as number;
   };
 
-  const messages = () => sessionDetail()?.messages ?? [];
-  const visibleMessages = () =>
-    messages().filter(
-      (message) => message.role.toLowerCase() !== "assistant" || message.text_preview.trim().length > 0,
-    );
+  // Lazy: only populated after the user activates the Messages tab.
+  // Empty-assistant filtering happens inside `partitionedMessages` so the
+  // compartment-boundary lookup can still resolve IDs that point at
+  // tool-call-only assistant turns (otherwise those compartments silently
+  // collapse into the preceding live segment).
+  const messages = () => messagesResource() ?? [];
+  // Tab badge count: cheap server-provided count from `sessionDetail` so we
+  // can render "Messages (37312)" before paying the fetch cost. Falls back
+  // to the loaded list length once the user has activated the tab, in case
+  // the count was missing (e.g. older backend without the field).
+  const messagesCount = () =>
+    sessionDetail()?.messages_count ?? messagesResource()?.length ?? 0;
+  const cacheEventsCount = () =>
+    sessionDetail()?.cache_events_count ?? cacheEvents()?.length ?? 0;
   const compartments = () => sessionDetail()?.compartments ?? [];
   const facts = () => sessionDetail()?.facts ?? [];
   const notes = () => sessionDetail()?.notes ?? [];
   const meta = () => sessionDetail()?.meta ?? null;
   const tokenBreakdown = () => sessionDetail()?.token_breakdown ?? null;
   const piCompactions = () => sessionDetail()?.pi_compaction_entries ?? [];
+
+  // Per-session in-place expansion state for compartmentalized message ranges
+  // on the Messages tab. Reset whenever the user picks a different session so
+  // a fresh selection always lands on the cheap default view (live tail only).
+  const [expandedMessageCompartments, setExpandedMessageCompartments] = createSignal<Set<number>>(
+    new Set(),
+  );
+  createEffect(() => {
+    selectedSession();
+    setExpandedMessageCompartments(new Set<number>());
+  });
+  const toggleMessageCompartment = (id: number) => {
+    setExpandedMessageCompartments((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  // Partition the message list into a sequence of compartment segments + the
+  // live (uncompartmentalized) tail. Compartment ranges are resolved by
+  // `start_message_id` / `end_message_id` against the *raw* message list
+  // (not the visible-filtered one) because a compartment boundary may itself
+  // be an empty-assistant message (tool-call-only assistant turns are
+  // common and they're filtered out of the display by `visibleMessages`).
+  // Looking up boundaries in the filtered list would miss those compartments
+  // and merge their content into the surrounding live segment.
+  //
+  // The visible-filter is applied per slice at the end so the rendered
+  // cards still hide empty assistants, while boundary resolution stays
+  // accurate.
+  //
+  // The result is ordered oldest → newest so the Messages tab renders the
+  // expected timeline: compartment placeholders at the top, live tail at
+  // the bottom, scroll-to-bottom on first open lands on the newest message.
+  type MessageSegment =
+    | { kind: "live"; messages: SessionMessageRow[] }
+    | { kind: "compartment"; compartment: Compartment; messages: SessionMessageRow[] };
+  const partitionedMessages = createMemo<MessageSegment[]>(() => {
+    const raw = messages();
+    const comps = compartments();
+    if (raw.length === 0) return [];
+
+    // Visible-filter applied lazily per slice — we keep the unfiltered list
+    // for boundary resolution but never render the dropped messages.
+    const filterVisible = (rows: SessionMessageRow[]) =>
+      rows.filter(
+        (m) => m.role.toLowerCase() !== "assistant" || m.text_preview.trim().length > 0,
+      );
+
+    if (comps.length === 0) {
+      const visible = filterVisible(raw);
+      return visible.length > 0 ? [{ kind: "live", messages: visible }] : [];
+    }
+
+    const idIndex = new Map<string, number>();
+    raw.forEach((m, i) => {
+      idIndex.set(m.message_id, i);
+    });
+
+    const sortedComps = [...comps].sort((a, b) => a.sequence - b.sequence);
+    const result: MessageSegment[] = [];
+    let cursor = 0;
+
+    for (const c of sortedComps) {
+      if (!c.start_message_id || !c.end_message_id) continue;
+      const startIdx = idIndex.get(c.start_message_id);
+      const endIdx = idIndex.get(c.end_message_id);
+      if (startIdx === undefined || endIdx === undefined || endIdx < startIdx) continue;
+      // Any messages between the previous segment and this compartment's
+      // start are leftover live messages — surface them so the timeline
+      // never silently drops content even on data with small gaps.
+      if (startIdx > cursor) {
+        const live = filterVisible(raw.slice(cursor, startIdx));
+        if (live.length > 0) result.push({ kind: "live", messages: live });
+      }
+      result.push({
+        kind: "compartment",
+        compartment: c,
+        messages: filterVisible(raw.slice(startIdx, endIdx + 1)),
+      });
+      cursor = endIdx + 1;
+    }
+
+    if (cursor < raw.length) {
+      const live = filterVisible(raw.slice(cursor));
+      if (live.length > 0) result.push({ kind: "live", messages: live });
+    }
+    return result;
+  });
+
+  // Auto-scroll the Messages tab to bottom on first activation for each
+  // session. Tracked per-session so toggling tabs or expanding a compartment
+  // doesn't yank the viewport — only opening a fresh session re-scrolls.
+  let messagesBottomRef: HTMLDivElement | undefined;
+  const [initialMessagesScrollDone, setInitialMessagesScrollDone] = createSignal<string | null>(
+    null,
+  );
+  createEffect(() => {
+    const selected = selectedSession();
+    if (!selected) return;
+    if (activeTab() !== "messages") return;
+    if (messagesResource.loading) return;
+    const data = messagesResource();
+    if (!data || data.length === 0) return;
+    if (initialMessagesScrollDone() === selected.sessionId) return;
+    // queueMicrotask gives Solid one tick to flush the DOM update so the
+    // anchor element is mounted before we scroll to it.
+    queueMicrotask(() => {
+      messagesBottomRef?.scrollIntoView({ behavior: "instant" as ScrollBehavior, block: "end" });
+      setInitialMessagesScrollDone(selected.sessionId);
+    });
+  });
 
   const selectedRow = () => {
     const selected = selectedSession();
@@ -239,6 +417,46 @@ export default function SessionViewer() {
       default:
         return "purple";
     }
+  };
+
+  // Single message-row renderer used by both the live tail and the
+  // expanded-compartment sections of the Messages tab. Defined inline so it
+  // can close over `roleClass` without leaking helpers to module scope.
+  const MessageCard = (props: { message: SessionMessageRow }) => {
+    const role = () => props.message.role;
+    const isPrimaryRole = () =>
+      ["user", "assistant", "system"].includes(role().toLowerCase());
+    return (
+      <div class="card">
+        <div
+          style={{
+            display: "flex",
+            "align-items": "center",
+            gap: "8px",
+            "margin-bottom": "6px",
+          }}
+        >
+          <span class={`pill ${roleClass(role())}`}>{role()}</span>
+          <span class="mono" style={{ "font-size": "11px", color: "var(--text-secondary)" }}>
+            {formatDateTime(props.message.timestamp_ms)}
+          </span>
+          <span class="mono" style={{ "font-size": "10px", color: "var(--text-muted)" }}>
+            {truncate(props.message.message_id, 16)}
+          </span>
+        </div>
+        <div
+          style={{
+            "font-size": "12px",
+            "line-height": "1.6",
+            "white-space": "pre-wrap",
+            color: isPrimaryRole() ? "var(--text-primary)" : "var(--text-secondary)",
+            "font-style": isPrimaryRole() ? "normal" : "italic",
+          }}
+        >
+          {props.message.text_preview}
+        </div>
+      </div>
+    );
   };
 
   const cacheHitRatio = (event: DbCacheEvent) => {
@@ -426,7 +644,11 @@ export default function SessionViewer() {
                       style={{ cursor: "pointer", "text-align": "left", width: "100%" }}
                       onClick={() => {
                         setSelectedSession({ harness: session.harness, sessionId: session.session_id });
-                        setActiveTab("messages");
+                        // Reset to Compartments on every selection so opening
+                        // a new session lands on the cheap-to-render tab
+                        // instead of carrying over the previous selection's
+                        // (possibly heavy) Messages tab.
+                        setActiveTab("compartments");
                       }}
                     >
                       <div
@@ -478,17 +700,17 @@ export default function SessionViewer() {
         <div class="tab-pills">
           <button
             type="button"
-            class={`tab-pill ${activeTab() === "messages" ? "active" : ""}`}
-            onClick={() => setActiveTab("messages")}
-          >
-            Messages ({visibleMessages().length})
-          </button>
-          <button
-            type="button"
             class={`tab-pill ${activeTab() === "compartments" ? "active" : ""}`}
             onClick={() => setActiveTab("compartments")}
           >
             Compartments ({compartments().length})
+          </button>
+          <button
+            type="button"
+            class={`tab-pill ${activeTab() === "messages" ? "active" : ""}`}
+            onClick={() => setActiveTab("messages")}
+          >
+            Messages ({messagesCount()})
           </button>
           <button
             type="button"
@@ -516,7 +738,7 @@ export default function SessionViewer() {
             class={`tab-pill ${activeTab() === "cache" ? "active" : ""}`}
             onClick={() => setActiveTab("cache")}
           >
-            Cache ({cacheEvents()?.length ?? 0})
+            Cache ({cacheEventsCount()})
           </button>
         </div>
 
@@ -580,9 +802,12 @@ export default function SessionViewer() {
         </Show>
 
         <div class="scroll-area">
-          {/* Compartments tab */}
+          {/* Messages tab (lazy: fetched only after user clicks the tab) */}
           <Show when={activeTab() === "messages"}>
-            <Show when={!sessionDetail.loading} fallback={<div class="empty-state">Loading...</div>}>
+            <Show
+              when={!messagesResource.loading}
+              fallback={<div class="empty-state">Loading messages…</div>}
+            >
               <div class="list-gap">
                 <Show when={piCompactions().length > 0}>
                   <div class="card" style={{ "border-left": "3px solid var(--purple)" }}>
@@ -599,40 +824,115 @@ export default function SessionViewer() {
                   </div>
                 </Show>
                 <Show
-                  when={visibleMessages().length > 0}
-                  fallback={<div class="empty-state"><span class="empty-state-icon">💬</span>No messages</div>}
+                  when={partitionedMessages().length > 0}
+                  fallback={
+                    <div class="empty-state">
+                      <span class="empty-state-icon">💬</span>No messages
+                    </div>
+                  }
                 >
-                  <For each={visibleMessages()}>
-                    {(message) => (
-                      <div class="card">
-                        <div style={{ display: "flex", "align-items": "center", gap: "8px", "margin-bottom": "6px" }}>
-                          <span class={`pill ${roleClass(message.role)}`}>{message.role}</span>
-                          <span class="mono" style={{ "font-size": "11px", color: "var(--text-secondary)" }}>
-                            {formatDateTime(message.timestamp_ms)}
-                          </span>
-                          <span class="mono" style={{ "font-size": "10px", color: "var(--text-muted)" }}>
-                            {truncate(message.message_id, 16)}
-                          </span>
-                        </div>
-                        <div
-                          style={{
-                            "font-size": "12px",
-                            "line-height": "1.6",
-                            "white-space": "pre-wrap",
-                            color: ["user", "assistant", "system"].includes(message.role.toLowerCase())
-                              ? "var(--text-primary)"
-                              : "var(--text-secondary)",
-                            "font-style": ["user", "assistant", "system"].includes(message.role.toLowerCase())
-                              ? "normal"
-                              : "italic",
-                          }}
-                        >
-                          {message.text_preview}
-                        </div>
-                      </div>
+                  {/*
+                    Partitioned timeline: compartment segments first (rendered
+                    as collapsed placeholders unless explicitly expanded), then
+                    the live tail of uncompartmentalized messages at the
+                    bottom. Auto-scroll lands the user on the newest message.
+                    Clicking a compartment placeholder expands its message
+                    range inline at its chronological position.
+                  */}
+                  <For each={partitionedMessages()}>
+                    {(segment) => (
+                      <Show
+                        when={segment.kind === "compartment"}
+                        fallback={
+                          <For each={segment.messages}>
+                            {(message) => <MessageCard message={message} />}
+                          </For>
+                        }
+                      >
+                        {(() => {
+                          // Narrow to compartment segment for type safety.
+                          const compSeg = segment as Extract<
+                            MessageSegment,
+                            { kind: "compartment" }
+                          >;
+                          const comp = compSeg.compartment;
+                          const expanded = () => expandedMessageCompartments().has(comp.id);
+                          return (
+                            <>
+                              <button
+                                type="button"
+                                class="card"
+                                style={{
+                                  cursor: "pointer",
+                                  "text-align": "left",
+                                  width: "100%",
+                                  "border-left": "3px solid var(--accent)",
+                                  background: expanded()
+                                    ? "var(--bg-card-hover, var(--bg-card))"
+                                    : undefined,
+                                }}
+                                onClick={() => toggleMessageCompartment(comp.id)}
+                                title={
+                                  expanded()
+                                    ? "Click to collapse this compartment"
+                                    : "Click to expand and show this compartment's messages"
+                                }
+                              >
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    "align-items": "center",
+                                    gap: "8px",
+                                    "margin-bottom": "4px",
+                                  }}
+                                >
+                                  <span class="pill gray">📜 #{comp.sequence}</span>
+                                  <span
+                                    style={{
+                                      flex: "1 1 auto",
+                                      "min-width": "0",
+                                      overflow: "hidden",
+                                      "text-overflow": "ellipsis",
+                                      "white-space": "nowrap",
+                                      "font-weight": 500,
+                                    }}
+                                  >
+                                    {comp.title}
+                                  </span>
+                                  <span
+                                    class="mono"
+                                    style={{ "font-size": "10px", color: "var(--text-muted)" }}
+                                  >
+                                    {compSeg.messages.length} msgs · ordinals{" "}
+                                    {comp.start_message}-{comp.end_message}
+                                  </span>
+                                </div>
+                                <div
+                                  style={{
+                                    "font-size": "11px",
+                                    color: "var(--text-secondary)",
+                                    "font-style": "italic",
+                                  }}
+                                >
+                                  {expanded()
+                                    ? "▼ showing compartment messages — click to collapse"
+                                    : "▶ click to show compartment messages"}
+                                </div>
+                              </button>
+                              <Show when={expanded()}>
+                                <For each={compSeg.messages}>
+                                  {(message) => <MessageCard message={message} />}
+                                </For>
+                              </Show>
+                            </>
+                          );
+                        })()}
+                      </Show>
                     )}
                   </For>
                 </Show>
+                {/* Scroll anchor: target for initial scroll-to-bottom. */}
+                <div ref={messagesBottomRef} />
               </div>
             </Show>
           </Show>
