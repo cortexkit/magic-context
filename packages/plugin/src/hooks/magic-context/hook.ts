@@ -394,7 +394,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         }
 
         try {
-            checkScheduleAndEnqueue(db, dreaming.schedule);
+            checkScheduleAndEnqueue(db, dreaming.schedule, projectPath);
             lastScheduleCheckMs = now;
         } catch (error) {
             log("[dreamer] scheduled enqueue check failed:", error);
@@ -424,6 +424,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 DREAMER_AGENT,
                 deps.config.dreamer?.fallback_models,
             ),
+            projectIdentity: projectPath,
         }).catch((error: unknown) => {
             log("[dreamer] scheduled queue processing failed:", error);
         });
