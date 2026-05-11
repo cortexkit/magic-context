@@ -27,6 +27,17 @@ export function ensureDreamQueueTable(db: Database): void {
     ).run();
 }
 
+function hasActiveDreamLease(db: Database): boolean {
+    try {
+        return isLeaseActive(db);
+    } catch (error) {
+        if (String(error).includes("no such table: dream_state")) {
+            return false;
+        }
+        throw error;
+    }
+}
+
 /** Enqueue a project for dreaming. Skips if the same project already has any queue entry (queued or running).
  *
  * @param force - When true (e.g. manual /ctx-dream), uses the lease TTL (2 min) as the stale threshold
@@ -44,7 +55,7 @@ export function enqueueDream(
         // Clean stale started entries before checking — prevents post-crash permanent "already queued".
         // Age alone is not enough: a healthy long-running dream can exceed the manual 2m force
         // threshold while still renewing its lease. Only recover stale rows when no live lease exists.
-        if (!isLeaseActive(db)) {
+        if (!hasActiveDreamLease(db)) {
             // Scheduled runs use 2h (max dream runtime) so we don't interrupt a legitimately running dream.
             // Manual /ctx-dream uses the lease TTL (2 min) so a crashed/killed runner doesn't permanently
             // block the user from re-triggering.

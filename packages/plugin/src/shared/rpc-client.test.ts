@@ -32,7 +32,23 @@ function makeTempDir(): string {
 function writePortFile(storageDir: string, directory: string, port: number): void {
     const portFile = rpcPortFilePath(storageDir, directory);
     mkdirSync(dirname(portFile), { recursive: true });
-    writeFileSync(portFile, String(port), "utf-8");
+    writeFileSync(
+        portFile,
+        JSON.stringify({ port, pid: process.pid, started_at: Date.now() }),
+        "utf-8",
+    );
+}
+
+function writePortFileForPid(
+    storageDir: string,
+    directory: string,
+    port: number,
+    pid: number,
+    startedAt: number,
+): void {
+    const portFile = rpcPortFilePath(storageDir, directory, pid);
+    mkdirSync(dirname(portFile), { recursive: true });
+    writeFileSync(portFile, JSON.stringify({ port, pid, started_at: startedAt }), "utf-8");
 }
 
 async function startRpcServer(handler: (method: string) => Response | object): Promise<TestServer> {
@@ -128,5 +144,16 @@ describe("MagicContextRpcClient", () => {
         const client = new MagicContextRpcClient(storageDir, directory);
         expect(await client.call<{ value: string }>("value")).toEqual({ value: "ok" });
         expect(calls).toBe(2);
+    });
+
+    test("ignores newer stale pid files and discovers the latest live instance", async () => {
+        const storageDir = makeTempDir();
+        const directory = "/repo";
+        const live = await startRpcServer(() => ({ value: "live" }));
+        writePortFileForPid(storageDir, directory, 65535, 999_999_999, Date.now() + 10_000);
+        writePortFileForPid(storageDir, directory, live.port, process.pid, Date.now());
+
+        const client = new MagicContextRpcClient(storageDir, directory);
+        expect(await client.call<{ value: string }>("value")).toEqual({ value: "live" });
     });
 });

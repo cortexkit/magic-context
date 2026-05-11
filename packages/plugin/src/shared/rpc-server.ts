@@ -1,8 +1,8 @@
-import { mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
 import { log } from "./logger";
-import { rpcPortFilePath } from "./rpc-utils";
+import { isPidAlive, parseRpcPortFile, rpcPortDir, rpcPortFilePath } from "./rpc-utils";
 
 type RpcHandler = (params: Record<string, unknown>) => Promise<Record<string, unknown>>;
 
@@ -11,9 +11,12 @@ export class MagicContextRpcServer {
     private port = 0;
     private handlers = new Map<string, RpcHandler>();
     private portFilePath: string;
+    private portDir: string;
+    private startedAt = Date.now();
 
     constructor(storageDir: string, directory: string) {
         this.portFilePath = rpcPortFilePath(storageDir, directory);
+        this.portDir = rpcPortDir(storageDir, directory);
     }
 
     /** Register an RPC method handler. */
@@ -40,12 +43,20 @@ export class MagicContextRpcServer {
                 this.port = addr.port;
                 this.server = server;
 
-                // Write port file atomically
+                // Write a per-process port file atomically. Multi-instance
+                // OpenCode is supported: TUI discovery scans all live pid files
+                // and picks the most recent instead of cross-wiring via one
+                // shared project file.
                 try {
+                    this.warnIfOtherLiveInstance();
                     const dir = dirname(this.portFilePath);
                     mkdirSync(dir, { recursive: true });
                     const tmpPath = `${this.portFilePath}.tmp`;
-                    writeFileSync(tmpPath, String(this.port), "utf-8");
+                    writeFileSync(
+                        tmpPath,
+                        JSON.stringify({ port: this.port, pid: process.pid, started_at: this.startedAt }),
+                        "utf-8",
+                    );
                     renameSync(tmpPath, this.portFilePath);
                     log(`[rpc] server listening on 127.0.0.1:${this.port}`);
                 } catch (err) {
@@ -58,6 +69,22 @@ export class MagicContextRpcServer {
             // Don't keep the process alive just for the RPC server
             server.unref();
         });
+    }
+
+    private warnIfOtherLiveInstance(): void {
+        try {
+            for (const entry of readdirSync(this.portDir)) {
+                if (!entry.startsWith("port-") || !entry.endsWith(".json")) continue;
+                const record = parseRpcPortFile(readFileSync(`${this.portDir}/${entry}`, "utf-8"));
+                if (!record || record.pid === process.pid || !isPidAlive(record.pid)) continue;
+                log(
+                    `[rpc] another Magic Context RPC server is active for this project (pid ${record.pid}, port ${record.port}); starting separate instance on a new port`,
+                );
+                return;
+            }
+        } catch {
+            // No discovery directory yet, or unreadable stale file. Not fatal.
+        }
     }
 
     /** Stop the server and clean up port file. */
