@@ -11,9 +11,9 @@
  *
  * The defensive UX rule: if the freshly built snapshot has `inputTokens === 0`
  * BUT we have a recent good snapshot for this session AND the session shows
- * evidence of being "in flight" (compartments/facts/memories exist and the
- * cached snapshot was good), serve the cached values for the breakdown
- * instead of letting the bar flicker.
+ * explicit evidence of being "in flight" (historian/compartment work, pending
+ * ops, or other active work signals), serve the cached values for the
+ * breakdown instead of letting the bar flicker.
  *
  * What we never do:
  *   - Override anything when the live build genuinely succeeded
@@ -71,6 +71,13 @@ export function applyStickySnapshotCache(
         cache.delete(sessionId);
         return fresh;
     }
+    if (!hasInFlightEvidence(fresh)) {
+        // A fresh zero-token snapshot with no active-work signal means the
+        // session was reset/deleted/reverted, not a mid-turn flicker. Drop the
+        // cache so old sidebar values cannot survive the reset window.
+        cache.delete(sessionId);
+        return fresh;
+    }
 
     // Hybrid: preserve token-breakdown fields from the cached snapshot, but
     // keep fresh values for everything that's authoritative right now from
@@ -89,6 +96,12 @@ export function applyStickySnapshotCache(
         toolCallTokens: cached.snapshot.toolCallTokens,
         toolDefinitionTokens: cached.snapshot.toolDefinitionTokens,
     };
+}
+
+function hasInFlightEvidence(snapshot: SidebarSnapshot): boolean {
+    return (
+        snapshot.compartmentInProgress || snapshot.historianRunning || snapshot.pendingOpsCount > 0
+    );
 }
 
 /**

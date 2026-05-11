@@ -103,7 +103,17 @@ function recallSidebarSnapshot(sessionId: string, fallback: SidebarSnapshot): Si
         stickySidebarCache.delete(sessionId);
         return fallback;
     }
+    if (!hasInFlightEvidence(fallback)) {
+        stickySidebarCache.delete(sessionId);
+        return fallback;
+    }
     return cached.snapshot;
+}
+
+function hasInFlightEvidence(snapshot: SidebarSnapshot): boolean {
+    return (
+        snapshot.compartmentInProgress || snapshot.historianRunning || snapshot.pendingOpsCount > 0
+    );
 }
 
 /** Fetch sidebar snapshot from the server via RPC. */

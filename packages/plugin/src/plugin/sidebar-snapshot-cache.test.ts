@@ -110,16 +110,47 @@ describe("applyStickySnapshotCache", () => {
         expect(result.pendingOpsCount).toBe(12);
     });
 
+    test("clears cached tokens when zero snapshot has no in-flight evidence", () => {
+        applyStickySnapshotCache("ses_test", makeSnapshot({ inputTokens: 100_000 }));
+
+        const reset = applyStickySnapshotCache(
+            "ses_test",
+            makeSnapshot({ inputTokens: 0, compartmentInProgress: false, historianRunning: false }),
+        );
+        expect(reset.inputTokens).toBe(0);
+
+        const later = applyStickySnapshotCache(
+            "ses_test",
+            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+        );
+        expect(later.inputTokens).toBe(0);
+    });
+
+    test("sticks when compartment work is explicitly in progress", () => {
+        applyStickySnapshotCache("ses_test", makeSnapshot({ inputTokens: 100_000 }));
+        const result = applyStickySnapshotCache(
+            "ses_test",
+            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+        );
+        expect(result.inputTokens).toBe(100_000);
+    });
+
     test("does not stick after fresh non-zero overwrites the cached zero state", () => {
         applyStickySnapshotCache("ses_test", makeSnapshot({ inputTokens: 100_000 }));
         // Mid-turn flicker — sticks.
-        const stuck = applyStickySnapshotCache("ses_test", makeSnapshot({ inputTokens: 0 }));
+        const stuck = applyStickySnapshotCache(
+            "ses_test",
+            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+        );
         expect(stuck.inputTokens).toBe(100_000);
         // Fresh good reading lands — overwrites the cache.
         const fresh = applyStickySnapshotCache("ses_test", makeSnapshot({ inputTokens: 200_000 }));
         expect(fresh.inputTokens).toBe(200_000);
         // Subsequent flicker now sticks to the new value.
-        const stuck2 = applyStickySnapshotCache("ses_test", makeSnapshot({ inputTokens: 0 }));
+        const stuck2 = applyStickySnapshotCache(
+            "ses_test",
+            makeSnapshot({ inputTokens: 0, compartmentInProgress: true }),
+        );
         expect(stuck2.inputTokens).toBe(200_000);
     });
 
