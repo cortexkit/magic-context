@@ -15,6 +15,7 @@ import { confirm, intro, log, note, outro, selectOne, spinner } from "../lib/pro
 
 const PLUGIN_NAME = "@cortexkit/opencode-magic-context";
 const PLUGIN_ENTRY = "@cortexkit/opencode-magic-context@latest";
+const DCP_PLUGIN_NAME = "@tarquinen/opencode-dcp";
 
 // ─── Helpers ──────────────────────────────────────────────
 
@@ -107,6 +108,44 @@ function addPluginToTuiConfig(configPath: string, format: "json" | "jsonc" | "no
 
     existing.plugin = rawPlugins;
     writeFileSync(configPath, `${stringifyJsonc(existing, null, 2)}\n`);
+}
+
+export function findDcpPluginIndexes(plugins: unknown[]): number[] {
+    return plugins
+        .map((plugin, index) => (matchesPluginEntry(plugin, DCP_PLUGIN_NAME) ? index : -1))
+        .filter((index) => index >= 0);
+}
+
+function pluginEntryName(entry: unknown): string {
+    if (typeof entry === "string") return entry;
+    if (Array.isArray(entry) && typeof entry[0] === "string") return entry[0];
+    return String(entry);
+}
+
+async function resolveDcpConflictBeforeSetup(
+    configPath: string,
+    format: "json" | "jsonc" | "none",
+): Promise<void> {
+    if (format === "none") return;
+    const ocConfig = readJsonc(configPath);
+    if (!ocConfig) return;
+    const plugins = Array.isArray(ocConfig.plugin) ? ocConfig.plugin : [];
+    const dcpIndexes = findDcpPluginIndexes(plugins);
+    if (dcpIndexes.length === 0) return;
+
+    log.warn(`Found conflicting plugin: ${pluginEntryName(plugins[dcpIndexes[0]])}`);
+    log.message(
+        "opencode-dcp (Dynamic Context Pruning) and Magic Context both manage context.\n" +
+            "Running both simultaneously will cause unpredictable behavior.",
+    );
+    const shouldRemove = await confirm("Remove opencode-dcp from your config?", true);
+    if (shouldRemove) {
+        ocConfig.plugin = plugins.filter((_plugin, index) => !dcpIndexes.includes(index));
+        writeFileSync(configPath, `${stringifyJsonc(ocConfig, null, 2)}\n`);
+        log.success("Removed opencode-dcp from plugin list");
+    } else {
+        log.warn("Skipped — you may experience context management conflicts");
+    }
 }
 
 function writeMagicContextConfig(
@@ -212,36 +251,14 @@ export async function runSetup(): Promise<number> {
         existsSync(paths.magicContextConfig) ||
         paths.tuiConfigFormat !== "none";
 
-    // ─── Step 4: Add plugin & disable compaction ────────
+    // ─── Step 4: Check for DCP plugin conflict before mutating setup files ────────
+    await resolveDcpConflictBeforeSetup(paths.opencodeConfig, paths.opencodeConfigFormat);
+
+    // ─── Step 5: Add plugin & disable compaction ────────
     addPluginToOpenCodeConfig(paths.opencodeConfig, paths.opencodeConfigFormat);
     log.success(`Plugin added to ${paths.opencodeConfig}`);
     log.info("Disabled built-in compaction (auto=false, prune=false)");
     log.message("Magic Context handles context management — built-in compaction would interfere");
-
-    // ─── Step 4.5: Check for DCP plugin conflict ────────
-    if (paths.opencodeConfigFormat !== "none") {
-        const ocConfig = readJsonc(paths.opencodeConfig);
-        if (ocConfig) {
-            const plugins = (ocConfig.plugin as string[]) ?? [];
-            const dcpIndex = plugins.findIndex((p) => p.startsWith("@tarquinen/opencode-dcp"));
-            if (dcpIndex !== -1) {
-                log.warn(`Found conflicting plugin: ${plugins[dcpIndex]}`);
-                log.message(
-                    "opencode-dcp (Dynamic Context Pruning) and Magic Context both manage context.\n" +
-                        "Running both simultaneously will cause unpredictable behavior.",
-                );
-                const shouldRemove = await confirm("Remove opencode-dcp from your config?", true);
-                if (shouldRemove) {
-                    plugins.splice(dcpIndex, 1);
-                    ocConfig.plugin = plugins;
-                    writeFileSync(paths.opencodeConfig, `${stringifyJsonc(ocConfig, null, 2)}\n`);
-                    log.success("Removed opencode-dcp from plugin list");
-                } else {
-                    log.warn("Skipped — you may experience context management conflicts");
-                }
-            }
-        }
-    }
 
     if (hadExistingSetup) {
         const conflicts = detectConflicts(process.cwd());
