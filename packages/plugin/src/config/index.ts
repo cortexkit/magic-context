@@ -61,46 +61,53 @@ function loadConfigFile(configPath: string): LoadedConfigFile | null {
     }
 }
 
-function mergeConfigs(
-    base: MagicContextPluginConfig,
-    override: MagicContextPluginConfig,
-    options: { allowUserOnlyFields?: boolean } = {},
-): MagicContextPluginConfig {
-    const config: MagicContextPluginConfig = {
-        ...base,
-        ...override,
-        // USER-only security boundary: project configs must not silently
-        // suppress plugin self-updates, which may include security fixes.
-        auto_update: options.allowUserOnlyFields ? override.auto_update : base.auto_update,
-        // Deep-merge nested config objects so partial overrides don't lose base values
-        memory: {
-            ...(base.memory ?? {}),
-            ...(override.memory ?? {}),
-        } as MagicContextPluginConfig["memory"],
-        embedding: (override.embedding ?? base.embedding) as MagicContextPluginConfig["embedding"],
-        historian: override.historian ?? base.historian,
-        dreamer: override.dreamer
-            ? ({
-                  ...(base.dreamer ?? {}),
-                  ...override.dreamer,
-              } as MagicContextPluginConfig["dreamer"])
-            : base.dreamer,
-        sidekick: override.sidekick
-            ? ({
-                  ...(base.sidekick ?? {}),
-                  ...override.sidekick,
-              } as MagicContextPluginConfig["sidekick"])
-            : base.sidekick,
-        disabled_hooks: [
-            ...new Set([...(base.disabled_hooks ?? []), ...(override.disabled_hooks ?? [])]),
-        ],
-        command: {
-            ...(base.command ?? {}),
-            ...(override.command ?? {}),
-        },
-    };
-
-    return config;
+/**
+ * Deep-merge two raw JSON objects. Both inputs must come from BEFORE Zod
+ * parsing — otherwise Zod-filled defaults appear as if they were explicit
+ * overrides and clobber genuine values from the other source.
+ *
+ * Plain object values merge recursively. Arrays, primitives, and `null` are
+ * replaced atomically (override wins). This matches typical config-merge
+ * semantics: arrays like `disabled_hooks` should be set whole, not interleaved
+ * element-wise.
+ *
+ * `disabled_hooks` is the one exception: we union-merge it below so user
+ * and project can both contribute hook IDs without one silently losing the
+ * other's entries.
+ */
+function deepMergeRawConfig(
+    base: Record<string, unknown>,
+    override: Record<string, unknown>,
+): Record<string, unknown> {
+    const result: Record<string, unknown> = { ...base };
+    for (const key of Object.keys(override)) {
+        const baseVal = base[key];
+        const overrideVal = override[key];
+        if (
+            baseVal !== null &&
+            typeof baseVal === "object" &&
+            !Array.isArray(baseVal) &&
+            overrideVal !== null &&
+            typeof overrideVal === "object" &&
+            !Array.isArray(overrideVal)
+        ) {
+            result[key] = deepMergeRawConfig(
+                baseVal as Record<string, unknown>,
+                overrideVal as Record<string, unknown>,
+            );
+        } else if (
+            key === "disabled_hooks" &&
+            Array.isArray(baseVal) &&
+            Array.isArray(overrideVal)
+        ) {
+            // Union-merge so user + project can both disable hooks without
+            // one source erasing the other's entries.
+            result[key] = [...new Set([...baseVal, ...overrideVal])];
+        } else {
+            result[key] = overrideVal;
+        }
+    }
+    return result;
 }
 
 function getProjectUserOnlyFields(config: Record<string, unknown>): string[] {
@@ -338,39 +345,67 @@ export function loadPluginConfig(
     const projectLoaded =
         projectDetected.format === "none" ? null : loadConfigFile(projectDetected.path);
 
-    let config: MagicContextPluginConfig & { configWarnings?: string[] } = parsePluginConfig({});
     const allWarnings: string[] = [];
+    let mergedRaw: Record<string, unknown> = {};
 
     if (userLoaded) {
         // Variable-substitution warnings surface first so users see missing
         // env vars before any downstream schema-validation warnings.
         allWarnings.push(...userLoaded.warnings.map((w) => `[user config] ${w}`));
-        const parsed = parsePluginConfig(userLoaded.config);
-        if (parsed.configWarnings?.length) {
-            allWarnings.push(...parsed.configWarnings.map((w) => `[user config] ${w}`));
-        }
-        config = mergeConfigs(config, parsed, { allowUserOnlyFields: true });
+        mergedRaw = deepMergeRawConfig(mergedRaw, userLoaded.config);
     }
 
     if (projectLoaded) {
         allWarnings.push(...projectLoaded.warnings.map((w) => `[project config] ${w}`));
-        const parsed = parsePluginConfig(projectLoaded.config);
-        if (parsed.configWarnings?.length) {
-            allWarnings.push(...parsed.configWarnings.map((w) => `[project config] ${w}`));
-        }
-        const strippedUserOnlyFields = getProjectUserOnlyFields(projectLoaded.config);
+
+        // Strip user-only fields from project raw BEFORE merging. Project
+        // configs must not silently override `auto_update` — that's a
+        // security boundary: a malicious project config could otherwise
+        // suppress plugin self-updates that may include security fixes.
+        const projectRaw = { ...projectLoaded.config };
+        const strippedUserOnlyFields = getProjectUserOnlyFields(projectRaw);
         if (strippedUserOnlyFields.length > 0) {
+            for (const key of strippedUserOnlyFields) {
+                delete projectRaw[key];
+            }
             allWarnings.push(
                 `[project config] Ignoring ${strippedUserOnlyFields.join(
                     ", ",
                 )} from project config (security: these settings only honor user-level config)`,
             );
         }
-        config = mergeConfigs(config, parsed);
+
+        mergedRaw = deepMergeRawConfig(mergedRaw, projectRaw);
+    }
+
+    // Parse the merged raw config ONCE. Critical: parsing must run AFTER the
+    // raw merge so Zod fills defaults only for keys neither user nor project
+    // explicitly set. The previous design parsed each source separately then
+    // merged the parsed (defaults-filled) results, which let a project
+    // config that didn't mention `embedding` silently override a user's
+    // explicit openai-compatible config with the local Zod default. See
+    // regression discussion 2026-05-12.
+    const config = parsePluginConfig(mergedRaw);
+
+    if (config.configWarnings?.length) {
+        // Tag schema-validation warnings against whichever source set the
+        // bad field. We can't always tell which one set what after merging,
+        // so use a generic prefix when the offending key appears in both.
+        allWarnings.push(
+            ...config.configWarnings.map((w) => {
+                if (userLoaded && projectLoaded) return `[config] ${w}`;
+                if (userLoaded) return `[user config] ${w}`;
+                return `[project config] ${w}`;
+            }),
+        );
     }
 
     if (allWarnings.length > 0) {
         config.configWarnings = allWarnings;
+    } else if ("configWarnings" in config) {
+        // Don't leak an empty configWarnings field through to callers when
+        // the merge was clean.
+        config.configWarnings = undefined;
     }
 
     return config;

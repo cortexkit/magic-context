@@ -246,3 +246,104 @@ describe("loadPluginConfig — user-only settings", () => {
         expect(result.configWarnings?.join("\n")).toContain("Ignoring auto_update");
     });
 });
+
+describe("loadPluginConfig — raw merge preserves user fields not set in project", () => {
+    // Regression for the 2026-05-12 embedding-wipe bug. Project configs that
+    // don't mention `embedding` (or any other defaulted field) must inherit
+    // the user's explicit value instead of getting clobbered by the Zod
+    // default. Previously each source was parsed separately and Zod-filled
+    // defaults appeared as if they were explicit project overrides.
+
+    it("user embedding survives when project config omits embedding", () => {
+        const userConfig = JSON.stringify({
+            embedding: {
+                provider: "openai-compatible",
+                model: "text-embedding-qwen3-embedding-8b",
+                endpoint: "http://localhost:1234/v1",
+            },
+        });
+        const projectConfig = JSON.stringify({ ctx_reduce_enabled: true });
+
+        const result = loadWithUserAndProjectConfig(userConfig, projectConfig);
+
+        expect(result.embedding.provider).toBe("openai-compatible");
+        if (result.embedding.provider === "openai-compatible") {
+            expect(result.embedding.model).toBe("text-embedding-qwen3-embedding-8b");
+            expect(result.embedding.endpoint).toBe("http://localhost:1234/v1");
+        }
+    });
+
+    it("project can still override embedding when it explicitly sets one", () => {
+        const userConfig = JSON.stringify({
+            embedding: {
+                provider: "openai-compatible",
+                model: "user-model",
+                endpoint: "http://user:1/v1",
+            },
+        });
+        const projectConfig = JSON.stringify({
+            embedding: {
+                provider: "openai-compatible",
+                model: "project-model",
+                endpoint: "http://project:1/v1",
+            },
+        });
+
+        const result = loadWithUserAndProjectConfig(userConfig, projectConfig);
+        expect(result.embedding.provider).toBe("openai-compatible");
+        if (result.embedding.provider === "openai-compatible") {
+            expect(result.embedding.model).toBe("project-model");
+            expect(result.embedding.endpoint).toBe("http://project:1/v1");
+        }
+    });
+
+    it("user scalar field survives when project omits it", () => {
+        // execute_threshold_percentage default is { default: 65, ... }. User
+        // sets a value, project doesn't mention it — user must win.
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({ execute_threshold_percentage: 30, enabled: true }),
+            JSON.stringify({ ctx_reduce_enabled: false }),
+        );
+
+        // execute_threshold_percentage min is 20, so 30 is valid
+        expect(result.execute_threshold_percentage).toBe(30);
+        expect(result.ctx_reduce_enabled).toBe(false);
+    });
+
+    it("nested object fields deep-merge across user and project", () => {
+        // User sets compaction_markers: true; project sets historian model.
+        // Both must coexist in the merged result.
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({
+                compaction_markers: true,
+                historian: { model: "anthropic/claude-opus-4-7" },
+            }),
+            JSON.stringify({
+                historian: { fallback_models: ["anthropic/claude-sonnet-4-6"] },
+            }),
+        );
+
+        expect(result.compaction_markers).toBe(true);
+        expect(result.historian?.model).toBe("anthropic/claude-opus-4-7");
+        expect(result.historian?.fallback_models).toEqual(["anthropic/claude-sonnet-4-6"]);
+    });
+
+    it("project boolean override beats user default", () => {
+        // User: ctx_reduce_enabled defaults to true (omitted). Project sets false.
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({ enabled: true }),
+            JSON.stringify({ ctx_reduce_enabled: false }),
+        );
+
+        expect(result.ctx_reduce_enabled).toBe(false);
+    });
+
+    it("disabled_hooks union-merges across user and project", () => {
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({ disabled_hooks: ["a", "b"] }),
+            JSON.stringify({ disabled_hooks: ["b", "c"] }),
+        );
+
+        expect(result.disabled_hooks?.sort()).toEqual(["a", "b", "c"]);
+    });
+});
