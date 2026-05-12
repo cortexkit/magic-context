@@ -184,6 +184,9 @@ const MIGRATIONS: Migration[] = [
                     embedding BLOB NOT NULL,
                     model_id TEXT NOT NULL,
                     created_at INTEGER NOT NULL,
+                    -- FK-cascade audit (v12): git_commit_embeddings.sha -> git_commits.sha
+                    -- uses ON DELETE CASCADE, so SQLite PRAGMA foreign_keys must be ON on
+                    -- every connection and v12 cleans historical orphan rows.
                     FOREIGN KEY(sha) REFERENCES git_commits(sha) ON DELETE CASCADE
                 );
 
@@ -457,6 +460,40 @@ const MIGRATIONS: Migration[] = [
                     "ALTER TABLE session_meta ADD COLUMN todo_synthetic_state_json TEXT DEFAULT ''",
                 );
             }
+        },
+    },
+    {
+        version: 12,
+        description: "Clean orphan rows from FK-cascade embedding tables",
+        up: (db: Database) => {
+            const hasTable = (name: string): boolean =>
+                Boolean(
+                    db
+                        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = ?")
+                        .get(name),
+                );
+
+            const memoryEmbeddings = hasTable("memory_embeddings")
+                ? db
+                      .prepare(
+                          `DELETE FROM memory_embeddings
+                           WHERE memory_id NOT IN (SELECT id FROM memories)`,
+                      )
+                      .run().changes
+                : 0;
+            log(`[migrations] v12 cleaned ${memoryEmbeddings} orphan memory_embeddings row(s)`);
+
+            const gitCommitEmbeddings = hasTable("git_commit_embeddings")
+                ? db
+                      .prepare(
+                          `DELETE FROM git_commit_embeddings
+                           WHERE sha NOT IN (SELECT sha FROM git_commits)`,
+                      )
+                      .run().changes
+                : 0;
+            log(
+                `[migrations] v12 cleaned ${gitCommitEmbeddings} orphan git_commit_embeddings row(s)`,
+            );
         },
     },
 ];

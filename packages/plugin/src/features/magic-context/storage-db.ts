@@ -79,9 +79,12 @@ function migrateLegacyStorageIfNeeded(targetDbPath: string, targetDbDir: string)
 }
 
 export function initializeDatabase(db: Database): void {
+    // SQLite per-connection PRAGMAs. foreign_keys MUST run before any reads
+    // or writes: it defaults to OFF, which silently breaks every ON DELETE
+    // CASCADE / SET NULL declared in the schema below and in migrations.
+    db.exec("PRAGMA foreign_keys=ON");
     db.exec("PRAGMA journal_mode=WAL");
     db.exec("PRAGMA busy_timeout=5000");
-    db.exec("PRAGMA foreign_keys=ON");
     db.exec(`
     CREATE TABLE IF NOT EXISTS tags (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -179,6 +182,9 @@ export function initializeDatabase(db: Database): void {
     );
 
     CREATE TABLE IF NOT EXISTS memory_embeddings (
+      -- FK-cascade audit (v12): memory_embeddings.memory_id -> memories.id
+      -- uses ON DELETE CASCADE, so SQLite PRAGMA foreign_keys must be ON on
+      -- every connection and v12 cleans historical orphan rows.
       memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
       embedding BLOB NOT NULL,
       model_id TEXT
