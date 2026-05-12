@@ -14,11 +14,14 @@
 import { join } from "node:path";
 import {
     closeCompactionMarkerDb,
+    getOpenCodeMessageById,
     injectCompactionMarker,
     removeCompactionMarker,
 } from "../../features/magic-context/compaction-marker";
+import { getCompartmentsByEndMessageId } from "../../features/magic-context/compartment-storage";
 import {
     getPersistedCompactionMarkerState,
+    type PendingCompactionMarker,
     setPersistedCompactionMarkerState,
 } from "../../features/magic-context/storage-meta-persisted";
 import { getDataDir } from "../../shared/data-path";
@@ -52,8 +55,191 @@ export type MarkerUpdateOutcome =
     | { kind: "retryable-failure"; error: Error };
 
 /**
+ * Validate that a deferred pending-marker target is still the right thing to
+ * apply. Plan v6 §5 two-step check:
+ *
+ *   1. PRIMARY: raw OpenCode message at `pending.endMessageId` must still
+ *      exist. If recomp / revert / partial-recomp wiped that message between
+ *      publication and the consuming pass, the deferred target is gone.
+ *   2. SECONDARY: a compartment row in our own DB must still have
+ *      `end_message_id == pending.endMessageId` AND
+ *      `end_message == pending.ordinal`. Catches the case where the raw
+ *      message survives but compartmentalization changed (recomp redistributed
+ *      boundaries, partial recomp resequenced).
+ *
+ * Returns `"ok"` only when both checks pass.
+ * Returns `"compartment-removed"` when either the raw message or the
+ * compartment row is gone.
+ * Returns `"target-superseded"` when the compartment row exists at the
+ * boundary endMessageId but its ordinal differs from `pending.ordinal` (a
+ * later publish moved past us).
+ *
+ * Throws on DB-access failures (locked OpenCode DB, missing attach) — caller's
+ * outer try/catch maps that to `retryable-failure`.
+ */
+function validatePendingTarget(
+    db: Database,
+    sessionId: string,
+    pending: PendingCompactionMarker,
+): "ok" | "compartment-removed" | "target-superseded" {
+    // 1. PRIMARY: raw OpenCode message must still exist. May throw on DB
+    //    failure; caller catches and returns retryable-failure.
+    const ocMessage = getOpenCodeMessageById(sessionId, pending.endMessageId);
+    if (!ocMessage) {
+        return "compartment-removed";
+    }
+
+    // 2. SECONDARY: compartment row keyed by endMessageId.
+    const compartments = getCompartmentsByEndMessageId(db, sessionId, pending.endMessageId);
+    if (compartments.length === 0) {
+        return "compartment-removed";
+    }
+    if (compartments.length > 1) {
+        // Schema doesn't enforce UNIQUE(session_id, end_message_id), but the
+        // historian's validation effectively makes them unique. >1 here means
+        // a future schema/validation bug; loud-fail rather than guess.
+        log(
+            `[magic-context][${sessionId}] WARNING: ${compartments.length} compartments share endMessageId=${pending.endMessageId} — schema invariant violated; treating as stale`,
+        );
+        return "compartment-removed";
+    }
+    const compartment = compartments[0];
+    if (compartment.endMessage !== pending.ordinal) {
+        // Same end-message id but different ordinal — a later publish already
+        // moved the marker past us. Skip this stale pending and let the newer
+        // publish's drain heal.
+        return "target-superseded";
+    }
+    return "ok";
+}
+
+/**
+ * Apply a deferred compaction-marker mutation owned by a specific pending
+ * blob. Called from the transform postprocess drain — see
+ * `transform-postprocess-phase.ts` Plan v6 §1.
+ *
+ * Returns one of four outcomes; the drain interprets each:
+ *   - `applied`         → CAS-clear pending (we did the work)
+ *   - `already-current` → CAS-clear pending (boundary already at this ordinal)
+ *   - `stale-skip`      → CAS-clear pending (target gone or superseded)
+ *   - `retryable-failure` → KEEP pending (transient failure; next consuming
+ *                          pass will retry; another publish may overwrite
+ *                          blob and that publish's drain heals)
+ *
+ * The justification for "retry on inject failure" is that
+ * `removeCompactionMarker()` is a no-op success on already-missing rows (per
+ * `compaction-marker.ts:358-367`), so a retry of the full sequence is safe:
+ * the second remove sees nothing to delete and succeeds; the second inject
+ * tries again.
+ */
+export function applyDeferredCompactionMarker(
+    db: Database,
+    sessionId: string,
+    pending: PendingCompactionMarker,
+    directory?: string,
+): MarkerUpdateOutcome {
+    try {
+        // Stale-target check FIRST — cheap and avoids any state mutation when
+        // the target is already gone. The check may throw on DB failure;
+        // outer catch turns that into retryable-failure.
+        const validation = validatePendingTarget(db, sessionId, pending);
+        if (validation !== "ok") {
+            sessionLog(
+                sessionId,
+                `compaction-marker drain: stale-skip (${validation}) for ordinal ${pending.ordinal} endMessageId=${pending.endMessageId}`,
+            );
+            return { kind: "stale-skip", reason: validation };
+        }
+
+        const existing = getPersistedCompactionMarkerState(db, sessionId);
+        if (existing && existing.boundaryOrdinal >= pending.ordinal) {
+            // Marker already at this boundary (or further). Nothing to do.
+            // Includes the equal case — placeholder text never changes.
+            return { kind: "already-current" };
+        }
+
+        // Remove old marker if present. `removeCompactionMarker` returns false
+        // only when the DELETE transaction itself failed (e.g. SQLITE_BUSY).
+        // No-op success on already-missing rows is fine — that's why retry is
+        // safe. False here means we couldn't even attempt the delete cleanly;
+        // bail to retryable WITHOUT calling inject (avoids leaving two marker
+        // rows for the same boundary).
+        if (existing) {
+            const removed = removeCompactionMarker(existing);
+            if (!removed) {
+                return {
+                    kind: "retryable-failure",
+                    error: new Error(
+                        `failed to remove old compaction marker at ordinal ${existing.boundaryOrdinal}`,
+                    ),
+                };
+            }
+            sessionLog(
+                sessionId,
+                `compaction-marker drain: removed old boundary at ordinal ${existing.boundaryOrdinal}, advancing to ${pending.ordinal}`,
+            );
+        }
+
+        // Inject new marker. injectCompactionMarker's internal transaction is
+        // atomic — null return means the transaction rolled back cleanly, so
+        // state is CONSISTENT (no half-write). The OLD marker is gone (if it
+        // was present), so OpenCode briefly sees no marker between old-remove
+        // and next-retry-inject. That window is acceptable: filterCompacted
+        // simply falls back to full-history, the transform sees more raw
+        // messages on those passes, and the next consuming pass either
+        // succeeds the inject or another publish overwrites pending.
+        const result = injectCompactionMarker({
+            sessionId,
+            endOrdinal: pending.ordinal,
+            summaryText: MARKER_SUMMARY_TEXT,
+            directory: directory ?? process.cwd(),
+        });
+        if (!result) {
+            return {
+                kind: "retryable-failure",
+                error: new Error(
+                    `injectCompactionMarker returned null for ordinal ${pending.ordinal}; will retry`,
+                ),
+            };
+        }
+
+        setPersistedCompactionMarkerState(db, sessionId, {
+            ...result,
+            boundaryOrdinal: pending.ordinal,
+        });
+        sessionLog(
+            sessionId,
+            `compaction-marker drain: applied at ordinal ${pending.ordinal}, boundary user msg ${result.boundaryMessageId}`,
+        );
+        return { kind: "applied", markerOrdinal: pending.ordinal };
+    } catch (err) {
+        // Thrown paths:
+        //   - getWritableOpenCodeDb() (attached DB missing/locked)
+        //   - getOpenCodeMessageById() raw SELECT failure
+        //   - getCompartmentsByEndMessageId() local SELECT failure
+        //   - setPersistedCompactionMarkerState() UPDATE failure
+        // All retryable. Note: findBoundaryUserMessage() returning null flows
+        // through injectCompactionMarker() returning null (handled above),
+        // NOT through this catch.
+        const error = err instanceof Error ? err : new Error(String(err));
+        sessionLog(
+            sessionId,
+            `compaction-marker drain: retryable failure for ordinal ${pending.ordinal}:`,
+            error,
+        );
+        return { kind: "retryable-failure", error };
+    }
+}
+
+/**
  * After historian publishes new compartments, inject or move the compaction marker.
  * Only moves the boundary forward; summary text is a static placeholder.
+ *
+ * Plan v6: callers in incremental / recomp / partial-recomp paths invoke this
+ * directly only when they are NOT deferring (i.e.
+ * `preserveInjectionCacheUntilConsumed === false` OR
+ * `experimentalCompactionMarkers === false`). Deferred path uses
+ * `applyDeferredCompactionMarker` from postprocess drain.
  */
 export function updateCompactionMarkerAfterPublication(
     db: Database,
