@@ -89,7 +89,9 @@ describe("runSetup", () => {
         writeFileSync(settingsPath, JSON.stringify(existing));
 
         const added = writePiSettingsPackage(settingsPath);
-        const updated = parseJsonc(readFileSync(settingsPath, "utf-8")) as unknown as typeof existing;
+        const updated = parseJsonc(
+            readFileSync(settingsPath, "utf-8"),
+        ) as unknown as typeof existing;
 
         expect(added).toBe(false);
         expect(updated.packages).toEqual(existing.packages);

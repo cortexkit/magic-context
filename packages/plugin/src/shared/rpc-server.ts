@@ -1,4 +1,11 @@
-import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+    mkdirSync,
+    readdirSync,
+    readFileSync,
+    renameSync,
+    unlinkSync,
+    writeFileSync,
+} from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
 import { log } from "./logger";
@@ -54,7 +61,11 @@ export class MagicContextRpcServer {
                     const tmpPath = `${this.portFilePath}.tmp`;
                     writeFileSync(
                         tmpPath,
-                        JSON.stringify({ port: this.port, pid: process.pid, started_at: this.startedAt }),
+                        JSON.stringify({
+                            port: this.port,
+                            pid: process.pid,
+                            started_at: this.startedAt,
+                        }),
                         "utf-8",
                     );
                     renameSync(tmpPath, this.portFilePath);

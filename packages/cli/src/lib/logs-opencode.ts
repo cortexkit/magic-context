@@ -98,7 +98,11 @@ export async function bundleIssueReport(
     const historianScanWindow = sanitizeLogContent(logLines.slice(-4000).join("\n"));
     const historianFailureLines = extractHistorianFailureLines(historianScanWindow, 30);
 
-    const configBody = JSON.stringify(sanitizeConfigValue(report.magicContextConfig.flags), null, 2);
+    const configBody = JSON.stringify(
+        sanitizeConfigValue(report.magicContextConfig.flags),
+        null,
+        2,
+    );
     const sanitizedConfigPath = report.configPaths.magicContextConfig.replace(homedir(), "~");
 
     const bodyMarkdown = [

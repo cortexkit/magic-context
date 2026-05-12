@@ -10,8 +10,8 @@ import {
     getPiVersion,
     PI_PACKAGE_SOURCE,
 } from "../lib/pi-helpers";
-import type { PromptIO } from "../lib/prompts";
 import { hasPiMagicContextPackage } from "../lib/pi-package-entry";
+import type { PromptIO } from "../lib/prompts";
 
 type EmbeddingChoice =
     | { provider: "local"; model: string }

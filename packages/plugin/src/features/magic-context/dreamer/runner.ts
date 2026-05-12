@@ -805,7 +805,9 @@ export async function runDream(args: {
             const umStart = Date.now();
             try {
                 if (!verifyLeaseStillHeld("before user-memory review")) {
-                    throw new Error(lostLeaseReason ?? "Dream lease lost before user-memory review");
+                    throw new Error(
+                        lostLeaseReason ?? "Dream lease lost before user-memory review",
+                    );
                 }
                 const reviewResult = await reviewUserMemories({
                     db: args.db,
@@ -854,7 +856,9 @@ export async function runDream(args: {
         if (!circuitBreakerTripped && !lostLease && Date.now() <= deadline) {
             try {
                 if (!verifyLeaseStillHeld("before smart-note evaluation")) {
-                    throw new Error(lostLeaseReason ?? "Dream lease lost before smart-note evaluation");
+                    throw new Error(
+                        lostLeaseReason ?? "Dream lease lost before smart-note evaluation",
+                    );
                 }
                 await evaluateSmartNotes({
                     db: args.db,
@@ -870,7 +874,9 @@ export async function runDream(args: {
                     isLeaseLost: () => lostLease,
                 });
                 if (!verifyLeaseStillHeld("after smart-note evaluation")) {
-                    throw new Error(lostLeaseReason ?? "Dream lease lost after smart-note evaluation");
+                    throw new Error(
+                        lostLeaseReason ?? "Dream lease lost after smart-note evaluation",
+                    );
                 }
             } catch (error) {
                 const errorDescription = describeError(error);
@@ -890,7 +896,9 @@ export async function runDream(args: {
             const kfStart = Date.now();
             try {
                 if (!verifyLeaseStillHeld("before key-file identification")) {
-                    throw new Error(lostLeaseReason ?? "Dream lease lost before key-file identification");
+                    throw new Error(
+                        lostLeaseReason ?? "Dream lease lost before key-file identification",
+                    );
                 }
                 await identifyKeyFiles({
                     db: args.db,
@@ -906,7 +914,9 @@ export async function runDream(args: {
                     isLeaseLost: () => lostLease,
                 });
                 if (!verifyLeaseStillHeld("after key-file identification")) {
-                    throw new Error(lostLeaseReason ?? "Dream lease lost after key-file identification");
+                    throw new Error(
+                        lostLeaseReason ?? "Dream lease lost after key-file identification",
+                    );
                 }
                 result.tasks.push({
                     name: "key files",

@@ -4,8 +4,8 @@ import {
     isPidAlive,
     legacyRpcPortFilePath,
     parseRpcPortFile,
-    rpcPortDir,
     type RpcPortFileRecord,
+    rpcPortDir,
 } from "./rpc-utils";
 
 const MAX_RETRIES = 10;
@@ -42,11 +42,14 @@ export class MagicContextRpcClient {
             }
 
             try {
-                const response = await this.fetchWithTimeout(`http://127.0.0.1:${port}/rpc/${method}`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(params),
-                });
+                const response = await this.fetchWithTimeout(
+                    `http://127.0.0.1:${port}/rpc/${method}`,
+                    {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(params),
+                    },
+                );
 
                 if (!response.ok) {
                     const text = await response.text();

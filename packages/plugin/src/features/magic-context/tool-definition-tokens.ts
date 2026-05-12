@@ -86,7 +86,8 @@ function stableStringify(value: unknown, seen = new WeakSet<object>()): string {
     if (value === null || typeof value !== "object") return JSON.stringify(value) ?? String(value);
     if (seen.has(value)) return '"[Circular]"';
     seen.add(value);
-    if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item, seen)).join(",")}]`;
+    if (Array.isArray(value))
+        return `[${value.map((item) => stableStringify(item, seen)).join(",")}]`;
     const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
         a.localeCompare(b),
     );

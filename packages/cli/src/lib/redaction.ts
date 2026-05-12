@@ -7,7 +7,10 @@ function escapeRegex(value: string): string {
 const SECRET_KEY_PATTERN = /(?:key|token|secret|password|auth|bearer|credential)/i;
 
 function redactionTypeForKey(key: string): string {
-    const normalized = key.trim().toLowerCase().replace(/[^a-z0-9_.-]+/g, "_");
+    const normalized = key
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_.-]+/g, "_");
     const suffix = normalized.split(".").filter(Boolean).at(-1) ?? normalized;
     return suffix || "secret";
 }
@@ -79,13 +82,20 @@ const SECRET_TEXT_PATTERNS: Array<{
     {
         pattern:
             /(["'])([^"']*(?:key|token|secret|password|auth|bearer|credential)[^"']*)\1(\s*:\s*)(["'])([^"']*)\4/gi,
-        replacement: (_full: string, quote: string, key: string, separator: string, valueQuote: string) =>
+        replacement: (
+            _full: string,
+            quote: string,
+            key: string,
+            separator: string,
+            valueQuote: string,
+        ) =>
             `${quote}${key}${quote}${separator}${valueQuote}<REDACTED:${redactionTypeForKey(key)}>${valueQuote}`,
     },
     {
         pattern:
             /\b([A-Za-z0-9_.-]*(?:key|token|secret|password|auth|bearer|credential)[A-Za-z0-9_.-]*)\s*=\s*([^\s'"`]+)/gi,
-        replacement: (_full: string, key: string) => `${key}=<REDACTED:${redactionTypeForKey(key)}>`,
+        replacement: (_full: string, key: string) =>
+            `${key}=<REDACTED:${redactionTypeForKey(key)}>`,
     },
 ];
 

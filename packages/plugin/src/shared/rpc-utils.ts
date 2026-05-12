@@ -22,11 +22,7 @@ export function rpcPortDir(storageDir: string, directory: string): string {
 }
 
 /** Per-process RPC port file path. */
-export function rpcPortFilePath(
-    storageDir: string,
-    directory: string,
-    pid = process.pid,
-): string {
+export function rpcPortFilePath(storageDir: string, directory: string, pid = process.pid): string {
     return join(rpcPortDir(storageDir, directory), `port-${pid}.json`);
 }
 

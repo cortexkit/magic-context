@@ -3,9 +3,9 @@ import { join } from "node:path";
 import { parse, stringify } from "comment-json";
 
 import {
+    type ConflictResult,
     DCP_PACKAGE_NAMES,
     extractPluginName,
-    type ConflictResult,
     matchesPackageName,
 } from "./conflict-detector";
 import { getOpenCodeConfigPaths } from "./opencode-config-dir";

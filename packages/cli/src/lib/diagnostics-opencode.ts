@@ -499,9 +499,11 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         "### Historian failures (session_meta)",
         report.historianFailures.length === 0
             ? "_No sessions with historian failures._"
-            : ["```json", JSON.stringify(sanitizeConfigValue(report.historianFailures), null, 2), "```"].join(
-                  "\n",
-              ),
+            : [
+                  "```json",
+                  JSON.stringify(sanitizeConfigValue(report.historianFailures), null, 2),
+                  "```",
+              ].join("\n"),
         "",
         "### Log file",
         `- Path: ${sanitizeString(report.logFile.path)}`,

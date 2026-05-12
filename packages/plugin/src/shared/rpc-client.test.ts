@@ -1,8 +1,8 @@
+import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { createServer } from "node:http";
-import { afterEach, describe, expect, test } from "bun:test";
 import { MagicContextRpcClient } from "./rpc-client";
 import { rpcPortFilePath } from "./rpc-utils";
 
@@ -125,7 +125,9 @@ describe("MagicContextRpcClient", () => {
         writePortFile(storageDir, directory, port);
 
         const client = new MagicContextRpcClient(storageDir, directory);
-        await expect(client.call("value")).rejects.toThrow("Magic Context RPC server not available");
+        await expect(client.call("value")).rejects.toThrow(
+            "Magic Context RPC server not available",
+        );
     }, 20_000);
 
     test("re-resolves and retries transient 5xx responses", async () => {

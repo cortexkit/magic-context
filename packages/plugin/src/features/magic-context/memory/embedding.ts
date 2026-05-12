@@ -3,10 +3,10 @@ import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "../../../config/schema/magic-cont
 import { log } from "../../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../../shared/sqlite";
 import { cosineSimilarity } from "./cosine-similarity";
+import { getEmbeddingProviderIdentity } from "./embedding-identity";
 import { LocalEmbeddingProvider } from "./embedding-local";
 import { OpenAICompatibleEmbeddingProvider } from "./embedding-openai";
 import type { EmbeddingProvider } from "./embedding-provider";
-import { getEmbeddingProviderIdentity } from "./embedding-identity";
 import { saveEmbedding } from "./storage-memory-embeddings";
 
 const DEFAULT_EMBEDDING_CONFIG: EmbeddingConfig = {
@@ -99,7 +99,8 @@ export function initializeEmbedding(config: EmbeddingConfig): void {
     const nextConfig = resolveEmbeddingConfig(config);
     const nextProviderIdentity = resolveProviderIdentity(nextConfig);
     const previousProvider = provider;
-    const previousProviderIdentity = previousProvider?.modelId ?? resolveProviderIdentity(embeddingConfig);
+    const previousProviderIdentity =
+        previousProvider?.modelId ?? resolveProviderIdentity(embeddingConfig);
 
     if (previousProviderIdentity === nextProviderIdentity) {
         embeddingConfig = nextConfig;

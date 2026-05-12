@@ -167,7 +167,10 @@ describe("dreamer", () => {
                 });
 
                 expect(promptSyncSpy).toHaveBeenCalledTimes(1);
-                expect(result.tasks.map((task) => task.name)).toEqual(["consolidate", "lease-lost"]);
+                expect(result.tasks.map((task) => task.name)).toEqual([
+                    "consolidate",
+                    "lease-lost",
+                ]);
                 expect(result.tasks[1]?.error).toContain("Dream lease lost");
                 expect(getDreamState(db, "last_dream_at")).toBeNull();
             } finally {
