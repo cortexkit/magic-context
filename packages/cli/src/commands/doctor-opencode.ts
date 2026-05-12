@@ -1,5 +1,5 @@
 import { execSync, spawnSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -22,12 +22,8 @@ import { isDevPathPluginEntry, matchesPluginEntry } from "../adapters/opencode";
 import { collectDiagnostics } from "../lib/diagnostics-opencode";
 import { bundleIssueReport } from "../lib/logs-opencode";
 import { isOpenCodeInstalled } from "../lib/opencode-helpers";
-import {
-    detectConfigPaths,
-    getMagicContextHistorianDir,
-    getMagicContextLogPath,
-} from "../lib/paths";
-import { confirm, intro, log, outro, spinner, text } from "../lib/prompts";
+import { detectConfigPaths, getMagicContextLogPath } from "../lib/paths";
+import { confirm, intro, log, outro, selectOne, spinner, text } from "../lib/prompts";
 
 const PLUGIN_NAME = "@cortexkit/opencode-magic-context";
 const PLUGIN_ENTRY_WITH_VERSION = `${PLUGIN_NAME}@latest`;
@@ -203,7 +199,39 @@ async function runIssueFlow(): Promise<number> {
 
     try {
         const report = await collectDiagnostics();
-        const bundled = await bundleIssueReport(report, description, title);
+        s.stop("Diagnostics collected");
+
+        // Ask the user which session this issue relates to. Only show the
+        // picker when there's more than one recent session — otherwise the
+        // single-session case is unambiguous, and the no-session case
+        // (Node-only run without bun:sqlite) skips filtering entirely.
+        let sessionFilter: string | null = null;
+        if (report.recentSessions.length > 1) {
+            const choice = await selectOne(
+                "Which session is this issue about? (filters log lines from other sessions)",
+                [
+                    ...report.recentSessions.map((session, index) => {
+                        const displayTitle = session.title.trim() || "(no title)";
+                        const truncatedTitle =
+                            displayTitle.length > 50
+                                ? `${displayTitle.slice(0, 47)}...`
+                                : displayTitle;
+                        return {
+                            label: `${truncatedTitle} — ${session.sessionId}${index === 0 ? " (most recent)" : ""}`,
+                            value: session.sessionId,
+                        };
+                    }),
+                    {
+                        label: "All sessions (no filtering)",
+                        value: "__all__",
+                    },
+                ],
+            );
+            sessionFilter = choice === "__all__" ? null : choice;
+        }
+
+        s.start("Bundling issue report");
+        const bundled = await bundleIssueReport(report, description, title, sessionFilter);
         s.stop(`Report written to ${bundled.path}`);
 
         const shouldSubmit = await confirm("Submit this issue on GitHub now?", true);
@@ -1023,30 +1051,34 @@ export async function runDoctor(
         log.info(`Log file: ${logPath} (not yet created)`);
     }
 
-    const historianDumpDir = getMagicContextHistorianDir("opencode");
-    if (existsSync(historianDumpDir)) {
-        try {
-            const dumps = readdirSync(historianDumpDir)
-                .filter((f) => f.endsWith(".xml"))
-                .map((f) => ({
-                    name: f,
-                    mtime: statSync(join(historianDumpDir, f)).mtimeMs,
-                }))
-                .sort((a, b) => b.mtime - a.mtime);
-            if (dumps.length > 0) {
-                warn(`Historian debug dumps: ${dumps.length} file(s) in ${historianDumpDir}`);
-                for (const dump of dumps.slice(0, 3)) {
-                    const age = Math.round((Date.now() - dump.mtime) / 60000);
-                    const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`;
-                    log.info(`  ${dump.name} (${ageStr})`);
-                }
-                if (dumps.length > 3) {
-                    log.info(`  ... and ${dumps.length - 3} more`);
-                }
+    // Historian dumps live per-project under `<dir>/.opencode/magic-context/historian/`.
+    // We surface them grouped by project so users can see which session's dumps are
+    // where. Falls back to the legacy tmp-dir layout when collectDiagnostics returns
+    // empty buckets (Node-only runs, no OpenCode DB, no historian has run yet under
+    // the new path).
+    const diagnostics = await collectDiagnostics();
+    const dumpBuckets = diagnostics.historianDumps.byProject;
+    if (dumpBuckets.length > 0) {
+        const totalCount = dumpBuckets.reduce((sum, b) => sum + b.count, 0);
+        const sessionCount = dumpBuckets.length;
+        warn(`Historian debug dumps: ${totalCount} file(s) across ${sessionCount} project(s)`);
+        for (const bucket of dumpBuckets) {
+            log.info(`  [${bucket.directory}] ${bucket.count} file(s)`);
+            for (const dump of bucket.recent.slice(0, 3)) {
+                const age = dump.ageMinutes;
+                const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`;
+                log.info(`    ${dump.name} (${ageStr})`);
             }
-        } catch {
-            // Can't read dump directory — skip
+            if (bucket.count > 3) {
+                log.info(`    ... and ${bucket.count - 3} more`);
+            }
         }
+    }
+    // Legacy tmp-dir dumps from pre-Phase 3 plugin versions — still listed if
+    // present so users can find old artifacts without spelunking the tmp dir.
+    const legacy = diagnostics.historianDumps.legacyDumps;
+    if (legacy.count > 0) {
+        log.info(`Legacy historian dumps (pre-v0.18.x): ${legacy.count} file(s) in ${legacy.dir}`);
     }
 
     // 11. Check OMO config

@@ -13,7 +13,10 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseCompartmentOutput } from "@magic-context/core/hooks/magic-context/compartment-parser";
 import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
-import { getOpenCodeCacheDir } from "@magic-context/core/shared/data-path";
+import {
+    getOpenCodeCacheDir,
+    getProjectMagicContextHistorianDir,
+} from "@magic-context/core/shared/data-path";
 import { parse as parseJsonc } from "comment-json";
 import { getOpenCodeVersion, isOpenCodeInstalled } from "./opencode-helpers";
 import {
@@ -62,13 +65,70 @@ export interface DiagnosticReport {
         exists: boolean;
         sizeKb: number;
     };
-    historianDumps: {
+    /**
+     * Recent active OpenCode sessions (top 5 by `session.time_updated`). Used
+     * to anchor historian-dump lookups to real project directories and to
+     * power the session picker in the `--issue` flow.
+     *
+     * Populated only when bun:sqlite is available (under Bun) and OpenCode's
+     * own DB at ~/.local/share/opencode/opencode.db exists. Empty array on
+     * Node-only runs (and the diagnostics report falls back to the legacy
+     * tmp-dir historian listing).
+     */
+    recentSessions: RecentSessionSummary[];
+    /**
+     * Historian dumps grouped by project directory. Pre-Phase 3 dumps under
+     * the legacy harness-scoped tmp dir are surfaced separately as
+     * `legacyDumps` so users with old artifacts still see them in doctor.
+     */
+    historianDumps: HistorianDumpsReport;
+    /** Most recent historian-failure rows from session_meta across all sessions. */
+    historianFailures: HistorianFailureSummary[];
+}
+
+/**
+ * Per-project historian-dump bucket built from the recent-sessions list.
+ *
+ * One entry per unique project directory that has at least one dump under
+ * `<directory>/.opencode/magic-context/historian/`. Sessions sharing a
+ * directory roll into the same bucket. Empty buckets are omitted.
+ */
+export interface ProjectHistorianBucket {
+    /** Project directory the bucket represents. */
+    directory: string;
+    /** Most recently active session in this project (drives picker label). */
+    primarySessionId: string;
+    /** All recent session IDs touching this directory. */
+    sessionIds: string[];
+    /** Total dump count in the directory. */
+    count: number;
+    /** Up to 5 newest dumps with parsed metadata. */
+    recent: HistorianDumpSummary[];
+}
+
+export interface HistorianDumpsReport {
+    /** Per-project dump buckets, ordered by latest activity. */
+    byProject: ProjectHistorianBucket[];
+    /**
+     * Legacy harness-scoped tmp-dir listing, kept so users with pre-Phase-3
+     * dumps under `${tmpdir}/opencode/magic-context/historian/` still see
+     * them in doctor output. Empty on fresh installs.
+     */
+    legacyDumps: {
         dir: string;
         count: number;
         recent: HistorianDumpSummary[];
     };
-    /** Most recent historian-failure rows from session_meta across all sessions. */
-    historianFailures: HistorianFailureSummary[];
+}
+
+export interface RecentSessionSummary {
+    sessionId: string;
+    /** Session title from OpenCode (may be empty for fresh sessions). */
+    title: string;
+    /** Project directory the session lives under. */
+    directory: string;
+    /** ISO timestamp of last activity (`session.time_updated`). */
+    lastActiveAt: string;
 }
 
 export interface HistorianDumpSummary {
@@ -236,11 +296,19 @@ function parseHistorianDumpMeta(path: string): HistorianDumpMeta | { error: stri
     }
 }
 
-function collectHistorianDumps(): DiagnosticReport["historianDumps"] {
-    const dir = getMagicContextHistorianDir("opencode");
-    if (!existsSync(dir)) {
-        return { dir, count: 0, recent: [] };
-    }
+/**
+ * Walk a directory's `*.xml` files and return them as HistorianDumpSummary
+ * entries, sorted newest-first. Returns up to `limit` entries.
+ *
+ * Shared by both the project-local walker (one bucket per project) and the
+ * legacy tmp-dir fallback walker, so changes to the dump-listing shape live
+ * in one place.
+ */
+function listDumpsInDir(
+    dir: string,
+    limit: number,
+): { count: number; recent: HistorianDumpSummary[] } {
+    if (!existsSync(dir)) return { count: 0, recent: [] };
     try {
         const entries = readdirSync(dir)
             .filter((name) => name.endsWith(".xml"))
@@ -255,7 +323,7 @@ function collectHistorianDumps(): DiagnosticReport["historianDumps"] {
             .sort((a, b) => b.mtime - a.mtime);
 
         const now = Date.now();
-        const recent: HistorianDumpSummary[] = entries.slice(0, 5).map((entry) => {
+        const recent: HistorianDumpSummary[] = entries.slice(0, limit).map((entry) => {
             const meta = parseHistorianDumpMeta(join(dir, entry.name));
             const summary: HistorianDumpSummary = {
                 name: entry.name,
@@ -269,9 +337,146 @@ function collectHistorianDumps(): DiagnosticReport["historianDumps"] {
             }
             return summary;
         });
-        return { dir, count: entries.length, recent };
+        return { count: entries.length, recent };
     } catch {
-        return { dir, count: 0, recent: [] };
+        return { count: 0, recent: [] };
+    }
+}
+
+/**
+ * Group historian dumps by project directory using the recent-sessions list as
+ * the lookup index. For each unique directory, opens
+ * `<directory>/.opencode/magic-context/historian/` and lists dumps there.
+ *
+ * Falls back to the legacy harness-scoped tmp-dir layout when recentSessions
+ * is empty (Node runs without bun:sqlite) OR when the project-local dir is
+ * missing/empty. This keeps doctor useful on:
+ *   - Fresh installs where no historian has run yet under the new path
+ *   - Pi-only machines (Node, no bun:sqlite, no OpenCode DB)
+ *   - Old machines with pre-Phase-3 dumps still in tmp
+ */
+function collectHistorianDumps(
+    recentSessions: RecentSessionSummary[],
+): DiagnosticReport["historianDumps"] {
+    // Build per-project buckets from unique directories. We iterate the recent
+    // sessions in time-DESC order, so the first session that touches a given
+    // directory becomes the bucket's primarySessionId.
+    const buckets = new Map<string, ProjectHistorianBucket>();
+    for (const session of recentSessions) {
+        const dir = session.directory;
+        if (!dir) continue;
+        const projectHistorianDir = getProjectMagicContextHistorianDir(dir);
+        const listing = listDumpsInDir(projectHistorianDir, 5);
+        const existing = buckets.get(dir);
+        if (existing) {
+            // Same directory, multiple sessions — append session id, keep
+            // the listing we already computed (same path).
+            if (!existing.sessionIds.includes(session.sessionId)) {
+                existing.sessionIds.push(session.sessionId);
+            }
+            continue;
+        }
+        if (listing.count === 0) continue;
+        buckets.set(dir, {
+            directory: dir,
+            primarySessionId: session.sessionId,
+            sessionIds: [session.sessionId],
+            count: listing.count,
+            recent: listing.recent,
+        });
+    }
+
+    const legacyDir = getMagicContextHistorianDir("opencode");
+    const legacyListing = listDumpsInDir(legacyDir, 5);
+
+    return {
+        byProject: [...buckets.values()],
+        legacyDumps: {
+            dir: legacyDir,
+            count: legacyListing.count,
+            recent: legacyListing.recent,
+        },
+    };
+}
+
+/**
+ * Read recent active OpenCode sessions from OpenCode's own SQLite DB.
+ *
+ * Returns the top 5 sessions by `session.time_updated` (descending), filtered
+ * to non-archived rows. The list anchors historian-dump lookups to real
+ * project directories and powers the `--issue` flow's session picker.
+ *
+ * Same bun:sqlite gating as collectHistorianFailures: only attempts the
+ * import under Bun. Returns [] on Node runs (the typical `npx` invocation)
+ * and on machines without OpenCode installed. Doctor degrades gracefully —
+ * historian dumps fall back to the legacy tmp-dir listing on the empty path.
+ */
+async function collectRecentSessions(): Promise<RecentSessionSummary[]> {
+    const opencodeDbPath = join(homedir(), ".local", "share", "opencode", "opencode.db");
+    if (!existsSync(opencodeDbPath)) return [];
+
+    if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined") {
+        return [];
+    }
+
+    type DatabaseCtor = new (
+        path: string,
+        opts?: { readonly?: boolean },
+    ) => {
+        prepare: (sql: string) => { all: () => unknown[] };
+        close: () => void;
+    };
+
+    let DatabaseClass: DatabaseCtor;
+    try {
+        const mod = (await new Function("p", "return import(p)")("bun:sqlite")) as {
+            Database: DatabaseCtor;
+        };
+        DatabaseClass = mod.Database;
+    } catch {
+        return [];
+    }
+
+    let db: { prepare: (sql: string) => { all: () => unknown[] }; close: () => void } | null = null;
+    try {
+        db = new DatabaseClass(opencodeDbPath, { readonly: true });
+        const rows = db
+            .prepare(
+                // session.time_updated is refreshed within a few seconds of each
+                // new message (verified live), so it's a safe recency proxy.
+                // Filter time_archived to skip user-archived sessions and exclude
+                // parent_id IS NOT NULL to skip subagent child sessions —
+                // historian artifacts live under the parent project, not the
+                // child's directory.
+                "SELECT id, directory, title, time_updated FROM session " +
+                    "WHERE time_archived IS NULL AND parent_id IS NULL " +
+                    "ORDER BY time_updated DESC LIMIT 5",
+            )
+            .all() as Array<{
+            id: unknown;
+            directory: unknown;
+            title: unknown;
+            time_updated: unknown;
+        }>;
+        return rows.flatMap((row) => {
+            const sessionId = typeof row.id === "string" ? row.id : null;
+            const directory = typeof row.directory === "string" ? row.directory : null;
+            if (!sessionId || !directory) return [];
+            const title = typeof row.title === "string" ? row.title : "";
+            const lastActiveAt =
+                typeof row.time_updated === "number"
+                    ? new Date(row.time_updated).toISOString()
+                    : "";
+            return [{ sessionId, title, directory, lastActiveAt }];
+        });
+    } catch {
+        return [];
+    } finally {
+        try {
+            db?.close();
+        } catch {
+            // ignore close errors
+        }
     }
 }
 
@@ -384,6 +589,7 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
     const logFileSize = existsSync(logPath) ? statSync(logPath).size : 0;
 
     const conflictResult = detectConflicts(process.cwd());
+    const recentSessions = await collectRecentSessions();
 
     return {
         timestamp: new Date().toISOString(),
@@ -416,7 +622,8 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
             exists: existsSync(logPath),
             sizeKb: Math.round(logFileSize / 1024),
         },
-        historianDumps: collectHistorianDumps(),
+        recentSessions,
+        historianDumps: collectHistorianDumps(recentSessions),
         historianFailures: await collectHistorianFailures(storageDirPath),
     };
 }
@@ -454,10 +661,26 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
     };
 
     const historianDumps = {
-        dir: sanitizeString(report.historianDumps.dir),
-        count: report.historianDumps.count,
-        recent: report.historianDumps.recent,
+        byProject: report.historianDumps.byProject.map((bucket) => ({
+            directory: sanitizeString(bucket.directory),
+            primarySessionId: bucket.primarySessionId,
+            sessionIds: bucket.sessionIds,
+            count: bucket.count,
+            recent: bucket.recent,
+        })),
+        legacyDumps: {
+            dir: sanitizeString(report.historianDumps.legacyDumps.dir),
+            count: report.historianDumps.legacyDumps.count,
+            recent: report.historianDumps.legacyDumps.recent,
+        },
     };
+
+    const recentSessions = report.recentSessions.map((session) => ({
+        sessionId: session.sessionId,
+        title: session.title,
+        directory: sanitizeString(session.directory),
+        lastActiveAt: session.lastActiveAt,
+    }));
 
     return [
         `- Timestamp: ${report.timestamp}`,
@@ -490,8 +713,14 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         JSON.stringify(storage, null, 2),
         "```",
         "",
+        "### Recent sessions",
+        recentSessions.length === 0
+            ? "_No recent OpenCode sessions found (or OpenCode DB unavailable on this runtime)._"
+            : ["```json", JSON.stringify(recentSessions, null, 2), "```"].join("\n"),
+        "",
         "### Historian dumps",
         "(Metadata only — XML content is not included in this report.)",
+        "Dumps are stored per-project under `<project>/.opencode/magic-context/historian/`.",
         "```json",
         JSON.stringify(historianDumps, null, 2),
         "```",

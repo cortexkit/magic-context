@@ -362,7 +362,11 @@ describe("bundleIssueReport secret redaction", () => {
                 storageDir: { path: join(root, "storage"), exists: true, contextDbSizeBytes: 0 },
                 conflicts: { hasConflict: false, reasons: [] },
                 logFile: { path: join(root, "missing.log"), exists: false, sizeKb: 0 },
-                historianDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
+                recentSessions: [],
+                historianDumps: {
+                    byProject: [],
+                    legacyDumps: { dir: join(root, "dumps"), count: 0, recent: [] },
+                },
                 historianFailures: [
                     {
                         sessionId: "ses_1",

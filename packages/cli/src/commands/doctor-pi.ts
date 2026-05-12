@@ -30,7 +30,6 @@ import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { collectDiagnostics } from "../lib/diagnostics-pi";
 import { bundleIssueReport } from "../lib/logs-pi";
 import {
-    getMagicContextHistorianDir,
     getMagicContextLogPath,
     getPiAgentConfigDir,
     getPiUserConfigPath,
@@ -626,33 +625,38 @@ async function runHealthChecks(options: {
         add(results, "info", `No plugin log file yet at ${logPath}`);
     }
 
-    // Historian debug dumps — kept on disk after failed historian runs so
-    // users can attach them to bug reports. Aligned with OpenCode doctor.
-    const historianDumpDir = getMagicContextHistorianDir("pi");
-    if (existsSync(historianDumpDir)) {
-        try {
-            const dumps = readdirSync(historianDumpDir)
-                .filter((f) => f.endsWith(".xml"))
-                .map((f) => ({ name: f, mtime: statSync(join(historianDumpDir, f)).mtimeMs }))
-                .sort((a, b) => b.mtime - a.mtime);
-            if (dumps.length > 0) {
-                add(
-                    results,
-                    "warn",
-                    `Historian debug dumps: ${dumps.length} file(s) in ${historianDumpDir}`,
-                );
-                for (const dump of dumps.slice(0, 3)) {
-                    const age = Math.round((Date.now() - dump.mtime) / 60000);
-                    const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`;
-                    add(results, "info", `  ${dump.name} (${ageStr})`);
-                }
-                if (dumps.length > 3) {
-                    add(results, "info", `  ... and ${dumps.length - 3} more`);
-                }
+    // Historian dumps now live per-project under `<dir>/.opencode/magic-context/historian/`
+    // — surface them grouped by project. Falls back to the legacy harness-scoped
+    // tmp-dir layout when no project-local dumps are present (pre-Phase-3 plugin
+    // versions or fresh installs).
+    const diagnosticsForDumps = await collectDiagnostics(options.cwd);
+    const dumpBuckets = diagnosticsForDumps.historianDumps.byProject;
+    if (dumpBuckets.length > 0) {
+        const totalCount = dumpBuckets.reduce((sum, b) => sum + b.count, 0);
+        add(
+            results,
+            "warn",
+            `Historian debug dumps: ${totalCount} file(s) across ${dumpBuckets.length} project(s)`,
+        );
+        for (const bucket of dumpBuckets) {
+            add(results, "info", `  [${bucket.directory}] ${bucket.count} file(s)`);
+            for (const dump of bucket.recent.slice(0, 3)) {
+                const age = dump.ageMinutes;
+                const ageStr = age < 60 ? `${age}m ago` : `${Math.round(age / 60)}h ago`;
+                add(results, "info", `    ${dump.name} (${ageStr})`);
             }
-        } catch {
-            // Can't read dump directory — skip
+            if (bucket.count > 3) {
+                add(results, "info", `    ... and ${bucket.count - 3} more`);
+            }
         }
+    }
+    const legacyDumps = diagnosticsForDumps.historianDumps.legacyDumps;
+    if (legacyDumps.count > 0) {
+        add(
+            results,
+            "info",
+            `Legacy historian dumps (pre-v0.18.x): ${legacyDumps.count} file(s) in ${legacyDumps.dir}`,
+        );
     }
 
     if (!options.quiet) {
@@ -754,9 +758,31 @@ async function runIssueFlow(options: {
     spinner.start("Collecting sanitized Pi diagnostics");
     try {
         const report = await options.deps.collectDiagnostics(options.cwd);
+        spinner.stop("Diagnostics collected");
+
+        let sessionFilter: string | null = null;
+        if (report.recentSessions.length > 1) {
+            const choice = await options.prompts.selectOne(
+                "Which Pi session is this issue about? (filters log lines from other sessions)",
+                [
+                    ...report.recentSessions.map((session, index) => ({
+                        label: `${session.directory} — ${session.sessionId}${index === 0 ? " (most recent)" : ""}`,
+                        value: session.sessionId,
+                    })),
+                    {
+                        label: "All sessions (no filtering)",
+                        value: "__all__",
+                    },
+                ],
+            );
+            sessionFilter = choice === "__all__" ? null : choice;
+        }
+
+        spinner.start("Bundling Pi issue report");
         const bundled = await bundleIssueReport(report, description, title, {
             cwd: options.cwd,
             now: options.deps.now(),
+            sessionFilter,
         });
         spinner.stop(`Report written to ${bundled.path}`);
 

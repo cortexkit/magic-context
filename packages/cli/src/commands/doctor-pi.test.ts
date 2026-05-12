@@ -299,6 +299,15 @@ describe("Pi doctor", () => {
                 exists: true,
                 sizeKb: 1,
             },
+            recentSessions: [],
+            historianDumps: {
+                byProject: [],
+                legacyDumps: {
+                    dir: join(tmpdir(), "pi", "magic-context", "historian"),
+                    count: 0,
+                    recent: [],
+                },
+            },
         };
 
         const options = baseOptions(root, cwd, prompts);

@@ -29,16 +29,33 @@ export interface BundledIssueReport {
     bodyMarkdown: string;
 }
 
+/**
+ * Drop log lines that reference a session ID OTHER than `sessionId`.
+ * See logs-opencode.ts for the rationale; this Pi variant uses the same
+ * approach because Pi historian logs include the OpenCode-style `ses_*`
+ * shape for its own child sessions and that's what the picker presents.
+ */
+function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
+    if (!sessionId) return lines;
+    const otherSessionPattern = /\bses_[A-Za-z0-9]{8,32}\b/g;
+    return lines.filter((line) => {
+        const matches = line.match(otherSessionPattern);
+        if (!matches) return true;
+        return matches.every((id) => id === sessionId);
+    });
+}
+
 export async function bundleIssueReport(
     report: PiDiagnosticReport,
     description: string,
     title: string,
-    options: { cwd?: string; now?: Date } = {},
+    options: { cwd?: string; now?: Date; sessionFilter?: string | null } = {},
 ): Promise<BundledIssueReport> {
     const LOG_TAIL_LINES = 400;
-    const logLines = report.logFile.exists
+    const allLogLines = report.logFile.exists
         ? readFileSync(report.logFile.path, "utf-8").split(/\r?\n/)
         : [];
+    const logLines = filterLogLinesBySession(allLogLines, options.sessionFilter ?? null);
     const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
 
     const bodyMarkdown = [

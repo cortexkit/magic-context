@@ -80,15 +80,42 @@ function extractHistorianFailureLines(sanitized: string, limit = 30): string[] {
     return matches.reverse();
 }
 
+/**
+ * Drop log lines that reference a `ses_*` session ID OTHER than `sessionId`.
+ * Lines without any `ses_*` reference are kept (they're shared-runtime logs
+ * that may or may not be relevant — we don't have enough signal to drop
+ * them, and keeping them is safe).
+ *
+ * When `sessionId` is null, no filtering happens — the full log slice is
+ * returned. This is the Q2 design: filter only when the user picked a
+ * specific session in the `--issue` picker.
+ */
+function filterLogLinesBySession(lines: string[], sessionId: string | null): string[] {
+    if (!sessionId) return lines;
+    // Pattern matches OpenCode session IDs (`ses_*` with hex/alnum body, up to
+    // 32 chars). Anchored with a non-word boundary so we don't trip on names
+    // that happen to embed `ses_`.
+    const otherSessionPattern = /\bses_[A-Za-z0-9]{8,32}\b/g;
+    return lines.filter((line) => {
+        const matches = line.match(otherSessionPattern);
+        if (!matches) return true;
+        // Keep the line only if EVERY session ID it mentions matches the chosen
+        // one. Mixed-session lines (rare but possible) get dropped to be safe.
+        return matches.every((id) => id === sessionId);
+    });
+}
+
 export async function bundleIssueReport(
     report: DiagnosticReport,
     description: string,
     _title: string,
+    sessionFilter: string | null = null,
 ): Promise<BundledIssueReport> {
     const LOG_TAIL_LINES = 400;
-    const logLines = report.logFile.exists
+    const allLogLines = report.logFile.exists
         ? readFileSync(report.logFile.path, "utf-8").split(/\r?\n/)
         : [];
+    const logLines = filterLogLinesBySession(allLogLines, sessionFilter);
     const recentLog = sanitizeLogContent(logLines.slice(-LOG_TAIL_LINES).join("\n")).trim();
 
     // Also extract historian-failure lines from a wider window so issue reports
