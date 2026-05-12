@@ -58,13 +58,16 @@ export type ToolUsageSinceUserTurn = Map<string, number>;
  * actually occurred — the next defer pass MUST hit the cache.
  *
  * Producers: `/ctx-flush`, real variant change, system-prompt hash change,
- * historian publish (`onInjectionCacheCleared`), recomp publish, partial
- * recomp publish.
+ * explicit user refresh paths (flush/recomp/variant/system-prompt hash).
+ * Background historian/compressor publications use DeferredHistoryRefreshSessions.
  *
  * NOT a producer: the background compressor — its output deliberately
  * lands on the next natural cache-bust pass instead of forcing one.
  */
 export type HistoryRefreshSessions = Set<string>;
+
+/** Persistent deferred history refresh from background historian/compressor publication. */
+export type DeferredHistoryRefreshSessions = Set<string>;
 
 /**
  * One-shot: signals that the system-prompt adjuncts (project docs, user
@@ -88,13 +91,17 @@ export type SystemPromptRefreshSessions = Set<string>;
  * blocked passes until the materialization succeeds.
  *
  * Producers: `/ctx-flush`, real variant change, system-prompt hash change,
- * historian publish, recomp publish, partial recomp publish.
+ * explicit user refresh paths (flush/recomp/variant/system-prompt hash).
+ * Background historian publications use DeferredMaterializationSessions.
  *
  * Why historian/recomp produce here too: those publish paths queue drop
  * ops via `queueDropsForCompartmentalizedMessages`. The next safe pass
  * needs to materialize those queued drops or context will accumulate.
  */
 export type PendingMaterializationSessions = Set<string>;
+
+/** Persistent deferred drop-materialization signal from background historian publication. */
+export type DeferredMaterializationSessions = Set<string>;
 
 /**
  * @deprecated Use `HistoryRefreshSessions`, `SystemPromptRefreshSessions`,
@@ -217,10 +224,12 @@ export function createEventHook(args: {
     sessionDirectoryBySession: Map<string, string>;
     recentReduceBySession: RecentReduceBySession;
     toolUsageSinceUserTurn: ToolUsageSinceUserTurn;
-    /** All three sets are cleaned on `session.deleted` to prevent leaks. */
+    /** All signal sets are cleaned on `session.deleted` to prevent leaks. */
     historyRefreshSessions: HistoryRefreshSessions;
+    deferredHistoryRefreshSessions: DeferredHistoryRefreshSessions;
     systemPromptRefreshSessions: SystemPromptRefreshSessions;
     pendingMaterializationSessions: PendingMaterializationSessions;
+    deferredMaterializationSessions: DeferredMaterializationSessions;
     lastHeuristicsTurnId: LastHeuristicsTurnId;
     commitSeenLastPass?: Map<string, boolean>;
     client: PluginContext["client"];
@@ -305,8 +314,10 @@ export function createEventHook(args: {
             args.recentReduceBySession.delete(sessionId);
             args.toolUsageSinceUserTurn.delete(sessionId);
             args.historyRefreshSessions.delete(sessionId);
+            args.deferredHistoryRefreshSessions.delete(sessionId);
             args.systemPromptRefreshSessions.delete(sessionId);
             args.pendingMaterializationSessions.delete(sessionId);
+            args.deferredMaterializationSessions.delete(sessionId);
             args.lastHeuristicsTurnId.delete(sessionId);
             args.commitSeenLastPass?.delete(sessionId);
             clearNoteNudgeState(args.db, sessionId);

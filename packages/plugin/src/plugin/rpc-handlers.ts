@@ -670,7 +670,7 @@ export function registerRpcHandlers(
             // Without these signals the TUI recomp would silently leave
             // injection cache stale, causing defer passes to render an
             // outdated history block until the next natural cache bust.
-            onInjectionCacheCleared: (sid) => {
+            onCompartmentStatePublished: (sid) => {
                 liveSessionState.historyRefreshSessions.add(sid);
                 liveSessionState.pendingMaterializationSessions.add(sid);
             },

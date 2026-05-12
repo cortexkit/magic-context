@@ -117,11 +117,10 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             // 0, matching what partial recomp does for its rebuilt range.
             clearCompressionDepth(db, sessionId);
 
-            // Invalidate injection cache after recomp promotion
-            clearInjectionCache(sessionId);
-            // Signal the caller that the next transform MUST treat itself as
-            // cache-busting. See council Finding #9.
-            deps.onInjectionCacheCleared?.(sessionId);
+            if (deps.preserveInjectionCacheUntilConsumed !== true) {
+                clearInjectionCache(sessionId);
+            }
+            deps.onCompartmentStatePublished?.(sessionId);
 
             // Issue #44: respect memory.enabled and memory.auto_promote.
             if (deps.directory && deps.memoryEnabled !== false && deps.autoPromote !== false) {
@@ -311,11 +310,10 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         // Full recomp rebuilds every compartment, so all pre-existing depth
         // rows are stale. Matches partial recomp's behavior for rebuilt ranges.
         clearCompressionDepth(db, sessionId);
-        // Invalidate injection cache after final recomp promotion
-        clearInjectionCache(sessionId);
-        // Signal the caller that the next transform MUST treat itself as
-        // cache-busting. See council Finding #9.
-        deps.onInjectionCacheCleared?.(sessionId);
+        if (deps.preserveInjectionCacheUntilConsumed !== true) {
+            clearInjectionCache(sessionId);
+        }
+        deps.onCompartmentStatePublished?.(sessionId);
 
         const finalCompartments = promoted?.compartments ?? candidateCompartments;
         const finalFacts = promoted?.facts ?? candidateFacts;

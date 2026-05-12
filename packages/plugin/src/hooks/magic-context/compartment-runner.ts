@@ -8,10 +8,20 @@ import {
 import { executeContextRecompInternal } from "./compartment-runner-recomp";
 import type { CompartmentRunnerDeps } from "./compartment-runner-types";
 
-const activeRuns = new Map<string, Promise<void>>();
+export interface ActiveCompartmentRun {
+    promise: Promise<void>;
+    published: boolean;
+}
 
-export function getActiveCompartmentRun(sessionId: string): Promise<void> | undefined {
+const activeRuns = new Map<string, ActiveCompartmentRun>();
+
+export function getActiveCompartmentRun(sessionId: string): ActiveCompartmentRun | undefined {
     return activeRuns.get(sessionId);
+}
+
+export function markActiveCompartmentRunPublished(sessionId: string): void {
+    const activeRun = activeRuns.get(sessionId);
+    if (activeRun) activeRun.published = true;
 }
 
 /**
@@ -29,15 +39,34 @@ export function getActiveCompartmentRun(sessionId: string): Promise<void> | unde
  * bailed — this function will overwrite silently if called anyway, which is
  * the desired behavior for the retry path.
  */
-export function registerActiveCompartmentRun(sessionId: string, promise: Promise<void>): void {
+export function registerActiveCompartmentRun(
+    sessionId: string,
+    promise: Promise<void>,
+): ActiveCompartmentRun {
+    const activeRun: ActiveCompartmentRun = {
+        promise: Promise.resolve(),
+        published: false,
+    };
     const wrapped = promise.finally(() => {
         // Only clear if this is still the current entry (another run may have
         // replaced us if the caller overwrote; don't stomp the replacement).
-        if (activeRuns.get(sessionId) === wrapped) {
+        if (activeRuns.get(sessionId)?.promise === wrapped) {
             activeRuns.delete(sessionId);
         }
     });
-    activeRuns.set(sessionId, wrapped);
+    activeRun.promise = wrapped;
+    activeRuns.set(sessionId, activeRun);
+    return activeRun;
+}
+
+function withPublishedCallback(deps: CompartmentRunnerDeps): CompartmentRunnerDeps {
+    return {
+        ...deps,
+        onCompartmentStatePublished: (sid) => {
+            markActiveCompartmentRunPublished(sid);
+            deps.onCompartmentStatePublished?.(sid);
+        },
+    };
 }
 
 export function startCompartmentAgent(deps: CompartmentRunnerDeps): void {
@@ -52,7 +81,8 @@ export function startCompartmentAgent(deps: CompartmentRunnerDeps): void {
     // Track the real underlying promise — NOT a raced wrapper.
     // This ensures activeRuns.has(sessionId) stays true until the historian run
     // actually completes, preventing duplicate runs even if an external await times out.
-    const promise = runCompartmentAgent(deps)
+    const runnerDeps = withPublishedCallback(deps);
+    const promise = runCompartmentAgent(runnerDeps)
         .catch((err) => {
             sessionLog(deps.sessionId, "compartment agent: unhandled rejection:", err);
             // Ensure compartmentInProgress is cleared on any failure
@@ -63,9 +93,11 @@ export function startCompartmentAgent(deps: CompartmentRunnerDeps): void {
             }
         })
         .finally(() => {
-            activeRuns.delete(deps.sessionId);
+            if (activeRuns.get(deps.sessionId)?.promise === promise) {
+                activeRuns.delete(deps.sessionId);
+            }
         });
-    activeRuns.set(deps.sessionId, promise);
+    activeRuns.set(deps.sessionId, { promise, published: false });
 }
 
 export interface ExecuteContextRecompOptions {
@@ -90,21 +122,22 @@ export async function executeContextRecomp(
         return "## Magic Recomp\n\nHistorian is already running for this session. Wait for it to finish, then try `/ctx-recomp` again.";
     }
 
+    const runnerDeps = withPublishedCallback(deps);
     const promise = options.range
-        ? executePartialRecompInternal(deps, options.range)
-        : executeContextRecompInternal(deps);
-    activeRuns.set(
-        sessionId,
-        promise
-            .then(() => undefined)
-            .catch((err) => {
-                sessionLog(sessionId, "compartment agent: recomp unhandled rejection:", err);
-            }),
-    );
+        ? executePartialRecompInternal(runnerDeps, options.range)
+        : executeContextRecompInternal(runnerDeps);
+    const wrappedPromise = promise
+        .then(() => undefined)
+        .catch((err) => {
+            sessionLog(sessionId, "compartment agent: recomp unhandled rejection:", err);
+        });
+    activeRuns.set(sessionId, { promise: wrappedPromise, published: false });
     try {
         return await promise;
     } finally {
-        activeRuns.delete(sessionId);
+        if (activeRuns.get(sessionId)?.promise === wrappedPromise) {
+            activeRuns.delete(sessionId);
+        }
     }
 }
 

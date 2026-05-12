@@ -41,7 +41,11 @@ export interface PreparedCompartmentInjection {
  * pass from the authoritative SQLite compartment state.
  */
 const INJECTION_CACHE_MAX = 100;
-const injectionCache = new BoundedSessionMap<PreparedCompartmentInjection>(INJECTION_CACHE_MAX);
+type InjectionCacheEntry =
+    | { kind: "empty"; compartmentEndMessageId: ""; renderedBytes: 0 }
+    | { kind: "populated"; injection: PreparedCompartmentInjection };
+
+const injectionCache = new BoundedSessionMap<InjectionCacheEntry>(INJECTION_CACHE_MAX);
 
 export function clearInjectionCache(sessionId: string): void {
     injectionCache.delete(sessionId);
@@ -211,10 +215,14 @@ export function prepareCompartmentInjection(
     // historian publications between passes do not bust the prompt-cache prefix.
     const cached = injectionCache.get(sessionId);
     if (!isCacheBusting && cached) {
+        if (cached.kind === "empty") {
+            return null;
+        }
+        const prepared = cached.injection;
         // Re-do the splice with the cached boundary (messages are rebuilt fresh each pass)
-        if (cached.compartmentEndMessageId.length > 0) {
+        if (prepared.compartmentEndMessageId.length > 0) {
             const cutoffIndex = messages.findIndex(
-                (message) => message.info.id === cached.compartmentEndMessageId,
+                (message) => message.info.id === prepared.compartmentEndMessageId,
             );
             if (cutoffIndex >= 0) {
                 const remaining = messages.slice(cutoffIndex + 1);
@@ -227,11 +235,11 @@ export function prepareCompartmentInjection(
                 // defer passes instead of alternating between injected/not-injected.
                 sessionLog(
                     sessionId,
-                    `compartment injection: cached boundary ${cached.compartmentEndMessageId} not in messages (already trimmed), reusing cache`,
+                    `compartment injection: cached boundary ${prepared.compartmentEndMessageId} not in messages (already trimmed), reusing cache`,
                 );
             }
         }
-        return cached;
+        return prepared;
     }
 
     const compartments = getCompartments(db, sessionId);
@@ -293,7 +301,11 @@ export function prepareCompartmentInjection(
 
     // Nothing to inject if we have no compartments, no facts, and no memories
     if (compartments.length === 0 && facts.length === 0 && !memoryBlock) {
-        injectionCache.delete(sessionId);
+        injectionCache.set(sessionId, {
+            kind: "empty",
+            compartmentEndMessageId: "",
+            renderedBytes: 0,
+        });
         return null;
     }
 
@@ -333,7 +345,7 @@ export function prepareCompartmentInjection(
             factCount: facts.length,
             memoryCount,
         };
-        injectionCache.set(sessionId, result);
+        injectionCache.set(sessionId, { kind: "populated", injection: result });
         return result;
     }
 
@@ -359,7 +371,7 @@ export function prepareCompartmentInjection(
             factCount: facts.length,
             memoryCount,
         };
-        injectionCache.set(sessionId, result);
+        injectionCache.set(sessionId, { kind: "populated", injection: result });
         return result;
     }
 
@@ -380,7 +392,7 @@ export function prepareCompartmentInjection(
         factCount: facts.length,
         memoryCount,
     };
-    injectionCache.set(sessionId, result);
+    injectionCache.set(sessionId, { kind: "populated", injection: result });
     return result;
 }
 

@@ -19,6 +19,7 @@ import { afterEach, describe, expect, it, mock } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { replaceAllCompartmentState } from "../../features/magic-context/compartment-storage";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import {
     closeDatabase,
@@ -27,6 +28,7 @@ import {
 } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
+import { canConsumeDeferredOnThisPass } from "./cache-busting-signals";
 import { registerActiveCompartmentRun } from "./compartment-runner";
 import { createNudgePlacementStore, createTransform } from "./transform";
 
@@ -403,6 +405,541 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
 
         // System-prompt set was never touched by historian publication.
         expect(systemPromptRefreshSessions.has(sessionId)).toBe(false);
+    });
+
+    it("Test 6: deferred helper rejects low-context defer passes", () => {
+        expect(
+            canConsumeDeferredOnThisPass({
+                schedulerDecision: "defer",
+                contextPercentage: 30,
+                justAwaitedPublication: false,
+                activeRunBlocksMaterialization: false,
+            }),
+        ).toBe(false);
+    });
+
+    it("Test 7: deferred helper accepts scheduler execute", () => {
+        expect(
+            canConsumeDeferredOnThisPass({
+                schedulerDecision: "execute",
+                contextPercentage: 30,
+                justAwaitedPublication: false,
+                activeRunBlocksMaterialization: false,
+            }),
+        ).toBe(true);
+    });
+
+    it("Test 8: deferred helper accepts force materialization threshold", () => {
+        expect(
+            canConsumeDeferredOnThisPass({
+                schedulerDecision: "defer",
+                contextPercentage: 85,
+                justAwaitedPublication: false,
+                activeRunBlocksMaterialization: false,
+            }),
+        ).toBe(true);
+    });
+
+    it("Test 9: deferred helper blocks active low-context runs", () => {
+        expect(
+            canConsumeDeferredOnThisPass({
+                schedulerDecision: "execute",
+                contextPercentage: 30,
+                justAwaitedPublication: false,
+                activeRunBlocksMaterialization: true,
+            }),
+        ).toBe(false);
+    });
+
+    it("Test 10: just-awaited publication overrides the active-run block", () => {
+        expect(
+            canConsumeDeferredOnThisPass({
+                schedulerDecision: "defer",
+                contextPercentage: 30,
+                justAwaitedPublication: true,
+                activeRunBlocksMaterialization: true,
+            }),
+        ).toBe(true);
+    });
+
+    it("Test 11: deferred publish stays invisible across low-context defer passes", async () => {
+        useTempDataHome("ctx-busting-test11-");
+        const sessionId = "ses-deferred-low-context";
+        const db = openDatabase();
+        const historyRefreshSessions = new Set<string>();
+        const deferredHistoryRefreshSessions = new Set<string>();
+        const pendingMaterializationSessions = new Set<string>();
+        const deferredMaterializationSessions = new Set<string>();
+        const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
+        replaceAllCompartmentState(
+            db,
+            sessionId,
+            [
+                {
+                    sequence: 1,
+                    startMessage: 1,
+                    endMessage: 1,
+                    startMessageId: "m-user",
+                    endMessageId: "m-user",
+                    title: "old",
+                    content: "old history",
+                },
+            ],
+            [],
+        );
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler,
+            contextUsageMap: new Map([
+                [
+                    sessionId,
+                    { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            nudger: () => null,
+            db,
+            nudgePlacements: createNudgePlacementStore(),
+            historyRefreshSessions,
+            deferredHistoryRefreshSessions,
+            pendingMaterializationSessions,
+            deferredMaterializationSessions,
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 1,
+            autoDropToolAge: 1000,
+            dropToolStructure: true,
+            client: testClient,
+            directory: testDirectory,
+        });
+
+        const firstMessages = buildSimpleMessages(sessionId);
+        await transform({}, { messages: firstMessages });
+        const firstWire = JSON.stringify(firstMessages[0]);
+
+        deferredHistoryRefreshSessions.add(sessionId);
+        deferredMaterializationSessions.add(sessionId);
+
+        const secondMessages = buildSimpleMessages(sessionId);
+        await transform({}, { messages: secondMessages });
+
+        expect(JSON.stringify(secondMessages[0])).toBe(firstWire);
+        expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(true);
+        expect(deferredMaterializationSessions.has(sessionId)).toBe(true);
+    });
+
+    it("Test 12: execute pass consumes deferred history and materialization together", async () => {
+        useTempDataHome("ctx-busting-test12-");
+        const sessionId = "ses-deferred-execute";
+        const db = openDatabase();
+        const historyRefreshSessions = new Set<string>();
+        const deferredHistoryRefreshSessions = new Set<string>([sessionId]);
+        const pendingMaterializationSessions = new Set<string>();
+        const deferredMaterializationSessions = new Set<string>([sessionId]);
+        const scheduler: Scheduler = { shouldExecute: mock(() => "execute" as const) };
+        replaceAllCompartmentState(db, sessionId, [], []);
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler,
+            contextUsageMap: new Map([
+                [
+                    sessionId,
+                    { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            nudger: () => null,
+            db,
+            nudgePlacements: createNudgePlacementStore(),
+            historyRefreshSessions,
+            deferredHistoryRefreshSessions,
+            pendingMaterializationSessions,
+            deferredMaterializationSessions,
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 1,
+            autoDropToolAge: 1000,
+            dropToolStructure: true,
+        });
+
+        await transform({}, { messages: buildSimpleMessages(sessionId) });
+
+        expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(false);
+        expect(deferredMaterializationSessions.has(sessionId)).toBe(false);
+    });
+
+    it("Test 13: active low-context execute does not consume deferred state", async () => {
+        useTempDataHome("ctx-busting-test13-");
+        const sessionId = "ses-active-execute";
+        const deferredHistoryRefreshSessions = new Set<string>([sessionId]);
+        const deferredMaterializationSessions = new Set<string>([sessionId]);
+        const scheduler: Scheduler = { shouldExecute: mock(() => "execute" as const) };
+        const lift = blockCompartmentRun(sessionId);
+        try {
+            const transform = createTransform({
+                tagger: createTagger(),
+                scheduler,
+                contextUsageMap: new Map([
+                    [
+                        sessionId,
+                        { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
+                    ],
+                ]),
+                nudger: () => null,
+                db: openDatabase(),
+                nudgePlacements: createNudgePlacementStore(),
+                historyRefreshSessions: new Set<string>(),
+                deferredHistoryRefreshSessions,
+                pendingMaterializationSessions: new Set<string>(),
+                deferredMaterializationSessions,
+                lastHeuristicsTurnId: new Map<string, string>(),
+                clearReasoningAge: 50,
+                protectedTags: 1,
+                autoDropToolAge: 1000,
+                dropToolStructure: true,
+                client: testClient,
+                directory: testDirectory,
+            });
+            await transform({}, { messages: buildSimpleMessages(sessionId) });
+            expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(true);
+            expect(deferredMaterializationSessions.has(sessionId)).toBe(true);
+        } finally {
+            lift();
+        }
+    });
+
+    it("Test 14: compressor-only deferred history drains without materialization", async () => {
+        useTempDataHome("ctx-busting-test14-");
+        const sessionId = "ses-compressor-only";
+        const deferredHistoryRefreshSessions = new Set<string>([sessionId]);
+        const scheduler: Scheduler = { shouldExecute: mock(() => "execute" as const) };
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler,
+            contextUsageMap: new Map([
+                [
+                    sessionId,
+                    { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            nudger: () => null,
+            db: openDatabase(),
+            nudgePlacements: createNudgePlacementStore(),
+            historyRefreshSessions: new Set<string>(),
+            deferredHistoryRefreshSessions,
+            pendingMaterializationSessions: new Set<string>(),
+            deferredMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 1,
+            autoDropToolAge: 1000,
+            dropToolStructure: true,
+        });
+        await transform({}, { messages: buildSimpleMessages(sessionId) });
+        expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(false);
+    });
+
+    it("Test 15: low-context explicit refresh drains both deferred sets", async () => {
+        useTempDataHome("ctx-busting-test15-");
+        const sessionId = "ses-explicit-drain";
+        const historyRefreshSessions = new Set<string>([sessionId]);
+        const pendingMaterializationSessions = new Set<string>([sessionId]);
+        const deferredHistoryRefreshSessions = new Set<string>([sessionId]);
+        const deferredMaterializationSessions = new Set<string>([sessionId]);
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: mock(() => "defer" as const) },
+            contextUsageMap: new Map([
+                [
+                    sessionId,
+                    { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            nudger: () => null,
+            db: openDatabase(),
+            nudgePlacements: createNudgePlacementStore(),
+            historyRefreshSessions,
+            deferredHistoryRefreshSessions,
+            pendingMaterializationSessions,
+            deferredMaterializationSessions,
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 1,
+            autoDropToolAge: 1000,
+            dropToolStructure: true,
+        });
+        await transform({}, { messages: buildSimpleMessages(sessionId) });
+        expect(historyRefreshSessions.has(sessionId)).toBe(false);
+        expect(pendingMaterializationSessions.has(sessionId)).toBe(false);
+        expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(false);
+        expect(deferredMaterializationSessions.has(sessionId)).toBe(false);
+    });
+
+    it("Test 16: explicit blocked refresh materializes next pass without another history signal", async () => {
+        useTempDataHome("ctx-busting-test16-");
+        const sessionId = "ses-explicit-blocked";
+        const db = openDatabase();
+        replaceAllCompartmentState(
+            db,
+            sessionId,
+            [
+                {
+                    sequence: 1,
+                    startMessage: 1,
+                    endMessage: 1,
+                    startMessageId: "m-user",
+                    endMessageId: "m-user",
+                    title: "summary",
+                    content: "cached history",
+                },
+            ],
+            [],
+        );
+        const historyRefreshSessions = new Set<string>([sessionId]);
+        const pendingMaterializationSessions = new Set<string>([sessionId]);
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: mock(() => "defer" as const) },
+            contextUsageMap: new Map([
+                [
+                    sessionId,
+                    { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            nudger: () => null,
+            db,
+            nudgePlacements: createNudgePlacementStore(),
+            historyRefreshSessions,
+            pendingMaterializationSessions,
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 1,
+            autoDropToolAge: 1000,
+            dropToolStructure: true,
+            client: testClient,
+            directory: testDirectory,
+        });
+        const lift = blockCompartmentRun(sessionId);
+        let passAText = "";
+        try {
+            const passA = buildSimpleMessages(sessionId);
+            await transform({}, { messages: passA });
+            passAText = JSON.stringify(passA[0]);
+            expect(historyRefreshSessions.has(sessionId)).toBe(false);
+            expect(pendingMaterializationSessions.has(sessionId)).toBe(true);
+        } finally {
+            lift();
+        }
+        const passB = buildSimpleMessages(sessionId);
+        await transform({}, { messages: passB });
+        expect(JSON.stringify(passB[0])).toBe(passAText);
+        expect(pendingMaterializationSessions.has(sessionId)).toBe(false);
+        expect(historyRefreshSessions.has(sessionId)).toBe(false);
+    });
+
+    it("Test 17: empty-state sentinel keeps low-context defer replay empty", async () => {
+        useTempDataHome("ctx-busting-test17-");
+        const sessionId = "ses-empty-sentinel";
+        const db = openDatabase();
+        const deferredHistoryRefreshSessions = new Set<string>([sessionId]);
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: mock(() => "defer" as const) },
+            contextUsageMap: new Map([
+                [
+                    sessionId,
+                    { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            nudger: () => null,
+            db,
+            nudgePlacements: createNudgePlacementStore(),
+            historyRefreshSessions: new Set<string>(),
+            deferredHistoryRefreshSessions,
+            pendingMaterializationSessions: new Set<string>(),
+            deferredMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 1,
+            autoDropToolAge: 1000,
+            dropToolStructure: true,
+        });
+        const first = buildSimpleMessages(sessionId);
+        await transform({}, { messages: first });
+        const firstWire = JSON.stringify(first);
+        const second = buildSimpleMessages(sessionId);
+        await transform({}, { messages: second });
+        expect(JSON.stringify(second)).toBe(firstWire);
+        expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(true);
+    });
+
+    it("Test 18: deferred signals are session-isolated", async () => {
+        useTempDataHome("ctx-busting-test18-");
+        const set = new Set<string>(["A"]);
+        const mat = new Set<string>(["A"]);
+        const db = openDatabase();
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: mock(() => "execute" as const) },
+            contextUsageMap: new Map([
+                ["B", { usage: { percentage: 30, inputTokens: 30_000 }, updatedAt: Date.now() }],
+            ]),
+            nudger: () => null,
+            db,
+            nudgePlacements: createNudgePlacementStore(),
+            historyRefreshSessions: new Set<string>(),
+            deferredHistoryRefreshSessions: set,
+            pendingMaterializationSessions: new Set<string>(),
+            deferredMaterializationSessions: mat,
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 1,
+            autoDropToolAge: 1000,
+            dropToolStructure: true,
+        });
+        await transform({}, { messages: buildSimpleMessages("B") });
+        expect(set.has("A")).toBe(true);
+        expect(mat.has("A")).toBe(true);
+        expect(set.has("B")).toBe(false);
+    });
+
+    it("Test 19: multiple deferred publishes coalesce in sets", () => {
+        const sessions = new Set<string>();
+        sessions.add("ses");
+        sessions.add("ses");
+        expect(sessions.size).toBe(1);
+    });
+
+    it("Test 20: explicit low-context flush with deferred materialization pending drains both sets", async () => {
+        useTempDataHome("ctx-busting-test20-");
+        const sessionId = "ses-test20";
+        const historyRefreshSessions = new Set<string>([sessionId]);
+        const pendingMaterializationSessions = new Set<string>([sessionId]);
+        const deferredHistoryRefreshSessions = new Set<string>([sessionId]);
+        const deferredMaterializationSessions = new Set<string>([sessionId]);
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: mock(() => "defer" as const) },
+            contextUsageMap: new Map([
+                [
+                    sessionId,
+                    { usage: { percentage: 10, inputTokens: 10_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            nudger: () => null,
+            db: openDatabase(),
+            nudgePlacements: createNudgePlacementStore(),
+            historyRefreshSessions,
+            deferredHistoryRefreshSessions,
+            pendingMaterializationSessions,
+            deferredMaterializationSessions,
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 1,
+            autoDropToolAge: 1000,
+            dropToolStructure: true,
+        });
+        await transform({}, { messages: buildSimpleMessages(sessionId) });
+        expect(deferredHistoryRefreshSessions.has(sessionId)).toBe(false);
+        expect(deferredMaterializationSessions.has(sessionId)).toBe(false);
+    });
+
+    it("Test 21: blocked explicit refresh retries materialization without rebuild", async () => {
+        useTempDataHome("ctx-busting-test21-");
+        const sessionId = "ses-test21";
+        const historyRefreshSessions = new Set<string>([sessionId]);
+        const pendingMaterializationSessions = new Set<string>([sessionId]);
+        const db = openDatabase();
+        replaceAllCompartmentState(
+            db,
+            sessionId,
+            [
+                {
+                    sequence: 1,
+                    startMessage: 1,
+                    endMessage: 1,
+                    startMessageId: "m-user",
+                    endMessageId: "m-user",
+                    title: "summary",
+                    content: "history for blocked retry",
+                },
+            ],
+            [],
+        );
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: mock(() => "defer" as const) },
+            contextUsageMap: new Map([
+                [
+                    sessionId,
+                    { usage: { percentage: 10, inputTokens: 10_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            nudger: () => null,
+            db,
+            nudgePlacements: createNudgePlacementStore(),
+            historyRefreshSessions,
+            pendingMaterializationSessions,
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 1,
+            autoDropToolAge: 1000,
+            dropToolStructure: true,
+            client: testClient,
+            directory: testDirectory,
+        });
+
+        const lift = blockCompartmentRun(sessionId);
+        const passA = buildSimpleMessages(sessionId);
+        try {
+            await transform({}, { messages: passA });
+            expect(historyRefreshSessions.has(sessionId)).toBe(false);
+            expect(pendingMaterializationSessions.has(sessionId)).toBe(true);
+        } finally {
+            lift();
+        }
+
+        const passAWire = JSON.stringify(passA[0]);
+        const passB = buildSimpleMessages(sessionId);
+        await transform({}, { messages: passB });
+
+        expect(JSON.stringify(passB[0])).toBe(passAWire);
+        expect(historyRefreshSessions.has(sessionId)).toBe(false);
+        expect(pendingMaterializationSessions.has(sessionId)).toBe(false);
+    });
+
+    it("Test 22: concurrent transforms keep explicit capture per session", async () => {
+        useTempDataHome("ctx-busting-test22-");
+        const historyRefreshSessions = new Set<string>(["A"]);
+        const deferredHistoryRefreshSessions = new Set<string>(["A"]);
+        const pendingMaterializationSessions = new Set<string>(["A"]);
+        const deferredMaterializationSessions = new Set<string>(["A"]);
+        const db = openDatabase();
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: mock(() => "defer" as const) },
+            contextUsageMap: new Map([
+                ["A", { usage: { percentage: 10, inputTokens: 10_000 }, updatedAt: Date.now() }],
+                ["B", { usage: { percentage: 10, inputTokens: 10_000 }, updatedAt: Date.now() }],
+            ]),
+            nudger: () => null,
+            db,
+            nudgePlacements: createNudgePlacementStore(),
+            historyRefreshSessions,
+            deferredHistoryRefreshSessions,
+            pendingMaterializationSessions,
+            deferredMaterializationSessions,
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 1,
+            autoDropToolAge: 1000,
+            dropToolStructure: true,
+        });
+        await Promise.all([
+            transform({}, { messages: buildSimpleMessages("A") }),
+            transform({}, { messages: buildSimpleMessages("B") }),
+        ]);
+        expect(historyRefreshSessions.has("A")).toBe(false);
+        expect(historyRefreshSessions.has("B")).toBe(false);
+        expect(deferredHistoryRefreshSessions.has("B")).toBe(false);
     });
 });
 

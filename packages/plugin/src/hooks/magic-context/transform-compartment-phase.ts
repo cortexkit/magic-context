@@ -5,7 +5,9 @@ import type { PluginContext } from "../../plugin/types";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
 import {
+    type ActiveCompartmentRun,
     getActiveCompartmentRun,
+    markActiveCompartmentRunPublished,
     registerActiveCompartmentRun,
     startCompartmentAgent,
 } from "./compartment-runner";
@@ -55,8 +57,11 @@ interface RunCompartmentPhaseArgs {
     projectPath?: string;
     injectionBudgetTokens?: number;
     getNotificationParams?: () => import("./send-session-notification").NotificationParams;
-    /** True when this pass is already cache-busting (flush or scheduler execute). */
-    cacheAlreadyBusting?: boolean;
+    /** True when this pass is already safe for background compression to run. */
+    safeForBackgroundCompression?: boolean;
+    /** True when this pass is already rebuilding history; suppress standalone compressor. */
+    suppressBackgroundCompressionThisPass?: boolean;
+    deferredHistoryRefreshSessions: Set<string>;
     /** True when transform already triggered recovery/emergency historian work this pass. */
     skipAwaitForThisPass?: boolean;
     /** When true, inject compaction markers into OpenCode's DB after historian publication */
@@ -77,17 +82,23 @@ interface RunCompartmentPhaseArgs {
     memoryEnabled?: boolean;
     /** Auto-promotion gate (`memory.auto_promote`). Issue #44. */
     autoPromote?: boolean;
-    /** Forwarded to compartment runner — see CompartmentRunnerDeps.onInjectionCacheCleared. */
-    onInjectionCacheCleared?: (sessionId: string) => void;
+    /** Forwarded to compartment runner — see CompartmentRunnerDeps.onCompartmentStatePublished. */
+    onCompartmentStatePublished?: (sessionId: string) => void;
 }
 
 export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promise<{
     pendingCompartmentInjection: PreparedCompartmentInjection | null;
     awaitedCompartmentRun: boolean;
     compartmentInProgress: boolean;
+    published: boolean;
+    justAwaitedPublication: boolean;
+    rebuiltHistoryThisPass: boolean;
 }> {
     let pendingCompartmentInjection = args.pendingCompartmentInjection;
     let compartmentInProgress = args.sessionMeta.compartmentInProgress;
+    let published = false;
+    let justAwaitedPublication = false;
+    let rebuiltHistoryThisPass = false;
     let lastCompartmentEnd: number | null = null;
     let rawMessageCount: number | null = null;
     let cachedProtectedTailStart: number | null = null;
@@ -113,7 +124,7 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
     }
 
     async function awaitCompartmentRun(
-        activeRun: Promise<void>,
+        activeRun: ActiveCompartmentRun,
         reason: string,
     ): Promise<"completed" | "timed_out"> {
         sessionLog(args.sessionId, reason);
@@ -121,7 +132,7 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
         const timeout = new Promise<"timeout">((resolve) =>
             setTimeout(() => resolve("timeout"), timeoutMs),
         );
-        const result = await Promise.race([activeRun.then(() => "done" as const), timeout]);
+        const result = await Promise.race([activeRun.promise.then(() => "done" as const), timeout]);
         if (result === "timeout") {
             sessionLog(
                 args.sessionId,
@@ -133,15 +144,22 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
             args.sessionId,
             "transform: compartment agent completed, refreshing compartment coverage",
         );
+        justAwaitedPublication = activeRun.published;
+        published = published || activeRun.published;
+        const historyReprepareShouldBust =
+            activeRun.published && args.deferredHistoryRefreshSessions.has(args.sessionId);
         pendingCompartmentInjection = prepareCompartmentInjection(
             args.db,
             args.resolvedSessionId,
             args.messages,
-            args.cacheAlreadyBusting ?? false,
+            historyReprepareShouldBust,
             args.projectPath,
             args.injectionBudgetTokens,
             args.experimentalTemporalAwareness,
         );
+        if (historyReprepareShouldBust) {
+            rebuiltHistoryThisPass = true;
+        }
         return "completed";
     }
 
@@ -181,7 +199,8 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
                 compressorMaxMergeDepth: args.compressorMaxMergeDepth,
                 memoryEnabled: args.memoryEnabled,
                 autoPromote: args.autoPromote,
-                onInjectionCacheCleared: args.onInjectionCacheCleared,
+                onCompartmentStatePublished: args.onCompartmentStatePublished,
+                preserveInjectionCacheUntilConsumed: true,
             });
             compartmentInProgress = true;
         }
@@ -223,7 +242,8 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
                 compressorMaxMergeDepth: args.compressorMaxMergeDepth,
                 memoryEnabled: args.memoryEnabled,
                 autoPromote: args.autoPromote,
-                onInjectionCacheCleared: args.onInjectionCacheCleared,
+                onCompartmentStatePublished: args.onCompartmentStatePublished,
+                preserveInjectionCacheUntilConsumed: true,
             });
             activeRun = getActiveCompartmentRun(args.sessionId);
         } else if (!activeRun && hasEligibleHistoryForCompartment()) {
@@ -280,7 +300,8 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
     //   - no historian ran this pass (compressor already fires post-historian)
     //   - cooldown: at least 10 minutes since last independent compressor run
     if (
-        args.cacheAlreadyBusting &&
+        args.safeForBackgroundCompression &&
+        !args.suppressBackgroundCompressionThisPass &&
         args.historyBudgetTokens &&
         args.historyBudgetTokens > 0 &&
         args.client &&
@@ -310,6 +331,9 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
         })
             .then((compressed) => {
                 if (compressed) {
+                    markActiveCompartmentRunPublished(args.sessionId);
+                    published = true;
+                    args.deferredHistoryRefreshSessions.add(args.sessionId);
                     sessionLog(
                         args.sessionId,
                         "independent compressor completed in background — compressed history will appear on next cache-busting pass",
@@ -326,5 +350,12 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
         registerActiveCompartmentRun(args.sessionId, compressorPromise);
     }
 
-    return { pendingCompartmentInjection, awaitedCompartmentRun, compartmentInProgress };
+    return {
+        pendingCompartmentInjection,
+        awaitedCompartmentRun,
+        compartmentInProgress,
+        published,
+        justAwaitedPublication,
+        rebuiltHistoryThisPass,
+    };
 }

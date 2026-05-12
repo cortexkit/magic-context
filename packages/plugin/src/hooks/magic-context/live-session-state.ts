@@ -5,7 +5,7 @@ import type { AgentBySession, LiveModelBySession, VariantBySession } from "./hoo
  * every component that needs to share signals with the others (the magic-
  * context hook, RPC handlers, command handlers, etc).
  *
- * The three `*Sessions` sets are the cache-busting signal channels added in
+ * The `*Sessions` sets are the cache-busting signal channels added in
  * the Oracle 2026-04-26 review (replaces the old single `flushedSessions`).
  * See `hook-handlers.ts` for the full lifetime/semantics doc-comment on
  * each set, and `system-prompt-hash.ts` / `transform.ts` /
@@ -21,8 +21,10 @@ export interface LiveSessionState {
     variantBySession: VariantBySession;
     agentBySession: AgentBySession;
     historyRefreshSessions: Set<string>;
+    deferredHistoryRefreshSessions: Set<string>;
     systemPromptRefreshSessions: Set<string>;
     pendingMaterializationSessions: Set<string>;
+    deferredMaterializationSessions: Set<string>;
     /**
      * Cache of resolved session.directory values from `client.session.get(...)`.
      *
@@ -44,8 +46,10 @@ export function createLiveSessionState(): LiveSessionState {
         variantBySession: new Map<string, string | undefined>(),
         agentBySession: new Map<string, string>(),
         historyRefreshSessions: new Set<string>(),
+        deferredHistoryRefreshSessions: new Set<string>(),
         systemPromptRefreshSessions: new Set<string>(),
         pendingMaterializationSessions: new Set<string>(),
+        deferredMaterializationSessions: new Set<string>(),
         sessionDirectoryBySession: new Map<string, string>(),
     };
 }

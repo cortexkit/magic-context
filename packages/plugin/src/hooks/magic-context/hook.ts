@@ -216,10 +216,14 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     // full split rationale.
     const historyRefreshSessions =
         deps.liveSessionState?.historyRefreshSessions ?? new Set<string>();
+    const deferredHistoryRefreshSessions =
+        deps.liveSessionState?.deferredHistoryRefreshSessions ?? new Set<string>();
     const systemPromptRefreshSessions =
         deps.liveSessionState?.systemPromptRefreshSessions ?? new Set<string>();
     const pendingMaterializationSessions =
         deps.liveSessionState?.pendingMaterializationSessions ?? new Set<string>();
+    const deferredMaterializationSessions =
+        deps.liveSessionState?.deferredMaterializationSessions ?? new Set<string>();
     const lastHeuristicsTurnId = new Map<string, string>();
     const commitSeenLastPass = new Map<string, boolean>();
     const variantBySession =
@@ -281,7 +285,9 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         dropToolStructure: deps.config.drop_tool_structure ?? true,
         clearReasoningAge: deps.config.clear_reasoning_age ?? 50,
         historyRefreshSessions,
+        deferredHistoryRefreshSessions,
         pendingMaterializationSessions,
+        deferredMaterializationSessions,
         lastHeuristicsTurnId,
         commitSeenLastPass,
         client: deps.client,
@@ -494,7 +500,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                     // pending-materialization (persistent until heuristics
                     // succeed). NOT systemPromptRefresh — recomp doesn't
                     // touch disk-backed adjuncts. See council Finding #9.
-                    onInjectionCacheCleared: (sid) => {
+                    onCompartmentStatePublished: (sid) => {
                         historyRefreshSessions.add(sid);
                         pendingMaterializationSessions.add(sid);
                     },
@@ -596,8 +602,10 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         recentReduceBySession,
         toolUsageSinceUserTurn,
         historyRefreshSessions,
+        deferredHistoryRefreshSessions,
         systemPromptRefreshSessions,
         pendingMaterializationSessions,
+        deferredMaterializationSessions,
         lastHeuristicsTurnId,
         commitSeenLastPass,
         client: deps.client,
