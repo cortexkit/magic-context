@@ -5,7 +5,7 @@ import { DEFAULT_HISTORIAN_TIMEOUT_MS } from "../../config/schema/magic-context"
 import type { PluginContext } from "../../plugin/types";
 import * as shared from "../../shared";
 import { extractLatestAssistantText } from "../../shared/assistant-message-extractor";
-import { getMagicContextHistorianDir } from "../../shared/data-path";
+import { getProjectMagicContextHistorianDir } from "../../shared/data-path";
 import { describeError, getErrorMessage } from "../../shared/error-message";
 import { buildHistorianEditorPrompt } from "./compartment-prompt";
 import type {
@@ -20,16 +20,14 @@ import {
 } from "./compartment-runner-validation";
 
 // Intentionally kept: historian validation failure dumps are preserved for
-// debugging. They land in the harness-scoped historian dir
-// (${tmpdir}/${harness}/magic-context/historian) and survive until manual
-// cleanup or OS temp pruning. The user has explicitly requested keeping these
-// dumps for now (see audit #21).
-//
-// Resolved at call time rather than at module load so the path follows the
-// harness set during boot — Pi `setHarness("pi")` may run after this module is
-// first imported when both packages share dist artifacts at build time.
-function historianResponseDumpDir(): string {
-    return getMagicContextHistorianDir();
+// debugging. They land in the project-local historian dir
+// (<project>/.opencode/magic-context/historian/) so they sit inside the
+// project boundary OpenCode's permission system already trusts AND so users
+// debugging a failed run can find dumps next to the project they belong to.
+// The user has explicitly requested keeping these dumps for now (see audit
+// #21); they survive until manual cleanup.
+function historianResponseDumpDir(directory: string): string {
+    return getProjectMagicContextHistorianDir(directory);
 }
 const MAX_HISTORIAN_RETRIES = 2;
 
@@ -348,6 +346,7 @@ async function runHistorianPrompt(args: {
 
         const dumpPath = dumpHistorianResponse(
             parentSessionId,
+            sessionDirectory,
             dumpLabel ?? "historian-response",
             result,
         );
@@ -508,9 +507,14 @@ function cleanupHistorianDump(sessionId: string, dumpPath?: string): void {
     }
 }
 
-function dumpHistorianResponse(sessionId: string, label: string, text: string): string | undefined {
+function dumpHistorianResponse(
+    sessionId: string,
+    directory: string,
+    label: string,
+    text: string,
+): string | undefined {
     try {
-        const dumpDir = historianResponseDumpDir();
+        const dumpDir = historianResponseDumpDir(directory);
         mkdirSync(dumpDir, { recursive: true });
         const safeSessionId = sanitizeDumpName(sessionId);
         const safeLabel = sanitizeDumpName(label);

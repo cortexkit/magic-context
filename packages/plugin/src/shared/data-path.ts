@@ -59,6 +59,51 @@ export function getMagicContextHistorianDir(harness: HarnessId = getHarness()): 
     return path.join(getMagicContextTempDir(harness), "historian");
 }
 
+/**
+ * Project-local magic-context artifact directory.
+ *
+ * Layout: `<project-directory>/.opencode/magic-context/`
+ *
+ * Used for artifacts that the historian/recomp pipeline writes during a run
+ * and that the model is asked to read via its native Read tool. OpenCode's
+ * `external_directory` permission system asks the user before reading any
+ * file outside the project directory or its worktree, which interrupts every
+ * historian run when artifacts live under `os.tmpdir()`. Writing under the
+ * project's own `.opencode/` subtree falls inside the project boundary and
+ * never triggers a permission prompt.
+ *
+ * The `.opencode/` parent dir is OpenCode's own per-project convention (used
+ * for project-local config, plans, dumps, plugin installs). Anchoring
+ * magic-context artifacts under `.opencode/magic-context/` keeps them
+ * co-located with related OpenCode metadata and makes them easy for users to
+ * locate when debugging.
+ *
+ * Logger does NOT use this — log files stay in the per-harness tmp subtree
+ * because they are written by the plugin process itself (no model-side Read
+ * tool call, no permission prompt) and span sessions/projects.
+ */
+export function getProjectMagicContextDir(directory: string): string {
+    return path.join(directory, ".opencode", "magic-context");
+}
+
+/**
+ * Project-local historian artifact directory.
+ *
+ * Layout: `<project-directory>/.opencode/magic-context/historian/`
+ *
+ * Used for:
+ *   - existing-state offload XMLs that long historian/recomp passes write
+ *     before invoking the model (the model reads the file via Read tool)
+ *   - validation-failure dump XMLs preserved for debugging
+ *
+ * Callers must `mkdirSync(dir, { recursive: true })` before writing — the
+ * `.opencode/` parent may not exist on a fresh project, and write failures
+ * here must degrade gracefully (e.g. historian falls back to inline state).
+ */
+export function getProjectMagicContextHistorianDir(directory: string): string {
+    return path.join(getProjectMagicContextDir(directory), "historian");
+}
+
 export function getOpenCodeStorageDir(): string {
     return path.join(getDataDir(), "opencode", "storage");
 }

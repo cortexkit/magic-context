@@ -192,9 +192,16 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                       ? `${memoryBlock}\n\nThis is your first run. No existing compartments or facts.`
                       : "This is your first run. No existing state.";
 
-            // Clean up previous pass's state file before writing the new one
+            // Clean up previous pass's state file before writing the new one.
+            // State file lives under <project>/.opencode/magic-context/historian/
+            // so historian's Read tool doesn't trigger OpenCode's
+            // external_directory permission prompt.
             cleanupHistorianStateFile(currentStateFilePath);
-            currentStateFilePath = maybeWriteHistorianStateFile(sessionId, existingState);
+            currentStateFilePath = maybeWriteHistorianStateFile(
+                sessionId,
+                existingState,
+                sessionDirectory,
+            );
 
             const prompt = buildCompartmentAgentPrompt(
                 existingState,

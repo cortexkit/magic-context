@@ -143,10 +143,15 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                   ? `${memoryBlock}\n\nThis is your first run. No existing compartments or facts.`
                   : "This is your first run. No existing state.";
 
-        // Write large existing state to a temp file so the prompt body stays
-        // within HTTP/SDK serialization limits. Historian reads the file via
-        // its built-in Read tool. File is deleted in finally{}.
-        stateFilePath = maybeWriteHistorianStateFile(sessionId, existingState);
+        // Write large existing state to a project-local temp file so the
+        // prompt body stays within HTTP/SDK serialization limits. The file
+        // lives under <project>/.opencode/magic-context/historian/ so OpenCode's
+        // permission system treats it as project-internal and historian's Read
+        // tool call never triggers an `external_directory` prompt. Deleted in
+        // finally{}. The session directory is resolved a few lines below; we
+        // need to pass `directory` here because `sessionDirectory` isn't bound
+        // yet at this point in the flow.
+        stateFilePath = maybeWriteHistorianStateFile(sessionId, existingState, directory);
         if (stateFilePath) {
             sessionLog(
                 sessionId,

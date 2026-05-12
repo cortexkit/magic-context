@@ -284,8 +284,16 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			// which buffers the full reasoning trace before emitting any
 			// output). The historian agent has access to Pi's built-in Read
 			// tool and the prompt instructs it to read the file before
-			// processing the new chunk. Cleaned up in finally{}.
-			stateFilePath = maybeWriteHistorianStateFile(sessionId, existingState);
+			// processing the new chunk. The file lives under
+			// <project>/.opencode/magic-context/historian/ so it stays
+			// inside the project boundary on the OpenCode side and remains a
+			// stable, user-debuggable location for Pi as well. Cleaned up in
+			// finally{}.
+			stateFilePath = maybeWriteHistorianStateFile(
+				sessionId,
+				existingState,
+				directory,
+			);
 			if (stateFilePath) {
 				sessionLog(
 					sessionId,

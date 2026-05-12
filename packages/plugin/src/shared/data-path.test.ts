@@ -8,6 +8,8 @@ import {
     getMagicContextStorageDir,
     getOpenCodeCacheDir,
     getOpenCodeStorageDir,
+    getProjectMagicContextDir,
+    getProjectMagicContextHistorianDir,
 } from "./data-path";
 
 const savedEnv = {
@@ -117,5 +119,41 @@ describe("data-path", () => {
         expect(legacy).not.toBe(shared);
         expect(legacy).toContain("opencode");
         expect(shared).toContain("cortexkit");
+    });
+
+    test("getProjectMagicContextDir composes <project>/.opencode/magic-context", () => {
+        // Project-local artifacts (historian state file, failure dumps) live
+        // inside the project so OpenCode's external_directory permission system
+        // treats them as project-internal. Without this, historian's Read tool
+        // would trigger a permission prompt on every run when artifacts lived
+        // under os.tmpdir().
+        expect(getProjectMagicContextDir("/Users/me/Work/proj")).toBe(
+            path.join("/Users/me/Work/proj", ".opencode", "magic-context"),
+        );
+    });
+
+    test("getProjectMagicContextHistorianDir appends historian/", () => {
+        expect(getProjectMagicContextHistorianDir("/Users/me/Work/proj")).toBe(
+            path.join("/Users/me/Work/proj", ".opencode", "magic-context", "historian"),
+        );
+    });
+
+    test("getProjectMagicContextDir is unaffected by XDG_DATA_HOME", () => {
+        // Project-local paths anchor to the project directory the caller
+        // passes in, NOT to any user-config env var. Setting XDG_DATA_HOME
+        // (which changes the shared storage dir) must not change the
+        // project-local historian dir.
+        process.env.XDG_DATA_HOME = "/tmp/custom-data";
+        expect(getProjectMagicContextDir("/some/project")).toBe(
+            path.join("/some/project", ".opencode", "magic-context"),
+        );
+    });
+
+    test("getProjectMagicContextDir handles trailing slashes via path.join", () => {
+        // path.join normalizes redundant separators so callers don't need to
+        // worry about how the project directory was constructed.
+        expect(getProjectMagicContextDir("/some/project/")).toBe(
+            path.join("/some/project/", ".opencode", "magic-context"),
+        );
     });
 });
