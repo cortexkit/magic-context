@@ -1092,8 +1092,7 @@ export function createTransform(deps: TransformDeps) {
             phaseJustAwaitedPublication: compartmentPhase.justAwaitedPublication,
             compartmentInProgress,
             historyRefreshExplicitBeforePrepare,
-            compartmentInjectionRebuiltFromDb:
-                pendingCompartmentInjection?.rebuiltFromDb === true,
+            compartmentInjectionRebuiltFromDb: pendingCompartmentInjection?.rebuiltFromDb === true,
             rebuiltHistoryFromInitialPrepare,
             historyRebuiltThisPass,
             canConsumeDeferredLate,

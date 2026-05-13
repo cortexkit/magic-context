@@ -510,9 +510,7 @@ const MIGRATIONS: Migration[] = [
             // NULL — see `getSessionsWithPendingMarker` / `healNullTextColumns`
             // contracts in storage-db.ts. Plan v6 §3.
             if (!cols.some((c) => c.name === "pending_compaction_marker_state")) {
-                db.exec(
-                    "ALTER TABLE session_meta ADD COLUMN pending_compaction_marker_state TEXT",
-                );
+                db.exec("ALTER TABLE session_meta ADD COLUMN pending_compaction_marker_state TEXT");
             }
         },
     },

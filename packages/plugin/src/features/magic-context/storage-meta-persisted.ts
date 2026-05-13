@@ -1,6 +1,6 @@
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
-import { stableStringify } from '../../shared/stable-json';
+import { stableStringify } from "../../shared/stable-json";
 import { ensureSessionMetaRow } from "./storage-meta-shared";
 import type { ContextUsage } from "./types";
 
@@ -706,7 +706,6 @@ export function removeStrippedPlaceholderId(
     return true;
 }
 
-
 // ── Pending compaction marker state (plan v6 deferred drain) ──
 
 /**
@@ -749,9 +748,7 @@ export function getPendingCompactionMarkerState(
     sessionId: string,
 ): PendingCompactionMarker | null {
     const row = db
-        .prepare(
-            "SELECT pending_compaction_marker_state FROM session_meta WHERE session_id = ?",
-        )
+        .prepare("SELECT pending_compaction_marker_state FROM session_meta WHERE session_id = ?")
         .get(sessionId) as { pending_compaction_marker_state?: string | null } | null;
     const raw = row?.pending_compaction_marker_state;
     // Defensive: NULL is the canonical absence, but legacy / cross-version

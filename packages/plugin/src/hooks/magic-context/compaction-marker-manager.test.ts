@@ -60,20 +60,13 @@ function createOpenCodeDb(dataHome: string): Database {
     return db;
 }
 
-function insertUserMessage(
-    db: Database,
-    id: string,
-    sessionId: string,
-    timeCreated: number,
-): void {
+function insertUserMessage(db: Database, id: string, sessionId: string, timeCreated: number): void {
     db.prepare(
         "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
     ).run(id, sessionId, timeCreated, timeCreated, JSON.stringify({ role: "user" }));
 }
 
-function makePending(
-    overrides: Partial<PendingCompactionMarker> = {},
-): PendingCompactionMarker {
+function makePending(overrides: Partial<PendingCompactionMarker> = {}): PendingCompactionMarker {
     return {
         ordinal: 10,
         endMessageId: "msg-boundary",
@@ -122,12 +115,7 @@ describe("applyDeferredCompactionMarker — outcomes", () => {
         // Seed session_meta row so the manager can write boundary state into it.
         db.prepare("INSERT INTO session_meta (session_id) VALUES (?)").run("ses-1");
 
-        const outcome = applyDeferredCompactionMarker(
-            db,
-            "ses-1",
-            makePending(),
-            dataHome,
-        );
+        const outcome = applyDeferredCompactionMarker(db, "ses-1", makePending(), dataHome);
 
         expect(outcome.kind).toBe("applied");
         if (outcome.kind === "applied") {
@@ -180,12 +168,7 @@ describe("applyDeferredCompactionMarker — outcomes", () => {
         insertCompartment(db, "ses-1", 10, "msg-boundary");
         db.prepare("INSERT INTO session_meta (session_id) VALUES (?)").run("ses-1");
 
-        const outcome = applyDeferredCompactionMarker(
-            db,
-            "ses-1",
-            makePending(),
-            dataHome,
-        );
+        const outcome = applyDeferredCompactionMarker(db, "ses-1", makePending(), dataHome);
 
         expect(outcome.kind).toBe("stale-skip");
         if (outcome.kind === "stale-skip") {
@@ -203,12 +186,7 @@ describe("applyDeferredCompactionMarker — outcomes", () => {
         // No compartment inserted — simulates a recomp that wiped local state
         db.prepare("INSERT INTO session_meta (session_id) VALUES (?)").run("ses-1");
 
-        const outcome = applyDeferredCompactionMarker(
-            db,
-            "ses-1",
-            makePending(),
-            dataHome,
-        );
+        const outcome = applyDeferredCompactionMarker(db, "ses-1", makePending(), dataHome);
 
         expect(outcome.kind).toBe("stale-skip");
         if (outcome.kind === "stale-skip") {
@@ -265,25 +243,14 @@ describe("applyDeferredCompactionMarker — outcomes", () => {
             .prepare(
                 "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
             )
-            .run(
-                "msg-boundary",
-                "ses-1",
-                1_000,
-                1_000,
-                JSON.stringify({ role: "assistant" }),
-            );
+            .run("msg-boundary", "ses-1", 1_000, 1_000, JSON.stringify({ role: "assistant" }));
         closeQuietly(opencodeDb);
 
         const db = openDatabase();
         insertCompartment(db, "ses-1", 10, "msg-boundary");
         db.prepare("INSERT INTO session_meta (session_id) VALUES (?)").run("ses-1");
 
-        const outcome = applyDeferredCompactionMarker(
-            db,
-            "ses-1",
-            makePending(),
-            dataHome,
-        );
+        const outcome = applyDeferredCompactionMarker(db, "ses-1", makePending(), dataHome);
 
         // No user message exists at or before the boundary → inject returns
         // null → retryable-failure.
@@ -307,12 +274,7 @@ describe("applyDeferredCompactionMarker — outcomes", () => {
         insertCompartment(db, "ses-1", 10, "msg-boundary");
         db.prepare("INSERT INTO session_meta (session_id) VALUES (?)").run("ses-1");
 
-        const outcome = applyDeferredCompactionMarker(
-            db,
-            "ses-1",
-            makePending(),
-            dataHome,
-        );
+        const outcome = applyDeferredCompactionMarker(db, "ses-1", makePending(), dataHome);
 
         expect(outcome.kind).toBe("retryable-failure");
     });

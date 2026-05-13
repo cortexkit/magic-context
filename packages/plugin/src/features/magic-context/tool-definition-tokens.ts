@@ -41,7 +41,7 @@
 import { createHash } from "node:crypto";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import type { Database, Statement } from "../../shared/sqlite";
-import { stableStringify } from '../../shared/stable-json';
+import { stableStringify } from "../../shared/stable-json";
 
 // Inner map: toolID → measured tokens for that tool (description + params).
 // Outer map: composite key → per-tool breakdown.

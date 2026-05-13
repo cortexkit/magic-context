@@ -905,10 +905,7 @@ export async function runPostTransformPhase(
     // only conditionally suppress it when the marker apply returned
     // `retryable-failure`, so the next consuming pass retries.
     let suppressV12HistoryDrain = false;
-    if (
-        historyWasConsumedThisPass &&
-        args.deferredHistoryRefreshSessions.has(args.sessionId)
-    ) {
+    if (historyWasConsumedThisPass && args.deferredHistoryRefreshSessions.has(args.sessionId)) {
         const pending = getPendingCompactionMarkerState(args.db, args.sessionId);
         if (pending) {
             const outcome = applyDeferredCompactionMarker(

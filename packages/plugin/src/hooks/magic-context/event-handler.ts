@@ -1,9 +1,9 @@
 import type { createCompactionHandler } from "../../features/magic-context/compaction";
 import { scheduleClearAndReindex } from "../../features/magic-context/message-index-async";
 import { detectOverflow } from "../../features/magic-context/overflow-detection";
-import { clearPendingCompactionMarkerStateIf, getPendingCompactionMarkerState } from '../../features/magic-context/storage';
 import {
     clearHistorianFailureState,
+    clearPendingCompactionMarkerStateIf,
     clearPersistedNoteNudge,
     clearPersistedNudgePlacement,
     clearPersistedStickyTurnReminder,
@@ -14,6 +14,7 @@ import {
     getMaxTagNumberBySession,
     getOrCreateSessionMeta,
     getOverflowState,
+    getPendingCompactionMarkerState,
     getPersistedNoteNudge,
     getPersistedNudgePlacement,
     getPersistedReasoningWatermark,
@@ -29,7 +30,6 @@ import type { Tagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { log, sessionLog } from "../../shared/logger";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
-import { resetDegradedCacheCount } from "./transform-postprocess-phase";
 import { checkCompartmentTrigger } from "./compartment-trigger";
 import { deriveTriggerBudget } from "./derive-budgets";
 import {
@@ -50,6 +50,7 @@ import { clearNoteNudgeState } from "./note-nudger";
 import { readRawSessionMessages } from "./read-session-chunk";
 import { clearMessageTokensCache, type NudgePlacementStore } from "./transform";
 import { clearCompressorCooldown } from "./transform-compartment-phase";
+import { resetDegradedCacheCount } from "./transform-postprocess-phase";
 
 const CONTEXT_USAGE_TTL_MS = 60 * 60 * 1000;
 

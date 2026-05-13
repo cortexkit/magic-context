@@ -33,7 +33,10 @@ describe("stableStringify", () => {
     });
 
     test("arrays of objects sort keys per element", () => {
-        const input = [{ b: 1, a: 2 }, { d: 3, c: 4 }];
+        const input = [
+            { b: 1, a: 2 },
+            { d: 3, c: 4 },
+        ];
         expect(stableStringify(input)).toBe('[{"a":2,"b":1},{"c":4,"d":3}]');
     });
 

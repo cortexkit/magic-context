@@ -15,9 +15,9 @@ import {
 } from "../../features/magic-context/dreamer";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import type { Scheduler } from "../../features/magic-context/scheduler";
-import { getSessionsWithPendingMarker } from '../../features/magic-context/storage';
 import {
     getDatabasePersistenceError,
+    getSessionsWithPendingMarker,
     isDatabasePersisted,
     openDatabase,
 } from "../../features/magic-context/storage";
