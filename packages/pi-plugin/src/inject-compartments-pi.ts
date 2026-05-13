@@ -348,9 +348,15 @@ export function injectSessionHistoryIntoPi(
 	// projection, but back to the real Pi message array. The projection
 	// already reflects the trim (its length shrank); we use the cached
 	// boundary id to do the equivalent trim on Pi.
+	//
+	// `compartmentEndMessageId` is nullable: a non-null non-empty value
+	// means "trim Pi messages to this boundary"; null/empty means "no
+	// trim" (either fresh session with no compartments yet, or the
+	// degraded-cache path where the boundary message is missing from
+	// the visible array).
 	const boundaryId = prepared.compartmentEndMessageId;
 	const skippedVisible =
-		boundaryId.length > 0
+		boundaryId != null && boundaryId.length > 0
 			? trimPiMessagesToBoundary(piMessages, entryIds, boundaryId)
 			: prepared.skippedVisibleMessages;
 
