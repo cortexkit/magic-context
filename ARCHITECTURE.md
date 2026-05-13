@@ -199,10 +199,10 @@
 - Location: `src/features/magic-context/plugin-messages.ts`
 - Pattern: Vestigial — superseded by RPC. Module remains for forward-compat with older TUI plugin versions that may still poll it; no active runtime callers in current code.
 
-**Compaction markers:**
-- Purpose: Inject OpenCode-compatible compaction boundaries into the message table so `filterCompacted` stops at historian's last compartment boundary, shrinking the transform-input array.
-- Location: `src/features/magic-context/compaction-marker.ts`, `src/hooks/magic-context/compaction-marker-manager.ts`
-- Pattern: Write summary/compaction rows into OpenCode's DB after historian publishes; filter them out from raw reads. Stable feature (default `compaction_markers: true` since v0.16.x); raw-history readers strip `summary=true` / `finish="stop"` rows to preserve original ordinals.
+**Compaction markers (deferred drain, plan v6):**
+- Purpose: Inject OpenCode-compatible compaction boundaries into the message table so `filterCompacted` stops at historian's last compartment boundary, shrinking the transform-input array. Marker movement is deferred from historian publish into the next materializing transform pass so a single cache-bust cycle covers both the `<session-history>` rebuild AND the marker boundary advance.
+- Location: `src/features/magic-context/compaction-marker.ts`, `src/hooks/magic-context/compaction-marker-manager.ts`, `src/features/magic-context/storage-meta-persisted.ts` (pending blob helpers).
+- Pattern: Historian / compressor incremental runners write the prospective new boundary (`{ordinal, endMessageId, publishedAt}`) into `session_meta.pending_compaction_marker_state` in the same transaction that publishes new compartments. The next consuming transform pass that drains `deferredHistoryRefreshSessions` calls `applyDeferredCompactionMarker(...)`, which validates the pending target against the latest stored compartment via `getCompartmentsByEndMessageId(...)` plus an OpenCode-message existence check via `getOpenCodeMessageById(...)`, then sequences `removeCompactionMarker` → `injectCompactionMarker`. Returns a tagged `MarkerUpdateOutcome` (`applied` | `already-current` | `stale-skip` | `retryable-failure`); only `retryable-failure` preserves the deferred-history signal so the next pass retries. CAS-clear (`clearPendingCompactionMarkerStateIf`) on success guards against publish/drain races within and across processes. Eager paths (`/ctx-flush`, `/ctx-recomp`) call the marker manager directly and CAS-clear any stale pending blob. Restart-safe: hook init calls `getSessionsWithPendingMarker(...)` to rehydrate deferred sets so the next pass after restart still drains. `event-handler` CAS-clears pending state on `session.compacted` (provider already advanced the boundary) and on `session.deleted` via cascade. Raw-history readers strip `summary=true` / `finish="stop"` rows to preserve original ordinals. Stable feature, default `compaction_markers: true` since v0.16.x; deferred drain since v0.19 (plan v6).
 
 **Auto-update checker:**
 - Purpose: Self-update the cached `@latest` plugin install once per plugin process — OpenCode's plugin cache no longer auto-updates.
@@ -238,6 +238,11 @@
 - Purpose: Store per-session scalars and JSON blobs that must survive across transform passes and OpenCode restarts.
 - Location: `src/features/magic-context/storage-meta-shared.ts`, `src/features/magic-context/storage-meta-persisted.ts`, `src/features/magic-context/storage-meta-session.ts`, `src/features/magic-context/storage-meta.ts`
 - Pattern: `session_meta` SQLite table with `ensureColumn()` and versioned migrations; typed row interfaces with runtime guards; NULL coercion in `isSessionMetaRow()` so legacy rows don't trigger fallback-to-defaults on every read.
+
+**Cache-busting signals (plan v6):**
+- Purpose: Surface durable per-pass facts the postprocess phase uses to decide whether the v12 deferred-history drain, the deferred-marker drain, and the deferred-materialization drain are eligible to fire — without re-reading transform state.
+- Location: `src/hooks/magic-context/cache-busting-signals.ts`, threaded into `RunPostTransformPhaseArgs` (`historyRebuiltThisPass`, `historyRefreshExplicitBeforePrepare`, `compartmentInjectionRebuiltFromDb`, `canConsumeDeferredLate`, `phaseJustAwaitedPublication`, etc.).
+- Pattern: Captured at well-defined points in `transform.ts` (e.g. `historyRefreshExplicitBeforePrepare` is read immediately before `prepareCompartmentInjection`, not later) so concurrent transform passes don't clobber each other's signals. The drain decision (`historyWasConsumedThisPass`) combines `historyRebuiltThisPass && (canConsumeDeferredLate || phaseJustAwaitedPublication || explicitRebuildHappened) && materializationSatisfied`. Degraded-cache state (null-boundary rebuild) is tracked by `degradedCacheCountBySession` in postprocess; entry logs in `inject-compartments.ts` and a warning at `DEGRADE_CACHE_WARNING_THRESHOLD=10` consecutive degraded rebuilds.
 
 ## Entry Points
 
@@ -327,7 +332,7 @@ Magic Context runs in three effective modes depending on `ctx_reduce_enabled` an
 
 **Storage:** Use the SQLite database created by `src/features/magic-context/storage-db.ts` under the cortexkit data directory resolved by `src/shared/data-path.ts` (`~/.local/share/cortexkit/magic-context/context.db` on Linux/macOS, XDG-equivalent on Windows). Legacy OpenCode-plugin-folder DBs are migrated forward on first boot. The same DB is shared cross-harness between OpenCode and Pi; session-scoped tables include a `harness` discriminator (`'opencode'` / `'pi'`) while project-scoped tables (memories, git commits) are shared.
 
-**Schema migrations:** `src/features/magic-context/migrations.ts` declares versioned migrations v1–v11 (v10 added `tool_owner_message_id` for composite tool-tag identity; v11 added `todo_synthetic_*` columns for synthetic-todowrite). Migration runner uses `schema_migrations` table with version-ordered execution and sibling-startup race protection (duplicate-insert is tolerated).
+**Schema migrations:** `src/features/magic-context/migrations.ts` declares versioned migrations v1–v13 (v10 added `tool_owner_message_id` for composite tool-tag identity; v11 added `todo_synthetic_*` columns for synthetic-todowrite; v12 cleaned orphan `memory_embeddings` rows and verified embedding cascade behavior; v13 added `pending_compaction_marker_state` for the plan-v6 deferred-marker drain). Migration runner uses `schema_migrations` table with version-ordered execution and sibling-startup race protection (duplicate-insert is tolerated).
 
 **Harness-aware behavior:** `src/shared/harness.ts` exposes `setHarness()`/`getHarness()` for the runtime to identify itself; production INSERTs into session-scoped tables tag rows with the current harness. Pi-specific session-resolution paths are skipped on OpenCode and vice versa.
 
