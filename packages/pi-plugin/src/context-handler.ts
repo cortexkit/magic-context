@@ -34,6 +34,7 @@
  * as the OpenCode `messages-transform` wrapper.
  */
 
+import * as crypto from "node:crypto";
 import { getLastCompartmentEndMessage } from "@magic-context/core/features/magic-context/compartment-storage";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
@@ -52,9 +53,12 @@ import {
 } from "@magic-context/core/features/magic-context/storage";
 import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
 import {
+	clearDeferredExecutePendingIfMatches,
 	clearEmergencyRecovery,
 	getOverflowState,
 	getPersistedStickyTurnReminder,
+	peekDeferredExecutePending,
+	setDeferredExecutePendingIfAbsent,
 	setPersistedStickyTurnReminder,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import {
@@ -65,6 +69,10 @@ import {
 	applyFlushedStatuses,
 	applyPendingOperations,
 } from "@magic-context/core/hooks/magic-context/apply-operations";
+import {
+	applyMidTurnDeferral,
+	detectMidTurnBypassReason,
+} from "@magic-context/core/hooks/magic-context/boundary-execution";
 import { replayCavemanCompression } from "@magic-context/core/hooks/magic-context/caveman-cleanup";
 import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
 import { resolveExecuteThreshold } from "@magic-context/core/hooks/magic-context/event-resolvers";
@@ -114,7 +122,7 @@ import {
 	runPiCompressionPassIfNeeded,
 } from "./pi-compressor-runner";
 import { type PiHistorianDeps, runPiHistorian } from "./pi-historian-runner";
-import { readPiSessionMessages } from "./read-session-pi";
+import { isMidTurnPi, readPiSessionMessages } from "./read-session-pi";
 import {
 	buildMessageIdToMaxTag,
 	clearOldReasoningPi,
@@ -993,6 +1001,37 @@ export function registerPiContextHandler(
 				);
 			}
 
+			const schedulerDecisionEarly = schedulerDecision;
+			const midTurn = isMidTurnPi(event, sessionId);
+			const bypassReason = detectMidTurnBypassReason({
+				contextUsage: { percentage: usagePercentage },
+				sessionMeta,
+				historyRefreshSessions,
+				sessionId,
+			});
+
+			const { midTurnAdjustedSchedulerDecision, sideEffect } =
+				applyMidTurnDeferral({
+					base: schedulerDecisionEarly,
+					bypassReason,
+					midTurn,
+				});
+
+			if (sideEffect === "set-flag") {
+				const flagPayload = {
+					id: crypto.randomUUID(),
+					reason: `${schedulerDecisionEarly}-${bypassReason}`,
+					recordedAt: Date.now(),
+				};
+				setDeferredExecutePendingIfAbsent(options.db, sessionId, flagPayload);
+			}
+
+			schedulerDecision = midTurnAdjustedSchedulerDecision;
+			sessionLog(
+				sessionId,
+				`pi [boundary-exec] base=${schedulerDecisionEarly} bypass=${bypassReason} midTurn=${midTurn} effective=${midTurnAdjustedSchedulerDecision} sideEffect=${sideEffect}`,
+			);
+
 			// Force-materialization @ 85%+: aggressive drop-all-tools mode.
 			// Mirrors OpenCode transform-postprocess-phase.ts:145-146.
 			const forceMaterialization =
@@ -1776,6 +1815,8 @@ interface RunPipelineResult {
 }
 
 async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
+	let executedWorkThisPass = false;
+
 	// 0. Inject temporal `<!-- +Xm -->` markers into user messages
 	// BEFORE tagging so the §N§ tag prefix wraps around our marker on
 	// re-tagging. Idempotent: existing markers are detected by regex
@@ -1864,16 +1905,25 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		args.forceMaterialization ||
 		hasPendingMaterializeSignal
 	) {
-		applyPendingOperations(
-			args.sessionId,
-			args.db,
-			targets,
-			args.protectedTags,
-		);
-		// Drain only after success — if applyPendingOperations throws
-		// the flag stays set so the next pass retries.
-		if (hasPendingMaterializeSignal) {
-			consumePendingMaterialization(args.sessionId);
+		try {
+			applyPendingOperations(
+				args.sessionId,
+				args.db,
+				targets,
+				args.protectedTags,
+			);
+			executedWorkThisPass = true;
+			// Drain only after success — if applyPendingOperations throws
+			// the flag stays set so the next pass retries.
+			if (hasPendingMaterializeSignal) {
+				consumePendingMaterialization(args.sessionId);
+			}
+		} catch (err) {
+			sessionLog(
+				args.sessionId,
+				`pi pending operations failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
+			throw err;
 		}
 	}
 
@@ -2018,6 +2068,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				},
 			);
 			heuristicsExecuted = true;
+			executedWorkThisPass = true;
 		} catch (err) {
 			sessionLog(
 				args.sessionId,
@@ -2059,6 +2110,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					);
 				}
 			}
+			executedWorkThisPass = true;
 		} catch (err) {
 			sessionLog(
 				args.sessionId,
@@ -2115,6 +2167,24 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		messages: args.messages,
 		isCacheBusting: args.isCacheBusting,
 	});
+
+	if (executedWorkThisPass) {
+		try {
+			const currentFlag = peekDeferredExecutePending(args.db, args.sessionId);
+			if (currentFlag !== null) {
+				clearDeferredExecutePendingIfMatches(
+					args.db,
+					args.sessionId,
+					currentFlag,
+				);
+			}
+		} catch (err) {
+			sessionLog(
+				args.sessionId,
+				`pi [boundary-exec] drain failed (continuing): ${err}`,
+			);
+		}
+	}
 
 	const outputMessages = transcript.getOutputMessages();
 

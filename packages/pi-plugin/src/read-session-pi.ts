@@ -72,6 +72,59 @@
 import type { RawMessage } from "@magic-context/core/hooks/magic-context/read-session-raw";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 
+export function isMidTurnPi(event: unknown, _sessionId: string): boolean {
+	const messages = (event as { messages?: unknown })?.messages;
+	if (!Array.isArray(messages)) return false;
+
+	let latestAssistantIndex = -1;
+	let latestAssistant: Record<string, unknown> | null = null;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i];
+		if (msg !== null && typeof msg === "object") {
+			const record = msg as Record<string, unknown>;
+			if (record.role === "assistant") {
+				latestAssistantIndex = i;
+				latestAssistant = record;
+				break;
+			}
+		}
+	}
+
+	if (latestAssistant === null) return false;
+	if (latestAssistant.stopReason === "toolUse") return true;
+
+	const toolCallIds = getToolCallIds(latestAssistant.content);
+	if (toolCallIds.size === 0) return false;
+
+	const pairedToolResultIds = new Set<string>();
+	for (const msg of messages.slice(latestAssistantIndex + 1)) {
+		if (msg === null || typeof msg !== "object") continue;
+		const record = msg as Record<string, unknown>;
+		if (record.role !== "toolResult") continue;
+		if (typeof record.toolCallId === "string") {
+			pairedToolResultIds.add(record.toolCallId);
+		}
+	}
+
+	for (const id of toolCallIds) {
+		if (!pairedToolResultIds.has(id)) return true;
+	}
+	return false;
+}
+
+function getToolCallIds(content: unknown): Set<string> {
+	const ids = new Set<string>();
+	if (!Array.isArray(content)) return ids;
+	for (const item of content) {
+		if (item === null || typeof item !== "object") continue;
+		const record = item as Record<string, unknown>;
+		if (record.type === "toolCall" && typeof record.id === "string") {
+			ids.add(record.id);
+		}
+	}
+	return ids;
+}
+
 /**
  * Read the active Pi session branch and synthesize an OpenCode-shape
  * RawMessage[]. Returns an empty array if no branch is available.

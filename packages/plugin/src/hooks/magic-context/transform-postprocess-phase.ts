@@ -1,5 +1,6 @@
 import {
     type ContextDatabase,
+    clearDeferredExecutePendingIfMatches,
     clearPendingCompactionMarkerStateIf,
     clearPersistedStickyTurnReminder,
     clearPersistedTodoSyntheticAnchor,
@@ -9,6 +10,7 @@ import {
     getPersistedTodoSyntheticAnchor,
     getStrippedPlaceholderIds,
     getTopNBySize,
+    peekDeferredExecutePending,
     setPersistedStickyTurnReminder,
     setPersistedTodoSyntheticAnchor,
     setStrippedPlaceholderIds,
@@ -318,6 +320,8 @@ export async function runPostTransformPhase(
     }
     let explicitMaterializedSuccessfully = false;
     let deferredMaterializedSuccessfully = false;
+    let heuristicsRanSuccessfully = false;
+    let pendingOpsRanSuccessfully = false;
     try {
         if (shouldApplyPendingOps) {
             const applyReason = isExplicitFlush
@@ -467,6 +471,10 @@ export async function runPostTransformPhase(
         if (shouldRunHeuristics) {
             if (isExplicitFlush) explicitMaterializedSuccessfully = true;
             if (deferredMaterialize) deferredMaterializedSuccessfully = true;
+            heuristicsRanSuccessfully = true;
+        }
+        if (shouldApplyPendingOps) {
+            pendingOpsRanSuccessfully = true;
         }
     } catch (error) {
         sessionLog(args.sessionId, "transform failed applying pending operations:", error);
@@ -939,6 +947,31 @@ export async function runPostTransformPhase(
     }
     if (explicitMaterializedSuccessfully || deferredMaterializedSuccessfully) {
         args.deferredMaterializationSessions.delete(args.sessionId);
+    }
+
+    const workExecutedSuccessfully =
+        explicitMaterializedSuccessfully ||
+        deferredMaterializedSuccessfully ||
+        heuristicsRanSuccessfully ||
+        pendingOpsRanSuccessfully;
+
+    if (workExecutedSuccessfully) {
+        try {
+            const currentFlag = peekDeferredExecutePending(args.db, args.sessionId);
+            if (currentFlag !== null) {
+                const cleared = clearDeferredExecutePendingIfMatches(
+                    args.db,
+                    args.sessionId,
+                    currentFlag,
+                );
+                sessionLog(
+                    args.sessionId,
+                    `[boundary-exec] deferred-execute drain: ${cleared ? "cleared" : "stale-noop"} reason=${currentFlag.reason}`,
+                );
+            }
+        } catch (err) {
+            sessionLog(args.sessionId, `[boundary-exec] drain failed (continuing): ${err}`);
+        }
     }
 
     if (args.fullFeatureMode && args.autoSearch?.enabled && args.projectPath) {

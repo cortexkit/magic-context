@@ -732,6 +732,12 @@ export interface PendingCompactionMarker {
     publishedAt: number;
 }
 
+export interface DeferredExecutePayload {
+    id: string;
+    reason: string;
+    recordedAt: number;
+}
+
 /** Type guard for a parsed PendingCompactionMarker payload. */
 function isPendingCompactionMarker(value: unknown): value is PendingCompactionMarker {
     return (
@@ -806,6 +812,55 @@ export function clearPendingCompactionMarkerStateIf(
         .prepare(
             `UPDATE session_meta SET pending_compaction_marker_state = NULL
              WHERE session_id = ? AND pending_compaction_marker_state = ?`,
+        )
+        .run(sessionId, expectedBlob);
+    return result.changes > 0;
+}
+
+export function peekDeferredExecutePending(
+    db: Database,
+    sessionId: string,
+): DeferredExecutePayload | null {
+    const row = db
+        .prepare("SELECT deferred_execute_state FROM session_meta WHERE session_id = ?")
+        .get(sessionId) as { deferred_execute_state?: string | null } | null;
+    const raw = row?.deferred_execute_state;
+    // Defensive: NULL is the canonical absence, but legacy / cross-version
+    // writes might still put `""` here. Both treated as absent.
+    if (raw === null || raw === undefined || raw === "") return null;
+    try {
+        return JSON.parse(raw) as DeferredExecutePayload;
+    } catch {
+        return null;
+    }
+}
+
+export function setDeferredExecutePendingIfAbsent(
+    db: Database,
+    sessionId: string,
+    payload: DeferredExecutePayload,
+): boolean {
+    ensureSessionMetaRow(db, sessionId);
+    const payloadBlob = stableStringify(payload);
+    const result = db
+        .prepare(
+            `UPDATE session_meta SET deferred_execute_state = ?
+             WHERE session_id = ? AND deferred_execute_state IS NULL`,
+        )
+        .run(payloadBlob, sessionId);
+    return result.changes > 0;
+}
+
+export function clearDeferredExecutePendingIfMatches(
+    db: Database,
+    sessionId: string,
+    expected: DeferredExecutePayload,
+): boolean {
+    const expectedBlob = stableStringify(expected);
+    const result = db
+        .prepare(
+            `UPDATE session_meta SET deferred_execute_state = NULL
+             WHERE session_id = ? AND deferred_execute_state = ?`,
         )
         .run(sessionId, expectedBlob);
     return result.changes > 0;

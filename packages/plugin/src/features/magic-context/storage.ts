@@ -25,6 +25,7 @@ export {
     openDatabase,
 } from "./storage-db";
 export {
+    clearDeferredExecutePendingIfMatches,
     clearDetectedContextLimit,
     clearEmergencyRecovery,
     clearHistorianFailureState,
@@ -35,6 +36,7 @@ export {
     clearPersistedStickyTurnReminder,
     clearPersistedTodoSyntheticAnchor,
     clearSession,
+    type DeferredExecutePayload,
     getHistorianFailureState,
     getNoteLastReadAt,
     getOrCreateSessionMeta,
@@ -52,9 +54,11 @@ export {
     type PendingCompactionMarker,
     type PersistedOverflowState,
     type PersistedTodoSyntheticAnchor,
+    peekDeferredExecutePending,
     recordDetectedContextLimit,
     recordOverflowDetected,
     removeStrippedPlaceholderId,
+    setDeferredExecutePendingIfAbsent,
     setNoteLastReadAt,
     setPendingCompactionMarkerState,
     setPersistedNudgePlacement,

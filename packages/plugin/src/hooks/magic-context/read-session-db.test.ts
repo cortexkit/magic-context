@@ -6,7 +6,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { closeReadOnlySessionDb, findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
+import {
+    closeReadOnlySessionDb,
+    findLastAssistantModelFromOpenCodeDb,
+    isMidTurnFromOpenCodeDb,
+} from "./read-session-db";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -20,6 +24,85 @@ afterEach(() => {
         rmSync(dir, { recursive: true, force: true });
     }
     tempDirs.length = 0;
+});
+
+function createMidTurnDb(): Database {
+    const db = new Database(":memory:");
+    db.exec(
+        "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
+    );
+    db.exec(
+        "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
+    );
+    return db;
+}
+
+function insertAssistant(
+    db: Database,
+    sessionId: string,
+    id: string,
+    data: Record<string, unknown>,
+): void {
+    db.prepare(
+        "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+    ).run(id, sessionId, Date.now(), Date.now(), JSON.stringify({ role: "assistant", ...data }));
+}
+
+function insertPart(
+    db: Database,
+    sessionId: string,
+    messageId: string,
+    id: string,
+    data: unknown,
+): void {
+    db.prepare(
+        "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(id, messageId, sessionId, Date.now(), Date.now(), JSON.stringify(data));
+}
+
+describe("isMidTurnFromOpenCodeDb", () => {
+    it("is mid-turn when the latest assistant finished with tool-calls", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("is mid-turn when the latest assistant has a non-provider-executed tool part", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "stop" });
+        insertPart(db, "session-1", "assistant-1", "part-1", {
+            type: "tool",
+            providerExecuted: false,
+        });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("is not mid-turn for provider-executed tool parts", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "stop" });
+        insertPart(db, "session-1", "assistant-1", "part-1", {
+            type: "tool",
+            providerExecuted: true,
+        });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
+
+    it("is not mid-turn when the latest assistant has no tool parts", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "stop" });
+        insertPart(db, "session-1", "assistant-1", "part-1", { type: "text", text: "done" });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
+
+    it("is not mid-turn when there is no assistant message", () => {
+        const db = createMidTurnDb();
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
 });
 
 function useTempDataHome(prefix: string): void {

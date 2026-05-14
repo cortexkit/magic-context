@@ -103,7 +103,7 @@ export function parseModelListOutput(output: string): string[] {
         if (!line || line.toLowerCase().includes("usage:")) continue;
 
         const token = line.split(/\s+/)[0]?.trim().replace(/,$/, "");
-        if (!token || !token.includes("/")) continue;
+        if (!token?.includes("/")) continue;
         if (/^https?:\/\//.test(token)) continue;
         models.add(token);
     }

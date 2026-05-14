@@ -319,7 +319,11 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       -- valid JSON blob written via setPendingCompactionMarkerState.
       -- Excluded from healNullTextColumns. Readers filter IS NOT NULL AND
       -- != empty-string defensively. Plan v6 section 3.
-      pending_compaction_marker_state TEXT
+      pending_compaction_marker_state TEXT,
+      -- deferred_execute_state: intentionally NULLABLE without a default.
+      -- Absence is SQL NULL; presence is a JSON blob written via
+      -- setDeferredExecutePendingIfAbsent. Excluded from healNullTextColumns.
+      deferred_execute_state TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_tags_session_tag_number ON tags(session_id, tag_number);
@@ -453,6 +457,10 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // filter `IS NOT NULL AND != ''`. This column MUST NOT be added to
     // `healNullTextColumns` (NULL is the load-bearing absence sentinel).
     ensureColumn(db, "session_meta", "pending_compaction_marker_state", "TEXT");
+    // Boundary-execution deferred intent (plan v8). Intentionally NO DEFAULT
+    // clause — absence is SQL NULL, presence is a JSON blob. This column MUST
+    // NOT be added to `healNullTextColumns`.
+    ensureColumn(db, "session_meta", "deferred_execute_state", "TEXT");
 
     // NULL-column healing runs as migration v5 (one-shot at schema upgrade).
     // Previously it ran on every plugin startup — each heal function issued

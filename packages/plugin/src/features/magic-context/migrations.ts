@@ -544,6 +544,23 @@ const MIGRATIONS: Migration[] = [
             `);
         },
     },
+    {
+        version: 15,
+        description: "Add deferred_execute_state column for boundary execution drain",
+        up: (db: Database) => {
+            const cols = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{
+                name?: string;
+            }>;
+            // CAS blob storing the deferred-execute payload between a mid-turn
+            // scheduler execute decision and the next boundary pass that
+            // successfully runs execute work. Intentionally declared WITHOUT
+            // `DEFAULT ''` so absence is signalled as SQL NULL, matching
+            // pending_compaction_marker_state. Excluded from null-heal lists.
+            if (!cols.some((c) => c.name === "deferred_execute_state")) {
+                db.exec("ALTER TABLE session_meta ADD COLUMN deferred_execute_state TEXT");
+            }
+        },
+    },
 ];
 
 function ensureMigrationsTable(db: Database): void {

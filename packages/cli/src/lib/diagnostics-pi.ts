@@ -18,7 +18,7 @@ import {
     getPiUserConfigPath,
     getPiUserExtensionsPath,
 } from "./paths";
-import { detectPiBinary, getPiVersion, PI_PACKAGE_SOURCE } from "./pi-helpers";
+import { detectPiBinary, getPiVersion } from "./pi-helpers";
 import {
     describePiPackageEntry,
     hasPiMagicContextPackage,
