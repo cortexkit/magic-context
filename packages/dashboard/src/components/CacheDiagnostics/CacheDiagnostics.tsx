@@ -340,6 +340,18 @@ export default function CacheDiagnostics() {
       : all;
   };
 
+  // Ordering used for worst-severity promotion across multi-step turns.
+  // Higher rank wins — full_bust > bust > warming > warning > info > stable > unknown.
+  const SEVERITY_RANK: Record<string, number> = {
+    full_bust: 6,
+    bust: 5,
+    warming: 4,
+    warning: 3,
+    info: 2,
+    stable: 1,
+  };
+  const severityRank = (severity: string): number => SEVERITY_RANK[severity] ?? 0;
+
   const cacheTurns = createMemo(() => {
     const turns: CacheTurn[] = [];
     const map = new Map<string, CacheTurn>();
@@ -368,6 +380,11 @@ export default function CacheDiagnostics() {
       turn.totalCacheWrite += event.cache_write;
       turn.lastCacheRead = event.cache_read;
       turn.totalInputTokens += event.input_tokens;
+      // Promote worst severity across all steps so a multi-step turn with a
+      // mid-turn cache bust doesn't render as STABLE in the parent row.
+      if (severityRank(event.severity) > severityRank(turn.worstSeverity)) {
+        turn.worstSeverity = event.severity;
+      }
     }
     // Sort by start time descending (newest first) so the list is chronological
     // when reversed below, matching the original event order.
@@ -582,17 +599,20 @@ export default function CacheDiagnostics() {
             <div class="chart-bars">
               <For each={cacheTurns()}>
                 {(turn) => {
-                  const first = turn.events[0];
-                  const totalPrompt =
-                    first.cache_read + turn.totalCacheWrite + first.input_tokens;
+                  // Parent represents the turn's FINAL state — the last step's
+                  // prompt is what actually got sent at the end of the turn.
+                  // Aggregating prompts/tokens across steps double-counts the
+                  // bust child and produces nonsense totals.
+                  const last = turn.events[turn.events.length - 1];
+                  const totalPrompt = last.cache_read + last.cache_write + last.input_tokens;
                   const turnHitRatio =
-                    totalPrompt > 0 ? first.cache_read / totalPrompt : first.hit_ratio;
+                    totalPrompt > 0 ? last.cache_read / totalPrompt : last.hit_ratio;
                   const stepLabel = turn.events.length > 1 ? `\n${turn.events.length} steps` : "";
                   return (
                     <div
                       class={`chart-bar ${turnHitRatio === 0 ? "black" : severityBarClass(turnHitRatio)}`}
                       style={{ height: `${Math.max(3, turnHitRatio * 100)}%` }}
-                      title={`${formatDateTime(turn.startTime)}${stepLabel}\nHit: ${(turnHitRatio * 100).toFixed(1)}%\nPrompt: ${totalPrompt.toLocaleString()}\nCached: ${first.cache_read.toLocaleString()}\nNew: ${turn.totalCacheWrite.toLocaleString()}\nUncached: ${first.input_tokens.toLocaleString()}${first.cause ? `\nCause: ${first.cause}` : ""}`}
+                      title={`${formatDateTime(turn.startTime)}${stepLabel}\nHit: ${(turnHitRatio * 100).toFixed(1)}%\nPrompt: ${totalPrompt.toLocaleString()}\nCached: ${last.cache_read.toLocaleString()}\nNew (last step): ${last.cache_write.toLocaleString()}\nUncached: ${last.input_tokens.toLocaleString()}${last.cause ? `\nCause: ${last.cause}` : ""}`}
                     />
                   );
                 }}
@@ -618,12 +638,16 @@ export default function CacheDiagnostics() {
             <div class="list-gap">
               <For each={[...cacheTurns()].reverse()}>
                 {(turn) => {
+                  // Parent stats reflect the turn's FINAL step (the prompt that
+                  // actually shipped), not an aggregate across steps. Aggregation
+                  // double-counts a bust child and produces nonsense like
+                  // prompt=823k for a 540k actual turn (see fix in chart-bar above).
                   const first = turn.events[0];
+                  const last = turn.events[turn.events.length - 1];
                   const isExpanded = () => expandedTurns().has(turn.turnId);
-                  const totalPrompt =
-                    first.cache_read + turn.totalCacheWrite + first.input_tokens;
+                  const totalPrompt = last.cache_read + last.cache_write + last.input_tokens;
                   const turnHitRatio =
-                    totalPrompt > 0 ? first.cache_read / totalPrompt : first.hit_ratio;
+                    totalPrompt > 0 ? last.cache_read / totalPrompt : last.hit_ratio;
                   const isMultiStep = turn.events.length > 1;
                   return (
                     <div
@@ -705,7 +729,7 @@ export default function CacheDiagnostics() {
                           {(turnHitRatio * 100).toFixed(1)}%
                         </span>
                         <span class="mono">prompt={totalPrompt.toLocaleString()}</span>
-                        <span class="mono">cached={first.cache_read.toLocaleString()}</span>
+                        <span class="mono">cached={last.cache_read.toLocaleString()}</span>
                         <span class="mono">new={turn.totalCacheWrite.toLocaleString()}</span>
                         <div class="cache-bar">
                           <div
@@ -714,7 +738,7 @@ export default function CacheDiagnostics() {
                           />
                         </div>
                       </div>
-                      <Show when={first.cause}>
+                      <Show when={last.cause ?? first.cause}>
                         <div
                           style={{
                             "margin-top": "6px",
@@ -722,12 +746,15 @@ export default function CacheDiagnostics() {
                             color: "var(--amber)",
                           }}
                         >
-                          Cause: {first.cause}
+                          Cause: {last.cause ?? first.cause}
                         </div>
                       </Show>
                       <Show when={isExpanded()}>
                         <div class="cache-turn-expanded">
-                          <For each={turn.events}>
+                          {/* Newest-step first inside the drill-down so the user
+                              reads top-to-bottom matching the outer recent-turn
+                              ordering (which is also newest-first). */}
+                          <For each={[...turn.events].reverse()}>
                             {(event) => {
                               const evTotalPrompt =
                                 event.cache_read + event.cache_write + event.input_tokens;
