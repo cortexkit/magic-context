@@ -363,15 +363,13 @@ async function runHistorianPrompt(args: {
         };
     } finally {
         if (agentSessionId) {
-            await client.session
-                .delete({ path: { id: agentSessionId }, query: { directory: sessionDirectory } })
-                .catch((e: unknown) => {
-                    shared.sessionLog(
-                        parentSessionId,
-                        "compartment agent: session cleanup failed",
-                        getErrorMessage(e),
-                    );
-                });
+            await client.session.delete({ path: { id: agentSessionId } }).catch((e: unknown) => {
+                shared.sessionLog(
+                    parentSessionId,
+                    "compartment agent: session cleanup failed",
+                    getErrorMessage(e),
+                );
+            });
         }
     }
 }

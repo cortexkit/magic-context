@@ -387,7 +387,6 @@ async function identifyKeyFilesForSession(args: {
                 await args.client.session
                     .delete({
                         path: { id: agentSessionId },
-                        query: { directory: args.sessionDirectory },
                     })
                     .catch((error: unknown) => {
                         log(
@@ -764,7 +763,6 @@ export async function runDream(args: {
                     await args.client.session
                         .delete({
                             path: { id: agentSessionId },
-                            query: { directory: args.sessionDirectory ?? args.projectIdentity },
                         })
                         .catch((error: unknown) => {
                             log("[dreamer] failed to delete child session:", error);
@@ -1196,7 +1194,6 @@ Only include notes whose conditions you could definitively evaluate. Skip notes 
             await args.client.session
                 .delete({
                     path: { id: agentSessionId },
-                    query: { directory: args.sessionDirectory ?? args.projectIdentity },
                 })
                 .catch(() => {});
         }

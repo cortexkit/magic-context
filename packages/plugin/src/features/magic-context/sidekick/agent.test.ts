@@ -93,7 +93,6 @@ describe("runSidekick", () => {
         });
         expect(client.session.delete).toHaveBeenCalledWith({
             path: { id: "sidekick-child" },
-            query: { directory: "/repo/project" },
         });
     });
 

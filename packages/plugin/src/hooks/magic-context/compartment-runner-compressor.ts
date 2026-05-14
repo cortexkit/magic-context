@@ -732,15 +732,9 @@ async function runCompressorPass(args: CompressorPassArgs): Promise<Array<{
         return null;
     } finally {
         if (agentSessionId) {
-            await client.session
-                .delete({ path: { id: agentSessionId }, query: { directory } })
-                .catch((e: unknown) => {
-                    sessionLog(
-                        sessionId,
-                        "compressor: session cleanup failed:",
-                        getErrorMessage(e),
-                    );
-                });
+            await client.session.delete({ path: { id: agentSessionId } }).catch((e: unknown) => {
+                sessionLog(sessionId, "compressor: session cleanup failed:", getErrorMessage(e));
+            });
         }
     }
 }

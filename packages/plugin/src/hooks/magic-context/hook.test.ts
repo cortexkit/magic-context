@@ -596,7 +596,6 @@ describe("magic-context hook", () => {
         );
         expect(promptMocks.deleteSession).toHaveBeenCalledWith({
             path: { id: "dream-child" },
-            query: { directory: "/tmp" },
         });
     });
 

@@ -86,7 +86,6 @@ export async function runSidekick(deps: {
             await deps.client.session
                 .delete({
                     path: { id: agentSessionId },
-                    query: { directory: deps.sessionDirectory ?? deps.projectPath },
                 })
                 .catch((error: unknown) => {
                     log("[magic-context] failed to delete sidekick child session:", error);
