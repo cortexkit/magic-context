@@ -33,6 +33,12 @@ import {
 import type { ContextUsage } from "../../features/magic-context/types";
 import { createEventHandler } from "./event-handler";
 
+type ContextUsageCacheEntry = {
+    usage: ContextUsage;
+    updatedAt: number;
+    lastResponseTime?: number;
+};
+
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
@@ -89,7 +95,7 @@ function countMessageIndexRows(sessionId: string): number {
     return typeof row?.count === "number" ? row.count : 0;
 }
 
-function createDeps(contextUsageMap: Map<string, { usage: ContextUsage; updatedAt: number }>) {
+function createDeps(contextUsageMap: Map<string, ContextUsageCacheEntry>) {
     return {
         contextUsageMap,
         compactionHandler: { onCompacted: mock(() => {}) },
@@ -144,7 +150,7 @@ describe("createEventHandler", () => {
 
     it("tracks assistant token usage and updates lastResponseTime", async () => {
         useTempDataHome("context-event-message-updated-");
-        const contextUsageMap = new Map<string, { usage: ContextUsage; updatedAt: number }>();
+        const contextUsageMap = new Map<string, ContextUsageCacheEntry>();
         const handler = createEventHandler(createDeps(contextUsageMap));
         const before = Date.now();
 
@@ -171,6 +177,7 @@ describe("createEventHandler", () => {
         const expectedPercentage = ((120_000 + 15_000) / resolveContextLimit()) * 100;
         expect(usageEntry?.usage.inputTokens).toBe(135_000);
         expect(usageEntry?.usage.percentage).toBeCloseTo(expectedPercentage, 5);
+        expect(usageEntry?.lastResponseTime).toBeGreaterThanOrEqual(before);
         expect(
             getOrCreateSessionMeta(openDatabase(), "ses-usage").lastResponseTime,
         ).toBeGreaterThanOrEqual(before);

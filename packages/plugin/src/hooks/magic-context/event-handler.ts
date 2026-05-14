@@ -59,6 +59,7 @@ type CacheTtlConfig = string | Record<string, string>;
 interface ContextUsageEntry {
     usage: ContextUsage;
     updatedAt: number;
+    lastResponseTime?: number;
 }
 
 interface MessageRemovedCleanupResult {
@@ -406,6 +407,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                             inputTokens: totalInputTokens,
                         },
                         updatedAt: now,
+                        lastResponseTime: now,
                     });
 
                     updates.lastContextPercentage = percentage;

@@ -145,7 +145,10 @@ function findLastAssistantModel(
 export interface TransformDeps {
     tagger: Tagger;
     scheduler: Scheduler;
-    contextUsageMap: Map<string, { usage: ContextUsage; updatedAt: number }>;
+    contextUsageMap: Map<
+        string,
+        { usage: ContextUsage; updatedAt: number; lastResponseTime?: number }
+    >;
     nudger: (
         sessionId: string,
         contextUsage: ContextUsage,

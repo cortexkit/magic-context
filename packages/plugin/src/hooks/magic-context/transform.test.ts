@@ -1683,6 +1683,7 @@ describe("createTransform", () => {
         //#when — simulate message.updated setting real usage, then second pass loads it
         contextUsageMap.delete("ses-lazy");
         updateSessionMeta(db, "ses-lazy", {
+            lastResponseTime: 1_000,
             lastContextPercentage: 50,
             lastInputTokens: 100_000,
         });

@@ -4,24 +4,58 @@ import { loadPersistedUsage } from "../../features/magic-context/storage";
 import type { ContextUsage, SessionMeta } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared/logger";
 
+type ContextUsageCacheEntry = {
+    usage: ContextUsage;
+    updatedAt: number;
+    lastResponseTime?: number;
+};
+
+function loadPersistedUsageWatermark(db: ContextDatabase, sessionId: string): number | null {
+    const result = db
+        .prepare("SELECT last_response_time FROM session_meta WHERE session_id = ?")
+        .get(sessionId);
+
+    if (result === null || typeof result !== "object") return null;
+    const lastResponseTime = (result as { last_response_time?: unknown }).last_response_time;
+    return typeof lastResponseTime === "number" ? lastResponseTime : null;
+}
+
 export function loadContextUsage(
-    contextUsageMap: Map<string, { usage: ContextUsage; updatedAt: number }>,
+    contextUsageMap: Map<string, ContextUsageCacheEntry>,
     db: ContextDatabase,
     sessionId: string,
 ): ContextUsage {
-    let contextUsageEntry = contextUsageMap.get(sessionId);
-    if (!contextUsageEntry) {
-        try {
-            const persisted = loadPersistedUsage(db, sessionId);
-            if (persisted) {
-                contextUsageMap.set(sessionId, persisted);
-                contextUsageEntry = persisted;
-            }
-        } catch (error) {
-            sessionLog(sessionId, "transform failed loading persisted usage:", error);
+    const contextUsageEntry = contextUsageMap.get(sessionId);
+    try {
+        const persistedLastResponseTime = loadPersistedUsageWatermark(db, sessionId);
+        const cachedLastResponseTime =
+            contextUsageEntry?.lastResponseTime ?? contextUsageEntry?.updatedAt;
+        if (
+            contextUsageEntry &&
+            contextUsageEntry.lastResponseTime === undefined &&
+            (persistedLastResponseTime === null || persistedLastResponseTime === 0)
+        ) {
+            return contextUsageEntry.usage;
         }
+        if (contextUsageEntry && cachedLastResponseTime === persistedLastResponseTime) {
+            return contextUsageEntry.usage;
+        }
+
+        const persisted = loadPersistedUsage(db, sessionId);
+        if (persisted) {
+            contextUsageMap.set(sessionId, {
+                ...persisted,
+                lastResponseTime: persistedLastResponseTime ?? persisted.updatedAt,
+            });
+            return persisted.usage;
+        }
+
+        contextUsageMap.delete(sessionId);
+    } catch (error) {
+        sessionLog(sessionId, "transform failed loading persisted usage:", error);
+        return contextUsageEntry?.usage ?? { percentage: 0, inputTokens: 0 };
     }
-    return contextUsageEntry?.usage ?? { percentage: 0, inputTokens: 0 };
+    return { percentage: 0, inputTokens: 0 };
 }
 
 export function resolveSchedulerDecision(
