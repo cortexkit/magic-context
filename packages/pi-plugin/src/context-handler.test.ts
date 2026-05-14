@@ -12,6 +12,7 @@ import {
 	getTagsBySession,
 	incrementHistorianFailure,
 	queuePendingOp,
+	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
@@ -64,6 +65,53 @@ describe("registerPiContextHandler", () => {
 
 			expect(isSessionReconciled("ses-context")).toBe(true);
 		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("clears stale compartmentInProgress on first context pass after restart", async () => {
+		const db = createTestDb();
+		try {
+			const sessionId = "ses-pi-zombie-historian";
+			clearContextHandlerSession(sessionId);
+			updateSessionMeta(db, sessionId, { compartmentInProgress: true });
+			expect(getOrCreateSessionMeta(db, sessionId).compartmentInProgress).toBe(
+				true,
+			);
+
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				ctxReduceEnabled: false,
+				historian: {
+					runner: {} as SubagentRunner,
+					model: "test/historian",
+					historianChunkTokens: 8000,
+					executeThresholdPercentage: 65,
+					triggerBudget: 8000,
+				},
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			const messages = [userMessage("hello", 1)] as never[];
+			const ctx = {
+				...fakeContext(sessionId),
+				getContextUsage: () => ({
+					tokens: 1000,
+					percent: 1,
+					contextWindow: 100_000,
+				}),
+			};
+
+			await handler({ messages }, ctx as never);
+
+			expect(getOrCreateSessionMeta(db, sessionId).compartmentInProgress).toBe(
+				false,
+			);
+		} finally {
+			clearContextHandlerSession("ses-pi-zombie-historian");
 			closeQuietly(db);
 		}
 	});

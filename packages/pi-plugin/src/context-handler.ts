@@ -1600,6 +1600,18 @@ function maybeFireHistorian(args: {
 	let triggered = false;
 	try {
 		if (isFirstContextPassForSession) {
+			const sessionMeta = getOrCreateSessionMeta(db, sessionId);
+			if (
+				sessionMeta.compartmentInProgress &&
+				!inFlightHistorian.has(sessionId)
+			) {
+				updateSessionMeta(db, sessionId, { compartmentInProgress: false });
+				sessionLog(
+					sessionId,
+					"pi-historian: cleared stale compartmentInProgress flag on first context pass after restart",
+				);
+			}
+
 			const failureState = getHistorianFailureState(db, sessionId);
 			const shouldRecoverOnFirstPass =
 				failureState.failureCount > 0 &&
