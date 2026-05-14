@@ -293,6 +293,11 @@ export async function getAvailableModels(): Promise<string[]> {
   return invoke("get_available_models");
 }
 
+export async function getAvailablePiModels(): Promise<string[]> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke("get_available_pi_models");
+}
+
 // ── User Memory API ─────────────────────────────────────────
 
 export async function getUserMemories(status?: string): Promise<UserMemory[]> {

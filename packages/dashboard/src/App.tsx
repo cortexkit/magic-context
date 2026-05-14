@@ -9,11 +9,12 @@ import LogViewer from "./components/LogViewer/LogViewer";
 import MemoryBrowser from "./components/MemoryBrowser/MemoryBrowser";
 import SessionViewer from "./components/SessionViewer/SessionViewer";
 import UserMemories from "./components/UserMemories/UserMemories";
-import { getAvailableModels, getDbHealth } from "./lib/api";
+import { getAvailableModels, getAvailablePiModels, getDbHealth } from "./lib/api";
 import type { NavSection } from "./lib/types";
 import { checkForUpdate, installAndRelaunch, runUpdater } from "./lib/updater";
 
 const MODELS_CACHE_KEY = "mc_dashboard_models_cache";
+const PI_MODELS_CACHE_KEY = "magic-context.available-pi-models";
 const UPDATE_POLL_INTERVAL = 10 * 60 * 1000; // 10 minutes
 
 function loadCachedModels(): string[] {
@@ -25,10 +26,20 @@ function loadCachedModels(): string[] {
   }
 }
 
+function loadCachedPiModels(): string[] {
+  try {
+    const raw = localStorage.getItem(PI_MODELS_CACHE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
 export default function App() {
   const [activeSection, setActiveSection] = createSignal<NavSection>("memories");
   const [health] = createResource(getDbHealth);
   const [availableModels, setAvailableModels] = createSignal<string[]>(loadCachedModels());
+  const [availablePiModels, setAvailablePiModels] = createSignal<string[]>(loadCachedPiModels());
   const [updateVersion, setUpdateVersion] = createSignal<string | null>(null);
   const [updateInstalling, setUpdateInstalling] = createSignal(false);
   const [updateDismissed, setUpdateDismissed] = createSignal(false);
@@ -40,6 +51,17 @@ export default function App() {
         setAvailableModels(fresh);
         try {
           localStorage.setItem(MODELS_CACHE_KEY, JSON.stringify(fresh));
+        } catch {}
+      })
+      .catch(() => {
+        /* keep cached */
+      });
+
+    getAvailablePiModels()
+      .then((fresh) => {
+        setAvailablePiModels(fresh);
+        try {
+          localStorage.setItem(PI_MODELS_CACHE_KEY, JSON.stringify(fresh));
         } catch {}
       })
       .catch(() => {
@@ -142,7 +164,7 @@ export default function App() {
             <UserMemories />
           </Show>
           <Show when={activeSection() === "config"}>
-            <ConfigEditor models={availableModels()} />
+            <ConfigEditor models={availableModels()} piModels={availablePiModels()} />
           </Show>
           <Show when={activeSection() === "logs"}>
             <LogViewer />

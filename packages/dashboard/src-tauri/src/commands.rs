@@ -459,6 +459,67 @@ pub async fn get_available_models() -> Vec<String> {
     Vec::new()
 }
 
+/// Parse the tabular output of `pi --list-models` into `provider/model` strings.
+///
+/// Skips the header line, empty lines, and any row with fewer than 2 tokens.
+/// Whitespace is normalized via `split_whitespace`.
+pub fn parse_pi_models_output(text: &str) -> Vec<String> {
+    text.lines()
+        .skip(1) // skip header
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|line| {
+            let tokens: Vec<&str> = line.split_whitespace().take(2).collect();
+            if tokens.len() >= 2 {
+                Some(format!("{}/{}", tokens[0], tokens[1]))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub async fn get_available_pi_models() -> Vec<String> {
+    // GUI apps on macOS don't inherit shell PATH; try common locations.
+    //
+    // The first candidate is `~/.pi/bin/pi` because that's the path the
+    // official pi-coding-agent installer writes to and it's NOT on the GUI
+    // launcher's $PATH on macOS. Additional fallback paths cover pre-CI
+    // installs, custom installs, Homebrew on Intel + ARM, and shell-PATH
+    // discovery for users who launched from a terminal.
+    let candidates = if cfg!(target_os = "windows") {
+        let home = std::env::var("USERPROFILE").unwrap_or_default();
+        vec![
+            format!("{}\\.pi\\bin\\pi.exe", home),
+            "pi.exe".to_string(),
+        ]
+    } else {
+        let home = std::env::var("HOME").unwrap_or_default();
+        vec![
+            format!("{}/.pi/bin/pi", home),
+            "pi".to_string(),
+            format!("{}/.local/bin/pi", home),
+            "/usr/local/bin/pi".to_string(),
+            "/opt/homebrew/bin/pi".to_string(),
+        ]
+    };
+
+    for bin in &candidates {
+        if let Ok(output) = tokio::process::Command::new(bin)
+            .arg("--list-models")
+            .output()
+            .await
+        {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                return parse_pi_models_output(&text);
+            }
+        }
+    }
+
+    Vec::new()
+}
+
 // ── Embedding test ──────────────────────────────────────────
 
 /// Probe an OpenAI-compatible embedding endpoint and classify the outcome.
@@ -602,5 +663,48 @@ pub fn get_db_health(state: State<'_, AppState>) -> db::DbHealth {
             wal_size_bytes: 0,
             table_counts: Vec::new(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_pi_models_output;
+
+    #[test]
+    fn test_parse_pi_models_output_normal() {
+        let input = "provider        model                           context  max-out  thinking  images\nanthropic       claude-opus-4-5                 200K     64K      yes       yes   \ncerebras        gpt-oss-120b                    131.1K   32.8K    yes       no    \ngithub-copilot  claude-opus-4.7                 144K     64K      yes       yes   \n";
+        let result = parse_pi_models_output(input);
+        assert_eq!(
+            result,
+            vec![
+                "anthropic/claude-opus-4-5",
+                "cerebras/gpt-oss-120b",
+                "github-copilot/claude-opus-4.7",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_pi_models_output_empty() {
+        assert!(parse_pi_models_output("").is_empty());
+    }
+
+    #[test]
+    fn test_parse_pi_models_output_header_only() {
+        assert!(parse_pi_models_output("provider        model").is_empty());
+    }
+
+    #[test]
+    fn test_parse_pi_models_output_extra_whitespace() {
+        let input = "provider   model\n  anthropic    claude-sonnet-4-5  \n\n  \n";
+        let result = parse_pi_models_output(input);
+        assert_eq!(result, vec!["anthropic/claude-sonnet-4-5"]);
+    }
+
+    #[test]
+    fn test_parse_pi_models_output_single_token_skipped() {
+        let input = "provider   model\nanthropic\n  \ncerebras  gpt-oss\n";
+        let result = parse_pi_models_output(input);
+        assert_eq!(result, vec!["cerebras/gpt-oss"]);
     }
 }

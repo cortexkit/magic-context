@@ -2083,13 +2083,15 @@ function ProjectConfigDetail(props: {
 
 // ── Main ConfigEditor ───────────────────────────────────────
 
-export default function ConfigEditor(props: { models: string[] }) {
+export default function ConfigEditor(props: { models: string[]; piModels: string[] }) {
   const [configTarget, setConfigTarget] = createSignal<ConfigTarget>(loadUserConfigTab());
   const [userConfig, { refetch: refetchUser }] = createResource(() => getConfig("user"));
   const [piConfig, { refetch: refetchPi }] = createResource(getPiConfig);
   const [projectConfigs, { refetch: refetchProjects }] = createResource(getProjectConfigs);
   const [saveStatus, setSaveStatus] = createSignal<string | null>(null);
   const [selectedProject, setSelectedProject] = createSignal<ProjectConfigEntry | null>(null);
+
+  const effectiveModels = () => (configTarget() === "pi" ? props.piModels : props.models);
 
   const activeUserConfig = () => (configTarget() === "pi" ? piConfig() : userConfig());
   const activeUserConfigLoading = () =>
@@ -2225,7 +2227,7 @@ export default function ConfigEditor(props: { models: string[] }) {
                 content={activeUserConfig()?.content ?? ""}
                 onSave={handleUserSave}
                 saveStatus={saveStatus()}
-                models={props.models}
+                models={effectiveModels()}
               />
             </Show>
           </Show>
