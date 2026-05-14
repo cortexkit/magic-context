@@ -170,6 +170,16 @@ pub fn get_session_messages(
 }
 
 #[tauri::command]
+pub fn get_project_key_files(
+    state: State<'_, AppState>,
+    project_path: String,
+) -> Result<Vec<db::KeyFileRow>, String> {
+    let path = state.get_db_path()?;
+    let conn = db::open_readonly(&path).map_err(|e| e.to_string())?;
+    db::get_project_key_files(&conn, &project_path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn enumerate_projects() -> Vec<db::ProjectRow> {
     db::enumerate_projects()
 }

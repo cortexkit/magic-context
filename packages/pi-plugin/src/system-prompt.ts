@@ -62,26 +62,24 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { buildMagicContextSection } from "@magic-context/core/agents/magic-context-prompt";
-import {
-	escapeXmlAttr,
-	escapeXmlContent,
-} from "@magic-context/core/features/magic-context/compartment-storage";
-import { getKeyFiles } from "@magic-context/core/features/magic-context/key-files/storage-key-files";
 import {
 	type ContextDatabase,
 	getOrCreateSessionMeta,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import { getActiveUserMemories } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
+import {
+	clearKeyFilesCacheForSession,
+	readVersionedKeyFiles,
+} from "@magic-context/core/hooks/magic-context/key-files-block";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { log, sessionLog } from "@magic-context/core/shared/logger";
 
 const PROJECT_DOCS_MARKER = "<project-docs>";
 const USER_PROFILE_MARKER = "<user-profile>";
-const KEY_FILES_MARKER = "<key-files>";
 const MAGIC_CONTEXT_MARKER = "## Magic Context";
 
 /**
@@ -93,7 +91,6 @@ const MAGIC_CONTEXT_MARKER = "## Magic Context";
 const stickyDateBySession = new Map<string, string>();
 const cachedDocsBySession = new Map<string, string | null>();
 const cachedUserProfileBySession = new Map<string, string | null>();
-const cachedKeyFilesBySession = new Map<string, string | null>();
 
 const DOC_FILES = ["ARCHITECTURE.md", "STRUCTURE.md"] as const;
 
@@ -128,81 +125,6 @@ function buildUserProfileBlock(db: ContextDatabase): string | null {
 	if (memories.length === 0) return null;
 	const items = memories.map((m) => `- ${m.content}`).join("\n");
 	return `${USER_PROFILE_MARKER}\n${items}\n</user-profile>`;
-}
-
-/**
- * Read pinned key files and render them as a `<key-files>` block, enforcing
- * the same path-traversal and token-budget guards as
- * `system-prompt-hash.ts:254-342`:
- *
- *   - Resolved absolute path must stay inside `directory`.
- *   - Symlink real-path (after `realpathSync`) must also stay inside
- *     `directory` — a symlink could otherwise escape the project root.
- *   - Total tokens across all files must stay under `tokenBudget`. Files
- *     are processed in the order dreamer wrote them; first-fit greedy.
- */
-function buildKeyFilesBlock(
-	db: ContextDatabase,
-	sessionId: string,
-	directory: string,
-	tokenBudget: number,
-): string | null {
-	const entries = getKeyFiles(db, sessionId);
-	if (entries.length === 0) return null;
-
-	const sections: string[] = [];
-	const projectRoot = resolve(directory);
-	let remainingBudgetTokens = tokenBudget;
-
-	for (const entry of entries) {
-		try {
-			const absPath = resolve(directory, entry.filePath);
-			if (!absPath.startsWith(projectRoot + sep) && absPath !== projectRoot) {
-				log(
-					`[magic-context-pi] key file path escapes project root, skipping: ${entry.filePath}`,
-				);
-				continue;
-			}
-			if (!existsSync(absPath)) continue;
-
-			let realPath: string;
-			try {
-				realPath = realpathSync(absPath);
-			} catch {
-				continue; // broken symlink
-			}
-			if (!realPath.startsWith(projectRoot + sep) && realPath !== projectRoot) {
-				log(
-					`[magic-context-pi] key file symlink escapes project root, skipping: ${entry.filePath} → ${realPath}`,
-				);
-				continue;
-			}
-
-			const content = readFileSync(realPath, "utf-8").trim();
-			if (content.length === 0) continue;
-
-			const fileTokens = estimateTokens(content);
-			if (fileTokens > remainingBudgetTokens) {
-				log(
-					`[magic-context-pi] key file ${entry.filePath} exceeds remaining budget (${fileTokens} > ${remainingBudgetTokens}), skipping`,
-				);
-				continue;
-			}
-			remainingBudgetTokens -= fileTokens;
-
-			sections.push(
-				`<file path="${escapeXmlAttr(entry.filePath)}">\n${escapeXmlContent(content)}\n</file>`,
-			);
-		} catch (error) {
-			log(
-				`[magic-context-pi] failed to read key file ${entry.filePath}:`,
-				error,
-			);
-		}
-	}
-
-	if (sections.length === 0) return null;
-	return `${KEY_FILES_MARKER}\n${sections.join("\n\n")}\n</key-files>`;
 }
 
 export interface BuildMagicContextBlockOptions {
@@ -306,19 +228,27 @@ export function buildMagicContextBlock(
 
 	// 3. Pinned key files as <key-files>.
 	if (opts.pinKeyFilesEnabled && sessionId) {
-		const keyFilesBlock = readCachedAdjunct({
-			cache: cachedKeyFilesBySession,
-			sessionId,
-			isCacheBusting,
-			compute: () =>
-				buildKeyFilesBlock(
-					opts.db,
+		let sessionMeta:
+			| import("@magic-context/core/features/magic-context/types").SessionMeta
+			| null = null;
+		try {
+			sessionMeta = getOrCreateSessionMeta(opts.db, sessionId);
+		} catch (error) {
+			sessionLog(sessionId, "Pi key-files session meta load failed:", error);
+		}
+		const keyFilesBlock = sessionMeta
+			? readVersionedKeyFiles({
+					db: opts.db,
 					sessionId,
-					opts.cwd,
-					opts.pinKeyFilesTokenBudget ?? 10_000,
-				),
-			describe: "key files",
-		});
+					sessionMeta,
+					directory: opts.cwd,
+					isCacheBusting,
+					config: {
+						enabled: opts.pinKeyFilesEnabled,
+						tokenBudget: opts.pinKeyFilesTokenBudget ?? 10_000,
+					},
+				})
+			: null;
 		if (keyFilesBlock) sections.push(keyFilesBlock);
 	}
 
@@ -527,7 +457,7 @@ export function clearPiSystemPromptSession(sessionId: string): void {
 	stickyDateBySession.delete(sessionId);
 	cachedDocsBySession.delete(sessionId);
 	cachedUserProfileBySession.delete(sessionId);
-	cachedKeyFilesBySession.delete(sessionId);
+	clearKeyFilesCacheForSession(sessionId);
 }
 
 /** Test-only: confirm the magic-context guidance marker is present. */

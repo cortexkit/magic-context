@@ -340,6 +340,20 @@ pub struct DreamRun {
     pub memory_changes_json: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct KeyFileRow {
+    pub project_path: String,
+    pub path: String,
+    pub content: String,
+    pub content_hash: String,
+    pub local_token_estimate: i64,
+    pub generated_at: i64,
+    pub generated_by_model: Option<String>,
+    pub generation_config_hash: String,
+    pub stale_reason: Option<String>,
+    pub version: i64,
+}
+
 // ── Note types ────────────────────────────────────────────────
 // Unified Note struct replaces SessionNote and SmartNote
 // Both session notes (type='session') and smart notes (type='smart') are stored in the notes table
@@ -2300,6 +2314,41 @@ pub fn get_session_messages(
                 .collect())
         }
     }
+}
+
+pub fn get_project_key_files(
+    conn: &Connection,
+    project_path: &str,
+) -> Result<Vec<KeyFileRow>, rusqlite::Error> {
+    let version: i64 = conn
+        .query_row(
+            "SELECT version FROM project_key_files_version WHERE project_path = ?1",
+            [project_path],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let mut stmt = conn.prepare(
+        "SELECT project_path, path, content, content_hash, local_token_estimate,
+                generated_at, generated_by_model, generation_config_hash, stale_reason
+           FROM project_key_files
+          WHERE project_path = ?1
+          ORDER BY generated_at DESC, path ASC",
+    )?;
+    let rows = stmt.query_map([project_path], |row| {
+        Ok(KeyFileRow {
+            project_path: row.get(0)?,
+            path: row.get(1)?,
+            content: row.get(2)?,
+            content_hash: row.get(3)?,
+            local_token_estimate: row.get(4)?,
+            generated_at: row.get(5)?,
+            generated_by_model: row.get(6)?,
+            generation_config_hash: row.get(7)?,
+            stale_reason: row.get(8)?,
+            version,
+        })
+    })?;
+    rows.collect()
 }
 
 pub fn get_opencode_session_detail(

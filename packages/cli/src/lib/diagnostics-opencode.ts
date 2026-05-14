@@ -11,6 +11,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { getAftAvailability } from "@magic-context/core/features/magic-context/key-files/aft-availability";
 import { parseCompartmentOutput } from "@magic-context/core/hooks/magic-context/compartment-parser";
 import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
 import {
@@ -45,6 +46,12 @@ export interface DiagnosticReport {
         exists: boolean;
         parseError?: string;
         flags: Record<string, unknown>;
+    };
+    aft: {
+        available: boolean;
+        opencode: boolean;
+        pi: boolean;
+        checkedPaths: string[];
     };
     pluginCache: {
         path: string;
@@ -607,6 +614,7 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
             ...(magicContextConfig.error ? { parseError: magicContextConfig.error } : {}),
             flags: (sanitizeValue(magicContextConfig.value ?? {}) as Record<string, unknown>) ?? {},
         },
+        aft: getAftAvailability(),
         pluginCache: getPluginCacheInfo(),
         storageDir: {
             path: storageDirPath,
@@ -691,6 +699,7 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
         `- Plugin registered in opencode config: ${report.opencodeConfigHasPlugin}`,
         `- Plugin registered in tui config: ${report.tuiConfigHasPlugin}`,
         `- magic-context.jsonc parse error: ${report.magicContextConfig.parseError ?? "none"}`,
+        `- AFT available: ${report.aft?.available ?? false} (opencode=${report.aft?.opencode ?? false}, pi=${report.aft?.pi ?? false})`,
         `- Conflicts detected: ${report.conflicts.hasConflict ? report.conflicts.reasons.join("; ") : "none"}`,
         "",
         "### Config paths",

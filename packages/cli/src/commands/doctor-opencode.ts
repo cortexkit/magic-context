@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { loadPluginConfig } from "@magic-context/core/config";
 import { substituteConfigVariables } from "@magic-context/core/config/variable";
+import { getAftAvailability } from "@magic-context/core/features/magic-context/key-files/aft-availability";
 import {
     type EmbeddingProbeOutcome,
     probeEmbeddingEndpoint,
@@ -907,6 +908,17 @@ export async function runDoctor(
                     "dreamer.user_memories is enabled (default) but dreamer itself is disabled — user memory candidates will be collected but never promoted to stable memories. Enable `dreamer.enabled: true` or set `dreamer.user_memories.enabled: false` to silence this.",
                 );
                 issues++;
+            }
+            const pinKeyFilesObj = dreamerObj?.pin_key_files as Record<string, unknown> | undefined;
+            if (pinKeyFilesObj?.enabled === true) {
+                const aft = getAftAvailability();
+                if (aft.available) {
+                    pass("AFT detected for dreamer.pin_key_files");
+                } else {
+                    fail(
+                        `dreamer.pin_key_files is enabled but AFT is not configured. Install/register AFT (checked: ${aft.checkedPaths.join(", ")})`,
+                    );
+                }
             }
         } catch {
             // Config parse failed — skip this check

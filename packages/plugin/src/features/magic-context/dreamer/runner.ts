@@ -17,6 +17,7 @@ import {
     heuristicKeyFileSelection,
     KEY_FILES_SYSTEM_PROMPT,
     parseKeyFilesOutput,
+    runKeyFilesTask,
 } from "../key-files/identify-key-files";
 import { getMemoryCountsByStatus } from "../memory/storage-memory";
 import { getPendingSmartNotes, markNoteChecked, markNoteReady } from "../storage-notes";
@@ -408,7 +409,7 @@ async function identifyKeyFilesForSession(args: {
     }
 }
 
-async function identifyKeyFiles(args: {
+async function _identifyKeyFiles(args: {
     db: Database;
     client: PluginContext["client"];
     projectIdentity: string;
@@ -898,19 +899,24 @@ export async function runDream(args: {
                         lostLeaseReason ?? "Dream lease lost before key-file identification",
                     );
                 }
-                await identifyKeyFiles({
-                    db: args.db,
-                    client: args.client,
-                    projectIdentity: args.projectIdentity,
-                    parentSessionId,
-                    sessionDirectory: args.sessionDirectory ?? args.projectIdentity,
-                    holderId,
-                    deadline,
-                    config: args.experimentalPinKeyFiles,
-                    fallbackModels: args.fallbackModels,
-                    onLeaseLost: markLeaseLost,
-                    isLeaseLost: () => lostLease,
-                });
+                const openCodeDb = openOpenCodeDb();
+                if (openCodeDb) {
+                    try {
+                        await runKeyFilesTask({
+                            db: args.db,
+                            openCodeDb,
+                            client: args.client,
+                            projectPath: args.sessionDirectory ?? args.projectIdentity,
+                            holderId,
+                            deadline,
+                            parentSessionId,
+                            config: args.experimentalPinKeyFiles,
+                            fallbackModels: args.fallbackModels,
+                        });
+                    } finally {
+                        closeQuietly(openCodeDb);
+                    }
+                }
                 if (!verifyLeaseStillHeld("after key-file identification")) {
                     throw new Error(
                         lostLeaseReason ?? "Dream lease lost after key-file identification",

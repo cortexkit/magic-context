@@ -2,6 +2,15 @@
 
 > All paths below are relative to `packages/plugin/` — the published npm package.
 
+## Key-files v6 locations
+
+- `packages/plugin/src/features/magic-context/key-files/project-key-files.ts` — project-scoped storage helpers, version helpers, orphan GC, hashing.
+- `packages/plugin/src/features/magic-context/key-files/read-history.ts` — primary-session read aggregation and range coalescing.
+- `packages/plugin/src/features/magic-context/key-files/identify-key-files.ts` — Dreamer prompt, validator, and atomic commit path.
+- `packages/plugin/src/features/magic-context/key-files/aft-availability.ts` — OpenCode/Pi AFT configuration detection.
+- `packages/plugin/src/hooks/magic-context/key-files-block.ts` — versioned injection cache and stale-update flushing shared by OpenCode and Pi.
+- `packages/dashboard/src/components/SessionViewer/SessionViewer.tsx` — read-only key-files panel in session detail.
+
 ## Directory Layout
 
 ```text

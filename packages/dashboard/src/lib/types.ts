@@ -141,6 +141,19 @@ export interface SessionDetail {
   pi_compaction_entries: PiCompactionEntry[];
 }
 
+export interface KeyFileRow {
+  project_path: string;
+  path: string;
+  content: string;
+  content_hash: string;
+  local_token_estimate: number;
+  generated_at: number;
+  generated_by_model: string | null;
+  generation_config_hash: string;
+  stale_reason: string | null;
+  version: number;
+}
+
 export interface ProjectRow {
   identity: string;
   display_name: string;

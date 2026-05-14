@@ -2,6 +2,12 @@
 
 All settings are flat top-level keys in `magic-context.jsonc`. The schema is **shared between the OpenCode plugin and the Pi extension** — every setting documented here applies to both unless explicitly marked **Pi only** or **OpenCode only**.
 
+### Key files (`dreamer.pin_key_files`)
+
+`dreamer.pin_key_files.enabled: true` requires AFT to be registered in the active harness. OpenCode checks `~/.config/opencode/opencode.json[c]` for an AFT plugin entry; Pi checks `~/.pi/agent/settings.json` for `@cortexkit/aft-pi` in `packages` or `extensions`. If AFT is missing, key-files generation and injection soft-disable: Magic Context logs a warning, `doctor` reports the missing AFT configuration, and no `<key-files>` block is emitted.
+
+Key files are project-scoped in SQLite. `project_key_files` stores one row per file, with LLM-stitched content and a plugin-computed `content_hash`; `project_key_files_version` stores the per-project version counter used to invalidate per-session prompt caches after Dreamer commits.
+
 ### Configuration locations
 
 **OpenCode** reads (in priority order, project overrides user):

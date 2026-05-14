@@ -8,6 +8,7 @@ import { getErrorMessage } from "../../shared/error-message";
 import { log } from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { deleteOrphanProjectKeyFiles } from "./key-files/project-key-files";
 import { runMigrations } from "./migrations";
 import {
     loadToolDefinitionMeasurements,
@@ -220,6 +221,26 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       memory_changes_json TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_dream_runs_project ON dream_runs(project_path, finished_at DESC);
+
+    CREATE TABLE IF NOT EXISTS project_key_files (
+      project_path           TEXT    NOT NULL,
+      path                   TEXT    NOT NULL,
+      content                TEXT    NOT NULL,
+      content_hash           TEXT    NOT NULL,
+      local_token_estimate   INTEGER NOT NULL,
+      generated_at           INTEGER NOT NULL,
+      generated_by_model     TEXT,
+      generation_config_hash TEXT    NOT NULL,
+      stale_reason           TEXT,
+      PRIMARY KEY (project_path, path)
+    );
+    CREATE INDEX IF NOT EXISTS idx_project_key_files_project ON project_key_files(project_path);
+    CREATE INDEX IF NOT EXISTS idx_project_key_files_generated_at ON project_key_files(project_path, generated_at);
+
+    CREATE TABLE IF NOT EXISTS project_key_files_version (
+      project_path TEXT    PRIMARY KEY,
+      version      INTEGER NOT NULL DEFAULT 0
+    );
 
     -- (smart_notes: see note above; merged into unified notes table by migration v1)
 
@@ -638,6 +659,11 @@ export function openDatabase(): Database {
         const db = new Database(dbPath);
         initializeDatabase(db);
         runMigrations(db);
+        try {
+            deleteOrphanProjectKeyFiles(db);
+        } catch (error) {
+            log(`[magic-context] key-files orphan GC failed: ${getErrorMessage(error)}`);
+        }
         // Tool-owner backfill (plan v3.3.1, Layer B). Runs once per
         // boot to populate tool_owner_message_id on legacy tool tags.
         // The backfill module short-circuits when no work is needed

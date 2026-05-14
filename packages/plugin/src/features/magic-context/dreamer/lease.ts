@@ -25,6 +25,15 @@ export function getLeaseHolder(db: Database): string | null {
     return getDreamState(db, LEASE_HOLDER_KEY);
 }
 
+export function peekLeaseHolderAndExpiry(db: Database, expectedHolder: string): boolean {
+    const holder = getDreamState(db, LEASE_HOLDER_KEY);
+    if (holder !== expectedHolder) return false;
+    const expiryStr = getDreamState(db, LEASE_EXPIRY_KEY);
+    if (!expiryStr) return false;
+    const expiry = Number(expiryStr);
+    return Number.isFinite(expiry) && expiry >= Date.now();
+}
+
 export function acquireLease(db: Database, holderId: string): boolean {
     return db.transaction(() => {
         if (isLeaseActive(db)) {

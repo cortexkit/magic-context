@@ -514,6 +514,36 @@ const MIGRATIONS: Migration[] = [
             }
         },
     },
+    {
+        version: 14,
+        description: "Add project-scoped key files and version counter",
+        up: (db: Database) => {
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS project_key_files (
+                    project_path           TEXT    NOT NULL,
+                    path                   TEXT    NOT NULL,
+                    content                TEXT    NOT NULL,
+                    content_hash           TEXT    NOT NULL,
+                    local_token_estimate   INTEGER NOT NULL,
+                    generated_at           INTEGER NOT NULL,
+                    generated_by_model     TEXT,
+                    generation_config_hash TEXT    NOT NULL,
+                    stale_reason           TEXT,
+                    PRIMARY KEY (project_path, path)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_project_key_files_project
+                    ON project_key_files(project_path);
+                CREATE INDEX IF NOT EXISTS idx_project_key_files_generated_at
+                    ON project_key_files(project_path, generated_at);
+
+                CREATE TABLE IF NOT EXISTS project_key_files_version (
+                    project_path TEXT    PRIMARY KEY,
+                    version      INTEGER NOT NULL DEFAULT 0
+                );
+            `);
+        },
+    },
 ];
 
 function ensureMigrationsTable(db: Database): void {

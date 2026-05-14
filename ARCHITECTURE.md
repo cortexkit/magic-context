@@ -1,5 +1,13 @@
 # Architecture
 
+## Key-files v6 architecture
+
+Key files are project-scoped, not session-scoped. The Dreamer aggregates primary-session read history, asks an AFT-enabled subagent to produce one stitched content block per chosen file, validates the single-file contract, then commits rows into `project_key_files`. The plugin computes each row's `content_hash` from disk at commit time; unreadable files use the `"<missing>"` sentinel and start with `stale_reason = 'missing'`.
+
+Every replacement commit runs under `BEGIN IMMEDIATE`, verifies the Dreamer lease with a pure read, deletes/reinserts the project's rows, and bumps `project_key_files_version` in the same transaction. System-prompt injection caches `{value, version}` per session and recomputes only on first access, cache-bust, or version mismatch, preserving prompt-cache byte stability while allowing OpenCode and Pi to invalidate each other through the shared SQLite version row.
+
+Injection renders only stored DB content. Disk drift queues a CAS-protected stale update and never changes the bytes already being rendered; stale writes do not bump the version because they do not affect `<key-files>` output. Subagent sessions skip before the version lookup so subagents never poison or consume key-files context.
+
 > All `src/` paths below are relative to `packages/plugin/` — the published npm package.
 
 ## Pattern Overview
