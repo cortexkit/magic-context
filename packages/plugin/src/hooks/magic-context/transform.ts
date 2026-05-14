@@ -1,3 +1,4 @@
+import * as crypto from "node:crypto";
 import { getLastCompartmentEndMessage } from "../../features/magic-context/compartment-storage";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { scheduleReconciliation } from "../../features/magic-context/message-index-async";
@@ -19,6 +20,7 @@ import type { PluginContext } from "../../plugin/types";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
+import { applyMidTurnDeferral, detectMidTurnBypassReason } from "./boundary-execution";
 import { canConsumeDeferredOnThisPass } from "./cache-busting-signals";
 import { replayCavemanCompression } from "./caveman-cleanup";
 import { getActiveCompartmentRun, startCompartmentAgent } from "./compartment-runner";
@@ -37,6 +39,7 @@ import {
     getRawSessionMessageCount,
     readRawSessionMessages,
 } from "./read-session-chunk";
+import { isMidTurn } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 
 import { sendIgnoredMessage } from "./send-session-notification";
@@ -68,6 +71,7 @@ import {
     clearHistorianFailureState,
     clearPersistedReasoningWatermark,
     getOverflowState,
+    setDeferredExecutePendingIfAbsent,
 } from "../../features/magic-context/storage-meta-persisted";
 import type { LiveModelBySession } from "./hook-handlers";
 
@@ -510,6 +514,33 @@ export function createTransform(deps: TransformDeps) {
             sessionId,
             deps.getModelKey?.(sessionId),
         );
+        const midTurn = isMidTurn(deps, resolvedSessionId);
+        const bypassReason = detectMidTurnBypassReason({
+            contextUsage: contextUsageEarly,
+            sessionMeta,
+            historyRefreshSessions: deps.historyRefreshSessions,
+            sessionId,
+        });
+
+        const { midTurnAdjustedSchedulerDecision, sideEffect } = applyMidTurnDeferral({
+            base: schedulerDecisionEarly,
+            bypassReason,
+            midTurn,
+        });
+
+        if (sideEffect === "set-flag") {
+            const flagPayload = {
+                id: crypto.randomUUID(),
+                reason: `${schedulerDecisionEarly}-${bypassReason}`,
+                recordedAt: Date.now(),
+            };
+            setDeferredExecutePendingIfAbsent(db, sessionId, flagPayload);
+        }
+
+        sessionLog(
+            sessionId,
+            `[boundary-exec] base=${schedulerDecisionEarly} bypass=${bypassReason} midTurn=${midTurn} effective=${midTurnAdjustedSchedulerDecision} sideEffect=${sideEffect}`,
+        );
         // Capture explicit history refresh immediately before the first
         // prepareCompartmentInjection consumer and before any drain. This is a
         // per-pass local, not shared deps state: concurrent transforms must not
@@ -521,7 +552,7 @@ export function createTransform(deps: TransformDeps) {
                 sessionMeta.compartmentInProgress) &&
             contextUsageEarly.percentage < FORCE_MATERIALIZE_PERCENTAGE;
         const canConsumeDeferredEarly = canConsumeDeferredOnThisPass({
-            schedulerDecision: schedulerDecisionEarly,
+            schedulerDecision: midTurnAdjustedSchedulerDecision,
             contextPercentage: contextUsageEarly.percentage,
             justAwaitedPublication: false,
             activeRunBlocksMaterialization: earlyActiveRunBlocksMaterialization,
@@ -993,7 +1024,7 @@ export function createTransform(deps: TransformDeps) {
 
         // Reuse the early scheduler result — inputs haven't changed.
         const contextUsage = contextUsageEarly;
-        const schedulerDecision = schedulerDecisionEarly;
+        const schedulerDecision = midTurnAdjustedSchedulerDecision;
         const rawGetNotifParams = deps.getNotificationParams;
         const tCompartmentPhase = performance.now();
         const compartmentPhase = await runCompartmentPhase({
@@ -1022,7 +1053,8 @@ export function createTransform(deps: TransformDeps) {
             // Scheduler "execute" passes are safe for compressor (they already bust cache
             // via pending ops), but standalone compression is suppressed when
             // this pass itself is consuming a history refresh.
-            safeForBackgroundCompression: isCacheBusting || schedulerDecisionEarly === "execute",
+            safeForBackgroundCompression:
+                isCacheBusting || midTurnAdjustedSchedulerDecision === "execute",
             suppressBackgroundCompressionThisPass: historyBustThisPass,
             deferredHistoryRefreshSessions,
             skipAwaitForThisPass: skipCompartmentAwaitForThisPass,
@@ -1056,7 +1088,7 @@ export function createTransform(deps: TransformDeps) {
             getActiveCompartmentRun(sessionId) !== undefined &&
             contextUsageEarly.percentage < FORCE_MATERIALIZE_PERCENTAGE;
         const canConsumeDeferredLate = canConsumeDeferredOnThisPass({
-            schedulerDecision: schedulerDecisionEarly,
+            schedulerDecision: midTurnAdjustedSchedulerDecision,
             contextPercentage: contextUsageEarly.percentage,
             justAwaitedPublication: compartmentPhase.justAwaitedPublication,
             activeRunBlocksMaterialization: lateActiveRunBlocksMaterialization,
