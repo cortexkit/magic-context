@@ -1155,6 +1155,48 @@ pub fn get_session_cache_events(
     }
 }
 
+/// Trim a chronologically-ordered event list to at most `target_turns`
+/// complete turns, keeping the most recent turns.
+fn trim_events_to_turns(events: Vec<DbCacheEvent>, target_turns: usize) -> Vec<DbCacheEvent> {
+    if events.is_empty() || target_turns == 0 {
+        return Vec::new();
+    }
+    let turn_starts: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.is_turn_start)
+        .map(|(i, _)| i)
+        .collect();
+    if turn_starts.len() <= target_turns {
+        return events;
+    }
+    let keep_from_idx = turn_starts[turn_starts.len() - target_turns];
+    events.into_iter().skip(keep_from_idx).collect()
+}
+
+/// Fetch events for one session, trimmed so the result contains at most
+/// `target_turns` complete turns (most recent first). Events are returned
+/// in chronological order (oldest → newest).
+///
+/// Strategy: fetch up to `max_events = target_turns * 50` raw events (cap of 50
+/// events/turn is conservative — even very heavy tool-use turns rarely exceed
+/// that). Then group into turns. If we got more than target_turns, drop oldest
+/// events until only `target_turns` most-recent turns remain.
+pub fn get_session_cache_events_by_turn_count(
+    harness: Harness,
+    session_id: &str,
+    target_turns: usize,
+) -> Vec<DbCacheEvent> {
+    let max_events = (target_turns * 50).max(200); // floor to existing limit
+    let raw = match harness {
+        Harness::Opencode => {
+            get_opencode_session_cache_events(session_id, Some(max_events))
+        }
+        Harness::Pi => get_pi_session_cache_events(session_id, Some(max_events)),
+    };
+    trim_events_to_turns(raw, target_turns)
+}
+
 fn get_opencode_session_cache_events(session_id: &str, limit: Option<usize>) -> Vec<DbCacheEvent> {
     let Some(opencode_db_path) = resolve_opencode_db_path() else {
         return Vec::new();
@@ -3649,5 +3691,132 @@ mod cache_turn_tests {
         assert!(events[0].is_turn_start);
         assert!(!events[1].is_turn_start);
         assert_eq!(events[1].turn_id, "p1");
+    }
+}
+
+#[cfg(test)]
+mod get_session_cache_events_by_turn_count_tests {
+    use super::*;
+
+    fn event(message_id: &str, session_id: &str, timestamp: i64, is_turn_start: bool) -> DbCacheEvent {
+        DbCacheEvent {
+            harness: Harness::Opencode,
+            message_id: message_id.to_string(),
+            session_id: session_id.to_string(),
+            timestamp,
+            input_tokens: 10,
+            cache_read: 80,
+            cache_write: 10,
+            total_tokens: 100,
+            hit_ratio: 0.8,
+            severity: "stable".to_string(),
+            cause: None,
+            agent: None,
+            finish: Some("stop".to_string()),
+            turn_id: String::new(),
+            is_turn_start,
+        }
+    }
+
+    #[test]
+    fn empty_session_returns_empty() {
+        let result = trim_events_to_turns(Vec::new(), 3);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn fewer_turns_than_target_returns_all() {
+        // 2 turns, target=10 → all events returned
+        let events = vec![
+            event("m1", "s1", 100, true),
+            event("m2", "s1", 200, false),
+            event("m3", "s1", 300, true),
+            event("m4", "s1", 400, false),
+        ];
+        let result = trim_events_to_turns(events.clone(), 10);
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0].message_id, "m1");
+        assert_eq!(result[3].message_id, "m4");
+    }
+
+    #[test]
+    fn trims_oldest_turns_when_over_target() {
+        // 5 turns, target=3 → keep last 3 turns (turns 3-5 = m5-m12)
+        let events = vec![
+            event("m1", "s1", 100, true),  // turn 1 start
+            event("m2", "s1", 200, false), // turn 1 cont
+            event("m3", "s1", 300, true),  // turn 2 start
+            event("m4", "s1", 400, false), // turn 2 cont
+            event("m5", "s1", 500, true),  // turn 3 start
+            event("m6", "s1", 600, false), // turn 3 cont
+            event("m7", "s1", 700, true),  // turn 4 start
+            event("m8", "s1", 800, false), // turn 4 cont
+            event("m9", "s1", 900, true),  // turn 5 start
+            event("m10", "s1", 1000, false), // turn 5 cont
+            event("m11", "s1", 1100, false), // turn 5 cont
+            event("m12", "s1", 1200, false), // turn 5 cont
+        ];
+        let result = trim_events_to_turns(events, 3);
+        assert_eq!(result.len(), 8); // m5-m12
+        assert_eq!(result[0].message_id, "m5");
+        assert_eq!(result[7].message_id, "m12");
+        // Verify turn starts in the trimmed result
+        assert!(result[0].is_turn_start); // m5 (turn 3 start)
+        assert!(!result[1].is_turn_start); // m6
+        assert!(result[2].is_turn_start); // m7 (turn 4 start)
+        assert!(!result[3].is_turn_start); // m8
+        assert!(result[4].is_turn_start); // m9 (turn 5 start)
+    }
+
+    #[test]
+    fn exact_target_turns_returns_all() {
+        // 3 turns, target=3 → all events returned
+        let events = vec![
+            event("m1", "s1", 100, true),
+            event("m2", "s1", 200, false),
+            event("m3", "s1", 300, true),
+            event("m4", "s1", 400, false),
+            event("m5", "s1", 500, true),
+            event("m6", "s1", 600, false),
+        ];
+        let result = trim_events_to_turns(events.clone(), 3);
+        assert_eq!(result.len(), 6);
+    }
+
+    #[test]
+    fn one_long_turn_returns_all() {
+        // 50 events all in one turn, target=5 → all 50 returned as one turn
+        let mut events: Vec<DbCacheEvent> = (0..50)
+            .map(|i| event(&format!("m{i}"), "s1", 100 + i as i64 * 10, i == 0))
+            .collect();
+        let result = trim_events_to_turns(events.clone(), 5);
+        assert_eq!(result.len(), 50);
+        // Only the first event should be a turn start
+        assert!(result[0].is_turn_start);
+        for e in result.iter().skip(1) {
+            assert!(!e.is_turn_start);
+        }
+    }
+
+    #[test]
+    fn single_turn_target_one_returns_all() {
+        let events = vec![
+            event("m1", "s1", 100, true),
+            event("m2", "s1", 200, false),
+            event("m3", "s1", 300, false),
+        ];
+        let result = trim_events_to_turns(events.clone(), 1);
+        assert_eq!(result.len(), 3);
+        assert!(result[0].is_turn_start);
+    }
+
+    #[test]
+    fn target_zero_returns_empty() {
+        let events = vec![
+            event("m1", "s1", 100, true),
+            event("m2", "s1", 200, false),
+        ];
+        let result = trim_events_to_turns(events, 0);
+        assert!(result.is_empty());
     }
 }

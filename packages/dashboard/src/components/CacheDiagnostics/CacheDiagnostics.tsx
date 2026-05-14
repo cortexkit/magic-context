@@ -2,7 +2,7 @@ import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-j
 import {
   formatDateTime,
   getCacheEventsFromDb,
-  getSessionCacheEvents,
+  getSessionCacheEventsByTurns,
   listSessions,
   truncate,
 } from "../../lib/api";
@@ -70,6 +70,9 @@ export default function CacheDiagnostics() {
   // chart even when many sessions are active in parallel.
   const PER_SESSION = 200;
   const TOTAL_CAP = PER_SESSION * 10;
+  // For the per-session timeline we ask the backend for a turn count, not an
+  // event count, so multi-step tool-use turns don't collapse the bar chart.
+  const TARGET_TURNS_PER_SESSION = 200;
 
   // Synchronously rebuild every derived signal from a (events, sessions) pair.
   // Used both for fresh data from a fetch and for cache rehydration on remount.
@@ -160,7 +163,9 @@ export default function CacheDiagnostics() {
   const refreshSessions = async (keys: SelectedSession[]) => {
     if (keys.length === 0) return;
     const results = await Promise.all(
-      keys.map((k) => getSessionCacheEvents(k.harness, k.sessionId, PER_SESSION)),
+      keys.map((k) =>
+        getSessionCacheEventsByTurns(k.harness, k.sessionId, TARGET_TURNS_PER_SESSION),
+      ),
     );
     const merged = results.flat();
     applyState(merged, cachedSessions, false);
@@ -244,10 +249,10 @@ export default function CacheDiagnostics() {
 
       const first = topN[0];
       const firstKey: SelectedSession = { harness: first.harness, sessionId: first.session_id };
-      const firstEvents = await getSessionCacheEvents(
+      const firstEvents = await getSessionCacheEventsByTurns(
         first.harness,
         first.session_id,
-        PER_SESSION,
+        TARGET_TURNS_PER_SESSION,
       );
       applyState(firstEvents, sessions, false);
       setSelectedSession(firstKey);

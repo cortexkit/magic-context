@@ -137,6 +137,23 @@ export async function getSessionCacheEvents(
 }
 
 /**
+ * Fetch cache events for a session, trimmed to at most `targetTurns` complete
+ * turns (most recent first). Use this for the Cache Hit Timeline so multi-step
+ * tool-use turns don't collapse the bar chart.
+ */
+export async function getSessionCacheEventsByTurns(
+  harness: Harness,
+  sessionId: string,
+  targetTurns: number,
+): Promise<DbCacheEvent[]> {
+  return invoke("get_session_cache_events_by_turns", {
+    harness,
+    sessionId,
+    targetTurns,
+  });
+}
+
+/**
  * Lazy fetch for the Messages tab. Returns the full message list for a session
  * (37k+ rows for long OpenCode sessions, ~28MB IPC payload). Only call this
  * when the user activates the Messages tab; `getSessionDetail()` returns a

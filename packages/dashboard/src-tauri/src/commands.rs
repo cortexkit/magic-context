@@ -144,6 +144,20 @@ pub fn get_session_cache_events(
     }
 }
 
+#[tauri::command]
+pub fn get_session_cache_events_by_turns(
+    harness: String,
+    session_id: String,
+    target_turns: usize,
+) -> Vec<db::DbCacheEvent> {
+    match harness.parse::<db::Harness>() {
+        Ok(harness) => {
+            db::get_session_cache_events_by_turn_count(harness, &session_id, target_turns)
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Lazy fetch for the Messages tab; see `db::get_session_messages` for why
 /// this is split from `get_session_detail`.
 #[tauri::command]
