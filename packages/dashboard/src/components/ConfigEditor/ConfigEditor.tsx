@@ -33,43 +33,130 @@ function loadUserConfigTab(): UserConfigTab {
 }
 
 // Minimal JSONC parser: strip comments while respecting string literals, then parse.
-function parseJsonc(text: string): Record<string, unknown> {
+/**
+ * JSONC parser ported from `packages/plugin/src/shared/jsonc-parser.ts`.
+ * Strips line/block comments AND trailing commas (both valid JSONC).
+ * The previous parser only stripped comments, so a config with trailing
+ * commas (the recommended editor-friendly style — and what `doctor`/setup
+ * writes by default) caused `JSON.parse` to throw, returned `{}`, and
+ * every field fell back to its default. That made the entire Config page
+ * show defaults even for users with valid config files.
+ */
+function stripJsonComments(content: string): string {
   let result = "";
-  let i = 0;
-  while (i < text.length) {
-    // String literal — copy verbatim
-    if (text[i] === '"') {
-      result += '"';
-      i++;
-      while (i < text.length && text[i] !== '"') {
-        if (text[i] === "\\") {
-          result += text[i++];
-        } // skip escape + next char
-        if (i < text.length) {
-          result += text[i++];
-        }
+  let inString = false;
+  let escaped = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  for (let index = 0; index < content.length; index += 1) {
+    const char = content[index];
+    const next = content[index + 1];
+
+    if (inLineComment) {
+      if (char === "\n") {
+        inLineComment = false;
+        result += char;
       }
-      if (i < text.length) {
-        result += text[i++];
-      } // closing quote
+      continue;
     }
-    // Single-line comment
-    else if (text[i] === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++;
+
+    if (inBlockComment) {
+      if (char === "*" && next === "/") {
+        inBlockComment = false;
+        index += 1;
+      }
+      continue;
     }
-    // Block comment
-    else if (text[i] === "/" && text[i + 1] === "*") {
-      i += 2;
-      while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) i++;
-      i += 2; // skip */
+
+    if (inString) {
+      result += char;
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
     }
-    // Normal character
-    else {
-      result += text[i++];
+
+    if (char === '"') {
+      inString = true;
+      result += char;
+      continue;
     }
+
+    if (char === "/" && next === "/") {
+      inLineComment = true;
+      index += 1;
+      continue;
+    }
+
+    if (char === "/" && next === "*") {
+      inBlockComment = true;
+      index += 1;
+      continue;
+    }
+
+    result += char;
   }
+
+  return result;
+}
+
+function stripTrailingCommas(content: string): string {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < content.length; index += 1) {
+    const char = content[index];
+
+    if (inString) {
+      result += char;
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      result += char;
+      continue;
+    }
+
+    if (char === ",") {
+      let lookahead = index + 1;
+      while (lookahead < content.length && /\s/.test(content[lookahead] ?? "")) {
+        lookahead += 1;
+      }
+      const next = content[lookahead];
+      if (next === "}" || next === "]") {
+        continue;
+      }
+    }
+
+    result += char;
+  }
+
+  return result;
+}
+
+function parseJsonc(text: string): Record<string, unknown> {
   try {
-    return JSON.parse(result);
+    const normalized = stripTrailingCommas(stripJsonComments(text));
+    const parsed = JSON.parse(normalized);
+    // Defend against `null`, primitives, arrays — `Record<string, unknown>` lies otherwise.
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    return {};
   } catch {
     return {};
   }
