@@ -199,8 +199,19 @@ pub async fn probe_embedding_endpoint(
 
     let url = format!("{}/embeddings", endpoint);
 
+    // `.no_proxy()` is deliberate: by default reqwest auto-detects macOS
+    // / Windows system proxy settings, which produces a confusing failure
+    // mode where `doctor` works (Node's fetch ignores system proxies and
+    // only honors HTTP_PROXY/HTTPS_PROXY env vars) but the dashboard
+    // tries to route the same localhost URL through whatever the user
+    // has configured in System Settings → Network → Proxies. Setting
+    // no_proxy() here aligns the dashboard probe with Node's behavior so
+    // both surfaces classify the same endpoint the same way. Users who
+    // genuinely want to route embedding traffic through a proxy can
+    // expose that as an explicit config field later if needed.
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_millis(options.timeout_ms))
+        .no_proxy()
         .build()
     {
         Ok(c) => c,
@@ -240,7 +251,12 @@ pub async fn probe_embedding_endpoint(
                 };
             }
             return EmbeddingProbeOutcome::NetworkError {
-                message: e.to_string(),
+                // reqwest's Display only renders the top-level message
+                // (`error sending request for url (...)`) and drops the
+                // underlying cause. Walk the source chain so users see the
+                // actual failure (connection refused, DNS, TLS handshake,
+                // etc.) instead of just the URL.
+                message: format_error_with_causes(&e),
             };
         }
     };
@@ -307,6 +323,32 @@ fn extract_dimensions(body: &serde_json::Value) -> Option<usize> {
         return None;
     }
     Some(embedding.len())
+}
+
+/// Walk a reqwest error's source chain so the user sees the underlying
+/// cause (`connection refused`, `dns error: failed to lookup ...`,
+/// `tls handshake eof`) instead of only the top-level `error sending
+/// request for url (...)` message. Limited to 5 levels of depth as a
+/// safety bound — reqwest errors typically only carry 1–2 sources.
+fn format_error_with_causes(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts = vec![err.to_string()];
+    let mut current = err.source();
+    let mut depth = 0;
+    while let Some(cause) = current {
+        if depth >= 5 {
+            break;
+        }
+        let cause_str = cause.to_string();
+        // Skip empty causes and de-duplicate against the immediately
+        // preceding part — reqwest occasionally wraps the same message
+        // at multiple layers and we'd rather not surface it twice.
+        if !cause_str.is_empty() && parts.last().map(|p| p.as_str()) != Some(cause_str.as_str()) {
+            parts.push(cause_str);
+        }
+        current = cause.source();
+        depth += 1;
+    }
+    parts.join(": ")
 }
 
 fn truncate_preview(text: &str) -> String {
@@ -467,6 +509,70 @@ mod tests {
     fn truncate_preview_leaves_short_bodies_intact() {
         let preview = truncate_preview("short");
         assert_eq!(preview, "short");
+    }
+
+    // ── format_error_with_causes ──────────────────────────────
+
+    use std::error::Error;
+    use std::fmt;
+
+    /// Tiny error with a manually-controlled source chain so we can verify
+    /// the formatter walks it correctly without needing reqwest internals.
+    #[derive(Debug)]
+    struct ChainErr {
+        msg: &'static str,
+        source: Option<Box<ChainErr>>,
+    }
+    impl fmt::Display for ChainErr {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(self.msg)
+        }
+    }
+    impl Error for ChainErr {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            self.source
+                .as_deref()
+                .map(|e| e as &(dyn Error + 'static))
+        }
+    }
+
+    #[test]
+    fn format_error_with_causes_joins_chain() {
+        let inner = ChainErr {
+            msg: "Connection refused (os error 61)",
+            source: None,
+        };
+        let outer = ChainErr {
+            msg: "error sending request for url (http://localhost:1234)",
+            source: Some(Box::new(inner)),
+        };
+        let formatted = format_error_with_causes(&outer);
+        assert_eq!(
+            formatted,
+            "error sending request for url (http://localhost:1234): Connection refused (os error 61)"
+        );
+    }
+
+    #[test]
+    fn format_error_with_causes_handles_single_level() {
+        let only = ChainErr {
+            msg: "standalone failure",
+            source: None,
+        };
+        assert_eq!(format_error_with_causes(&only), "standalone failure");
+    }
+
+    #[test]
+    fn format_error_with_causes_dedups_repeated_messages() {
+        let inner = ChainErr {
+            msg: "same message",
+            source: None,
+        };
+        let outer = ChainErr {
+            msg: "same message",
+            source: Some(Box::new(inner)),
+        };
+        assert_eq!(format_error_with_causes(&outer), "same message");
     }
 
     #[tokio::test]
