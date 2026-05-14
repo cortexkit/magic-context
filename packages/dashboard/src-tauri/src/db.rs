@@ -174,6 +174,8 @@ pub struct SessionFilter {
     /// `None` = no filter (return both). The dashboard "Subagents" toggle
     /// sends `Some(false)` when unchecked so subagents are filtered server-side.
     pub is_subagent: Option<bool>,
+    pub offset: Option<u32>,
+    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -186,6 +188,13 @@ pub struct SessionRow {
     pub message_count: u32,
     pub last_activity_ms: i64,
     pub is_subagent: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct PagedSessions {
+    pub rows: Vec<SessionRow>,
+    pub total: u32,
+    pub has_more: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -820,13 +829,12 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
         .filter(|((h, _), _)| matches!(h, Harness::Opencode))
         .map(|((_, sid), _)| sid.clone())
         .collect();
-    let true_first_sessions: HashSet<(Harness, String)> =
-        if !oc_session_ids.is_empty() {
-            if let Some(opencode_db_path) = resolve_opencode_db_path() {
-                if let Ok(conn) = open_readonly(&opencode_db_path) {
-                    // Build IN-clause with placeholders for each session_id we care about.
-                    let placeholders = vec!["?"; oc_session_ids.len()].join(",");
-                    let sql = format!(
+    let true_first_sessions: HashSet<(Harness, String)> = if !oc_session_ids.is_empty() {
+        if let Some(opencode_db_path) = resolve_opencode_db_path() {
+            if let Ok(conn) = open_readonly(&opencode_db_path) {
+                // Build IN-clause with placeholders for each session_id we care about.
+                let placeholders = vec!["?"; oc_session_ids.len()].join(",");
+                let sql = format!(
                         "SELECT session_id, MIN(time_created) AS first_ts
                          FROM message
                          WHERE session_id IN ({})
@@ -835,28 +843,27 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
                          GROUP BY session_id",
                         placeholders
                     );
-                    let session_id_refs: Vec<&dyn rusqlite::types::ToSql> =
-                        oc_session_ids.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
-                    if let Ok(mut stmt) = conn.prepare(&sql) {
-                        let rows = stmt.query_map(session_id_refs.as_slice(), |row| {
-                            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                        });
-                        if let Ok(rows) = rows {
-                            // A session is "truly first" in our window if its
-                            // window-earliest timestamp matches its DB-wide
-                            // earliest assistant timestamp.
-                            rows.filter_map(|r| r.ok())
-                                .filter(|(sid, db_earliest)| {
-                                    earliest_ts_in_window
-                                        .get(&(Harness::Opencode, sid.clone()))
-                                        .map(|window_earliest| *window_earliest <= *db_earliest)
-                                        .unwrap_or(false)
-                                })
-                                .map(|(sid, _)| (Harness::Opencode, sid))
-                                .collect()
-                        } else {
-                            HashSet::new()
-                        }
+                let session_id_refs: Vec<&dyn rusqlite::types::ToSql> = oc_session_ids
+                    .iter()
+                    .map(|s| s as &dyn rusqlite::types::ToSql)
+                    .collect();
+                if let Ok(mut stmt) = conn.prepare(&sql) {
+                    let rows = stmt.query_map(session_id_refs.as_slice(), |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    });
+                    if let Ok(rows) = rows {
+                        // A session is "truly first" in our window if its
+                        // window-earliest timestamp matches its DB-wide
+                        // earliest assistant timestamp.
+                        rows.filter_map(|r| r.ok())
+                            .filter(|(sid, db_earliest)| {
+                                earliest_ts_in_window
+                                    .get(&(Harness::Opencode, sid.clone()))
+                                    .map(|window_earliest| *window_earliest <= *db_earliest)
+                                    .unwrap_or(false)
+                            })
+                            .map(|(sid, _)| (Harness::Opencode, sid))
+                            .collect()
                     } else {
                         HashSet::new()
                     }
@@ -868,7 +875,10 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
             }
         } else {
             HashSet::new()
-        };
+        }
+    } else {
+        HashSet::new()
+    };
 
     // Pi-side: a Pi session has its true-first assistant message in our window
     // when our window-earliest timestamp for that Pi session is also the
@@ -930,8 +940,7 @@ fn build_db_cache_events(rows: Vec<RawDbCacheEvent>, enrich_causes: bool) -> Vec
 
         let session_key = (row.harness, row.session_id.clone());
         let is_first_session_event = seen_sessions.insert(session_key.clone());
-        let is_truly_first =
-            is_first_session_event && true_first_sessions.contains(&session_key);
+        let is_truly_first = is_first_session_event && true_first_sessions.contains(&session_key);
         let (severity, cause) = if is_truly_first {
             (
                 "info".to_string(),
@@ -996,8 +1005,8 @@ pub fn get_session_cache_stats_from_db(limit: usize) -> Vec<SessionCacheStats> {
     rows.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
     rows.truncate(2000); // 200 per-session × ~10 sessions cap
     let events = build_db_cache_events(rows, false); // skip log enrichment for stats
-    // Key by (harness, session_id) so OC and Pi sessions never collide on a
-    // shared short-prefix session ID.
+                                                     // Key by (harness, session_id) so OC and Pi sessions never collide on a
+                                                     // shared short-prefix session ID.
     let mut map: HashMap<(Harness, String), (usize, i64, i64, i64, i64, usize)> = HashMap::new();
 
     for event in events {
@@ -1079,10 +1088,7 @@ pub fn get_session_cache_events(
     }
 }
 
-fn get_opencode_session_cache_events(
-    session_id: &str,
-    limit: Option<usize>,
-) -> Vec<DbCacheEvent> {
+fn get_opencode_session_cache_events(session_id: &str, limit: Option<usize>) -> Vec<DbCacheEvent> {
     let Some(opencode_db_path) = resolve_opencode_db_path() else {
         return Vec::new();
     };
@@ -1285,7 +1291,8 @@ fn enumerate_projects_filtered(project_paths_filter: Option<&HashSet<String>>) -
                         }
                         entry.opencode_path = Some(worktree);
                         entry.harnesses.insert(Harness::Opencode);
-                        entry.session_count = entry.session_count.saturating_add(count.max(0) as u32);
+                        entry.session_count =
+                            entry.session_count.saturating_add(count.max(0) as u32);
                     }
                 }
             }
@@ -1858,17 +1865,24 @@ pub fn bulk_delete_memory(
     // Explicitly clear embeddings first; the FK would handle this too but
     // being explicit documents the intent and matches single-row delete logs.
     {
-        let sql = format!("DELETE FROM memory_embeddings WHERE memory_id IN ({})", placeholders);
+        let sql = format!(
+            "DELETE FROM memory_embeddings WHERE memory_id IN ({})",
+            placeholders
+        );
         let mut stmt = tx.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> =
-            memory_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        let params: Vec<&dyn rusqlite::ToSql> = memory_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::ToSql)
+            .collect();
         stmt.execute(&params[..])?;
     }
     let affected = {
         let sql = format!("DELETE FROM memories WHERE id IN ({})", placeholders);
         let mut stmt = tx.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> =
-            memory_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        let params: Vec<&dyn rusqlite::ToSql> = memory_ids
+            .iter()
+            .map(|id| id as &dyn rusqlite::ToSql)
+            .collect();
         stmt.execute(&params[..])?
     };
     tx.commit()?;
@@ -1995,8 +2009,12 @@ pub fn list_opencode_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
         })
     });
 
-    rows.map(|rows| rows.flatten().filter(|row| session_matches_filter(row, filter)).collect())
-        .unwrap_or_default()
+    rows.map(|rows| {
+        rows.flatten()
+            .filter(|row| session_matches_filter(row, filter))
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 pub fn list_pi_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
@@ -2032,13 +2050,45 @@ pub fn list_all_sessions(filter: SessionFilter) -> Vec<SessionRow> {
     rows
 }
 
+pub fn list_sessions_paged(filter: SessionFilter) -> PagedSessions {
+    let rows = list_all_sessions(filter.clone());
+    page_session_rows(rows, filter.offset, filter.limit)
+}
+
+fn page_session_rows(
+    rows: Vec<SessionRow>,
+    offset: Option<u32>,
+    limit: Option<u32>,
+) -> PagedSessions {
+    let total_usize = rows.len();
+    let offset_usize = offset.unwrap_or(0) as usize;
+    let limit_usize = limit.map(|value| value as usize).unwrap_or(total_usize);
+    let paged_rows: Vec<SessionRow> = rows
+        .into_iter()
+        .skip(offset_usize)
+        .take(limit_usize)
+        .collect();
+    let consumed = offset_usize.saturating_add(paged_rows.len());
+
+    PagedSessions {
+        rows: paged_rows,
+        total: total_usize as u32,
+        has_more: consumed < total_usize,
+    }
+}
+
 fn session_matches_filter(row: &SessionRow, filter: &SessionFilter) -> bool {
     if let Some(identity) = filter.project_identity.as_deref() {
         if row.project_identity != identity {
             return false;
         }
     }
-    if let Some(search) = filter.search.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(search) = filter
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         let search = search.to_ascii_lowercase();
         let haystack = format!("{} {} {}", row.title, row.project_display, row.session_id)
             .to_ascii_lowercase();
@@ -2334,10 +2384,7 @@ fn normalize_preview(text: &str) -> String {
         .collect()
 }
 
-pub fn get_pi_session_detail(
-    conn: Option<&Connection>,
-    session_id: &str,
-) -> Option<SessionDetail> {
+pub fn get_pi_session_detail(conn: Option<&Connection>, session_id: &str) -> Option<SessionDetail> {
     let path = pi_sessions::find_pi_session_path(session_id)?;
     let detail = pi_sessions::read_pi_session_detail(&path)?;
     let title = clean_pi_title(detail.meta.session_name.clone(), &detail.meta.first_message);
@@ -2362,7 +2409,9 @@ pub fn get_pi_session_detail(
     let notes = conn
         .and_then(|c| get_session_notes(c, session_id).ok())
         .unwrap_or_default();
-    let meta = conn.and_then(|c| get_session_meta(c, session_id).ok()).flatten();
+    let meta = conn
+        .and_then(|c| get_session_meta(c, session_id).ok())
+        .flatten();
     let token_breakdown = conn
         .and_then(|c| get_context_token_breakdown(c, session_id).ok())
         .flatten();
@@ -2593,11 +2642,11 @@ pub fn update_session_fact(
     )
 }
 
-pub fn delete_session_fact(
-    conn: &Connection,
-    fact_id: i64,
-) -> Result<usize, rusqlite::Error> {
-    conn.execute("DELETE FROM session_facts WHERE id = ?1", rusqlite::params![fact_id])
+pub fn delete_session_fact(conn: &Connection, fact_id: i64) -> Result<usize, rusqlite::Error> {
+    conn.execute(
+        "DELETE FROM session_facts WHERE id = ?1",
+        rusqlite::params![fact_id],
+    )
 }
 
 pub fn update_note(
@@ -2611,17 +2660,14 @@ pub fn update_note(
     )
 }
 
-pub fn delete_note(
-    conn: &Connection,
-    note_id: i64,
-) -> Result<usize, rusqlite::Error> {
-    conn.execute("DELETE FROM notes WHERE id = ?1", rusqlite::params![note_id])
+pub fn delete_note(conn: &Connection, note_id: i64) -> Result<usize, rusqlite::Error> {
+    conn.execute(
+        "DELETE FROM notes WHERE id = ?1",
+        rusqlite::params![note_id],
+    )
 }
 
-pub fn dismiss_note(
-    conn: &Connection,
-    note_id: i64,
-) -> Result<usize, rusqlite::Error> {
+pub fn dismiss_note(conn: &Connection, note_id: i64) -> Result<usize, rusqlite::Error> {
     conn.execute(
         "UPDATE notes SET status = 'dismissed', updated_at = ?1 WHERE id = ?2",
         rusqlite::params![chrono::Utc::now().timestamp_millis(), note_id],
@@ -2870,8 +2916,7 @@ pub fn get_user_memories(
     );
 
     let mut stmt = conn.prepare(&sql)?;
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-        params.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
     let rows = stmt.query_map(param_refs.as_slice(), |row| {
         let source_candidate_ids: Option<String> = row.get(4)?;
         Ok(UserMemory {
@@ -2889,7 +2934,9 @@ pub fn get_user_memories(
     rows.collect()
 }
 
-pub fn get_user_memory_candidates(conn: &Connection) -> Result<Vec<UserMemoryCandidate>, rusqlite::Error> {
+pub fn get_user_memory_candidates(
+    conn: &Connection,
+) -> Result<Vec<UserMemoryCandidate>, rusqlite::Error> {
     let mut stmt = conn.prepare(
         "SELECT id, content, session_id, source_compartment_start, source_compartment_end, created_at
          FROM user_memory_candidates
@@ -3010,6 +3057,87 @@ pub fn get_db_health(db_path: &PathBuf) -> DbHealth {
     }
 }
 
+#[cfg(test)]
+mod list_sessions_paged_tests {
+    use super::*;
+
+    fn make_rows(count: usize) -> Vec<SessionRow> {
+        (0..count)
+            .map(|idx| SessionRow {
+                harness: if idx % 2 == 0 {
+                    Harness::Opencode
+                } else {
+                    Harness::Pi
+                },
+                session_id: format!("session-{idx:02}"),
+                title: format!("Session {idx}"),
+                project_identity: if idx % 3 == 0 {
+                    "project-a"
+                } else {
+                    "project-b"
+                }
+                .to_string(),
+                project_display: "Project".to_string(),
+                message_count: idx as u32,
+                last_activity_ms: (1000 - idx) as i64,
+                is_subagent: idx % 4 == 0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn paging_unset_returns_full_list_like_list_all_sessions() {
+        let rows = make_rows(12);
+        let paged = page_session_rows(rows.clone(), None, None);
+
+        assert_eq!(paged.total, rows.len() as u32);
+        assert!(!paged.has_more);
+        assert_eq!(
+            paged
+                .rows
+                .iter()
+                .map(|row| row.session_id.as_str())
+                .collect::<Vec<_>>(),
+            rows.iter()
+                .map(|row| row.session_id.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn paging_slices_rows_and_reports_has_more() {
+        let rows = make_rows(12);
+        let first = page_session_rows(rows.clone(), Some(0), Some(5));
+        let second = page_session_rows(rows.clone(), Some(5), Some(5));
+        let past_end = page_session_rows(rows, Some(20), Some(5));
+
+        assert_eq!(first.rows.len(), 5);
+        assert_eq!(first.rows[0].session_id, "session-00");
+        assert!(first.has_more);
+        assert_eq!(second.rows.len(), 5);
+        assert_eq!(second.rows[0].session_id, "session-05");
+        assert!(second.has_more);
+        assert!(past_end.rows.is_empty());
+        assert!(!past_end.has_more);
+    }
+
+    #[test]
+    fn total_reflects_filtered_rows_before_paging() {
+        let filter = SessionFilter {
+            project_identity: Some("project-a".to_string()),
+            ..SessionFilter::default()
+        };
+        let filtered: Vec<SessionRow> = make_rows(12)
+            .into_iter()
+            .filter(|row| session_matches_filter(row, &filter))
+            .collect();
+        let paged = page_session_rows(filtered, Some(0), Some(2));
+
+        assert_eq!(paged.total, 4);
+        assert_eq!(paged.rows.len(), 2);
+        assert!(paged.has_more);
+    }
+}
 
 #[cfg(test)]
 mod clean_pi_title_tests {

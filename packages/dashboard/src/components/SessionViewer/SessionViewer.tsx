@@ -1,5 +1,5 @@
 import { ask } from "@tauri-apps/plugin-dialog";
-import { createEffect, createMemo, createResource, createSignal, For, Index, Show } from "solid-js";
+import { createEffect, createMemo, createResource, createSignal, For, Index, onCleanup, onMount, Show } from "solid-js";
 import {
   deleteNote,
   deleteSessionFact,
@@ -11,7 +11,7 @@ import {
   getSessionDetail,
   getSessionMessages,
   getSmartNotes,
-  listSessions,
+  listSessionsPaged,
   truncate,
   updateNote,
   updateSessionFact,
@@ -30,6 +30,7 @@ import FilterSelect from "../shared/FilterSelect";
 
 const PROJECT_FILTER_KEY = "mc_sessions_project_filter";
 const HARNESS_FILTER_KEY = "mc_sessions_harness_filter";
+const PAGE_SIZE = 50;
 
 /**
  * Compression depth → user-facing label + `.pill` color variant.
@@ -93,6 +94,7 @@ type HarnessFilter = "all" | Harness;
 type SelectedSession = { harness: Harness; sessionId: string };
 
 const sessionsCache = new Map<string, SessionRow[]>();
+const sessionsTotalCache = new Map<string, number>();
 
 function sessionFilterKey(filter: SessionFilter): string {
   return JSON.stringify({
@@ -165,7 +167,13 @@ export default function SessionViewer() {
 
   const [sessions, setSessions] = createSignal<SessionRow[]>([]);
   const [sessionsLoading, setSessionsLoading] = createSignal(false);
+  const [sessionPage, setSessionPage] = createSignal(1);
+  const [hasMore, setHasMore] = createSignal(false);
+  const [totalSessions, setTotalSessions] = createSignal(0);
+  const [loadingMore, setLoadingMore] = createSignal(false);
   let sessionRequestId = 0;
+  let loadMoreSentinel: HTMLDivElement | undefined;
+  let loadMoreObserver: IntersectionObserver | undefined;
 
   createEffect(() => {
     const filter = sessionFilter();
@@ -173,23 +181,70 @@ export default function SessionViewer() {
     const cached = sessionsCache.get(key);
     const requestId = ++sessionRequestId;
 
+    setSessionPage(1);
+
     if (cached) {
       setSessions(cached);
+      setTotalSessions(sessionsTotalCache.get(key) ?? cached.length);
+      setHasMore(cached.length < (sessionsTotalCache.get(key) ?? cached.length));
       setSessionsLoading(false);
     } else {
       setSessions([]);
+      setTotalSessions(0);
+      setHasMore(false);
       setSessionsLoading(true);
     }
 
-    void listSessions(filter)
+    void listSessionsPaged({ ...filter, offset: 0, limit: PAGE_SIZE })
       .then((fresh) => {
-        sessionsCache.set(key, fresh);
-        if (requestId === sessionRequestId) setSessions(fresh);
+        sessionsCache.set(key, fresh.rows);
+        sessionsTotalCache.set(key, fresh.total);
+        if (requestId === sessionRequestId) {
+          setSessions(fresh.rows);
+          setTotalSessions(fresh.total);
+          setHasMore(fresh.has_more);
+          setSessionPage(1);
+        }
       })
       .finally(() => {
         if (requestId === sessionRequestId) setSessionsLoading(false);
       });
   });
+
+  const loadMoreSessions = () => {
+    if (!hasMore() || loadingMore() || sessionsLoading()) return;
+    const filter = sessionFilter();
+    const key = sessionFilterKey(filter);
+    const requestId = sessionRequestId;
+    setLoadingMore(true);
+
+    void listSessionsPaged({ ...filter, offset: sessions().length, limit: PAGE_SIZE })
+      .then((fresh) => {
+        if (requestId !== sessionRequestId) return;
+        const nextRows = [...sessions(), ...fresh.rows];
+        setSessions(nextRows);
+        setTotalSessions(fresh.total);
+        setHasMore(fresh.has_more);
+        setSessionPage((page) => page + 1);
+        sessionsCache.set(key, nextRows);
+        sessionsTotalCache.set(key, fresh.total);
+      })
+      .finally(() => {
+        if (requestId === sessionRequestId) setLoadingMore(false);
+      });
+  };
+
+  onMount(() => {
+    loadMoreObserver = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) loadMoreSessions();
+      },
+      { rootMargin: "200px" },
+    );
+    if (loadMoreSentinel) loadMoreObserver.observe(loadMoreSentinel);
+  });
+
+  onCleanup(() => loadMoreObserver?.disconnect());
 
   const detailKey = createMemo(() => selectedSession());
   const [sessionDetail, { refetch: refetchSessionDetail }] = createResource(detailKey, async (selected) => {
@@ -690,6 +745,22 @@ export default function SessionViewer() {
                   );
                 }}
               </For>
+              <div
+                ref={(el) => {
+                  loadMoreSentinel = el;
+                  loadMoreObserver?.observe(el);
+                }}
+                style={{ "font-size": "11px", color: "var(--text-muted)", "text-align": "center", padding: "8px" }}
+                data-page={sessionPage()}
+                data-total={totalSessions()}
+              >
+                <Show
+                  when={loadingMore()}
+                  fallback={<Show when={!hasMore() && filteredSessions().length > 0}>No more sessions</Show>}
+                >
+                  Loading more...
+                </Show>
+              </div>
             </div>
           </Show>
         </div>

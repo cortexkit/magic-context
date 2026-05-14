@@ -14,6 +14,7 @@ import type {
   Memory,
   MemoryStats,
   Note,
+  PagedSessions,
   ProjectRow,
   SessionDetail,
   SessionFact,
@@ -92,6 +93,25 @@ export async function listSessions(filter?: SessionFilter): Promise<SessionRow[]
   if (typeof filter?.is_subagent === "boolean") sanitized.is_subagent = filter.is_subagent;
 
   return invoke("list_sessions", {
+    filter: Object.keys(sanitized).length > 0 ? sanitized : null,
+  });
+}
+
+function sanitizeSessionFilter(filter?: SessionFilter): SessionFilter {
+  const sanitized: SessionFilter = {};
+  if (filter?.harness) sanitized.harness = filter.harness;
+  if (filter?.project_identity) sanitized.project_identity = filter.project_identity;
+  if (filter?.search) sanitized.search = filter.search;
+  if (typeof filter?.is_subagent === "boolean") sanitized.is_subagent = filter.is_subagent;
+  if (typeof filter?.offset === "number") sanitized.offset = filter.offset;
+  if (typeof filter?.limit === "number") sanitized.limit = filter.limit;
+  return sanitized;
+}
+
+export async function listSessionsPaged(filter?: SessionFilter): Promise<PagedSessions> {
+  const sanitized = sanitizeSessionFilter(filter);
+
+  return invoke("list_sessions_paged", {
     filter: Object.keys(sanitized).length > 0 ? sanitized : null,
   });
 }

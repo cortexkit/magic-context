@@ -112,6 +112,11 @@ pub fn list_sessions(filter: Option<db::SessionFilter>) -> Vec<db::SessionRow> {
 }
 
 #[tauri::command]
+pub fn list_sessions_paged(filter: Option<db::SessionFilter>) -> db::PagedSessions {
+    db::list_sessions_paged(filter.unwrap_or_default())
+}
+
+#[tauri::command]
 pub fn get_session_detail(
     state: State<'_, AppState>,
     harness: String,
@@ -156,7 +161,9 @@ pub fn enumerate_projects() -> Vec<db::ProjectRow> {
 }
 
 #[tauri::command]
-pub fn enumerate_memory_projects(state: State<'_, AppState>) -> Result<Vec<db::ProjectRow>, String> {
+pub fn enumerate_memory_projects(
+    state: State<'_, AppState>,
+) -> Result<Vec<db::ProjectRow>, String> {
     let path = state.get_db_path()?;
     let conn = db::open_readonly(&path).map_err(|e| e.to_string())?;
     db::enumerate_memory_projects(&conn).map_err(|e| e.to_string())
@@ -215,10 +222,7 @@ pub fn update_session_fact(
 }
 
 #[tauri::command]
-pub fn delete_session_fact(
-    state: State<'_, AppState>,
-    fact_id: i64,
-) -> Result<(), String> {
+pub fn delete_session_fact(state: State<'_, AppState>, fact_id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
     let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
     db::delete_session_fact(&conn, fact_id).map_err(|e| e.to_string())?;
@@ -238,10 +242,7 @@ pub fn update_note(
 }
 
 #[tauri::command]
-pub fn delete_note(
-    state: State<'_, AppState>,
-    note_id: i64,
-) -> Result<(), String> {
+pub fn delete_note(state: State<'_, AppState>, note_id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
     let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
     db::delete_note(&conn, note_id).map_err(|e| e.to_string())?;
@@ -249,10 +250,7 @@ pub fn delete_note(
 }
 
 #[tauri::command]
-pub fn dismiss_note(
-    state: State<'_, AppState>,
-    note_id: i64,
-) -> Result<(), String> {
+pub fn dismiss_note(state: State<'_, AppState>, note_id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
     let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
     db::dismiss_note(&conn, note_id).map_err(|e| e.to_string())?;
@@ -564,40 +562,28 @@ pub fn get_user_memory_candidates(
 }
 
 #[tauri::command]
-pub fn dismiss_user_memory(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<(), String> {
+pub fn dismiss_user_memory(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
     let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
     db::dismiss_user_memory(&conn, id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn delete_user_memory(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<(), String> {
+pub fn delete_user_memory(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
     let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
     db::delete_user_memory(&conn, id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn delete_user_memory_candidate(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<(), String> {
+pub fn delete_user_memory_candidate(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
     let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
     db::delete_user_memory_candidate(&conn, id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn promote_user_memory_candidate(
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<(), String> {
+pub fn promote_user_memory_candidate(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let path = state.get_db_path()?;
     let conn = db::open_readwrite(&path).map_err(|e| e.to_string())?;
     db::promote_user_memory_candidate(&conn, id).map_err(|e| e.to_string())

@@ -79,6 +79,8 @@ export interface SessionFilter {
    * subagent sessions (which dominate the row count) are filtered server-side.
    */
   is_subagent?: boolean;
+  offset?: number;
+  limit?: number;
 }
 
 export interface SessionRow {
@@ -90,6 +92,12 @@ export interface SessionRow {
   message_count: number;
   last_activity_ms: number;
   is_subagent: boolean;
+}
+
+export interface PagedSessions {
+  rows: SessionRow[];
+  total: number;
+  has_more: boolean;
 }
 
 export interface SessionMessageRow {

@@ -39,6 +39,7 @@ fn main() {
             // Sessions
             commands::get_sessions,
             commands::list_sessions,
+            commands::list_sessions_paged,
             commands::get_session_detail,
             commands::get_session_messages,
             commands::get_session_cache_events,
@@ -90,8 +91,8 @@ fn main() {
         .setup(|app| {
             // ── macOS app menu bar ──
             let app_handle_for_menu = app.app_handle().clone();
-            let check_updates_item = MenuItemBuilder::with_id("app_check_updates", "Check for Updates...")
-                .build(app)?;
+            let check_updates_item =
+                MenuItemBuilder::with_id("app_check_updates", "Check for Updates...").build(app)?;
             let app_submenu = SubmenuBuilder::new(app, "Magic Context")
                 .about(None)
                 .item(&check_updates_item)
@@ -156,7 +157,8 @@ fn main() {
 
             {
                 let png_bytes = include_bytes!("../icons/tray-icon.png");
-                let img = image::load_from_memory(png_bytes).expect("failed to decode tray icon PNG");
+                let img =
+                    image::load_from_memory(png_bytes).expect("failed to decode tray icon PNG");
                 let rgba = img.to_rgba8();
                 let (w, h) = rgba.dimensions();
                 let icon = tauri::image::Image::new_owned(rgba.into_raw(), w, h);
