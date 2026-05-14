@@ -8,6 +8,15 @@ interface RawCountRow {
     count?: number;
 }
 
+interface AssistantMidTurnRow {
+    id?: string;
+    finish?: string | null;
+}
+
+interface PartDataRow {
+    data?: string | null;
+}
+
 function getOpenCodeDbPath(): string {
     return join(getDataDir(), "opencode", "opencode.db");
 }
@@ -61,6 +70,46 @@ export function getRawSessionMessageCountFromDb(db: Database, sessionId: string)
         )
         .get(sessionId) as RawCountRow | null;
     return typeof row?.count === "number" ? row.count : 0;
+}
+
+export function isMidTurn(_deps: unknown, sessionId: string): boolean {
+    try {
+        return withReadOnlySessionDb((db) => isMidTurnFromOpenCodeDb(db, sessionId));
+    } catch (error) {
+        log("[magic-context] failed to inspect OpenCode mid-turn state:", error);
+        return false;
+    }
+}
+
+export function isMidTurnFromOpenCodeDb(db: Database, sessionId: string): boolean {
+    const latestAssistant = db
+        .prepare(
+            `SELECT id,
+                    json_extract(data, '$.finish') as finish
+             FROM message
+             WHERE session_id = ?
+               AND json_extract(data, '$.role') = 'assistant'
+             ORDER BY time_created DESC
+             LIMIT 1`,
+        )
+        .get(sessionId) as AssistantMidTurnRow | null;
+
+    if (typeof latestAssistant?.id !== "string") return false;
+    if (latestAssistant.finish === "tool-calls") return true;
+
+    const partRows = db
+        .prepare("SELECT data FROM part WHERE session_id = ? AND message_id = ?")
+        .all(sessionId, latestAssistant.id) as PartDataRow[];
+
+    return partRows.some((row) => {
+        if (typeof row.data !== "string" || row.data.length === 0) return false;
+        try {
+            const part = JSON.parse(row.data) as Record<string, unknown>;
+            return part.type === "tool" && part.providerExecuted !== true;
+        } catch {
+            return false;
+        }
+    });
 }
 
 interface AssistantModelRow {
