@@ -75,7 +75,7 @@ export class PiTestHarness {
 
   async sendPrompt(
     text: string,
-    options: { timeoutMs?: number; continueSession?: boolean } = {},
+    options: { timeoutMs?: number; continueSession?: boolean; images?: unknown[] } = {},
   ): Promise<PiRunResult> {
     const timeoutMs = options.timeoutMs ?? 60_000;
     const events: PiRpcEvent[] = [];
@@ -92,7 +92,7 @@ export class PiTestHarness {
     try {
       const promptResponse = await this.rpc.sendCommand(
         "prompt",
-        { message: text },
+        { message: text, ...(options.images ? { images: options.images } : {}) },
         { timeoutMs, label: "prompt response" },
       );
       requireSuccessfulResponse(promptResponse);
