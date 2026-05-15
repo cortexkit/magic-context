@@ -88,6 +88,7 @@ import type {
 	SubagentRunner,
 	SubagentRunResult,
 } from "@magic-context/core/shared/subagent-runner";
+import { convertEntriesToRawMessages } from "./read-session-pi";
 
 const HISTORIAN_AGENT_NAME = "magic-context-historian";
 const DEFAULT_HISTORIAN_TIMEOUT_MS = 120_000;
@@ -735,21 +736,46 @@ function appendPiNativeCompaction(args: {
 	}
 }
 
+/**
+ * Find the Pi SessionEntry id whose RawMessage ordinal corresponds to
+ * `lastCompactedOrdinal + 1` — i.e., the first entry whose content
+ * should survive a Pi-native compaction marker placed after the
+ * compartment that ends at `lastCompactedOrdinal`.
+ *
+ * # Why this routes through convertEntriesToRawMessages
+ *
+ * Historian publishes compartments whose `endMessage` ordinal comes
+ * from `read-session-pi.ts:convertEntriesToRawMessages` — the
+ * canonical Pi ordinal source. Pi's `appendCompaction` API expects
+ * `firstKeptEntryId` as a real SessionEntry id.
+ *
+ * A previous implementation walked `entries` with its own counter
+ * that incremented only on user|assistant roles. That counter
+ * diverged from `convertEntriesToRawMessages`, which also emits
+ * synthetic-user RawMessages for `toolResult→assistant` transitions
+ * (the common pattern in tool-heavy sessions: ~3,005 such transitions
+ * out of ~7,423 ordinals in a 2-week tool-heavy session).
+ *
+ * When the counters diverged, the function could never count past
+ * `(user_count + assistant_count)` ordinals, returned null for any
+ * `lastCompactedOrdinal` beyond that point, and Pi's native compaction
+ * marker was silently never written. The Pi JSONL grew unbounded
+ * while magic-context kept publishing compartments to its DB
+ * (cortexkit issue #X1, surfaced by pi-deferred-compaction-marker
+ * e2e test).
+ *
+ * Now the function delegates to the canonical ordinal source. The
+ * RawMessage at ordinal `N` carries `id` populated from either the
+ * real underlying entry (user|assistant|unknown role) or the first
+ * folded toolResult entry (synthetic user) — never empty.
+ */
 function findFirstKeptEntryId(
 	entries: unknown[],
 	lastCompactedOrdinal: number,
 ): string | null {
-	let ordinal = 0;
-	for (const entry of entries) {
-		if (!entry || typeof entry !== "object") continue;
-		const e = entry as { type?: unknown; id?: unknown; message?: unknown };
-		if (e.type !== "message") continue;
-		const role = (e.message as { role?: unknown } | undefined)?.role;
-		if (role !== "user" && role !== "assistant") continue;
-		ordinal++;
-		if (ordinal === lastCompactedOrdinal + 1) {
-			return typeof e.id === "string" && e.id.length > 0 ? e.id : null;
-		}
-	}
-	return null;
+	const rawMessages = convertEntriesToRawMessages(entries);
+	const target = lastCompactedOrdinal + 1;
+	const match = rawMessages.find((m) => m.ordinal === target);
+	if (!match) return null;
+	return match.id.length > 0 ? match.id : null;
 }
