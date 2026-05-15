@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { open, stat, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "../../../config/schema/magic-context";
 import { getMagicContextStorageDir } from "../../../shared/data-path";
 import { log } from "../../../shared/logger";
@@ -101,6 +102,102 @@ function startLockHeartbeat(lockPath: string): () => void {
     // Don't keep the event loop alive solely for the heartbeat.
     timer.unref?.();
     return () => clearInterval(timer);
+}
+
+/**
+ * Pre-inject the WASM ONNX runtime so transformers.js skips its native
+ * `onnxruntime-node` path entirely.
+ *
+ * Why this exists:
+ *   `@huggingface/transformers@4.x` does a top-level static `import "onnxruntime-node"`.
+ *   On Electron Desktop (e.g. OpenCode Desktop's main process), that native
+ *   `.node` binary fails to load for several environmental reasons — missing
+ *   Visual C++ Redistributables on Windows, ASAR archive layout issues,
+ *   onnxruntime's own dependency DLLs not being resolvable. The failure
+ *   propagates up the import chain and Node reports it as `ERR_MODULE_NOT_FOUND`
+ *   targeting `transformers.node.mjs`, even though that file exists.
+ *
+ *   transformers.js exposes `Symbol.for("onnxruntime")` as an override hook
+ *   (added in 3.4.x via PR #1231). If that global symbol is set before the
+ *   first `import("@huggingface/transformers")`, the library uses whatever ORT
+ *   we provide instead of attempting its own native-or-web backend selection.
+ *
+ *   `onnxruntime-web` (WASM backend) is already a direct dependency of
+ *   `@huggingface/transformers`, so it's installed alongside `onnxruntime-node`
+ *   with no extra package needed. WASM is slower than native CPU on Node/Bun
+ *   but on Electron Desktop it's the only path that actually loads.
+ *
+ * Why only Electron:
+ *   Plain Node and Bun runtimes (Pi, terminal OpenCode, dashboard backend)
+ *   load `onnxruntime-node` correctly. We don't want to regress those to WASM.
+ *   `process.versions.electron` is the canonical check — it's only present
+ *   inside Electron processes.
+ *
+ * Refs:
+ *   - https://github.com/cortexkit/magic-context/issues/78
+ *   - https://github.com/huggingface/transformers.js/pull/1231 (ORT_SYMBOL)
+ *   - https://github.com/huggingface/transformers.js/issues/1240 (Electron picks wrong ORT)
+ */
+async function injectWasmOrtForElectron(): Promise<boolean> {
+    if (typeof process === "undefined" || !process.versions?.electron) {
+        return false;
+    }
+
+    try {
+        // Non-literal specifier — same trick we use for `@huggingface/transformers`
+        // to keep Bun's static analyzer from eagerly probing the package at plugin
+        // load time. We need lazy resolution because non-Electron runtimes never
+        // need onnxruntime-web at all. See issue #4.
+        const ortWebSpec = `onnxruntime-${"web"}`;
+        const ortWeb = (await import(ortWebSpec)) as {
+            env?: { wasm?: { wasmPaths?: string | Record<string, string> } };
+            default?: unknown;
+        };
+
+        // Resolve the actual on-disk location of onnxruntime-web/dist/ so we can
+        // point WASM loading at the local .wasm/.mjs files rather than the
+        // jsdelivr CDN. Without this, the first embedding init would require
+        // network access — and would fail offline or behind corporate proxies.
+        try {
+            const { createRequire: createRequireFn } = await import("node:module");
+            const requireFn = createRequireFn(import.meta.url);
+            const pkgPath = requireFn.resolve("onnxruntime-web/package.json");
+            const distDir = join(dirname(pkgPath), "dist");
+            const wasmPathsPrefix = `${pathToFileURL(distDir).href}/`;
+            if (ortWeb.env?.wasm) {
+                ortWeb.env.wasm.wasmPaths = wasmPathsPrefix;
+            }
+        } catch (pathError) {
+            // Non-fatal — onnxruntime-web will fall back to its default CDN.
+            // First embedding init may need network, but subsequent ones use
+            // the WASM cache. We log and continue rather than blocking embeddings.
+            log(
+                "[magic-context] could not resolve local onnxruntime-web/dist, falling back to default WASM paths:",
+                pathError instanceof Error ? pathError.message : String(pathError),
+            );
+        }
+
+        // transformers.js does `if (ORT_SYMBOL in globalThis) { ONNX = globalThis[ORT_SYMBOL] }`
+        // at module-evaluation time. Setting this BEFORE the first
+        // `await import("@huggingface/transformers")` (immediately after this
+        // function returns) ensures the library picks up our WASM runtime
+        // instead of its own native selection logic.
+        (globalThis as Record<symbol, unknown>)[Symbol.for("onnxruntime")] = ortWeb;
+        log(
+            "[magic-context] Electron detected — using onnxruntime-web (WASM) for embeddings (bypasses onnxruntime-node native load)",
+        );
+        return true;
+    } catch (error) {
+        // If onnxruntime-web import itself fails (e.g. it's not installed for
+        // some reason), we fall through and let transformers do its normal
+        // native load. That will likely fail too, but the error will be the
+        // user's actual problem rather than something masked by our shim.
+        log(
+            "[magic-context] failed to inject onnxruntime-web for Electron — letting transformers fall back to native:",
+            error instanceof Error ? error.message : String(error),
+        );
+        return false;
+    }
 }
 
 type EmbeddingPipelineResult = {
@@ -246,6 +343,14 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
 
         this.initPromise = (async () => {
             try {
+                // Pre-inject WASM ORT runtime for Electron Desktop. This MUST run
+                // before the first `await import("@huggingface/transformers")` below
+                // — transformers.js reads `Symbol.for("onnxruntime")` at module
+                // evaluation time and uses whatever we provide instead of doing its
+                // own native-vs-web backend selection. No-op on plain Node/Bun.
+                // See: https://github.com/cortexkit/magic-context/issues/78
+                await injectWasmOrtForElectron();
+
                 // Non-literal import specifier prevents Bun from eagerly resolving
                 // @huggingface/transformers at plugin load time. Desktop sidecar spawns
                 // hit ENOENT on JSDoc-referenced files inside transformers' webpack dist

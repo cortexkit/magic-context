@@ -29,7 +29,7 @@
 		"README.md"
 	],
 	"scripts": {
-		"build": "bun build src/index.ts --outdir dist --target node --format esm --external @opencode-ai/plugin --external @huggingface/transformers --external better-sqlite3 --external bun:sqlite && tsc --emitDeclarationOnly",
+		"build": "bun build src/index.ts --outdir dist --target node --format esm --external @opencode-ai/plugin --external @huggingface/transformers --external onnxruntime-web --external better-sqlite3 --external bun:sqlite && tsc --emitDeclarationOnly",
 		"typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
 		"test": "bun test",
 		"lint": "biome check .",
