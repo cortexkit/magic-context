@@ -1029,6 +1029,66 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				}
 			}
 			updateSessionMeta(db, sessionId, updates);
+
+			// Synthetic-todowrite capture (Pi parity with OpenCode
+			// hook-handlers.ts `tool.execute.after` for `todowrite`).
+			//
+			// Why message_end and not tool_execution_start:
+			//   Pi's `tool_execution_start` only fires for tools Pi has
+			//   actually executed (i.e. tools the agent registered).
+			//   The mocked todowrite in tests — and any user-driven
+			//   custom todowrite-shaped tool that isn't in Pi's registry
+			//   — would not trigger `tool_execution_start`. Reading the
+			//   assistant message at `message_end` catches every
+			//   todowrite-shaped `toolCall` block regardless of whether
+			//   Pi could execute it locally, matching what OpenCode
+			//   captures via `tool.execute.after` on every visible tool
+			//   call.
+			//
+			// Cache safety: pure DB write, no message mutation.
+			// Subagents skip — they don't get synthetic todowrite
+			// injection downstream (mirrors OpenCode `fullFeatureMode`
+			// gate).
+			try {
+				const sessionMetaForTodo = getOrCreateSessionMeta(db, sessionId);
+				if (!sessionMetaForTodo.isSubagent) {
+					const msg = event.message as
+						| { role?: string; content?: unknown }
+						| undefined;
+					if (msg && msg.role === "assistant" && Array.isArray(msg.content)) {
+						for (const block of msg.content) {
+							if (!block || typeof block !== "object") continue;
+							const b = block as {
+								type?: unknown;
+								name?: unknown;
+								arguments?: unknown;
+							};
+							if (b.type !== "toolCall") continue;
+							if (typeof b.name !== "string") continue;
+							if (!/^todo.*write$|^write.*todo$|^todowrite$/i.test(b.name)) {
+								continue;
+							}
+							const args = b.arguments as
+								| { todos?: unknown }
+								| null
+								| undefined;
+							const todos = args?.todos;
+							if (!Array.isArray(todos)) continue;
+							const normalized = normalizeTodoStateJson(todos);
+							if (normalized === null) continue;
+							updateSessionMeta(db, sessionId, {
+								lastTodoState: normalized,
+							});
+							// First valid todowrite block wins — mirrors OpenCode's
+							// `tool.execute.after` behavior of capturing one
+							// snapshot per tool invocation.
+							break;
+						}
+					}
+				}
+			} catch (err) {
+				warn("message_end: synthetic todowrite capture failed:", err);
+			}
 		} catch (err) {
 			warn("message_end: persist session_meta usage failed:", err);
 		}

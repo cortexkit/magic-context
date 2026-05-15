@@ -20,6 +20,7 @@ import { createCtxMemoryTool } from "./ctx-memory";
 import { createCtxNoteTool } from "./ctx-note";
 import { createCtxReduceTool } from "./ctx-reduce";
 import { createCtxSearchTool } from "./ctx-search";
+import { createTodowriteTool } from "./todowrite";
 
 export interface RegisterToolsOptions {
 	db: ContextDatabase;
@@ -75,6 +76,14 @@ export function registerMagicContextTools(
 	);
 
 	pi.registerTool(createCtxExpandTool({ db: opts.db }));
+
+	// `todowrite` parity with OpenCode. Pi-coding-agent has no built-in
+	// task list tool, so without this the synthetic-todowrite injector
+	// would never have anything to surface. The tool just captures the
+	// `todos` arg and echoes a pretty-printed JSON ack; `message_end`
+	// in index.ts snapshots `params.todos` into `session_meta.last_todo_state`
+	// for downstream synthesis. See `tools/todowrite.ts` header for rationale.
+	pi.registerTool(createTodowriteTool());
 
 	// Conditionally register ctx_reduce. When ctxReduceEnabled is false:
 	//   - tool not registered (agent gets "tool not found" if it tries

@@ -121,6 +121,7 @@ import {
 	runPiCompressionPassIfNeeded,
 } from "./pi-compressor-runner";
 import { type PiHistorianDeps, runPiHistorian } from "./pi-historian-runner";
+import { injectSyntheticTodowriteForPi } from "./pi-todo-inject";
 import { isMidTurnPi, readPiSessionMessages } from "./read-session-pi";
 import {
 	buildMessageIdToMaxTag,
@@ -1267,6 +1268,53 @@ export function registerPiContextHandler(
 						`pi auto-search failed: ${err instanceof Error ? err.message : String(err)}`,
 					);
 				}
+			}
+
+			// Synthetic todowrite injection — Pi parity with OpenCode's
+			// transform-postprocess-phase.ts B7. On cache-busting passes,
+			// inject a Pi-shape toolCall + toolResult pair built from the
+			// `session_meta.last_todo_state` snapshot captured by
+			// `tool_execution_start` in index.ts. On defer passes, replay
+			// the same pair from the persisted snapshot to keep wire bytes
+			// byte-identical (Anthropic prompt cache stability).
+			//
+			// Cache-busting gate parity: OpenCode uses
+			// `isCacheBustingPass = shouldApplyPendingOps || shouldRunHeuristics`
+			// (transform-postprocess-phase.ts:273). Pi's `isCacheBusting`
+			// flag from the outer handler only covers history refresh
+			// (historian publication), so we OR it with `result.heuristicsExecuted`
+			// — the Pi equivalent of "execute pass that actually mutated
+			// state" — to match OpenCode's semantics.
+			//
+			// Subagents skip — they don't get synthetic injection in
+			// OpenCode either (see B7 `args.fullFeatureMode` gate).
+			try {
+				const sessionMetaForTodo = getOrCreateSessionMeta(
+					options.db,
+					sessionId,
+				);
+				if (
+					!sessionMetaForTodo.isSubagent &&
+					sessionMetaForTodo.lastTodoState !== ""
+				) {
+					const isCacheBustingForTodo =
+						isCacheBusting || result.heuristicsExecuted;
+					outputMessages = injectSyntheticTodowriteForPi({
+						db: options.db,
+						sessionId,
+						isSubagent: sessionMetaForTodo.isSubagent,
+						isCacheBusting: isCacheBustingForTodo,
+						lastTodoState: sessionMetaForTodo.lastTodoState,
+						messages: outputMessages as unknown as Parameters<
+							typeof injectSyntheticTodowriteForPi
+						>[0]["messages"],
+					}) as unknown as typeof outputMessages;
+				}
+			} catch (err) {
+				sessionLog(
+					sessionId,
+					`pi synthetic todowrite injection failed: ${err instanceof Error ? err.message : String(err)}`,
+				);
 			}
 
 			// Cast the rebuilt array back to the AgentMessage[] shape Pi's
