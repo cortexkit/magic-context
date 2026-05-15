@@ -17,6 +17,7 @@
  * both harnesses produce equivalent slices for the same range.
  */
 
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import {
 	readSessionChunk,
@@ -26,7 +27,6 @@ import {
 	CTX_EXPAND_DESCRIPTION,
 	CTX_EXPAND_TOKEN_BUDGET,
 } from "@magic-context/core/tools/ctx-expand/constants";
-import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import { readPiSessionMessages } from "../read-session-pi";
 

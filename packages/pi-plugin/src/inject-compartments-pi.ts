@@ -35,7 +35,7 @@ import { sessionLog as logSession } from "@magic-context/core/shared/logger";
 
 /**
  * Pi message shapes — kept structurally compatible with
- * `@mariozechner/pi-coding-agent`'s `AgentMessage` union. Same minimal
+ * `@earendil-works/pi-coding-agent`'s `AgentMessage` union. Same minimal
  * subset transcript-pi.ts uses.
  */
 type PiTextContent = { type: "text"; text: string; textSignature?: string };

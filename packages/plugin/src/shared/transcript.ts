@@ -22,7 +22,7 @@
  *   3. Lets the shared transform code (tagging, stripping, drops)
  *      operate on `TranscriptPart` interface instances without caring
  *      whether they're wrapping `Part` from `@opencode-ai/sdk` or
- *      `TextContent | ToolCall | ThinkingContent` from `@mariozechner/pi-ai`.
+ *      `TextContent | ToolCall | ThinkingContent` from `@earendil-works/pi-ai`.
  *
  * What this interface deliberately does NOT do:
  *
@@ -181,7 +181,7 @@ export interface TranscriptMessage {
  * messages-transform.ts, Pi's context-event handler). The shared
  * transform code receives a Transcript and operates only through this
  * interface — it never imports from `@opencode-ai/sdk` or
- * `@mariozechner/pi-ai`.
+ * `@earendil-works/pi-ai`.
  */
 export interface Transcript {
     /** Ordered messages in the current pass. */

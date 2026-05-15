@@ -1,3 +1,4 @@
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import { getDreamState } from "@magic-context/core/features/magic-context/dreamer/storage-dream-state";
 import { getMemoryCount } from "@magic-context/core/features/magic-context/memory/storage-memory";
@@ -9,7 +10,6 @@ import { getTagsBySession } from "@magic-context/core/features/magic-context/sto
 import { executeStatus } from "@magic-context/core/hooks/magic-context/execute-status";
 import { formatBytes } from "@magic-context/core/hooks/magic-context/format-bytes";
 import { describeError } from "@magic-context/core/shared/error-message";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { showStatusDialog } from "../dialogs/status-dialog";
 import { resolveSessionId, sendCtxStatusMessage } from "./pi-command-utils";
 

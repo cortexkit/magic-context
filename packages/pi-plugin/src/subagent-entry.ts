@@ -46,12 +46,12 @@
  *                                     dreamer subagents only.
  */
 
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { initializeEmbedding } from "@magic-context/core/features/magic-context/memory/embedding";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { openDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import { setHarness } from "@magic-context/core/shared/harness";
 import { log } from "@magic-context/core/shared/logger";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { loadPiConfig } from "./config";
 import { registerMagicContextTools } from "./tools";
 

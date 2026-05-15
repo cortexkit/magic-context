@@ -34,6 +34,7 @@
  * persisted prefix change.
  */
 
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
 	isEmptySidekickResult,
@@ -41,7 +42,6 @@ import {
 	stripThinkingBlocks,
 } from "@magic-context/core/features/magic-context/sidekick/core";
 import { log, sessionLog } from "@magic-context/core/shared/logger";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { PiSubagentRunner } from "../subagent-runner";
 
 /**

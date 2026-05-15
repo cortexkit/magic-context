@@ -14,6 +14,7 @@
  * provider for the duration of an expand call.
  */
 
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { getLastCompartmentEndMessage } from "@magic-context/core/features/magic-context/compartment-storage";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
@@ -22,7 +23,6 @@ import {
 } from "@magic-context/core/features/magic-context/search";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { getVisibleMemoryIds } from "@magic-context/core/hooks/magic-context/inject-compartments";
-import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { type Static, Type } from "typebox";
 
 const DEFAULT_LIMIT = 10;

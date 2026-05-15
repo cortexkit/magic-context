@@ -31,6 +31,7 @@
  * versa).
  */
 
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { invalidateAllMemoryBlockCaches } from "@magic-context/core/features/magic-context/compartment-storage";
 import {
 	archiveMemory,
@@ -55,7 +56,6 @@ import { computeNormalizedHash } from "@magic-context/core/features/magic-contex
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { log } from "@magic-context/core/shared/logger";
-import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { type Static, Type } from "typebox";
 
 const DEFAULT_LIST_LIMIT = 10;

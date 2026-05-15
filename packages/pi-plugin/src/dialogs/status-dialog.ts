@@ -1,3 +1,15 @@
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+	Theme,
+} from "@earendil-works/pi-coding-agent";
+import {
+	type Component,
+	matchesKey,
+	type TUI,
+	truncateToWidth,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import {
 	getCompartments,
 	getSessionFacts,
@@ -10,18 +22,6 @@ import { getTagsBySession } from "@magic-context/core/features/magic-context/sto
 import { resolveExecuteThresholdDetail } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import { formatBytes } from "@magic-context/core/hooks/magic-context/format-bytes";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
-import type {
-	ExtensionAPI,
-	ExtensionCommandContext,
-	Theme,
-} from "@mariozechner/pi-coding-agent";
-import {
-	type Component,
-	matchesKey,
-	type TUI,
-	truncateToWidth,
-	visibleWidth,
-} from "@mariozechner/pi-tui";
 import packageJson from "../../package.json";
 import { resolveSessionId } from "../commands/pi-command-utils";
 

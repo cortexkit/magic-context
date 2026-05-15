@@ -83,7 +83,7 @@ const DREAMER_ACTION_AGENTS: ReadonlySet<string> = new Set([
  * concatenated text content and return it as the run result.
  *
  * Why subprocess instead of in-process?
- * - Pi's @mariozechner/pi-coding-agent has no in-process child-session
+ * - Pi's @earendil-works/pi-coding-agent has no in-process child-session
  *   API equivalent to OpenCode's `client.session.create() / .prompt()`.
  *   Sessions are tied to a SessionManager that runs the interactive UI
  *   loop, and the agent loop expects to own stdout/stderr.
@@ -689,7 +689,7 @@ export function buildArgs(options: SubagentRunOptions): string[] {
  * Extract the final assistant message's text + status from a Pi `agent_end`
  * messages array.
  *
- * Pi's AgentMessage shape (from @mariozechner/pi-ai):
+ * Pi's AgentMessage shape (from @earendil-works/pi-ai):
  *   {
  *     role: "user" | "assistant" | "toolResult",
  *     content: Array<{ type: "text" | "toolCall" | "toolResult", ... }>,

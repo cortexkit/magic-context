@@ -1,8 +1,8 @@
+import type { ContextEvent } from "@earendil-works/pi-coding-agent";
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
 import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import { setHarness } from "@magic-context/core/shared/harness";
 import { Database } from "@magic-context/core/shared/sqlite";
-import type { ContextEvent } from "@mariozechner/pi-coding-agent";
 
 export type PiMessage = ContextEvent["messages"][number];
 

@@ -49,6 +49,7 @@
  * OpenCode lines 118-143.
  */
 
+import type { ContextEvent } from "@earendil-works/pi-coding-agent";
 import type {
 	UnifiedSearchOptions,
 	UnifiedSearchResult,
@@ -57,7 +58,6 @@ import { unifiedSearch } from "@magic-context/core/features/magic-context/search
 import { buildAutoSearchHint } from "@magic-context/core/hooks/magic-context/auto-search-hint";
 import { log, sessionLog } from "@magic-context/core/shared/logger";
 import type { Database } from "@magic-context/core/shared/sqlite";
-import type { ContextEvent } from "@mariozechner/pi-coding-agent";
 
 /**
  * Pi's full AgentMessage union, sourced from the live SDK ContextEvent

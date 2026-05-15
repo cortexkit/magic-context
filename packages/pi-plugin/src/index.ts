@@ -21,6 +21,7 @@
 
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type {
 	DreamerConfig,
 	HistorianConfig,
@@ -51,7 +52,6 @@ import {
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { setHarness } from "@magic-context/core/shared/harness";
 import { log } from "@magic-context/core/shared/logger";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
 	type PiSidekickConfig,
 	registerCtxAugCommand,

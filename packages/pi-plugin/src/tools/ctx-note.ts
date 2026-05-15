@@ -18,6 +18,7 @@
  *   `features/magic-context/storage-notes.ts` for the underlying storage
  */
 
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import {
@@ -29,7 +30,6 @@ import {
 	setNoteLastReadAt,
 	updateNote,
 } from "@magic-context/core/features/magic-context/storage";
-import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { type Static, Type } from "typebox";
 
 const FILTER_VALUES = [

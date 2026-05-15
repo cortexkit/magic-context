@@ -13,6 +13,7 @@
  * mentions, so the agent never sees the tool name or the §N§ syntax.
  */
 
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { parseRangeString } from "@magic-context/core/features/magic-context/range-parser";
 import {
 	type ContextDatabase,
@@ -24,7 +25,6 @@ import {
 } from "@magic-context/core/features/magic-context/storage";
 import { getErrorMessage } from "@magic-context/core/shared/error-message";
 import { CTX_REDUCE_DESCRIPTION } from "@magic-context/core/tools/ctx-reduce/constants";
-import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { type Static, Type } from "typebox";
 
 const ParamsSchema = Type.Object({

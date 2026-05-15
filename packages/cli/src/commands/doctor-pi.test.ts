@@ -121,7 +121,7 @@ function baseOptions(root: string, cwd: string, prompts: MockPrompts): RunDoctor
                 path: join(root, ".pi", "bin", "pi"),
                 source: "home",
             }),
-            getPiVersion: () => "0.71.0",
+            getPiVersion: () => "0.74.0",
             getLatestNpmVersion: () => "0.1.0",
             openDatabase: () => {
                 currentDb = createMockDb();
@@ -165,7 +165,7 @@ describe("Pi doctor", () => {
 
         expect(code).toBe(0);
         const output = prompts.messages.join("\n");
-        expect(output).toContain("PASS Pi 0.71.0 detected");
+        expect(output).toContain("PASS Pi 0.74.0 detected");
         expect(output).toContain("PASS npm:@cortexkit/pi-magic-context is registered");
         expect(output).toContain("PASS SQLite integrity_check: ok");
         expect(output).toContain("Summary: PASS");
@@ -264,7 +264,7 @@ describe("Pi doctor", () => {
             pluginVersion: "0.1.0",
             piInstalled: true,
             piPath: join(root, ".pi", "bin", "pi"),
-            piVersion: "0.71.0",
+            piVersion: "0.74.0",
             settings: {
                 path: join(agentDir, "settings.json"),
                 exists: true,

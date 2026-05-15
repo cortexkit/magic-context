@@ -231,18 +231,17 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
     const version = env.getPiVersion(pi.path);
     spinner.stop(version ? `Pi ${version} detected at ${pi.path}` : `Pi detected at ${pi.path}`);
 
-    // Pi 0.71.0 introduced the long-form `--extension` flag we use to load
-    // the lean subagent extension. Older Pi versions hard-fail with
-    // "Unknown option: -x" when subagents try to spawn, so warn loudly
-    // before the user wastes time on a setup that won't run subagents.
-    const MIN_PI_VERSION = "0.71.0";
+    // Pi 0.74.0 moved to the `@earendil-works/pi-coding-agent` package scope.
+    // Magic Context's peerDependency targets that scope, so older Pi versions
+    // (on `@mariozechner/pi-coding-agent`) cannot load this extension.
+    const MIN_PI_VERSION = "0.74.0";
     if (version && comparePiVersion(version, MIN_PI_VERSION) < 0) {
         prompts.log.warn(
             `Pi ${version} is older than the required ${MIN_PI_VERSION}.\n` +
-                `Magic Context spawns subagents with \`--extension <path>\` (long form), ` +
-                `which Pi 0.71.0 introduced. Older Pi versions hard-fail with ` +
-                `"Unknown option" when historian/dreamer/sidekick tries to run.\n` +
-                `Run \`pi update\` (or \`npm install -g @mariozechner/pi-coding-agent@latest\`) before continuing.`,
+                `Pi 0.74.0 renamed the npm package from \`@mariozechner/pi-coding-agent\` ` +
+                `to \`@earendil-works/pi-coding-agent\`. Magic Context's peer dependency ` +
+                `targets the new scope, so older Pi installs cannot load this extension.\n` +
+                `Run \`pi update --self\` (or \`npm install -g @earendil-works/pi-coding-agent@latest\`) before continuing.`,
         );
         const proceed = await prompts.confirm(
             "Continue with setup anyway? (subagents will fail at runtime)",

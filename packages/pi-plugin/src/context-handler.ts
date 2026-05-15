@@ -35,6 +35,11 @@
  */
 
 import * as crypto from "node:crypto";
+import type {
+	ContextEvent,
+	ExtensionAPI,
+	ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { getLastCompartmentEndMessage } from "@magic-context/core/features/magic-context/compartment-storage";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
@@ -91,15 +96,9 @@ import {
 	readRawSessionMessages,
 	setRawMessageProvider,
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
-
 import { log, sessionLog } from "@magic-context/core/shared/logger";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
-import type {
-	ContextEvent,
-	ExtensionAPI,
-	ExtensionContext,
-} from "@mariozechner/pi-coding-agent";
 import {
 	clearAutoSearchForPiSession,
 	runAutoSearchHintForPi,
@@ -372,7 +371,7 @@ export function consumePendingMaterialization(sessionId: string): boolean {
 /**
  * Pi's full AgentMessage union (user | assistant | toolResult | custom).
  * Sourced from the live ContextEvent payload so the type stays in sync
- * with @mariozechner/pi-coding-agent without us re-declaring it.
+ * with @earendil-works/pi-coding-agent without us re-declaring it.
  *
  * The nudge / note-nudge / auto-search helpers below operate on this
  * union but only inspect/mutate user and (rarely) assistant messages —
@@ -640,7 +639,7 @@ function resolveSessionId(ctx: ExtensionContext): string | undefined {
  * `buildSessionContext`'s compaction-aware emission order so the
  * resulting `entryIds[]` lines up with `event.messages` exactly.
  *
- * Algorithm — mirrors @mariozechner/pi-coding-agent's
+ * Algorithm — mirrors @earendil-works/pi-coding-agent's
  * `buildSessionContext` implementation (see node_modules/.../core/
  * session-manager.js:108 and our copy of the algorithm in this repo's
  * earlier debug session for `ses_21cba3abaffenqSinaCFbAFF3E`):

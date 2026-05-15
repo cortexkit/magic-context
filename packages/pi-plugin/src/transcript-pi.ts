@@ -2,7 +2,7 @@
  * Pi adapter for the harness-agnostic transcript interface.
  *
  * Pi delivers messages via `pi.on("context", ...)` as `AgentMessage[]`
- * (from `@mariozechner/pi-agent-core`). The event handler returns
+ * (from `@earendil-works/pi-agent-core`). The event handler returns
  * `{ messages: AgentMessage[] }` to mutate the LLM-bound message array.
  * Unlike OpenCode where `Part.text` is mutated in place, Pi messages
  * have content arrays of typed parts (`TextContent | ThinkingContent
@@ -77,7 +77,7 @@ import type {
 } from "@magic-context/core/shared/transcript";
 
 // We re-declare the minimal subset of pi-ai message shapes we need.
-// Importing from @mariozechner/pi-ai directly would couple the plugin
+// Importing from @earendil-works/pi-ai directly would couple the plugin
 // build to pi-ai's exact version; the test fixtures in 4b.2 will need
 // to construct synthetic messages, and a local type makes that easier.
 // The shape MUST stay structurally compatible with pi-ai's exports.
@@ -135,7 +135,7 @@ type PiAgentMessage = PiUserMessage | PiAssistantMessage | PiToolResultMessage;
  * mutations through the adapter's dirty-message tracking.
  *
  * Accepts `unknown[]` rather than the actual `AgentMessage[]` from
- * `@mariozechner/pi-agent-core` because that type embeds CustomAgentMessages
+ * `@earendil-works/pi-agent-core` because that type embeds CustomAgentMessages
  * declared via module augmentation, which makes generic inference brittle
  * across pi-coding-agent versions. We narrow to our recognized roles
  * (user/assistant/toolResult) at runtime; messages with other roles fall

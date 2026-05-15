@@ -13,8 +13,8 @@
  * shipped. This matches OpenCode's gating in `tool-registry.ts`.
  */
 
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { createCtxExpandTool } from "./ctx-expand";
 import { createCtxMemoryTool } from "./ctx-memory";
 import { createCtxNoteTool } from "./ctx-note";

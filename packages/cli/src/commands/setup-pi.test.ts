@@ -128,7 +128,7 @@ describe("runSetup", () => {
 
         const env: SetupEnvironment = {
             detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-            getPiVersion: () => "0.71.0",
+            getPiVersion: () => "0.74.0",
             getAvailableModels: () => [
                 "anthropic/claude-haiku-4-5",
                 "anthropic/claude-sonnet-4-6",
@@ -183,7 +183,7 @@ describe("runSetup", () => {
 
         const env: SetupEnvironment = {
             detectPiBinary: () => ({ path: join(root, "bin", "pi"), source: "path" }),
-            getPiVersion: () => "0.71.0",
+            getPiVersion: () => "0.74.0",
             // Only github-copilot model so buildModelSelection always picks it first
             getAvailableModels: () => ["github-copilot/gpt-5.4"],
             paths: {
@@ -229,7 +229,7 @@ describe("runSetup", () => {
         expect(prompts.messages.join("\n")).toContain("Pi not found");
     });
 
-    it("warns and exits when Pi version is below 0.71.0 and user declines", async () => {
+    it("warns and exits when Pi version is below 0.74.0 and user declines", async () => {
         const root = makeTempRoot();
         const agentDir = join(root, ".pi", "agent");
         const env: SetupEnvironment = {
@@ -249,13 +249,13 @@ describe("runSetup", () => {
 
         expect(code).toBe(0);
         const log = prompts.messages.join("\n");
-        expect(log).toContain("Pi 0.69.0 is older than the required 0.71.0");
+        expect(log).toContain("Pi 0.69.0 is older than the required 0.74.0");
         expect(log).toContain("outro:Setup cancelled");
         expect(existsSync(join(agentDir, "magic-context.jsonc"))).toBe(false);
         expect(existsSync(join(agentDir, "settings.json"))).toBe(false);
     });
 
-    it("continues setup when Pi version is below 0.71.0 and user opts in", async () => {
+    it("continues setup when Pi version is below 0.74.0 and user opts in", async () => {
         const root = makeTempRoot();
         const agentDir = join(root, ".pi", "agent");
         const env: SetupEnvironment = {
@@ -277,7 +277,7 @@ describe("runSetup", () => {
         expect(code).toBe(0);
         expect(existsSync(join(agentDir, "magic-context.jsonc"))).toBe(true);
         expect(prompts.messages.join("\n")).toContain(
-            "Pi 0.69.0 is older than the required 0.71.0",
+            "Pi 0.69.0 is older than the required 0.74.0",
         );
     });
 });

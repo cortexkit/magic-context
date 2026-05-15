@@ -55,7 +55,7 @@ state directly: `getState()`, `getMessages()`, `getSessionStats()`,
 `compactNow()`, and `newSession()`.
 
 RPC mode is available in the installed Pi peer range. The current peer is
-`@mariozechner/pi-coding-agent@^0.71.0`; the lockfile resolves `0.71.1`, whose
+`@earendil-works/pi-coding-agent@^0.71.0`; the lockfile resolves `0.71.1`, whose
 packaged docs specify the JSONL RPC protocol, and the changelog shows the
 current JSON protocol was introduced in `0.16.0`.
 

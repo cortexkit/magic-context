@@ -1,3 +1,4 @@
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { COMPARTMENT_AGENT_SYSTEM_PROMPT } from "@magic-context/core/hooks/magic-context/compartment-prompt";
@@ -10,7 +11,6 @@ import type { RawMessageProvider } from "@magic-context/core/hooks/magic-context
 import { setRawMessageProvider } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { describeError } from "@magic-context/core/shared/error-message";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
 	signalPiHistoryRefresh,
 	signalPiPendingMaterialization,

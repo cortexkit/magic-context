@@ -26,7 +26,7 @@
 		"README.md"
 	],
 	"scripts": {
-		"build": "bun build src/index.ts src/subagent-entry.ts --outdir dist --target node --format esm --external @mariozechner/pi-coding-agent --external @mariozechner/pi-tui --external @huggingface/transformers --external better-sqlite3",
+		"build": "bun build src/index.ts src/subagent-entry.ts --outdir dist --target node --format esm --external @earendil-works/pi-coding-agent --external @earendil-works/pi-tui --external @huggingface/transformers --external better-sqlite3",
 		"typecheck": "tsc --noEmit",
 		"test": "bun test",
 		"lint": "biome check src",
@@ -46,15 +46,15 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.7",
-		"@mariozechner/pi-coding-agent": "^0.71.0",
-		"@mariozechner/pi-tui": "^0.71.0",
+		"@earendil-works/pi-coding-agent": "^0.74.0",
+		"@earendil-works/pi-tui": "^0.74.0",
 		"@types/better-sqlite3": "^7.6.13",
 		"@types/node": "^22.0.0",
 		"typescript": "^5.8.0"
 	},
 	"peerDependencies": {
-		"@mariozechner/pi-coding-agent": "^0.71.0",
-		"@mariozechner/pi-tui": "^0.71.0"
+		"@earendil-works/pi-coding-agent": "^0.74.0",
+		"@earendil-works/pi-tui": "^0.74.0"
 	},
 	"exports": {
 		".": {

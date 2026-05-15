@@ -1,10 +1,10 @@
 # Magic Context — Pi extension
 
-Cross-session memory and context management for [Pi coding agent](https://github.com/mariozechner/pi-mono). Shares the same SQLite database as the [OpenCode plugin](https://www.npmjs.com/package/@cortexkit/opencode-magic-context), so memories, embeddings, dreamer state, and project knowledge follow you across both harnesses.
+Cross-session memory and context management for [Pi coding agent](https://github.com/earendil-works/pi-mono). Shares the same SQLite database as the [OpenCode plugin](https://www.npmjs.com/package/@cortexkit/opencode-magic-context), so memories, embeddings, dreamer state, and project knowledge follow you across both harnesses.
 
 > ⚠️ **Beta release.** The Pi extension is newer than the OpenCode plugin and is published as **beta**. Core flows (tagging, historian, memories, dreamer, `/ctx-aug`) are validated end-to-end on interactive `pi` sessions and `pi --print --mode json` subagents. Please [report issues](https://github.com/cortexkit/magic-context/issues) — every Pi-side rough edge is fixable.
 
-Requires `@mariozechner/pi-coding-agent` and `@mariozechner/pi-tui` `>= 0.71.0`.
+Requires `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` `>= 0.71.0`.
 
 ---
 

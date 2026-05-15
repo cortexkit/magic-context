@@ -16,7 +16,7 @@
  *   - OpenCode overflow detection (origin of patterns):
  *     https://github.com/sst/opencode/blob/main/packages/opencode/src/provider/error.ts
  *   - Adapted originally from:
- *     https://github.com/badlogic/pi-mono/blob/main/packages/ai/src/utils/overflow.ts
+ *     https://github.com/earendil-works/pi-mono/blob/main/packages/ai/src/utils/overflow.ts
  */
 
 /**

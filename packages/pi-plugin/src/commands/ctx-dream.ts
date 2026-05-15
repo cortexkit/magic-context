@@ -1,7 +1,7 @@
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { enqueueDream } from "@magic-context/core/features/magic-context/dreamer/queue";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { sessionLog } from "@magic-context/core/shared/logger";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { runPiDreamForProject } from "../dreamer";
 import { sendCtxStatusMessage } from "./pi-command-utils";
 

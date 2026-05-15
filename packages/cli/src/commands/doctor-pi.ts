@@ -50,12 +50,10 @@ import { type PromptIO, promptIO } from "../lib/prompts";
 import { writePiSettingsPackage } from "./setup-pi";
 
 const PACKAGE_NAME = "@cortexkit/pi-magic-context";
-// Pi 0.71.0 introduced the `--extension` long-form flag (replacing `-x`).
-// Magic Context spawns subagents with `--extension <lean-entry>` to load
-// only the lean tool surface in subagents without recursive plugin loading,
-// so older Pi versions hard-fail with "Unknown option: -x". This is also
-// our peerDependency floor in package.json.
-const MIN_PI_VERSION = "0.71.0";
+// Pi 0.74.0 renamed the npm package scope from `@mariozechner/pi-coding-agent`
+// to `@earendil-works/pi-coding-agent`. Magic Context's peerDependency targets
+// the new scope, so older Pi installs cannot load this extension.
+const MIN_PI_VERSION = "0.74.0";
 const ROW_COUNT_TABLES = ["tags", "compartments", "memories", "notes", "dream_runs"];
 
 type CheckStatus = "pass" | "warn" | "fail" | "info";
@@ -377,7 +375,7 @@ async function runHealthChecks(options: {
             add(
                 results,
                 "fail",
-                `Pi ${version} is older than required ${MIN_PI_VERSION}. Subagents (historian/dreamer/sidekick) use the long-form \`--extension\` flag introduced in Pi 0.71.0; older versions hard-fail with "Unknown option". Run \`pi update\` (or \`npm install -g @mariozechner/pi-coding-agent@latest\`).`,
+                `Pi ${version} is older than required ${MIN_PI_VERSION}. Subagents (historian/dreamer/sidekick) use the long-form \`--extension\` flag introduced in Pi 0.71.0; older versions hard-fail with "Unknown option". Run \`pi update\` (or \`npm install -g @earendil-works/pi-coding-agent@latest\`).`,
             );
         } else if (version) {
             add(results, "pass", `Pi version meets minimum ${MIN_PI_VERSION} requirement`);
