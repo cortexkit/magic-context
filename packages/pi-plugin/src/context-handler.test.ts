@@ -116,6 +116,112 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
+	it("resets stale persisted pressure on first context pass after restart", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-pi-stale-pressure-restart";
+		try {
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				ctxReduceEnabled: true,
+				protectedTags: 0,
+				scheduler: { executeThresholdPercentage: 65 },
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			const messages = [
+				userMessage("keep", 1),
+				assistantMessage("do not drop on live low pressure", 2),
+			] as never[];
+
+			await handler({ messages }, fakeContext(sessionId) as never);
+			queuePendingOp(db, sessionId, 2, "drop");
+			updateSessionMeta(db, sessionId, {
+				lastResponseTime: Date.now(),
+				cacheTtl: "59m",
+				lastContextPercentage: 92,
+				lastInputTokens: 92_000,
+			});
+			clearContextHandlerSession(sessionId);
+
+			const ctx = {
+				...fakeContext(sessionId),
+				getContextUsage: () => ({
+					tokens: 1_000,
+					percent: 1,
+					contextWindow: 100_000,
+				}),
+			};
+			const result = await handler({ messages }, ctx as never);
+
+			expect(textOf(result.messages[1] as never)).toContain(
+				"do not drop on live low pressure",
+			);
+			const meta = getOrCreateSessionMeta(db, sessionId);
+			expect(meta.lastContextPercentage).toBe(0);
+			expect(meta.lastInputTokens).toBe(0);
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+
+	it("resets stale persisted pressure when Pi switches models", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-pi-stale-pressure-model-switch";
+		try {
+			const fake = createFakePi();
+			recordPiLiveModel(sessionId, "anthropic/old-model");
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				ctxReduceEnabled: true,
+				protectedTags: 0,
+				scheduler: { executeThresholdPercentage: 65 },
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			const messages = [
+				userMessage("keep", 1),
+				assistantMessage("do not drop after model switch", 2),
+			] as never[];
+
+			await handler({ messages }, fakeContext(sessionId) as never);
+			queuePendingOp(db, sessionId, 2, "drop");
+			updateSessionMeta(db, sessionId, {
+				lastResponseTime: Date.now(),
+				cacheTtl: "59m",
+				lastContextPercentage: 88,
+				lastInputTokens: 88_000,
+			});
+			recordPiLiveModel(sessionId, "anthropic/old-model");
+
+			const ctx = {
+				...fakeContext(sessionId),
+				model: { provider: "anthropic", id: "new-model" },
+				getContextUsage: () => ({
+					tokens: 2_000,
+					percent: 2,
+					contextWindow: 200_000,
+				}),
+			};
+			const result = await handler({ messages }, ctx as never);
+
+			expect(textOf(result.messages[1] as never)).toContain(
+				"do not drop after model switch",
+			);
+			const meta = getOrCreateSessionMeta(db, sessionId);
+			expect(meta.lastContextPercentage).toBe(0);
+			expect(meta.lastInputTokens).toBe(0);
+		} finally {
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+
 	it("tags user, assistant, and toolResult messages through the Pi adapter", async () => {
 		const db = createTestDb();
 		try {

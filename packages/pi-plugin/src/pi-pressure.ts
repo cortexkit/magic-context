@@ -50,7 +50,9 @@ export interface PiPressure {
  * Returns null when the message is not an assistant or carries no
  * usage data (aborted/error messages have no usage).
  */
-export function extractAssistantUsage(message: unknown): PiAssistantUsage | null {
+export function extractAssistantUsage(
+	message: unknown,
+): PiAssistantUsage | null {
 	if (!message || typeof message !== "object") return null;
 	const m = message as { role?: unknown; usage?: unknown };
 	if (m.role !== "assistant") return null;

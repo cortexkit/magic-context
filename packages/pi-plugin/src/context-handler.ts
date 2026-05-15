@@ -214,6 +214,16 @@ const liveModelBySession = new Map<string, string>();
 const toolUsageSinceUserTurn = new Map<string, number>();
 const latestUserMessageBySession = new Map<string, string>();
 
+function resolvePiContextModelKey(ctx: ExtensionContext): string | undefined {
+	const model = (ctx as { model?: { provider?: unknown; id?: unknown } }).model;
+	if (!model) return undefined;
+	if (typeof model.provider !== "string" || model.provider.length === 0) {
+		return undefined;
+	}
+	if (typeof model.id !== "string" || model.id.length === 0) return undefined;
+	return `${model.provider}/${model.id}`;
+}
+
 function readPiSessionMessageById(
 	ctx: ExtensionContext,
 	messageId: string,
@@ -895,6 +905,16 @@ export function registerPiContextHandler(
 			const isFirstContextPassForSession =
 				!firstContextPassSeenBySession.has(sessionId);
 			firstContextPassSeenBySession.add(sessionId);
+			const piUsage = ctx.getContextUsage?.();
+			const previousModelKey = liveModelBySession.get(sessionId);
+			const currentModelKey = resolvePiContextModelKey(ctx);
+			const modelChanged =
+				previousModelKey !== undefined &&
+				currentModelKey !== undefined &&
+				previousModelKey !== currentModelKey;
+			if (currentModelKey !== undefined) {
+				liveModelBySession.set(sessionId, currentModelKey);
+			}
 
 			// Resolve scheduler decision: execute-vs-defer based on TTL
 			// + threshold. Drives whether heuristic cleanup runs on this
@@ -916,7 +936,25 @@ export function registerPiContextHandler(
 				options.db,
 				sessionId,
 			);
-			const piUsage = ctx.getContextUsage?.();
+			if (
+				(isFirstContextPassForSession || modelChanged) &&
+				(sessionMetaForUsage.lastContextPercentage > 0 ||
+					sessionMetaForUsage.lastInputTokens > 0)
+			) {
+				const reason = isFirstContextPassForSession
+					? "first pass"
+					: `model switch ${previousModelKey} -> ${currentModelKey}`;
+				sessionLog(
+					sessionId,
+					`pi transform: ${reason} reset — percentage=${sessionMetaForUsage.lastContextPercentage.toFixed(1)}% tokens=${sessionMetaForUsage.lastInputTokens} — clearing stale usage state`,
+				);
+				updateSessionMeta(options.db, sessionId, {
+					lastContextPercentage: 0,
+					lastInputTokens: 0,
+				});
+				sessionMetaForUsage.lastContextPercentage = 0;
+				sessionMetaForUsage.lastInputTokens = 0;
+			}
 			let usagePercentage = 0;
 			let usageInputTokens = 0;
 			if (

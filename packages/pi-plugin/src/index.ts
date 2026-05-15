@@ -65,7 +65,6 @@ import { registerCtxFlushCommand } from "./commands/ctx-flush";
 import { registerCtxRecompCommand } from "./commands/ctx-recomp";
 import { registerCtxStatusCommand } from "./commands/ctx-status";
 import { loadPiConfig } from "./config";
-import { computePiPressure, extractAssistantUsage } from "./pi-pressure";
 import {
 	awaitInFlightHistorians,
 	clearContextHandlerSession,
@@ -87,6 +86,7 @@ import {
 	registerPiDreamerProject,
 	unregisterPiDreamerProject,
 } from "./dreamer";
+import { computePiPressure, extractAssistantUsage } from "./pi-pressure";
 import { readPiSessionMessages } from "./read-session-pi";
 import { registerStatusLine, updateStatusLine } from "./status-line";
 import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
@@ -1000,7 +1000,10 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				if (overflowState.detectedContextLimit > 0) {
 					effectiveContextLimit =
 						effectiveContextLimit > 0
-							? Math.min(effectiveContextLimit, overflowState.detectedContextLimit)
+							? Math.min(
+									effectiveContextLimit,
+									overflowState.detectedContextLimit,
+								)
 							: overflowState.detectedContextLimit;
 				}
 			} catch (err) {
