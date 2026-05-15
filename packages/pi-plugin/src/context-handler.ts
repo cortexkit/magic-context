@@ -932,10 +932,7 @@ export function registerPiContextHandler(
 			// a provider overflow recovery sets a lower detected limit.
 			// Fall back to `piUsage` on the first pass before message_end
 			// has had a chance to run.
-			const sessionMetaForUsage = getOrCreateSessionMeta(
-				options.db,
-				sessionId,
-			);
+			const sessionMetaForUsage = getOrCreateSessionMeta(options.db, sessionId);
 			if (
 				(isFirstContextPassForSession || modelChanged) &&
 				(sessionMetaForUsage.lastContextPercentage > 0 ||
@@ -1320,9 +1317,11 @@ export function registerPiContextHandler(
 			// `isCacheBustingPass = shouldApplyPendingOps || shouldRunHeuristics`
 			// (transform-postprocess-phase.ts:273). Pi's `isCacheBusting`
 			// flag from the outer handler only covers history refresh
-			// (historian publication), so we OR it with `result.heuristicsExecuted`
-			// — the Pi equivalent of "execute pass that actually mutated
-			// state" — to match OpenCode's semantics.
+			// (historian publication), so we OR it with
+			// `result.executedWorkThisPass` — pending-op materialization,
+			// heuristic cleanup, or reasoning clearing — to match
+			// OpenCode's broader "execute pass that actually mutated state"
+			// semantics.
 			//
 			// Subagents skip — they don't get synthetic injection in
 			// OpenCode either (see B7 `args.fullFeatureMode` gate).
@@ -1336,7 +1335,7 @@ export function registerPiContextHandler(
 					sessionMetaForTodo.lastTodoState !== ""
 				) {
 					const isCacheBustingForTodo =
-						isCacheBusting || result.heuristicsExecuted;
+						isCacheBusting || result.executedWorkThisPass;
 					outputMessages = injectSyntheticTodowriteForPi({
 						db: options.db,
 						sessionId,
@@ -1941,6 +1940,8 @@ interface RunPipelineResult {
 	messages: unknown[];
 	/** Whether heuristic cleanup actually ran on this pass. */
 	heuristicsExecuted: boolean;
+	/** Whether any execute-only state mutation ran on this pass. */
+	executedWorkThisPass: boolean;
 	/** Whether <session-history> was written into message[0]. */
 	historyInjected: boolean;
 	/** Aggregate counts for log parity with OpenCode. */
@@ -2343,6 +2344,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	return {
 		messages: outputMessages,
 		heuristicsExecuted,
+		executedWorkThisPass,
 		historyInjected: injectionResult?.injected ?? false,
 		heuristicsResult,
 		injectionResult,
