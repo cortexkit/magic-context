@@ -61,7 +61,7 @@ export function normalizeTodoStateJson(todos: unknown): string | null {
         normalized.push({
             content: todo.content,
             status: todo.status,
-            priority: todo.priority,
+            priority: todo.priority ?? "medium",
         });
     }
 
@@ -194,7 +194,7 @@ function parseTodoState(stateJson: string): TodoItem[] | null {
             result.push({
                 content: item.content,
                 status: item.status,
-                priority: item.priority,
+                priority: item.priority ?? "medium",
             });
         }
         return result;
@@ -209,6 +209,6 @@ function isTodoItem(value: unknown): value is TodoItem {
     return (
         typeof todo.content === "string" &&
         typeof todo.status === "string" &&
-        typeof todo.priority === "string"
+        (todo.priority === undefined || typeof todo.priority === "string")
     );
 }

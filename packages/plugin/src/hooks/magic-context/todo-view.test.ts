@@ -35,6 +35,13 @@ describe("normalizeTodoStateJson", () => {
         expect(parsed[0].id).toBeUndefined();
     });
 
+    it("defaults missing priority to medium", () => {
+        const json = normalizeTodoStateJson([{ content: "Task", status: "pending" }]);
+        expect(JSON.parse(json ?? "null")).toEqual([
+            { content: "Task", status: "pending", priority: "medium" },
+        ]);
+    });
+
     it("rejects whole array if any item is malformed", () => {
         const todos = [
             { content: "Valid", status: "pending", priority: "high" },

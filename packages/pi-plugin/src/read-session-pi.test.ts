@@ -118,14 +118,14 @@ describe("convertEntriesToRawMessages: synthetic-user entry-id propagation", () 
 		//   2: asst-1 (real)
 		//   3: synthetic user folding tr-1 — MUST carry tr-1's id
 		//   4: asst-2 (real)
-		expect(raws.map((r) => ({ ordinal: r.ordinal, id: r.id, role: r.role }))).toEqual(
-			[
-				{ ordinal: 1, id: "user-1", role: "user" },
-				{ ordinal: 2, id: "asst-1", role: "assistant" },
-				{ ordinal: 3, id: "tr-1", role: "user" },
-				{ ordinal: 4, id: "asst-2", role: "assistant" },
-			],
-		);
+		expect(
+			raws.map((r) => ({ ordinal: r.ordinal, id: r.id, role: r.role })),
+		).toEqual([
+			{ ordinal: 1, id: "user-1", role: "user" },
+			{ ordinal: 2, id: "asst-1", role: "assistant" },
+			{ ordinal: 3, id: "tr-1", role: "user" },
+			{ ordinal: 4, id: "asst-2", role: "assistant" },
+		]);
 	});
 
 	it("assigns the first folded toolResult's id when multiple toolResults stack before an assistant", () => {
@@ -221,15 +221,15 @@ describe("convertEntriesToRawMessages: synthetic-user entry-id propagation", () 
 		//   3: asst-2
 		//   4: synthetic user folding tr-2   — id="tr-2"
 		//   5: asst-3
-		expect(raws.map((r) => ({ ordinal: r.ordinal, id: r.id, role: r.role }))).toEqual(
-			[
-				{ ordinal: 1, id: "asst-1", role: "assistant" },
-				{ ordinal: 2, id: "real-user", role: "user" },
-				{ ordinal: 3, id: "asst-2", role: "assistant" },
-				{ ordinal: 4, id: "tr-2", role: "user" },
-				{ ordinal: 5, id: "asst-3", role: "assistant" },
-			],
-		);
+		expect(
+			raws.map((r) => ({ ordinal: r.ordinal, id: r.id, role: r.role })),
+		).toEqual([
+			{ ordinal: 1, id: "asst-1", role: "assistant" },
+			{ ordinal: 2, id: "real-user", role: "user" },
+			{ ordinal: 3, id: "asst-2", role: "assistant" },
+			{ ordinal: 4, id: "tr-2", role: "user" },
+			{ ordinal: 5, id: "asst-3", role: "assistant" },
+		]);
 	});
 
 	it("reproduces the user-session ordinal divergence: every RawMessage has a non-empty id", () => {

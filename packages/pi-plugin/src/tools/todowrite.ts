@@ -30,14 +30,23 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 
-const STATUS_VALUES = ["pending", "in_progress", "completed", "cancelled"] as const;
+const STATUS_VALUES = [
+	"pending",
+	"in_progress",
+	"completed",
+	"cancelled",
+] as const;
 const PRIORITY_VALUES = ["high", "medium", "low"] as const;
 
 const TodoItem = Type.Object({
 	content: Type.String({ description: "Brief description of the task" }),
 	status: Type.Union(STATUS_VALUES.map((v) => Type.Literal(v))),
-	priority: Type.Optional(Type.Union(PRIORITY_VALUES.map((v) => Type.Literal(v)))),
-	id: Type.Optional(Type.String({ description: "Optional stable id for the todo" })),
+	priority: Type.Optional(
+		Type.Union(PRIORITY_VALUES.map((v) => Type.Literal(v))),
+	),
+	id: Type.Optional(
+		Type.String({ description: "Optional stable id for the todo" }),
+	),
 });
 
 const TodowriteParams = Type.Object({
@@ -73,7 +82,13 @@ export function createTodowriteTool(): ToolDefinition<typeof TodowriteParams> {
 		label: "Todos",
 		description: TOOL_DESCRIPTION,
 		parameters: TodowriteParams,
-		async execute(_toolCallId, params: TodowriteParamsT, _signal, _onUpdate, _ctx) {
+		async execute(
+			_toolCallId,
+			params: TodowriteParamsT,
+			_signal,
+			_onUpdate,
+			_ctx,
+		) {
 			const todos = params.todos ?? [];
 			// Output shape matches OpenCode `todo.ts:46-52`: pretty-printed JSON
 			// of the full todos array. Magic Context's `tool_execution_start`

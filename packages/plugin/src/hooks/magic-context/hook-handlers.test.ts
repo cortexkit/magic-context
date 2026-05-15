@@ -124,7 +124,7 @@ describe("createToolExecuteAfterHook todo snapshots", () => {
             await hook({
                 tool: "todowrite",
                 sessionID: "ses-malformed",
-                args: { todos: [{ content: "Missing priority", status: "pending" }] },
+                args: { todos: [{ content: "Missing status" }] },
             });
 
             expect(getOrCreateSessionMeta(db, "ses-malformed").lastTodoState).toBe("[]");
