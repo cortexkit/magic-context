@@ -72,7 +72,10 @@ type PiToolResultMessage = {
 	syntheticTodoMarker?: true;
 };
 
-type PiMessage = PiAssistantMessage | PiToolResultMessage | Record<string, unknown>;
+type PiMessage =
+	| PiAssistantMessage
+	| PiToolResultMessage
+	| Record<string, unknown>;
 
 function getMessageId(message: PiAssistantMessage): string {
 	if (typeof message.responseId === "string" && message.responseId.length > 0) {
@@ -124,9 +127,10 @@ function findToolResultAfter(
  * provider-style `toolCall` block + `toolResult` message that Pi will
  * forward to the LLM.
  */
-function piBlocksFromSynthetic(
-	part: SyntheticTodoPart,
-): { call: PiToolCallBlock; result: PiToolResultMessage } {
+function piBlocksFromSynthetic(part: SyntheticTodoPart): {
+	call: PiToolCallBlock;
+	result: PiToolResultMessage;
+} {
 	return {
 		call: {
 			type: "toolCall",
@@ -232,7 +236,10 @@ export function injectSyntheticTodowriteForPi(args: {
 }): PiMessage[] {
 	if (args.isSubagent) return args.messages;
 
-	const persistedAnchor = getPersistedTodoSyntheticAnchor(args.db, args.sessionId);
+	const persistedAnchor = getPersistedTodoSyntheticAnchor(
+		args.db,
+		args.sessionId,
+	);
 
 	if (args.isCacheBusting) {
 		const part = buildSyntheticTodoPart(args.lastTodoState);
@@ -288,29 +295,10 @@ export function injectSyntheticTodowriteForPi(args: {
 	if (part === null || part.callID !== persistedAnchor.callId) {
 		return args.messages;
 	}
-	if (injectByAssistantId(args.messages, persistedAnchor.messageId, part)) {
-		return args.messages;
-	}
-	// The persisted anchor message isn't in the visible window (e.g. Pi's
-	// post-compaction `event.messages` dropped it, or it was trimmed by
-	// `<session-history>` injection). Anchor-recovery fallback: inject
-	// onto the latest assistant and update the persisted messageId so
-	// subsequent defer passes can re-locate it. Wire bytes still come
-	// from the persisted stateJson, so the on-wire `tool_use` block is
-	// byte-identical with previous defer passes (the only thing changing
-	// is which assistant the pair hangs off — Anthropic cache keys on
-	// content, not assistant indices). Mirrors the recovery behavior
-	// OpenCode's `injectToolPartIntoAssistantById` provides via its
-	// fallback-to-latest path in `transform-postprocess-phase.ts`.
-	const recoveredMessageId = injectIntoLatestAssistant(args.messages, part);
-	if (recoveredMessageId && recoveredMessageId !== persistedAnchor.messageId) {
-		setPersistedTodoSyntheticAnchor(
-			args.db,
-			args.sessionId,
-			persistedAnchor.callId,
-			recoveredMessageId,
-			persistedAnchor.stateJson,
-		);
-	}
+	// If the anchor is not in Pi's visible window, skip silently — same
+	// behavior as OpenCode's `injectToolPartIntoAssistantById`. Re-anchoring
+	// on defer would change the message-array position versus prior defer
+	// passes and bust prompt-cache wire shape.
+	injectByAssistantId(args.messages, persistedAnchor.messageId, part);
 	return args.messages;
 }
