@@ -36,7 +36,7 @@ import {
     updateSessionMeta,
     updateTagStatus,
 } from "./storage";
-import { initializeDatabase } from "./storage-db";
+import { ensureColumn, initializeDatabase } from "./storage-db";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -76,6 +76,36 @@ function makeMemoryDatabase(): Database {
 }
 
 describe("magic-context storage", () => {
+    it("ensureColumn tolerates a sibling adding the column between PRAGMA and ALTER", () => {
+        //#given
+        const dir = makeTempDir("mc-ensure-column-race-");
+        const dbPath = join(dir, "race.db");
+        const dbA = new Database(dbPath);
+        const dbB = new Database(dbPath);
+        dbA.exec("CREATE TABLE race_table (id INTEGER PRIMARY KEY)");
+        let siblingApplied = false;
+        const racingDb = {
+            prepare: dbA.prepare.bind(dbA),
+            exec: (sql: string) => {
+                if (!siblingApplied && sql.includes("ADD COLUMN raced_column")) {
+                    siblingApplied = true;
+                    dbB.exec("ALTER TABLE race_table ADD COLUMN raced_column TEXT");
+                }
+                return dbA.exec(sql);
+            },
+        } as unknown as Database;
+
+        //#when / then
+        expect(() => ensureColumn(racingDb, "race_table", "raced_column", "TEXT")).not.toThrow();
+        const columns = dbA.prepare("PRAGMA table_info(race_table)").all() as Array<{
+            name?: string;
+        }>;
+        expect(columns.some((row) => row.name === "raced_column")).toBe(true);
+
+        closeQuietly(dbA);
+        closeQuietly(dbB);
+    });
+
     it("opens file DB with WAL mode, busy timeout, and required tables", () => {
         //#given
         const dataHome = useTempDataHome("context-storage-open-");

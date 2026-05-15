@@ -616,7 +616,12 @@ function healNullIntegerColumns(db: Database): void {
 // Intentional: the definition regex allows single quotes and parens because SQLite column
 // defaults use them (e.g. TEXT DEFAULT '', INTEGER DEFAULT 0). All callsites pass hardcoded
 // string literals — no user input reaches this function, so the regex is sufficient.
-function ensureColumn(db: Database, table: string, column: string, definition: string): void {
+export function ensureColumn(
+    db: Database,
+    table: string,
+    column: string,
+    definition: string,
+): void {
     if (
         !/^[a-z_]+$/.test(table) ||
         !/^[a-z_]+$/.test(column) ||
@@ -628,7 +633,15 @@ function ensureColumn(db: Database, table: string, column: string, definition: s
     if (rows.some((row) => row.name === column)) {
         return;
     }
-    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    try {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    } catch (err) {
+        const recheck = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>;
+        if (recheck.some((row) => row.name === column)) {
+            return;
+        }
+        throw err;
+    }
 }
 
 /**
