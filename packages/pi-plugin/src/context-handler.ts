@@ -948,9 +948,13 @@ export function registerPiContextHandler(
 				updateSessionMeta(options.db, sessionId, {
 					lastContextPercentage: 0,
 					lastInputTokens: 0,
+					observedSafeInputTokens: 0,
+					cacheAlertSent: false,
 				});
 				sessionMetaForUsage.lastContextPercentage = 0;
 				sessionMetaForUsage.lastInputTokens = 0;
+				sessionMetaForUsage.observedSafeInputTokens = 0;
+				sessionMetaForUsage.cacheAlertSent = false;
 			}
 			let usagePercentage = 0;
 			let usageInputTokens = 0;

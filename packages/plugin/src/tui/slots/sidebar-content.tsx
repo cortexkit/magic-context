@@ -317,6 +317,12 @@ const SidebarContent = (props: {
     )
 
     const s = createMemo(() => snapshot())
+    const contextSummaryColor = createMemo(() => {
+        const usage = s()?.usagePercentage ?? 0
+        if (usage >= 80) return props.theme.error
+        if (usage >= 65) return props.theme.warning
+        return props.theme.accent
+    })
 
     return (
         <box
@@ -341,7 +347,15 @@ const SidebarContent = (props: {
 
             {/* Token breakdown bar */}
             {s() && s()!.inputTokens > 0 && (
-                <box marginTop={1}>
+                <box marginTop={1} flexDirection="column">
+                    {(s()?.contextLimit ?? 0) > 0 && (
+                        <box width="100%" flexDirection="row" justifyContent="space-between">
+                            <text fg={props.theme.textMuted}>Context</text>
+                            <text fg={contextSummaryColor()}>
+                                <b>{s()!.usagePercentage.toFixed(1)}%</b> · {compactTokens(s()!.inputTokens)} / {compactTokens(s()!.contextLimit)} tokens
+                            </text>
+                        </box>
+                    )}
                     <TokenBreakdown theme={props.theme} snapshot={s()!} />
                 </box>
             )}

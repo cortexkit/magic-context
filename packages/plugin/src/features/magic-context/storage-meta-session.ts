@@ -16,7 +16,7 @@ import type { SessionMeta } from "./types";
 export function getOrCreateSessionMeta(db: Database, sessionId: string): SessionMeta {
     const result = db
         .prepare(
-            "SELECT session_id, last_response_time, cache_ttl, counter, last_nudge_tokens, last_nudge_band, last_transform_error, is_subagent, last_context_percentage, last_input_tokens, times_execute_threshold_reached, compartment_in_progress, system_prompt_hash, system_prompt_tokens, conversation_tokens, tool_call_tokens, cleared_reasoning_through_tag, last_todo_state FROM session_meta WHERE session_id = ?",
+            "SELECT session_id, last_response_time, cache_ttl, counter, last_nudge_tokens, last_nudge_band, last_transform_error, is_subagent, last_context_percentage, last_input_tokens, observed_safe_input_tokens, cache_alert_sent, times_execute_threshold_reached, compartment_in_progress, system_prompt_hash, system_prompt_tokens, conversation_tokens, tool_call_tokens, cleared_reasoning_through_tag, last_todo_state FROM session_meta WHERE session_id = ?",
         )
         .get(sessionId);
 

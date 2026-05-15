@@ -305,6 +305,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       is_subagent INTEGER DEFAULT 0,
       last_context_percentage REAL DEFAULT 0,
       last_input_tokens INTEGER DEFAULT 0,
+      observed_safe_input_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_alert_sent INTEGER NOT NULL DEFAULT 0,
       times_execute_threshold_reached INTEGER DEFAULT 0,
       compartment_in_progress INTEGER DEFAULT 0,
       historian_failure_count INTEGER DEFAULT 0,
@@ -386,6 +388,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // and no new notes have been created or updated since.
     ensureColumn(db, "session_meta", "note_last_read_at", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "times_execute_threshold_reached", "INTEGER DEFAULT 0");
+    ensureColumn(db, "session_meta", "observed_safe_input_tokens", "INTEGER NOT NULL DEFAULT 0");
+    ensureColumn(db, "session_meta", "cache_alert_sent", "INTEGER NOT NULL DEFAULT 0");
     ensureColumn(db, "session_meta", "compartment_in_progress", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "historian_failure_count", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "historian_last_error", "TEXT DEFAULT NULL");
@@ -600,6 +604,8 @@ function healNullIntegerColumns(db: Database): void {
         ["conversation_tokens", 0],
         ["tool_call_tokens", 0],
         ["note_nudge_trigger_pending", 0],
+        ["observed_safe_input_tokens", 0],
+        ["cache_alert_sent", 0],
     ];
     for (const [column, fallback] of columns) {
         try {

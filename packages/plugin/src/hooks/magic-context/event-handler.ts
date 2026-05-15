@@ -29,6 +29,7 @@ import { getPersistedCompactionMarkerState } from "../../features/magic-context/
 import type { Tagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { log, sessionLog } from "../../shared/logger";
+import { refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
 import { checkCompartmentTrigger } from "./compartment-trigger";
 import { deriveTriggerBudget } from "./derive-budgets";
@@ -48,6 +49,7 @@ import {
 } from "./event-resolvers";
 import { clearNoteNudgeState } from "./note-nudger";
 import { readRawSessionMessages } from "./read-session-chunk";
+import { type NotificationParams, sendIgnoredMessage } from "./send-session-notification";
 import { clearMessageTokensCache, type NudgePlacementStore } from "./transform";
 import { clearCompressorCooldown } from "./transform-compartment-phase";
 import { resetDegradedCacheCount } from "./transform-postprocess-phase";
@@ -85,6 +87,12 @@ export interface EventHandlerDeps {
     };
     tagger: Tagger;
     db: ReturnType<typeof import("../../features/magic-context/storage").openDatabase>;
+    client?: unknown;
+    getNotificationParams?: (sessionId: string) => NotificationParams;
+}
+
+function formatTokens(value: number): string {
+    return value.toLocaleString();
 }
 
 function evictExpiredUsageEntries(contextUsageMap: Map<string, ContextUsageEntry>): void {
@@ -292,6 +300,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 clearMessageTokensCache(info.sessionID);
             }
 
+            let messageHadOverflowError = false;
+
             // Secondary overflow-detection path: OpenCode attaches overflow
             // errors to the assistant message itself in addition to emitting
             // session.error. Checking both ensures we catch the error no
@@ -301,6 +311,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
             if (info.error !== undefined && info.error !== null) {
                 const detection = detectOverflow(info.error);
                 if (detection.isOverflow) {
+                    messageHadOverflowError = true;
                     try {
                         const metaForOverflow = getOrCreateSessionMeta(deps.db, info.sessionID);
                         if (metaForOverflow.isSubagent) {
@@ -374,6 +385,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     cacheTtl?: string;
                     lastContextPercentage?: number;
                     lastInputTokens?: number;
+                    observedSafeInputTokens?: number;
+                    cacheAlertSent?: boolean;
                 } = {
                     lastResponseTime: now,
                 };
@@ -389,17 +402,53 @@ export function createEventHandler(deps: EventHandlerDeps) {
                         (info.tokens?.input ?? 0) +
                         (info.tokens?.cache?.read ?? 0) +
                         (info.tokens?.cache?.write ?? 0);
-                    const contextLimit = resolveContextLimit(info.providerID, info.modelID, {
+                    let contextLimit = resolveContextLimit(info.providerID, info.modelID, {
                         db: deps.db,
                         sessionID: info.sessionID,
                     });
-                    const percentage =
-                        contextLimit > 0 ? (totalInputTokens / contextLimit) * 100 : 0;
+                    let percentage = contextLimit > 0 ? (totalInputTokens / contextLimit) * 100 : 0;
 
                     sessionLog(
                         info.sessionID,
                         `event message.updated: totalInputTokens=${totalInputTokens} contextLimit=${contextLimit} percentage=${percentage.toFixed(1)}%`,
                     );
+
+                    const sessionMeta = getOrCreateSessionMeta(deps.db, info.sessionID);
+                    const observedSafeInputTokens = sessionMeta.observedSafeInputTokens ?? 0;
+                    if (
+                        percentage > 100 &&
+                        observedSafeInputTokens > 0 &&
+                        totalInputTokens <= observedSafeInputTokens * 2
+                    ) {
+                        const oldLimit = contextLimit;
+                        if (deps.client) {
+                            await refreshModelLimitsFromApi(
+                                deps.client as Parameters<typeof refreshModelLimitsFromApi>[0],
+                            );
+                            contextLimit = resolveContextLimit(info.providerID, info.modelID, {
+                                db: deps.db,
+                                sessionID: info.sessionID,
+                            });
+                            if (contextLimit >= totalInputTokens) {
+                                percentage = (totalInputTokens / contextLimit) * 100;
+                                sessionLog(
+                                    info.sessionID,
+                                    `models-dev-cache: regression recovered for ${info.providerID}/${info.modelID} via refresh (was=${oldLimit}, now=${contextLimit})`,
+                                );
+                            }
+                        }
+
+                        if (contextLimit < totalInputTokens && !sessionMeta.cacheAlertSent) {
+                            updates.cacheAlertSent = true;
+                            const safeTokens = Math.max(observedSafeInputTokens, totalInputTokens);
+                            await sendIgnoredMessage(
+                                deps.client,
+                                info.sessionID,
+                                `⚠️ Magic Context: OpenCode reports a context limit of ${formatTokens(contextLimit)} tokens for ${info.providerID}/${info.modelID} but you've successfully sent ${formatTokens(safeTokens)} tokens in this session — the cached limit looks wrong. Restart OpenCode if you suspect this is incorrect.`,
+                                deps.getNotificationParams?.(info.sessionID) ?? {},
+                            );
+                        }
+                    }
 
                     deps.contextUsageMap.set(info.sessionID, {
                         usage: {
@@ -412,6 +461,12 @@ export function createEventHandler(deps: EventHandlerDeps) {
 
                     updates.lastContextPercentage = percentage;
                     updates.lastInputTokens = totalInputTokens;
+                    if (!messageHadOverflowError) {
+                        updates.observedSafeInputTokens = Math.max(
+                            observedSafeInputTokens,
+                            totalInputTokens,
+                        );
+                    }
 
                     const historianFailureState = getHistorianFailureState(deps.db, info.sessionID);
                     if (historianFailureState.failureCount > 0 && percentage < 90) {
@@ -422,7 +477,6 @@ export function createEventHandler(deps: EventHandlerDeps) {
                         );
                     }
 
-                    const sessionMeta = getOrCreateSessionMeta(deps.db, info.sessionID);
                     const previousPercentage = sessionMeta.lastContextPercentage;
                     if (!sessionMeta.isSubagent) {
                         const effectiveExecuteThreshold = resolveExecuteThreshold(

@@ -160,28 +160,21 @@ const plugin: Plugin = async (ctx) => {
             log(`[magic-context] RPC server failed to start: ${err}`);
         });
 
-        // Warm the model-context-limit cache from OpenCode's SDK and refresh
-        // periodically. The API response matches OpenCode's internal resolution
-        // (live models.dev cache + compiled-in snapshot + custom provider overrides
-        // + derived experimental modes), so any model OpenCode knows the limit
-        // for, we know too. Fire-and-forget: if it fails we fall through to the
-        // disk-based loader in models-dev-cache.
+        // Warm the model-context-limit cache from OpenCode's SDK once at startup.
+        // The API response matches OpenCode's internal resolution (live models.dev
+        // cache + compiled-in snapshot + custom provider overrides + derived
+        // experimental modes), so any model OpenCode knows the limit for, we know
+        // too. Fire-and-forget: if it fails we fall through to the disk-based
+        // loader in models-dev-cache.
         //
-        // Refresh interval: 1 hour. The OpenCode-internal models.dev cache TTL
-        // is 5 minutes, but our use case (reading per-model context limits)
-        // doesn't benefit from refreshing that often. The github-copilot
-        // provider plugin in particular fetches `/models` on every
-        // `Provider.list()` call and its upstream API returns slightly
-        // different model sets between calls (model_picker_enabled toggles),
-        // so a 5-minute refresh produced confusing log churn for no real
-        // benefit. Limits for individual models are stable across days.
+        // Do NOT refresh periodically. Limits are stable in practice, and newly
+        // added models require an OpenCode restart anyway because provider
+        // plugins, snapshots, and opencode.jsonc are loaded at process boot. More
+        // importantly, issue #77 showed that a later refresh can regress to a
+        // smaller/wrong limit and silently break an in-progress session. The
+        // event handler may still retry this refresh once when it detects an
+        // obviously bad cache value, but normal operation is one-shot.
         void refreshModelLimitsFromApi(ctx.client);
-        setInterval(
-            () => {
-                void refreshModelLimitsFromApi(ctx.client);
-            },
-            60 * 60 * 1000,
-        );
     }
 
     // Conflict warning / cleanup for Desktop mode.

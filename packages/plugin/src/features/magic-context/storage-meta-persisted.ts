@@ -559,11 +559,11 @@ export function recordOverflowDetected(
         ensureSessionMetaRow(db, sessionId);
         if (typeof reportedLimit === "number" && reportedLimit > 0) {
             db.prepare(
-                "UPDATE session_meta SET detected_context_limit = ?, needs_emergency_recovery = 1 WHERE session_id = ?",
+                "UPDATE session_meta SET detected_context_limit = ?, needs_emergency_recovery = 1, observed_safe_input_tokens = 0, cache_alert_sent = 0 WHERE session_id = ?",
             ).run(reportedLimit, sessionId);
         } else {
             db.prepare(
-                "UPDATE session_meta SET needs_emergency_recovery = 1 WHERE session_id = ?",
+                "UPDATE session_meta SET needs_emergency_recovery = 1, observed_safe_input_tokens = 0, cache_alert_sent = 0 WHERE session_id = ?",
             ).run(sessionId);
         }
     })();
@@ -583,10 +583,9 @@ export function recordDetectedContextLimit(
     if (!(reportedLimit > 0)) return;
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
-        db.prepare("UPDATE session_meta SET detected_context_limit = ? WHERE session_id = ?").run(
-            reportedLimit,
-            sessionId,
-        );
+        db.prepare(
+            "UPDATE session_meta SET detected_context_limit = ?, observed_safe_input_tokens = 0, cache_alert_sent = 0 WHERE session_id = ?",
+        ).run(reportedLimit, sessionId);
     })();
 }
 

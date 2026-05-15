@@ -13,6 +13,8 @@ export interface SessionMetaRow {
     is_subagent: number;
     last_context_percentage: number;
     last_input_tokens: number;
+    observed_safe_input_tokens: number;
+    cache_alert_sent: number;
     times_execute_threshold_reached: number;
     compartment_in_progress: number;
     // Intentional: type is string (MD5 hex digest), but the guard accepts string|number
@@ -35,6 +37,8 @@ export const META_COLUMNS: Record<string, string> = {
     isSubagent: "is_subagent",
     lastContextPercentage: "last_context_percentage",
     lastInputTokens: "last_input_tokens",
+    observedSafeInputTokens: "observed_safe_input_tokens",
+    cacheAlertSent: "cache_alert_sent",
     timesExecuteThresholdReached: "times_execute_threshold_reached",
     compartmentInProgress: "compartment_in_progress",
     systemPromptHash: "system_prompt_hash",
@@ -45,7 +49,7 @@ export const META_COLUMNS: Record<string, string> = {
     lastTodoState: "last_todo_state",
 };
 
-export const BOOLEAN_META_KEYS = new Set(["isSubagent", "compartmentInProgress"]);
+export const BOOLEAN_META_KEYS = new Set(["isSubagent", "compartmentInProgress", "cacheAlertSent"]);
 
 // Defensive typeof checks: columns may be NULL in DB when a row was seeded
 // before a column was added with ensureColumn (SQLite sets existing rows to
@@ -76,6 +80,8 @@ export function isSessionMetaRow(row: unknown): row is SessionMetaRow {
         typeof r.is_subagent === "number" &&
         typeof r.last_context_percentage === "number" &&
         typeof r.last_input_tokens === "number" &&
+        isNumberOrNull(r.observed_safe_input_tokens) &&
+        isNumberOrNull(r.cache_alert_sent) &&
         // INTEGER columns added via ensureColumn: pre-existing rows get NULL
         // instead of DEFAULT. Strict typeof "number" would reject those rows
         // and trigger the scheduler-reset cascade described above. toSessionMeta
@@ -105,6 +111,8 @@ export function getDefaultSessionMeta(sessionId: string): SessionMeta {
         isSubagent: false,
         lastContextPercentage: 0,
         lastInputTokens: 0,
+        observedSafeInputTokens: 0,
+        cacheAlertSent: false,
         timesExecuteThresholdReached: 0,
         compartmentInProgress: false,
         systemPromptHash: "",
@@ -121,7 +129,7 @@ export function ensureSessionMetaRow(db: Database, sessionId: string): void {
     // Note-nudge persistence columns rely on session_meta defaults and are updated
     // through storage-meta-persisted helpers, not SessionMeta writes.
     db.prepare(
-        "INSERT OR IGNORE INTO session_meta (session_id, harness, last_response_time, cache_ttl, counter, last_nudge_tokens, last_nudge_band, last_transform_error, is_subagent, last_context_percentage, last_input_tokens, times_execute_threshold_reached, compartment_in_progress, system_prompt_hash, cleared_reasoning_through_tag) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO session_meta (session_id, harness, last_response_time, cache_ttl, counter, last_nudge_tokens, last_nudge_band, last_transform_error, is_subagent, last_context_percentage, last_input_tokens, observed_safe_input_tokens, cache_alert_sent, times_execute_threshold_reached, compartment_in_progress, system_prompt_hash, cleared_reasoning_through_tag) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ).run(
         sessionId,
         getHarness(),
@@ -134,6 +142,8 @@ export function ensureSessionMetaRow(db: Database, sessionId: string): void {
         defaults.isSubagent ? 1 : 0,
         defaults.lastContextPercentage,
         defaults.lastInputTokens,
+        defaults.observedSafeInputTokens,
+        defaults.cacheAlertSent ? 1 : 0,
         defaults.timesExecuteThresholdReached,
         defaults.compartmentInProgress ? 1 : 0,
         defaults.systemPromptHash ?? "",
@@ -169,6 +179,8 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
         isSubagent: row.is_subagent === 1,
         lastContextPercentage: row.last_context_percentage,
         lastInputTokens: row.last_input_tokens,
+        observedSafeInputTokens: numOrZero(row.observed_safe_input_tokens),
+        cacheAlertSent: numOrZero(row.cache_alert_sent) === 1,
         timesExecuteThresholdReached: numOrZero(row.times_execute_threshold_reached),
         compartmentInProgress: row.compartment_in_progress === 1,
         systemPromptHash: String(systemPromptHashRaw),

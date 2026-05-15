@@ -55,6 +55,8 @@ export interface SessionMeta {
     isSubagent: boolean;
     lastContextPercentage: number;
     lastInputTokens: number;
+    observedSafeInputTokens: number;
+    cacheAlertSent: boolean;
     timesExecuteThresholdReached: number;
     compartmentInProgress: boolean;
     systemPromptHash: string;

@@ -410,6 +410,8 @@ export function createTransform(deps: TransformDeps) {
                     updateSessionMeta(db, sessionId, {
                         lastContextPercentage: 0,
                         lastInputTokens: 0,
+                        observedSafeInputTokens: 0,
+                        cacheAlertSent: false,
                         clearedReasoningThroughTag: 0,
                     });
                     clearHistorianFailureState(db, sessionId);
@@ -428,6 +430,8 @@ export function createTransform(deps: TransformDeps) {
                         lastContextPercentage: 0,
                         lastInputTokens: 0,
                         clearedReasoningThroughTag: 0,
+                        observedSafeInputTokens: 0,
+                        cacheAlertSent: false,
                     };
                 }
             }

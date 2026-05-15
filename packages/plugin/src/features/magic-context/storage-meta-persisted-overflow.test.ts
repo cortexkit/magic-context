@@ -28,6 +28,8 @@ function createTestDb(): Database {
             is_subagent INTEGER NOT NULL DEFAULT 0,
             last_context_percentage REAL NOT NULL DEFAULT 0,
             last_input_tokens INTEGER NOT NULL DEFAULT 0,
+            observed_safe_input_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_alert_sent INTEGER NOT NULL DEFAULT 0,
             times_execute_threshold_reached INTEGER NOT NULL DEFAULT 0,
             compartment_in_progress INTEGER NOT NULL DEFAULT 0,
             system_prompt_hash TEXT NOT NULL DEFAULT '',
@@ -87,6 +89,26 @@ describe("recordDetectedContextLimit", () => {
         const state = getOverflowState(db, "ses_mixed");
         expect(state.detectedContextLimit).toBe(80_000); // updated
         expect(state.needsEmergencyRecovery).toBe(true); // preserved
+    });
+
+    it("clears cache-regression sentinels when a real overflow limit is recorded", () => {
+        ensureSessionMetaRow(db, "ses_overflow_clears_alert");
+        db.prepare(
+            "UPDATE session_meta SET observed_safe_input_tokens = 90000, cache_alert_sent = 1 WHERE session_id = ?",
+        ).run("ses_overflow_clears_alert");
+
+        recordOverflowDetected(db, "ses_overflow_clears_alert", 64_000);
+
+        const row = db
+            .prepare(
+                "SELECT observed_safe_input_tokens, cache_alert_sent FROM session_meta WHERE session_id = ?",
+            )
+            .get("ses_overflow_clears_alert") as {
+            observed_safe_input_tokens: number;
+            cache_alert_sent: number;
+        };
+        expect(row.observed_safe_input_tokens).toBe(0);
+        expect(row.cache_alert_sent).toBe(0);
     });
 
     it("can be cleared via clearEmergencyRecovery without touching the limit", () => {

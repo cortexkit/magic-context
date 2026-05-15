@@ -398,6 +398,14 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         config: deps.config,
         tagger: deps.tagger,
         db,
+        client: deps.client,
+        getNotificationParams: (sessionId) =>
+            getLiveNotificationParams(
+                sessionId,
+                liveModelBySession,
+                variantBySession,
+                agentBySession,
+            ),
         nudgePlacements,
         onSessionCacheInvalidated: (sessionId: string) => {
             clearInjectionCache(sessionId);

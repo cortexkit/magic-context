@@ -7,7 +7,10 @@ import { resolveProjectIdentity } from "../features/magic-context/memory/project
 import { getMemoriesByProject } from "../features/magic-context/memory/storage-memory";
 import { type ContextDatabase as Database, openDatabase } from "../features/magic-context/storage";
 import { getMeasuredToolDefinitionTokens } from "../features/magic-context/tool-definition-tokens";
-import { resolveExecuteThresholdDetail } from "../hooks/magic-context/event-resolvers";
+import {
+    resolveContextLimit,
+    resolveExecuteThresholdDetail,
+} from "../hooks/magic-context/event-resolvers";
 import { getLiveNotificationParams } from "../hooks/magic-context/hook-handlers";
 import {
     renderMemoryBlock,
@@ -85,6 +88,7 @@ export function buildSidebarSnapshot(
         sessionId,
         usagePercentage: 0,
         inputTokens: 0,
+        contextLimit: 0,
         systemPromptTokens: 0,
         compartmentCount: 0,
         factCount: 0,
@@ -331,6 +335,11 @@ export function buildSidebarSnapshot(
             }
         }
 
+        const contextLimit =
+            activeProviderID && activeModelID
+                ? resolveContextLimit(activeProviderID, activeModelID, { db, sessionID: sessionId })
+                : 0;
+
         const calibration = resolveModelCalibration(activeProviderID, activeModelID);
         const calibrated = calibrateBuckets({
             inputTokens,
@@ -348,6 +357,7 @@ export function buildSidebarSnapshot(
             sessionId,
             usagePercentage,
             inputTokens,
+            contextLimit,
             systemPromptTokens: calibrated.systemTokens,
             compartmentCount,
             factCount,
@@ -474,9 +484,11 @@ export function buildStatusDetail(
 
         // Derived context limit needed for tokens-based threshold resolution.
         const contextLimitForTokens =
-            base.usagePercentage > 0
-                ? Math.round(base.inputTokens / (base.usagePercentage / 100))
-                : 0;
+            base.contextLimit > 0
+                ? base.contextLimit
+                : base.usagePercentage > 0
+                  ? Math.round(base.inputTokens / (base.usagePercentage / 100))
+                  : 0;
 
         // Config values (resolve per-model)
         if (config) {
@@ -516,7 +528,9 @@ export function buildStatusDetail(
         }
 
         // Derived values
-        if (base.usagePercentage > 0) {
+        if (base.contextLimit > 0) {
+            detail.contextLimit = base.contextLimit;
+        } else if (base.usagePercentage > 0) {
             detail.contextLimit = Math.round(base.inputTokens / (base.usagePercentage / 100));
         }
         detail.cacheTtlMs = parseTtlString(detail.cacheTtl);

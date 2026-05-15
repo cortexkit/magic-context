@@ -293,6 +293,8 @@ export function createEventHook(args: {
                     clearPersistedReasoningWatermark(args.db, assistantInfo.sessionID);
                     updateSessionMeta(args.db, assistantInfo.sessionID, {
                         clearedReasoningThroughTag: 0,
+                        observedSafeInputTokens: 0,
+                        cacheAlertSent: false,
                     });
                 }
             }

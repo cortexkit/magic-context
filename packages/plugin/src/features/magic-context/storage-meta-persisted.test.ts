@@ -25,6 +25,8 @@ function createTestDb(): Database {
             is_subagent INTEGER NOT NULL DEFAULT 0,
             last_context_percentage REAL NOT NULL DEFAULT 0,
             last_input_tokens INTEGER NOT NULL DEFAULT 0,
+            observed_safe_input_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_alert_sent INTEGER NOT NULL DEFAULT 0,
             times_execute_threshold_reached INTEGER NOT NULL DEFAULT 0,
             compartment_in_progress INTEGER NOT NULL DEFAULT 0,
             system_prompt_hash TEXT NOT NULL DEFAULT '',

@@ -707,7 +707,11 @@ describe("magic-context hook", () => {
             },
         });
 
-        updateSessionMeta(openDatabase(), "ses-model-change", { clearedReasoningThroughTag: 7 });
+        updateSessionMeta(openDatabase(), "ses-model-change", {
+            clearedReasoningThroughTag: 7,
+            observedSafeInputTokens: 20_000,
+            cacheAlertSent: true,
+        });
 
         await hook.event!({
             event: {
@@ -729,9 +733,10 @@ describe("magic-context hook", () => {
             },
         });
 
-        expect(
-            getOrCreateSessionMeta(openDatabase(), "ses-model-change").clearedReasoningThroughTag,
-        ).toBe(0);
+        const meta = getOrCreateSessionMeta(openDatabase(), "ses-model-change");
+        expect(meta.clearedReasoningThroughTag).toBe(0);
+        expect(meta.observedSafeInputTokens).toBe(0);
+        expect(meta.cacheAlertSent).toBe(false);
     });
 
     it("injects a hidden ctx_reduce reminder on the next user turn after a tool-heavy turn without ctx_reduce", async () => {

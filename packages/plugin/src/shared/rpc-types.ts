@@ -7,6 +7,7 @@ export interface SidebarSnapshot {
     sessionId: string;
     usagePercentage: number;
     inputTokens: number;
+    contextLimit: number;
     systemPromptTokens: number;
     compartmentCount: number;
     factCount: number;

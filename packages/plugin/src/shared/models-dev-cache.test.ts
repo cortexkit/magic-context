@@ -299,11 +299,11 @@ describe("models-dev-cache", () => {
         expect(getModelsDevCacheState().apiLoaded).toBe(false);
     });
 
-    test("suppresses repeated logs when API count oscillates between known sizes", async () => {
-        // Simulates github-copilot's /models endpoint returning different model sets
-        // between calls. We want first sighting of each new size to log, but once a
-        // size has been seen before, further flips between known sizes should be
-        // silent (with one "oscillating" notice).
+    test("repeated manual API refreshes replace cache state without corruption", async () => {
+        // Simulates the issue #77 recovery path manually retrying provider metadata
+        // after a bad cache value. Normal startup no longer schedules periodic
+        // refreshes, but explicit refresh calls should still replace cache state
+        // cleanly even when provider counts alternate.
         const sizeA = {
             data: {
                 providers: [
@@ -335,23 +335,18 @@ describe("models-dev-cache", () => {
         const clientA = { config: { providers: async () => sizeA } };
         const clientB = { config: { providers: async () => sizeB } };
 
-        // First sighting of size 3 → logs "loaded 3 entries".
         await refreshModelLimitsFromApi(clientA);
         expect(getModelsDevCacheState().apiCount).toBe(3);
 
-        // First sighting of size 2 → logs "loaded 2 entries (was 3)".
         await refreshModelLimitsFromApi(clientB);
         expect(getModelsDevCacheState().apiCount).toBe(2);
 
-        // Second sighting of size 3 → logs the "oscillating" notice once.
         await refreshModelLimitsFromApi(clientA);
         expect(getModelsDevCacheState().apiCount).toBe(3);
 
-        // Second sighting of size 2 → silent (no new log expected).
         await refreshModelLimitsFromApi(clientB);
         expect(getModelsDevCacheState().apiCount).toBe(2);
 
-        // Third sighting of size 3 → still silent.
         await refreshModelLimitsFromApi(clientA);
         expect(getModelsDevCacheState().apiCount).toBe(3);
 

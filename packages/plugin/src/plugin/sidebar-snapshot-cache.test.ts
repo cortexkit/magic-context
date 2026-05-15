@@ -15,6 +15,7 @@ function makeSnapshot(overrides: Partial<SidebarSnapshot> = {}): SidebarSnapshot
         sessionId: "ses_test",
         usagePercentage: 0,
         inputTokens: 0,
+        contextLimit: 0,
         systemPromptTokens: 0,
         compartmentCount: 0,
         factCount: 0,

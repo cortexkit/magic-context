@@ -15,6 +15,10 @@ import {
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
+import {
+	clearModelsDevCache,
+	refreshModelLimitsFromApi,
+} from "@magic-context/core/shared/models-dev-cache";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
 import { clearAutoSearchForPiSession } from "./auto-search-pi";
@@ -39,6 +43,7 @@ import {
 describe("registerPiContextHandler", () => {
 	afterEach(() => {
 		__resetMessageIndexAsyncForTests();
+		clearModelsDevCache();
 		clearContextHandlerSession("ses-context");
 		clearContextHandlerSession("ses-sticky-context");
 		clearAutoSearchForPiSession("ses-context");
@@ -196,6 +201,8 @@ describe("registerPiContextHandler", () => {
 				cacheTtl: "59m",
 				lastContextPercentage: 88,
 				lastInputTokens: 88_000,
+				observedSafeInputTokens: 88_000,
+				cacheAlertSent: true,
 			});
 			recordPiLiveModel(sessionId, "anthropic/old-model");
 
@@ -216,6 +223,8 @@ describe("registerPiContextHandler", () => {
 			const meta = getOrCreateSessionMeta(db, sessionId);
 			expect(meta.lastContextPercentage).toBe(0);
 			expect(meta.lastInputTokens).toBe(0);
+			expect(meta.observedSafeInputTokens).toBe(0);
+			expect(meta.cacheAlertSent).toBe(false);
 		} finally {
 			clearContextHandlerSession(sessionId);
 			closeQuietly(db);
@@ -558,6 +567,88 @@ describe("registerPiContextHandler", () => {
 			expect(getOrCreateSessionMeta(db, "ses-context").cacheTtl).toBe("1h");
 		} finally {
 			clearContextHandlerSession("ses-context");
+			closeQuietly(db);
+		}
+	});
+
+	it("tracks Pi observed safe input token high-water mark", async () => {
+		const db = createTestDb();
+		try {
+			const { persistPiPressureFromMessageEnd } = await import("./index");
+
+			await persistPiPressureFromMessageEnd({
+				db,
+				sessionId: "ses-pi-pressure-safe",
+				message: assistantMessage("done", 1, {
+					usage: { input: 80_000, cacheRead: 10_000, cacheWrite: 0 },
+				}),
+				piContextWindow: 200_000,
+			});
+			await persistPiPressureFromMessageEnd({
+				db,
+				sessionId: "ses-pi-pressure-safe",
+				message: assistantMessage("smaller", 2, {
+					usage: { input: 50_000, cacheRead: 0, cacheWrite: 0 },
+				}),
+				piContextWindow: 200_000,
+			});
+
+			const meta = getOrCreateSessionMeta(db, "ses-pi-pressure-safe");
+			expect(meta.observedSafeInputTokens).toBe(90_000);
+			expect(meta.lastInputTokens).toBe(50_000);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("alerts once when Pi model-cache context limit is below observed safe tokens", async () => {
+		const db = createTestDb();
+		try {
+			const { persistPiPressureFromMessageEnd } = await import("./index");
+			await refreshModelLimitsFromApi({
+				config: {
+					providers: async () => ({
+						data: {
+							providers: [
+								{
+									id: "test-provider",
+									models: { "test-model": { limit: { context: 10_000 } } },
+								},
+							],
+						},
+					}),
+				},
+			});
+			updateSessionMeta(db, "ses-pi-pressure-alert", {
+				observedSafeInputTokens: 80_000,
+			});
+			const notify = mock(async () => undefined);
+
+			for (const inputTokens of [90_000, 91_000]) {
+				await persistPiPressureFromMessageEnd({
+					db,
+					sessionId: "ses-pi-pressure-alert",
+					message: assistantMessage("done", 1, {
+						provider: "test-provider",
+						model: "test-model",
+						usage: { input: inputTokens, cacheRead: 0, cacheWrite: 0 },
+					}),
+					piContextWindow: 10_000,
+					notifyIssue: notify,
+				});
+			}
+
+			const meta = getOrCreateSessionMeta(db, "ses-pi-pressure-alert");
+			expect(meta.cacheAlertSent).toBe(true);
+			expect(meta.lastContextPercentage).toBe(910);
+			expect(notify).toHaveBeenCalledTimes(1);
+			expect(notify.mock.calls[0]?.[0]).toContain(
+				"context limit of 10,000 tokens",
+			);
+			expect(notify.mock.calls[0]?.[0]).toContain(
+				"successfully sent 90,000 tokens",
+			);
+		} finally {
 			closeQuietly(db);
 		}
 	});

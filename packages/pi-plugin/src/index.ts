@@ -57,6 +57,10 @@ import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path"
 import { setHarness } from "@magic-context/core/shared/harness";
 import { log } from "@magic-context/core/shared/logger";
 import {
+	clearModelsDevCache,
+	getModelsDevContextLimit,
+} from "@magic-context/core/shared/models-dev-cache";
+import {
 	type PiSidekickConfig,
 	registerCtxAugCommand,
 } from "./commands/ctx-aug";
@@ -136,6 +140,139 @@ function info(message: string, data?: unknown): void {
 
 function warn(message: string, data?: unknown): void {
 	log(`${PREFIX} WARN ${message}`, data);
+}
+
+function formatTokens(value: number): string {
+	return value.toLocaleString();
+}
+
+function getPiMessageModel(message: unknown): {
+	provider: string | undefined;
+	model: string | undefined;
+} {
+	if (!message || typeof message !== "object") {
+		return { provider: undefined, model: undefined };
+	}
+	const msg = message as { provider?: unknown; model?: unknown };
+	return {
+		provider: typeof msg.provider === "string" ? msg.provider : undefined,
+		model: typeof msg.model === "string" ? msg.model : undefined,
+	};
+}
+
+function resolvePiPressureContextLimit(args: {
+	db: ContextDatabase;
+	sessionId: string;
+	provider: string | undefined;
+	model: string | undefined;
+	piContextWindow: number;
+}): number {
+	const cachedLimit =
+		args.provider && args.model
+			? getModelsDevContextLimit(args.provider, args.model)
+			: undefined;
+	let effectiveContextLimit = cachedLimit ?? args.piContextWindow;
+	try {
+		const overflowState = getOverflowState(args.db, args.sessionId);
+		if (overflowState.detectedContextLimit > 0) {
+			effectiveContextLimit =
+				effectiveContextLimit > 0
+					? Math.min(effectiveContextLimit, overflowState.detectedContextLimit)
+					: overflowState.detectedContextLimit;
+		}
+	} catch (err) {
+		warn("message_end: getOverflowState failed:", err);
+	}
+	return effectiveContextLimit;
+}
+
+export async function persistPiPressureFromMessageEnd(args: {
+	db: ContextDatabase;
+	sessionId: string;
+	message: unknown;
+	piContextWindow: number;
+	piTokens?: number;
+	notifyIssue?: (message: string) => unknown | Promise<unknown>;
+}): Promise<void> {
+	const { provider, model } = getPiMessageModel(args.message);
+	const effectiveContextLimit = resolvePiPressureContextLimit({
+		db: args.db,
+		sessionId: args.sessionId,
+		provider,
+		model,
+		piContextWindow: args.piContextWindow,
+	});
+	const usage = extractAssistantUsage(args.message);
+	const pressure = computePiPressure(usage, effectiveContextLimit);
+	const msg =
+		args.message && typeof args.message === "object"
+			? (args.message as { errorMessage?: unknown })
+			: undefined;
+	const messageHadOverflowError =
+		typeof msg?.errorMessage === "string" &&
+		detectOverflow(msg.errorMessage).isOverflow;
+	const updates: Partial<{
+		lastResponseTime: number;
+		lastContextPercentage: number;
+		lastInputTokens: number;
+		observedSafeInputTokens: number;
+		cacheAlertSent: boolean;
+	}> = { lastResponseTime: Date.now() };
+
+	if (pressure) {
+		let percentage = pressure.percentage;
+		let contextLimit = effectiveContextLimit;
+		const meta = getOrCreateSessionMeta(args.db, args.sessionId);
+		const observedSafeInputTokens = meta.observedSafeInputTokens ?? 0;
+		if (
+			percentage > 100 &&
+			observedSafeInputTokens > 0 &&
+			pressure.inputTokens <= observedSafeInputTokens * 2
+		) {
+			const oldLimit = contextLimit;
+			clearModelsDevCache();
+			contextLimit = resolvePiPressureContextLimit({
+				db: args.db,
+				sessionId: args.sessionId,
+				provider,
+				model,
+				piContextWindow: args.piContextWindow,
+			});
+			if (contextLimit >= pressure.inputTokens) {
+				percentage = (pressure.inputTokens / contextLimit) * 100;
+				log(
+					`${PREFIX} models-dev-cache: regression recovered for ${provider}/${model} via Pi cache reload (was=${oldLimit}, now=${contextLimit})`,
+				);
+			} else if (!meta.cacheAlertSent) {
+				updates.cacheAlertSent = true;
+				const safeTokens = Math.max(
+					observedSafeInputTokens,
+					pressure.inputTokens,
+				);
+				const modelLabel =
+					provider && model ? `${provider}/${model}` : "the active model";
+				await args.notifyIssue?.(
+					`⚠️ Magic Context: Pi reports a context limit of ${formatTokens(contextLimit)} tokens for ${modelLabel} but you've successfully sent ${formatTokens(safeTokens)} tokens in this session — the cached limit looks wrong. Restart Pi if you suspect this is incorrect.`,
+				);
+			}
+		}
+		updates.lastContextPercentage = percentage;
+		updates.lastInputTokens = pressure.inputTokens;
+		if (!messageHadOverflowError) {
+			updates.observedSafeInputTokens = Math.max(
+				observedSafeInputTokens,
+				pressure.inputTokens,
+			);
+		}
+	} else if (typeof args.piTokens === "number") {
+		updates.lastInputTokens = args.piTokens;
+		if (args.piContextWindow > 0) {
+			updates.lastContextPercentage =
+				(args.piTokens / args.piContextWindow) * 100;
+		}
+	}
+
+	updateSessionMeta(args.db, args.sessionId, updates);
 }
 
 /** Plugin version from package.json. */
@@ -994,44 +1131,26 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				piUsage && typeof piUsage.contextWindow === "number"
 					? piUsage.contextWindow
 					: 0;
-			let effectiveContextLimit = piContextWindow;
-			try {
-				const overflowState = getOverflowState(db, sessionId);
-				if (overflowState.detectedContextLimit > 0) {
-					effectiveContextLimit =
-						effectiveContextLimit > 0
-							? Math.min(
-									effectiveContextLimit,
-									overflowState.detectedContextLimit,
-								)
-							: overflowState.detectedContextLimit;
-				}
-			} catch (err) {
-				warn("message_end: getOverflowState failed:", err);
-			}
-			const usage = extractAssistantUsage(event.message);
-			const pressure = computePiPressure(usage, effectiveContextLimit);
-			const updates: Partial<{
-				lastResponseTime: number;
-				lastContextPercentage: number;
-				lastInputTokens: number;
-			}> = { lastResponseTime: Date.now() };
-			if (pressure) {
-				updates.lastContextPercentage = pressure.percentage;
-				updates.lastInputTokens = pressure.inputTokens;
-			} else if (piUsage && typeof piUsage.tokens === "number") {
-				// Fallback path when the assistant message had no usage
-				// payload (e.g. aborted/error before usage was set). Pi's
-				// reported tokens isn't ideal — it may include output —
-				// but it's better than dropping the update entirely so
-				// the scheduler still sees fresh pressure data.
-				updates.lastInputTokens = piUsage.tokens;
-				if (piUsage.contextWindow > 0) {
-					updates.lastContextPercentage =
-						(piUsage.tokens / piUsage.contextWindow) * 100;
-				}
-			}
-			updateSessionMeta(db, sessionId, updates);
+			await persistPiPressureFromMessageEnd({
+				db,
+				sessionId,
+				message: event.message,
+				piContextWindow,
+				piTokens:
+					piUsage && typeof piUsage.tokens === "number"
+						? piUsage.tokens
+						: undefined,
+				notifyIssue: async (message) => {
+					const uiNotify = (
+						ctx as { ui?: { notify?: (message: string) => unknown } }
+					).ui?.notify;
+					if (typeof uiNotify === "function") {
+						void uiNotify.call(ctx.ui, message);
+					} else {
+						warn(message);
+					}
+				},
+			});
 
 			// Synthetic-todowrite capture (Pi parity with OpenCode
 			// hook-handlers.ts `tool.execute.after` for `todowrite`).

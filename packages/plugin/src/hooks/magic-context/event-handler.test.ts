@@ -31,6 +31,7 @@ import {
     setPersistedDeliveredNoteNudge,
 } from "../../features/magic-context/storage-meta-persisted";
 import type { ContextUsage } from "../../features/magic-context/types";
+import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { createEventHandler } from "./event-handler";
 
 type ContextUsageCacheEntry = {
@@ -45,6 +46,7 @@ const originalXdgDataHome = process.env.XDG_DATA_HOME;
 afterEach(() => {
     __resetMessageIndexAsyncForTests();
     closeDatabase();
+    clearModelsDevCache();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
 
     for (const dir of tempDirs) {
@@ -119,6 +121,26 @@ function createDeps(contextUsageMap: Map<string, ContextUsageCacheEntry>) {
     };
 }
 
+function providersClient(limit: number, prompt?: ReturnType<typeof mock>) {
+    return {
+        config: {
+            providers: async () => ({
+                data: {
+                    providers: [
+                        {
+                            id: "test-provider",
+                            models: {
+                                "test-model": { limit: { context: limit } },
+                            },
+                        },
+                    ],
+                },
+            }),
+        },
+        session: prompt ? { prompt } : undefined,
+    };
+}
+
 describe("createEventHandler", () => {
     it("keeps root sessions out of reduced mode", async () => {
         useTempDataHome("context-event-root-session-");
@@ -181,6 +203,110 @@ describe("createEventHandler", () => {
         expect(
             getOrCreateSessionMeta(openDatabase(), "ses-usage").lastResponseTime,
         ).toBeGreaterThanOrEqual(before);
+        expect(getOrCreateSessionMeta(openDatabase(), "ses-usage").observedSafeInputTokens).toBe(
+            135_000,
+        );
+    });
+
+    it("recovers silently when a cache-regressed context limit is fixed by refresh", async () => {
+        useTempDataHome("context-event-cache-regression-recovered-");
+        const contextUsageMap = new Map<string, ContextUsageCacheEntry>();
+        await refreshModelLimitsFromApi(providersClient(100_000));
+        const deps = createDeps(contextUsageMap);
+        deps.client = providersClient(100_000);
+        const handler = createEventHandler(deps);
+
+        await handler({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        role: "assistant",
+                        finish: "stop",
+                        sessionID: "ses-regression-recovered",
+                        providerID: "test-provider",
+                        modelID: "test-model",
+                        tokens: { input: 80_000, cache: { read: 0, write: 0 } },
+                    },
+                },
+            },
+        });
+        await refreshModelLimitsFromApi(providersClient(10_000));
+
+        await handler({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        role: "assistant",
+                        finish: "stop",
+                        sessionID: "ses-regression-recovered",
+                        providerID: "test-provider",
+                        modelID: "test-model",
+                        tokens: { input: 90_000, cache: { read: 0, write: 0 } },
+                    },
+                },
+            },
+        });
+
+        const meta = getOrCreateSessionMeta(openDatabase(), "ses-regression-recovered");
+        expect(meta.lastContextPercentage).toBe(90);
+        expect(meta.observedSafeInputTokens).toBe(90_000);
+        expect(meta.cacheAlertSent).toBe(false);
+        expect(contextUsageMap.get("ses-regression-recovered")?.usage.percentage).toBe(90);
+    });
+
+    it("alerts once when a cache-regressed context limit stays wrong after refresh", async () => {
+        useTempDataHome("context-event-cache-regression-alert-");
+        const contextUsageMap = new Map<string, ContextUsageCacheEntry>();
+        await refreshModelLimitsFromApi(providersClient(100_000));
+        const prompt = mock(async () => ({}));
+        const deps = createDeps(contextUsageMap);
+        deps.client = providersClient(10_000, prompt);
+        const handler = createEventHandler(deps);
+
+        await handler({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        role: "assistant",
+                        finish: "stop",
+                        sessionID: "ses-regression-alert",
+                        providerID: "test-provider",
+                        modelID: "test-model",
+                        tokens: { input: 80_000, cache: { read: 0, write: 0 } },
+                    },
+                },
+            },
+        });
+        await refreshModelLimitsFromApi(providersClient(10_000));
+
+        for (const inputTokens of [90_000, 91_000]) {
+            await handler({
+                event: {
+                    type: "message.updated",
+                    properties: {
+                        info: {
+                            role: "assistant",
+                            finish: "stop",
+                            sessionID: "ses-regression-alert",
+                            providerID: "test-provider",
+                            modelID: "test-model",
+                            tokens: { input: inputTokens, cache: { read: 0, write: 0 } },
+                        },
+                    },
+                },
+            });
+        }
+
+        const meta = getOrCreateSessionMeta(openDatabase(), "ses-regression-alert");
+        expect(meta.cacheAlertSent).toBe(true);
+        expect(meta.lastContextPercentage).toBe(910);
+        expect(prompt).toHaveBeenCalledTimes(1);
+        const call = prompt.mock.calls[0]?.[0] as { body?: { parts?: Array<{ text?: string }> } };
+        expect(call.body?.parts?.[0]?.text).toContain("context limit of 10,000 tokens");
+        expect(call.body?.parts?.[0]?.text).toContain("successfully sent 90,000 tokens");
     });
 
     it("refreshes ttl for tokenless assistant updates when prior usage exists", async () => {

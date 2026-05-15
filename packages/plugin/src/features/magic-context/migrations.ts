@@ -561,6 +561,25 @@ const MIGRATIONS: Migration[] = [
             }
         },
     },
+    {
+        version: 16,
+        description: "Add context-limit cache regression sentinels",
+        up: (db: Database) => {
+            const cols = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{
+                name?: string;
+            }>;
+            if (!cols.some((c) => c.name === "observed_safe_input_tokens")) {
+                db.exec(
+                    "ALTER TABLE session_meta ADD COLUMN observed_safe_input_tokens INTEGER NOT NULL DEFAULT 0",
+                );
+            }
+            if (!cols.some((c) => c.name === "cache_alert_sent")) {
+                db.exec(
+                    "ALTER TABLE session_meta ADD COLUMN cache_alert_sent INTEGER NOT NULL DEFAULT 0",
+                );
+            }
+        },
+    },
 ];
 
 function ensureMigrationsTable(db: Database): void {

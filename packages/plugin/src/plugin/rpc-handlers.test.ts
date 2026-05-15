@@ -6,6 +6,8 @@ import { insertMemory } from "../features/magic-context/memory";
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
 import { runMigrations } from "../features/magic-context/migrations";
 import { initializeDatabase } from "../features/magic-context/storage-db";
+import { createLiveSessionState } from "../hooks/magic-context/live-session-state";
+import { clearModelsDevCache, refreshModelLimitsFromApi } from "../shared/models-dev-cache";
 import { Database } from "../shared/sqlite";
 import { closeQuietly } from "../shared/sqlite-helpers";
 import { buildSidebarSnapshot, buildStatusDetail } from "./rpc-handlers";
@@ -20,6 +22,7 @@ function createTestDb(): Database {
 
 afterEach(() => {
     resetSidebarSnapshotCache();
+    clearModelsDevCache();
 });
 
 describe("buildSidebarSnapshot — memory tokens fallback (bug #1)", () => {
@@ -118,6 +121,49 @@ describe("buildSidebarSnapshot — memory tokens fallback (bug #1)", () => {
             expect(snapshot.memoryBlockCount).toBe(1);
             // Tokens come from estimating the cached block string directly.
             expect(snapshot.memoryTokens).toBeGreaterThan(0);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+});
+
+describe("buildSidebarSnapshot — context limit", () => {
+    test("populates contextLimit from the active session model", async () => {
+        const db = createTestDb();
+        try {
+            const sessionId = "ses-sidebar-context-limit";
+            const directory = process.cwd();
+            db.prepare(
+                `INSERT INTO session_meta (
+                    session_id, last_input_tokens, last_context_percentage,
+                    system_prompt_tokens, memory_block_cache, memory_block_count
+                ) VALUES (?, 80000, 40, 5000, '', 0)`,
+            ).run(sessionId);
+            await refreshModelLimitsFromApi({
+                config: {
+                    providers: async () => ({
+                        data: {
+                            providers: [
+                                {
+                                    id: "test-provider",
+                                    models: {
+                                        "test-model": { limit: { context: 200_000 } },
+                                    },
+                                },
+                            ],
+                        },
+                    }),
+                },
+            });
+            const live = createLiveSessionState();
+            live.liveModelBySession.set(sessionId, {
+                providerID: "test-provider",
+                modelID: "test-model",
+            });
+
+            const snapshot = buildSidebarSnapshot(db, sessionId, directory, live, 4000);
+
+            expect(snapshot.contextLimit).toBe(200_000);
         } finally {
             closeQuietly(db);
         }

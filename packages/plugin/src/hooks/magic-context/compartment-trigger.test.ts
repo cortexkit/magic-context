@@ -101,12 +101,17 @@ function makeSessionMeta(sessionId: string, lastContextPercentage: number): Sess
         isSubagent: false,
         lastContextPercentage,
         lastInputTokens: 0,
+        observedSafeInputTokens: 0,
+        cacheAlertSent: false,
         timesExecuteThresholdReached: 0,
         compartmentInProgress: false,
         lastTransformError: null,
         systemPromptHash: "",
         systemPromptTokens: 0,
+        conversationTokens: 0,
+        toolCallTokens: 0,
         clearedReasoningThroughTag: 0,
+        lastTodoState: "",
     };
 }
 

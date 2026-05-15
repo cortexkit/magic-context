@@ -15,8 +15,9 @@
  *      code path that cannot reach the SDK client.
  *
  * The public getter (`getModelsDevContextLimit()`) is synchronous: it checks
- * the API cache first, then the file cache. The plugin warms and refreshes
- * the API cache from `src/index.ts` at startup and on a timer.
+ * the API cache first, then the file cache. The plugin warms the API cache
+ * once from `src/index.ts` at startup. Runtime retries are reserved for the
+ * issue #77 cache-regression recovery path.
  */
 
 import { createHash } from "node:crypto";
@@ -33,10 +34,9 @@ interface OpencodeClientLike {
     };
 }
 
-// File-cache fallback only. The primary `models.json` API refresh is driven
-// by `setInterval(refreshModelLimitsFromApi, ...)` in `index.ts` at a 1-hour
-// cadence; this 5-minute interval governs the on-disk-cache fallback path
-// when the API loader hasn't run yet (e.g. during plugin warmup).
+// File-cache fallback only. The primary API refresh is one-shot at startup;
+// this 5-minute interval governs the on-disk-cache fallback path when the API
+// loader hasn't run yet (e.g. during plugin warmup).
 const RELOAD_INTERVAL_MS = 5 * 60 * 1000;
 
 interface CachedModelMetadata {
@@ -46,17 +46,6 @@ interface CachedModelMetadata {
 /** Populated async from OpenCode SDK. Primary source of truth when available. */
 let apiCache: Map<string, CachedModelMetadata> | null = null;
 let apiLoadedAt = 0;
-/**
- * Recently-seen API cache sizes, used to detect oscillation between two
- * stable values (typically caused by upstream provider plugins like
- * github-copilot whose `/models` endpoint returns slightly different model
- * sets between calls based on `model_picker_enabled` toggles). Once the
- * same size has been observed before, we stop logging count changes —
- * the count is a function of upstream behavior we can't control, and
- * repeated logs only add noise.
- */
-const recentlySeenApiSizes = new Set<number>();
-let oscillationLogged = false;
 
 /** Populated sync from disk as fallback. */
 let fileCache: Map<string, CachedModelMetadata> | null = null;
@@ -237,11 +226,11 @@ function loadModelsDevMetadataFromFile(): Map<string, CachedModelMetadata> {
 /**
  * Asynchronously refresh the API-layer cache from OpenCode's SDK.
  *
- * Call this at plugin startup and periodically (e.g. every 5 minutes) from
- * `src/index.ts`. OpenCode's `/config/providers` endpoint returns every
- * provider with full model metadata — including `limit.context` — resolved
- * through the same path OpenCode itself uses (live cache + compiled-in
- * snapshot + opencode.json overrides + derived experimental modes).
+ * Call this at plugin startup and from the issue #77 regression-recovery path.
+ * OpenCode's `/config/providers` endpoint returns every provider with full
+ * model metadata — including `limit.context` — resolved through the same path
+ * OpenCode itself uses (live cache + compiled-in snapshot + opencode.json
+ * overrides + derived experimental modes).
  *
  * Safe to call concurrently; only overwrites the cache on success.
  */
@@ -277,33 +266,16 @@ export async function refreshModelLimitsFromApi(client: OpencodeClientLike): Pro
         apiCache = map;
         apiLoadedAt = Date.now();
 
-        // Log policy:
-        //   - Always log the first successful load.
-        //   - Log a count change once per new size we haven't seen before.
-        //   - When the count returns to a previously-seen size, log an
-        //     "oscillation" message exactly once explaining the cause, then
-        //     stay silent on further flips between known sizes.
         if (previousSize === null) {
-            recentlySeenApiSizes.add(map.size);
             sessionLog(
                 "global",
                 `models-dev-cache: API layer loaded ${map.size} model metadata entries`,
             );
         } else if (previousSize !== map.size) {
-            const sizeAlreadySeen = recentlySeenApiSizes.has(map.size);
-            recentlySeenApiSizes.add(map.size);
-            if (!sizeAlreadySeen) {
-                sessionLog(
-                    "global",
-                    `models-dev-cache: API layer loaded ${map.size} model metadata entries (was ${previousSize})`,
-                );
-            } else if (!oscillationLogged) {
-                oscillationLogged = true;
-                sessionLog(
-                    "global",
-                    `models-dev-cache: API count oscillating between ${[...recentlySeenApiSizes].sort((a, b) => a - b).join(" ↔ ")} — likely upstream provider plugin returning slightly different model sets between calls (e.g. github-copilot's /models endpoint toggling model_picker_enabled). Suppressing further size-change logs.`,
-                );
-            }
+            sessionLog(
+                "global",
+                `models-dev-cache: API layer loaded ${map.size} model metadata entries (was ${previousSize})`,
+            );
         }
     } catch (error) {
         sessionLog(
@@ -345,8 +317,6 @@ export function getModelsDevContextLimit(providerID: string, modelID: string): n
 export function clearModelsDevCache(): void {
     apiCache = null;
     apiLoadedAt = 0;
-    recentlySeenApiSizes.clear();
-    oscillationLogged = false;
     fileCache = null;
     fileLastAttempt = 0;
 }
