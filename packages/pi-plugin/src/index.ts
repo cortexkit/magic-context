@@ -38,7 +38,10 @@ import {
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import { openDatabase } from "@magic-context/core/features/magic-context/storage-db";
-import { recordOverflowDetected } from "@magic-context/core/features/magic-context/storage-meta-persisted";
+import {
+	getOverflowState,
+	recordOverflowDetected,
+} from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import {
 	deriveHistorianChunkTokens,
 	deriveTriggerBudget,
@@ -49,6 +52,7 @@ import {
 	clearNoteNudgeState,
 	onNoteTrigger,
 } from "@magic-context/core/hooks/magic-context/note-nudger";
+import { normalizeTodoStateJson } from "@magic-context/core/hooks/magic-context/todo-view";
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { setHarness } from "@magic-context/core/shared/harness";
 import { log } from "@magic-context/core/shared/logger";
@@ -61,6 +65,7 @@ import { registerCtxFlushCommand } from "./commands/ctx-flush";
 import { registerCtxRecompCommand } from "./commands/ctx-recomp";
 import { registerCtxStatusCommand } from "./commands/ctx-status";
 import { loadPiConfig } from "./config";
+import { computePiPressure, extractAssistantUsage } from "./pi-pressure";
 import {
 	awaitInFlightHistorians,
 	clearContextHandlerSession,
@@ -831,6 +836,27 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					| { todos?: Array<{ status?: string }> }
 					| undefined;
 				const todos = todoArgs?.todos;
+				const sessionMeta = Array.isArray(todos)
+					? getOrCreateSessionMeta(db, sessionId)
+					: null;
+
+				// Synthetic-todowrite snapshot capture (Pi parity with
+				// OpenCode hook-handlers.ts:386-401). Persist normalized
+				// state on EVERY todowrite call so the transform-time
+				// injection path in pi-pipeline.ts always has a current
+				// snapshot to replay on the next cache-busting pass.
+				// Cache-safe: this is a pure DB write with no message
+				// mutation. Subagents skip — they do not get synthetic
+				// todowrite injection.
+				if (sessionMeta && !sessionMeta.isSubagent) {
+					const normalizedTodos = normalizeTodoStateJson(todos);
+					if (normalizedTodos !== null) {
+						updateSessionMeta(db, sessionId, {
+							lastTodoState: normalizedTodos,
+						});
+					}
+				}
+
 				if (
 					Array.isArray(todos) &&
 					todos.length > 0 &&
@@ -838,8 +864,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 						(t) => t.status === "completed" || t.status === "cancelled",
 					)
 				) {
-					const sessionMeta = getOrCreateSessionMeta(db, sessionId);
-					if (!sessionMeta.isSubagent) {
+					if (sessionMeta && !sessionMeta.isSubagent) {
 						onNoteTrigger(db, sessionId, "todos_complete");
 					}
 				}
@@ -955,17 +980,53 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 				message: event.message,
 				cacheTtlConfig: config.cache_ttl,
 			});
+			// Compute pressure with OpenCode-equivalent semantics: pull
+			// the assistant's `usage` field and use
+			// `input + cacheRead + cacheWrite` (NOT output) divided by
+			// the effective context limit. Prefer
+			// `session_meta.detected_context_limit` over Pi's
+			// `getContextUsage().contextWindow` so that after a
+			// provider context-overflow, the next pass's pressure
+			// reflects the real, lower limit the provider reported.
+			// See `pi-pressure.ts` for the full rationale.
 			const piUsage = ctx.getContextUsage?.();
+			const piContextWindow =
+				piUsage && typeof piUsage.contextWindow === "number"
+					? piUsage.contextWindow
+					: 0;
+			let effectiveContextLimit = piContextWindow;
+			try {
+				const overflowState = getOverflowState(db, sessionId);
+				if (overflowState.detectedContextLimit > 0) {
+					effectiveContextLimit =
+						effectiveContextLimit > 0
+							? Math.min(effectiveContextLimit, overflowState.detectedContextLimit)
+							: overflowState.detectedContextLimit;
+				}
+			} catch (err) {
+				warn("message_end: getOverflowState failed:", err);
+			}
+			const usage = extractAssistantUsage(event.message);
+			const pressure = computePiPressure(usage, effectiveContextLimit);
 			const updates: Partial<{
 				lastResponseTime: number;
 				lastContextPercentage: number;
 				lastInputTokens: number;
 			}> = { lastResponseTime: Date.now() };
-			if (piUsage && typeof piUsage.percent === "number") {
-				updates.lastContextPercentage = piUsage.percent;
-			}
-			if (piUsage && typeof piUsage.tokens === "number") {
+			if (pressure) {
+				updates.lastContextPercentage = pressure.percentage;
+				updates.lastInputTokens = pressure.inputTokens;
+			} else if (piUsage && typeof piUsage.tokens === "number") {
+				// Fallback path when the assistant message had no usage
+				// payload (e.g. aborted/error before usage was set). Pi's
+				// reported tokens isn't ideal — it may include output —
+				// but it's better than dropping the update entirely so
+				// the scheduler still sees fresh pressure data.
 				updates.lastInputTokens = piUsage.tokens;
+				if (piUsage.contextWindow > 0) {
+					updates.lastContextPercentage =
+						(piUsage.tokens / piUsage.contextWindow) * 100;
+				}
 			}
 			updateSessionMeta(db, sessionId, updates);
 		} catch (err) {

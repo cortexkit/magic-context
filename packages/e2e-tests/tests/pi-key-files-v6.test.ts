@@ -3,7 +3,7 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { initializeDatabase } from "../../plugin/src/features/magic-context/storage-db";
@@ -36,6 +36,20 @@ function sha256(input: string | Buffer): string {
 function systemPrompt(h: PiTestHarness): string {
     const system = h.mock.lastRequest()?.body.system;
     if (typeof system === "string") return system;
+    // Pi sends system as an array of `{ type: "text", text: "..." }` blocks.
+    // Join the unescaped `text` fields so test assertions can match the
+    // original XML/markdown content rather than its JSON-escaped form.
+    if (Array.isArray(system)) {
+        return system
+            .map((b: unknown) => {
+                if (b && typeof b === "object" && "text" in b) {
+                    const t = (b as { text: unknown }).text;
+                    return typeof t === "string" ? t : "";
+                }
+                return "";
+            })
+            .join("\n");
+    }
     return JSON.stringify(system ?? "");
 }
 
@@ -106,7 +120,12 @@ function replaceKeyFiles(args: {
 describe("pi key-files v6", () => {
     it("injects shared project_key_files rows and refreshes when the version bumps", async () => {
         const sharedDataDir = mkdtempSync(join(tmpdir(), "pi-kf-data-"));
-        const workdir = mkdtempSync(join(tmpdir(), "pi-kf-work-"));
+        // realpath workdir so seeded project_path matches what
+        // `resolveProjectPath()` (via `realpathSync`) computes when Pi
+        // looks up rows at runtime. On macOS `tmpdir()` returns
+        // `/var/folders/...` but the actual path is
+        // `/private/var/folders/...`.
+        const workdir = realpathSync(mkdtempSync(join(tmpdir(), "pi-kf-work-")));
         const { db, dbPath } = openSeedDb(sharedDataDir);
         db.close();
 
@@ -132,7 +151,7 @@ describe("pi key-files v6", () => {
                     enabled: true,
                     inject_docs: false,
                     user_memories: { enabled: false },
-                    pin_key_files: { enabled: true, token_budget: 1_000 },
+                    pin_key_files: { enabled: true, token_budget: 2_000 },
                 },
             },
         });
