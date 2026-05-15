@@ -210,7 +210,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			if (existingValidationError) {
 				sessionLog(
 					sessionId,
-					`pi-historian failure: source=existing-validation reason="${existingValidationError}"`,
+					`historian failure: source=existing-validation reason="${existingValidationError}"`,
 				);
 				await notify(
 					`Historian skipped: existing stored compartments are invalid: ${existingValidationError}`,
@@ -228,7 +228,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			if (protectedTailStart <= offset) {
 				sessionLog(
 					sessionId,
-					`pi-historian skip: protected tail covers all eligible history (offset=${offset}, protectedStart=${protectedTailStart})`,
+					`historian skip: protected tail covers all eligible history (offset=${offset}, protectedStart=${protectedTailStart})`,
 				);
 				return;
 			}
@@ -242,7 +242,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			if (!chunk.text || chunk.messageCount === 0) {
 				sessionLog(
 					sessionId,
-					`pi-historian skip: empty chunk (offset=${offset}, protectedStart=${protectedTailStart})`,
+					`historian skip: empty chunk (offset=${offset}, protectedStart=${protectedTailStart})`,
 				);
 				return;
 			}
@@ -251,7 +251,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			if (chunkCoverageError) {
 				sessionLog(
 					sessionId,
-					`pi-historian failure: source=chunk-coverage reason="${chunkCoverageError}" chunkRange=${chunk.startIndex}-${chunk.endIndex}`,
+					`historian failure: source=chunk-coverage reason="${chunkCoverageError}" chunkRange=${chunk.startIndex}-${chunk.endIndex}`,
 				);
 				await notify(
 					`Historian skipped: raw chunk could not be safely chunked: ${chunkCoverageError}`,
@@ -298,7 +298,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			if (stateFilePath) {
 				sessionLog(
 					sessionId,
-					`pi-historian: existing state offloaded to file (${existingState.length} chars) → ${stateFilePath}`,
+					`historian: existing state offloaded to file (${existingState.length} chars) → ${stateFilePath}`,
 				);
 			}
 
@@ -319,7 +319,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 
 			sessionLog(
 				sessionId,
-				`pi-historian: invoking subagent (model=${historianModel}, chunk=${chunk.startIndex}-${chunk.endIndex}, ${chunk.messageCount} msgs, ~${chunk.tokenEstimate} tokens)`,
+				`historian: invoking subagent (model=${historianModel}, chunk=${chunk.startIndex}-${chunk.endIndex}, ${chunk.messageCount} msgs, ~${chunk.tokenEstimate} tokens)`,
 			);
 
 			// Per-pass milestone tracing for the Pi child run. We log the
@@ -338,25 +338,25 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						if (event.type === "spawned") {
 							sessionLog(
 								sessionId,
-								`pi-historian[${passLabel}] spawned pid=${event.pid ?? "?"} argv=${event.argv.length} args`,
+								`historian[${passLabel}] spawned pid=${event.pid ?? "?"} argv=${event.argv.length} args`,
 							);
 						} else if (event.type === "terminal") {
 							sessionLog(
 								sessionId,
-								`pi-historian[${passLabel}] terminal @${event.ms}ms stopReason=${event.stopReason ?? "?"} textLen=${event.textLength} hasToolCall=${event.hasToolCall}`,
+								`historian[${passLabel}] terminal @${event.ms}ms stopReason=${event.stopReason ?? "?"} textLen=${event.textLength} hasToolCall=${event.hasToolCall}`,
 							);
 						} else if (event.type === "stderr") {
 							const cleaned = event.chunk.replace(/\s+/g, " ").trim();
 							if (cleaned.length > 0) {
 								sessionLog(
 									sessionId,
-									`pi-historian[${passLabel}] stderr: ${cleaned.slice(0, 500)}`,
+									`historian[${passLabel}] stderr: ${cleaned.slice(0, 500)}`,
 								);
 							}
 						} else if (event.type === "child_exit") {
 							sessionLog(
 								sessionId,
-								`pi-historian[${passLabel}] child_exit @${event.ms}ms code=${event.code} signal=${event.signal}`,
+								`historian[${passLabel}] child_exit @${event.ms}ms code=${event.code} signal=${event.signal}`,
 							);
 						} else if (traceRawEvents) {
 							if (event.type === "raw_event") {
@@ -371,12 +371,12 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 								}
 								sessionLog(
 									sessionId,
-									`pi-historian[${passLabel}] raw_event @${event.ms}ms type=${event.eventType ?? "?"}: ${serialized}`,
+									`historian[${passLabel}] raw_event @${event.ms}ms type=${event.eventType ?? "?"}: ${serialized}`,
 								);
 							} else if (event.type === "first_event") {
 								sessionLog(
 									sessionId,
-									`pi-historian[${passLabel}] first_event @${event.ms}ms type=${event.eventType}`,
+									`historian[${passLabel}] first_event @${event.ms}ms type=${event.eventType}`,
 								);
 							}
 						}
@@ -422,7 +422,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			if (validatedPass.kind === "validation-failed") {
 				sessionLog(
 					sessionId,
-					`pi-historian: first pass validation failed, retrying with repair prompt: ${validatedPass.error}`,
+					`historian: first pass validation failed, retrying with repair prompt: ${validatedPass.error}`,
 				);
 				const repairPrompt = buildHistorianRepairPrompt(
 					prompt,
@@ -463,7 +463,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						: validatedPass.kind === "spawn-failed"
 							? `subagent run failed (${validatedPass.reason}): ${validatedPass.error}`
 							: "historian returned no usable text";
-				sessionLog(sessionId, `pi-historian failure: ${errorMsg}`);
+				sessionLog(sessionId, `historian failure: ${errorMsg}`);
 				incrementHistorianFailure(db, sessionId, errorMsg);
 				await notify(`Historian failed: ${errorMsg}`);
 				return;
@@ -486,10 +486,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				// instead of the repaired one. See parity audit Round 7.
 				const draftAssistantText = validatedDraftText ?? "";
 				if (draftAssistantText.trim().length > 0) {
-					sessionLog(
-						sessionId,
-						"pi-historian two-pass: running editor on draft",
-					);
+					sessionLog(sessionId, "historian two-pass: running editor on draft");
 					const editorResult = await runner.run({
 						agent: HISTORIAN_AGENT_NAME,
 						systemPrompt: HISTORIAN_EDITOR_SYSTEM_PROMPT,
@@ -511,7 +508,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 					if (editorPass.kind === "ok") {
 						sessionLog(
 							sessionId,
-							`pi-historian two-pass: editor accepted, replacing draft`,
+							`historian two-pass: editor accepted, replacing draft`,
 						);
 						validatedPass = editorPass;
 					} else {
@@ -523,7 +520,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 									: "editor returned no usable text";
 						sessionLog(
 							sessionId,
-							`pi-historian two-pass: editor failed (${editorErr}), falling back to draft`,
+							`historian two-pass: editor failed (${editorErr}), falling back to draft`,
 						);
 						// Keep validatedPass as the first-pass result.
 					}
@@ -537,7 +534,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				const errorMsg = `historian returned compartments that did not advance past raw message ${offset - 1}`;
 				sessionLog(
 					sessionId,
-					`pi-historian failure: source=no-progress newCompartmentCount=${newCompartments.length} lastNewEnd=${lastNewEnd} priorEnd=${offset - 1}`,
+					`historian failure: source=no-progress newCompartmentCount=${newCompartments.length} lastNewEnd=${lastNewEnd} priorEnd=${offset - 1}`,
 				);
 				incrementHistorianFailure(db, sessionId, errorMsg);
 				await notify(`Historian failed: ${errorMsg}`);
@@ -586,7 +583,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 
 			sessionLog(
 				sessionId,
-				`pi-historian: published ${newCompartments.length} compartment(s), ${validatedPass.facts?.length ?? 0} fact(s) covering messages ${chunk.startIndex}-${lastNewEnd}`,
+				`historian: published ${newCompartments.length} compartment(s), ${validatedPass.facts?.length ?? 0} fact(s) covering messages ${chunk.startIndex}-${lastNewEnd}`,
 			);
 			completedSuccessfully = true;
 		});
@@ -594,7 +591,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 		const desc = describeError(error);
 		sessionLog(
 			sessionId,
-			`pi-historian failure: source=exception ${desc.brief}${desc.stackHead ? ` stackHead="${desc.stackHead}"` : ""}`,
+			`historian failure: source=exception ${desc.brief}${desc.stackHead ? ` stackHead="${desc.stackHead}"` : ""}`,
 		);
 		incrementHistorianFailure(db, sessionId, desc.brief);
 		await notify(`Historian failed unexpectedly: ${desc.brief}`);
@@ -709,7 +706,7 @@ function appendPiNativeCompaction(args: {
 		if (!firstKeptEntryId) {
 			sessionLog(
 				args.sessionId,
-				`pi-historian: native compaction skipped; no firstKeptEntryId after ordinal ${args.lastCompactedOrdinal}`,
+				`historian: native compaction skipped; no firstKeptEntryId after ordinal ${args.lastCompactedOrdinal}`,
 			);
 			return;
 		}
@@ -726,12 +723,12 @@ function appendPiNativeCompaction(args: {
 		);
 		sessionLog(
 			args.sessionId,
-			`pi-historian: appended native compaction firstKept=${firstKeptEntryId} tokensBefore=${args.tokensBefore}`,
+			`historian: appended native compaction firstKept=${firstKeptEntryId} tokensBefore=${args.tokensBefore}`,
 		);
 	} catch (error) {
 		sessionLog(
 			args.sessionId,
-			`pi-historian: native compaction append failed: ${error instanceof Error ? error.message : String(error)}`,
+			`historian: native compaction append failed: ${error instanceof Error ? error.message : String(error)}`,
 		);
 	}
 }

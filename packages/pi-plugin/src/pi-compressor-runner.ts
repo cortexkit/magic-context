@@ -198,7 +198,7 @@ export async function runPiCompressionPassIfNeeded(
 	if (totalTokens <= historyBudgetTokens) {
 		sessionLog(
 			sessionId,
-			`pi-compressor: history block ~${totalTokens} tokens within budget ${historyBudgetTokens}, skipping`,
+			`compressor: history block ~${totalTokens} tokens within budget ${historyBudgetTokens}, skipping`,
 		);
 		return false;
 	}
@@ -209,7 +209,7 @@ export async function runPiCompressionPassIfNeeded(
 	if (floorHeadroom < 1) {
 		sessionLog(
 			sessionId,
-			`pi-compressor: no floor headroom (${compartments.length} compartments, floor=${floor}), skipping`,
+			`compressor: no floor headroom (${compartments.length} compartments, floor=${floor}), skipping`,
 		);
 		return false;
 	}
@@ -224,7 +224,7 @@ export async function runPiCompressionPassIfNeeded(
 	if (band.length < 2) {
 		sessionLog(
 			sessionId,
-			`pi-compressor: no eligible same-depth band found (floor=${floor}, maxDepth=${maxMergeDepth}, grace=${graceCompartments}, maxPerPass=${maxCompartmentsPerPass}), skipping`,
+			`compressor: no eligible same-depth band found (floor=${floor}, maxDepth=${maxMergeDepth}, grace=${graceCompartments}, maxPerPass=${maxCompartmentsPerPass}), skipping`,
 		);
 		return false;
 	}
@@ -242,7 +242,7 @@ export async function runPiCompressionPassIfNeeded(
 
 	sessionLog(
 		sessionId,
-		`pi-compressor: picked ${band.length} compartments (${selectedCompartments[0]?.startMessage}-${selectedCompartments[selectedCompartments.length - 1]?.endMessage}, ~${selectedTokens} tokens), avg_depth=${avgDepth.toFixed(1)} → output_depth=${outputDepth}`,
+		`compressor: picked ${band.length} compartments (${selectedCompartments[0]?.startMessage}-${selectedCompartments[selectedCompartments.length - 1]?.endMessage}, ~${selectedTokens} tokens), avg_depth=${avgDepth.toFixed(1)} → output_depth=${outputDepth}`,
 	);
 
 	if (outputDepth === 5) {
@@ -343,7 +343,7 @@ async function runCompressorPass(
 		if (!result.ok) {
 			sessionLog(
 				args.sessionId,
-				`pi-compressor: subagent failed (${result.reason}): ${result.error}`,
+				`compressor: subagent failed (${result.reason}): ${result.error}`,
 			);
 			return null;
 		}
@@ -352,7 +352,7 @@ async function runCompressorPass(
 		if (parsed.compartments.length === 0) {
 			sessionLog(
 				args.sessionId,
-				"pi-compressor: historian returned no compartments",
+				"compressor: historian returned no compartments",
 			);
 			return null;
 		}
@@ -364,17 +364,14 @@ async function runCompressorPass(
 		if (!snapped) {
 			sessionLog(
 				args.sessionId,
-				"pi-compressor: rejecting — LLM output contains ordinal(s) outside input range",
+				"compressor: rejecting — LLM output contains ordinal(s) outside input range",
 			);
 			return null;
 		}
 		return snapped.result;
 	} catch (error) {
 		const desc = describeError(error);
-		sessionLog(
-			args.sessionId,
-			`pi-compressor: subagent exception: ${desc.brief}`,
-		);
+		sessionLog(args.sessionId, `compressor: subagent exception: ${desc.brief}`);
 		return null;
 	}
 }
@@ -463,7 +460,7 @@ function finalizeCompression(args: {
 	if (compressedStart !== originalStart || compressedEnd !== originalEnd) {
 		sessionLog(
 			sessionId,
-			`pi-compressor: compressed range ${compressedStart}-${compressedEnd} doesn't match original ${originalStart}-${originalEnd}, aborting`,
+			`compressor: compressed range ${compressedStart}-${compressedEnd} doesn't match original ${originalStart}-${originalEnd}, aborting`,
 		);
 		return false;
 	}
@@ -472,10 +469,7 @@ function finalizeCompression(args: {
 		const prev = compressed[i - 1];
 		const curr = compressed[i];
 		if (!prev || !curr || curr.startMessage !== prev.endMessage + 1) {
-			sessionLog(
-				sessionId,
-				`pi-compressor: non-contiguous output at index ${i}`,
-			);
+			sessionLog(sessionId, `compressor: non-contiguous output at index ${i}`);
 			return false;
 		}
 	}
@@ -493,7 +487,7 @@ function finalizeCompression(args: {
 
 	replaceAllCompartmentState(db, sessionId, allCompartments, args.facts);
 	incrementCompressionDepth(db, sessionId, originalStart, originalEnd);
-	sessionLog(sessionId, `pi-compressor: completed ${args.logLabel}`);
+	sessionLog(sessionId, `compressor: completed ${args.logLabel}`);
 	return true;
 }
 

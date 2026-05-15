@@ -270,7 +270,7 @@ export async function runAutoSearchHintForPi(args: {
 	if (hasStackedAugmentation(rawPartsText)) {
 		sessionLog(
 			sessionId,
-			"pi auto-search: skipping — user message already carries augmentation/hint",
+			"auto-search: skipping — user message already carries augmentation/hint",
 		);
 		autoSearchByTurn.set(sessionId, { messageId: userMsgId, hint: "" });
 		return messages;
@@ -302,7 +302,7 @@ export async function runAutoSearchHintForPi(args: {
 		);
 	} catch (error) {
 		log(
-			`[pi auto-search] unified search failed for session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+			`[auto-search] unified search failed for session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
 		);
 		autoSearchByTurn.set(sessionId, { messageId: userMsgId, hint: "" });
 		return messages;
@@ -311,7 +311,7 @@ export async function runAutoSearchHintForPi(args: {
 	if (results === null) {
 		sessionLog(
 			sessionId,
-			`pi auto-search: timed out after ${AUTO_SEARCH_TIMEOUT_MS}ms, skipping hint for this turn`,
+			`auto-search: timed out after ${AUTO_SEARCH_TIMEOUT_MS}ms, skipping hint for this turn`,
 		);
 		autoSearchByTurn.set(sessionId, { messageId: userMsgId, hint: "" });
 		return messages;
@@ -326,7 +326,7 @@ export async function runAutoSearchHintForPi(args: {
 	if (results[0].score < scoreThreshold) {
 		sessionLog(
 			sessionId,
-			`pi auto-search: top score ${results[0].score.toFixed(3)} below threshold ${scoreThreshold}`,
+			`auto-search: top score ${results[0].score.toFixed(3)} below threshold ${scoreThreshold}`,
 		);
 		autoSearchByTurn.set(sessionId, { messageId: userMsgId, hint: "" });
 		return messages;
@@ -345,7 +345,7 @@ export async function runAutoSearchHintForPi(args: {
 	appendHintToUserMessage(userMsg, payload);
 	sessionLog(
 		sessionId,
-		`pi auto-search: attached hint to ${userMsgId} (${results.length} fragments, top score ${results[0].score.toFixed(3)})`,
+		`auto-search: attached hint to ${userMsgId} (${results.length} fragments, top score ${results[0].score.toFixed(3)})`,
 	);
 
 	return messages;

@@ -52,6 +52,7 @@ import {
 	type ContextDatabase,
 	getActiveTagsBySession,
 	getHistorianFailureState,
+	getPendingOps,
 	getTagsByNumbers,
 	getTopNBySize,
 	updateSessionMeta,
@@ -214,6 +215,20 @@ const liveModelBySession = new Map<string, string>();
 const toolUsageSinceUserTurn = new Map<string, number>();
 const latestUserMessageBySession = new Map<string, string>();
 
+function logTransformTiming(
+	sessionId: string,
+	stage: string,
+	start: number,
+	extra?: string,
+): void {
+	const elapsed = (performance.now() - start).toFixed(1);
+	const suffix = extra ? ` ${extra}` : "";
+	sessionLog(
+		sessionId,
+		`transform stage: stage=${stage} elapsed=${elapsed}ms${suffix}`,
+	);
+}
+
 function resolvePiContextModelKey(ctx: ExtensionContext): string | undefined {
 	const model = (ctx as { model?: { provider?: unknown; id?: unknown } }).model;
 	if (!model) return undefined;
@@ -324,7 +339,7 @@ function persistLastTransformErrorIfChanged(
 	} catch (err) {
 		sessionLog(
 			sessionId,
-			`pi transform error persistence failed: ${err instanceof Error ? err.message : String(err)}`,
+			`transform error persistence failed: ${err instanceof Error ? err.message : String(err)}`,
 		);
 	}
 }
@@ -341,7 +356,7 @@ function clearLastTransformErrorIfSet(
 	} catch (err) {
 		sessionLog(
 			sessionId,
-			`pi transform error clear failed: ${err instanceof Error ? err.message : String(err)}`,
+			`transform error clear failed: ${err instanceof Error ? err.message : String(err)}`,
 		);
 	}
 }
@@ -859,8 +874,10 @@ export function registerPiContextHandler(
 		: null;
 
 	pi.on("context", async (event, ctx) => {
+		const transformStartTime = performance.now();
 		let sessionIdForError: string | undefined;
 		try {
+			const tFindSession = performance.now();
 			const sessionId = resolveSessionId(ctx);
 			if (sessionId === undefined) {
 				// No active session — fall through with no mutation.
@@ -870,6 +887,12 @@ export function registerPiContextHandler(
 				return;
 			}
 			sessionIdForError = sessionId;
+			logTransformTiming(
+				sessionId,
+				"findSessionId",
+				tFindSession,
+				`messages=${event.messages.length}`,
+			);
 
 			const rawMessageProvider = {
 				readMessages: () => readPiSessionMessages(ctx),
@@ -879,9 +902,11 @@ export function registerPiContextHandler(
 			setRawMessageProvider(sessionId, rawMessageProvider);
 			scheduleReconciliation(options.db, sessionId, readRawSessionMessages);
 
+			const tLastUser = performance.now();
 			const latestUserId = findLatestUserMessageIdPi(
 				event.messages as PiAgentMessage[],
 			);
+			logTransformTiming(sessionId, "findLastUserMessageId", tLastUser);
 			if (latestUserId) {
 				scheduleIncrementalIndex(
 					options.db,
@@ -906,6 +931,7 @@ export function registerPiContextHandler(
 				!firstContextPassSeenBySession.has(sessionId);
 			firstContextPassSeenBySession.add(sessionId);
 			const piUsage = ctx.getContextUsage?.();
+			const tModelDetect = performance.now();
 			const previousModelKey = liveModelBySession.get(sessionId);
 			const currentModelKey = resolvePiContextModelKey(ctx);
 			const modelChanged =
@@ -932,7 +958,9 @@ export function registerPiContextHandler(
 			// a provider overflow recovery sets a lower detected limit.
 			// Fall back to `piUsage` on the first pass before message_end
 			// has had a chance to run.
+			const tMeta = performance.now();
 			const sessionMetaForUsage = getOrCreateSessionMeta(options.db, sessionId);
+			logTransformTiming(sessionId, "getOrCreateSessionMeta", tMeta);
 			if (
 				(isFirstContextPassForSession || modelChanged) &&
 				(sessionMetaForUsage.lastContextPercentage > 0 ||
@@ -943,7 +971,7 @@ export function registerPiContextHandler(
 					: `model switch ${previousModelKey} -> ${currentModelKey}`;
 				sessionLog(
 					sessionId,
-					`pi transform: ${reason} reset — percentage=${sessionMetaForUsage.lastContextPercentage.toFixed(1)}% tokens=${sessionMetaForUsage.lastInputTokens} — clearing stale usage state`,
+					`transform: ${reason} reset — percentage=${sessionMetaForUsage.lastContextPercentage.toFixed(1)}% tokens=${sessionMetaForUsage.lastInputTokens} — clearing stale usage state`,
 				);
 				updateSessionMeta(options.db, sessionId, {
 					lastContextPercentage: 0,
@@ -990,6 +1018,7 @@ export function registerPiContextHandler(
 			// recovery flag is cleared by the historian publication
 			// path on success (see signalPiHistoryRefresh), so we won't
 			// keep bumping forever.
+			const tEmergencyRecovery = performance.now();
 			try {
 				const overflowState = getOverflowState(options.db, sessionId);
 				if (overflowState.detectedContextLimit > 0) {
@@ -1004,20 +1033,21 @@ export function registerPiContextHandler(
 				if (overflowState.needsEmergencyRecovery && usagePercentage < 95) {
 					sessionLog(
 						sessionId,
-						`pi transform: overflow recovery flag set — bumping percentage from ${usagePercentage.toFixed(1)}% to 95% (detectedLimit=${overflowState.detectedContextLimit || "unknown"})`,
+						`transform: overflow recovery flag set — bumping percentage from ${usagePercentage.toFixed(1)}% to 95% (detectedLimit=${overflowState.detectedContextLimit || "unknown"})`,
 					);
 					usagePercentage = 95;
 				}
 			} catch (err) {
 				sessionLog(
 					sessionId,
-					`pi transform: overflow state read failed: ${err instanceof Error ? err.message : String(err)}`,
+					`transform: overflow state read failed: ${err instanceof Error ? err.message : String(err)}`,
 				);
 			}
 
 			const sessionMeta = sessionMetaForUsage;
 			const modelKey = liveModelBySession.get(sessionId);
 			let schedulerDecision: "execute" | "defer";
+			const tScheduler = performance.now();
 			try {
 				schedulerDecision = scheduler.shouldExecute(
 					sessionMeta,
@@ -1030,10 +1060,11 @@ export function registerPiContextHandler(
 			} catch (err) {
 				sessionLog(
 					sessionId,
-					`pi scheduler failed (defaulting to defer): ${err instanceof Error ? err.message : String(err)}`,
+					`scheduler failed (defaulting to defer): ${err instanceof Error ? err.message : String(err)}`,
 				);
 				schedulerDecision = "defer";
 			}
+			logTransformTiming(sessionId, "schedulerAndUsage", tScheduler);
 
 			// Migrated/imported sessions: a Pi session loaded with a large
 			// existing JSONL has no usage data yet (pre-LLM-call) and no
@@ -1061,9 +1092,10 @@ export function registerPiContextHandler(
 				schedulerDecision = "execute";
 				sessionLog(
 					sessionId,
-					`pi transform: large imported session detected (${piMessageCount} messages, no usage baseline) — forcing execute on first pass`,
+					`transform: large imported session detected (${piMessageCount} messages, no usage baseline) — forcing execute on first pass`,
 				);
 			}
+			logTransformTiming(sessionId, "modelChangeDetection", tModelDetect);
 
 			const schedulerDecisionEarly = schedulerDecision;
 			const midTurn = isMidTurnPi(event, sessionId);
@@ -1093,7 +1125,7 @@ export function registerPiContextHandler(
 			schedulerDecision = midTurnAdjustedSchedulerDecision;
 			sessionLog(
 				sessionId,
-				`pi [boundary-exec] base=${schedulerDecisionEarly} bypass=${bypassReason} midTurn=${midTurn} effective=${midTurnAdjustedSchedulerDecision} sideEffect=${sideEffect}`,
+				`[boundary-exec] base=${schedulerDecisionEarly} bypass=${bypassReason} midTurn=${midTurn} effective=${midTurnAdjustedSchedulerDecision} sideEffect=${sideEffect}`,
 			);
 
 			// Force-materialization @ 85%+: aggressive drop-all-tools mode.
@@ -1129,7 +1161,7 @@ export function registerPiContextHandler(
 					lastEmergencyNotificationAtMs.set(sessionId, now);
 					sessionLog(
 						sessionId,
-						`pi EMERGENCY: usage=${usagePercentage.toFixed(1)}% — awaiting in-flight historian + applying drop-all-tools`,
+						`EMERGENCY: usage=${usagePercentage.toFixed(1)}% — awaiting in-flight historian + applying drop-all-tools`,
 					);
 				}
 
@@ -1145,7 +1177,7 @@ export function registerPiContextHandler(
 						]);
 						sessionLog(
 							sessionId,
-							"pi EMERGENCY: historian wait completed (or timed out)",
+							"EMERGENCY: historian wait completed (or timed out)",
 						);
 					} catch {
 						// Historian already logged its own failure; just continue.
@@ -1181,7 +1213,12 @@ export function registerPiContextHandler(
 
 			sessionLog(
 				sessionId,
-				`pi transform: usage=${usagePercentage.toFixed(1)}% (${usageInputTokens} tokens, limit=${usageContextLimit ?? "?"}) decision=${schedulerDecision}${forceMaterialization ? " force=true" : ""}${isEmergency ? " EMERGENCY=true" : ""}${isCacheBusting ? " busting=true" : ""}`,
+				`transform: usage=${usagePercentage.toFixed(1)}% (${usageInputTokens} tokens, limit=${usageContextLimit ?? "?"}) decision=${schedulerDecision}${forceMaterialization ? " force=true" : ""}${isEmergency ? " EMERGENCY=true" : ""}${isCacheBusting ? " busting=true" : ""}`,
+			);
+			logTransformTiming(
+				sessionId,
+				"emergencyRecoveryBlock",
+				tEmergencyRecovery,
 			);
 
 			// Resolve SessionEntry IDs for each AgentMessage in event.messages
@@ -1212,6 +1249,10 @@ export function registerPiContextHandler(
 				// 85% gate, so the LLM call sees the smallest possible
 				// prompt before we hand control back to Pi.
 				forceMaterialization: forceMaterialization || isEmergency,
+				contextUsage: {
+					percentage: usagePercentage,
+					inputTokens: usageInputTokens,
+				},
 				isCacheBusting,
 				reasoningClearing: {
 					clearReasoningAge:
@@ -1250,10 +1291,12 @@ export function registerPiContextHandler(
 			// message shape. Each is independently optional and fail-open —
 			// any thrown error is logged and the pipeline returns the
 			// already-mutated messages unchanged.
+			const tPostTransform = performance.now();
 			let outputMessages = result.messages as PiAgentMessage[];
 
 			if (nudgerFn && options.nudge) {
 				try {
+					const tNudge = performance.now();
 					outputMessages = applyRollingNudge({
 						sessionId,
 						db: options.db,
@@ -1261,10 +1304,11 @@ export function registerPiContextHandler(
 						ctx,
 						nudgerFn,
 					});
+					logTransformTiming(sessionId, "applyContextNudge", tNudge);
 				} catch (err) {
 					sessionLog(
 						sessionId,
-						`pi rolling nudge failed: ${err instanceof Error ? err.message : String(err)}`,
+						`rolling nudge failed: ${err instanceof Error ? err.message : String(err)}`,
 					);
 				}
 			}
@@ -1279,7 +1323,7 @@ export function registerPiContextHandler(
 			} catch (err) {
 				sessionLog(
 					sessionId,
-					`pi note nudges failed: ${err instanceof Error ? err.message : String(err)}`,
+					`note nudges failed: ${err instanceof Error ? err.message : String(err)}`,
 				);
 			}
 
@@ -1304,7 +1348,7 @@ export function registerPiContextHandler(
 				} catch (err) {
 					sessionLog(
 						sessionId,
-						`pi auto-search failed: ${err instanceof Error ? err.message : String(err)}`,
+						`auto-search failed: ${err instanceof Error ? err.message : String(err)}`,
 					);
 				}
 			}
@@ -1354,9 +1398,15 @@ export function registerPiContextHandler(
 			} catch (err) {
 				sessionLog(
 					sessionId,
-					`pi synthetic todowrite injection failed: ${err instanceof Error ? err.message : String(err)}`,
+					`synthetic todowrite injection failed: ${err instanceof Error ? err.message : String(err)}`,
 				);
 			}
+
+			logTransformTiming(sessionId, "postTransformPhase", tPostTransform);
+			sessionLog(
+				sessionId,
+				`transform completed in ${(performance.now() - transformStartTime).toFixed(1)}ms (${outputMessages.length} messages, ${result.targetCount} targets, watermark: ${result.reasoningWatermark})`,
+			);
 
 			// Cast the rebuilt array back to the AgentMessage[] shape Pi's
 			// ContextEventResult expects. The nudge/note/auto-search paths
@@ -1473,15 +1523,12 @@ function maybeFireCompressor(args: {
 	if (inFlightHistorian.has(sessionId) || inFlightCompressor.has(sessionId)) {
 		sessionLog(
 			sessionId,
-			"pi-compressor trigger eval: in-flight historian/compressor, skipping",
+			"compressor trigger eval: in-flight historian/compressor, skipping",
 		);
 		return;
 	}
 	if (isPiCompressorOnCooldown(sessionId, compressor.cooldownMs)) {
-		sessionLog(
-			sessionId,
-			"pi-compressor trigger eval: cooldown active, skipping",
-		);
+		sessionLog(sessionId, "compressor trigger eval: cooldown active, skipping");
 		return;
 	}
 
@@ -1535,7 +1582,7 @@ function maybeFireCompressor(args: {
 		.catch((err) => {
 			sessionLog(
 				sessionId,
-				`pi-compressor failed in background: ${err instanceof Error ? err.message : String(err)}`,
+				`compressor failed in background: ${err instanceof Error ? err.message : String(err)}`,
 			);
 		})
 		.finally(() => {
@@ -1561,7 +1608,7 @@ function hasEligiblePiCompartmentHistory(
 	} catch (err) {
 		sessionLog(
 			sessionId,
-			`pi-historian recovery eligibility failed: ${err instanceof Error ? err.message : String(err)}`,
+			`historian recovery eligibility failed: ${err instanceof Error ? err.message : String(err)}`,
 		);
 		return false;
 	}
@@ -1615,7 +1662,7 @@ function spawnPiHistorianRun(args: {
 			} catch (err) {
 				sessionLog(
 					sessionId,
-					`pi historian: clearEmergencyRecovery failed: ${err instanceof Error ? err.message : String(err)}`,
+					`historian: clearEmergencyRecovery failed: ${err instanceof Error ? err.message : String(err)}`,
 				);
 			}
 			// Historian publication invalidates the injection cache AND
@@ -1701,7 +1748,7 @@ function maybeFireHistorian(args: {
 	const { ctx, sessionId, db, historian, isFirstContextPassForSession } = args;
 
 	if (inFlightHistorian.has(sessionId)) {
-		sessionLog(sessionId, "pi-historian trigger eval: in-flight, skipping");
+		sessionLog(sessionId, "historian trigger eval: in-flight, skipping");
 		return;
 	}
 
@@ -1725,7 +1772,7 @@ function maybeFireHistorian(args: {
 			};
 			sessionLog(
 				sessionId,
-				`pi-historian trigger eval: usage=${usage.percentage.toFixed(1)}% (${usage.inputTokens} tokens) [from session_meta], checking trigger...`,
+				`historian trigger eval: usage=${usage.percentage.toFixed(1)}% (${usage.inputTokens} tokens) [from session_meta], checking trigger...`,
 			);
 		} else {
 			// Fallback to Pi-reported usage when no message_end has
@@ -1742,7 +1789,7 @@ function maybeFireHistorian(args: {
 			) {
 				sessionLog(
 					sessionId,
-					`pi-historian trigger eval: no usage info yet (tokens=${piUsage?.tokens ?? "<no piUsage>"}, percent=${piUsage?.percent ?? "<no piUsage>"}, contextWindow=${piUsage?.contextWindow ?? "<no piUsage>"})`,
+					`historian trigger eval: no usage info yet (tokens=${piUsage?.tokens ?? "<no piUsage>"}, percent=${piUsage?.percent ?? "<no piUsage>"}, contextWindow=${piUsage?.contextWindow ?? "<no piUsage>"})`,
 				);
 				return;
 			}
@@ -1752,13 +1799,13 @@ function maybeFireHistorian(args: {
 			};
 			sessionLog(
 				sessionId,
-				`pi-historian trigger eval: usage=${usage.percentage.toFixed(1)}% (${usage.inputTokens} tokens) [piUsage fallback], checking trigger...`,
+				`historian trigger eval: usage=${usage.percentage.toFixed(1)}% (${usage.inputTokens} tokens) [piUsage fallback], checking trigger...`,
 			);
 		}
 	} catch (err) {
 		sessionLog(
 			sessionId,
-			`pi-historian trigger eval: getContextUsage threw: ${err instanceof Error ? err.message : String(err)}`,
+			`historian trigger eval: getContextUsage threw: ${err instanceof Error ? err.message : String(err)}`,
 		);
 		return;
 	}
@@ -1784,7 +1831,7 @@ function maybeFireHistorian(args: {
 				updateSessionMeta(db, sessionId, { compartmentInProgress: false });
 				sessionLog(
 					sessionId,
-					"pi-historian: cleared stale compartmentInProgress flag on first context pass after restart",
+					"historian: cleared stale compartmentInProgress flag on first context pass after restart",
 				);
 			}
 
@@ -1796,7 +1843,7 @@ function maybeFireHistorian(args: {
 				triggered = true;
 				sessionLog(
 					sessionId,
-					`pi-historian recovery triggered on session load after ${failureState.failureCount} failure(s)`,
+					`historian recovery triggered on session load after ${failureState.failureCount} failure(s)`,
 				);
 				sendPiIgnoredNotification(
 					ctx,
@@ -1832,7 +1879,7 @@ function maybeFireHistorian(args: {
 		if (!trigger.shouldFire) {
 			sessionLog(
 				sessionId,
-				`pi-historian trigger eval: shouldFire=false (no trigger condition met)`,
+				`historian trigger eval: shouldFire=false (no trigger condition met)`,
 			);
 			return;
 		}
@@ -1840,7 +1887,7 @@ function maybeFireHistorian(args: {
 		triggered = true;
 		sessionLog(
 			sessionId,
-			`pi-historian trigger fired (reason=${trigger.reason ?? "unknown"}) usage=${usage.percentage.toFixed(1)}% — spawning subagent`,
+			`historian trigger fired (reason=${trigger.reason ?? "unknown"}) usage=${usage.percentage.toFixed(1)}% — spawning subagent`,
 		);
 
 		// Fire-and-forget for the user's LLM call: the parent agent
@@ -1858,7 +1905,7 @@ function maybeFireHistorian(args: {
 		});
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		sessionLog(sessionId, `pi-historian trigger eval failed: ${message}`);
+		sessionLog(sessionId, `historian trigger eval failed: ${message}`);
 		if (!triggered) unregister();
 	}
 }
@@ -1909,6 +1956,7 @@ interface RunPipelineArgs {
 	 * computes from current usage percentage.
 	 */
 	forceMaterialization?: boolean;
+	contextUsage: { percentage: number; inputTokens: number };
 	/**
 	 * One-shot signal that the injection cache should be invalidated and
 	 * the prepared block rebuilt on this pass. Mirrors OpenCode's
@@ -1951,6 +1999,8 @@ interface RunPipelineResult {
 	/** Aggregate counts for log parity with OpenCode. */
 	heuristicsResult: PiHeuristicCleanupResult | null;
 	injectionResult: PiInjectionResult | null;
+	targetCount: number;
+	reasoningWatermark: number;
 }
 
 async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
@@ -1963,20 +2013,22 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// at transform.ts:648 — runs on every pass, deterministic from
 	// timestamps, retroactive when the flag flips.
 	if (args.temporalAwareness) {
+		const tTemporal = performance.now();
 		try {
 			const injected = injectPiTemporalMarkers(args.messages);
 			if (injected > 0) {
 				sessionLog(
 					args.sessionId,
-					`pi temporal-awareness: injected ${injected} gap markers`,
+					`temporal-awareness: injected ${injected} gap markers`,
 				);
 			}
 		} catch (err) {
 			sessionLog(
 				args.sessionId,
-				`pi temporal-awareness failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+				`temporal-awareness failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
 			);
 		}
+		logTransformTiming(args.sessionId, "injectTemporalMarkers", tTemporal);
 	}
 
 	const transcript = createPiTranscript(args.messages, args.sessionId);
@@ -1984,6 +2036,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// 1. Tagging: assigns tag numbers + injects §N§ prefixes (unless
 	// ctx_reduce_enabled is false, in which case prefixes are skipped
 	// but DB-side tag IDs still get created so drops continue to work).
+	const tTag = performance.now();
 	const { targets } = tagTranscript(
 		args.sessionId,
 		transcript,
@@ -1993,6 +2046,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			skipPrefixInjection: !args.ctxReduceEnabled,
 		},
 	);
+	logTransformTiming(args.sessionId, "tagMessages", tTag);
 
 	// 1b. Note-nudge `commit_detected` trigger. Mirrors OpenCode's logic
 	// in `tag-messages.ts` + `transform.ts:677-690`: only fire on the
@@ -2019,7 +2073,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		// pipeline. Log and continue.
 		sessionLog(
 			args.sessionId,
-			`pi commit-detect failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+			`commit-detect failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
 		);
 	}
 
@@ -2039,17 +2093,35 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// Drops in the protected window are deferred (re-queued) so the
 	// agent's recent working context stays intact.
 	const hasPendingMaterializeSignal = hasPendingMaterialization(args.sessionId);
-	if (
+	const pendingOps = getPendingOps(args.db, args.sessionId);
+	const shouldApplyPendingOps =
 		args.schedulerDecision === "execute" ||
 		args.forceMaterialization ||
-		hasPendingMaterializeSignal
-	) {
+		hasPendingMaterializeSignal;
+	if (shouldApplyPendingOps) {
+		const applyReason = hasPendingMaterializeSignal
+			? "explicit_flush"
+			: args.forceMaterialization
+				? "force_materialization"
+				: `scheduler_execute (scheduler=${args.schedulerDecision})`;
+		sessionLog(
+			args.sessionId,
+			`pending ops WILL APPLY — reason=${applyReason}, pendingOps=${pendingOps.length}, context=${args.contextUsage.percentage.toFixed(1)}%`,
+		);
 		try {
+			const tApplyPending = performance.now();
 			applyPendingOperations(
 				args.sessionId,
 				args.db,
 				targets,
 				args.protectedTags,
+				undefined,
+				pendingOps,
+			);
+			logTransformTiming(
+				args.sessionId,
+				"applyPendingOperations",
+				tApplyPending,
 			);
 			executedWorkThisPass = true;
 			// Drain only after success — if applyPendingOperations throws
@@ -2060,10 +2132,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		} catch (err) {
 			sessionLog(
 				args.sessionId,
-				`pi pending operations failed: ${err instanceof Error ? err.message : String(err)}`,
+				`pending operations failed: ${err instanceof Error ? err.message : String(err)}`,
 			);
 			throw err;
 		}
+	} else {
+		sessionLog(
+			args.sessionId,
+			`pending ops WILL NOT APPLY — reason=scheduler_defer pendingOps=${pendingOps.length} context=${args.contextUsage.percentage.toFixed(1)}%`,
+		);
 	}
 
 	// 3. Apply persistent dropped/truncated tag statuses so cross-pass
@@ -2077,10 +2154,23 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// of the whole session (~50k rows on long sessions). Without this
 	// pre-load it lazy-loads via getTagsBySession internally — exactly
 	// the full-table scan we eliminated in OpenCode's transform.
-	const flushedSliceTags = getTagsByNumbers(args.db, args.sessionId, [
-		...targets.keys(),
-	]);
+	const targetTagNumbers = [...targets.keys()];
+	const tGetTags = performance.now();
+	const flushedSliceTags = getTagsByNumbers(
+		args.db,
+		args.sessionId,
+		targetTagNumbers,
+	);
+	logTransformTiming(
+		args.sessionId,
+		"getTagsByNumbers",
+		tGetTags,
+		`targets=${targetTagNumbers.length} fetched=${flushedSliceTags.length}`,
+	);
+	const tFlushed = performance.now();
 	applyFlushedStatuses(args.sessionId, args.db, targets, flushedSliceTags);
+	logTransformTiming(args.sessionId, "applyFlushedStatuses", tFlushed);
+	logTransformTiming(args.sessionId, "batchFinalize:flushed", tFlushed);
 
 	// 3b. Reasoning replay (cache-stable, runs on EVERY pass).
 	// Re-applies typed-reasoning [cleared] markers and inline
@@ -2094,6 +2184,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const messageIdToMaxTag = buildMessageIdToMaxTag(targets);
 	if (args.reasoningClearing) {
 		try {
+			const tReplayReasoning = performance.now();
 			const clearedReplay = replayClearedReasoningPi({
 				db: args.db,
 				sessionId: args.sessionId,
@@ -2111,13 +2202,24 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			if (clearedReplay > 0 || inlineReplay > 0) {
 				sessionLog(
 					args.sessionId,
-					`pi reasoning replay: cleared=${clearedReplay} inline=${inlineReplay}`,
+					`reasoning replay: cleared=${clearedReplay} inline=${inlineReplay}`,
 				);
 			}
+			logTransformTiming(
+				args.sessionId,
+				"replayReasoningClearing",
+				tReplayReasoning,
+			);
+			logTransformTiming(
+				args.sessionId,
+				"stripClearedReasoning",
+				tReplayReasoning,
+				`strippedParts=${clearedReplay}`,
+			);
 		} catch (err) {
 			sessionLog(
 				args.sessionId,
-				`pi reasoning replay failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+				`reasoning replay failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
 			);
 		}
 	}
@@ -2138,7 +2240,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		// P0 perf: caveman replay only acts on tags whose tag_number is in
 		// `targets`, so fetch just that slice instead of the whole session
 		// (~50k rows on long sessions).
-		const targetTagNumbers = [...targets.keys()];
 		const tags = getTagsByNumbers(args.db, args.sessionId, targetTagNumbers);
 		const replayed = replayCavemanCompression(
 			args.sessionId,
@@ -2149,13 +2250,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		if (replayed > 0) {
 			sessionLog(
 				args.sessionId,
-				`pi caveman replay: ${replayed} tags re-compressed from source`,
+				`caveman replay: ${replayed} tags re-compressed from source`,
 			);
 		}
 	} catch (err) {
 		sessionLog(
 			args.sessionId,
-			`pi caveman replay failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+			`caveman replay failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
 		);
 	}
 
@@ -2187,12 +2288,34 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// transform-postprocess-phase.ts.
 	let heuristicsExecuted = false;
 	let heuristicsResult: PiHeuristicCleanupResult | null = null;
+	const tActiveTags = performance.now();
+	const activeTags = getActiveTagsBySession(args.db, args.sessionId);
+	logTransformTiming(
+		args.sessionId,
+		"getActiveTagsBySession",
+		tActiveTags,
+		`count=${activeTags.length}`,
+	);
 	const shouldRunHeuristics =
 		args.heuristics !== undefined &&
 		(args.schedulerDecision === "execute" ||
 			args.forceMaterialization === true);
+	if (shouldRunHeuristics) {
+		const reason = args.forceMaterialization
+			? "force_materialization"
+			: `scheduler_execute (pendingOps=${pendingOps.length}, scheduler=${args.schedulerDecision})`;
+		sessionLog(
+			args.sessionId,
+			`heuristics WILL RUN — reason=${reason}, context=${args.contextUsage.percentage.toFixed(1)}%, turn=n/a`,
+		);
+	} else {
+		const reason =
+			args.heuristics === undefined ? "disabled" : "scheduler_defer";
+		sessionLog(args.sessionId, `heuristics WILL NOT RUN — reason=${reason}`);
+	}
 	if (shouldRunHeuristics && args.heuristics) {
 		try {
+			const tHeuristic = performance.now();
 			heuristicsResult = applyPiHeuristicCleanup(
 				args.sessionId,
 				args.db,
@@ -2205,13 +2328,20 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					dropAllTools: args.forceMaterialization === true,
 					caveman: args.heuristics.caveman,
 				},
+				activeTags,
 			);
 			heuristicsExecuted = true;
 			executedWorkThisPass = true;
+			logTransformTiming(
+				args.sessionId,
+				"applyHeuristicCleanup",
+				tHeuristic,
+				`droppedTools=${heuristicsResult.droppedTools} deduplicatedTools=${heuristicsResult.deduplicatedTools} droppedInjections=${heuristicsResult.droppedInjections} compressedTextTags=${heuristicsResult.compressedTextTags}`,
+			);
 		} catch (err) {
 			sessionLog(
 				args.sessionId,
-				`pi heuristic cleanup failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+				`heuristic cleanup failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
 			);
 		}
 	}
@@ -2230,30 +2360,33 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		(args.schedulerDecision === "execute" || args.forceMaterialization === true)
 	) {
 		try {
+			const tClearReasoning = performance.now();
 			const clearOutcome = clearOldReasoningPi({
 				messages: args.messages,
 				messageIdToMaxTag,
 				clearReasoningAge: args.reasoningClearing.clearReasoningAge,
 				piMessageStableId,
 			});
+			const meta = getOrCreateSessionMeta(args.db, args.sessionId);
+			const prevWatermark = meta.clearedReasoningThroughTag ?? 0;
 			if (clearOutcome.cleared > 0 && clearOutcome.newWatermark > 0) {
-				const meta = getOrCreateSessionMeta(args.db, args.sessionId);
-				const prevWatermark = meta.clearedReasoningThroughTag ?? 0;
 				if (clearOutcome.newWatermark > prevWatermark) {
 					updateSessionMeta(args.db, args.sessionId, {
 						clearedReasoningThroughTag: clearOutcome.newWatermark,
 					});
 					sessionLog(
 						args.sessionId,
-						`pi reasoning cleared on execute: cleared=${clearOutcome.cleared} watermark=${prevWatermark}->${clearOutcome.newWatermark}`,
+						`reasoning cleanup: cleared=${clearOutcome.cleared} inlineStripped=0 watermark=${prevWatermark}→${clearOutcome.newWatermark}`,
 					);
 				}
 			}
+			logTransformTiming(args.sessionId, "clearOldReasoning", tClearReasoning);
+			logTransformTiming(args.sessionId, "watermarkCleanup", tClearReasoning);
 			executedWorkThisPass = true;
 		} catch (err) {
 			sessionLog(
 				args.sessionId,
-				`pi reasoning clearing failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+				`reasoning clearing failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
 			);
 		}
 	}
@@ -2274,6 +2407,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let injectionResult: PiInjectionResult | null = null;
 	if (args.injection) {
 		try {
+			const tInjection = performance.now();
 			injectionResult = injectSessionHistoryIntoPi(
 				args.db,
 				args.sessionId,
@@ -2292,10 +2426,16 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			if (args.isCacheBusting) {
 				historyRefreshSessions.delete(args.sessionId);
 			}
+			logTransformTiming(
+				args.sessionId,
+				"prepareCompartmentInjection",
+				tInjection,
+			);
+			logTransformTiming(args.sessionId, "compartmentPhase", tInjection);
 		} catch (err) {
 			sessionLog(
 				args.sessionId,
-				`pi compartment injection failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+				`compartment injection failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
 			);
 		}
 	}
@@ -2320,10 +2460,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		} catch (err) {
 			sessionLog(
 				args.sessionId,
-				`pi [boundary-exec] drain failed (continuing): ${err}`,
+				`[boundary-exec] drain failed (continuing): ${err}`,
 			);
 		}
 	}
+	logTransformTiming(
+		args.sessionId,
+		"batchFinalize:heuristics",
+		performance.now(),
+	);
 
 	const outputMessages = transcript.getOutputMessages();
 
@@ -2341,7 +2486,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	} catch (err) {
 		sessionLog(
 			args.sessionId,
-			`pi token accounting failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+			`token accounting failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
 		);
 	}
 
@@ -2352,6 +2497,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		historyInjected: injectionResult?.injected ?? false,
 		heuristicsResult,
 		injectionResult,
+		targetCount: targets.size,
+		reasoningWatermark:
+			getOrCreateSessionMeta(args.db, args.sessionId)
+				.clearedReasoningThroughTag ?? 0,
 	};
 }
 
@@ -2461,7 +2610,7 @@ function applyNoteNudges(args: {
 			clearNoteNudgeState(db, sessionId);
 			sessionLog(
 				sessionId,
-				`pi note-nudge: sticky anchor ${sticky.messageId} gone, cleared`,
+				`note-nudge: sticky anchor ${sticky.messageId} gone, cleared`,
 			);
 		}
 	}

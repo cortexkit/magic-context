@@ -99,7 +99,7 @@ export function stripPiDroppedPlaceholderMessages(args: {
 	if (removed > 0 || discovered > 0) {
 		sessionLog(
 			sessionId,
-			`pi placeholder strip: removed=${removed} discovered=${discovered}`,
+			`placeholder strip: removed=${removed} discovered=${discovered}`,
 		);
 	}
 	return { removed, discovered };

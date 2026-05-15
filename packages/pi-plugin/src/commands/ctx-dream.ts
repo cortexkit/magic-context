@@ -105,7 +105,7 @@ export function registerCtxDreamCommand(
 				const message = error instanceof Error ? error.message : String(error);
 				sessionLog(
 					deps.projectIdentity,
-					`pi /ctx-dream failed to drain queue: ${message}`,
+					`/ctx-dream failed to drain queue: ${message}`,
 				);
 				sendCtxStatusMessage(
 					pi,

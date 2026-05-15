@@ -375,12 +375,12 @@ export function injectSessionHistoryIntoPi(
 		if (prepared.compartmentCount > 0) {
 			logSession(
 				sessionId,
-				`pi: injected ${prepared.compartmentCount} compartments + ${prepared.factCount} facts${memoryLabel} into message[0] (skipped ${skippedVisible}/${beforeProjectionLen} visible messages)`,
+				`injected ${prepared.compartmentCount} compartments + ${prepared.factCount} facts${memoryLabel} into message[0] (skipped ${skippedVisible}/${beforeProjectionLen} visible messages)`,
 			);
 		} else {
 			logSession(
 				sessionId,
-				`pi: injected ${prepared.factCount} facts${memoryLabel} into message[0] (no compartments yet)`,
+				`injected ${prepared.factCount} facts${memoryLabel} into message[0] (no compartments yet)`,
 			);
 		}
 	}
