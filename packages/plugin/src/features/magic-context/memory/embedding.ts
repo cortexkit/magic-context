@@ -9,6 +9,23 @@ import { OpenAICompatibleEmbeddingProvider } from "./embedding-openai";
 import type { EmbeddingProvider } from "./embedding-provider";
 import { saveEmbedding } from "./storage-memory-embeddings";
 
+export type {
+    EmbeddingFeatures,
+    ProjectEmbeddingRegistrationSnapshot,
+} from "../project-embedding-registry";
+export {
+    _resetProjectEmbeddingRegistryForTests,
+    _setTestProviderFactoryForProject,
+    embedBatchForProject,
+    embedTextForProject,
+    embedUnembeddedMemoriesForProject,
+    getProjectEmbeddingSnapshot,
+    registerProjectEmbeddingAndMaybeWipe,
+    registerProjectInObservationMode,
+    sweepAllRegisteredProjects,
+    unregisterProjectEmbedding,
+} from "../project-embedding-registry";
+
 const DEFAULT_EMBEDDING_CONFIG: EmbeddingConfig = {
     provider: "local",
     model: DEFAULT_LOCAL_EMBEDDING_MODEL,
@@ -169,7 +186,7 @@ export async function embedUnembeddedMemories(
     config: EmbeddingConfig,
     batchSize = 10,
 ): Promise<number> {
-    return embedUnembeddedMemoriesForProject(db, projectPath, config, batchSize);
+    return embedUnembeddedMemoriesWithConfig(db, projectPath, config, batchSize);
 }
 
 /** Wall-clock ceiling per sweep invocation — ensures a hung/slow endpoint can't
@@ -244,7 +261,7 @@ export async function embedAllUnembeddedMemories(
 
         outer: for (const project of projects) {
             while (Date.now() < deadline) {
-                const count = await embedUnembeddedMemoriesForProject(
+                const count = await embedUnembeddedMemoriesWithConfig(
                     db,
                     project.project_path,
                     config,
@@ -288,7 +305,7 @@ export function _resetEmbeddingSweepGuard(): void {
     sweepInProgress = false;
 }
 
-async function embedUnembeddedMemoriesForProject(
+async function embedUnembeddedMemoriesWithConfig(
     db: Database,
     projectPath: string,
     config: EmbeddingConfig,

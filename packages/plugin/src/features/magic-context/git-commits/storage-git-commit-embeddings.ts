@@ -15,6 +15,10 @@ interface CommitEmbeddingRow {
     model_id: string;
 }
 
+interface StoredCommitModelIdRow {
+    modelId: string | null;
+}
+
 interface UnembeddedRow {
     sha: string;
     message: string;
@@ -25,6 +29,7 @@ const loadProjectStatements = new WeakMap<Database, PreparedStatement>();
 const loadUnembeddedStatements = new WeakMap<Database, PreparedStatement>();
 const countEmbeddedStatements = new WeakMap<Database, PreparedStatement>();
 const clearProjectStatements = new WeakMap<Database, PreparedStatement>();
+const distinctModelIdStatements = new WeakMap<Database, PreparedStatement>();
 
 function getSaveStatement(db: Database): PreparedStatement {
     let stmt = saveStatements.get(db);
@@ -96,6 +101,20 @@ function getClearProjectStatement(db: Database): PreparedStatement {
     return stmt;
 }
 
+function getDistinctModelIdStatement(db: Database): PreparedStatement {
+    let stmt = distinctModelIdStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            `SELECT DISTINCT e.model_id AS modelId
+             FROM git_commit_embeddings e
+             JOIN git_commits c ON c.sha = e.sha
+             WHERE c.project_path = ?`,
+        );
+        distinctModelIdStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
 export function saveCommitEmbedding(
     db: Database,
     sha: string,
@@ -137,4 +156,12 @@ export function countEmbeddedCommits(db: Database, projectPath: string): number 
 
 export function clearProjectCommitEmbeddings(db: Database, projectPath: string): number {
     return getClearProjectStatement(db).run(projectPath).changes;
+}
+
+export function getDistinctCommitEmbeddingModelIds(
+    db: Database,
+    projectPath: string,
+): Set<string | null> {
+    const rows = getDistinctModelIdStatement(db).all(projectPath) as StoredCommitModelIdRow[];
+    return new Set(rows.map((row) => (typeof row.modelId === "string" ? row.modelId : null)));
 }

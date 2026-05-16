@@ -19,11 +19,33 @@ export interface LoadPiConfigResult {
 	loadedFromPaths: string[];
 }
 
+export type LoadOutcome =
+	| "ok"
+	| "project-file-parse-error"
+	| "project-file-io-error"
+	| "schema-recovery"
+	| "substitution-failure";
+
+export interface LoadPiConfigResultDetailed extends LoadPiConfigResult {
+	loadOutcome: LoadOutcome;
+	sources: {
+		userConfig: LoadOutcome;
+		projectConfig: LoadOutcome;
+	};
+	substitutionFailures: Array<{
+		keyPath: string;
+		source: "user" | "project";
+		message: string;
+	}>;
+	recoveredTopLevelKeys: string[];
+}
+
 interface LoadedConfigFile {
 	path: string;
 	scope: "user" | "project";
 	config: Record<string, unknown>;
 	warnings: string[];
+	loadOutcome: LoadOutcome;
 }
 
 const CONFIG_FILE_NAME = "magic-context";
@@ -58,6 +80,8 @@ function loadConfigFile(
 			scope,
 			config: parseJsonc(substituted.text) as Record<string, unknown>,
 			warnings: substituted.warnings.map((warning) => `${path}: ${warning}`),
+			loadOutcome:
+				substituted.warnings.length > 0 ? "substitution-failure" : "ok",
 		};
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
@@ -68,6 +92,10 @@ function loadConfigFile(
 			warnings: [
 				`${path}: failed to load config: ${message}; using defaults for this file.`,
 			],
+			loadOutcome:
+				typeof (error as { code?: unknown }).code === "string"
+					? "project-file-io-error"
+					: "project-file-parse-error",
 		};
 	}
 }
@@ -110,7 +138,10 @@ function mergeRawConfigs(
 	return merged;
 }
 
-function parsePiConfig(rawConfig: Record<string, unknown>): {
+function parsePiConfig(
+	rawConfig: Record<string, unknown>,
+	recoveredTopLevelKeys: string[] = [],
+): {
 	config: MagicContextConfig;
 	warnings: string[];
 } {
@@ -132,6 +163,7 @@ function parsePiConfig(rawConfig: Record<string, unknown>): {
 	const warnings: string[] = [];
 
 	for (const key of errorPaths) {
+		recoveredTopLevelKeys.push(key);
 		const isAgentConfig =
 			key === "historian" || key === "dreamer" || key === "sidekick";
 		delete patched[key];
@@ -199,5 +231,124 @@ export function loadPiConfig(
 		config: parsed.config,
 		warnings,
 		loadedFromPaths: loadedFiles.map((loaded) => loaded.path),
+	};
+}
+
+function collectEmptyStringPaths(value: unknown, prefix = ""): string[] {
+	if (typeof value === "string") {
+		return value === "" && prefix ? [prefix] : [];
+	}
+	if (Array.isArray(value) || value === null || typeof value !== "object") {
+		return [];
+	}
+
+	const paths: string[] = [];
+	for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+		const nextPrefix = prefix ? `${prefix}.${key}` : key;
+		paths.push(...collectEmptyStringPaths(child, nextPrefix));
+	}
+	return paths;
+}
+
+function bindSubstitutionFailures(
+	loaded: LoadedConfigFile,
+): Array<{ keyPath: string; source: "user" | "project"; message: string }> {
+	if (
+		loaded.warnings.length === 0 ||
+		loaded.loadOutcome !== "substitution-failure"
+	) {
+		return [];
+	}
+	const emptyPaths = collectEmptyStringPaths(loaded.config);
+	return loaded.warnings.map((message) => {
+		const matchedPath = emptyPaths.find((path) => {
+			const tail = path.split(".").at(-1) ?? path;
+			return (
+				message.includes(path) ||
+				message.toLowerCase().includes(tail.toLowerCase())
+			);
+		});
+		return {
+			keyPath: matchedPath ?? "<unknown>",
+			source: loaded.scope,
+			message,
+		};
+	});
+}
+
+function combinedOutcome(args: {
+	sources: LoadPiConfigResultDetailed["sources"];
+	substitutionFailures: LoadPiConfigResultDetailed["substitutionFailures"];
+	recoveredTopLevelKeys: string[];
+}): LoadOutcome {
+	const sourceOutcomes = Object.values(args.sources);
+	if (sourceOutcomes.includes("project-file-parse-error"))
+		return "project-file-parse-error";
+	if (sourceOutcomes.includes("project-file-io-error"))
+		return "project-file-io-error";
+	if (args.recoveredTopLevelKeys.length > 0) return "schema-recovery";
+	if (args.substitutionFailures.length > 0) return "substitution-failure";
+	return "ok";
+}
+
+export function loadPiConfigDetailed(
+	opts: LoadPiConfigOptions = {},
+): LoadPiConfigResultDetailed {
+	const cwd = opts.cwd ?? process.cwd();
+	const loadedFiles: LoadedConfigFile[] = [];
+	const warnings: string[] = [];
+
+	const projectPath = resolveFirstExisting(getProjectConfigPaths(cwd));
+	if (projectPath) {
+		const loaded = loadConfigFile(projectPath, "project");
+		if (loaded) loadedFiles.push(loaded);
+	}
+
+	const userPath = resolveFirstExisting(getUserConfigPaths());
+	if (userPath) {
+		const loaded = loadConfigFile(userPath, "user");
+		if (loaded) loadedFiles.push(loaded);
+	}
+
+	let rawConfig: Record<string, unknown> = {};
+	const mergeFiles = [...loadedFiles].sort((a, b) => {
+		if (a.scope === b.scope) return 0;
+		return a.scope === "user" ? -1 : 1;
+	});
+
+	for (const loaded of mergeFiles) {
+		const prefix =
+			loaded.scope === "user" ? "[user config]" : "[project config]";
+		warnings.push(...loaded.warnings.map((warning) => `${prefix} ${warning}`));
+		rawConfig = mergeRawConfigs(rawConfig, loaded.config);
+	}
+
+	const recoveredTopLevelKeys: string[] = [];
+	const parsed = parsePiConfig(rawConfig, recoveredTopLevelKeys);
+	warnings.push(
+		...parsed.warnings.map((warning) => `[merged config] ${warning}`),
+	);
+	const substitutionFailures = loadedFiles.flatMap(bindSubstitutionFailures);
+	const userLoaded = loadedFiles.find((loaded) => loaded.scope === "user");
+	const projectLoaded = loadedFiles.find(
+		(loaded) => loaded.scope === "project",
+	);
+	const sources = {
+		userConfig: userLoaded?.loadOutcome ?? ("ok" as LoadOutcome),
+		projectConfig: projectLoaded?.loadOutcome ?? ("ok" as LoadOutcome),
+	};
+
+	return {
+		config: parsed.config,
+		warnings,
+		loadedFromPaths: loadedFiles.map((loaded) => loaded.path),
+		loadOutcome: combinedOutcome({
+			sources,
+			substitutionFailures,
+			recoveredTopLevelKeys,
+		}),
+		sources,
+		substitutionFailures,
+		recoveredTopLevelKeys,
 	};
 }
