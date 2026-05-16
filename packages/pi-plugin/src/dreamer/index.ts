@@ -9,6 +9,7 @@ import {
 import type { DreamRunResult } from "@magic-context/core/features/magic-context/dreamer/runner";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { startDreamScheduleTimer } from "@magic-context/core/plugin/dream-timer";
+import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
 import { PiSubagentRunner } from "../subagent-runner";
 
 export interface PiDreamerOptions {
@@ -32,6 +33,11 @@ export interface PiDreamerOptions {
 	 * previously made dreamer's memory tasks a no-op.
 	 */
 	memoryEnabled: boolean;
+	gitCommitIndexing: {
+		enabled: boolean;
+		since_days: number;
+		max_commits: number;
+	};
 }
 
 type DreamTimerRegistration = Parameters<typeof startDreamScheduleTimer>[0];
@@ -118,8 +124,8 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		dreamerConfig: opts.config,
 		experimentalUserMemories,
 		experimentalPinKeyFiles,
-		gitCommitIndexing: undefined,
-		ensureRegistered: async () => {},
+		gitCommitIndexing: opts.gitCommitIndexing,
+		ensureRegistered: ensureProjectRegisteredFromPiDirectory,
 	}).then((timerCleanup) => {
 		cleanup = timerCleanup;
 	});

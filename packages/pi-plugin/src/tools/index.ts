@@ -24,8 +24,12 @@ import { createTodowriteTool } from "./todowrite";
 
 export interface RegisterToolsOptions {
 	db: ContextDatabase;
-	memoryEnabled: boolean;
-	embeddingEnabled: boolean;
+	ensureProjectRegistered?: (
+		directory: string,
+		db: ContextDatabase,
+	) => Promise<void>;
+	memoryEnabled?: boolean;
+	embeddingEnabled?: boolean;
 	gitCommitsEnabled?: boolean;
 	/** When true, ctx_memory exposes dreamer-only actions (update, merge, archive).
 	 *  Set by the subagent extension entry when the parent passes
@@ -53,6 +57,7 @@ export function registerMagicContextTools(
 	pi.registerTool(
 		createCtxSearchTool({
 			db: opts.db,
+			ensureProjectRegistered: opts.ensureProjectRegistered,
 			memoryEnabled: opts.memoryEnabled,
 			embeddingEnabled: opts.embeddingEnabled,
 			gitCommitsEnabled: opts.gitCommitsEnabled,
@@ -62,6 +67,7 @@ export function registerMagicContextTools(
 	pi.registerTool(
 		createCtxMemoryTool({
 			db: opts.db,
+			ensureProjectRegistered: opts.ensureProjectRegistered,
 			memoryEnabled: opts.memoryEnabled,
 			embeddingEnabled: opts.embeddingEnabled,
 			allowDreamerActions: opts.allowDreamerActions ?? false,

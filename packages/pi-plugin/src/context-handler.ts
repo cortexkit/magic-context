@@ -105,6 +105,7 @@ import {
 	runAutoSearchHintForPi,
 } from "./auto-search-pi";
 import { detectRecentCommit } from "./detect-recent-commit";
+import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import {
 	applyPiHeuristicCleanup,
 	type PiHeuristicCleanupResult,
@@ -497,9 +498,6 @@ export interface PiAutoSearchHandlerOptions {
 	enabled: boolean;
 	scoreThreshold: number;
 	minPromptChars: number;
-	memoryEnabled: boolean;
-	embeddingEnabled: boolean;
-	gitCommitsEnabled: boolean;
 }
 
 /** Heuristic-cleanup config — drops aged tools, dedups, strips system injections. */
@@ -845,7 +843,8 @@ export function registerPiContextHandler(
 	options: PiContextHandlerOptions,
 ): void {
 	const tagger = createTagger();
-	const projectIdentity = resolveProjectIdentity(process.cwd());
+	const projectDirectory = process.cwd();
+	const projectIdentity = resolveProjectIdentity(projectDirectory);
 
 	// Build a real shared scheduler so cache-busting stages (heuristic
 	// cleanup, compartment injection rebuild) only run on execute passes.
@@ -1329,6 +1328,10 @@ export function registerPiContextHandler(
 
 			if (options.autoSearch?.enabled) {
 				try {
+					await ensureProjectRegisteredFromPiDirectory(
+						projectDirectory,
+						options.db,
+					);
 					outputMessages = await runAutoSearchHintForPi({
 						sessionId,
 						db: options.db,
@@ -1338,9 +1341,6 @@ export function registerPiContextHandler(
 							scoreThreshold: options.autoSearch.scoreThreshold,
 							minPromptChars: options.autoSearch.minPromptChars,
 							projectPath: projectIdentity,
-							memoryEnabled: options.autoSearch.memoryEnabled,
-							embeddingEnabled: options.autoSearch.embeddingEnabled,
-							gitCommitsEnabled: options.autoSearch.gitCommitsEnabled,
 							visibleMemoryIds:
 								getVisibleMemoryIds(options.db, sessionId) ?? null,
 						},

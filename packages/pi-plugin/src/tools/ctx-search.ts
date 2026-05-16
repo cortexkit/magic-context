@@ -16,6 +16,10 @@
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { getLastCompartmentEndMessage } from "@magic-context/core/features/magic-context/compartment-storage";
+import {
+	embedTextForProject,
+	getProjectEmbeddingSnapshot,
+} from "@magic-context/core/features/magic-context/memory/embedding";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
 	type UnifiedSearchResult,
@@ -110,8 +114,12 @@ function formatSearchResults(
 
 export interface CtxSearchToolDeps {
 	db: ContextDatabase;
-	memoryEnabled: boolean;
-	embeddingEnabled: boolean;
+	ensureProjectRegistered?: (
+		directory: string,
+		db: ContextDatabase,
+	) => Promise<void>;
+	memoryEnabled?: boolean;
+	embeddingEnabled?: boolean;
 	gitCommitsEnabled?: boolean;
 }
 
@@ -152,6 +160,15 @@ export function createCtxSearchTool(
 
 			const sessionId = ctx.sessionManager.getSessionId();
 			const projectIdentity = resolveProjectIdentity(ctx.cwd);
+			await deps.ensureProjectRegistered?.(ctx.cwd, deps.db);
+			const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
+			const memoryEnabled =
+				snapshot?.features.memoryEnabled ?? deps.memoryEnabled;
+			const embeddingEnabled = snapshot
+				? snapshot.enabled || snapshot.gitCommitEnabled
+				: deps.embeddingEnabled;
+			const gitCommitsEnabled =
+				snapshot?.gitCommitEnabled ?? deps.gitCommitsEnabled ?? false;
 
 			// Only search message history up to the last compartment boundary —
 			// anything after that is still in the live context and already visible to the agent.
@@ -170,11 +187,20 @@ export function createCtxSearchTool(
 				query,
 				{
 					limit: normalizeLimit(params.limit),
-					memoryEnabled: deps.memoryEnabled,
-					embeddingEnabled: deps.embeddingEnabled,
+					memoryEnabled,
+					embeddingEnabled,
+					embedQuery: async (text, signal) => {
+						const result = await embedTextForProject(
+							projectIdentity,
+							text,
+							signal,
+						);
+						return result?.vector ?? null;
+					},
+					isEmbeddingRuntimeEnabled: () => embeddingEnabled === true,
 					maxMessageOrdinal:
 						lastCompartmentEnd >= 0 ? lastCompartmentEnd : undefined,
-					gitCommitsEnabled: deps.gitCommitsEnabled ?? false,
+					gitCommitsEnabled,
 					sources: params.sources,
 					visibleMemoryIds,
 				},
