@@ -4,7 +4,6 @@ import { detectOverflow } from "../../features/magic-context/overflow-detection"
 import {
     clearHistorianFailureState,
     clearPendingCompactionMarkerStateIf,
-    clearPersistedNoteNudge,
     clearPersistedNudgePlacement,
     clearPersistedStickyTurnReminder,
     clearSession,
@@ -21,6 +20,8 @@ import {
     getPersistedStickyTurnReminder,
     recordDetectedContextLimit,
     recordOverflowDetected,
+    removeAutoSearchHintDecisionByMessageId,
+    removeNoteNudgeAnchorByMessageId,
     removeStrippedPlaceholderId,
     setPersistedReasoningWatermark,
     updateSessionMeta,
@@ -47,7 +48,7 @@ import {
     resolveModelKey,
     resolveSessionId,
 } from "./event-resolvers";
-import { clearNoteNudgeState } from "./note-nudger";
+import { clearNoteNudgeTriggerOnly } from "./note-nudger";
 import { readRawSessionMessages } from "./read-session-chunk";
 import { type NotificationParams, sendIgnoredMessage } from "./send-session-notification";
 import { clearMessageTokensCache, type NudgePlacementStore } from "./transform";
@@ -140,18 +141,33 @@ function cleanupRemovedMessageState(
                 : `event message.removed: nudge anchor unchanged for ${messageId}`,
         );
 
+        const removedNoteNudgeAnchor = removeNoteNudgeAnchorByMessageId(
+            deps.db,
+            sessionId,
+            messageId,
+        );
+        const removedAutoSearchDecision = removeAutoSearchHintDecisionByMessageId(
+            deps.db,
+            sessionId,
+            messageId,
+        );
         const persistedNoteNudge = getPersistedNoteNudge(deps.db, sessionId);
-        const clearedNoteNudge =
-            persistedNoteNudge.triggerMessageId === messageId ||
-            persistedNoteNudge.stickyMessageId === messageId;
-        if (clearedNoteNudge) {
-            clearPersistedNoteNudge(deps.db, sessionId);
+        const clearedNoteNudgeTrigger = persistedNoteNudge.triggerMessageId === messageId;
+        if (clearedNoteNudgeTrigger) {
+            clearNoteNudgeTriggerOnly(deps.db, sessionId);
         }
+        const clearedNoteNudge = removedNoteNudgeAnchor || clearedNoteNudgeTrigger;
         sessionLog(
             sessionId,
             clearedNoteNudge
-                ? `event message.removed: cleared note nudge state for ${messageId}`
+                ? `event message.removed: pruned note nudge state for ${messageId}`
                 : `event message.removed: note nudge state unchanged for ${messageId}`,
+        );
+        sessionLog(
+            sessionId,
+            removedAutoSearchDecision
+                ? `event message.removed: pruned auto-search decision for ${messageId}`
+                : `event message.removed: auto-search decision unchanged for ${messageId}`,
         );
 
         const persistedStickyTurnReminder = getPersistedStickyTurnReminder(deps.db, sessionId);
@@ -567,14 +583,6 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     sessionLog(
                         info.sessionID,
                         "event message.removed: cleared in-memory nudge placement cache",
-                    );
-                }
-
-                if (cleanup.clearedNoteNudge) {
-                    clearNoteNudgeState(deps.db, info.sessionID, { persist: false });
-                    sessionLog(
-                        info.sessionID,
-                        "event message.removed: cleared in-memory note nudge state",
                     );
                 }
 

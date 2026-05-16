@@ -467,8 +467,14 @@ function casUpdateJsonArrayColumn<T>(
     column: "note_nudge_anchors" | "auto_search_hint_decisions",
     validator: (value: unknown) => value is T,
     mutate: (current: T[]) => T[] | null,
+    options?: { ensureRow?: boolean },
 ): boolean {
-    ensureSessionMetaRow(db, sessionId);
+    if (options?.ensureRow === false) {
+        const exists = db.prepare("SELECT 1 FROM session_meta WHERE session_id = ?").get(sessionId);
+        if (!exists) return true;
+    } else {
+        ensureSessionMetaRow(db, sessionId);
+    }
     for (let attempt = 0; attempt < CAS_RETRY_LIMIT; attempt += 1) {
         const row = db
             .prepare(`SELECT ${column} FROM session_meta WHERE session_id = ?`)
@@ -653,6 +659,7 @@ export function removeNoteNudgeAnchorByMessageId(
             removed = next.length !== current.length;
             return removed ? next : null;
         },
+        { ensureRow: false },
     );
     return ok && removed;
 }
@@ -673,6 +680,7 @@ export function removeAutoSearchHintDecisionByMessageId(
             removed = next.length !== current.length;
             return removed ? next : null;
         },
+        { ensureRow: false },
     );
     return ok && removed;
 }

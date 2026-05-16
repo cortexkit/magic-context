@@ -27,8 +27,11 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import {
+    appendAutoSearchHintDecision,
+    appendNoteNudgeAnchor,
+    getAutoSearchHintDecisions,
+    getNoteNudgeAnchors,
     getPersistedNoteNudge,
-    setPersistedDeliveredNoteNudge,
 } from "../../features/magic-context/storage-meta-persisted";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
@@ -624,12 +627,23 @@ describe("createEventHandler", () => {
         expect(deps.nudgePlacements.clear).toHaveBeenCalledWith("ses-anchor", { persist: false });
     });
 
-    it("clears note nudge state when the removed message is referenced", async () => {
+    it("prunes only sticky-injection anchors for the removed message", async () => {
         useTempDataHome("context-event-message-removed-note-");
         const deps = createDeps(new Map());
         const handler = createEventHandler(deps);
 
-        setPersistedDeliveredNoteNudge(deps.db, "ses-note", "Remember this", "msg-note");
+        appendNoteNudgeAnchor(deps.db, "ses-note", "msg-note", "Remember this");
+        appendNoteNudgeAnchor(deps.db, "ses-note", "msg-other", "Keep this");
+        appendAutoSearchHintDecision(deps.db, "ses-note", {
+            messageId: "msg-note",
+            decision: "hint",
+            text: "auto hint",
+        });
+        appendAutoSearchHintDecision(deps.db, "ses-note", {
+            messageId: "msg-other",
+            decision: "no-hint",
+            reason: "empty",
+        });
 
         await handler({
             event: {
@@ -638,12 +652,42 @@ describe("createEventHandler", () => {
             },
         });
 
-        expect(getPersistedNoteNudge(openDatabase(), "ses-note")).toEqual({
+        expect(getNoteNudgeAnchors(openDatabase(), "ses-note")).toEqual([
+            { messageId: "msg-other", text: "Keep this" },
+        ]);
+        expect(getAutoSearchHintDecisions(openDatabase(), "ses-note")).toEqual([
+            { messageId: "msg-other", decision: "no-hint", reason: "empty" },
+        ]);
+    });
+
+    it("clears note nudge trigger only when the removed message is the trigger", async () => {
+        useTempDataHome("context-event-message-removed-note-trigger-");
+        const deps = createDeps(new Map());
+        const handler = createEventHandler(deps);
+
+        deps.db
+            .prepare(
+                "INSERT INTO session_meta (session_id, note_nudge_trigger_pending, note_nudge_trigger_message_id) VALUES (?, ?, ?)",
+            )
+            .run("ses-note-trigger", 1, "msg-trigger");
+        appendNoteNudgeAnchor(deps.db, "ses-note-trigger", "msg-anchor", "Keep anchor");
+
+        await handler({
+            event: {
+                type: "message.removed",
+                properties: { sessionID: "ses-note-trigger", messageID: "msg-trigger" },
+            },
+        });
+
+        expect(getPersistedNoteNudge(openDatabase(), "ses-note-trigger")).toEqual({
             triggerPending: false,
             triggerMessageId: null,
             stickyText: null,
             stickyMessageId: null,
         });
+        expect(getNoteNudgeAnchors(openDatabase(), "ses-note-trigger")).toEqual([
+            { messageId: "msg-anchor", text: "Keep anchor" },
+        ]);
     });
 
     it("clears sticky turn reminders when the removed message was the reminder anchor", async () => {
