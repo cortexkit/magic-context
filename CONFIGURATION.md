@@ -36,7 +36,7 @@ Both plugins write to the same SQLite database at `~/.local/share/cortexkit/magi
 
 So memories you write in OpenCode appear in Pi sessions for the same project (and vice versa), while per-session compartments and tags stay correctly attributed to their originating harness.
 
-For semantic search to work cross-harness, both plugins **must use the same embedding model**. Magic Context detects mismatch on startup and logs a warning; the easiest fix is to keep the `embedding` block identical in both config files.
+For semantic search to work cross-harness, both plugins resolve embedding config per project identity on every retrieval path. OpenCode and Pi can run in the same process against different projects without sharing one process-global embedding provider. For one project, keep the effective `embedding` block consistent across the OpenCode and Pi config stack; Magic Context tags stored vectors with the resolved model identity and clears stale vectors for that project when the provider/model changes.
 
 ### JSON Schema
 
