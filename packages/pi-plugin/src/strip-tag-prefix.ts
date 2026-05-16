@@ -1,6 +1,6 @@
 /**
- * Strip injected `§N§` tag prefixes from assistant text before Pi
- * persists the message.
+ * Strip injected `§N§` tag prefixes AND defensively strip any cargo-cult
+ * `§` characters from assistant text before Pi persists the message.
  *
  * # Why this exists
  *
@@ -27,36 +27,34 @@
  * mutating `event.message.content[i].text` is visible to the
  * persistence call.
  *
- * # Regex
+ * # Two-step strip (matches OpenCode `text-complete.ts`)
  *
- * `^(§\d+§\s*)+` — same shape as the OpenCode handler. Matches one or
- * more `§N§` blocks at the very start of a string, optionally followed
- * by whitespace, allowing for the rare case where the model emits
- * multiple consecutive prefixes (`§4§ §5§ ...`).
+ * 1. `^(§N§\s*)+` removes well-formed leading prefix runs (the canonical
+ *    case where the model correctly mimics MC's tag prefix at the start
+ *    of a response). Digit-aware: removes the whole `§N§ ` pair cleanly,
+ *    leaving no digit residue.
  *
- * Only the leading run is stripped; embedded `§N§` references inside
- * the response (e.g. agent referencing past tags) are intentionally
- * preserved because they may carry meaning.
+ * 2. Global `§` strip removes ANY remaining `§` character anywhere in
+ *    the text. Defends against cargo-cult patterns observed when execute
+ *    passes drop most tool structure:
+ *      - `§40827§` mid-text (well-formed cargo-cult pair)
+ *      - `§40827"&gt;` (malformed partial — hybrid of MC tag and XML)
+ *      - stray `§` anywhere
+ *
+ *    Only the MC transform layer is authorized to write `§N§` prefixes.
+ *    Any `§` reaching this hook from the model is by definition wrong.
+ *    Cost: legitimate `§5.1` section refs become `5.1`; models adapt
+ *    naturally to alternative notation.
  *
  * # Scope
  *
  * Only `assistant` messages need stripping. User messages are
- * user-typed text (no LLM mimicking). Tool result messages already
- * have prefixes added by the tagger and the same persistence model
- * applies, but we leave those untouched because the tag prefix on tool
- * results is intentional context — the user expects to see "§5§ ..."
- * in the displayed tool result so they can reference it later.
- *
- * Actually wait — tool results are the output of `tool_result`
- * messages from the user role in Pi's model. If the tagger added a
- * §N§ prefix to those, they'd persist with the prefix. But the
- * tagger only injects prefixes when `skipPrefixInjection: false`
- * (i.e. `ctx_reduce_enabled: true`). For users with reduction
- * disabled, no prefixes get injected anywhere, so this strip is
- * a no-op — but still safe and cheap.
+ * user-typed text (no LLM mimicking). Tool result messages keep their
+ * tagger-injected prefix because that prefix is intentional context.
  */
 
-const TAG_PREFIX_REGEX = /^(\u00a7\d+\u00a7\s*)+/;
+const LEADING_TAG_PREFIX_REGEX = /^(\u00a7\d+\u00a7\s*)+/;
+const SECTION_CHAR_REGEX = /\u00a7/g;
 
 /**
  * Mutate the given assistant message's text parts in place to strip
@@ -86,7 +84,9 @@ export function stripTagPrefixFromAssistantMessage(message: {
 		}
 		const textPart = part as { type: "text"; text: unknown };
 		if (typeof textPart.text !== "string") continue;
-		const stripped = textPart.text.replace(TAG_PREFIX_REGEX, "");
+		const stripped = textPart.text
+			.replace(LEADING_TAG_PREFIX_REGEX, "")
+			.replace(SECTION_CHAR_REGEX, "");
 		if (stripped !== textPart.text) {
 			textPart.text = stripped;
 			mutated = true;
