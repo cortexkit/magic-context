@@ -389,11 +389,11 @@ describe("registerPiContextHandler", () => {
 
 			await handler(
 				{ messages: [userMessage("trigger turn", 1)] as never[] },
-				fakeContext("ses-context") as never,
+				fakeContext("ses-context", process.cwd(), ["entry-trigger"]) as never,
 			);
 			const result = await handler(
 				{ messages: [userMessage("new turn", 2)] as never[] },
-				fakeContext("ses-context") as never,
+				fakeContext("ses-context", process.cwd(), ["entry-new"]) as never,
 			);
 
 			expect(textOf(result.messages[0] as never)).toContain(
@@ -425,20 +425,20 @@ describe("registerPiContextHandler", () => {
 			onNoteTrigger(db, sessionId, "historian_complete");
 			await handler(
 				{ messages: [userMessage("trigger turn", 1)] as never[] },
-				fakeContext(sessionId) as never,
+				fakeContext(sessionId, process.cwd(), ["entry-trigger"]) as never,
 			);
 			await handler(
 				{ messages: [userMessage("new turn", 2)] as never[] },
-				fakeContext(sessionId) as never,
+				fakeContext(sessionId, process.cwd(), ["entry-new"]) as never,
 			);
 
 			const result = await handler(
 				{ messages: [userMessage("new turn", 2)] as never[] },
-				fakeContext(sessionId) as never,
+				fakeContext(sessionId, process.cwd(), ["entry-new"]) as never,
 			);
 			const onceMore = await handler(
 				{ messages: result.messages },
-				fakeContext(sessionId) as never,
+				fakeContext(sessionId, process.cwd(), ["entry-new"]) as never,
 			);
 
 			expect(
@@ -501,7 +501,7 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
-	it("clearContextHandlerSession clears auto-search per-session caches", async () => {
+	it("clearContextHandlerSession preserves persisted auto-search decisions", async () => {
 		const db = createTestDb();
 		const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(
 			async () => [],
@@ -539,7 +539,7 @@ describe("registerPiContextHandler", () => {
 				fakeContext("ses-context") as never,
 			);
 
-			expect(spy).toHaveBeenCalledTimes(2);
+			expect(spy).toHaveBeenCalledTimes(1);
 		} finally {
 			spy.mockRestore();
 			closeQuietly(db);

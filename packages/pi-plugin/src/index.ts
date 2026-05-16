@@ -48,7 +48,7 @@ import {
 } from "@magic-context/core/hooks/magic-context/derive-budgets";
 import { resolveCacheTtl } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import {
-	clearNoteNudgeState,
+	clearNoteNudgeTriggerAndCooldown,
 	onNoteTrigger,
 } from "@magic-context/core/hooks/magic-context/note-nudger";
 import { normalizeTodoStateJson } from "@magic-context/core/hooks/magic-context/todo-view";
@@ -942,7 +942,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 					}
 				}
 			} else if (event.toolName === "ctx_note") {
-				clearNoteNudgeState(db, sessionId);
+				clearNoteNudgeTriggerAndCooldown(db, sessionId);
 			}
 		} catch (err) {
 			// tool-event hook is opportunistic; failure should not break
