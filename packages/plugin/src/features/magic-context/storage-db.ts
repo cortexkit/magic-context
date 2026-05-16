@@ -298,6 +298,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       note_nudge_trigger_message_id TEXT DEFAULT '',
       note_nudge_sticky_text TEXT DEFAULT '',
       note_nudge_sticky_message_id TEXT DEFAULT '',
+      note_nudge_anchors TEXT NOT NULL DEFAULT '[]',
+      auto_search_hint_decisions TEXT NOT NULL DEFAULT '[]',
       last_todo_state TEXT DEFAULT '',
       todo_synthetic_call_id TEXT DEFAULT '',
       todo_synthetic_anchor_message_id TEXT DEFAULT '',
@@ -379,6 +381,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "session_meta", "note_nudge_trigger_message_id", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "note_nudge_sticky_text", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "note_nudge_sticky_message_id", "TEXT DEFAULT ''");
+    ensureColumn(db, "session_meta", "note_nudge_anchors", "TEXT NOT NULL DEFAULT '[]'");
+    ensureColumn(db, "session_meta", "auto_search_hint_decisions", "TEXT NOT NULL DEFAULT '[]'");
     ensureColumn(db, "session_meta", "last_todo_state", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "todo_synthetic_call_id", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "todo_synthetic_anchor_message_id", "TEXT DEFAULT ''");
@@ -631,7 +635,7 @@ export function ensureColumn(
     if (
         !/^[a-z_]+$/.test(table) ||
         !/^[a-z_]+$/.test(column) ||
-        !/^[A-Z0-9_'(),\s]+$/i.test(definition)
+        !/^[A-Z0-9_'(),[\]\s]+$/i.test(definition)
     ) {
         throw new Error(`Unsafe schema identifier: ${table}.${column} ${definition}`);
     }

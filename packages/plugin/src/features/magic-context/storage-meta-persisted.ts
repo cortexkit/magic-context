@@ -55,6 +55,34 @@ export interface PersistedNoteNudge {
     stickyMessageId: string | null;
 }
 
+export interface NoteNudgeAnchor {
+    messageId: string;
+    text: string;
+}
+
+export type AutoSearchHintNoHintReason =
+    | "below-threshold"
+    | "timeout"
+    | "empty"
+    | "error"
+    | "stacked"
+    | "too-short";
+
+export type AutoSearchHintDecision =
+    | { messageId: string; decision: "hint"; text: string }
+    | { messageId: string; decision: "no-hint"; reason: AutoSearchHintNoHintReason };
+
+export type NoteNudgeDeliveryOutcome =
+    | { ok: true; kind: "appended" }
+    | { ok: true; kind: "already-present" }
+    | { ok: false; kind: "conflict" }
+    | { ok: false; kind: "cas-exhausted" };
+
+export type AppendAutoSearchHintOutcome =
+    | { ok: true; kind: "appended"; decision: AutoSearchHintDecision }
+    | { ok: true; kind: "already-present"; decision: AutoSearchHintDecision }
+    | { ok: false; kind: "cas-exhausted" };
+
 export interface PersistedTodoSyntheticAnchor {
     callId: string;
     messageId: string;
@@ -72,6 +100,16 @@ export interface PersistedHistorianFailureState {
     lastError: string | null;
     lastFailureAt: number | null;
 }
+
+const CAS_RETRY_LIMIT = 5;
+const AUTO_SEARCH_NO_HINT_REASONS = new Set<string>([
+    "below-threshold",
+    "timeout",
+    "empty",
+    "error",
+    "stacked",
+    "too-short",
+]);
 
 function isPersistedUsageRow(row: unknown): row is PersistedUsageRow {
     if (row === null || typeof row !== "object") return false;
@@ -113,6 +151,44 @@ function isPersistedNoteNudgeRow(row: unknown): row is PersistedNoteNudgeRow {
         typeof r.note_nudge_sticky_text === "string" &&
         typeof r.note_nudge_sticky_message_id === "string"
     );
+}
+
+function isValidNoteNudgeAnchor(value: unknown): value is NoteNudgeAnchor {
+    if (value === null || typeof value !== "object") return false;
+    const row = value as Record<string, unknown>;
+    return (
+        typeof row.messageId === "string" &&
+        row.messageId.length > 0 &&
+        typeof row.text === "string" &&
+        row.text.length > 0
+    );
+}
+
+function isValidAutoSearchHintDecision(value: unknown): value is AutoSearchHintDecision {
+    if (value === null || typeof value !== "object") return false;
+    const row = value as Record<string, unknown>;
+    if (typeof row.messageId !== "string" || row.messageId.length === 0) return false;
+    if (row.decision === "hint") {
+        return typeof row.text === "string" && row.text.length > 0;
+    }
+    if (row.decision === "no-hint") {
+        return typeof row.reason === "string" && AUTO_SEARCH_NO_HINT_REASONS.has(row.reason);
+    }
+    return false;
+}
+
+function parseJsonArray<T>(
+    json: string | null | undefined,
+    validator: (value: unknown) => value is T,
+): T[] {
+    if (!json) return [];
+    try {
+        const parsed = JSON.parse(json);
+        if (!Array.isArray(parsed)) return [];
+        return parsed.filter(validator);
+    } catch {
+        return [];
+    }
 }
 
 function isPersistedTodoSyntheticAnchorRow(row: unknown): row is PersistedTodoSyntheticAnchorRow {
@@ -366,6 +442,239 @@ export function clearPersistedNoteNudge(db: Database, sessionId: string): void {
     db.prepare(
         "UPDATE session_meta SET note_nudge_trigger_pending = 0, note_nudge_trigger_message_id = '', note_nudge_sticky_text = '', note_nudge_sticky_message_id = '' WHERE session_id = ?",
     ).run(sessionId);
+}
+
+export function getNoteNudgeAnchors(db: Database, sessionId: string): NoteNudgeAnchor[] {
+    const row = db
+        .prepare("SELECT note_nudge_anchors FROM session_meta WHERE session_id = ?")
+        .get(sessionId) as { note_nudge_anchors?: string | null } | undefined;
+    return parseJsonArray(row?.note_nudge_anchors, isValidNoteNudgeAnchor);
+}
+
+export function getAutoSearchHintDecisions(
+    db: Database,
+    sessionId: string,
+): AutoSearchHintDecision[] {
+    const row = db
+        .prepare("SELECT auto_search_hint_decisions FROM session_meta WHERE session_id = ?")
+        .get(sessionId) as { auto_search_hint_decisions?: string | null } | undefined;
+    return parseJsonArray(row?.auto_search_hint_decisions, isValidAutoSearchHintDecision);
+}
+
+function casUpdateJsonArrayColumn<T>(
+    db: Database,
+    sessionId: string,
+    column: "note_nudge_anchors" | "auto_search_hint_decisions",
+    validator: (value: unknown) => value is T,
+    mutate: (current: T[]) => T[] | null,
+): boolean {
+    ensureSessionMetaRow(db, sessionId);
+    for (let attempt = 0; attempt < CAS_RETRY_LIMIT; attempt += 1) {
+        const row = db
+            .prepare(`SELECT ${column} FROM session_meta WHERE session_id = ?`)
+            .get(sessionId) as Record<string, string | null> | undefined;
+        const currentBlob = row?.[column] ?? "[]";
+        const current = parseJsonArray(currentBlob, validator);
+        const next = mutate(current);
+        if (next === null) return true;
+        const nextBlob = stableStringify(next);
+        if (nextBlob === currentBlob) return true;
+        const result = db
+            .prepare(`UPDATE session_meta SET ${column} = ? WHERE session_id = ? AND ${column} = ?`)
+            .run(nextBlob, sessionId, currentBlob);
+        if (result.changes > 0) return true;
+    }
+    sessionLog(sessionId, `${column} CAS: ${CAS_RETRY_LIMIT} retries exhausted`);
+    return false;
+}
+
+export function appendNoteNudgeAnchor(
+    db: Database,
+    sessionId: string,
+    messageId: string,
+    text: string,
+): boolean {
+    if (!messageId || !text) return false;
+    return casUpdateJsonArrayColumn(
+        db,
+        sessionId,
+        "note_nudge_anchors",
+        isValidNoteNudgeAnchor,
+        (current) => {
+            if (current.some((anchor) => anchor.messageId === messageId && anchor.text === text)) {
+                return null;
+            }
+            if (current.some((anchor) => anchor.messageId === messageId)) {
+                sessionLog(sessionId, "note-nudge: messageId conflict, refusing append");
+                return null;
+            }
+            return [...current, { messageId, text }];
+        },
+    );
+}
+
+type NoteNudgeDeliveryPlan = { kind: "appended" | "already-present" | "conflict" };
+
+export function deliverNoteNudgeAtomic(
+    db: Database,
+    sessionId: string,
+    messageId: string,
+    text: string,
+): NoteNudgeDeliveryOutcome {
+    let plan: NoteNudgeDeliveryPlan | null = null;
+    const casOk = casUpdateJsonArrayColumn(
+        db,
+        sessionId,
+        "note_nudge_anchors",
+        isValidNoteNudgeAnchor,
+        (current) => {
+            if (current.some((anchor) => anchor.messageId === messageId && anchor.text === text)) {
+                plan = { kind: "already-present" };
+                return null;
+            }
+            if (current.some((anchor) => anchor.messageId === messageId)) {
+                plan = { kind: "conflict" };
+                sessionLog(sessionId, "note-nudge: messageId conflict, refusing append");
+                return null;
+            }
+            plan = { kind: "appended" };
+            return [...current, { messageId, text }];
+        },
+    );
+    if (!casOk) {
+        sessionLog(sessionId, `note-nudge: CAS exhausted for ${messageId}; skipping wire append`);
+        return { ok: false, kind: "cas-exhausted" };
+    }
+    const committedPlan = plan as NoteNudgeDeliveryPlan | null;
+    if (!committedPlan) {
+        sessionLog(
+            sessionId,
+            "note-nudge: CAS reported success with no plan staged; treating as failure",
+        );
+        return { ok: false, kind: "cas-exhausted" };
+    }
+    if (committedPlan.kind === "conflict") {
+        return { ok: false, kind: "conflict" };
+    }
+    db.prepare(
+        "UPDATE session_meta SET note_nudge_trigger_pending = 0, note_nudge_trigger_message_id = '' WHERE session_id = ?",
+    ).run(sessionId);
+    return { ok: true, kind: committedPlan.kind };
+}
+
+export function appendAutoSearchHintDecision(
+    db: Database,
+    sessionId: string,
+    entry: AutoSearchHintDecision,
+): AppendAutoSearchHintOutcome {
+    if (!entry.messageId) return { ok: false, kind: "cas-exhausted" };
+    let staged: { kind: "appended" | "already-present"; decision: AutoSearchHintDecision } | null =
+        null;
+    const casOk = casUpdateJsonArrayColumn(
+        db,
+        sessionId,
+        "auto_search_hint_decisions",
+        isValidAutoSearchHintDecision,
+        (current) => {
+            const existing = current.find((decision) => decision.messageId === entry.messageId);
+            if (existing) {
+                staged = { kind: "already-present", decision: existing };
+                return null;
+            }
+            staged = { kind: "appended", decision: entry };
+            return [...current, entry];
+        },
+    );
+    if (!casOk) return { ok: false, kind: "cas-exhausted" };
+    const committed = staged as {
+        kind: "appended" | "already-present";
+        decision: AutoSearchHintDecision;
+    } | null;
+    if (!committed) {
+        sessionLog(sessionId, "auto-search: CAS reported success with no staged outcome");
+        return { ok: false, kind: "cas-exhausted" };
+    }
+    return { ok: true, kind: committed.kind, decision: committed.decision };
+}
+
+export function pruneNoteNudgeAnchors(
+    db: Database,
+    sessionId: string,
+    visibleMessageIds: Set<string>,
+): number {
+    let pruned = 0;
+    casUpdateJsonArrayColumn(
+        db,
+        sessionId,
+        "note_nudge_anchors",
+        isValidNoteNudgeAnchor,
+        (current) => {
+            const next = current.filter((anchor) => visibleMessageIds.has(anchor.messageId));
+            pruned = current.length - next.length;
+            return pruned > 0 ? next : null;
+        },
+    );
+    return pruned;
+}
+
+export function pruneAutoSearchHintDecisions(
+    db: Database,
+    sessionId: string,
+    visibleMessageIds: Set<string>,
+): number {
+    let pruned = 0;
+    casUpdateJsonArrayColumn(
+        db,
+        sessionId,
+        "auto_search_hint_decisions",
+        isValidAutoSearchHintDecision,
+        (current) => {
+            const next = current.filter((decision) => visibleMessageIds.has(decision.messageId));
+            pruned = current.length - next.length;
+            return pruned > 0 ? next : null;
+        },
+    );
+    return pruned;
+}
+
+export function removeNoteNudgeAnchorByMessageId(
+    db: Database,
+    sessionId: string,
+    messageId: string,
+): boolean {
+    let removed = false;
+    const ok = casUpdateJsonArrayColumn(
+        db,
+        sessionId,
+        "note_nudge_anchors",
+        isValidNoteNudgeAnchor,
+        (current) => {
+            const next = current.filter((anchor) => anchor.messageId !== messageId);
+            removed = next.length !== current.length;
+            return removed ? next : null;
+        },
+    );
+    return ok && removed;
+}
+
+export function removeAutoSearchHintDecisionByMessageId(
+    db: Database,
+    sessionId: string,
+    messageId: string,
+): boolean {
+    let removed = false;
+    const ok = casUpdateJsonArrayColumn(
+        db,
+        sessionId,
+        "auto_search_hint_decisions",
+        isValidAutoSearchHintDecision,
+        (current) => {
+            const next = current.filter((decision) => decision.messageId !== messageId);
+            removed = next.length !== current.length;
+            return removed ? next : null;
+        },
+    );
+    return ok && removed;
 }
 
 export function getPersistedTodoSyntheticAnchor(

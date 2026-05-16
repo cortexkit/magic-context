@@ -7,6 +7,8 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import { runMigrations } from "./migrations";
 import {
     addNote,
+    appendAutoSearchHintDecision,
+    appendNoteNudgeAnchor,
     buildCompartmentBlock,
     clearPendingOps,
     clearPersistedNudgePlacement,
@@ -14,6 +16,8 @@ import {
     clearSession,
     closeDatabase,
     dismissNote,
+    getAutoSearchHintDecisions,
+    getNoteNudgeAnchors,
     getOrCreateSessionMeta,
     getPendingOps,
     getPendingSmartNotes,
@@ -27,7 +31,11 @@ import {
     insertTag,
     markNoteReady,
     openDatabase,
+    pruneAutoSearchHintDecisions,
+    pruneNoteNudgeAnchors,
     queuePendingOp,
+    removeAutoSearchHintDecisionByMessageId,
+    removeNoteNudgeAnchorByMessageId,
     removePendingOp,
     replaceAllSessionNotes,
     setPersistedNudgePlacement,
@@ -217,6 +225,79 @@ describe("magic-context storage", () => {
 
         //#then
         expect(getSessionNotes(db, sessionId)).toEqual([]);
+        closeQuietly(db);
+    });
+
+    it("stores note-nudge anchors append-only and prunes by visible message ids", () => {
+        //#given
+        const db = makeMemoryDatabase();
+        const sessionId = "ses-anchor";
+
+        //#when
+        expect(appendNoteNudgeAnchor(db, sessionId, "m1", "text-1")).toBe(true);
+        expect(appendNoteNudgeAnchor(db, sessionId, "m1", "text-1")).toBe(true);
+        expect(appendNoteNudgeAnchor(db, sessionId, "m1", "different")).toBe(true);
+        expect(appendNoteNudgeAnchor(db, sessionId, "m2", "text-2")).toBe(true);
+
+        //#then
+        expect(getNoteNudgeAnchors(db, sessionId)).toEqual([
+            { messageId: "m1", text: "text-1" },
+            { messageId: "m2", text: "text-2" },
+        ]);
+        expect(pruneNoteNudgeAnchors(db, sessionId, new Set(["m2"]))).toBe(1);
+        expect(getNoteNudgeAnchors(db, sessionId)).toEqual([{ messageId: "m2", text: "text-2" }]);
+        expect(removeNoteNudgeAnchorByMessageId(db, sessionId, "m2")).toBe(true);
+        expect(getNoteNudgeAnchors(db, sessionId)).toEqual([]);
+        closeQuietly(db);
+    });
+
+    it("stores auto-search decisions with stored-entry already-present semantics", () => {
+        //#given
+        const db = makeMemoryDatabase();
+        const sessionId = "ses-auto-decision";
+        const first = { messageId: "m1", decision: "hint" as const, text: "STORED" };
+
+        //#when / then
+        expect(appendAutoSearchHintDecision(db, sessionId, first)).toEqual({
+            ok: true,
+            kind: "appended",
+            decision: first,
+        });
+        expect(
+            appendAutoSearchHintDecision(db, sessionId, {
+                messageId: "m1",
+                decision: "no-hint",
+                reason: "stacked",
+            }),
+        ).toEqual({ ok: true, kind: "already-present", decision: first });
+        expect(
+            appendAutoSearchHintDecision(db, sessionId, {
+                messageId: "m2",
+                decision: "no-hint",
+                reason: "below-threshold",
+            }),
+        ).toEqual({
+            ok: true,
+            kind: "appended",
+            decision: { messageId: "m2", decision: "no-hint", reason: "below-threshold" },
+        });
+        expect(pruneAutoSearchHintDecisions(db, sessionId, new Set(["m1"]))).toBe(1);
+        expect(getAutoSearchHintDecisions(db, sessionId)).toEqual([first]);
+        expect(removeAutoSearchHintDecisionByMessageId(db, sessionId, "m1")).toBe(true);
+        expect(getAutoSearchHintDecisions(db, sessionId)).toEqual([]);
+        closeQuietly(db);
+    });
+
+    it("recovers from malformed sticky-injection JSON", () => {
+        //#given
+        const db = makeMemoryDatabase();
+        db.prepare(
+            "INSERT INTO session_meta (session_id, note_nudge_anchors, auto_search_hint_decisions) VALUES (?, ?, ?)",
+        ).run("ses-bad-json", "not-json", "{}");
+
+        //#then
+        expect(getNoteNudgeAnchors(db, "ses-bad-json")).toEqual([]);
+        expect(getAutoSearchHintDecisions(db, "ses-bad-json")).toEqual([]);
         closeQuietly(db);
     });
 
