@@ -50,6 +50,10 @@
  */
 
 import type { ContextEvent } from "@earendil-works/pi-coding-agent";
+import {
+	embedTextForProject,
+	getProjectEmbeddingSnapshot,
+} from "@magic-context/core/features/magic-context/memory/embedding";
 import type {
 	UnifiedSearchOptions,
 	UnifiedSearchResult,
@@ -81,9 +85,6 @@ export interface PiAutoSearchOptions {
 	scoreThreshold: number;
 	minPromptChars: number;
 	projectPath: string;
-	memoryEnabled: boolean;
-	embeddingEnabled: boolean;
-	gitCommitsEnabled: boolean;
 	visibleMemoryIds?: Set<number> | null;
 }
 
@@ -285,11 +286,26 @@ export async function runAutoSearchHintForPi(args: {
 
 	let results: UnifiedSearchResult[] | null;
 	try {
+		const snapshot = getProjectEmbeddingSnapshot(options.projectPath);
+		const memoryEnabled = snapshot?.features.memoryEnabled ?? true;
+		const embeddingEnabled = snapshot
+			? snapshot.enabled || snapshot.gitCommitEnabled
+			: true;
+		const gitCommitsEnabled = snapshot?.gitCommitEnabled ?? false;
 		const searchOptions: UnifiedSearchOptions = {
 			limit: 10,
-			memoryEnabled: options.memoryEnabled,
-			embeddingEnabled: options.embeddingEnabled,
-			gitCommitsEnabled: options.gitCommitsEnabled,
+			memoryEnabled,
+			embeddingEnabled,
+			gitCommitsEnabled,
+			embedQuery: async (text, signal) => {
+				const result = await embedTextForProject(
+					options.projectPath,
+					text,
+					signal,
+				);
+				return result?.vector ?? null;
+			},
+			isEmbeddingRuntimeEnabled: () => embeddingEnabled === true,
 			visibleMemoryIds: options.visibleMemoryIds ?? null,
 		};
 		results = await unifiedSearchWithTimeout(

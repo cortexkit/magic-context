@@ -47,12 +47,12 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { initializeEmbedding } from "@magic-context/core/features/magic-context/memory/embedding";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { openDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import { setHarness } from "@magic-context/core/shared/harness";
 import { log } from "@magic-context/core/shared/logger";
 import { loadPiConfig } from "./config";
+import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import { registerMagicContextTools } from "./tools";
 
 const SUBAGENT_DREAMER_ACTIONS_FLAG = "magic-context-dreamer-actions";
@@ -74,7 +74,7 @@ export default function magicContextSubagentExtension(pi: ExtensionAPI): void {
 		default: false,
 	});
 
-	pi.on("session_start", () => {
+	pi.on("session_start", async () => {
 		try {
 			const db = openDatabase();
 			if (!db) {
@@ -87,32 +87,15 @@ export default function magicContextSubagentExtension(pi: ExtensionAPI): void {
 			// flag match the parent's runtime. Subagent doesn't honor
 			// historian/dreamer/sidekick blocks at all (those are
 			// parent-only concerns).
-			const { config: cfg } = loadPiConfig();
-			const memoryEnabled = cfg.memory?.enabled ?? true;
-			const embeddingProvider = cfg.embedding?.provider ?? "local";
-			const embeddingEnabled = embeddingProvider !== "off";
-			const gitCommitsEnabled =
-				cfg.experimental?.git_commit_indexing?.enabled ?? false;
+			const directory = process.cwd();
+			const { config: cfg } = loadPiConfig({ cwd: directory });
+			await ensureProjectRegisteredFromPiDirectory(directory, db);
 			const dreamerActionsEnabled =
 				pi.getFlag(SUBAGENT_DREAMER_ACTIONS_FLAG) === true;
 
-			if (embeddingEnabled && cfg.embedding) {
-				try {
-					initializeEmbedding(cfg.embedding);
-				} catch (err) {
-					log(
-						`[pi-subagent] embedding init failed (non-fatal): ${
-							err instanceof Error ? err.message : String(err)
-						}`,
-					);
-				}
-			}
-
 			registerMagicContextTools(pi, {
 				db,
-				memoryEnabled,
-				embeddingEnabled,
-				gitCommitsEnabled,
+				ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
 				// Subagents inherit the same dreamer-action allowlist
 				// the parent passed via the --magic-context-dreamer-actions
 				// flag. Default false → write/delete/list only.
@@ -121,8 +104,8 @@ export default function magicContextSubagentExtension(pi: ExtensionAPI): void {
 
 			log(
 				`[pi-subagent] registered tools: ctx_search, ctx_memory, ctx_note, ctx_expand` +
-					` (memory=${memoryEnabled}, embedding=${embeddingEnabled},` +
-					` git_commits=${gitCommitsEnabled}, dreamer_actions=${dreamerActionsEnabled})`,
+					` (memory=${cfg.memory.enabled}, embedding=${cfg.embedding.provider !== "off"},` +
+					` git_commits=${cfg.experimental.git_commit_indexing.enabled}, dreamer_actions=${dreamerActionsEnabled})`,
 			);
 		} catch (err) {
 			log(

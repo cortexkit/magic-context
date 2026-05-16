@@ -203,6 +203,7 @@ export interface TransformDeps {
          *  still write memories explicitly via `ctx_memory write`. Issue #44. */
         autoPromote: boolean;
     };
+    ensureProjectRegistered?: (directory: string, db: ContextDatabase) => Promise<void>;
     /**
      * Returns the historian chunk budget. Called at each historian spawn site
      * so the value is always derived from current config — keeping hook,
@@ -254,9 +255,8 @@ export interface TransformDeps {
         enabled: boolean;
         scoreThreshold: number;
         minPromptChars: number;
-        memoryEnabled: boolean;
-        embeddingEnabled: boolean;
-        gitCommitsEnabled: boolean;
+        directory?: string;
+        ensureProjectRegistered?: (directory: string, db: ContextDatabase) => Promise<void>;
     };
     /**
      * Experimental age-tier caveman text compression — rewrites long
@@ -612,6 +612,7 @@ export function createTransform(deps: TransformDeps) {
                 // who disable the feature actually see no memories created.
                 memoryEnabled: deps.memoryConfig?.enabled,
                 autoPromote: deps.memoryConfig?.autoPromote,
+                ensureProjectRegistered: deps.ensureProjectRegistered,
                 // Historian publication invalidates the injection cache AND
                 // changes compartments/facts that render into message[0]. We
                 // signal:
@@ -1074,6 +1075,7 @@ export function createTransform(deps: TransformDeps) {
             // memory.auto_promote.
             memoryEnabled: deps.memoryConfig?.enabled,
             autoPromote: deps.memoryConfig?.autoPromote,
+            ensureProjectRegistered: deps.ensureProjectRegistered,
             // See startRecoveryRun above for the full rationale —
             // historian/recomp publication signals history rebuild +
             // pending materialization, but NOT system-prompt adjuncts.

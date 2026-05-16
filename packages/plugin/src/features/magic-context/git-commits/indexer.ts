@@ -10,10 +10,9 @@
  * sweeps of the same project.
  */
 
-import type { EmbeddingConfig } from "../../../config/schema/magic-context";
 import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
-import { embedBatch, getEmbeddingModelId, isEmbeddingEnabled } from "../memory/embedding";
+import { embedBatchForProject, getProjectEmbeddingSnapshot } from "../memory/embedding";
 import { readGitCommits } from "./git-log-reader";
 import {
     countEmbeddedCommits,
@@ -63,7 +62,6 @@ export async function indexCommitsForProject(
     db: Database,
     projectPath: string,
     directory: string,
-    embeddingConfig: EmbeddingConfig,
     options: IndexCommitsOptions,
 ): Promise<IndexCommitsResult> {
     const result: IndexCommitsResult = {
@@ -114,14 +112,15 @@ export async function indexCommitsForProject(
         result.updated = upsert.updated;
         result.evicted = enforceProjectCap(db, projectPath, options.maxCommits);
 
-        if (options.skipEmbed || !isEmbeddingEnabled()) {
+        const snapshot = getProjectEmbeddingSnapshot(projectPath);
+        if (options.skipEmbed || !snapshot?.gitCommitEnabled) {
             log(
-                `[git-commits] indexed ${projectPath}: scanned=${result.scanned} inserted=${result.inserted} updated=${result.updated} evicted=${result.evicted} embedded=0 (embedding skipped: skipEmbed=${options.skipEmbed === true} embeddingEnabled=${isEmbeddingEnabled()})`,
+                `[git-commits] indexed ${projectPath}: scanned=${result.scanned} inserted=${result.inserted} updated=${result.updated} evicted=${result.evicted} embedded=0 (embedding skipped: skipEmbed=${options.skipEmbed === true} gitCommitEnabled=${snapshot?.gitCommitEnabled === true})`,
             );
             return result;
         }
 
-        result.embedded = await embedUnembeddedCommits(db, projectPath, embeddingConfig);
+        result.embedded = await embedUnembeddedCommits(db, projectPath);
         log(
             `[git-commits] indexed ${projectPath}: scanned=${result.scanned} inserted=${result.inserted} updated=${result.updated} evicted=${result.evicted} embedded=${result.embedded}`,
         );
@@ -136,15 +135,12 @@ export async function indexCommitsForProject(
  * the wall-clock / per-sweep limits. Mirrors the memory embedding sweep
  * behavior so provider switches refresh the commit index as quickly as memories.
  */
-export async function embedUnembeddedCommits(
-    db: Database,
-    projectPath: string,
-    _config: EmbeddingConfig,
-): Promise<number> {
+export async function embedUnembeddedCommits(db: Database, projectPath: string): Promise<number> {
     if (embedInProgress.has(projectPath)) {
         return 0;
     }
-    if (!isEmbeddingEnabled()) {
+    const snapshot = getProjectEmbeddingSnapshot(projectPath);
+    if (!snapshot?.gitCommitEnabled) {
         return 0;
     }
 
@@ -160,15 +156,17 @@ export async function embedUnembeddedCommits(
 
             let embeddedThisBatch = 0;
             try {
-                const embeddings = await embedBatch(rows.map((row) => row.message));
-                const modelId = getEmbeddingModelId();
-                if (modelId === "off") break;
+                const result = await embedBatchForProject(
+                    projectPath,
+                    rows.map((row) => row.message),
+                );
+                if (!result) break;
 
                 db.transaction(() => {
                     for (const [index, row] of rows.entries()) {
-                        const embedding = embeddings[index];
+                        const embedding = result.vectors[index];
                         if (!embedding) continue;
-                        saveCommitEmbedding(db, row.sha, embedding, modelId);
+                        saveCommitEmbedding(db, row.sha, embedding, result.modelId);
                         embeddedThisBatch += 1;
                     }
                 })();

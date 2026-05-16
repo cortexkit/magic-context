@@ -325,6 +325,10 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     private readonly model: string;
     private pipeline: EmbeddingPipeline | null = null;
     private initPromise: Promise<void> | null = null;
+    private inFlight = 0;
+    private disposing = false;
+    private disposePromise: Promise<void> | null = null;
+    private readonly inFlightWaiters: Array<() => void> = [];
 
     constructor(model = DEFAULT_LOCAL_EMBEDDING_MODEL) {
         this.model = model;
@@ -332,6 +336,10 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     }
 
     async initialize(): Promise<boolean> {
+        if (this.disposing) {
+            return false;
+        }
+
         if (this.pipeline) {
             return true;
         }
@@ -343,6 +351,10 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
 
         this.initPromise = (async () => {
             try {
+                if (this.disposing) {
+                    return;
+                }
+
                 // Pre-inject WASM ORT runtime for Electron Desktop. This MUST run
                 // before the first `await import("@huggingface/transformers")` below
                 // — transformers.js reads `Symbol.for("onnxruntime")` at module
@@ -408,11 +420,17 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
                             // Passing `dtype: "fp32"` selects the full-precision ONNX
                             // model; the model file on disk is unchanged (~90MB for
                             // all-MiniLM-L6-v2).
-                            this.pipeline = await withQuietConsole(() =>
+                            const pipeline = await withQuietConsole(() =>
                                 createPipeline("feature-extraction", this.model, {
                                     dtype: "fp32",
                                 }),
                             );
+                            if (this.disposing) {
+                                await pipeline.dispose?.();
+                                this.pipeline = null;
+                            } else {
+                                this.pipeline = pipeline;
+                            }
                             lastError = undefined;
                             break;
                         } catch (error) {
@@ -431,6 +449,8 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
 
                     if (this.pipeline) {
                         log(`[magic-context] embedding model loaded: ${this.model}`);
+                    } else if (this.disposing) {
+                        return;
                     } else {
                         throw lastError ?? new Error("unknown embedding load failure");
                     }
@@ -450,17 +470,39 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
         return this.pipeline !== null;
     }
 
+    private waitForInFlightToDrain(): Promise<void> {
+        if (this.inFlight === 0) {
+            return Promise.resolve();
+        }
+        return new Promise((resolve) => {
+            this.inFlightWaiters.push(resolve);
+        });
+    }
+
+    private finishInFlight(): void {
+        this.inFlight = Math.max(0, this.inFlight - 1);
+        if (this.inFlight !== 0) return;
+        const waiters = this.inFlightWaiters.splice(0);
+        for (const waiter of waiters) {
+            waiter();
+        }
+    }
+
     async embed(text: string, signal?: AbortSignal): Promise<Float32Array | null> {
         // Local inference is fast (typically <100ms) and can't be cancelled
         // mid-compute with transformers.js, so we honor `signal` only as a
         // pre-flight check — callers whose timeout already fired get null
         // without starting fresh inference work.
         if (signal?.aborted) return null;
-        if (!(await this.initialize())) {
-            return null;
-        }
+        if (this.disposing) return null;
+
+        this.inFlight += 1;
 
         try {
+            if (!(await this.initialize())) {
+                return null;
+            }
+
             const pipeline = this.pipeline;
             if (!pipeline) {
                 return null;
@@ -477,6 +519,8 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
         } catch (error) {
             log("[magic-context] embedding failed:", error);
             return null;
+        } finally {
+            this.finishInFlight();
         }
     }
 
@@ -489,11 +533,17 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
             return Array.from({ length: texts.length }, () => null);
         }
 
-        if (!(await this.initialize())) {
+        if (this.disposing) {
             return Array.from({ length: texts.length }, () => null);
         }
 
+        this.inFlight += 1;
+
         try {
+            if (!(await this.initialize())) {
+                return Array.from({ length: texts.length }, () => null);
+            }
+
             const pipeline = this.pipeline;
             if (!pipeline) {
                 return Array.from({ length: texts.length }, () => null);
@@ -510,28 +560,39 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
         } catch (error) {
             log("[magic-context] embedding batch failed:", error);
             return Array.from({ length: texts.length }, () => null);
+        } finally {
+            this.finishInFlight();
         }
     }
 
     async dispose(): Promise<void> {
-        if (this.initPromise) {
-            await this.initPromise;
+        if (this.disposePromise) {
+            return this.disposePromise;
         }
 
-        if (!this.pipeline) {
-            this.pipeline = null;
-            this.initPromise = null;
-            return;
-        }
+        this.disposing = true;
+        this.disposePromise = (async () => {
+            if (this.initPromise) {
+                await this.initPromise;
+            }
 
-        try {
-            await this.pipeline.dispose?.();
-        } catch (error) {
-            log("[magic-context] embedding model dispose failed:", error);
-        } finally {
+            await this.waitForInFlightToDrain();
+
+            const pipelineToDispose = this.pipeline;
             this.pipeline = null;
             this.initPromise = null;
-        }
+            if (!pipelineToDispose) {
+                return;
+            }
+
+            try {
+                await pipelineToDispose.dispose?.();
+            } catch (error) {
+                log("[magic-context] embedding model dispose failed:", error);
+            }
+        })();
+
+        return this.disposePromise;
     }
 
     isLoaded(): boolean {

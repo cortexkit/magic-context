@@ -37,6 +37,29 @@ interface LoadedConfigFile {
     warnings: string[];
 }
 
+export type LoadOutcome =
+    | "ok"
+    | "project-file-parse-error"
+    | "project-file-io-error"
+    | "schema-recovery"
+    | "substitution-failure";
+
+export interface LoadResultDetailed {
+    config: MagicContextPluginConfig & { configWarnings?: string[] };
+    loadOutcome: LoadOutcome;
+    sources: {
+        userConfig: LoadOutcome;
+        projectConfig: LoadOutcome;
+    };
+    substitutionFailures: Array<{ keyPath: string; source: "user" | "project"; message: string }>;
+    recoveredTopLevelKeys: string[];
+}
+
+interface LoadedConfigFileDetailed extends LoadedConfigFile {
+    outcome: LoadOutcome;
+    source: "user" | "project";
+}
+
 function loadConfigFile(configPath: string): LoadedConfigFile | null {
     try {
         if (!existsSync(configPath)) {
@@ -58,6 +81,48 @@ function loadConfigFile(configPath: string): LoadedConfigFile | null {
             error instanceof Error ? error.message : String(error),
         );
         return null;
+    }
+}
+
+function loadConfigFileDetailed(
+    configPath: string,
+    source: "user" | "project",
+): LoadedConfigFileDetailed | null {
+    if (!existsSync(configPath)) {
+        return null;
+    }
+
+    let rawText: string;
+    try {
+        rawText = readFileSync(configPath, "utf-8");
+    } catch (error) {
+        return {
+            config: {},
+            warnings: [
+                `${configPath}: failed to read config: ${error instanceof Error ? error.message : String(error)}`,
+            ],
+            outcome: "project-file-io-error",
+            source,
+        };
+    }
+
+    try {
+        const substituted = substituteConfigVariables({ text: rawText, configPath });
+        return {
+            config: parseJsonc<Record<string, unknown>>(substituted.text),
+            warnings: substituted.warnings.map((w) => `${configPath}: ${w}`),
+            outcome: substituted.warnings.length > 0 ? "substitution-failure" : "ok",
+            source,
+        };
+    } catch (error) {
+        return {
+            config: {},
+            warnings: [
+                `${configPath}: failed to load config: ${error instanceof Error ? error.message : String(error)}`,
+            ],
+            outcome: "project-file-parse-error",
+            source,
+        };
     }
 }
 
@@ -247,6 +312,7 @@ function migrateLegacyExperimental(
 
 function parsePluginConfig(
     rawConfig: Record<string, unknown>,
+    recoveredTopLevelKeys: string[] = [],
 ): MagicContextPluginConfig & { configWarnings?: string[] } {
     // Pre-Zod shim: reshape legacy experimental.* graduated keys so the user's
     // opt-in/out state survives upgrades even when they never run `doctor`.
@@ -288,6 +354,7 @@ function parsePluginConfig(
 
     const patched: Record<string, unknown> = { ...rawConfig };
     for (const key of errorPaths) {
+        recoveredTopLevelKeys.push(key);
         const isAgentConfig = key === "historian" || key === "dreamer" || key === "sidekick";
         if (isAgentConfig) {
             // Drop agent configs entirely on error — don't default them
@@ -409,4 +476,123 @@ export function loadPluginConfig(
     }
 
     return config;
+}
+
+function collectEmptyStringPaths(value: unknown, prefix = ""): string[] {
+    if (typeof value === "string") {
+        return value === "" && prefix ? [prefix] : [];
+    }
+    if (Array.isArray(value) || value === null || typeof value !== "object") {
+        return [];
+    }
+
+    const paths: string[] = [];
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+        const nextPrefix = prefix ? `${prefix}.${key}` : key;
+        paths.push(...collectEmptyStringPaths(child, nextPrefix));
+    }
+    return paths;
+}
+
+function bindSubstitutionFailures(
+    loaded: LoadedConfigFileDetailed | null,
+): Array<{ keyPath: string; source: "user" | "project"; message: string }> {
+    if (!loaded || loaded.warnings.length === 0 || loaded.outcome !== "substitution-failure") {
+        return [];
+    }
+
+    const emptyPaths = collectEmptyStringPaths(loaded.config);
+    return loaded.warnings.map((message) => {
+        const matchedPath = emptyPaths.find((path) => {
+            const tail = path.split(".").at(-1) ?? path;
+            return message.includes(path) || message.toLowerCase().includes(tail.toLowerCase());
+        });
+        return { keyPath: matchedPath ?? "<unknown>", source: loaded.source, message };
+    });
+}
+
+function combinedOutcome(args: {
+    sources: LoadResultDetailed["sources"];
+    substitutionFailures: LoadResultDetailed["substitutionFailures"];
+    recoveredTopLevelKeys: string[];
+}): LoadOutcome {
+    const sourceOutcomes = Object.values(args.sources);
+    if (sourceOutcomes.includes("project-file-parse-error")) return "project-file-parse-error";
+    if (sourceOutcomes.includes("project-file-io-error")) return "project-file-io-error";
+    if (args.recoveredTopLevelKeys.length > 0) return "schema-recovery";
+    if (args.substitutionFailures.length > 0) return "substitution-failure";
+    return "ok";
+}
+
+export function loadPluginConfigDetailed(directory: string): LoadResultDetailed {
+    const userDetected = detectConfigFile(getUserConfigBasePath());
+    const rootDetected = detectConfigFile(join(directory, CONFIG_FILE_BASENAME));
+    const dotOpenCodeDetected = detectConfigFile(getProjectConfigBasePath(directory));
+    const projectDetected = rootDetected.format !== "none" ? rootDetected : dotOpenCodeDetected;
+
+    const userLoaded =
+        userDetected.format === "none" ? null : loadConfigFileDetailed(userDetected.path, "user");
+    const projectLoaded =
+        projectDetected.format === "none"
+            ? null
+            : loadConfigFileDetailed(projectDetected.path, "project");
+
+    const allWarnings: string[] = [];
+    let mergedRaw: Record<string, unknown> = {};
+
+    if (userLoaded) {
+        allWarnings.push(...userLoaded.warnings.map((w) => `[user config] ${w}`));
+        mergedRaw = deepMergeRawConfig(mergedRaw, userLoaded.config);
+    }
+
+    if (projectLoaded) {
+        allWarnings.push(...projectLoaded.warnings.map((w) => `[project config] ${w}`));
+        const projectRaw = { ...projectLoaded.config };
+        const strippedUserOnlyFields = getProjectUserOnlyFields(projectRaw);
+        if (strippedUserOnlyFields.length > 0) {
+            for (const key of strippedUserOnlyFields) {
+                delete projectRaw[key];
+            }
+            allWarnings.push(
+                `[project config] Ignoring ${strippedUserOnlyFields.join(
+                    ", ",
+                )} from project config (security: these settings only honor user-level config)`,
+            );
+        }
+        mergedRaw = deepMergeRawConfig(mergedRaw, projectRaw);
+    }
+
+    const recoveredTopLevelKeys: string[] = [];
+    const config = parsePluginConfig(mergedRaw, recoveredTopLevelKeys);
+    if (config.configWarnings?.length) {
+        allWarnings.push(
+            ...config.configWarnings.map((w) => {
+                if (userLoaded && projectLoaded) return `[config] ${w}`;
+                if (userLoaded) return `[user config] ${w}`;
+                return `[project config] ${w}`;
+            }),
+        );
+    }
+    if (allWarnings.length > 0) {
+        config.configWarnings = allWarnings;
+    } else if ("configWarnings" in config) {
+        config.configWarnings = undefined;
+    }
+
+    const substitutionFailures = [
+        ...bindSubstitutionFailures(userLoaded),
+        ...bindSubstitutionFailures(projectLoaded),
+    ];
+    const sources = {
+        userConfig: userLoaded?.outcome ?? ("ok" as LoadOutcome),
+        projectConfig: projectLoaded?.outcome ?? ("ok" as LoadOutcome),
+    };
+
+    return {
+        config,
+        loadOutcome: combinedOutcome({ sources, substitutionFailures, recoveredTopLevelKeys }),
+        sources,
+        substitutionFailures,
+        recoveredTopLevelKeys,
+    };
 }

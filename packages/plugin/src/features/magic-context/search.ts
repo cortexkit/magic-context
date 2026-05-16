@@ -180,6 +180,7 @@ async function getSemanticScores(args: {
     const cachedEmbeddings = getProjectEmbeddings(args.db, args.projectPath);
     const embeddings = await ensureMemoryEmbeddings({
         db: args.db,
+        projectIdentity: args.projectPath,
         memories: args.memories,
         existingEmbeddings: cachedEmbeddings,
     });

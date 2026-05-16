@@ -6,54 +6,57 @@
  * the active embedding provider, so this works for local MiniLM, OpenAI-
  * compatible (LMStudio/Ollama), or any other configured endpoint.
  *
- * Run: bun scripts/backfill-embeddings.ts [--project <path>]
- *   --project  Only backfill memories for this project_path (default: all).
+ * Run: bun scripts/backfill-embeddings.ts [--directory <cwd>] [--project <project_path>]
+ *   --directory  Project directory used to resolve config and identity.
+ *   --project    Only backfill memories for this project_path (must match --directory identity unless --force-project-path).
  */
 import { Database } from "../src/shared/sqlite";
-import { readFileSync } from "node:fs";
-import { parseJsonc } from "../src/shared/jsonc-parser";
-import { MagicContextConfigSchema } from "../src/config/schema/magic-context";
+import { loadPluginConfig } from "../src/config";
 import {
-    embedBatch,
-    ensureEmbeddingModel,
-    getEmbeddingModelId,
-    initializeEmbedding,
+    embedBatchForProject,
+    getProjectEmbeddingSnapshot,
+    registerProjectEmbeddingAndMaybeWipe,
 } from "../src/features/magic-context/memory/embedding";
+import { resolveProjectIdentity } from "../src/features/magic-context/memory/project-identity";
 import { saveEmbedding } from "../src/features/magic-context/memory/storage-memory-embeddings";
 
 const DB_PATH = `${process.env.HOME}/.local/share/opencode/storage/plugin/magic-context/context.db`;
-const USER_CONFIG_PATH = `${process.env.HOME}/.config/opencode/magic-context.jsonc`;
-
-function loadEmbeddingConfigFromUserFile() {
-    try {
-        const raw = readFileSync(USER_CONFIG_PATH, "utf8");
-        const parsed = parseJsonc(raw);
-        const config = MagicContextConfigSchema.parse(parsed);
-        if (config.embedding) {
-            console.log(
-                `Using embedding config from ${USER_CONFIG_PATH}: provider=${config.embedding.provider}`,
-            );
-            return config.embedding;
-        }
-    } catch (err) {
-        console.warn(`Could not read ${USER_CONFIG_PATH}: ${String(err)}`);
-    }
-    console.log("Falling back to local MiniLM default.");
-    return { provider: "local" as const, model: "Xenova/all-MiniLM-L6-v2" };
+function getArg(name: string): string | null {
+    const index = process.argv.indexOf(name);
+    return index >= 0 ? (process.argv[index + 1] ?? null) : null;
 }
 
 async function main() {
-    const projectFilter = process.argv.includes("--project")
-        ? process.argv[process.argv.indexOf("--project") + 1]
-        : null;
+    const directory = getArg("--directory") ?? process.cwd();
+    const projectFilter = getArg("--project");
+    const forceProjectPath = process.argv.includes("--force-project-path");
+    const projectIdentity = resolveProjectIdentity(directory);
+
+    if (projectFilter && projectFilter !== projectIdentity && !forceProjectPath) {
+        console.error(
+            `--project ${projectFilter} does not match identity for --directory ${directory}: ${projectIdentity}. ` +
+                "Pass --force-project-path to override.",
+        );
+        process.exit(1);
+    }
 
     const db = new Database(DB_PATH);
     db.exec("PRAGMA journal_mode=WAL");
-    const embeddingConfig = loadEmbeddingConfigFromUserFile();
-    initializeEmbedding(embeddingConfig);
+    const config = loadPluginConfig(directory);
+    registerProjectEmbeddingAndMaybeWipe(
+        db,
+        projectIdentity,
+        config.embedding,
+        {
+            memoryEnabled: config.memory.enabled,
+            gitCommitEnabled: config.experimental.git_commit_indexing.enabled,
+        },
+        directory,
+    );
 
     // Find memories without embeddings (optionally filtered to one project)
-    const query = projectFilter
+    const effectiveProject = projectFilter ?? projectIdentity;
+    const query = effectiveProject
         ? `SELECT m.id, m.content, m.category, m.project_path
            FROM memories m
            LEFT JOIN memory_embeddings me ON me.memory_id = m.id
@@ -64,11 +67,11 @@ async function main() {
            WHERE m.status != 'deleted' AND me.memory_id IS NULL`;
     const stmt = db.prepare(query);
     const allMemories = (
-        projectFilter ? stmt.all(projectFilter) : stmt.all()
+        effectiveProject ? stmt.all(effectiveProject) : stmt.all()
     ) as Array<{ id: number; content: string; category: string; project_path: string }>;
 
     console.log(
-        `Found ${allMemories.length} memories without embeddings${projectFilter ? ` in project ${projectFilter}` : ""}`,
+        `Found ${allMemories.length} memories without embeddings${effectiveProject ? ` in project ${effectiveProject}` : ""}`,
     );
 
     if (allMemories.length === 0) {
@@ -77,16 +80,12 @@ async function main() {
         return;
     }
 
-    // Initialize embedding model
-    console.log("Loading embedding model...");
-    const ready = await ensureEmbeddingModel();
-    if (!ready) {
-        console.error("Failed to load embedding model");
+    const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
+    if (!snapshot?.enabled) {
+        console.error("Embedding is disabled for this project.");
         db.close();
         process.exit(1);
     }
-    console.log("Model loaded.");
-    const modelId = getEmbeddingModelId();
 
     // Batch embed for efficiency
     const batchSize = 32;
@@ -98,13 +97,17 @@ async function main() {
         const texts = batch.map((m) => m.content);
 
         try {
-            const embeddings = await embedBatch(texts);
+            const result = await embedBatchForProject(projectIdentity, texts);
+            if (!result) {
+                failed += batch.length;
+                continue;
+            }
 
             for (let j = 0; j < batch.length; j++) {
                 const memory = batch[j]!;
-                const embedding = embeddings[j];
+                const embedding = result.vectors[j];
                 if (embedding) {
-                    saveEmbedding(db, memory.id, embedding, modelId);
+                    saveEmbedding(db, memory.id, embedding, result.modelId);
                     embedded++;
                 } else {
                     console.warn(`  Failed to embed memory ${memory.id}: null result`);

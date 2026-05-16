@@ -54,6 +54,7 @@ interface RunCompartmentPhaseArgs {
     messages: MessageLike[];
     pendingCompartmentInjection: PreparedCompartmentInjection | null;
     fallbackModelId?: string;
+    ensureProjectRegistered?: (directory: string, db: ContextDatabase) => Promise<void>;
     projectPath?: string;
     injectionBudgetTokens?: number;
     getNotificationParams?: () => import("./send-session-notification").NotificationParams;
@@ -191,6 +192,7 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
                 fallbackModels: args.fallbackModels,
                 directory: args.compartmentDirectory,
                 fallbackModelId: args.fallbackModelId,
+                ensureProjectRegistered: args.ensureProjectRegistered,
                 getNotificationParams: args.getNotificationParams,
                 experimentalCompactionMarkers: args.experimentalCompactionMarkers,
                 experimentalUserMemories: args.experimentalUserMemories,
@@ -234,6 +236,7 @@ export async function runCompartmentPhase(args: RunCompartmentPhaseArgs): Promis
                 fallbackModels: args.fallbackModels,
                 directory: args.compartmentDirectory,
                 fallbackModelId: args.fallbackModelId,
+                ensureProjectRegistered: args.ensureProjectRegistered,
                 getNotificationParams: args.getNotificationParams,
                 experimentalCompactionMarkers: args.experimentalCompactionMarkers,
                 experimentalUserMemories: args.experimentalUserMemories,

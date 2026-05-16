@@ -1,15 +1,18 @@
 import { DREAMER_AGENT } from "../agents/dreamer";
-import type { DreamerConfig, EmbeddingConfig } from "../config/schema/magic-context";
+import type { DreamerConfig } from "../config/schema/magic-context";
 import { checkScheduleAndEnqueue, processDreamQueue } from "../features/magic-context/dreamer";
 import {
     embedUnembeddedCommits,
     indexCommitsForProject,
 } from "../features/magic-context/git-commits";
-import { embedAllUnembeddedMemories } from "../features/magic-context/memory/embedding";
-import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
+import {
+    embedUnembeddedMemoriesForProject,
+    getProjectEmbeddingSnapshot,
+} from "../features/magic-context/memory/embedding";
 import { openDatabase } from "../features/magic-context/storage";
 import { log } from "../shared/logger";
 import { resolveFallbackChain } from "../shared/resolve-fallbacks";
+import type { Database } from "../shared/sqlite";
 import type { PluginContext } from "./types";
 
 /** Check interval for dream schedule (15 minutes). */
@@ -23,10 +26,9 @@ const DREAM_TIMER_INTERVAL_MS = 15 * 60 * 1000;
  */
 interface ProjectRegistration {
     directory: string;
+    projectIdentity: string;
     client: PluginContext["client"];
     dreamerConfig?: DreamerConfig;
-    embeddingConfig: EmbeddingConfig;
-    memoryEnabled: boolean;
     experimentalUserMemories?: { enabled: boolean; promotionThreshold: number };
     experimentalPinKeyFiles?: {
         enabled: boolean;
@@ -38,6 +40,7 @@ interface ProjectRegistration {
         since_days: number;
         max_commits: number;
     };
+    ensureRegistered: (directory: string, db: Database) => Promise<void>;
 }
 
 /** Singleton timer state. */
@@ -57,12 +60,17 @@ const registeredProjects = new Map<string, ProjectRegistration>();
  * Returns a cleanup that removes this project's registration. The timer
  * itself stops only when the last project unregisters.
  */
-export function startDreamScheduleTimer(args: ProjectRegistration): (() => void) | undefined {
+export async function startDreamScheduleTimer(
+    args: ProjectRegistration,
+): Promise<(() => void) | undefined> {
+    const db = openDatabase();
+    await args.ensureRegistered(args.directory, db);
+    const snapshot = getProjectEmbeddingSnapshot(args.projectIdentity);
     const dreamingEnabled = Boolean(
         args.dreamerConfig?.enabled && args.dreamerConfig.schedule?.trim(),
     );
-    const embeddingSweepEnabled = args.memoryEnabled && args.embeddingConfig.provider !== "off";
-    const commitIndexingEnabled = args.gitCommitIndexing?.enabled === true;
+    const embeddingSweepEnabled = snapshot?.enabled ?? false;
+    const commitIndexingEnabled = snapshot?.gitCommitEnabled ?? false;
 
     if (!dreamingEnabled && !embeddingSweepEnabled && !commitIndexingEnabled) {
         return;
@@ -120,42 +128,36 @@ export function startDreamScheduleTimer(args: ProjectRegistration): (() => void)
  */
 function runTick(origin: "startup" | "interval"): void {
     log(`[dreamer] timer tick (${origin}) — projects=${registeredProjects.size}`);
-    try {
-        // Memory embedding sweep is global (iterates all projects in DB),
-        // so we only need to call it once per tick — not per registered
-        // project.
-        const anyEmbeddingEnabled = Array.from(registeredProjects.values()).some(
-            (r) => r.memoryEnabled && r.embeddingConfig.provider !== "off",
-        );
-        if (anyEmbeddingEnabled) {
-            // Use the first registered project's embeddingConfig — they
-            // should all match (it's a top-level user config).
-            const first = registeredProjects.values().next().value;
-            if (first) {
-                void embedAllUnembeddedMemories(openDatabase(), first.embeddingConfig)
-                    .then((embeddedCount) => {
-                        if (embeddedCount > 0) {
-                            log(
-                                `[magic-context] proactively embedded ${embeddedCount} ${embeddedCount === 1 ? "memory" : "memories"} across all projects`,
-                            );
-                        }
-                    })
-                    .catch((error: unknown) => {
-                        log("[magic-context] periodic memory embedding sweep failed:", error);
-                    });
-            }
-        }
+    void (async () => {
+        try {
+            const db = openDatabase();
+            // Per-project work — git commit indexing, dream schedule check,
+            // dream queue processing. We iterate all registered projects so
+            // Desktop's "open all projects at once" workflow indexes every one,
+            // not just whichever project happened to register the timer first.
+            for (const reg of registeredProjects.values()) {
+                await reg.ensureRegistered(reg.directory, db);
+                const memorySnapshot = getProjectEmbeddingSnapshot(reg.projectIdentity);
+                if (memorySnapshot?.enabled) {
+                    const embeddedCount = await embedUnembeddedMemoriesForProject(
+                        db,
+                        reg.projectIdentity,
+                    );
+                    if (embeddedCount > 0) {
+                        log(
+                            `[magic-context] proactively embedded ${embeddedCount} ${embeddedCount === 1 ? "memory" : "memories"} for project ${reg.projectIdentity}`,
+                        );
+                    }
+                }
 
-        // Per-project work — git commit indexing, dream schedule check,
-        // dream queue processing. We iterate all registered projects so
-        // Desktop's "open all projects at once" workflow indexes every one,
-        // not just whichever project happened to register the timer first.
-        for (const reg of registeredProjects.values()) {
-            void sweepProject(reg, origin);
+                await reg.ensureRegistered(reg.directory, db);
+                const gitSnapshot = getProjectEmbeddingSnapshot(reg.projectIdentity);
+                await sweepProject(reg, origin, db, gitSnapshot?.gitCommitEnabled === true);
+            }
+        } catch (error) {
+            log("[magic-context] timer-triggered maintenance check failed:", error);
         }
-    } catch (error) {
-        log("[magic-context] timer-triggered maintenance check failed:", error);
-    }
+    })();
 }
 
 /**
@@ -169,17 +171,18 @@ function runTick(origin: "startup" | "interval"): void {
 async function sweepProject(
     reg: ProjectRegistration,
     origin: "startup" | "interval",
+    db: Database = openDatabase(),
+    gitCommitEnabled = getProjectEmbeddingSnapshot(reg.projectIdentity)?.gitCommitEnabled === true,
 ): Promise<void> {
     const dreamingEnabled = Boolean(
         reg.dreamerConfig?.enabled && reg.dreamerConfig.schedule?.trim(),
     );
-    const commitIndexingEnabled = reg.gitCommitIndexing?.enabled === true;
-
-    if (commitIndexingEnabled && reg.gitCommitIndexing) {
+    if (gitCommitEnabled && reg.gitCommitIndexing) {
         await sweepGitCommits({
             directory: reg.directory,
             gitCommitIndexing: reg.gitCommitIndexing,
-            embeddingConfig: reg.embeddingConfig,
+            projectIdentity: reg.projectIdentity,
+            db,
         });
     }
 
@@ -188,7 +191,6 @@ async function sweepProject(
     }
 
     try {
-        const db = openDatabase();
         log(
             `[dreamer] timer tick (${origin}) ${reg.directory} — checking schedule window "${reg.dreamerConfig.schedule}"`,
         );
@@ -198,8 +200,7 @@ async function sweepProject(
         // identity to both `checkScheduleAndEnqueue` (so we don't enqueue work
         // for projects this host doesn't own) and `processDreamQueue` (so we
         // only drain entries that belong to us).
-        const registrationIdentity = resolveProjectIdentity(reg.directory);
-        checkScheduleAndEnqueue(db, reg.dreamerConfig.schedule, registrationIdentity);
+        checkScheduleAndEnqueue(db, reg.dreamerConfig.schedule, reg.projectIdentity);
 
         await processDreamQueue({
             db,
@@ -209,7 +210,7 @@ async function sweepProject(
             maxRuntimeMinutes: reg.dreamerConfig.max_runtime_minutes,
             experimentalUserMemories: reg.experimentalUserMemories,
             experimentalPinKeyFiles: reg.experimentalPinKeyFiles,
-            projectIdentity: registrationIdentity,
+            projectIdentity: reg.projectIdentity,
             fallbackModels: resolveFallbackChain(DREAMER_AGENT, reg.dreamerConfig.fallback_models),
         });
     } catch (error) {
@@ -226,29 +227,28 @@ async function sweepProject(
  */
 async function sweepGitCommits(args: {
     directory: string;
+    projectIdentity: string;
+    db: Database;
     gitCommitIndexing: { enabled: boolean; since_days: number; max_commits: number };
-    embeddingConfig: EmbeddingConfig;
 }): Promise<void> {
-    const { directory, gitCommitIndexing, embeddingConfig } = args;
+    const { directory, projectIdentity, db, gitCommitIndexing } = args;
     const startedAt = Date.now();
     log(
-        `[git-commits] sweep starting for ${directory} (sinceDays=${gitCommitIndexing.since_days} maxCommits=${gitCommitIndexing.max_commits} embedding=${embeddingConfig.provider})`,
+        `[git-commits] sweep starting for ${directory} (sinceDays=${gitCommitIndexing.since_days} maxCommits=${gitCommitIndexing.max_commits})`,
     );
     try {
-        const db = openDatabase();
-        const projectPath = resolveProjectIdentity(directory);
-        const result = await indexCommitsForProject(db, projectPath, directory, embeddingConfig, {
+        const result = await indexCommitsForProject(db, projectIdentity, directory, {
             sinceDays: gitCommitIndexing.since_days,
             maxCommits: gitCommitIndexing.max_commits,
         });
         // Drain any remaining embedding backlog (indexer caps per run).
         let drainedEmbeddings = 0;
-        if (embeddingConfig.provider !== "off" && result.embedded > 0) {
-            drainedEmbeddings = await embedUnembeddedCommits(db, projectPath, embeddingConfig);
+        if (result.embedded > 0) {
+            drainedEmbeddings = await embedUnembeddedCommits(db, projectIdentity);
         }
         const elapsedMs = Date.now() - startedAt;
         log(
-            `[git-commits] sweep finished for ${projectPath} in ${elapsedMs}ms: scanned=${result.scanned} inserted=${result.inserted} updated=${result.updated} evicted=${result.evicted} embedded=${result.embedded} drained=${drainedEmbeddings}`,
+            `[git-commits] sweep finished for ${projectIdentity} in ${elapsedMs}ms: scanned=${result.scanned} inserted=${result.inserted} updated=${result.updated} evicted=${result.evicted} embedded=${result.embedded} drained=${drainedEmbeddings}`,
         );
     } catch (error) {
         const elapsedMs = Date.now() - startedAt;

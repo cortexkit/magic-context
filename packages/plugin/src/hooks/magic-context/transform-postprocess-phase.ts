@@ -133,9 +133,8 @@ interface RunPostTransformPhaseArgs {
         enabled: boolean;
         scoreThreshold: number;
         minPromptChars: number;
-        memoryEnabled: boolean;
-        embeddingEnabled: boolean;
-        gitCommitsEnabled: boolean;
+        directory?: string;
+        ensureProjectRegistered?: (directory: string, db: ContextDatabase) => Promise<void>;
     };
     /**
      * Age-tier caveman compression (experimental). Only honored when
@@ -990,10 +989,9 @@ export async function runPostTransformPhase(
                     enabled: true,
                     scoreThreshold: args.autoSearch.scoreThreshold,
                     minPromptChars: args.autoSearch.minPromptChars,
+                    directory: args.autoSearch.directory ?? args.sessionDirectory,
                     projectPath: args.projectPath,
-                    memoryEnabled: args.autoSearch.memoryEnabled,
-                    embeddingEnabled: args.autoSearch.embeddingEnabled,
-                    gitCommitsEnabled: args.autoSearch.gitCommitsEnabled,
+                    ensureProjectRegistered: args.autoSearch.ensureProjectRegistered,
                     visibleMemoryIds,
                 },
             });

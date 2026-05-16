@@ -16,7 +16,10 @@ import {
     updateMemoryContent,
     updateMemorySeenCount,
 } from "../../features/magic-context/memory";
-import { embedText, getEmbeddingModelId } from "../../features/magic-context/memory/embedding";
+import {
+    embedTextForProject,
+    getProjectEmbeddingSnapshot,
+} from "../../features/magic-context/memory/embedding";
 import { computeNormalizedHash } from "../../features/magic-context/memory/normalize-hash";
 import { sessionLog } from "../../shared/logger";
 import { CTX_MEMORY_DESCRIPTION, CTX_MEMORY_TOOL_NAME, DEFAULT_SEARCH_LIMIT } from "./constants";
@@ -129,16 +132,18 @@ function filterByCategory(memories: Memory[], category?: string): Memory[] {
 function queueMemoryEmbedding(args: {
     deps: CtxMemoryToolDeps;
     sessionId: string;
+    projectPath: string;
     memoryId: number;
     content: string;
 }): void {
-    if (!args.deps.embeddingEnabled) {
+    const snapshot = getProjectEmbeddingSnapshot(args.projectPath);
+    if (!snapshot?.enabled) {
         return;
     }
 
     void (async () => {
-        const embedding = await embedText(args.content);
-        if (!embedding) {
+        const result = await embedTextForProject(args.projectPath, args.content);
+        if (!result) {
             sessionLog(
                 args.sessionId,
                 `memory embedding skipped for memory ${args.memoryId}: provider unavailable or embedding generation failed.`,
@@ -146,16 +151,7 @@ function queueMemoryEmbedding(args: {
             return;
         }
 
-        const modelId = getEmbeddingModelId();
-        if (modelId === "off") {
-            sessionLog(
-                args.sessionId,
-                `memory embedding skipped for memory ${args.memoryId}: embedding provider is off.`,
-            );
-            return;
-        }
-
-        saveEmbedding(args.deps.db, args.memoryId, embedding, modelId);
+        saveEmbedding(args.deps.db, args.memoryId, result.vector, result.modelId);
         sessionLog(args.sessionId, `proactively embedded memory ${args.memoryId}.`);
     })().catch((error: unknown) => {
         sessionLog(args.sessionId, `memory embedding failed for memory ${args.memoryId}:`, error);
@@ -225,10 +221,6 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 .describe("Archive reason (optional for archive)"),
         },
         async execute(args: CtxMemoryArgs, toolContext) {
-            if (!deps.memoryEnabled) {
-                return getDisabledMessage();
-            }
-
             if (toolContext.agent !== DREAMER_AGENT && !allowedActions.includes(args.action)) {
                 return `Error: Action '${args.action}' is not allowed in this context.`;
             }
@@ -238,6 +230,15 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
             // can differ from the session's working directory when the user
             // runs `opencode -s <id>` from outside the project.
             const projectPath = deps.resolveProjectPath(toolContext.directory);
+            await deps.ensureProjectRegistered?.(toolContext.directory, deps.db);
+            const embeddingSnapshot = getProjectEmbeddingSnapshot(projectPath);
+            if (
+                embeddingSnapshot
+                    ? !embeddingSnapshot.features.memoryEnabled
+                    : deps.memoryEnabled === false
+            ) {
+                return getDisabledMessage();
+            }
 
             if (args.action === "write") {
                 const content = args.content?.trim();
@@ -278,6 +279,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 queueMemoryEmbedding({
                     deps,
                     sessionId: toolContext.sessionID,
+                    projectPath,
                     memoryId: memory.id,
                     content,
                 });
@@ -342,6 +344,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 queueMemoryEmbedding({
                     deps,
                     sessionId: toolContext.sessionID,
+                    projectPath,
                     memoryId: memory.id,
                     content,
                 });
@@ -470,6 +473,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 queueMemoryEmbedding({
                     deps,
                     sessionId: toolContext.sessionID,
+                    projectPath,
                     memoryId: canonicalMemory.id,
                     content,
                 });

@@ -28,7 +28,6 @@ import type {
 	MagicContextConfig,
 	SidekickConfig,
 } from "@magic-context/core/config/schema/magic-context";
-import { initializeEmbedding } from "@magic-context/core/features/magic-context/memory/embedding";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import { scheduleIncrementalIndex } from "@magic-context/core/features/magic-context/message-index-async";
 import { detectOverflow } from "@magic-context/core/features/magic-context/overflow-detection";
@@ -90,6 +89,7 @@ import {
 	registerPiDreamerProject,
 	unregisterPiDreamerProject,
 } from "./dreamer";
+import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import { computePiPressure, extractAssistantUsage } from "./pi-pressure";
 import { readPiSessionMessages } from "./read-session-pi";
 import { registerStatusLine, updateStatusLine } from "./status-line";
@@ -417,12 +417,6 @@ function resolveAutoSearchFromConfig(
 		enabled,
 		scoreThreshold: auto?.score_threshold ?? 0.55,
 		minPromptChars: auto?.min_prompt_chars ?? 20,
-		// Memory + embedding gates flow from the top-level config keys; the
-		// auto-search runner uses these to decide which sources to query.
-		memoryEnabled: config.memory.enabled,
-		embeddingEnabled: config.embedding.provider !== "off",
-		gitCommitsEnabled:
-			config.experimental?.git_commit_indexing?.enabled ?? false,
 	};
 }
 
@@ -495,64 +489,8 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		return;
 	}
 
-	// Initialize the embedding runtime BEFORE registering tools. Without this,
-	// `embedText()` returns null for every query, so semantic search produces
-	// zero candidates and only FTS runs.
-	//
-	// CROSS-HARNESS COHERENCE: The shared cortexkit/magic-context DB stores
-	// memory embeddings tagged with model_id. Pi must use the same embedding
-	// model as OpenCode for cosine similarity to work against existing
-	// vectors — otherwise every search returns 0 hits. The schema's
-	// `embedding` block is shared between harnesses, so users only need to
-	// set it once (typically in the user-level magic-context.jsonc).
-	initializeEmbedding(config.embedding);
-	info(
-		`initialized embedding runtime: provider=${config.embedding.provider}` +
-			(config.embedding.provider !== "off"
-				? ` model=${(config.embedding as { model?: string }).model ?? "(default)"}`
-				: ""),
-	);
-
-	// Council finding #5: warn loudly if Pi's configured embedding model
-	// disagrees with the model that the project's stored embedding vectors
-	// were produced under. Cross-harness search relies on cosine similarity
-	// between vectors from the SAME model — a mismatch silently returns
-	// zero hits because the embedding spaces are unrelated.
-	//
-	// We only warn (don't crash) because:
-	//   - The user may be intentionally rotating embedding models.
-	//   - Existing vectors will be re-embedded as part of the periodic
-	//     dreamer sweep + on-demand re-embedding when memories update.
-	//   - Hard-failing on mismatch would prevent the upgrade path from
-	//     ever completing.
-	//
-	// The warning surfaces in `magic-context.log` so users debugging
-	// "why is search returning nothing?" see a clear pointer.
-	if (config.embedding.provider !== "off") {
-		try {
-			const { getStoredModelId } = await import(
-				"@magic-context/core/features/magic-context/memory/storage-memory-embeddings"
-			);
-			const { getEmbeddingModelId } = await import(
-				"@magic-context/core/features/magic-context/memory/embedding"
-			);
-			const stored = getStoredModelId(db, projectIdentity);
-			const current = getEmbeddingModelId();
-			if (stored && current && stored !== current) {
-				warn(
-					`embedding model mismatch detected for project ${projectIdentity}: ` +
-						`stored vectors use "${stored}" but Pi is configured with "${current}". ` +
-						"Cross-harness search will return zero results until vectors are re-embedded. " +
-						"Either restore the previous embedding model in magic-context.jsonc, or wait " +
-						"for the dreamer's periodic embedding sweep to backfill new vectors.",
-				);
-			}
-		} catch (err) {
-			// Embedding-model lookup is best-effort — if it throws (e.g. DB
-			// schema race during first boot), don't block plugin load.
-			warn("embedding model coherence check failed (non-fatal):", err);
-		}
-	}
+	await ensureProjectRegisteredFromPiDirectory(projectDir, db);
+	info(`registered embedding config for project ${projectIdentity}`);
 
 	// Register the agent-facing tools. Reuses the same business logic
 	// the OpenCode plugin uses (insertMemory, unifiedSearch, addNote, …)
@@ -561,10 +499,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	// directory.
 	registerMagicContextTools(pi, {
 		db,
-		memoryEnabled: config.memory.enabled,
-		embeddingEnabled: config.embedding.provider !== "off",
-		gitCommitsEnabled:
-			config.experimental?.git_commit_indexing?.enabled ?? false,
+		ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
 		// Main extension entry never gets the dreamer-only ctx_memory
 		// surface — those actions are reserved for dreamer subagents
 		// loaded via subagent-entry.ts with the
@@ -741,6 +676,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			// useless on Pi.
 			embeddingConfig: config.embedding,
 			memoryEnabled: config.memory.enabled,
+			gitCommitIndexing: config.experimental.git_commit_indexing,
 		});
 		info(
 			dreamerConfig.enabled

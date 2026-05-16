@@ -1,7 +1,7 @@
 import { sessionLog } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
 import { CATEGORY_DEFAULT_TTL, PROMOTABLE_CATEGORIES } from "./constants";
-import { embedText, getEmbeddingModelId } from "./embedding";
+import { embedTextForProject } from "./embedding";
 import { computeNormalizedHash } from "./normalize-hash";
 import { getMemoryByHash, insertMemory, updateMemorySeenCount } from "./storage-memory";
 import { saveEmbedding } from "./storage-memory-embeddings";
@@ -58,7 +58,7 @@ export function promoteSessionFactsToMemory(
             const memory = insertMemory(db, memoryInput);
             // Intentional: fire-and-forget embedding — promotion runs infrequently (after historian passes)
             // and the number of new facts per pass is small. Batching adds complexity for negligible benefit.
-            void embedAndStoreMemory(db, sessionId, memory.id, memory.content);
+            void embedAndStoreMemory(db, sessionId, projectPath, memory.id, memory.content);
         } catch (error) {
             sessionLog(
                 sessionId,
@@ -72,13 +72,14 @@ export function promoteSessionFactsToMemory(
 async function embedAndStoreMemory(
     db: Database,
     sessionId: string,
+    projectPath: string,
     memoryId: number,
     content: string,
 ): Promise<void> {
     try {
-        const embedding = await embedText(content);
-        if (embedding) {
-            saveEmbedding(db, memoryId, embedding, getEmbeddingModelId());
+        const result = await embedTextForProject(projectPath, content);
+        if (result) {
+            saveEmbedding(db, memoryId, result.vector, result.modelId);
         }
     } catch (error) {
         sessionLog(sessionId, `memory embedding failed for memory ${memoryId}:`, error);

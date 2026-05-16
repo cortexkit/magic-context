@@ -49,8 +49,8 @@ import {
 	updateMemorySeenCount,
 } from "@magic-context/core/features/magic-context/memory";
 import {
-	embedText,
-	getEmbeddingModelId,
+	embedTextForProject,
+	getProjectEmbeddingSnapshot,
 } from "@magic-context/core/features/magic-context/memory/embedding";
 import { computeNormalizedHash } from "@magic-context/core/features/magic-context/memory/normalize-hash";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
@@ -171,22 +171,25 @@ function formatMemoryList(memories: Memory[]): string {
 
 function queueEmbedding(args: {
 	deps: CtxMemoryToolDeps;
+	projectIdentity: string;
 	memoryId: number;
 	content: string;
 }) {
-	if (!args.deps.embeddingEnabled) return;
+	const snapshot = getProjectEmbeddingSnapshot(args.projectIdentity);
+	if (!snapshot?.enabled) return;
 	void (async () => {
 		try {
-			const embedding = await embedText(args.content);
-			if (!embedding) {
+			const result = await embedTextForProject(
+				args.projectIdentity,
+				args.content,
+			);
+			if (!result) {
 				log(
 					`[magic-context-pi] embedding skipped for memory ${args.memoryId}: provider unavailable.`,
 				);
 				return;
 			}
-			const modelId = getEmbeddingModelId();
-			if (modelId === "off") return;
-			saveEmbedding(args.deps.db, args.memoryId, embedding, modelId);
+			saveEmbedding(args.deps.db, args.memoryId, result.vector, result.modelId);
 			log(`[magic-context-pi] proactively embedded memory ${args.memoryId}.`);
 		} catch (error) {
 			log(
@@ -199,8 +202,12 @@ function queueEmbedding(args: {
 
 export interface CtxMemoryToolDeps {
 	db: ContextDatabase;
-	memoryEnabled: boolean;
-	embeddingEnabled: boolean;
+	ensureProjectRegistered?: (
+		directory: string,
+		db: ContextDatabase,
+	) => Promise<void>;
+	memoryEnabled?: boolean;
+	embeddingEnabled?: boolean;
 	/** When true, dreamer-only actions (update, merge, archive) are exposed.
 	 *  Set by the subagent extension entry when the parent passes
 	 *  `--magic-context-dreamer-actions`. Default: false (write/delete/list only). */
@@ -231,10 +238,6 @@ export function createCtxMemoryTool(
 			_onUpdate,
 			ctx,
 		) {
-			if (!deps.memoryEnabled) {
-				return err("Cross-session memory is disabled for this project.");
-			}
-
 			// Gate dreamer-only actions on the allowlist flag. Mirrors
 			// OpenCode's `if (toolContext.agent !== DREAMER_AGENT && !allowedActions.includes(args.action))`.
 			if (!dreamerAllowed && DREAMER_ONLY_ACTIONS.has(params.action)) {
@@ -244,6 +247,15 @@ export function createCtxMemoryTool(
 			}
 
 			const projectIdentity = resolveProjectIdentity(ctx.cwd);
+			await deps.ensureProjectRegistered?.(ctx.cwd, deps.db);
+			const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
+			if (
+				snapshot
+					? !snapshot.features.memoryEnabled
+					: deps.memoryEnabled === false
+			) {
+				return err("Cross-session memory is disabled for this project.");
+			}
 			const sessionId = ctx.sessionManager.getSessionId();
 
 			if (params.action === "write") {
@@ -282,7 +294,7 @@ export function createCtxMemoryTool(
 					sourceType: dreamerAllowed ? "dreamer" : "agent",
 				});
 
-				queueEmbedding({ deps, memoryId: memory.id, content });
+				queueEmbedding({ deps, projectIdentity, memoryId: memory.id, content });
 				invalidateAllMemoryBlockCaches(deps.db);
 				return ok(`Saved memory [ID: ${memory.id}] in ${rawCategory}.`);
 			}
@@ -338,7 +350,7 @@ export function createCtxMemoryTool(
 				}
 
 				updateMemoryContent(deps.db, memory.id, content, normalizedHash);
-				queueEmbedding({ deps, memoryId: memory.id, content });
+				queueEmbedding({ deps, projectIdentity, memoryId: memory.id, content });
 				invalidateAllMemoryBlockCaches(deps.db);
 				return ok(`Updated memory [ID: ${memory.id}] in ${memory.category}.`);
 			}
@@ -496,6 +508,7 @@ export function createCtxMemoryTool(
 
 				queueEmbedding({
 					deps,
+					projectIdentity,
 					memoryId: canonicalMemory.id,
 					content,
 				});

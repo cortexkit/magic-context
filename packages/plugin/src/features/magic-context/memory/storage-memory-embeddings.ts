@@ -14,6 +14,7 @@ const loadAllEmbeddingsStatements = new WeakMap<Database, PreparedStatement>();
 const deleteEmbeddingStatements = new WeakMap<Database, PreparedStatement>();
 const getStoredModelIdStatements = new WeakMap<Database, PreparedStatement>();
 const clearAllEmbeddingsStatements = new WeakMap<Database, PreparedStatement>();
+const getDistinctStoredModelIdsStatements = new WeakMap<Database, PreparedStatement>();
 
 function isEmbeddingBlob(value: unknown): value is Uint8Array | ArrayBuffer {
     return value instanceof Uint8Array || value instanceof ArrayBuffer;
@@ -87,6 +88,17 @@ function getClearAllEmbeddingsStatement(db: Database): PreparedStatement {
     return stmt;
 }
 
+function getDistinctStoredModelIdsStatement(db: Database): PreparedStatement {
+    let stmt = getDistinctStoredModelIdsStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            "SELECT DISTINCT memory_embeddings.model_id AS modelId FROM memory_embeddings INNER JOIN memories ON memories.id = memory_embeddings.memory_id WHERE memories.project_path = ?",
+        );
+        getDistinctStoredModelIdsStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
 export function saveEmbedding(
     db: Database,
     memoryId: number,
@@ -119,4 +131,9 @@ export function getStoredModelId(db: Database, projectPath: string): string | nu
 
 export function clearEmbeddingsForProject(db: Database, projectPath: string): void {
     getClearAllEmbeddingsStatement(db).run(projectPath);
+}
+
+export function getDistinctStoredModelIds(db: Database, projectPath: string): Set<string | null> {
+    const rows = getDistinctStoredModelIdsStatement(db).all(projectPath) as StoredModelIdRow[];
+    return new Set(rows.map((row) => (typeof row.modelId === "string" ? row.modelId : null)));
 }

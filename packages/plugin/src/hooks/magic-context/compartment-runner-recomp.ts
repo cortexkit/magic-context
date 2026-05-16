@@ -102,7 +102,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
 
         /** Promote staging → real tables and run post-processing.
          *  Returns formatted status lines on success, or null if validation fails or there's nothing to promote. */
-        function promoteAndFinalize(reason: string): string | null {
+        async function promoteAndFinalize(reason: string): Promise<string | null> {
             if (passCount === 0 || candidateCompartments.length === 0) return null;
 
             const mergedError = validateStoredCompartments(candidateCompartments);
@@ -128,6 +128,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
 
             // Issue #44: respect memory.enabled and memory.auto_promote.
             if (deps.directory && deps.memoryEnabled !== false && deps.autoPromote !== false) {
+                await deps.ensureProjectRegistered?.(deps.directory, db);
                 promoteSessionFactsToMemory(
                     db,
                     sessionId,
@@ -177,7 +178,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             if (!chunk.text || chunk.messageCount === 0 || chunk.endIndex < offset) {
                 // Remaining messages before the protected tail are too few or all noise.
                 // If we already have valid candidates, this is a normal completion — not a partial failure.
-                const promoted = promoteAndFinalize(
+                const promoted = await promoteAndFinalize(
                     `remaining messages ${offset}-${protectedTailStart - 1} were too few or all noise to form a historian chunk`,
                 );
                 if (promoted) {
@@ -188,7 +189,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
 
             const chunkCoverageError = validateChunkCoverage(chunk);
             if (chunkCoverageError) {
-                const partial = promoteAndFinalize(
+                const partial = await promoteAndFinalize(
                     `chunk could not be represented safely: ${chunkCoverageError}`,
                 );
                 if (partial) {
@@ -274,7 +275,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                     }
                 }
 
-                const partial = promoteAndFinalize(
+                const partial = await promoteAndFinalize(
                     `historian failed to validate messages ${chunk.startIndex}-${chunk.endIndex}: ${validatedPass.error}`,
                 );
                 if (partial) {
@@ -300,7 +301,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 (validatedPass.compartments?.[validatedPass.compartments.length - 1]?.endMessage ??
                     chunk.endIndex) + 1;
             if (nextOffset <= offset) {
-                const partial = promoteAndFinalize(
+                const partial = await promoteAndFinalize(
                     `historian made no forward progress after messages ${chunk.startIndex}-${chunk.endIndex}`,
                 );
                 if (partial) {
