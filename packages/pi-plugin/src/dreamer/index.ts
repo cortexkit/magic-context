@@ -110,19 +110,19 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 			}
 		: undefined;
 
-	const cleanup = startDreamScheduleTimer({
+	let cleanup: (() => void) | undefined;
+	void startDreamScheduleTimer({
 		directory: opts.projectDir,
+		projectIdentity: opts.projectIdentity,
 		client,
 		dreamerConfig: opts.config,
-		embeddingConfig: opts.embeddingConfig,
-		memoryEnabled: opts.memoryEnabled,
 		experimentalUserMemories,
 		experimentalPinKeyFiles,
+		gitCommitIndexing: undefined,
+		ensureRegistered: async () => {},
+	}).then((timerCleanup) => {
+		cleanup = timerCleanup;
 	});
-
-	if (!cleanup) {
-		return;
-	}
 
 	// Pi parity for OpenCode `command-handler.ts:236-246` (`/ctx-dream`):
 	// after enqueueing, OpenCode immediately drains the queue via
@@ -152,7 +152,10 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 			projectIdentity: opts.projectIdentity,
 		});
 
-	registeredProjects.set(opts.projectIdentity, { cleanup, runOnce });
+	registeredProjects.set(opts.projectIdentity, {
+		cleanup: () => cleanup?.(),
+		runOnce,
+	});
 }
 
 /**

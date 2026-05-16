@@ -10,7 +10,6 @@
  * sweeps of the same project.
  */
 
-import type { EmbeddingConfig } from "../../../config/schema/magic-context";
 import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
 import { embedBatchForProject, getProjectEmbeddingSnapshot } from "../memory/embedding";
@@ -63,7 +62,6 @@ export async function indexCommitsForProject(
     db: Database,
     projectPath: string,
     directory: string,
-    embeddingConfig: EmbeddingConfig,
     options: IndexCommitsOptions,
 ): Promise<IndexCommitsResult> {
     const result: IndexCommitsResult = {
@@ -122,7 +120,7 @@ export async function indexCommitsForProject(
             return result;
         }
 
-        result.embedded = await embedUnembeddedCommits(db, projectPath, embeddingConfig);
+        result.embedded = await embedUnembeddedCommits(db, projectPath);
         log(
             `[git-commits] indexed ${projectPath}: scanned=${result.scanned} inserted=${result.inserted} updated=${result.updated} evicted=${result.evicted} embedded=${result.embedded}`,
         );
@@ -137,11 +135,7 @@ export async function indexCommitsForProject(
  * the wall-clock / per-sweep limits. Mirrors the memory embedding sweep
  * behavior so provider switches refresh the commit index as quickly as memories.
  */
-export async function embedUnembeddedCommits(
-    db: Database,
-    projectPath: string,
-    _config: EmbeddingConfig,
-): Promise<number> {
+export async function embedUnembeddedCommits(db: Database, projectPath: string): Promise<number> {
     if (embedInProgress.has(projectPath)) {
         return 0;
     }
