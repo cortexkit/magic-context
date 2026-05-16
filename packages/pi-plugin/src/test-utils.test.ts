@@ -124,7 +124,11 @@ export function createFakePi() {
 	};
 }
 
-export function fakeContext(sessionId = "ses-test", cwd = process.cwd()) {
+export function fakeContext(
+	sessionId = "ses-test",
+	cwd = process.cwd(),
+	entryIds: string[] = ["entry-1"],
+) {
 	return {
 		cwd,
 		hasUI: true,
@@ -132,7 +136,12 @@ export function fakeContext(sessionId = "ses-test", cwd = process.cwd()) {
 		ui: { notify: () => undefined },
 		sessionManager: {
 			getSessionId: () => sessionId,
-			getBranch: () => [],
+			getBranch: () =>
+				entryIds.map((id, index) => ({
+					type: "message",
+					id,
+					message: userMessage("", index + 1),
+				})),
 		},
 		getContextUsage: () => ({ tokens: 0, percent: 0, contextWindow: 100_000 }),
 	};

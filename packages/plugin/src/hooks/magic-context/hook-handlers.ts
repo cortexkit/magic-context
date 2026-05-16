@@ -23,7 +23,11 @@ import {
     getSessionProperties,
 } from "./event-payloads";
 import { resolveSessionId as resolveEventSessionId } from "./event-resolvers";
-import { clearNoteNudgeState, onNoteTrigger } from "./note-nudger";
+import {
+    clearNoteNudgeTriggerAndCooldown,
+    onNoteTrigger,
+    resetNoteNudgeCooldownOnly,
+} from "./note-nudger";
 import { readRawSessionMessageById, readRawSessionMessages } from "./read-session-chunk";
 import { normalizeTodoStateJson } from "./todo-view";
 
@@ -322,7 +326,7 @@ export function createEventHook(args: {
             args.deferredMaterializationSessions.delete(sessionId);
             args.lastHeuristicsTurnId.delete(sessionId);
             args.commitSeenLastPass?.delete(sessionId);
-            clearNoteNudgeState(args.db, sessionId);
+            resetNoteNudgeCooldownOnly(sessionId);
             clearAutoSearchForSession(sessionId);
             clearSidebarSnapshotCache(sessionId);
             clearSessionTracking(sessionId);
@@ -420,7 +424,7 @@ export function createToolExecuteAfterHook(args: {
             }
         }
         if (typedInput.tool === "ctx_note") {
-            clearNoteNudgeState(args.db, typedInput.sessionID);
+            clearNoteNudgeTriggerAndCooldown(args.db, typedInput.sessionID);
         }
         args.toolUsageSinceUserTurn.set(typedInput.sessionID, turnUsage + 1);
     };

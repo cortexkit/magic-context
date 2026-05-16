@@ -28,18 +28,16 @@ import type {
     UnifiedSearchResult,
 } from "../../features/magic-context/search";
 import { unifiedSearch } from "../../features/magic-context/search";
+import {
+    type AutoSearchHintNoHintReason,
+    appendAutoSearchHintDecision,
+    getAutoSearchHintDecisions,
+} from "../../features/magic-context/storage-meta-persisted";
 import { log, sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { buildAutoSearchHint } from "./auto-search-hint";
 import { appendReminderToUserMessageById } from "./transform-message-helpers";
 import type { MessageLike } from "./transform-operations";
-
-/** Per-session cache: most recent auto-search decision, keyed by the user message id it was computed for.
- *  `hint === ""` is a valid sentinel meaning "already computed for this turn, produce no hint".
- *  Caching every outcome (success, empty, below-threshold, timeout) prevents re-running the full
- *  FTS + embedding search on every defer pass of the same user turn — transform can re-enter many
- *  times per turn (tool calls, reasoning steps) and without this cache we re-embed every time. */
-const autoSearchByTurn = new Map<string, { messageId: string; hint: string }>();
 
 /** Hard cap on how long the transform hot path waits for unified search to finish.
  *  If the configured embedding provider is slow or saturated, we abandon the hint for this
@@ -234,12 +232,26 @@ export async function runAutoSearchHint(args: {
     if (!userMsg || typeof userMsg.info.id !== "string") return;
     const userMsgId = userMsg.info.id;
 
-    const cached = autoSearchByTurn.get(sessionId);
-    if (cached && cached.messageId === userMsgId) {
-        // Same turn — replay (idempotent via .includes guard).
-        appendReminderToUserMessageById(messages, userMsgId, cached.hint);
+    const existing = getAutoSearchHintDecisions(db, sessionId);
+    const existingForMessage = existing.find((decision) => decision.messageId === userMsgId);
+    if (existingForMessage) {
+        if (existingForMessage.decision === "hint") {
+            appendReminderToUserMessageById(messages, userMsgId, existingForMessage.text);
+        }
         return;
     }
+
+    const writeNoHintAndReconcile = (reason: AutoSearchHintNoHintReason): void => {
+        const outcome = appendAutoSearchHintDecision(db, sessionId, {
+            messageId: userMsgId,
+            decision: "no-hint",
+            reason,
+        });
+        if (!outcome.ok) return;
+        if (outcome.kind === "already-present" && outcome.decision.decision === "hint") {
+            appendReminderToUserMessageById(messages, userMsgId, outcome.decision.text);
+        }
+    };
 
     // New turn — compute hint fresh. Suppression check must run BEFORE stripping
     // because the stripper removes the exact tags that signal "already augmented".
@@ -249,13 +261,12 @@ export async function runAutoSearchHint(args: {
             sessionId,
             "auto-search: skipping — user message already carries augmentation/hint",
         );
-        autoSearchByTurn.set(sessionId, { messageId: userMsgId, hint: "" });
+        writeNoHintAndReconcile("stacked");
         return;
     }
     const rawPrompt = extractUserPromptText(userMsg);
     if (rawPrompt.length < options.minPromptChars) {
-        // Cache the skip so we don't re-extract + re-check on every defer pass.
-        autoSearchByTurn.set(sessionId, { messageId: userMsgId, hint: "" });
+        writeNoHintAndReconcile("too-short");
         return;
     }
 
@@ -301,8 +312,7 @@ export async function runAutoSearchHint(args: {
         log(
             `[auto-search] unified search failed for session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
         );
-        // Cache the failure so we don't retry the same doomed search on the next defer pass.
-        autoSearchByTurn.set(sessionId, { messageId: userMsgId, hint: "" });
+        writeNoHintAndReconcile("error");
         return;
     }
 
@@ -311,13 +321,12 @@ export async function runAutoSearchHint(args: {
             sessionId,
             `auto-search: timed out after ${AUTO_SEARCH_TIMEOUT_MS}ms, skipping hint for this turn`,
         );
-        // Cache the timeout so later defer passes for this turn don't re-run the search.
-        autoSearchByTurn.set(sessionId, { messageId: userMsgId, hint: "" });
+        writeNoHintAndReconcile("timeout");
         return;
     }
 
     if (results.length === 0) {
-        autoSearchByTurn.set(sessionId, { messageId: userMsgId, hint: "" });
+        writeNoHintAndReconcile("empty");
         return;
     }
     if (results[0].score < options.scoreThreshold) {
@@ -325,21 +334,31 @@ export async function runAutoSearchHint(args: {
             sessionId,
             `auto-search: top score ${results[0].score.toFixed(3)} below threshold ${options.scoreThreshold}`,
         );
-        autoSearchByTurn.set(sessionId, { messageId: userMsgId, hint: "" });
+        writeNoHintAndReconcile("below-threshold");
         return;
     }
 
     const hintText = buildAutoSearchHint(results);
     if (!hintText) {
-        autoSearchByTurn.set(sessionId, { messageId: userMsgId, hint: "" });
+        writeNoHintAndReconcile("empty");
         return;
     }
 
     // Prefix with double newline so the hint is a separate block, not glued
     // onto the last word of the user's prompt.
     const payload = `\n\n${hintText}`;
-    autoSearchByTurn.set(sessionId, { messageId: userMsgId, hint: payload });
-    appendReminderToUserMessageById(messages, userMsgId, payload);
+    const outcome = appendAutoSearchHintDecision(db, sessionId, {
+        messageId: userMsgId,
+        decision: "hint",
+        text: payload,
+    });
+    if (!outcome.ok) {
+        sessionLog(sessionId, `auto-search: CAS exhausted for ${userMsgId}; skipping wire append`);
+        return;
+    }
+    if (outcome.decision.decision === "hint") {
+        appendReminderToUserMessageById(messages, userMsgId, outcome.decision.text);
+    }
     sessionLog(
         sessionId,
         `auto-search: attached hint to ${userMsgId} (${results.length} fragments, top score ${results[0].score.toFixed(3)})`,
@@ -348,10 +367,10 @@ export async function runAutoSearchHint(args: {
 
 /** Test hook — wipe the per-turn cache. */
 export function _resetAutoSearchCache(): void {
-    autoSearchByTurn.clear();
+    // Decisions are persisted in SQLite; retained as a no-op compatibility hook for tests.
 }
 
 /** Session cleanup hook — call on session.deleted. */
-export function clearAutoSearchForSession(sessionId: string): void {
-    autoSearchByTurn.delete(sessionId);
+export function clearAutoSearchForSession(_sessionId: string): void {
+    // Decisions are session_meta state and are removed by clearSession().
 }

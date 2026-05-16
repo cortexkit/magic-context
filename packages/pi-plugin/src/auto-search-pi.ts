@@ -59,6 +59,11 @@ import type {
 	UnifiedSearchResult,
 } from "@magic-context/core/features/magic-context/search";
 import { unifiedSearch } from "@magic-context/core/features/magic-context/search";
+import {
+	type AutoSearchHintNoHintReason,
+	appendAutoSearchHintDecision,
+	getAutoSearchHintDecisions,
+} from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { buildAutoSearchHint } from "@magic-context/core/hooks/magic-context/auto-search-hint";
 import { log, sessionLog } from "@magic-context/core/shared/logger";
 import type { Database } from "@magic-context/core/shared/sqlite";
@@ -87,15 +92,6 @@ export interface PiAutoSearchOptions {
 	projectPath: string;
 	visibleMemoryIds?: Set<number> | null;
 }
-
-type AutoSearchTurnCache = { messageId: string; hint: string };
-
-/**
- * Most recent auto-search decision per Pi session. `hint === ""` is a
- * deliberate sentinel for “already computed and no hint for this turn”,
- * preventing duplicate FTS/vector work on repeated context events.
- */
-const autoSearchByTurn = new Map<string, AutoSearchTurnCache>();
 
 const AUTO_SEARCH_TIMEOUT_MS = 3_000;
 const DEFAULT_SCORE_THRESHOLD = 0.55;
@@ -180,36 +176,19 @@ function extractUserPromptText(message: UserMessage): string {
 
 function findLatestMeaningfulUserMessage(
 	messages: AgentMessage[],
+	entryIds: readonly (string | undefined)[],
 ): { message: UserMessage; messageId: string } | null {
 	for (let i = messages.length - 1; i >= 0; i -= 1) {
 		const msg = messages[i];
 		if (msg?.role !== "user") continue;
 		if (collectUserPromptParts(msg).trim().length === 0) continue;
 
-		// Pi context-event messages do not carry the session-entry id. Use the
-		// array position plus timestamp/content shape as a stable-enough turn key
-		// within repeated context invocations for the same active branch.
-		return { message: msg, messageId: buildUserMessageTurnId(msg, i) };
+		const messageId = entryIds[i];
+		if (typeof messageId === "string") return { message: msg, messageId };
+		return null;
 	}
 
 	return null;
-}
-
-function buildUserMessageTurnId(message: UserMessage, index: number): string {
-	const timestamp =
-		typeof message.timestamp === "number" && Number.isFinite(message.timestamp)
-			? String(message.timestamp)
-			: "no-ts";
-	return `${index}:${timestamp}:${contentFingerprint(message)}`;
-}
-
-function contentFingerprint(message: UserMessage): string {
-	const raw = collectUserPromptParts(message);
-	let hash = 0;
-	for (let i = 0; i < raw.length; i += 1) {
-		hash = (hash * 31 + raw.charCodeAt(i)) | 0;
-	}
-	return `${raw.length}:${hash >>> 0}`;
 }
 
 function appendHintToUserMessage(message: UserMessage, hint: string): boolean {
@@ -250,20 +229,57 @@ export async function runAutoSearchHintForPi(args: {
 	sessionId: string;
 	db: Database;
 	messages: AgentMessage[];
+	entryIds?: readonly (string | undefined)[] | null;
 	options: PiAutoSearchOptions;
 }): Promise<AgentMessage[]> {
 	const { sessionId, db, messages, options } = args;
+	const entryIds =
+		args.entryIds === undefined
+			? messages.map((message, index) => {
+					const timestamp = (message as { timestamp?: unknown }).timestamp;
+					return `test-entry-${index}:${typeof timestamp === "number" ? timestamp : "no-ts"}`;
+				})
+			: args.entryIds;
 	if (!options.enabled) return messages;
+	if (entryIds === null) {
+		sessionLog(
+			sessionId,
+			"Pi auto-search: strict entry-id resolution failed; skipping fresh decision",
+		);
+		return messages;
+	}
 
-	const found = findLatestMeaningfulUserMessage(messages);
+	const found = findLatestMeaningfulUserMessage(messages, entryIds);
 	if (found === null) return messages;
 
 	const { message: userMsg, messageId: userMsgId } = found;
-	const cached = autoSearchByTurn.get(sessionId);
-	if (cached && cached.messageId === userMsgId) {
-		appendHintToUserMessage(userMsg, cached.hint);
+	const existing = getAutoSearchHintDecisions(db, sessionId);
+	const existingForMessage = existing.find(
+		(decision) => decision.messageId === userMsgId,
+	);
+	if (existingForMessage) {
+		if (existingForMessage.decision === "hint") {
+			appendHintToUserMessage(userMsg, existingForMessage.text);
+		}
 		return messages;
 	}
+
+	const writeNoHintAndReconcile = (
+		reason: AutoSearchHintNoHintReason,
+	): void => {
+		const outcome = appendAutoSearchHintDecision(db, sessionId, {
+			messageId: userMsgId,
+			decision: "no-hint",
+			reason,
+		});
+		if (!outcome.ok) return;
+		if (
+			outcome.kind === "already-present" &&
+			outcome.decision.decision === "hint"
+		) {
+			appendHintToUserMessage(userMsg, outcome.decision.text);
+		}
+	};
 
 	// Suppression check runs on raw text before stripping; OpenCode does the
 	// same at lines 189-198 because stripping removes the signal tags.
@@ -273,14 +289,14 @@ export async function runAutoSearchHintForPi(args: {
 			sessionId,
 			"auto-search: skipping — user message already carries augmentation/hint",
 		);
-		autoSearchByTurn.set(sessionId, { messageId: userMsgId, hint: "" });
+		writeNoHintAndReconcile("stacked");
 		return messages;
 	}
 
 	const rawPrompt = extractUserPromptText(userMsg);
 	const minPromptChars = options.minPromptChars ?? DEFAULT_MIN_PROMPT_CHARS;
 	if (rawPrompt.length < minPromptChars) {
-		autoSearchByTurn.set(sessionId, { messageId: userMsgId, hint: "" });
+		writeNoHintAndReconcile("too-short");
 		return messages;
 	}
 
@@ -320,7 +336,7 @@ export async function runAutoSearchHintForPi(args: {
 		log(
 			`[auto-search] unified search failed for session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
 		);
-		autoSearchByTurn.set(sessionId, { messageId: userMsgId, hint: "" });
+		writeNoHintAndReconcile("error");
 		return messages;
 	}
 
@@ -329,12 +345,12 @@ export async function runAutoSearchHintForPi(args: {
 			sessionId,
 			`auto-search: timed out after ${AUTO_SEARCH_TIMEOUT_MS}ms, skipping hint for this turn`,
 		);
-		autoSearchByTurn.set(sessionId, { messageId: userMsgId, hint: "" });
+		writeNoHintAndReconcile("timeout");
 		return messages;
 	}
 
 	if (results.length === 0) {
-		autoSearchByTurn.set(sessionId, { messageId: userMsgId, hint: "" });
+		writeNoHintAndReconcile("empty");
 		return messages;
 	}
 
@@ -344,21 +360,28 @@ export async function runAutoSearchHintForPi(args: {
 			sessionId,
 			`auto-search: top score ${results[0].score.toFixed(3)} below threshold ${scoreThreshold}`,
 		);
-		autoSearchByTurn.set(sessionId, { messageId: userMsgId, hint: "" });
+		writeNoHintAndReconcile("below-threshold");
 		return messages;
 	}
 
 	const hintText = buildAutoSearchHint(results);
 	if (!hintText) {
-		autoSearchByTurn.set(sessionId, { messageId: userMsgId, hint: "" });
+		writeNoHintAndReconcile("empty");
 		return messages;
 	}
 
 	// Prefix with double newline so the hint is a separate block, matching
 	// OpenCode lines 268-270.
 	const payload = `\n\n${hintText}`;
-	autoSearchByTurn.set(sessionId, { messageId: userMsgId, hint: payload });
-	appendHintToUserMessage(userMsg, payload);
+	const outcome = appendAutoSearchHintDecision(db, sessionId, {
+		messageId: userMsgId,
+		decision: "hint",
+		text: payload,
+	});
+	if (!outcome.ok) return messages;
+	if (outcome.decision.decision === "hint") {
+		appendHintToUserMessage(userMsg, outcome.decision.text);
+	}
 	sessionLog(
 		sessionId,
 		`auto-search: attached hint to ${userMsgId} (${results.length} fragments, top score ${results[0].score.toFixed(3)})`,
@@ -371,6 +394,6 @@ export async function runAutoSearchHintForPi(args: {
  * Session cleanup hook. Call from Pi's session shutdown/delete lifecycle to
  * release the per-turn cache entry for that session.
  */
-export function clearAutoSearchForPiSession(sessionId: string): void {
-	autoSearchByTurn.delete(sessionId);
+export function clearAutoSearchForPiSession(_sessionId: string): void {
+	// Auto-search decisions live in session_meta and are cleared by clearSession().
 }

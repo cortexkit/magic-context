@@ -1,12 +1,17 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { setNoteLastReadAt } from "../../features/magic-context/storage-meta-persisted";
+import {
+    appendNoteNudgeAnchor,
+    getNoteNudgeAnchors,
+    setNoteLastReadAt,
+} from "../../features/magic-context/storage-meta-persisted";
 import { addNote } from "../../features/magic-context/storage-notes";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     clearNoteNudgeState,
+    clearNoteNudgeTriggerOnly,
     getNoteNudgeText,
     getStickyNoteNudge,
     markNoteNudgeDelivered,
@@ -52,6 +57,8 @@ function makeDb(): Database {
             note_nudge_trigger_message_id TEXT DEFAULT '',
             note_nudge_sticky_text TEXT DEFAULT '',
             note_nudge_sticky_message_id TEXT DEFAULT '',
+            note_nudge_anchors TEXT NOT NULL DEFAULT '[]',
+            auto_search_hint_decisions TEXT NOT NULL DEFAULT '[]',
             note_last_read_at INTEGER DEFAULT 0,
             cleared_reasoning_through_tag INTEGER DEFAULT 0,
       harness TEXT NOT NULL DEFAULT 'opencode'
@@ -113,10 +120,11 @@ describe("note-nudger", () => {
         expect(getPersistedRow(db, "ses-trigger")).toEqual({
             triggerPending: 0,
             triggerMessageId: "",
-            stickyText: text!,
-            stickyMessageId: "u-2",
+            stickyText: "",
+            stickyMessageId: "",
         });
-        expect(getStickyNoteNudge(db, "ses-trigger")).toEqual({ text: text!, messageId: "u-2" });
+        expect(getNoteNudgeAnchors(db, "ses-trigger")).toEqual([{ messageId: "u-2", text: text! }]);
+        expect(getStickyNoteNudge(db, "ses-trigger")).toBeNull();
         expect(peekNoteNudgeText(db, "ses-trigger", "u-3")).toBeNull();
     });
 
@@ -228,5 +236,21 @@ describe("note-nudger", () => {
         onNoteTrigger(db, "ses-clear", "todos_complete");
 
         expect(getNoteNudgeText(db, "ses-clear")).toContain("You have 1 deferred note");
+    });
+
+    it("clearNoteNudgeTriggerOnly preserves delivered anchors", () => {
+        const db = makeDb();
+        appendNoteNudgeAnchor(db, "ses-trigger-only", "m1", "one");
+        appendNoteNudgeAnchor(db, "ses-trigger-only", "m2", "two");
+        onNoteTrigger(db, "ses-trigger-only", "todos_complete");
+
+        clearNoteNudgeTriggerOnly(db, "ses-trigger-only");
+
+        expect(getPersistedRow(db, "ses-trigger-only")?.triggerPending).toBe(0);
+        expect(getPersistedRow(db, "ses-trigger-only")?.triggerMessageId).toBe("");
+        expect(getNoteNudgeAnchors(db, "ses-trigger-only")).toEqual([
+            { messageId: "m1", text: "one" },
+            { messageId: "m2", text: "two" },
+        ]);
     });
 });

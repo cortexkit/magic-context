@@ -4,6 +4,8 @@ import {
     clearPendingCompactionMarkerStateIf,
     clearPersistedStickyTurnReminder,
     clearPersistedTodoSyntheticAnchor,
+    getAutoSearchHintDecisions,
+    getNoteNudgeAnchors,
     getPendingCompactionMarkerState,
     getPendingOps,
     getPersistedStickyTurnReminder,
@@ -11,6 +13,8 @@ import {
     getStrippedPlaceholderIds,
     getTopNBySize,
     peekDeferredExecutePending,
+    pruneAutoSearchHintDecisions,
+    pruneNoteNudgeAnchors,
     setPersistedStickyTurnReminder,
     setPersistedTodoSyntheticAnchor,
     setStrippedPlaceholderIds,
@@ -30,12 +34,7 @@ import {
     type PreparedCompartmentInjection,
     renderCompartmentInjection,
 } from "./inject-compartments";
-import {
-    clearNoteNudgeState,
-    getStickyNoteNudge,
-    markNoteNudgeDelivered,
-    peekNoteNudgeText,
-} from "./note-nudger";
+import { markNoteNudgeDelivered, peekNoteNudgeText } from "./note-nudger";
 import { hasVisibleNoteReadCall } from "./note-visibility";
 import { reinjectNudgeAtAnchor } from "./nudge-injection";
 import type { NudgePlacementStore } from "./nudge-placement-store";
@@ -53,6 +52,7 @@ import {
     appendReminderToLatestUserMessage,
     appendReminderToUserMessageById,
     countMessagesSinceLastUser,
+    findLastUserMessageId,
     injectToolPartIntoAssistantById,
     injectToolPartIntoLatestAssistant,
 } from "./transform-message-helpers";
@@ -704,33 +704,16 @@ export async function runPostTransformPhase(
         args.nudgePlacements.clear(args.sessionId);
     }
 
-    // Note nudges only run in full-feature sessions. Subagents don't need
-    // reminders — they're driven by the main agent's prompt, not the user.
-    const stickyNoteNudge = args.fullFeatureMode
-        ? getStickyNoteNudge(args.db, args.sessionId)
-        : null;
-    if (stickyNoteNudge) {
-        const reinjected = appendReminderToUserMessageById(
-            args.messages,
-            stickyNoteNudge.messageId,
-            stickyNoteNudge.text,
-        );
-        if (!reinjected) {
-            if (isCacheBustingPass) {
-                // Anchor message gone (compacted/deleted) — clear stale note nudge.
-                // A new nudge will only appear if another work boundary trigger fires
-                // (commit, historian, todo completion); it is NOT auto-recreated just
-                // because notes still exist.
-                clearNoteNudgeState(args.db, args.sessionId);
-                sessionLog(
-                    args.sessionId,
-                    `sticky note nudge cleared — anchor ${stickyNoteNudge.messageId} gone (compacted/deleted)`,
-                );
-            } else {
-                sessionLog(
-                    args.sessionId,
-                    `preserving sticky note nudge anchor to avoid cache bust: messageId=${stickyNoteNudge.messageId}`,
-                );
+    // Sticky-injection replay (§2.4): every pass replays every persisted anchor
+    // so cached user-message bytes remain identical until that message leaves
+    // the visible window. Prune happens later, only on cache-busting passes.
+    if (args.fullFeatureMode) {
+        for (const anchor of getNoteNudgeAnchors(args.db, args.sessionId)) {
+            appendReminderToUserMessageById(args.messages, anchor.messageId, anchor.text);
+        }
+        for (const decision of getAutoSearchHintDecisions(args.db, args.sessionId)) {
+            if (decision.decision === "hint") {
+                appendReminderToUserMessageById(args.messages, decision.messageId, decision.text);
             }
         }
     }
@@ -754,11 +737,18 @@ export async function runPostTransformPhase(
         : null;
     if (deferredNoteText) {
         const noteInstruction = `\n\n<instruction name="deferred_notes">${deferredNoteText}</instruction>`;
-        const anchoredMessageId = appendReminderToLatestUserMessage(args.messages, noteInstruction);
-        // Always mark delivered once text is generated — the trigger is consumed.
-        // If no user message exists, the nudge is lost for this cycle, but
-        // triggerPending must still clear to prevent firing on every subsequent pass.
-        markNoteNudgeDelivered(args.db, args.sessionId, noteInstruction, anchoredMessageId);
+        const anchoredMessageId = findLastUserMessageId(args.messages);
+        const outcome = markNoteNudgeDelivered(
+            args.db,
+            args.sessionId,
+            noteInstruction,
+            anchoredMessageId,
+        );
+        if (anchoredMessageId && outcome.ok) {
+            appendReminderToUserMessageById(args.messages, anchoredMessageId, noteInstruction);
+        } else if (anchoredMessageId && !outcome.ok) {
+            sessionLog(args.sessionId, `note-nudge delivery skipped wire append: ${outcome.kind}`);
+        }
     }
 
     // Todo state synthesis — inject a synthetic `todowrite` tool part into
@@ -997,6 +987,23 @@ export async function runPostTransformPhase(
             });
         } catch (error) {
             sessionLog(args.sessionId, "auto-search runner failed:", error);
+        }
+    }
+
+    if (args.fullFeatureMode && isCacheBustingPass) {
+        const visibleIds = new Set<string>();
+        for (const message of args.messages) {
+            if (typeof message.info?.id === "string") {
+                visibleIds.add(message.info.id);
+            }
+        }
+        const prunedAnchors = pruneNoteNudgeAnchors(args.db, args.sessionId, visibleIds);
+        const prunedDecisions = pruneAutoSearchHintDecisions(args.db, args.sessionId, visibleIds);
+        if (prunedAnchors > 0 || prunedDecisions > 0) {
+            sessionLog(
+                args.sessionId,
+                `sticky-injection GC: pruned ${prunedAnchors} note-nudge anchor(s), ${prunedDecisions} auto-search decision(s)`,
+            );
         }
     }
 

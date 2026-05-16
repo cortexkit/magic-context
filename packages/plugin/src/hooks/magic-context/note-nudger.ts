@@ -14,10 +14,10 @@
  */
 
 import {
-    clearPersistedNoteNudge,
+    deliverNoteNudgeAtomic,
     getNoteLastReadAt,
     getPersistedNoteNudge,
-    setPersistedDeliveredNoteNudge,
+    type NoteNudgeDeliveryOutcome,
     setPersistedNoteNudgeTrigger,
     setPersistedNoteNudgeTriggerMessageId,
 } from "../../features/magic-context/storage-meta-persisted";
@@ -41,7 +41,7 @@ function getPersistedNoteNudgeDeliveredAt(_db: unknown, sessionId: string): numb
     return lastDeliveredAt.get(sessionId) ?? 0;
 }
 
-function recordNoteNudgeDeliveryTime(sessionId: string): void {
+export function recordNoteNudgeDeliveryTime(sessionId: string): void {
     lastDeliveredAt.set(sessionId, Date.now());
 }
 
@@ -116,7 +116,7 @@ export function peekNoteNudgeText(
             sessionId,
             `note-nudge: suppressing — last delivered ${Math.round((Date.now() - deliveredAt) / 1000)}s ago (cooldown ${NOTE_NUDGE_COOLDOWN_MS / 60000}m)`,
         );
-        clearPersistedNoteNudge(db, sessionId);
+        clearNoteNudgeTriggerOnly(db, sessionId);
         return null;
     }
 
@@ -126,7 +126,7 @@ export function peekNoteNudgeText(
     const totalCount = notes.length + readySmartNotes.length;
     if (totalCount === 0) {
         sessionLog(sessionId, "note-nudge: triggerPending but no notes found, skipping");
-        clearPersistedNoteNudge(db, sessionId);
+        clearNoteNudgeTriggerOnly(db, sessionId);
         return null;
     }
 
@@ -165,7 +165,7 @@ export function peekNoteNudgeText(
                     mostRecentNoteActivity,
                 ).toISOString()}`,
             );
-            clearPersistedNoteNudge(db, sessionId);
+            clearNoteNudgeTriggerOnly(db, sessionId);
             return null;
         }
     }
@@ -210,15 +210,24 @@ export function markNoteNudgeDelivered(
     sessionId: string,
     text: string,
     messageId: string | null,
-): void {
-    setPersistedDeliveredNoteNudge(db, sessionId, messageId ? text : "", messageId ?? "");
-    recordNoteNudgeDeliveryTime(sessionId);
+): NoteNudgeDeliveryOutcome {
+    if (!messageId) {
+        clearNoteNudgeTriggerAndCooldown(db, sessionId);
+        sessionLog(sessionId, "note-nudge: marked delivered without anchor");
+        return { ok: true, kind: "already-present" };
+    }
+
+    const outcome = deliverNoteNudgeAtomic(db, sessionId, messageId, text);
+    if (outcome.ok) {
+        recordNoteNudgeDeliveryTime(sessionId);
+    }
     sessionLog(
         sessionId,
-        messageId
-            ? `note-nudge: marked delivered, sticky anchor=${messageId}`
-            : "note-nudge: marked delivered without anchor",
+        outcome.ok
+            ? `note-nudge: marked delivered, sticky anchor=${messageId} (${outcome.kind})`
+            : `note-nudge: delivery not persisted for anchor=${messageId} (${outcome.kind})`,
     );
+    return outcome;
 }
 
 /**
@@ -255,7 +264,39 @@ export function clearNoteNudgeState(
     options?: { persist?: boolean },
 ): void {
     if (options?.persist !== false) {
-        clearPersistedNoteNudge(db, sessionId);
+        clearAllNoteNudgeState(db, sessionId);
     }
     lastDeliveredAt.delete(sessionId); // also reset in-memory cooldown
+}
+
+export function clearAllNoteNudgeState(db: Database, sessionId: string): void {
+    db.transaction(() => {
+        db.prepare(
+            `UPDATE session_meta
+             SET note_nudge_anchors = '[]',
+                 note_nudge_trigger_pending = 0,
+                 note_nudge_trigger_message_id = '',
+                 note_nudge_sticky_text = '',
+                 note_nudge_sticky_message_id = ''
+             WHERE session_id = ?`,
+        ).run(sessionId);
+    })();
+    lastDeliveredAt.delete(sessionId);
+}
+
+export function clearNoteNudgeTriggerAndCooldown(db: Database, sessionId: string): void {
+    db.prepare(
+        "UPDATE session_meta SET note_nudge_trigger_pending = 0, note_nudge_trigger_message_id = '' WHERE session_id = ?",
+    ).run(sessionId);
+    lastDeliveredAt.delete(sessionId);
+}
+
+export function resetNoteNudgeCooldownOnly(sessionId: string): void {
+    lastDeliveredAt.delete(sessionId);
+}
+
+export function clearNoteNudgeTriggerOnly(db: Database, sessionId: string): void {
+    db.prepare(
+        "UPDATE session_meta SET note_nudge_trigger_pending = 0, note_nudge_trigger_message_id = '' WHERE session_id = ?",
+    ).run(sessionId);
 }

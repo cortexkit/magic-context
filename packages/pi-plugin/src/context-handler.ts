@@ -61,9 +61,13 @@ import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-conte
 import {
 	clearDeferredExecutePendingIfMatches,
 	clearEmergencyRecovery,
+	getAutoSearchHintDecisions,
+	getNoteNudgeAnchors,
 	getOverflowState,
 	getPersistedStickyTurnReminder,
 	peekDeferredExecutePending,
+	pruneAutoSearchHintDecisions,
+	pruneNoteNudgeAnchors,
 	setDeferredExecutePendingIfAbsent,
 	setPersistedStickyTurnReminder,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
@@ -84,8 +88,6 @@ import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context
 import { resolveExecuteThreshold } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import { getVisibleMemoryIds } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import {
-	clearNoteNudgeState,
-	getStickyNoteNudge,
 	markNoteNudgeDelivered,
 	onNoteTrigger,
 	peekNoteNudgeText,
@@ -694,6 +696,7 @@ function collectMessageEntryIds(
 	ctx: ExtensionContext,
 	expectedLength: number,
 	sessionId?: string,
+	strict = false,
 ): readonly (string | undefined)[] | undefined {
 	const sm = ctx.sessionManager as
 		| {
@@ -807,6 +810,7 @@ function collectMessageEntryIds(
 				`firstKeptEntryId=${firstKeptEntryId ?? "<none>"} totalBranchEntries=${totalEntries})` +
 				` — best-effort mapping returned; boundary trim may not match exactly`,
 		);
+		if (strict) return undefined;
 		// Defensively fall back: if we have FEWER ids than expected, pad
 		// with undefined at the front (covers historical compaction-summary
 		// cases where Pi prepended a synthetic message we missed). If we
@@ -828,6 +832,22 @@ function collectMessageEntryIds(
 	}
 
 	return ids;
+}
+
+export function collectMessageEntryIdsStrict(
+	ctx: ExtensionContext,
+	expectedLength: number,
+	sessionId?: string,
+): readonly (string | undefined)[] | null {
+	try {
+		return collectMessageEntryIds(ctx, expectedLength, sessionId, true) ?? null;
+	} catch (error) {
+		sessionLog(
+			sessionId ?? "pi",
+			`collectMessageEntryIdsStrict failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		return null;
+	}
 }
 
 /**
@@ -900,23 +920,32 @@ export function registerPiContextHandler(
 			};
 			setRawMessageProvider(sessionId, rawMessageProvider);
 			scheduleReconciliation(options.db, sessionId, readRawSessionMessages);
+			const strictEntryIds = collectMessageEntryIdsStrict(
+				ctx,
+				event.messages.length,
+				sessionId,
+			);
 
 			const tLastUser = performance.now();
-			const latestUserId = findLatestUserMessageIdPi(
+			const latestUser = findLatestUserMessageIdPi(
 				event.messages as PiAgentMessage[],
+				buildPiMessageIdByIndex(
+					event.messages as PiAgentMessage[],
+					strictEntryIds,
+				),
 			);
 			logTransformTiming(sessionId, "findLastUserMessageId", tLastUser);
-			if (latestUserId) {
+			if (latestUser) {
 				scheduleIncrementalIndex(
 					options.db,
 					sessionId,
-					latestUserId,
+					latestUser.messageId,
 					(_sessionId, messageId) => readPiSessionMessageById(ctx, messageId),
 				);
 				const previousUserId = latestUserMessageBySession.get(sessionId);
-				if (previousUserId !== latestUserId) {
+				if (previousUserId !== latestUser.messageId) {
 					onPiNewUserMessage({ db: options.db, sessionId });
-					latestUserMessageBySession.set(sessionId, latestUserId);
+					latestUserMessageBySession.set(sessionId, latestUser.messageId);
 				}
 			}
 
@@ -1318,6 +1347,8 @@ export function registerPiContextHandler(
 					db: options.db,
 					messages: outputMessages,
 					projectIdentity,
+					entryIds: strictEntryIds,
+					isCacheBusting,
 				});
 			} catch (err) {
 				sessionLog(
@@ -1336,6 +1367,7 @@ export function registerPiContextHandler(
 						sessionId,
 						db: options.db,
 						messages: outputMessages,
+						entryIds: strictEntryIds,
 						options: {
 							enabled: true,
 							scoreThreshold: options.autoSearch.scoreThreshold,
@@ -2591,26 +2623,29 @@ function applyNoteNudges(args: {
 	db: ContextDatabase;
 	messages: PiAgentMessage[];
 	projectIdentity: string;
+	entryIds: readonly (string | undefined)[] | null;
+	isCacheBusting: boolean;
 }): PiAgentMessage[] {
-	const { sessionId, db, messages, projectIdentity } = args;
+	const { sessionId, db, messages, projectIdentity, entryIds, isCacheBusting } =
+		args;
 
-	// Path 1: sticky replay first, so any newly-delivered nudge below
-	// doesn't get double-attached on the same pass.
-	const sticky = getStickyNoteNudge(db, sessionId);
-	if (sticky) {
-		const reinjected = appendReminderToUserMessageByIdPi(
+	const messageIdByIndex = buildPiMessageIdByIndex(messages, entryIds);
+
+	for (const anchor of getNoteNudgeAnchors(db, sessionId)) {
+		appendReminderToUserMessageByIdPi(
 			messages,
-			sticky.messageId,
-			sticky.text,
+			messageIdByIndex,
+			anchor.messageId,
+			anchor.text,
 		);
-		if (!reinjected) {
-			// Anchor message gone — clear stale state. Mirrors OpenCode
-			// transform-postprocess-phase.ts:621-630. New nudges only
-			// re-appear when a fresh trigger fires.
-			clearNoteNudgeState(db, sessionId);
-			sessionLog(
-				sessionId,
-				`note-nudge: sticky anchor ${sticky.messageId} gone, cleared`,
+	}
+	for (const decision of getAutoSearchHintDecisions(db, sessionId)) {
+		if (decision.decision === "hint") {
+			appendReminderToUserMessageByIdPi(
+				messages,
+				messageIdByIndex,
+				decision.messageId,
+				decision.text,
 			);
 		}
 	}
@@ -2625,7 +2660,8 @@ function applyNoteNudges(args: {
 	// re-surface the nudge at the next work-boundary trigger so the
 	// agent regains visibility into deferred intentions. Mirrors
 	// OpenCode's transform-postprocess-phase.ts:647 wiring.
-	const latestUserId = findLatestUserMessageIdPi(messages);
+	const latestUser = findLatestUserMessageIdPi(messages, messageIdByIndex);
+	const latestUserId = latestUser?.messageId ?? null;
 	const noteReadStillVisible = hasVisibleNoteReadCallPi(messages);
 	const deferredNoteText = peekNoteNudgeText(
 		db,
@@ -2635,15 +2671,40 @@ function applyNoteNudges(args: {
 		noteReadStillVisible,
 	);
 	if (deferredNoteText) {
+		if (entryIds === null) {
+			sessionLog(
+				sessionId,
+				"Pi note-nudge: strict resolution failed; deferring delivery to next pass",
+			);
+			return messages;
+		}
 		const noteInstruction = `\n\n<instruction name="deferred_notes">${deferredNoteText}</instruction>`;
-		const anchoredId = appendReminderToLatestUserMessagePi(
-			messages,
+		const anchoredId = latestUser?.messageId ?? null;
+		const outcome = markNoteNudgeDelivered(
+			db,
+			sessionId,
 			noteInstruction,
+			anchoredId,
 		);
-		// Always mark delivered once text is generated — the trigger is
-		// consumed even if no anchor was found, so future passes don't
-		// re-fire on every transform.
-		markNoteNudgeDelivered(db, sessionId, noteInstruction, anchoredId);
+		if (latestUser && anchoredId && outcome.ok) {
+			appendReminderToPiUserMessage(
+				messages[latestUser.index] as PiAgentMessage,
+				noteInstruction,
+			);
+		} else if (anchoredId && !outcome.ok) {
+			sessionLog(
+				sessionId,
+				`Pi note-nudge delivery skipped wire append: ${outcome.kind}`,
+			);
+		}
+	}
+
+	if (isCacheBusting && entryIds !== null) {
+		const visibleIds = new Set(
+			entryIds.filter((id): id is string => typeof id === "string"),
+		);
+		pruneNoteNudgeAnchors(db, sessionId, visibleIds);
+		pruneAutoSearchHintDecisions(db, sessionId, visibleIds);
 	}
 
 	return messages;
@@ -2685,66 +2746,67 @@ function hasMeaningfulUserTextPi(message: PiAgentMessage): boolean {
 	return false;
 }
 
-/**
- * Find the id of the latest meaningful user message. Pi messages don't
- * carry a stable id field per `AgentMessage`, so we synthesize one from
- * timestamp + index. Same approach as `auto-search-pi.ts`'s
- * `buildUserMessageTurnId` — duplicated locally to keep the modules
- * decoupled (note-nudge anchor and auto-search cache key are independent
- * concerns even though both currently use the same id shape).
- */
-function findLatestUserMessageIdPi(messages: PiAgentMessage[]): string | null {
+type PiMessageIdByIndex = Map<number, string>;
+
+function buildPiMessageIdByIndex(
+	messages: PiAgentMessage[],
+	entryIds: readonly (string | undefined)[] | null,
+): PiMessageIdByIndex {
+	const ids = new Map<number, string>();
+	for (let index = 0; index < messages.length; index += 1) {
+		const entryId = entryIds?.[index];
+		if (typeof entryId === "string") {
+			ids.set(index, entryId);
+			continue;
+		}
+		const messageId = (messages[index] as { id?: unknown } | undefined)?.id;
+		if (typeof messageId === "string") {
+			ids.set(index, messageId);
+		} else if (entryIds === null) {
+			ids.set(
+				index,
+				`pi:${index}:${readTimestamp(messages[index] as PiAgentMessage)}`,
+			);
+		}
+	}
+	return ids;
+}
+
+function findLatestUserMessageIdPi(
+	messages: PiAgentMessage[],
+	messageIdByIndex: PiMessageIdByIndex,
+): { index: number; messageId: string } | null {
 	for (let i = messages.length - 1; i >= 0; i -= 1) {
 		const msg = messages[i];
 		if (msg?.role !== "user" || !hasMeaningfulUserTextPi(msg)) continue;
-		const ts = readTimestamp(msg);
-		return `pi:${i}:${ts}`;
+		const messageId = messageIdByIndex.get(i);
+		if (typeof messageId === "string") {
+			return { index: i, messageId };
+		}
 	}
 	return null;
 }
 
 /**
- * Append `reminder` to the user message at `messageId` (synthetic id
- * built by `findLatestUserMessageIdPi`). Idempotent: skips if the exact
- * reminder text is already present. Mirrors
+ * Append `reminder` to the user message at `messageId`. Idempotent: skips if
+ * the exact reminder text is already present. Mirrors
  * `appendReminderToUserMessageById` from OpenCode's
  * `transform-message-helpers.ts:54`.
  */
 function appendReminderToUserMessageByIdPi(
 	messages: PiAgentMessage[],
+	messageIdByIndex: PiMessageIdByIndex,
 	messageId: string,
 	reminder: string,
 ): boolean {
 	for (let i = 0; i < messages.length; i += 1) {
 		const msg = messages[i];
 		if (msg?.role !== "user" || !hasMeaningfulUserTextPi(msg)) continue;
-		const ts = readTimestamp(msg);
-		const synthId = `pi:${i}:${ts}`;
-		if (synthId !== messageId) continue;
+		if (messageIdByIndex.get(i) !== messageId) continue;
 		appendReminderToPiUserMessage(msg, reminder);
 		return true;
 	}
 	return false;
-}
-
-/**
- * Append `reminder` to the latest meaningful user message. Returns the
- * synthetic id for sticky anchor tracking, or null when no user message
- * exists. Mirrors `appendReminderToLatestUserMessage` from
- * `transform-message-helpers.ts:37`.
- */
-function appendReminderToLatestUserMessagePi(
-	messages: PiAgentMessage[],
-	reminder: string,
-): string | null {
-	for (let i = messages.length - 1; i >= 0; i -= 1) {
-		const msg = messages[i];
-		if (msg?.role !== "user" || !hasMeaningfulUserTextPi(msg)) continue;
-		appendReminderToPiUserMessage(msg, reminder);
-		const ts = readTimestamp(msg);
-		return `pi:${i}:${ts}`;
-	}
-	return null;
 }
 
 /**

@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { runMigrations } from "../../features/magic-context/migrations";
 import * as searchModule from "../../features/magic-context/search";
+import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import { _resetAutoSearchCache, runAutoSearchHint } from "./auto-search-runner";
 import type { MessageLike } from "./transform-operations";
 
@@ -36,11 +39,14 @@ describe("auto-search-runner", () => {
 
     beforeEach(() => {
         db = new Database(":memory:");
+        initializeDatabase(db);
+        runMigrations(db);
         _resetAutoSearchCache();
     });
 
     afterEach(() => {
         _resetAutoSearchCache();
+        closeQuietly(db);
     });
 
     test("caches no-hint decision on empty results so defer passes don't re-search", async () => {

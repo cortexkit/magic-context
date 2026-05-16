@@ -580,6 +580,50 @@ const MIGRATIONS: Migration[] = [
             }
         },
     },
+    {
+        version: 17,
+        description: "Multi-anchor JSON storage for note-nudge and auto-search-hint persistence",
+        up: (db: Database) => {
+            const cols = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{
+                name?: string;
+            }>;
+            if (!cols.some((c) => c.name === "note_nudge_anchors")) {
+                db.exec(
+                    "ALTER TABLE session_meta ADD COLUMN note_nudge_anchors TEXT NOT NULL DEFAULT '[]'",
+                );
+            }
+            if (!cols.some((c) => c.name === "auto_search_hint_decisions")) {
+                db.exec(
+                    "ALTER TABLE session_meta ADD COLUMN auto_search_hint_decisions TEXT NOT NULL DEFAULT '[]'",
+                );
+            }
+
+            // Backfill legacy single-anchor note-nudge state into the append-only
+            // multi-anchor column. The NULL arm is required for upgraded rows that
+            // predate the NOT NULL default (§3).
+            db.exec(`
+                UPDATE session_meta
+                SET note_nudge_anchors = json_array(
+                    json_object(
+                        'messageId', note_nudge_sticky_message_id,
+                        'text', note_nudge_sticky_text
+                    )
+                )
+                WHERE COALESCE(note_nudge_sticky_text, '') != ''
+                  AND COALESCE(note_nudge_sticky_message_id, '') != ''
+                  AND (note_nudge_anchors IS NULL OR note_nudge_anchors = '[]')
+            `);
+
+            db.exec(`
+                UPDATE session_meta SET note_nudge_anchors = '[]'
+                WHERE note_nudge_anchors IS NULL
+            `);
+            db.exec(`
+                UPDATE session_meta SET auto_search_hint_decisions = '[]'
+                WHERE auto_search_hint_decisions IS NULL
+            `);
+        },
+    },
 ];
 
 function ensureMigrationsTable(db: Database): void {

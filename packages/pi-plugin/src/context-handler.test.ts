@@ -24,6 +24,7 @@ import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner"
 import { clearAutoSearchForPiSession } from "./auto-search-pi";
 import {
 	clearContextHandlerSession,
+	collectMessageEntryIdsStrict,
 	getPiToolUsageSinceUserTurnForTest,
 	recordPiCtxReduceExecution,
 	recordPiLiveModel,
@@ -389,11 +390,11 @@ describe("registerPiContextHandler", () => {
 
 			await handler(
 				{ messages: [userMessage("trigger turn", 1)] as never[] },
-				fakeContext("ses-context") as never,
+				fakeContext("ses-context", process.cwd(), ["entry-trigger"]) as never,
 			);
 			const result = await handler(
 				{ messages: [userMessage("new turn", 2)] as never[] },
-				fakeContext("ses-context") as never,
+				fakeContext("ses-context", process.cwd(), ["entry-new"]) as never,
 			);
 
 			expect(textOf(result.messages[0] as never)).toContain(
@@ -425,20 +426,20 @@ describe("registerPiContextHandler", () => {
 			onNoteTrigger(db, sessionId, "historian_complete");
 			await handler(
 				{ messages: [userMessage("trigger turn", 1)] as never[] },
-				fakeContext(sessionId) as never,
+				fakeContext(sessionId, process.cwd(), ["entry-trigger"]) as never,
 			);
 			await handler(
 				{ messages: [userMessage("new turn", 2)] as never[] },
-				fakeContext(sessionId) as never,
+				fakeContext(sessionId, process.cwd(), ["entry-new"]) as never,
 			);
 
 			const result = await handler(
 				{ messages: [userMessage("new turn", 2)] as never[] },
-				fakeContext(sessionId) as never,
+				fakeContext(sessionId, process.cwd(), ["entry-new"]) as never,
 			);
 			const onceMore = await handler(
 				{ messages: result.messages },
-				fakeContext(sessionId) as never,
+				fakeContext(sessionId, process.cwd(), ["entry-new"]) as never,
 			);
 
 			expect(
@@ -501,7 +502,7 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
-	it("clearContextHandlerSession clears auto-search per-session caches", async () => {
+	it("clearContextHandlerSession preserves persisted auto-search decisions", async () => {
 		const db = createTestDb();
 		const spy = spyOn(searchModule, "unifiedSearch").mockImplementation(
 			async () => [],
@@ -539,7 +540,7 @@ describe("registerPiContextHandler", () => {
 				fakeContext("ses-context") as never,
 			);
 
-			expect(spy).toHaveBeenCalledTimes(2);
+			expect(spy).toHaveBeenCalledTimes(1);
 		} finally {
 			spy.mockRestore();
 			closeQuietly(db);
@@ -885,5 +886,47 @@ describe("registerPiContextHandler", () => {
 		} finally {
 			closeQuietly(db);
 		}
+	});
+});
+
+describe("collectMessageEntryIdsStrict", () => {
+	it("returns null on API unavailable or length mismatch", () => {
+		expect(
+			collectMessageEntryIdsStrict(
+				{ sessionManager: {} } as never,
+				1,
+				"ses-strict",
+			),
+		).toBeNull();
+
+		expect(
+			collectMessageEntryIdsStrict(
+				{
+					sessionManager: {
+						getBranch: () => [{ type: "message", id: "entry-1" }],
+					},
+				} as never,
+				2,
+				"ses-strict",
+			),
+		).toBeNull();
+	});
+
+	it("returns real entry ids and preserves synthetic undefined entries", () => {
+		expect(
+			collectMessageEntryIdsStrict(
+				{
+					sessionManager: {
+						getBranch: () => [
+							{ type: "message", id: "entry-1" },
+							{ type: "compaction", firstKeptEntryId: "entry-2" },
+							{ type: "message", id: "entry-2" },
+						],
+					},
+				} as never,
+				2,
+				"ses-strict",
+			),
+		).toEqual([undefined, "entry-2"]);
 	});
 });
