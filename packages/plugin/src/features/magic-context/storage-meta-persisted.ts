@@ -406,7 +406,7 @@ export function setPersistedNoteNudgeTrigger(
     db.transaction(() => {
         ensureSessionMetaRow(db, sessionId);
         db.prepare(
-            "UPDATE session_meta SET note_nudge_trigger_pending = 1, note_nudge_trigger_message_id = ?, note_nudge_sticky_text = '', note_nudge_sticky_message_id = '' WHERE session_id = ?",
+            "UPDATE session_meta SET note_nudge_trigger_pending = 1, note_nudge_trigger_message_id = ? WHERE session_id = ?",
         ).run(triggerMessageId, sessionId);
     })();
 }
