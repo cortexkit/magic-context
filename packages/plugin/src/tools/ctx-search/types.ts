@@ -14,6 +14,7 @@ export interface CtxSearchArgs {
 
 export interface CtxSearchToolDeps {
     db: Database;
+    ensureProjectRegistered?: (directory: string, db: Database) => Promise<void>;
     /**
      * Resolve the project identity for the session's directory at call time.
      * See CtxMemoryToolDeps.resolveProjectPath for why this is a function:
@@ -21,8 +22,8 @@ export interface CtxSearchToolDeps {
      * session's working directory.
      */
     resolveProjectPath: (directory: string) => string;
-    memoryEnabled: boolean;
-    embeddingEnabled: boolean;
+    memoryEnabled?: boolean;
+    embeddingEnabled?: boolean;
     /** When true, ctx_search surfaces indexed git commits as a 3rd source. */
     gitCommitsEnabled?: boolean;
     /** Override message reader for testing (avoids opening OpenCode DB in CI). */

@@ -23,6 +23,7 @@ import {
 } from "../../features/magic-context/storage";
 import type { Tagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
+import { ensureProjectRegisteredFromOpenCodeDirectory } from "../../plugin/embedding-bootstrap";
 import type { PluginContext } from "../../plugin/types";
 import { getErrorMessage } from "../../shared/error-message";
 import { log } from "../../shared/logger";
@@ -324,6 +325,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                   autoPromote: deps.config.memory.auto_promote ?? true,
               }
             : undefined,
+        ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
         getHistorianChunkTokens,
         historyBudgetPercentage: deps.config.history_budget_percentage,
         executeThresholdPercentage: deps.config.execute_threshold_percentage,
@@ -369,14 +371,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                   enabled: true,
                   scoreThreshold: deps.config.experimental.auto_search.score_threshold,
                   minPromptChars: deps.config.experimental.auto_search.min_prompt_chars,
-                  memoryEnabled: deps.config.memory?.enabled !== false,
-                  // Gate semantic search on the actual embedding provider, not
-                  // on auto_search itself — the outer `if` already gates on
-                  // auto_search.enabled. If the provider is "off" we still
-                  // want FTS-backed message/memory hits to drive the hint.
-                  embeddingEnabled: deps.config.embedding?.provider !== "off",
-                  gitCommitsEnabled:
-                      deps.config.experimental?.git_commit_indexing?.enabled === true,
+                  directory: deps.directory,
+                  ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
               }
             : undefined,
         // Age-tier caveman text compression — only honored when
@@ -525,6 +521,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                     // Issue #44: respect memory feature gates from /ctx-recomp too.
                     memoryEnabled: deps.config.memory?.enabled,
                     autoPromote: deps.config.memory?.auto_promote ?? true,
+                    ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
                     // Recomp invalidates injection cache and queues drop ops
                     // via queueDropsForCompartmentalizedMessages. Signal both
                     // history-rebuild (one-shot for the next transform) and

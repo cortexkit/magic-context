@@ -289,6 +289,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
         // wrote project memories (with embeddings) even for users who
         // explicitly disabled the memory feature in config.
         if (deps.directory && deps.memoryEnabled !== false && deps.autoPromote !== false) {
+            await deps.ensureProjectRegistered?.(deps.directory, db);
             promoteSessionFactsToMemory(
                 db,
                 sessionId,

@@ -18,6 +18,7 @@ export interface CompartmentRunnerDeps {
     directory: string;
     historyBudgetTokens?: number;
     fallbackModelId?: string;
+    ensureProjectRegistered?: (directory: string, db: Database) => Promise<void>;
     getNotificationParams?: () => NotificationParams;
     /** When true, inject compaction markers into OpenCode's DB after publication */
     experimentalCompactionMarkers?: boolean;

@@ -5,6 +5,7 @@ import { SIDEKICK_AGENT } from "./agents/sidekick";
 import { loadPluginConfig } from "./config";
 import { getMagicContextBuiltinCommands } from "./features/builtin-commands/commands";
 import { DREAMER_SYSTEM_PROMPT } from "./features/magic-context/dreamer/task-prompts";
+import { resolveProjectIdentity } from "./features/magic-context/memory/project-identity";
 import { SIDEKICK_SYSTEM_PROMPT } from "./features/magic-context/sidekick/agent";
 import { recordToolDefinition } from "./features/magic-context/tool-definition-tokens";
 import { createAutoUpdateCheckerHook } from "./hooks/auto-update-checker";
@@ -16,6 +17,7 @@ import {
 import { createLiveSessionState } from "./hooks/magic-context/live-session-state";
 import { cleanupConflictWarnings, sendConflictWarning } from "./plugin/conflict-warning-hook";
 import { startDreamScheduleTimer } from "./plugin/dream-timer";
+import { ensureProjectRegisteredFromOpenCodeDirectory } from "./plugin/embedding-bootstrap";
 import { createEventHandler } from "./plugin/event";
 import { createSessionHooks } from "./plugin/hooks/create-session-hooks";
 import { createMessagesTransformHandler } from "./plugin/messages-transform";
@@ -119,8 +121,9 @@ const plugin: Plugin = async (ctx) => {
     // Start independent dream schedule timer at plugin level (not inside hooks)
     // so overnight dreaming works even when the user isn't chatting.
     if (pluginConfig.enabled) {
-        startDreamScheduleTimer({
+        const timerRegistration = {
             directory: ctx.directory,
+            projectIdentity: resolveProjectIdentity(ctx.directory),
             client: ctx.client,
             dreamerConfig: pluginConfig.dreamer,
             embeddingConfig: pluginConfig.embedding,
@@ -145,7 +148,9 @@ const plugin: Plugin = async (ctx) => {
                       max_commits: pluginConfig.experimental.git_commit_indexing.max_commits,
                   }
                 : undefined,
-        });
+            ensureRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
+        };
+        await startDreamScheduleTimer(timerRegistration);
 
         // Start RPC server for TUI↔server communication (replaces SQLite plugin_messages bus).
         // `storageDir` is hoisted above so the auto-update checker can also use it.

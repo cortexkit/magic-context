@@ -25,6 +25,7 @@ export interface CtxMemoryArgs {
 
 export interface CtxMemoryToolDeps {
     db: Database;
+    ensureProjectRegistered?: (directory: string, db: Database) => Promise<void>;
     /**
      * Resolve the project identity for the active session's directory.
      *
@@ -37,8 +38,8 @@ export interface CtxMemoryToolDeps {
      * directory's project.
      */
     resolveProjectPath: (directory: string) => string;
-    memoryEnabled: boolean;
-    embeddingEnabled: boolean;
+    memoryEnabled?: boolean;
+    embeddingEnabled?: boolean;
     allowedActions?: CtxMemoryAction[];
     sourceType?: MemorySourceType;
 }
