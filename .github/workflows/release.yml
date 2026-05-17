@@ -12,12 +12,27 @@ permissions:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# Pipeline shape (each stage gates the next via `needs:`):
+#
+#   test, test-pi, test-cli           (unit tests, parallel)
+#                  ↓
+#   e2e-opencode, e2e-pi              (Docker e2e, parallel — gated by unit tests)
+#                  ↓
+#   publish-npm, publish-npm-pi,
+#   publish-npm-cli                   (npm publishes, parallel — gated by e2e)
+#                  ↓
+#   github-release                    (GH release tag — gated by all publishes)
+#
+# Prior to v0.21.x the Docker e2e ran in a separate workflow
+# (e2e-docker.yml) on the same tag push, so publishes could complete
+# even if Docker e2e failed. Folding it inline closes that gap.
+
 jobs:
   test:
-    name: Test
+    name: Test (plugin)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -42,7 +57,7 @@ jobs:
     name: Test (pi-plugin)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -67,7 +82,7 @@ jobs:
     name: Test (cli)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -88,12 +103,85 @@ jobs:
       - name: Test
         run: bun run --cwd packages/cli test
 
+  e2e-opencode:
+    name: E2E (OpenCode, Docker)
+    runs-on: ubuntu-latest
+    needs: [test, test-cli]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install workspace deps
+        run: bun install --frozen-lockfile
+
+      - name: Build OpenCode plugin
+        run: bun run --cwd packages/plugin build
+
+      - name: Build CLI
+        # The CLI is its own package (@cortexkit/magic-context) since
+        # v0.16.1; Dockerfile.opencode COPYs packages/cli/dist/ in.
+        run: bun run --cwd packages/cli build
+
+      - name: Build E2E image
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            -f tests/docker/Dockerfile.opencode \
+            -t mc-e2e-opencode \
+            .
+
+      - name: Run E2E
+        run: docker run --rm --platform linux/amd64 mc-e2e-opencode
+
+  e2e-pi:
+    name: E2E (Pi, Docker)
+    runs-on: ubuntu-latest
+    needs: [test-pi, test-cli]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install workspace deps
+        run: bun install --frozen-lockfile
+
+      - name: Build Pi plugin
+        run: bun run --cwd packages/pi-plugin build
+
+      - name: Build CLI
+        # The CLI moved to its own package (@cortexkit/magic-context) in
+        # v0.16.1. Dockerfile.pi COPYs packages/cli/dist/ in for the
+        # `magic-context doctor --harness pi` test invocation.
+        run: bun run --cwd packages/cli build
+
+      - name: Build E2E image
+        # The Pi Dockerfile installs runtime deps fresh inside the image
+        # (better-sqlite3 builds against linux/amd64), so no host-side
+        # `npm install` is needed.
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            -f tests/docker/Dockerfile.pi \
+            -t mc-e2e-pi \
+            .
+
+      - name: Run E2E
+        run: docker run --rm --platform linux/amd64 mc-e2e-pi
+
   publish-npm:
     name: Publish plugin to npm
     runs-on: ubuntu-latest
-    needs: [test, test-pi, test-cli]
+    # Publishes are gated on the full e2e suite (OpenCode + Pi) so a tag
+    # push can never produce a published npm package whose runtime fails
+    # the install + first-turn smoke test.
+    needs: [test, test-pi, test-cli, e2e-opencode, e2e-pi]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v4
         with:
@@ -130,9 +218,9 @@ jobs:
   publish-npm-pi:
     name: Publish pi-plugin to npm
     runs-on: ubuntu-latest
-    needs: [test, test-pi, test-cli]
+    needs: [test, test-pi, test-cli, e2e-opencode, e2e-pi]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v4
         with:
@@ -164,9 +252,9 @@ jobs:
   publish-npm-cli:
     name: Publish unified CLI to npm
     runs-on: ubuntu-latest
-    needs: [test, test-pi, test-cli]
+    needs: [test, test-pi, test-cli, e2e-opencode, e2e-pi]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v4
         with:
@@ -198,13 +286,14 @@ jobs:
   github-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    # Wait for ALL three npm publishes to succeed before tagging the GitHub
-    # release. Previously this depended only on the test jobs, so a publish
-    # timeout or registry failure could leave a published release page on
-    # GitHub while one of the @cortexkit/* packages was missing from npm.
-    needs: [test, test-pi, test-cli, publish-npm, publish-npm-pi, publish-npm-cli]
+    # Wait for ALL three npm publishes to succeed before tagging the
+    # GitHub release. Previously this depended only on test jobs, so a
+    # publish timeout or registry failure could leave a published release
+    # page on GitHub while one of the @cortexkit/* packages was missing
+    # from npm.
+    needs: [test, test-pi, test-cli, e2e-opencode, e2e-pi, publish-npm, publish-npm-pi, publish-npm-cli]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
