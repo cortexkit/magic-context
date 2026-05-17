@@ -1,0 +1,58 @@
+# Announce GitHub releases to the Cortexkit Discord server.
+#
+# Fires on `release: published` — when the release.yml workflow's
+# `Create GitHub Release` step transitions the release to published state
+# (using the curated body from .alfonso/release-notes/<tag>.md).
+#
+# Discord webhook URL lives as a repository secret:
+#   Settings → Secrets and variables → Actions → DISCORD_RELEASE_WEBHOOK_URL
+#
+# To test without cutting a real release, fire manually via workflow_dispatch
+# with release_name + release_body + release_html_url.
+
+name: Discord Release Announcement
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_name:
+        description: Release title (e.g. v0.21.1)
+        required: true
+      release_body:
+        description: Release body markdown
+        required: true
+      release_html_url:
+        description: Release URL
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  announce:
+    name: Post to Discord
+    runs-on: ubuntu-latest
+    # Don't block the release pipeline on Discord delivery — if the webhook
+    # is down or misconfigured, the npm/GitHub artifacts are already
+    # published and the announcement can be retried via workflow_dispatch.
+    continue-on-error: true
+    steps:
+      - name: GitHub Releases to Discord
+        uses: SethCohen/github-releases-to-discord@v1
+        with:
+          webhook_url: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
+          # Cortexkit teal — matches the brand. Decimal value of #2C4A7C.
+          color: "2902140"
+          username: "Magic Context Releases"
+          # Reduce h1/h2 headings to fit Discord embed limits comfortably.
+          reduce_headings: true
+          # Keep PR/issue links — they're useful context in Discord.
+          remove_github_reference_links: false
+          footer_title: "Changelog"
+          footer_timestamp: true
+          # Manual-trigger inputs (no-op when fired by release event).
+          release_name: ${{ inputs.release_name }}
+          release_body: ${{ inputs.release_body }}
+          release_html_url: ${{ inputs.release_html_url }}
