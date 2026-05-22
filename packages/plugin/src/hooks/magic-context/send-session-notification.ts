@@ -6,6 +6,8 @@ export interface NotificationParams {
     variant?: string;
     providerId?: string;
     modelId?: string;
+    /** TUI toast lifetime in milliseconds (default: 5000). */
+    toastDurationMs?: number;
 }
 
 export type NotificationDeliveryDisposition = "sent" | "skipped" | "failed";
@@ -71,31 +73,32 @@ export async function sendIgnoredMessage(
     // is too easy to miss — dogfood 2026-05-30.
     forcePersist = false,
 ): Promise<NotificationDeliveryDisposition> {
+    const title = extractToastTitle(text);
+    const message = text.length > 200 ? `${text.slice(0, 200)}…` : text;
+    const toastVariant = inferToastVariant(text);
+    const duration = params.toastDurationMs ?? 5000;
+
     // In TUI mode, show as toast via RPC instead of ignored message — UNLESS the
     // caller asked to force-persist (long-running outcome must stay in scrollback).
     // Cannot use process.env.OPENCODE_CLIENT — it's undefined in the server plugin process.
     const { isTuiConnected: checkTui } = await import("../../shared/rpc-notifications");
     if (!forcePersist && checkTui(sessionId)) {
         try {
-            const c = client as Record<string, unknown>;
-            const tui = c?.tui as Record<string, unknown> | undefined;
-            if (typeof tui?.showToast === "function") {
-                // Intentional: call via property access to preserve `this` binding on the SDK client.
-                // The tui object is an SDK-generated client where methods live on the prototype.
-                const tuiClient = tui as Record<string, (...args: unknown[]) => Promise<unknown>>;
-                await tuiClient.showToast({
-                    body: {
-                        title: extractToastTitle(text),
-                        message: text.length > 200 ? `${text.slice(0, 200)}…` : text,
-                        variant: inferToastVariant(text),
-                        duration: 5000,
-                    },
-                });
-                return "sent";
-            }
+            const { pushNotification } = await import("../../shared/rpc-notifications");
+            pushNotification(
+                "toast",
+                {
+                    title,
+                    message,
+                    variant: toastVariant,
+                    duration,
+                },
+                sessionId,
+            );
+            return "sent";
         } catch {
-            // showToast failed or tui client is unavailable — fall through to ignored message.
-            sessionLog(sessionId, "TUI showToast failed, falling back to ignored message");
+            // RPC enqueue failed — fall through to ignored message.
+            sessionLog(sessionId, "TUI RPC toast enqueue failed, falling back to ignored message");
         }
     }
     // Title-safety guard (issue #129): an ignored message is hidden from the

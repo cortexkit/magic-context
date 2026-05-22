@@ -476,6 +476,13 @@
         }
       ]
     },
+    "toast_duration_ms": {
+      "default": 5000,
+      "description": "TUI toast lifetime in milliseconds for Magic Context notifications (min: 1000, max: 60000, default: 5000)",
+      "type": "number",
+      "minimum": 1000,
+      "maximum": 60000
+    },
     "execute_threshold_percentage": {
       "default": 65,
       "description": "Context percentage that forces queued operations to execute. Number or per-model object ({ default: 65, \"provider/model\": 45 }). Values above 80 are rejected because the runtime caps at 80% for cache safety (MAX_EXECUTE_THRESHOLD). Default: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE",

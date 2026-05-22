@@ -130,11 +130,13 @@ export function getLiveNotificationParams(
     liveModelBySession: LiveModelBySession,
     variantBySession: VariantBySession,
     agentBySession?: AgentBySession,
+    toastDurationMs?: number,
 ): {
     agent?: string;
     variant?: string;
     providerId?: string;
     modelId?: string;
+    toastDurationMs?: number;
 } {
     const model = liveModelBySession.get(sessionId);
     const variant = variantBySession.get(sessionId);
@@ -143,6 +145,7 @@ export function getLiveNotificationParams(
         ...(agent ? { agent } : {}),
         ...(variant ? { variant } : {}),
         ...(model ? { providerId: model.providerID, modelId: model.modelID } : {}),
+        ...(typeof toastDurationMs === "number" ? { toastDurationMs } : {}),
     };
 }
 

@@ -205,6 +205,7 @@ export async function loadStatusDetail(
         historyBlockTokens: 0,
         compressionBudget: null,
         compressionUsage: null,
+        toastDurationMs: 5000,
     };
 
     if (!rpcClient) return emptyDetail;
@@ -296,6 +297,17 @@ export async function dismissUpgradeReminder(sessionId: string): Promise<boolean
         return result.ok ?? false;
     } catch {
         return false;
+    }
+}
+
+/** Resolve global toast duration from server config via RPC. */
+export async function loadToastDurationMs(): Promise<number> {
+    if (!rpcClient) return 5000;
+    try {
+        const result = await rpcClient.call<{ toastDurationMs?: number }>("toast-duration", {});
+        return typeof result.toastDurationMs === "number" ? result.toastDurationMs : 5000;
+    } catch {
+        return 5000;
     }
 }
 

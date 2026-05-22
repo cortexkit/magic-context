@@ -92,6 +92,7 @@ export interface MagicContextDeps {
     config: {
         protected_tags: number;
         ctx_reduce_enabled?: boolean;
+        toast_duration_ms?: number;
         clear_reasoning_age?: number;
         execute_threshold_percentage?: number | { default: number; [modelKey: string]: number };
         execute_threshold_tokens?: { default?: number; [modelKey: string]: number | undefined };
@@ -343,7 +344,13 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         userMemoriesEnabled: dreamerConfig?.user_memories?.enabled === true,
         ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
         getNotificationParams: (sid) =>
-            getLiveNotificationParams(sid, liveModelBySession, variantBySession, agentBySession),
+            getLiveNotificationParams(
+                sid,
+                liveModelBySession,
+                variantBySession,
+                agentBySession,
+                deps.config.toast_duration_ms,
+            ),
     });
     // /ctx-embed start: backfill THIS session's compartment chunk embeddings,
     // reusing the recomp progress surface (sidebar + status bar) with kind="embed".
@@ -561,6 +568,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 liveModelBySession,
                 variantBySession,
                 agentBySession,
+                deps.config.toast_duration_ms,
             ),
         getModelKey: (sessionId) => {
             const model = liveModelBySession.get(sessionId);
@@ -618,6 +626,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 liveModelBySession,
                 variantBySession,
                 agentBySession,
+                deps.config.toast_duration_ms,
             ),
         onSessionCacheInvalidated: (sessionId: string) => {
             clearInjectionCache(sessionId);
@@ -698,6 +707,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     const commandHandler = createMagicContextCommandHandler({
         db,
         protectedTags: deps.config.protected_tags,
+        toastDurationMs: deps.config.toast_duration_ms,
         executeThresholdPercentage: deps.config.execute_threshold_percentage ?? 65,
         executeThresholdTokens: deps.config.execute_threshold_tokens,
         historyBudgetPercentage: deps.config.history_budget_percentage,
@@ -751,6 +761,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                     liveModelBySession,
                     variantBySession,
                     agentBySession,
+                    deps.config.toast_duration_ms,
                 ),
                 ...params,
             });
@@ -872,6 +883,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                                       liveModelBySession,
                                       variantBySession,
                                       agentBySession,
+                                      deps.config.toast_duration_ms,
                                   ),
                               isTuiConnected,
                               pushTuiDialogAction: (sid, resume) =>

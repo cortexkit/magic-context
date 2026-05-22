@@ -113,6 +113,7 @@ Higher-tier models with longer cache windows benefit from a longer TTL. Setting 
 | `ctx_reduce_enabled` | `boolean` | `true` | When `false`, hides `ctx_reduce` tool, disables all nudges/reminders, and strips reduction guidance from prompts. Heuristic cleanup, compartments, memory, and search still work. Useful for testing whether automatic cleanup alone is sufficient. |
 | `cache_ttl` | `string` or `object` | `"5m"` | Time after a response before applying pending ops. String or per-model map. |
 | `protected_tags` | `number` (1–100) | `20` | Last N active tags immune from immediate dropping. |
+| `toast_duration_ms` | `number` (1000–60000) | `5000` | TUI toast lifetime for Magic Context notifications in milliseconds. Increase this if toasts disappear too quickly. |
 | `execute_threshold_percentage` | `number` (20–80) or `object` | `65` | Context usage that forces queued ops to execute. Capped at 80% max for cache safety. Supports per-model map. |
 | `execute_threshold_tokens` | `object` (per-model map) | — | **Optional absolute-tokens variant of `execute_threshold_percentage`.** Per-model map (e.g. `{ "default": 150000, "github-copilot/gpt-5.2-codex": 40000 }`). When set for a model, overrides the percentage-based threshold for that model. Clamped to `80% × context_limit` with a warn log. Requires a resolvable context limit — falls through to percentage if unavailable. See below. |
 | `clear_reasoning_age` | `number` | `50` | Clear thinking/reasoning blocks older than N tags. |
@@ -626,6 +627,7 @@ Tier boundaries are hardcoded to keep behavior predictable and prevent cache-bus
     "anthropic/claude-opus-4-6": 50
   },
   "protected_tags": 10,
+  "toast_duration_ms": 12000,
   "history_budget_percentage": 0.15,
   "temporal_awareness": true,
 

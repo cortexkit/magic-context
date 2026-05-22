@@ -270,6 +270,7 @@ async function executeDreaming(
             text: string,
             params: NotificationParams,
         ) => Promise<void>;
+        toastDurationMs?: number;
         dreamer?: {
             config: DreamerConfig;
             projectPath: string;
@@ -288,11 +289,15 @@ async function executeDreaming(
     },
     sessionId: string,
 ): Promise<never> {
+    const dreamNotificationParams: NotificationParams = {
+        toastDurationMs: deps.toastDurationMs ?? 5000,
+    };
+
     if (!deps.dreamer?.config?.tasks?.length) {
         await deps.sendNotification(
             sessionId,
             "## /ctx-dream\n\nDreaming is not configured for this project.",
-            {},
+            dreamNotificationParams,
         );
         throwSentinel("CTX-DREAM");
     }
@@ -303,11 +308,15 @@ async function executeDreaming(
     // runner with an unexpired lease is never deleted just because it is older than 2m.
     const entry = enqueueDream(deps.db, deps.dreamer.projectPath, "manual", true);
     if (!entry) {
-        await deps.sendNotification(sessionId, "Dream already queued for this project", {});
+        await deps.sendNotification(
+            sessionId,
+            "Dream already queued for this project",
+            dreamNotificationParams,
+        );
         throwSentinel("CTX-DREAM");
     }
 
-    await deps.sendNotification(sessionId, "Starting dream run...", {});
+    await deps.sendNotification(sessionId, "Starting dream run...", dreamNotificationParams);
 
     const result = deps.dreamer.executeDream
         ? await deps.dreamer.executeDream(sessionId)
@@ -334,7 +343,7 @@ async function executeDreaming(
         result
             ? summarizeDreamResult(result)
             : "Dream queued, but another worker is already processing the queue.",
-        {},
+        dreamNotificationParams,
     );
     throwSentinel("CTX-DREAM");
 }
@@ -373,6 +382,8 @@ export function createMagicContextCommandHandler(deps: {
         text: string,
         params: NotificationParams,
     ) => Promise<void>;
+    /** Configured toast lifetime (ms) forwarded into diagnostics logs. */
+    toastDurationMs?: number;
     sidekick?: {
         config: SidekickConfig;
         projectPath: string;

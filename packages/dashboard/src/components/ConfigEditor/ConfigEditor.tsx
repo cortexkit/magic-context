@@ -204,6 +204,13 @@ const FIELD_DEFS: FieldDef[] = [
       "Enable agent-controlled reductions via the ctx_reduce tool. When enabled, the agent is prompted and nudged to choose what messages and tool calls to drop. When disabled, the system still manages context automatically via historian comparting and the tiered emergency drop under pressure.",
     section: "General",
   },
+  {
+    key: "toast_duration_ms",
+    label: "Toast Duration (ms)",
+    type: "number",
+    description: "How long Magic Context TUI toasts stay visible.",
+    section: "General",
+  },
   // Thresholds
   // cache_ttl and execute_threshold_percentage are rendered as custom PerModelField components
   // Tags & cleanup

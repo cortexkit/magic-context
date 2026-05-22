@@ -6,7 +6,7 @@ import { createMemo } from "solid-js"
 import type { TuiPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import { createSidebarContentSlot, kickRecompProgressRefresh } from "./slots/sidebar-content"
 import packageJson from "../../package.json"
-import { closeRpc, consumeTuiMessages, dismissUpgradeReminder, getAnnouncement, getCompartmentCount, getRpcGeneration, initRpcClient, loadEmbedDetail, loadStatusDetail, markAnnounced, markTuiMessagesHandled, requestRecomp, requestUpgrade, type EmbedDetail, type TuiMessage, type StatusDetail } from "./data/context-db"
+import { closeRpc, consumeTuiMessages, dismissUpgradeReminder, getAnnouncement, getCompartmentCount, getRpcGeneration, initRpcClient, loadEmbedDetail, loadStatusDetail, loadToastDurationMs, markAnnounced, markTuiMessagesHandled, requestRecomp, requestUpgrade, type EmbedDetail, type TuiMessage, type StatusDetail } from "./data/context-db"
 import { formatThresholdPercent } from "../shared/format-threshold"
 import { detectConflicts } from "../shared/conflict-detector"
 import { fixConflicts } from "../shared/conflict-fixer"
@@ -14,6 +14,42 @@ import { readJsoncFile } from "../shared/jsonc-parser"
 import { getOpenCodeConfigPaths } from "../shared/opencode-config-dir"
 
 const PLUGIN_NAME = "@cortexkit/opencode-magic-context"
+const DEFAULT_TOAST_DURATION_MS = 5000
+let unifiedToastDurationMs = DEFAULT_TOAST_DURATION_MS
+
+async function refreshToastDurationMs(): Promise<void> {
+    try {
+        const resolved = await loadToastDurationMs()
+        if (typeof resolved === "number" && Number.isFinite(resolved)) {
+            unifiedToastDurationMs = resolved
+        }
+    } catch {
+        // Keep the current value; the next poll/startup can retry.
+    }
+}
+
+function getToastDurationMs(): number {
+    return unifiedToastDurationMs
+}
+
+function showToast(
+    api: TuiPluginApi,
+    input: {
+        message: string
+        variant: "info" | "warning" | "error" | "success"
+        durationOverrideMs?: number
+    },
+): void {
+    const duration =
+        typeof input.durationOverrideMs === "number" && Number.isFinite(input.durationOverrideMs)
+            ? input.durationOverrideMs
+            : getToastDurationMs()
+    api.ui.toast({
+        message: input.message,
+        variant: input.variant,
+        duration,
+    })
+}
 
 function ensureParentDir(filePath: string) {
     mkdirSync(dirname(filePath), { recursive: true })
@@ -97,14 +133,18 @@ function showConflictDialog(api: TuiPluginApi, directory: string, reasons: strin
                             title="✅ Configuration Fixed"
                             message={`${actionSummary}\n\nPlease restart OpenCode for changes to take effect.`}
                             onConfirm={() => {
-                                api.ui.toast({ message: "Restart OpenCode to enable Magic Context", variant: "warning", duration: 10000 })
+                                showToast(api, {
+                                    message: "Restart OpenCode to enable Magic Context",
+                                    variant: "warning",
+                                    durationOverrideMs: 10_000,
+                                })
                             }}
                         />
                     ))
                 }, 50)
             }}
             onCancel={() => {
-                api.ui.toast({ message: "Magic Context remains disabled. Run: npx @cortexkit/opencode-magic-context@latest doctor", variant: "warning", duration: 5000 })
+                showToast(api, { message: "Magic Context remains disabled. Run: npx @cortexkit/opencode-magic-context@latest doctor", variant: "warning" })
             }}
         />
     ))
@@ -132,7 +172,7 @@ function showTuiSetupDialog(api: TuiPluginApi) {
                                 title="❌ Setup Failed"
                                 message={'Could not update tui.json automatically. Add the plugin manually:\n\n  { "plugin": ["@cortexkit/opencode-magic-context"] }'}
                                 onConfirm={() => {
-                                    api.ui.toast({ message: "Add plugin to tui.json manually", variant: "warning", duration: 5000 })
+                                    showToast(api, { message: "Add plugin to tui.json manually", variant: "warning" })
                                 }}
                             />
                         ))
@@ -146,14 +186,18 @@ function showTuiSetupDialog(api: TuiPluginApi) {
                             title="✅ Sidebar Enabled"
                             message="tui.json updated with Magic Context plugin.\n\nPlease restart OpenCode to see the sidebar."
                             onConfirm={() => {
-                                api.ui.toast({ message: "Restart OpenCode to see the sidebar", variant: "warning", duration: 10000 })
+                                showToast(api, {
+                                    message: "Restart OpenCode to see the sidebar",
+                                    variant: "warning",
+                                    durationOverrideMs: 10_000,
+                                })
                             }}
                         />
                     ))
                 }, 50)
             }}
             onCancel={() => {
-                api.ui.toast({ message: "You can add the sidebar later via: npx @cortexkit/opencode-magic-context@latest doctor", variant: "info", duration: 5000 })
+                showToast(api, { message: "You can add the sidebar later via: npx @cortexkit/opencode-magic-context@latest doctor", variant: "info" })
             }}
         />
     ))
@@ -458,7 +502,7 @@ function getModelKeyFromMessages(api: TuiPluginApi, sessionId: string): string |
 async function showRecompDialog(api: TuiPluginApi, targetSessionId = getSessionId(api)): Promise<boolean> {
     const sessionId = targetSessionId
     if (!sessionId) {
-        api.ui.toast({ message: "No active session", variant: "warning" })
+        showToast(api, { message: "No active session", variant: "warning" })
         return false
     }
 
@@ -483,10 +527,10 @@ async function showRecompDialog(api: TuiPluginApi, targetSessionId = getSessionI
             onConfirm={() => {
                 void requestRecomp(sessionId)
                 kickRecompProgressRefresh()
-                api.ui.toast({ message: "Recomp requested — historian will start shortly", variant: "info", duration: 5000 })
+                showToast(api, { message: "Recomp requested — historian will start shortly", variant: "info" })
             }}
             onCancel={() => {
-                api.ui.toast({ message: "Recomp cancelled", variant: "info", duration: 3000 })
+                showToast(api, { message: "Recomp cancelled", variant: "info", durationOverrideMs: 3000 })
             }}
         />
     ))
@@ -543,12 +587,11 @@ function showUpgradeDialog(
                     // call fires no message event, so without this the progress
                     // bar wouldn't appear until the upgrade finished.
                     kickRecompProgressRefresh()
-                    api.ui.toast({
+                    showToast(api, {
                         message: resume
                             ? "Resuming session upgrade — running in the background"
                             : "Session upgrade started — running in the background",
                         variant: "info",
-                        duration: 5000,
                     })
                     // Dismiss the durable reminder ONLY after the upgrade request
                     // actually started. If requestUpgrade() returns false (RPC /
@@ -566,10 +609,10 @@ function showUpgradeDialog(
                     // never-upgraded session (dogfood 2026-05-30) relies on THIS
                     // being the only place the TUI path stamps.
                     void dismissUpgradeReminder(sessionId)
-                    api.ui.toast({
+                    showToast(api, {
                         message: "Upgrade skipped — run /ctx-session-upgrade anytime",
                         variant: "info",
-                        duration: 4000,
+                        durationOverrideMs: 4000,
                     })
                 }}
             />
@@ -581,7 +624,7 @@ function showUpgradeDialog(
 async function showStatusDialog(api: TuiPluginApi, targetSessionId = getSessionId(api)): Promise<boolean> {
     const sessionId = targetSessionId
     if (!sessionId) {
-        api.ui.toast({ message: "No active session", variant: "warning" })
+        showToast(api, { message: "No active session", variant: "warning" })
         return false
     }
 
@@ -801,6 +844,7 @@ const tui: TuiPlugin = async (api, _options, meta) => {
     // Initialize RPC client for server communication
     const directory = api.state.path.directory ?? ""
     initRpcClient(directory)
+    await refreshToastDurationMs()
 
     // Register sidebar slot
     api.slots.register(createSidebarContentSlot(api))
@@ -838,6 +882,9 @@ const tui: TuiPlugin = async (api, _options, meta) => {
         pollInFlight = true
         const pollGeneration = getRpcGeneration()
         void consumeTuiMessages(requestedSessionId).then(async (messages) => {
+            if (unifiedToastDurationMs === DEFAULT_TOAST_DURATION_MS) {
+                void refreshToastDurationMs()
+            }
             // The dialog handlers read the current session when they run. If the
             // user switched routes while the RPC was in flight, drop this whole
             // batch without advancing the cursor; the next poll for the new
@@ -868,10 +915,13 @@ const tui: TuiPlugin = async (api, _options, meta) => {
                 }
                 if (msg.type === "toast") {
                     const p = msg.payload
-                    api.ui.toast({
+                    showToast(api, {
                         message: String(p.message ?? ""),
                         variant: (p.variant as "info" | "warning" | "error" | "success") ?? "info",
-                        duration: typeof p.duration === "number" ? p.duration : 5000,
+                        durationOverrideMs:
+                            typeof p.duration === "number" && Number.isFinite(p.duration)
+                                ? p.duration
+                                : undefined,
                     })
                     handledMessageIds.add(msg.id)
                 } else if (msg.type === "action") {

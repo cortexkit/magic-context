@@ -258,6 +258,8 @@ export interface MagicContextConfig {
     historian?: HistorianConfig;
     dreamer?: DreamerConfig;
     cache_ttl: string | { default: string; [modelKey: string]: string };
+    /** TUI toast lifetime in milliseconds for Magic Context notifications. Default: 5000. */
+    toast_duration_ms?: number;
     execute_threshold_percentage: number | { default: number; [modelKey: string]: number };
     /** Absolute token thresholds per model. When set for a given model (or via `default`),
      *  this overrides `execute_threshold_percentage` for that model. Useful for hard caps
@@ -387,6 +389,14 @@ export const MagicContextConfigSchema = z
             .default("5m")
             .describe(
                 'Cache TTL: string (e.g. "5m") or per-model object ({ default: "5m", "model-id": "10m" })',
+            ),
+        toast_duration_ms: z
+            .number()
+            .min(1_000)
+            .max(60_000)
+            .default(5_000)
+            .describe(
+                "TUI toast lifetime in milliseconds for Magic Context notifications (min: 1000, max: 60000, default: 5000)",
             ),
         execute_threshold_percentage: z
             .union([
