@@ -1,18 +1,12 @@
 /** @jsxImportSource @opentui/solid */
-import { createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
+import { createEffect, createMemo, createSignal, on, onCleanup, Show } from "solid-js"
 import type { TuiSlotPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import packageJson from "../../../package.json"
 import { loadSidebarSnapshot, type SidebarSnapshot } from "../data/context-db"
-import { formatThresholdPercent } from "../../shared/format-threshold"
+import { compactTokens, collapsedStatusLine, formatThresholdPercent } from "./sidebar-utils"
 
 const SINGLE_BORDER = { type: "single" } as any
 const REFRESH_DEBOUNCE_MS = 150
-
-function compactTokens(value: number): string {
-    if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
-    if (value >= 1_000) return `${(value / 1_000).toFixed(0)}K`
-    return String(value)
-}
 
 function relativeTime(ms: number): string {
     const diff = Date.now() - ms
@@ -34,6 +28,9 @@ const COLORS = {
     conversation: "#f87171", // Red
     toolCalls: "#fb923c", // Orange
     toolDefs: "#f472b6", // Pink
+    // Unused / free — dim, distinct from usage segments.
+    // Appears only in the collapsed bar when contextLimit > inputTokens.
+    free: "#666666", // Dim gray
 }
 
 interface TokenSegment {
@@ -47,6 +44,7 @@ interface TokenSegment {
 const TokenBreakdown = (props: {
     theme: TuiThemeCurrent
     snapshot: SidebarSnapshot
+    compact?: boolean
 }) => {
     // The bar is rendered as a flex row of colored boxes, each with
     // flexGrow=tokens and flexBasis=0. opentui distributes the parent
@@ -143,10 +141,28 @@ const TokenBreakdown = (props: {
             })
         }
 
+        // Free remaining context — shown only in compact mode so the bar
+        // fills the full contextLimit width and labels show "64K Free" etc.
+        if (props.compact && s.contextLimit && s.contextLimit > s.inputTokens) {
+            result.push({
+                key: "free",
+                tokens: s.contextLimit - s.inputTokens,
+                color: COLORS.free,
+                label: "Free",
+            })
+        }
+
         return result
     })
 
-    const totalTokens = createMemo(() => props.snapshot.inputTokens || 1)
+    // In compact mode with Free segment, the total is the full context limit
+    // so the Free segment gets its proportional share of the bar width.
+    const totalTokens = createMemo(() => {
+        if (props.compact && props.snapshot.contextLimit && props.snapshot.contextLimit > props.snapshot.inputTokens) {
+            return props.snapshot.contextLimit
+        }
+        return props.snapshot.inputTokens || 1
+    })
 
     // Render-time segments for the bar. Zero-token segments are filtered out
     // entirely (no flex weight, no rendered box) so they don't claim any
@@ -160,25 +176,68 @@ const TokenBreakdown = (props: {
 
     return (
         <box width="100%" flexDirection="column">
-            {/* Segmented bar: a width="100%" flex row of colored boxes,
-                each with flexGrow proportional to its token count and
-                flexBasis=0. opentui distributes the parent's full width
-                proportionally, so the bar always fills the sidebar
-                regardless of terminal size. Height is fixed at 1 row;
-                backgroundColor renders the colored bar. */}
+            {/* Segmented bar: flex row of colored boxes, each with flexGrow
+                proportional to its token count and flexBasis=0. opentui
+                distributes the parent's full width proportionally so the bar
+                always fills the sidebar. In compact mode, wide-enough segments
+                show token-count labels centered over their colored box. */}
             <box width="100%" flexDirection="row" height={1}>
-                {barSegments().map((seg) => (
-                    <box
-                        key={seg.key}
-                        flexGrow={Math.max(1, seg.tokens)}
-                        flexBasis={0}
-                        height={1}
-                        backgroundColor={seg.color}
-                    />
-                ))}
+                {(props.compact ? barSegments() : barSegments()).map((seg) => {
+                    // In compact mode, overlay a label when the segment is
+                    // wide enough (≥8% of the total). Free segments get the
+                    // "XXK Free" label at ≥12% to accommodate the longer text.
+                    const pct = seg.tokens / totalTokens()
+                    const showLabel = props.compact && pct >= 0.08 && seg.key !== "free"
+                    const showFreeLabel = props.compact && seg.key === "free" && pct >= 0.12
+
+                    if (showFreeLabel) {
+                        return (
+                            <box
+                                key={seg.key}
+                                flexGrow={Math.max(1, seg.tokens)}
+                                flexBasis={0}
+                                height={1}
+                                backgroundColor={seg.color}
+                                flexDirection="row"
+                                alignItems="center"
+                                justifyContent="center"
+                            >
+                                <text fg={props.theme.background}>{`${compactTokens(seg.tokens)} Free`}</text>
+                            </box>
+                        )
+                    }
+
+                    if (showLabel) {
+                        return (
+                            <box
+                                key={seg.key}
+                                flexGrow={Math.max(1, seg.tokens)}
+                                flexBasis={0}
+                                height={1}
+                                backgroundColor={seg.color}
+                                flexDirection="row"
+                                alignItems="center"
+                                justifyContent="center"
+                            >
+                                <text fg={props.theme.background}>{compactTokens(seg.tokens)}</text>
+                            </box>
+                        )
+                    }
+
+                    return (
+                        <box
+                            key={seg.key}
+                            flexGrow={Math.max(1, seg.tokens)}
+                            flexBasis={0}
+                            height={1}
+                            backgroundColor={seg.color}
+                        />
+                    )
+                })}
             </box>
 
-            {/* Legend rows */}
+            {/* Legend rows — hidden in compact mode */}
+            {!props.compact && (
             <box flexDirection="column" marginTop={0}>
                 {segments().map((seg) => {
                     const pct = ((seg.tokens / totalTokens()) * 100).toFixed(0)
@@ -197,6 +256,7 @@ const TokenBreakdown = (props: {
                     )
                 })}
             </box>
+            )}
         </box>
     )
 }
@@ -311,6 +371,19 @@ const SidebarContent = (props: {
         return props.theme.accent
     })
 
+    // Collapse state persisted via KV (survives restarts)
+    const COLLAPSED_KV_KEY = "mc-sidebar-collapsed"
+    const [collapsed, setCollapsed] = createSignal(
+        props.api.kv.get(COLLAPSED_KV_KEY, false) as boolean,
+    )
+    createEffect(() => {
+        props.api.kv.set(COLLAPSED_KV_KEY, collapsed())
+    })
+    const toggle = () => setCollapsed((x) => !x)
+
+    // Status line for collapsed view (line 3)
+    const collapsedStatusLineMemo = createMemo(() => collapsedStatusLine(s()))
+
     return (
         <box
             width="100%"
@@ -322,143 +395,169 @@ const SidebarContent = (props: {
             paddingLeft={1}
             paddingRight={1}
         >
-            {/* Header */}
-            <box flexDirection="row" justifyContent="space-between" alignItems="center">
-                <box paddingLeft={1} paddingRight={1} backgroundColor={props.theme.accent}>
-                    <text fg={props.theme.background}>
-                        <b>Magic Context</b>
-                    </text>
+            {/* Toggle header — collapsed shows compact usage, expanded shows brand */}
+            <Show when={collapsed()} fallback={
+                <box flexDirection="row" justifyContent="space-between" alignItems="center" onMouseDown={toggle}>
+                    <box paddingLeft={1} paddingRight={1} backgroundColor={props.theme.accent}>
+                        <text fg={props.theme.background}>
+                            <b>▼ Magic Context</b>
+                        </text>
+                    </box>
+                    <text fg={props.theme.textMuted}>v{packageJson.version}</text>
                 </box>
-                <text fg={props.theme.textMuted}>v{packageJson.version}</text>
-            </box>
+            }>
+                <Show when={s() && s()!.inputTokens > 0 && (s()?.contextLimit ?? 0) > 0} fallback={
+                    <box flexDirection="row" onMouseDown={toggle}>
+                        <text fg={props.theme.textMuted}>▶ Magic Context</text>
+                    </box>
+                }>
+                    <box flexDirection="row" width="100%" justifyContent="space-between" onMouseDown={toggle}>
+                        <text fg={contextSummaryColor()}>
+                            <b>▶</b> {s()!.usagePercentage.toFixed(1)}% / {formatThresholdPercent(s()!.executeThreshold)}%
+                        </text>
+                        <text fg={contextSummaryColor()}>
+                            {compactTokens(s()!.inputTokens)} / {compactTokens(s()!.contextLimit)}
+                        </text>
+                    </box>
+                </Show>
+            </Show>
 
-            {/* Token breakdown bar */}
-            {s() && s()!.inputTokens > 0 && (
-                <box marginTop={1} flexDirection="column">
-                    {(s()?.contextLimit ?? 0) > 0 && (
-                        <box width="100%" flexDirection="row" justifyContent="space-between">
-                            {/* Left: current usage vs the per-model execute
-                                threshold (the value Magic Context compares
-                                against when scheduling historian / drops).
-                                "47.5% / 65%" tells the user how close they
-                                are to the next compaction trigger. */}
-                            <text fg={contextSummaryColor()}>
-                                <b>{s()!.usagePercentage.toFixed(1)}%</b> / {formatThresholdPercent(s()!.executeThreshold)}%
-                            </text>
-                            {/* Right: absolute token usage vs the model's
-                                full context window (separate from the
-                                execute threshold so users still know how
-                                much headroom remains beyond compaction). */}
-                            <text fg={contextSummaryColor()}>
-                                {compactTokens(s()!.inputTokens)} / {compactTokens(s()!.contextLimit)}
-                            </text>
-                        </box>
-                    )}
-                    <TokenBreakdown theme={props.theme} snapshot={s()!} />
-                </box>
-            )}
+            {/* Collapsed: compact bar + status line */}
+            <Show when={collapsed() && s() && s()!.inputTokens > 0}>
+                <TokenBreakdown theme={props.theme} snapshot={s()!} compact />
+                <text fg={props.theme.textMuted}>{collapsedStatusLineMemo()}</text>
+            </Show>
 
-            {/* Historian section */}
-            <box width="100%" marginTop={1} flexDirection="row" justifyContent="space-between">
-                <text fg={props.theme.text}>
-                    <b>Historian</b>
-                </text>
-                {s()?.historianRunning ? (
-                    <text fg={props.theme.warning}>compacting ⟳</text>
-                ) : (
-                    <text fg={props.theme.textMuted}>idle</text>
+            {/* Expanded: full sidebar content */}
+            <Show when={!collapsed()}>
+                {/* Token breakdown bar */}
+                {s() && s()!.inputTokens > 0 && (
+                    <box marginTop={1} flexDirection="column">
+                        {(s()?.contextLimit ?? 0) > 0 && (
+                            <box width="100%" flexDirection="row" justifyContent="space-between">
+                                {/* Left: current usage vs the per-model execute
+                                    threshold (the value Magic Context compares
+                                    against when scheduling historian / drops).
+                                    "47.5% / 65%" tells the user how close they
+                                    are to the next compaction trigger. */}
+                                <text fg={contextSummaryColor()}>
+                                    <b>{s()!.usagePercentage.toFixed(1)}%</b> / {formatThresholdPercent(s()!.executeThreshold)}%
+                                </text>
+                                {/* Right: absolute token usage vs the model's
+                                    full context window (separate from the
+                                    execute threshold so users still know how
+                                    much headroom remains beyond compaction). */}
+                                <text fg={contextSummaryColor()}>
+                                    {compactTokens(s()!.inputTokens)} / {compactTokens(s()!.contextLimit)}
+                                </text>
+                            </box>
+                        )}
+                        <TokenBreakdown theme={props.theme} snapshot={s()!} />
+                    </box>
                 )}
-            </box>
-            <StatRow
-                theme={props.theme}
-                label="Compartments"
-                value={String(s()?.compartmentCount ?? 0)}
-            />
-            <StatRow
-                theme={props.theme}
-                label="Facts"
-                value={String(s()?.factCount ?? 0)}
-            />
 
-            {/* Memory section */}
-            <SectionHeader theme={props.theme} title="Memory" />
-            <StatRow
-                theme={props.theme}
-                label="Memories"
-                value={String(s()?.memoryCount ?? 0)}
-                accent
-            />
-            {(s()?.memoryBlockCount ?? 0) > 0 && (
+                {/* Historian section */}
+                <box width="100%" marginTop={1} flexDirection="row" justifyContent="space-between">
+                    <text fg={props.theme.text}>
+                        <b>Historian</b>
+                    </text>
+                    {s()?.historianRunning ? (
+                        <text fg={props.theme.warning}>compacting ⟳</text>
+                    ) : (
+                        <text fg={props.theme.textMuted}>idle</text>
+                    )}
+                </box>
                 <StatRow
                     theme={props.theme}
-                    label="Injected"
-                    value={String(s()!.memoryBlockCount)}
-                    dim
+                    label="Compartments"
+                    value={String(s()?.compartmentCount ?? 0)}
                 />
-            )}
+                <StatRow
+                    theme={props.theme}
+                    label="Facts"
+                    value={String(s()?.factCount ?? 0)}
+                />
 
-            {/* Queue & Status */}
-            {((s()?.pendingOpsCount ?? 0) > 0 ||
-                (s()?.sessionNoteCount ?? 0) > 0 ||
-                (s()?.readySmartNoteCount ?? 0) > 0) && (
-                <>
-                    <SectionHeader theme={props.theme} title="Status" />
-                    {(s()?.pendingOpsCount ?? 0) > 0 && (
-                        <StatRow
-                            theme={props.theme}
-                            label="Queue"
-                            value={`${s()!.pendingOpsCount} pending`}
-                            warning
-                        />
-                    )}
-                    {(s()?.sessionNoteCount ?? 0) > 0 && (
-                        <StatRow
-                            theme={props.theme}
-                            label="Notes"
-                            value={String(s()!.sessionNoteCount)}
-                        />
-                    )}
-                    {(s()?.readySmartNoteCount ?? 0) > 0 && (
-                        <StatRow
-                            theme={props.theme}
-                            label="Smart Notes"
-                            value={`${s()!.readySmartNoteCount} ready`}
-                            accent
-                        />
-                    )}
-                </>
-            )}
-
-            {/* Dreamer */}
-            {s()?.lastDreamerRunAt && (
-                <>
-                    <SectionHeader theme={props.theme} title="Dreamer" />
+                {/* Memory section */}
+                <SectionHeader theme={props.theme} title="Memory" />
+                <StatRow
+                    theme={props.theme}
+                    label="Memories"
+                    value={String(s()?.memoryCount ?? 0)}
+                    accent
+                />
+                {(s()?.memoryBlockCount ?? 0) > 0 && (
                     <StatRow
                         theme={props.theme}
-                        label="Last run"
-                        value={relativeTime(s()!.lastDreamerRunAt!)}
+                        label="Injected"
+                        value={String(s()!.memoryBlockCount)}
                         dim
                     />
-                </>
-            )}
+                )}
 
-            {/* Stats — v0.21.8 ships a single "Total tokens" number while we
-                figure out how to present the new-work / reprocessed
-                categorization without confusing users. The underlying
-                snapshot fields (newWorkTokens, totalInputTokens) and the
-                session_meta columns are still populated; only the UI is
-                simplified for now. */}
-            {s()?.totalInputTokens != null && (
-                <>
-                    <SectionHeader theme={props.theme} title="Stats" />
-                    <StatRow
-                        theme={props.theme}
-                        label="Total tokens"
-                        value={compactTokens(s()!.totalInputTokens ?? 0)}
-                        dim
-                    />
-                </>
-            )}
+                {/* Queue & Status */}
+                {((s()?.pendingOpsCount ?? 0) > 0 ||
+                    (s()?.sessionNoteCount ?? 0) > 0 ||
+                    (s()?.readySmartNoteCount ?? 0) > 0) && (
+                    <>
+                        <SectionHeader theme={props.theme} title="Status" />
+                        {(s()?.pendingOpsCount ?? 0) > 0 && (
+                            <StatRow
+                                theme={props.theme}
+                                label="Queue"
+                                value={`${s()!.pendingOpsCount} pending`}
+                                warning
+                            />
+                        )}
+                        {(s()?.sessionNoteCount ?? 0) > 0 && (
+                            <StatRow
+                                theme={props.theme}
+                                label="Notes"
+                                value={String(s()!.sessionNoteCount)}
+                            />
+                        )}
+                        {(s()?.readySmartNoteCount ?? 0) > 0 && (
+                            <StatRow
+                                theme={props.theme}
+                                label="Smart Notes"
+                                value={`${s()!.readySmartNoteCount} ready`}
+                                accent
+                            />
+                        )}
+                    </>
+                )}
+
+                {/* Dreamer */}
+                {s()?.lastDreamerRunAt && (
+                    <>
+                        <SectionHeader theme={props.theme} title="Dreamer" />
+                        <StatRow
+                            theme={props.theme}
+                            label="Last run"
+                            value={relativeTime(s()!.lastDreamerRunAt!)}
+                            dim
+                        />
+                    </>
+                )}
+
+                {/* Stats — v0.21.8 ships a single "Total tokens" number while we
+                    figure out how to present the new-work / reprocessed
+                    categorization without confusing users. The underlying
+                    snapshot fields (newWorkTokens, totalInputTokens) and the
+                    session_meta columns are still populated; only the UI is
+                    simplified for now. */}
+                {s()?.totalInputTokens != null && (
+                    <>
+                        <SectionHeader theme={props.theme} title="Stats" />
+                        <StatRow
+                            theme={props.theme}
+                            label="Total tokens"
+                            value={compactTokens(s()!.totalInputTokens ?? 0)}
+                            dim
+                        />
+                    </>
+                )}
+            </Show>
         </box>
     )
 }
