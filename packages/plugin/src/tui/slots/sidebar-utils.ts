@@ -1,5 +1,31 @@
 import type { SidebarSnapshot } from "../../shared/rpc-types"
 
+// ---------------------------------------------------------------------------
+// Compact bar configuration (from magic-context.jsonc → compact_bar)
+// ---------------------------------------------------------------------------
+
+/** User-configurable options for the collapsed sidebar token usage bar. */
+export interface CompactBarOptions {
+    /** Minimum segment share (0-1) to show the short token-count label on
+     * non-Free segments. Higher values reduce label clutter on narrow bars.
+     * Default: 0.10 */
+    labelThreshold?: number
+    /** Minimum segment share (0-1) to show the full "XXK Free" label on the
+     * last (free-context) segment. Below this threshold only the number is
+     * shown. Default: 0.25 */
+    freeLabelThreshold?: number
+    /** Whether to append " Free" to the last segment's label. When false,
+     * only the token count is shown regardless of segment width.
+     * Default: true */
+    showFreeLabel?: boolean
+}
+
+export const DEFAULT_COMPACT_BAR_OPTIONS: Required<CompactBarOptions> = {
+    labelThreshold: 0.10,
+    freeLabelThreshold: 0.25,
+    showFreeLabel: true,
+}
+
 /**
  * Compact byte/token count to a human-readable string.
  * Examples: 999 → "999", 1000 → "1K", 15300 → "15K", 1_200_000 → "1.2M"

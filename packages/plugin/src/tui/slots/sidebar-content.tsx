@@ -3,7 +3,9 @@ import { createEffect, createMemo, createSignal, on, onCleanup, Show } from "sol
 import type { TuiSlotPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import packageJson from "../../../package.json"
 import { loadSidebarSnapshot, type SidebarSnapshot } from "../data/context-db"
-import { compactTokens, collapsedStatusLine, formatThresholdPercent } from "./sidebar-utils"
+import { compactTokens, collapsedStatusLine, formatThresholdPercent, type CompactBarOptions, DEFAULT_COMPACT_BAR_OPTIONS } from "./sidebar-utils"
+import { readJsoncFile } from "../../shared/jsonc-parser"
+import { getOpenCodeConfigPaths } from "../../shared/opencode-config-dir"
 
 const SINGLE_BORDER = { type: "single" } as any
 const REFRESH_DEBOUNCE_MS = 150
@@ -45,7 +47,12 @@ const TokenBreakdown = (props: {
     theme: TuiThemeCurrent
     snapshot: SidebarSnapshot
     compact?: boolean
+    compactBarOptions?: CompactBarOptions
 }) => {
+    const barOpts = createMemo(() => ({
+        ...DEFAULT_COMPACT_BAR_OPTIONS,
+        ...props.compactBarOptions,
+    }))
     // The bar is rendered as a flex row of colored boxes, each with
     // flexGrow=tokens and flexBasis=0. opentui distributes the parent
     // container's full width proportionally, so the bar always fills the
@@ -183,12 +190,16 @@ const TokenBreakdown = (props: {
                 show token-count labels centered over their colored box. */}
             <box width="100%" flexDirection="row" height={1}>
                 {(props.compact ? barSegments() : barSegments()).map((seg) => {
-                    // In compact mode, overlay a label when the segment is
-                    // wide enough (≥8% of the total). Free segments get the
-                    // "XXK Free" label at ≥12% to accommodate the longer text.
+                    // Show label when segment is wide enough. Non-free segments
+                    // show the short token count (3-4 chars e.g. "42K") at the
+                    // labelThreshold. Free segments show just the number between
+                    // labelThreshold and freeLabelThreshold, and the full
+                    // "XXK Free" label at freeLabelThreshold+.
                     const pct = seg.tokens / totalTokens()
-                    const showLabel = props.compact && pct >= 0.08 && seg.key !== "free"
-                    const showFreeLabel = props.compact && seg.key === "free" && pct >= 0.12
+                    const { labelThreshold, freeLabelThreshold } = barOpts()
+                    const showLabel = props.compact && pct >= labelThreshold && seg.key !== "free"
+                    const showFreeLabel = props.compact && seg.key === "free" && barOpts().showFreeLabel && pct >= freeLabelThreshold
+                    const showFreeShort = props.compact && seg.key === "free" && pct >= labelThreshold && (!barOpts().showFreeLabel || pct < freeLabelThreshold)
 
                     if (showFreeLabel) {
                         return (
@@ -201,8 +212,27 @@ const TokenBreakdown = (props: {
                                 flexDirection="row"
                                 alignItems="center"
                                 justifyContent="center"
+                                overflow="hidden"
                             >
                                 <text fg={props.theme.background}>{`${compactTokens(seg.tokens)} Free`}</text>
+                            </box>
+                        )
+                    }
+
+                    if (showFreeShort) {
+                        return (
+                            <box
+                                key={seg.key}
+                                flexGrow={Math.max(1, seg.tokens)}
+                                flexBasis={0}
+                                height={1}
+                                backgroundColor={seg.color}
+                                flexDirection="row"
+                                alignItems="center"
+                                justifyContent="center"
+                                overflow="hidden"
+                            >
+                                <text fg={props.theme.background}>{compactTokens(seg.tokens)}</text>
                             </box>
                         )
                     }
@@ -218,6 +248,7 @@ const TokenBreakdown = (props: {
                                 flexDirection="row"
                                 alignItems="center"
                                 justifyContent="center"
+                                overflow="hidden"
                             >
                                 <text fg={props.theme.background}>{compactTokens(seg.tokens)}</text>
                             </box>
@@ -298,6 +329,7 @@ const SidebarContent = (props: {
     api: TuiPluginApi
     sessionID: () => string
     theme: TuiThemeCurrent
+    compactBarOptions?: CompactBarOptions
 }) => {
     const [snapshot, setSnapshot] = createSignal<SidebarSnapshot | null>(null)
     let refreshTimer: ReturnType<typeof setTimeout> | undefined
@@ -424,7 +456,7 @@ const SidebarContent = (props: {
 
             {/* Collapsed: compact bar + status line */}
             <Show when={collapsed() && s() && s()!.inputTokens > 0}>
-                <TokenBreakdown theme={props.theme} snapshot={s()!} compact />
+                <TokenBreakdown theme={props.theme} snapshot={s()!} compact compactBarOptions={props.compactBarOptions} />
                 <text fg={props.theme.textMuted}>{collapsedStatusLineMemo()}</text>
             </Show>
 
@@ -563,6 +595,26 @@ const SidebarContent = (props: {
 }
 
 export function createSidebarContentSlot(api: TuiPluginApi): TuiSlotPlugin {
+    // Read compact_bar config from magic-context.jsonc (silently falls back to defaults)
+    const compactBarOptions = (() => {
+        try {
+            const cfgPaths = getOpenCodeConfigPaths({ binary: "opencode" })
+            const cfg = readJsoncFile<Record<string, unknown>>(cfgPaths.omoConfig)
+            if (!cfg || typeof cfg !== "object") return undefined
+            const tuiSection = (cfg as Record<string, unknown>).tui
+            if (!tuiSection || typeof tuiSection !== "object") return undefined
+            const compactBar = (tuiSection as Record<string, unknown>).compact_bar
+            if (!compactBar || typeof compactBar !== "object") return undefined
+            const cb = compactBar as Record<string, unknown>
+            const opts: CompactBarOptions = {}
+            if (typeof cb.label_threshold === "number") opts.labelThreshold = cb.label_threshold
+            if (typeof cb.free_label_threshold === "number") opts.freeLabelThreshold = cb.free_label_threshold
+            if (typeof cb.show_free_label === "boolean") opts.showFreeLabel = cb.show_free_label
+            return Object.keys(opts).length > 0 ? opts : undefined
+        } catch {
+            return undefined
+        }
+    })()
     return {
         order: 150,
         slots: {
@@ -573,6 +625,7 @@ export function createSidebarContentSlot(api: TuiPluginApi): TuiSlotPlugin {
                         api={api}
                         sessionID={() => value.session_id}
                         theme={theme()}
+                        compactBarOptions={compactBarOptions}
                     />
                 )
             },

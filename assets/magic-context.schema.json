@@ -778,6 +778,69 @@
       "additionalProperties": false,
       "description": "Cross-session memory configuration"
     },
+    "tui": {
+      "description": "TUI sidebar and status dialog configuration",
+      "type": "object",
+      "properties": {
+        "sidebar": {
+          "description": "Sidebar panel defaults (manual toggle state is persisted via KV and overrides these)",
+          "type": "object",
+          "properties": {
+            "collapse_default": {
+              "description": "Start with the sidebar collapsed on new sessions. The manual toggle is still persisted across restarts via KV, so once a user toggles, that state is respected regardless of this default.",
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "additionalProperties": false,
+          "default": {
+            "collapse_default": false
+          }
+        },
+        "compact_bar": {
+          "description": "Token usage bar in collapsed sidebar mode",
+          "type": "object",
+          "properties": {
+            "label_threshold": {
+              "description": "Minimum segment share (0-1) to show the token-count label on a non-free segment. Higher values reduce label clutter on narrow segments. At the default 0.10 (10%), 4-char labels like '351K' fit a 4+ wide segment.",
+              "type": "number",
+              "minimum": 0.05,
+              "maximum": 0.50,
+              "default": 0.10
+            },
+            "free_label_threshold": {
+              "description": "Minimum segment share (0-1) to show the full 'XXK Free' label on the last (free-context) segment. Below this, the short number-only label is shown instead. The default 0.25 (25%) gives room for the longest possible label (9 chars, e.g. '351K Free') on a 36+ char sidebar. Narrower sidebars show just '351K'.",
+              "type": "number",
+              "minimum": 0.10,
+              "maximum": 0.50,
+              "default": 0.25
+            },
+            "show_free_label": {
+              "description": "Whether to append ' Free' to the last segment label. When false, only the token count is shown on the free segment regardless of segment width.",
+              "type": "boolean",
+              "default": true
+            }
+          },
+          "additionalProperties": false,
+          "default": {
+            "label_threshold": 0.10,
+            "free_label_threshold": 0.25,
+            "show_free_label": true
+          }
+        }
+      },
+      "additionalProperties": false,
+      "default": {
+        "sidebar": {
+          "collapse_default": false
+        },
+        "compact_bar": {
+          "label_threshold": 0.10,
+          "free_label_threshold": 0.25,
+          "show_free_label": true
+        }
+      }
+    },
     "sidekick": {
       "type": "object",
       "properties": {
