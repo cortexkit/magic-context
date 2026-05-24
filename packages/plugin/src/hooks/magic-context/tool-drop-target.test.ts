@@ -5,6 +5,7 @@ import type { MessageLike, ThinkingLikePart } from "./tag-messages";
 import {
     createToolDropTarget,
     extractToolCallObservation,
+    hasMeaningfulPart,
     type ToolCallIndex,
     ToolMutationBatch,
 } from "./tool-drop-target";
@@ -351,6 +352,49 @@ describe("tool-drop-target", () => {
                     });
                 });
             });
+        });
+    });
+
+    describe("hasMeaningfulPart", () => {
+        it("returns false for empty text", () => {
+            expect(hasMeaningfulPart({ type: "text", text: "" })).toBe(false);
+            expect(hasMeaningfulPart({ type: "text", text: "   " })).toBe(false);
+        });
+
+        it("returns false for text containing only tag prefixes", () => {
+            expect(hasMeaningfulPart({ type: "text", text: "§424§ " })).toBe(false);
+            expect(hasMeaningfulPart({ type: "text", text: "§424§" })).toBe(false);
+            expect(hasMeaningfulPart({ type: "text", text: "§424§   " })).toBe(false);
+            expect(hasMeaningfulPart({ type: "text", text: "§1§ §2§ " })).toBe(false);
+            expect(hasMeaningfulPart({ type: "text", text: '§15298">§15298§ ' })).toBe(false);
+            expect(hasMeaningfulPart({ type: "text", text: '§15298">§ ' })).toBe(false);
+        });
+
+        it("returns true for text with actual content", () => {
+            expect(hasMeaningfulPart({ type: "text", text: "hello" })).toBe(true);
+            expect(hasMeaningfulPart({ type: "text", text: "§424§ hello" })).toBe(true);
+            expect(hasMeaningfulPart({ type: "text", text: '§15298">§15298§ hello' })).toBe(true);
+        });
+
+        it("returns true for tools", () => {
+            expect(hasMeaningfulPart({ type: "tool" })).toBe(true);
+            expect(hasMeaningfulPart({ type: "tool_result" })).toBe(true);
+        });
+
+        it("returns false for non-record types", () => {
+            expect(hasMeaningfulPart(null)).toBe(false);
+            expect(hasMeaningfulPart(undefined)).toBe(false);
+            expect(hasMeaningfulPart("string")).toBe(false);
+            expect(hasMeaningfulPart(123)).toBe(false);
+        });
+
+        it("returns false for ignored part types", () => {
+            expect(hasMeaningfulPart({ type: "step-start" })).toBe(false);
+            expect(hasMeaningfulPart({ type: "step-finish" })).toBe(false);
+            expect(hasMeaningfulPart({ type: "thinking" })).toBe(false);
+            expect(hasMeaningfulPart({ type: "reasoning" })).toBe(false);
+            expect(hasMeaningfulPart({ type: "redacted_thinking" })).toBe(false);
+            expect(hasMeaningfulPart({ type: "meta" })).toBe(false);
         });
     });
 });

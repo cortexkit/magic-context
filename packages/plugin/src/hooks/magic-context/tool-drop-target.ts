@@ -145,11 +145,17 @@ function truncateInputValues(input: Record<string, unknown>): void {
     }
 }
 
+const MALFORMED_TAG_PREFIX_REGEX = /^(?:§\d+">§(?:\d+§)?\s*)+/;
+const TAG_PREFIX_REGEX = /^(?:§\d+§\s*)+/;
+
 export function hasMeaningfulPart(part: unknown): boolean {
     if (!isRecord(part)) return false;
     const type = part.type;
     if (type === "text") {
-        return typeof part.text === "string" && part.text.trim().length > 0;
+        if (typeof part.text !== "string") return false;
+        let stripped = part.text.replace(MALFORMED_TAG_PREFIX_REGEX, "");
+        stripped = stripped.replace(TAG_PREFIX_REGEX, "");
+        return stripped.trim().length > 0;
     }
     if (typeof type !== "string") return false;
     if (IGNORE_PART_TYPES.has(type)) return false;
