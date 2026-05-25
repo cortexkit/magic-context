@@ -422,7 +422,7 @@ All durable states live in a local SQLite database. If the database can't be ope
 | Embedding model cache (downloaded ONNX model, ~90 MB) | `~/.local/share/opencode/storage/plugin/magic-context/models/` |
 | Log file (diagnostic, non-essential) | `/tmp/magic-context.log` |
 
-> **Sandboxed / ephemeral environments** — The SQLite database and embedding model cache **must persist** between sandbox resets to avoid data loss and repeated model downloads. The log file is optional. Paths derive from `$XDG_DATA_HOME` (default `~/.local/share`); override with `$XDG_DATA_HOME` to point to a persistent mount.
+> **Sandboxed / ephemeral environments** — The SQLite database and embedding model cache **must persist** between sandbox resets to avoid data loss and repeated model downloads. The log file is optional. Paths derive from `$XDG_DATA_HOME` (default `~/.local/share`); override by setting `$XDG_DATA_HOME` to point to a persistent mount.
 
 | Table | Purpose |
 |-------|---------|
