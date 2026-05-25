@@ -30,7 +30,12 @@ const originalHome = process.env.HOME;
 afterEach(() => {
     setAftAvailabilityOverride(null);
     process.env.HOME = originalHome;
-    for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+    for (const dir of tempDirs)
+        try {
+            rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {
+            /* Ignore EBUSY on Windows */
+        }
     tempDirs.length = 0;
 });
 

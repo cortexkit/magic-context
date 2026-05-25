@@ -14,7 +14,11 @@ describe("substituteConfigVariables", () => {
     });
 
     afterEach(() => {
-        rmSync(tmpDir, { recursive: true, force: true });
+        try {
+            rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {
+            /* Ignore EBUSY on Windows */
+        }
         process.env = { ...ORIGINAL_ENV };
     });
 

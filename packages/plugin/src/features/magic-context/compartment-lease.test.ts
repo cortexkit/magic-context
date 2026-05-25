@@ -43,10 +43,12 @@ describe("compartment state lease", () => {
         const db = makeDb();
         const first = acquireCompartmentLease(db, "ses", "holder-a");
         expect(first).not.toBeNull();
+
         db.prepare("UPDATE compartment_state_lease SET expires_at = ? WHERE session_id = ?").run(
             Date.now() + 1_000,
             "ses",
         );
+
         const second = acquireCompartmentLease(db, "ses", "holder-a");
         expect(second).not.toBeNull();
         expect(second!.expiresAt).toBeGreaterThan(first!.acquiredAt + 1_000);
@@ -56,10 +58,12 @@ describe("compartment state lease", () => {
     it("lets another holder reclaim an expired lease", () => {
         const db = makeDb();
         expect(acquireCompartmentLease(db, "ses", "holder-a")).not.toBeNull();
+
         db.prepare("UPDATE compartment_state_lease SET expires_at = ? WHERE session_id = ?").run(
             Date.now() - 1,
             "ses",
         );
+
         expect(acquireCompartmentLease(db, "ses", "holder-b")).not.toBeNull();
         expect(isCompartmentLeaseHeld(db, "ses", "holder-b")).toBe(true);
         expect(isCompartmentLeaseHeld(db, "ses", "holder-a")).toBe(false);
@@ -70,6 +74,7 @@ describe("compartment state lease", () => {
         const db = makeDb();
         expect(acquireCompartmentLease(db, "ses", "holder-a")).not.toBeNull();
         expect(renewCompartmentLease(db, "ses", "holder-b")).toBe(false);
+
         db.prepare("UPDATE compartment_state_lease SET expires_at = ? WHERE session_id = ?").run(
             Date.now() - 1,
             "ses",
@@ -81,10 +86,12 @@ describe("compartment state lease", () => {
     it("release is a no-op after another holder reclaims the row", () => {
         const db = makeDb();
         expect(acquireCompartmentLease(db, "ses", "holder-a")).not.toBeNull();
+
         db.prepare("UPDATE compartment_state_lease SET expires_at = ? WHERE session_id = ?").run(
             Date.now() - 1,
             "ses",
         );
+
         expect(acquireCompartmentLease(db, "ses", "holder-b")).not.toBeNull();
         releaseCompartmentLease(db, "ses", "holder-a");
         expect(isCompartmentLeaseHeld(db, "ses", "holder-b")).toBe(true);
@@ -105,7 +112,11 @@ describe("compartment state lease", () => {
         } finally {
             closeQuietly(dbA);
             closeQuietly(dbB);
-            rmSync(dir, { recursive: true, force: true });
+            try {
+                rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+            } catch {
+                // Ignore EBUSY on Windows
+            }
         }
     });
 
@@ -114,10 +125,13 @@ describe("compartment state lease", () => {
         const path = join(dir, "context.db");
         const setup = makeDb(path);
         closeQuietly(setup);
+
         try {
-            const pluginRoot = process.cwd().endsWith("/packages/plugin")
-                ? process.cwd()
-                : join(process.cwd(), "packages", "plugin");
+            const projectRoot = process.cwd().includes("packages")
+                ? join(process.cwd(), "..", "..")
+                : process.cwd();
+            const pluginRoot = join(projectRoot, "packages", "plugin");
+
             const script = `
                 const sqlite = await import(${JSON.stringify(`file://${pluginRoot}/src/shared/sqlite.ts`)});
                 const storageDb = await import(${JSON.stringify(`file://${pluginRoot}/src/features/magic-context/storage-db.ts`)});
@@ -128,13 +142,18 @@ describe("compartment state lease", () => {
                 db.close();
                 console.log(JSON.stringify({ ok }));
             `;
+
             const [a, b] = await Promise.all([
                 $`bun -e ${script} holder-a`.json() as Promise<{ ok: boolean }>,
                 $`bun -e ${script} holder-b`.json() as Promise<{ ok: boolean }>,
             ]);
             expect([a.ok, b.ok].filter(Boolean)).toHaveLength(1);
         } finally {
-            rmSync(dir, { recursive: true, force: true });
+            try {
+                rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+            } catch {
+                // Ignore EBUSY on Windows
+            }
         }
     });
 });

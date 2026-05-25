@@ -36,7 +36,11 @@ describe("sticky-injection CAS helpers", () => {
                 { messageId: "m2", text: "text-2" },
             ]);
         } finally {
-            rmSync(dir, { recursive: true, force: true });
+            try {
+                rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+            } catch {
+                /* Ignore EBUSY on Windows */
+            }
         }
     });
 
@@ -51,7 +55,11 @@ describe("sticky-injection CAS helpers", () => {
             expect(pruneNoteNudgeAnchors(a, "s1", new Set(["m2"]))).toBe(1);
             expect(getNoteNudgeAnchors(b, "s1")).toEqual([{ messageId: "m2", text: "text-2" }]);
         } finally {
-            rmSync(dir, { recursive: true, force: true });
+            try {
+                rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+            } catch {
+                /* Ignore EBUSY on Windows */
+            }
         }
     });
 
@@ -70,7 +78,11 @@ describe("sticky-injection CAS helpers", () => {
             });
             expect(getNoteNudgeAnchors(db, "s1")).toEqual([{ messageId: "m1", text: "text-1" }]);
         } finally {
-            rmSync(dir, { recursive: true, force: true });
+            try {
+                rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+            } catch {
+                /* Ignore EBUSY on Windows */
+            }
         }
     });
 
@@ -93,7 +105,11 @@ describe("sticky-injection CAS helpers", () => {
                 }),
             ).toEqual({ ok: true, kind: "already-present", decision: stored });
         } finally {
-            rmSync(dir, { recursive: true, force: true });
+            try {
+                rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+            } catch {
+                /* Ignore EBUSY on Windows */
+            }
         }
     });
 });

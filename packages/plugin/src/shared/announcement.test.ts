@@ -35,7 +35,8 @@ afterEach(() => {
         process.env.XDG_DATA_HOME = originalXdg;
     }
     try {
-        fs.rmSync(tmpRoot, { recursive: true, force: true });
+        // maxRetries/retryDelay ride out transient EBUSY/EPERM on Windows.
+        fs.rmSync(tmpRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     } catch {
         // best-effort
     }

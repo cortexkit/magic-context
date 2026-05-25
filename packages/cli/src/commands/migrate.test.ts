@@ -183,7 +183,13 @@ function makeCortexkitDb() {
 
 afterEach(() => {
     for (const db of databases.splice(0)) db.close();
-    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+    for (const dir of tempDirs.splice(0)) {
+        try {
+            rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {
+            // Ignore EBUSY on Windows
+        }
+    }
 });
 
 describe("migrateOpenCodeSessionToPi", () => {

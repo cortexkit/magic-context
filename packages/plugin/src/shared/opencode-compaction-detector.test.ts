@@ -18,7 +18,11 @@ describe("opencode-compaction-detector", () => {
     });
 
     afterEach(() => {
-        rmSync(tmpDir, { recursive: true, force: true });
+        try {
+            rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {
+            /* Ignore EBUSY on Windows */
+        }
         delete process.env.OPENCODE_DISABLE_AUTOCOMPACT;
     });
 
@@ -30,7 +34,11 @@ describe("opencode-compaction-detector", () => {
             const result = isOpenCodeAutoCompactionEnabled(emptyDir);
 
             expect(result).toBe(true);
-            rmSync(emptyDir, { recursive: true, force: true });
+            try {
+                rmSync(emptyDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+            } catch {
+                /* Ignore EBUSY on Windows */
+            }
         });
     });
 

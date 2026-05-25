@@ -51,7 +51,11 @@ describe("resolveIsSubagentFromOpenCodeDb", () => {
         } else {
             process.env.XDG_DATA_HOME = originalXdg;
         }
-        rmSync(tempDir, { recursive: true, force: true });
+        try {
+            rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {
+            /* Ignore EBUSY on Windows */
+        }
     });
 
     it("returns true for a child session with a non-empty parent_id", () => {

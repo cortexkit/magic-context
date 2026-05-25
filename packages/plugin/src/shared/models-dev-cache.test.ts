@@ -39,7 +39,11 @@ describe("models-dev-cache", () => {
             if (v === undefined) delete process.env[k];
             else process.env[k] = v;
         }
-        rmSync(tempDir, { recursive: true, force: true });
+        try {
+            rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {
+            /* Ignore EBUSY on Windows */
+        }
         clearModelsDevCache();
     });
 

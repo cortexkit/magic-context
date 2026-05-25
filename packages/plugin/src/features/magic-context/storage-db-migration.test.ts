@@ -38,7 +38,11 @@ describe("storage-db legacy migration", () => {
             delete process.env.XDG_DATA_HOME;
         }
         try {
-            rmSync(tmpRoot, { recursive: true, force: true });
+            try {
+                rmSync(tmpRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+            } catch {
+                /* Ignore EBUSY on Windows */
+            }
         } catch {
             // Non-fatal — tests on locked Windows file handles can leave temp
             // dirs that the OS will clean up later.

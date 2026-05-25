@@ -414,7 +414,11 @@ describe("initFromDb signature cache", () => {
                 dbA.close();
             }
         } finally {
-            rmSync(tmpDir, { recursive: true, force: true });
+            try {
+                rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+            } catch {
+                /* Ignore EBUSY on Windows */
+            }
         }
     });
 

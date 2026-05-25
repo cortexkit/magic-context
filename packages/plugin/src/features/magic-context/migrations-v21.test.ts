@@ -20,7 +20,11 @@ describe("migration v21", () => {
         } finally {
             closeDatabase();
             process.env.XDG_DATA_HOME = undefined;
-            rmSync(dir, { recursive: true, force: true });
+            try {
+                rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+            } catch {
+                // Ignore EBUSY on Windows
+            }
         }
     });
 });

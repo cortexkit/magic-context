@@ -38,7 +38,11 @@ describe("fixConflicts", () => {
             if (value === undefined) delete process.env[key];
             else process.env[key] = value;
         }
-        rmSync(root, { recursive: true, force: true });
+        try {
+            rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {
+            /* Ignore EBUSY on Windows */
+        }
     });
 
     it("preserves JSONC comments and tuple plugin entries while removing canonical DCP", () => {

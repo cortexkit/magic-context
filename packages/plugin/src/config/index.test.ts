@@ -42,8 +42,16 @@ function loadWithUserConfig(configText: string, extraEnv: Record<string, string>
             if (v === undefined) delete process.env[k];
             else process.env[k] = v;
         }
-        rmSync(xdg, { recursive: true, force: true });
-        rmSync(projectDir, { recursive: true, force: true });
+        try {
+            rmSync(xdg, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {
+            /* Ignore EBUSY on Windows */
+        }
+        try {
+            rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {
+            /* Ignore EBUSY on Windows */
+        }
     }
 }
 
@@ -81,8 +89,16 @@ function loadWithUserAndProjectConfig(
             if (v === undefined) delete process.env[k];
             else process.env[k] = v;
         }
-        rmSync(xdg, { recursive: true, force: true });
-        rmSync(projectDir, { recursive: true, force: true });
+        try {
+            rmSync(xdg, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {
+            /* Ignore EBUSY on Windows */
+        }
+        try {
+            rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {
+            /* Ignore EBUSY on Windows */
+        }
     }
 }
 

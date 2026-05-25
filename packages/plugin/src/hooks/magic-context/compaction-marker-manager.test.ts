@@ -98,7 +98,11 @@ afterEach(() => {
     closeDatabase();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
     for (const dir of tempDirs) {
-        rmSync(dir, { recursive: true, force: true });
+        try {
+            rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {
+            // Ignore EBUSY on Windows
+        }
     }
     tempDirs.length = 0;
 });
@@ -255,7 +259,7 @@ describe("applyDeferredCompactionMarker — outcomes", () => {
         // No user message exists at or before the boundary → inject returns
         // null → retryable-failure.
         expect(outcome.kind).toBe("retryable-failure");
-        // Persisted state remains absent (we never wrote a marker)
+        // Persisted state remains absent ( we never wrote a marker)
         const persisted = getPersistedCompactionMarkerState(db, "ses-1");
         expect(persisted).toBeNull();
     });

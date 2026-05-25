@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     type DeferredExecutePayload,
     peekDeferredExecutePending,
@@ -50,16 +51,22 @@ function payload(id: string): DeferredExecutePayload {
 describe("deferred execute CAS race", () => {
     it("15. one WAL handle wins set-if-absent and the other no-ops", () => {
         const dir = mkdtempSync(join(tmpdir(), "boundary-exec-race-"));
+        const path = join(dir, "context.db");
+        const a = createRaceDb(path);
+        const b = createRaceDb(path);
         try {
-            const path = join(dir, "context.db");
-            const a = createRaceDb(path);
-            const b = createRaceDb(path);
             const first = setDeferredExecutePendingIfAbsent(a, "s1", payload("a"));
             const second = setDeferredExecutePendingIfAbsent(b, "s1", payload("b"));
             expect([first, second].filter(Boolean)).toHaveLength(1);
             expect(peekDeferredExecutePending(a, "s1")?.id).toBe(first ? "a" : "b");
         } finally {
-            rmSync(dir, { recursive: true, force: true });
+            closeQuietly(a);
+            closeQuietly(b);
+            try {
+                rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+            } catch {
+                // Ignore EBUSY on Windows
+            }
         }
     });
 });

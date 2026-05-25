@@ -20,7 +20,11 @@ afterEach(async () => {
         await server.close();
     }
     for (const dir of tempDirs.splice(0)) {
-        rmSync(dir, { recursive: true, force: true });
+        try {
+            rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {
+            /* Ignore EBUSY on Windows */
+        }
     }
 });
 

@@ -55,13 +55,21 @@ afterEach(() => {
     process.env.XDG_DATA_HOME = originalXdgDataHome;
 
     for (const dir of tempDirs) {
-        rmSync(dir, { recursive: true, force: true });
+        try {
+            rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {
+            // Ignore EBUSY on Windows
+        }
     }
     tempDirs.length = 0;
 
     // Clean up historian debug dumps created during tests
     const dumpDir = join(tmpdir(), "magic-context-historian");
-    rmSync(dumpDir, { recursive: true, force: true });
+    try {
+        rmSync(dumpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    } catch {
+        // Ignore EBUSY on Windows
+    }
 });
 
 describe("executeContextRecomp", () => {

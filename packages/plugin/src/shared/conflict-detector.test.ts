@@ -46,8 +46,21 @@ describe("detectConflicts", () => {
             else process.env[k] = v;
         }
         // Test directories live under tmpdir(); cleanup is best-effort.
-        rmSync(projectDir, { recursive: true, force: true });
-        rmSync(userConfigDir, { recursive: true, force: true });
+        try {
+            rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {
+            /* Ignore EBUSY on Windows */
+        }
+        try {
+            rmSync(userConfigDir, {
+                recursive: true,
+                force: true,
+                maxRetries: 10,
+                retryDelay: 100,
+            });
+        } catch {
+            /* Ignore EBUSY on Windows */
+        }
     });
 
     function writeProjectConfig(plugins: Array<string | [string, unknown]>): void {

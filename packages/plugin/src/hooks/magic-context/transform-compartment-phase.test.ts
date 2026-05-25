@@ -84,7 +84,12 @@ beforeEach(() => {
 afterEach(() => {
     closeDatabase();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
-    if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+    if (tempDir)
+        try {
+            rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {
+            /* Ignore EBUSY on Windows */
+        }
 });
 
 describe("runCompartmentPhase - 95% emergency notification idempotency", () => {

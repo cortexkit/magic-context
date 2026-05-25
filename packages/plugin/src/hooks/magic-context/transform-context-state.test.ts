@@ -20,7 +20,11 @@ afterEach(() => {
     process.env.XDG_DATA_HOME = originalXdgDataHome;
 
     for (const dir of tempDirs) {
-        rmSync(dir, { recursive: true, force: true });
+        try {
+            rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {
+            /* Ignore EBUSY on Windows */
+        }
     }
     tempDirs.length = 0;
 });

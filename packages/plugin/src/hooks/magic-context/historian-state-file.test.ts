@@ -15,7 +15,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-    rmSync(tempProjectDir, { recursive: true, force: true });
+    try {
+        rmSync(tempProjectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    } catch {
+        /* Ignore EBUSY on Windows */
+    }
 });
 
 describe("maybeWriteHistorianStateFile", () => {
