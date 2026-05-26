@@ -418,9 +418,9 @@ All durable states live in a local SQLite database. If the database can't be ope
 
 | What | Path |
 |------|------|
-| SQLite database (tags, compartments, memories, dream queue, all state) | `~/.local/share/cortexkit/magic-context/context.db` |
-| Embedding model cache (downloaded ONNX model, ~90 MB) | `~/.local/share/cortexkit/magic-context/models/` |
-| Log file (diagnostic, non-essential) | `{tmpdir}/{harness}/magic-context/magic-context.log` — `{tmpdir}` is the OS temp directory (e.g. `/tmp` on Linux/macOS), `{harness}` is `opencode` (OpenCode) or `pi` (Pi) |
+| SQLite database (tags, compartments, memories, dream queue, all state) | `$XDG_DATA_HOME/cortexkit/magic-context/context.db` (default: `~/.local/share/cortexkit/magic-context/context.db`) |
+| Embedding model cache (downloaded ONNX model, ~90 MB) | `$XDG_DATA_HOME/cortexkit/magic-context/models/` (default: `~/.local/share/cortexkit/magic-context/models/`) |
+| Log file (diagnostic, non-essential) | `{tmpdir}/{harness}/magic-context/magic-context.log` — `{tmpdir}` is the OS temp directory (`/tmp` on Linux/macOS, `%TEMP%` on Windows); `{harness}` is `opencode` (OpenCode) or `pi` (Pi) |
 
 > **Sandboxed / ephemeral environments** — The SQLite database and embedding model cache **must persist** between sandbox resets to avoid data loss and repeated model downloads. These paths derive from `$XDG_DATA_HOME` (default `~/.local/share`); override by setting `$XDG_DATA_HOME` to point to a persistent mount. The log file uses the OS temp directory and is optional.
 
