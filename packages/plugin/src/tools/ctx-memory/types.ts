@@ -1,12 +1,10 @@
 import type { MemorySourceType } from "../../features/magic-context/memory";
 import type { Database } from "../../shared/sqlite";
 
-export const CTX_MEMORY_ACTIONS = ["write", "delete"] as const;
+export const CTX_MEMORY_ACTIONS = ["write", "delete", "list", "update"] as const;
 
 export const CTX_MEMORY_DREAMER_ACTIONS = [
     ...CTX_MEMORY_ACTIONS,
-    "list",
-    "update",
     "merge",
     "archive",
 ] as const;

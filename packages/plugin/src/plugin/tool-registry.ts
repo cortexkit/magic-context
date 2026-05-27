@@ -82,7 +82,7 @@ export function createToolRegistry(args: {
             db,
             resolveProjectPath,
             ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
-            allowedActions: ["write", "delete"],
+            allowedActions: ["write", "delete", "list", "update"],
         }),
     };
 
