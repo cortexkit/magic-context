@@ -3,7 +3,19 @@ import { createEffect, createMemo, createSignal, on, onCleanup, Show } from "sol
 import type { TuiSlotPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import packageJson from "../../../package.json"
 import { loadSidebarSnapshot, type SidebarSnapshot } from "../data/context-db"
-import { compactTokens, collapsedStatusLine, formatThresholdPercent, type CompactBarOptions, DEFAULT_COMPACT_BAR_OPTIONS } from "./sidebar-utils"
+import {
+    collapsedStatusLine,
+    collapsedUsagePercentSegment,
+    collapsedUsageTokensSegment,
+    compactTokens,
+    formatThresholdPercent,
+    parseTuiSidebarSettings,
+    persistSidebarCollapsed,
+    resolveInitialSidebarCollapsed,
+    type CompactBarOptions,
+    DEFAULT_COMPACT_BAR_OPTIONS,
+    type TuiSidebarSettings,
+} from "./sidebar-utils"
 import { readJsoncFile } from "../../shared/jsonc-parser"
 import { getOpenCodeConfigPaths } from "../../shared/opencode-config-dir"
 
@@ -189,7 +201,7 @@ const TokenBreakdown = (props: {
                 always fills the sidebar. In compact mode, wide-enough segments
                 show token-count labels centered over their colored box. */}
             <box width="100%" flexDirection="row" height={1}>
-                {(props.compact ? barSegments() : barSegments()).map((seg) => {
+                {barSegments().map((seg) => {
                     // Show label when segment is wide enough. Non-free segments
                     // show the short token count (3-4 chars e.g. "42K") at the
                     // labelThreshold. Free segments show just the number between
@@ -329,7 +341,7 @@ const SidebarContent = (props: {
     api: TuiPluginApi
     sessionID: () => string
     theme: TuiThemeCurrent
-    compactBarOptions?: CompactBarOptions
+    sidebarSettings: TuiSidebarSettings
 }) => {
     const [snapshot, setSnapshot] = createSignal<SidebarSnapshot | null>(null)
     let refreshTimer: ReturnType<typeof setTimeout> | undefined
@@ -403,15 +415,17 @@ const SidebarContent = (props: {
         return props.theme.accent
     })
 
-    // Collapse state persisted via KV (survives restarts)
-    const COLLAPSED_KV_KEY = "mc-sidebar-collapsed"
+    // Collapse state: config default until the user toggles, then KV wins.
     const [collapsed, setCollapsed] = createSignal(
-        props.api.kv.get(COLLAPSED_KV_KEY, false) as boolean,
+        resolveInitialSidebarCollapsed(props.api.kv, props.sidebarSettings.collapseDefault),
     )
-    createEffect(() => {
-        props.api.kv.set(COLLAPSED_KV_KEY, collapsed())
-    })
-    const toggle = () => setCollapsed((x) => !x)
+    const toggle = () => {
+        setCollapsed((prev) => {
+            const next = !prev
+            persistSidebarCollapsed(props.api.kv, next)
+            return next
+        })
+    }
 
     // Status line for collapsed view (line 3)
     const collapsedStatusLineMemo = createMemo(() => collapsedStatusLine(s()))
@@ -438,25 +452,32 @@ const SidebarContent = (props: {
                     <text fg={props.theme.textMuted}>v{packageJson.version}</text>
                 </box>
             }>
-                <Show when={s() && s()!.inputTokens > 0 && (s()?.contextLimit ?? 0) > 0} fallback={
+                <Show when={s() && (s()?.contextLimit ?? 0) > 0} fallback={
                     <box flexDirection="row" onMouseDown={toggle}>
                         <text fg={props.theme.textMuted}>▶ Magic Context</text>
                     </box>
                 }>
                     <box flexDirection="row" width="100%" justifyContent="space-between" onMouseDown={toggle}>
                         <text fg={contextSummaryColor()}>
-                            <b>▶</b> {s()!.usagePercentage.toFixed(1)}% / {formatThresholdPercent(s()!.executeThreshold)}%
+                            <b>▶</b> {collapsedUsagePercentSegment(s()!.usagePercentage, s()!.executeThreshold)}
                         </text>
                         <text fg={contextSummaryColor()}>
-                            {compactTokens(s()!.inputTokens)} / {compactTokens(s()!.contextLimit)}
+                            {collapsedUsageTokensSegment(s()!.inputTokens, s()!.contextLimit)}
                         </text>
                     </box>
                 </Show>
             </Show>
 
-            {/* Collapsed: compact bar + status line */}
-            <Show when={collapsed() && s() && s()!.inputTokens > 0}>
-                <TokenBreakdown theme={props.theme} snapshot={s()!} compact compactBarOptions={props.compactBarOptions} />
+            {/* Collapsed: compact bar (when usage exists) + status line (always when snapshot loaded) */}
+            <Show when={collapsed() && s()}>
+                <Show when={s()!.inputTokens > 0}>
+                    <TokenBreakdown
+                        theme={props.theme}
+                        snapshot={s()!}
+                        compact
+                        compactBarOptions={props.sidebarSettings.compactBarOptions}
+                    />
+                </Show>
                 <text fg={props.theme.textMuted}>{collapsedStatusLineMemo()}</text>
             </Show>
 
@@ -594,27 +615,18 @@ const SidebarContent = (props: {
     )
 }
 
+function loadTuiSidebarSettings(): TuiSidebarSettings {
+    try {
+        const cfgPaths = getOpenCodeConfigPaths({ binary: "opencode" })
+        const cfg = readJsoncFile<Record<string, unknown>>(cfgPaths.omoConfig)
+        return parseTuiSidebarSettings(cfg)
+    } catch {
+        return { collapseDefault: false }
+    }
+}
+
 export function createSidebarContentSlot(api: TuiPluginApi): TuiSlotPlugin {
-    // Read compact_bar config from magic-context.jsonc (silently falls back to defaults)
-    const compactBarOptions = (() => {
-        try {
-            const cfgPaths = getOpenCodeConfigPaths({ binary: "opencode" })
-            const cfg = readJsoncFile<Record<string, unknown>>(cfgPaths.omoConfig)
-            if (!cfg || typeof cfg !== "object") return undefined
-            const tuiSection = (cfg as Record<string, unknown>).tui
-            if (!tuiSection || typeof tuiSection !== "object") return undefined
-            const compactBar = (tuiSection as Record<string, unknown>).compact_bar
-            if (!compactBar || typeof compactBar !== "object") return undefined
-            const cb = compactBar as Record<string, unknown>
-            const opts: CompactBarOptions = {}
-            if (typeof cb.label_threshold === "number") opts.labelThreshold = cb.label_threshold
-            if (typeof cb.free_label_threshold === "number") opts.freeLabelThreshold = cb.free_label_threshold
-            if (typeof cb.show_free_label === "boolean") opts.showFreeLabel = cb.show_free_label
-            return Object.keys(opts).length > 0 ? opts : undefined
-        } catch {
-            return undefined
-        }
-    })()
+    const sidebarSettings = loadTuiSidebarSettings()
     return {
         order: 150,
         slots: {
@@ -625,7 +637,7 @@ export function createSidebarContentSlot(api: TuiPluginApi): TuiSlotPlugin {
                         api={api}
                         sessionID={() => value.session_id}
                         theme={theme()}
-                        compactBarOptions={compactBarOptions}
+                        sidebarSettings={sidebarSettings}
                     />
                 )
             },
