@@ -5,7 +5,7 @@ const encoder = new TextEncoder();
 // Well-formed tag prefix: one or more `§N§` tokens separated by whitespace.
 const TAG_PREFIX_REGEX = /^(?:§\d+§\s*)+/;
 
-// Malformed tag prefix repair.
+// Malformed tag prefix repair (leading only — see MALFORMED_TAG_GLOBAL_REGEX).
 //
 // Some models occasionally produce a garbled tag reference at the start of an
 // assistant text part — the patterns observed in production are:
@@ -28,26 +28,74 @@ const TAG_PREFIX_REGEX = /^(?:§\d+§\s*)+/;
 // place, and prepends a NEW `§N§ ` in front — creating double-tagged text
 // that persists through re-tagging on every future transform pass and
 // reinforces the pattern in-context.
-//
-// Match loop: one or more leading malformed chunks, each followed by
-// optional whitespace — then the well-formed prefix regex finishes the job.
-//   §<digits>">§          → strip
-//   §<digits>">§<digits>§ → strip
-// The closing "§" on the repair variants is optional so the partial stub
-// form (`§15298">§ hello`) also matches.
 const MALFORMED_TAG_PREFIX_REGEX = /^(?:§\d+">§(?:\d+§)?\s*)+/;
+
+/** Well-formed `§N§` pairs anywhere (persistence cargo-cult cleanup). */
+const COMPLETE_TAG_PAIR_GLOBAL_REGEX = /\u00a7\d+\u00a7/g;
+
+/** Malformed tag/XML hybrid shapes anywhere (persistence cargo-cult cleanup). */
+const MALFORMED_TAG_GLOBAL_REGEX = /\u00a7\d+">(?:\u00a7(?:\d+\u00a7)?)?/g;
+
+/** Lone section signs after pair/malformed removal (persistence only). */
+const STRAY_SECTION_CHAR_REGEX = /\u00a7/g;
+
+export function stripWellFormedLeadingTagPrefix(value: string): string {
+    return value.replace(/^(\u00a7\d+\u00a7\s*)+/, "");
+}
+
+export function stripCompleteTagPairsGlobally(value: string): string {
+    return value.replace(COMPLETE_TAG_PAIR_GLOBAL_REGEX, "");
+}
+
+export function stripMalformedTagNotationGlobally(value: string): string {
+    return value.replace(MALFORMED_TAG_GLOBAL_REGEX, "");
+}
+
+export function stripTagSectionCharacters(value: string): string {
+    return value.replace(STRAY_SECTION_CHAR_REGEX, "");
+}
+
+/**
+ * Strip MC tag notation from assistant text at the persistence boundary
+ * (`experimental.text.complete`, Pi `message_end`). Removes whole `§N§` pairs
+ * (never bare leading digits), then malformed hybrids and stray `§`.
+ */
+export function stripPersistedAssistantText(value: string): string {
+    let text = stripWellFormedLeadingTagPrefix(value);
+    text = stripCompleteTagPairsGlobally(text);
+    text = stripMalformedTagNotationGlobally(text);
+    text = stripTagSectionCharacters(text);
+    return text;
+}
 
 export function byteSize(value: string): number {
     return encoder.encode(value).length;
 }
 
+/**
+ * Strip only §-shaped MC tag notation from the start of transform-visible text.
+ * Does not remove bare leading digits — those may be legitimate user content
+ * (`99 files`, `2024 roadmap`, numbered lists).
+ */
 export function stripTagPrefix(value: string): string {
-    // Strip malformed shapes first so a following well-formed tag (if any)
-    // is exposed for the canonical regex to also strip. Both regexes are
-    // anchored at the start, so order-dependent application is safe.
-    let stripped = value.replace(MALFORMED_TAG_PREFIX_REGEX, "");
-    stripped = stripped.replace(TAG_PREFIX_REGEX, "");
+    let stripped = value;
+    for (let pass = 0; pass < 8; pass++) {
+        const prev = stripped;
+        stripped = stripped.replace(MALFORMED_TAG_PREFIX_REGEX, "");
+        stripped = stripped.replace(TAG_PREFIX_REGEX, "");
+        if (stripped === prev) break;
+    }
     return stripped;
+}
+
+/**
+ * Split leading MC tag notation from the body (temporal marker injection).
+ * Uses the same §-only rules as {@link stripTagPrefix}.
+ */
+export function peelLeadingMcTagNotation(value: string): { tagPrefix: string; body: string } {
+    const body = stripTagPrefix(value);
+    if (body === value) return { tagPrefix: "", body };
+    return { tagPrefix: value.slice(0, value.length - body.length), body };
 }
 
 export function prependTag(tagId: number, value: string): string {

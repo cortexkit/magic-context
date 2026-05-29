@@ -27,6 +27,10 @@ import {
 	TEMPORAL_MARKER_PATTERN,
 	temporalMarkerPrefix,
 } from "@magic-context/core/hooks/magic-context/temporal-awareness";
+import {
+	peelLeadingMcTagNotation,
+	stripTagPrefix,
+} from "../../plugin/src/hooks/magic-context/tag-content-primitives";
 
 type PiTextContent = { type: "text"; text: string; textSignature?: string };
 type PiImageContent = { type: "image"; data: string; mimeType: string };
@@ -74,9 +78,7 @@ export function injectPiTemporalMarkers(messages: unknown[]): number {
 				const userMsg = msg as PiUserMessage;
 				if (typeof userMsg.content === "string") {
 					if (!TEMPORAL_MARKER_PATTERN.test(stripTagPrefix(userMsg.content))) {
-						const tagMatch = userMsg.content.match(/^(?:§\d+§\s*)+/);
-						const tagPrefix = tagMatch ? tagMatch[0] : "";
-						const body = userMsg.content.slice(tagPrefix.length);
+						const { tagPrefix, body } = peelLeadingMcTagNotation(userMsg.content);
 						(messages as PiAgentMessage[])[i] = {
 							...userMsg,
 							content: tagPrefix + prefix + body,
@@ -92,9 +94,7 @@ export function injectPiTemporalMarkers(messages: unknown[]): number {
 					);
 					if (firstTextIndex >= 0) {
 						const existing = userMsg.content[firstTextIndex] as PiTextContent;
-						const tagMatch = existing.text.match(/^(?:§\d+§\s*)+/);
-						const tagPrefix = tagMatch ? tagMatch[0] : "";
-						const body = existing.text.slice(tagPrefix.length);
+						const { tagPrefix, body } = peelLeadingMcTagNotation(existing.text);
 						if (!TEMPORAL_MARKER_PATTERN.test(body)) {
 							const newContent = userMsg.content.slice();
 							newContent[firstTextIndex] = {
@@ -121,15 +121,4 @@ export function injectPiTemporalMarkers(messages: unknown[]): number {
 	}
 
 	return injected;
-}
-
-/**
- * Strip the leading `§N§` tag prefix(es) so we test the marker pattern
- * against the body, not against the tagged form. Matches OpenCode's
- * approach in `injectTemporalMarkers`.
- */
-function stripTagPrefix(text: string): string {
-	const match = text.match(/^(?:§\d+§\s*)+/);
-	if (!match) return text;
-	return text.slice(match[0].length);
 }

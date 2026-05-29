@@ -52,7 +52,7 @@ describe("stripTagPrefixFromAssistantMessage", () => {
 	});
 
 	describe("cargo-culted § mid-text (models mimicking MC notation)", () => {
-		it("strips § from mid-text §N§ pair (cargo-cult defense)", () => {
+		it("removes mid-text §N§ pair entirely (cargo-cult defense)", () => {
 			const msg = {
 				role: "assistant",
 				content: [
@@ -62,21 +62,20 @@ describe("stripTagPrefixFromAssistantMessage", () => {
 					},
 				],
 			};
-			// V7: mid-text § is stripped as cargo-cult defense; digits stay as plain text.
 			expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
 			expect((msg.content[0] as { type: string; text: string }).text).toBe(
-				"Looking at 5 which references the earlier discussion",
+				"Looking at  which references the earlier discussion",
 			);
 		});
 
-		it('strips § from malformed §N"> hybrid mid-text', () => {
+		it('removes malformed §N"> hybrid mid-text', () => {
 			const msg = {
 				role: "assistant",
 				content: [{ type: "text", text: `Hello §40827">Oracle confirmed` }],
 			};
 			expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
 			expect((msg.content[0] as { type: string; text: string }).text).toBe(
-				`Hello 40827">Oracle confirmed`,
+				"Hello Oracle confirmed",
 			);
 		});
 
@@ -103,7 +102,7 @@ describe("stripTagPrefixFromAssistantMessage", () => {
 			};
 			expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
 			expect((msg.content[0] as { type: string; text: string }).text).toBe(
-				"The pattern 40827 appeared.",
+				"The pattern  appeared.",
 			);
 		});
 	});

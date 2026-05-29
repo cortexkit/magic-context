@@ -17,6 +17,8 @@
  * so injection is stable across transform passes and cache-safe.
  */
 
+import { peelLeadingMcTagNotation } from "./tag-content-primitives";
+
 /** User message gaps below this threshold get no marker. 5 minutes. */
 export const TEMPORAL_AWARENESS_THRESHOLD_SECONDS = 300;
 
@@ -170,9 +172,7 @@ export function injectTemporalMarkers(messages: unknown[]): number {
                         // inserted AFTER the tag (tagMessages strips-then-prepends
                         // the §N§, so keeping the marker to the right of it keeps
                         // the round-trip idempotent).
-                        const tagMatch = target.text.match(/^(?:§\d+§\s*)+/);
-                        const tagPrefix = tagMatch ? tagMatch[0] : "";
-                        const body = target.text.slice(tagPrefix.length);
+                        const { tagPrefix, body } = peelLeadingMcTagNotation(target.text);
                         if (!TEMPORAL_MARKER_PATTERN.test(body)) {
                             target.text = tagPrefix + prefix + body;
                             injected++;
