@@ -13,6 +13,11 @@
       "default": true,
       "description": "Enable magic context plugin"
     },
+    "auto_update": {
+      "type": "boolean",
+      "default": true,
+      "description": "Enable plugin auto update. Only allowed in user config. Project config cannot override this property."
+    },
     "ctx_reduce_enabled": {
       "type": "boolean",
       "default": true,
