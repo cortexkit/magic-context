@@ -110,12 +110,11 @@ function startLockHeartbeat(lockPath: string): () => void {
  *
  * Why this exists:
  *   `@huggingface/transformers@4.x` does a top-level static `import "onnxruntime-node"`.
- *   On Electron Desktop (e.g. OpenCode Desktop's main process), that native
- *   `.node` binary fails to load for several environmental reasons — missing
- *   Visual C++ Redistributables on Windows, ASAR archive layout issues,
- *   onnxruntime's own dependency DLLs not being resolvable. The failure
- *   propagates up the import chain and Node reports it as `ERR_MODULE_NOT_FOUND`
- *   targeting `transformers.node.mjs`, even though that file exists.
+ *   On runtimes where the native `.node` binary fails to load — Electron
+ *   Desktop (missing Visual C++ on Windows, ASAR layout issues, ABI
+ *   mismatches) and **Bun** (incomplete N-API compatibility layer that
+ *   panics on `napi_create_error`, see issue #95) — the failure propagates
+ *   up the import chain and crashes the host process.
  *
  *   transformers.js exposes `Symbol.for("onnxruntime")` as an override hook
  *   (added in 3.4.x via PR #1231). If that global symbol is set before the
@@ -124,29 +123,43 @@ function startLockHeartbeat(lockPath: string): () => void {
  *
  *   `onnxruntime-web` (WASM backend) is already a direct dependency of
  *   `@huggingface/transformers`, so it's installed alongside `onnxruntime-node`
- *   with no extra package needed. WASM is slower than native CPU on Node/Bun
- *   but on Electron Desktop it's the only path that actually loads.
+ *   with no extra package needed. WASM is slower than native CPU on Node but
+ *   on Electron Desktop and Bun it's the only path that loads reliably.
  *
- * Why only Electron:
- *   Plain Node and Bun runtimes (Pi, terminal OpenCode, dashboard backend)
- *   load `onnxruntime-node` correctly. We don't want to regress those to WASM.
- *   `process.versions.electron` is the canonical check — it's only present
- *   inside Electron processes.
+ * Why Electron and Bun:
+ *   - Electron: `.node` binaries compiled for plain Node may have wrong
+ *     NODE_MODULE_VERSION; ASAR archives can hide DLL dependencies.
+ *   - Bun: its N-API compatibility layer is incomplete — `onnxruntime-node`
+ *     calls `napi_create_error` which triggers Bun's fatal panic
+ *     (`NAPI FATAL ERROR: Error::New napi_create_error`, issue #95).
+ *   - Plain Node (Pi, terminal OpenCode, dashboard backend): loads
+ *     `onnxruntime-node` correctly — we don't want to regress those to WASM.
+ *
+ * Detection:
+ *   - `process.versions.electron` is set inside Electron processes.
+ *   - `process.versions.bun` is set inside Bun processes.
+ *   - Neither is set in plain Node.
  *
  * Refs:
- *   - https://github.com/cortexkit/magic-context/issues/78
+ *   - https://github.com/cortexkit/magic-context/issues/78 (Electron)
+ *   - https://github.com/cortexkit/magic-context/issues/95 (Bun NAPI crash)
  *   - https://github.com/huggingface/transformers.js/pull/1231 (ORT_SYMBOL)
  *   - https://github.com/huggingface/transformers.js/issues/1240 (Electron picks wrong ORT)
  */
-async function injectWasmOrtForElectron(): Promise<boolean> {
-    if (typeof process === "undefined" || !process.versions?.electron) {
+async function injectWasmOrtIfNeeded(): Promise<boolean> {
+    const isElectron = typeof process !== "undefined" && !!process.versions?.electron;
+    const isBun = typeof process !== "undefined" && typeof process.versions?.bun === "string";
+
+    if (!isElectron && !isBun) {
         return false;
     }
+
+    const runtimeLabel = isElectron ? "Electron" : "Bun";
 
     try {
         // Non-literal specifier — same trick we use for `@huggingface/transformers`
         // to keep Bun's static analyzer from eagerly probing the package at plugin
-        // load time. We need lazy resolution because non-Electron runtimes never
+        // load time. We need lazy resolution because plain-Node runtimes never
         // need onnxruntime-web at all. See issue #4.
         const ortWebSpec = `onnxruntime-${"web"}`;
         const ortWeb = (await import(ortWebSpec)) as {
@@ -184,7 +197,7 @@ async function injectWasmOrtForElectron(): Promise<boolean> {
         // instead of its own native selection logic.
         (globalThis as Record<symbol, unknown>)[Symbol.for("onnxruntime")] = ortWeb;
         log(
-            "[magic-context] Electron detected — using onnxruntime-web (WASM) for embeddings (bypasses onnxruntime-node native load)",
+            `[magic-context] ${runtimeLabel} detected — using onnxruntime-web (WASM) for embeddings (bypasses onnxruntime-node native load)`,
         );
         return true;
     } catch (error) {
@@ -193,7 +206,7 @@ async function injectWasmOrtForElectron(): Promise<boolean> {
         // native load. That will likely fail too, but the error will be the
         // user's actual problem rather than something masked by our shim.
         log(
-            "[magic-context] failed to inject onnxruntime-web for Electron — letting transformers fall back to native:",
+            `[magic-context] failed to inject onnxruntime-web for ${runtimeLabel} — letting transformers fall back to native:`,
             error instanceof Error ? error.message : String(error),
         );
         return false;
@@ -355,13 +368,15 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
                     return;
                 }
 
-                // Pre-inject WASM ORT runtime for Electron Desktop. This MUST run
-                // before the first `await import("@huggingface/transformers")` below
-                // — transformers.js reads `Symbol.for("onnxruntime")` at module
+                // Pre-inject WASM ORT runtime for Electron Desktop and Bun.
+                // This MUST run before the first `await import("@huggingface/transformers")`
+                // below — transformers.js reads `Symbol.for("onnxruntime")` at module
                 // evaluation time and uses whatever we provide instead of doing its
-                // own native-vs-web backend selection. No-op on plain Node/Bun.
-                // See: https://github.com/cortexkit/magic-context/issues/78
-                await injectWasmOrtForElectron();
+                // own native-vs-web backend selection.
+                // - Electron: avoids ABI mismatch / ASAR issues (issue #78).
+                // - Bun: avoids N-API fatal panic in onnxruntime-node (issue #95).
+                // No-op on plain Node (Pi, terminal OpenCode, dashboard).
+                await injectWasmOrtIfNeeded();
 
                 // Non-literal import specifier prevents Bun from eagerly resolving
                 // @huggingface/transformers at plugin load time. Desktop sidecar spawns
