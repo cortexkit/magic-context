@@ -78,7 +78,9 @@ export function injectPiTemporalMarkers(messages: unknown[]): number {
 				const userMsg = msg as PiUserMessage;
 				if (typeof userMsg.content === "string") {
 					if (!TEMPORAL_MARKER_PATTERN.test(stripTagPrefix(userMsg.content))) {
-						const { tagPrefix, body } = peelLeadingMcTagNotation(userMsg.content);
+						const { tagPrefix, body } = peelLeadingMcTagNotation(
+							userMsg.content,
+						);
 						(messages as PiAgentMessage[])[i] = {
 							...userMsg,
 							content: tagPrefix + prefix + body,
