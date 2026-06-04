@@ -1,3 +1,5 @@
+import { stripPersistedAssistantText } from "./tag-content-primitives";
+
 /**
  * Persistence-boundary strip for assistant completions (`experimental.text.complete`).
  *
@@ -21,8 +23,6 @@
  * Does not affect user message text (hook is assistant-only) or transform-injected
  * sentinels like `[dropped §N§]`.
  */
-
-import { stripPersistedAssistantText } from "./tag-content-primitives";
 
 export function createTextCompleteHandler() {
     return async (

@@ -65,7 +65,7 @@ export function stripPersistedAssistantText(value: string): string {
     text = stripCompleteTagPairsGlobally(text);
     text = stripMalformedTagNotationGlobally(text);
     text = stripTagSectionCharacters(text);
-    return text;
+    return text.trim();
 }
 
 export function byteSize(value: string): number {

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 
 import {
+    byteSize,
+    isThinkingPart,
     peelLeadingMcTagNotation,
     prependTag,
     stripPersistedAssistantText,
@@ -138,5 +140,55 @@ describe("peelLeadingMcTagNotation", () => {
 
             body: "body",
         });
+    });
+});
+
+describe("stripPersistedAssistantText edge cases", () => {
+    it("#given malformed prefix with trailing space #when strip runs #then trims result", () => {
+        expect(stripPersistedAssistantText(`${SECTION}15298">§15298§ `)).toBe("");
+    });
+
+    it("#given tag-only text with trailing space #when strip runs #then returns empty", () => {
+        expect(stripPersistedAssistantText(`${SECTION}42${SECTION} `)).toBe("");
+    });
+
+    it("#given whitespace-only after strip #when strip runs #then trims to empty", () => {
+        expect(stripPersistedAssistantText(`   `)).toBe("");
+    });
+});
+
+describe("byteSize", () => {
+    it("#given ascii string #when byteSize runs #then returns byte length", () => {
+        expect(byteSize("hello")).toBe(5);
+    });
+
+    it("#given empty string #when byteSize runs #then returns 0", () => {
+        expect(byteSize("")).toBe(0);
+    });
+
+    it("#given multibyte string #when byteSize runs #then returns encoded byte length", () => {
+        expect(byteSize("§42§")).toBe(6);
+    });
+});
+
+describe("isThinkingPart", () => {
+    it("#given thinking part #when isThinkingPart runs #then returns true", () => {
+        expect(isThinkingPart({ type: "thinking", thinking: "..." })).toBe(true);
+    });
+
+    it("#given reasoning part #when isThinkingPart runs #then returns true", () => {
+        expect(isThinkingPart({ type: "reasoning", reasoning: "..." })).toBe(true);
+    });
+
+    it("#given text part #when isThinkingPart runs #then returns false", () => {
+        expect(isThinkingPart({ type: "text", text: "hello" })).toBe(false);
+    });
+
+    it("#given null #when isThinkingPart runs #then returns false", () => {
+        expect(isThinkingPart(null)).toBe(false);
+    });
+
+    it("#given primitive #when isThinkingPart runs #then returns false", () => {
+        expect(isThinkingPart("string")).toBe(false);
     });
 });
