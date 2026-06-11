@@ -26,6 +26,7 @@ import {
     getTagById,
     getTagsBySession,
     incrementHistorianFailure,
+    insertTag,
     loadProtectedTailMeta,
     openDatabase,
     queuePendingOp,
@@ -690,6 +691,15 @@ describe("createTransform", () => {
         await transform({}, { messages: firstPass });
 
         const db = openDatabase();
+        // Push the real tool tag out of the newest-20 skeleton window (the
+        // db7bc0a tool-skeleton change keeps a truncated tool_use/tool_result
+        // pair for drops within that window) so this test keeps exercising
+        // the FULL-removal path it documents. Mirrors padSkeletonWindow in
+        // apply-operations.tool-drop.test.ts — upstream updated that file's
+        // tests for the new behavior but missed this one.
+        for (let i = 1; i <= 20; i += 1) {
+            insertTag(db, "ses-1", `call-pad-${i}`, "tool", 10, 2 + i);
+        }
         queuePendingOp(db, "ses-1", 1, "drop");
         queuePendingOp(db, "ses-1", 2, "drop");
         shouldExecute.mockImplementation(() => "execute");
