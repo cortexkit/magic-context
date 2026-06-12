@@ -56,7 +56,9 @@ import { clearInjectionCache, renderMemoryBlock } from "./inject-compartments";
 import { onNoteTrigger } from "./note-nudger";
 import {
     createDefaultBoundarySnapshotForTests,
+    hasRunnableCompartmentWindow,
     recordHighPressureNoEligibleHead,
+    resolveOpenCodeProtectedTailBoundary,
     selectPerRunCap,
     validateBoundarySnapshot,
 } from "./protected-tail-boundary";
@@ -203,7 +205,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                 ? priorCompartments[priorCompartments.length - 1].endMessage + 1
                 : 1;
 
-        const boundarySnapshot =
+        let boundarySnapshot =
             deps.boundarySnapshot ??
             (process.env.NODE_ENV === "test"
                 ? createDefaultBoundarySnapshotForTests(sessionId)
@@ -217,7 +219,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             rollbackDrainReservation();
             return;
         }
-        const validation =
+        let validation =
             boundarySnapshot.rawRangeFingerprint.length > 0
                 ? validateBoundarySnapshot({
                       db,
@@ -226,6 +228,42 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                           deps.currentContextLimit ?? boundarySnapshot.contextLimit,
                   })
                 : { ok: true };
+        // In an active session the protected tail's newest message changes every
+        // turn (a fresh user/assistant message lands), so a snapshot captured at
+        // trigger time goes stale on the "last ordinal id" check by the time the
+        // historian actually runs — even though the ELIGIBLE HEAD (offset →
+        // eligibleEnd) it would compact is untouched. Left as-is the runner no-ops
+        // forever while the trigger refires each turn, and queued drop ops starve
+        // (observed in production: 27 consecutive stale-snapshot no-ops, 179
+        // pending drops, zero reduction). Re-resolve the boundary ONCE from the
+        // CURRENT session state and adopt the fresh snapshot when it still exposes
+        // a runnable head. This does NOT weaken the protected-tail guarantee: the
+        // refreshed snapshot recomputes protectedTailStart/eligibleEnd from the
+        // live messages, so the head can never include a message that now belongs
+        // to the current protected tail.
+        if (!validation.ok && validation.reason === "stale_snapshot") {
+            const refreshed = resolveOpenCodeProtectedTailBoundary({
+                db,
+                sessionId,
+                mode: "incremental-runner",
+                contextLimit: deps.currentContextLimit ?? boundarySnapshot.contextLimit,
+                executeThresholdPercentage: boundarySnapshot.executeThresholdPercentage,
+                usage: {
+                    percentage: boundarySnapshot.usagePercentage,
+                    inputTokens: boundarySnapshot.usageInputTokens,
+                },
+                usageSource: boundarySnapshot.usageSource,
+                emergencyTailScale: boundarySnapshot.emergencyTailScale,
+            });
+            if (hasRunnableCompartmentWindow(refreshed)) {
+                sessionLog(
+                    sessionId,
+                    `historian: refreshed stale protected-tail snapshot at run time (was: ${validation.detail ?? "stale"}) — eligible head ${refreshed.offset}-${refreshed.eligibleEndOrdinal - 1}`,
+                );
+                boundarySnapshot = refreshed;
+                validation = { ok: true };
+            }
+        }
         if (!validation.ok) {
             sessionLog(
                 sessionId,
@@ -334,6 +372,14 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             rollbackDrainReservation();
             return;
         }
+
+        // Past every synchronous no-op early-return and immediately before the
+        // first `await` (client.session.get below): we are now committed to a
+        // real historian pass. Signal the caller so startCompartmentAgent keeps
+        // the active-run registration; a synchronous no-op above never reaches
+        // here, so its lingering registration is cleared instead of blocking the
+        // same transform pass's pending-op drain.
+        deps.onHistorianRunStarted?.();
 
         // v2 bounded reference model (replaces the unbounded existing_state dump):
         //   - 4 rotating cross-project seeds + last-6 recency compartments (no

@@ -117,6 +117,16 @@ export interface CompartmentRunnerDeps {
     onDeferredMarkerPending?: (sessionId: string) => void;
     /** Holder id for the DB-backed compartment-state lease guarding publish paths. */
     compartmentLeaseHolderId?: string;
+    /**
+     * Called synchronously the moment the runner commits to a REAL historian
+     * pass — after every no-op early-return (stale/empty snapshot, nothing to
+     * compact, drain-quota) and immediately before the first `await`. Lets
+     * `startCompartmentAgent` distinguish a fire-and-forget run that actually
+     * started from one that no-op'd synchronously, so a no-op does not leave
+     * the rest of the transform pass believing a historian is in progress
+     * (which would defer queued drop ops — the production livelock).
+     */
+    onHistorianRunStarted?: () => void;
 }
 
 export interface CandidateCompartment {

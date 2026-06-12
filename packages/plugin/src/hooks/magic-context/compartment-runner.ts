@@ -124,7 +124,14 @@ export function startCompartmentAgent(deps: CompartmentRunnerDeps): void {
     // Track the real underlying promise — NOT a raced wrapper.
     // This ensures activeRuns.has(sessionId) stays true until the historian run
     // actually completes, preventing duplicate runs even if an external await times out.
-    const runnerDeps = withPublishedCallback({ ...deps, compartmentLeaseHolderId: holderId });
+    let realRunStarted = false;
+    const runnerDeps = withPublishedCallback({
+        ...deps,
+        compartmentLeaseHolderId: holderId,
+        onHistorianRunStarted: () => {
+            realRunStarted = true;
+        },
+    });
     const promise = runCompartmentAgent(runnerDeps)
         .catch((err) => {
             sessionLog(deps.sessionId, "compartment agent: unhandled rejection:", err);
@@ -143,6 +150,20 @@ export function startCompartmentAgent(deps: CompartmentRunnerDeps): void {
             }
         });
     activeRuns.set(deps.sessionId, { promise, published: false });
+    // If the runner no-op'd synchronously (stale/empty snapshot, nothing to
+    // compact, drain-quota), it returned before signalling onHistorianRunStarted
+    // and before any `await`, so `promise` is already settling. It cleared
+    // compartmentInProgress in its own finally, but the activeRuns entry above
+    // would otherwise survive (cleared only by the microtask-scheduled
+    // promise.finally) and make the SAME transform pass treat a non-running
+    // historian as in-progress — deferring queued drop ops and starving them
+    // turn after turn (the production livelock). Drop the registration
+    // synchronously so pending ops can materialize this pass. The promise.finally
+    // below still runs for interval/lease cleanup; its `=== promise` guard makes
+    // the (now redundant) delete a no-op.
+    if (!realRunStarted && activeRuns.get(deps.sessionId)?.promise === promise) {
+        activeRuns.delete(deps.sessionId);
+    }
 }
 
 export interface ExecuteContextRecompOptions {

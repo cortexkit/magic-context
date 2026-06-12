@@ -36,6 +36,10 @@ import {
     runCompartmentAgent,
     startCompartmentAgent,
 } from "./compartment-runner";
+import {
+    hasRunnableCompartmentWindow,
+    resolveOpenCodeProtectedTailBoundary,
+} from "./protected-tail-boundary";
 import { tagMessages } from "./tag-messages";
 
 const tempDirs: string[] = [];
@@ -1780,6 +1784,186 @@ describe("runCompartmentAgent", () => {
         expect(notice).toContain("magic-context.jsonc");
         // The escalated notice surfaces the real error for diagnosis.
         expect(notice).toContain("historian model unavailable");
+    });
+
+    // Regression: production livelock (ses_157f877e2ffepme9doYf3RTnRx). In an
+    // active session the protected tail's newest message changes every turn, so
+    // the trigger-time boundary snapshot fails validation on the "last ordinal
+    // id changed" check by the time the historian runs — even though the eligible
+    // HEAD it would compact is untouched. The runner used to no-op forever while
+    // the trigger refired each turn and queued drop ops starved. It must now
+    // re-resolve the boundary at run time and make real progress.
+    it("refreshes a stale-tail boundary snapshot at run time instead of no-op'ing forever", async () => {
+        useTempDataHome("compartment-runner-stale-tail-refresh-");
+        createOpenCodeDb("ses-stale-tail", [
+            { id: "m-1", role: "user", text: `eligible head one ${"detail ".repeat(150)}` },
+            { id: "m-2", role: "assistant", text: `eligible head two ${"detail ".repeat(150)}` },
+            { id: "m-3", role: "user", text: `tail ${"context ".repeat(3000)}` },
+        ]);
+        const db = openDatabase();
+
+        // Tag the eligible head so a successful publish also queues drop ops —
+        // proving the stale→refresh→publish chain that feeds drop application.
+        tagMessages(
+            "ses-stale-tail",
+            [
+                {
+                    info: { id: "m-1", role: "user", sessionID: "ses-stale-tail" },
+                    parts: [{ type: "text", text: `eligible head one ${"detail ".repeat(150)}` }],
+                },
+                {
+                    info: { id: "m-2", role: "assistant", sessionID: "ses-stale-tail" },
+                    parts: [{ type: "text", text: `eligible head two ${"detail ".repeat(150)}` }],
+                },
+            ],
+            createTagger(),
+            db,
+        );
+
+        // Resolve a genuine snapshot (correct fingerprint + ids), then corrupt
+        // ONLY the recorded last-tail id to simulate the live tail advancing
+        // between trigger and run. Every other check (offset, protectedTailStart,
+        // eligibleEnd, eligible-range fingerprint) still passes — exactly the
+        // production failure mode.
+        const realSnapshot = resolveOpenCodeProtectedTailBoundary({
+            db,
+            sessionId: "ses-stale-tail",
+            mode: "trigger",
+            contextLimit: 8_000,
+            executeThresholdPercentage: 65,
+            usage: { percentage: 95, inputTokens: 7_600 },
+            usageSource: "live",
+        });
+        expect(hasRunnableCompartmentWindow(realSnapshot)).toBe(true);
+        expect(realSnapshot.offset).toBe(1);
+        expect(realSnapshot.eligibleEndOrdinal).toBeGreaterThan(realSnapshot.offset);
+        expect(realSnapshot.rawRangeFingerprint.length).toBeGreaterThan(0);
+        const staleSnapshot = {
+            ...realSnapshot,
+            rawLastMessageIdAtTrigger: "m-vanished-live-tail",
+        };
+
+        const client = {
+            session: {
+                get: mock(async () => ({ data: { directory: "/tmp/stale-tail" } })),
+                create: mock(async () => ({ data: { id: "ses-agent-stale-tail" } })),
+                prompt: mock(async () => ({})),
+                messages: mock(async () => ({
+                    data: [
+                        {
+                            info: { role: "assistant", time: { created: 1 } },
+                            parts: [
+                                {
+                                    type: "text",
+                                    text: '<compartment start="1" end="2" title="Eligible head">Head summary</compartment>',
+                                },
+                            ],
+                        },
+                    ],
+                })),
+                delete: mock(async () => ({})),
+            },
+        } as unknown as PluginContext["client"];
+
+        await runCompartmentAgentWithLease({
+            client,
+            db,
+            sessionId: "ses-stale-tail",
+            historianChunkTokens: 10_000,
+            directory: "/tmp",
+            boundarySnapshot: staleSnapshot,
+            currentContextLimit: 8_000,
+        });
+
+        // Re-derived and PUBLISHED rather than no-op'ing: progress is made.
+        const compartments = getCompartments(db, "ses-stale-tail");
+        expect(compartments).toHaveLength(1);
+        expect(compartments[0]?.startMessage).toBe(1);
+        expect(compartments[0]?.endMessage).toBe(2);
+        // And the published compartment queued drops for its covered tags, so the
+        // accumulated pending ops can finally drain (no starvation).
+        expect(getPendingOps(db, "ses-stale-tail").length).toBeGreaterThan(0);
+        expect(getOrCreateSessionMeta(db, "ses-stale-tail").compartmentInProgress).toBe(false);
+    });
+
+    // Regression: a synchronous runner no-op (stale/empty snapshot, nothing to
+    // compact) must NOT leave the rest of the transform pass believing a historian
+    // is in progress. startCompartmentAgent registers the run in `activeRuns`
+    // BEFORE the (microtask-scheduled) promise.finally can clear it; postprocess
+    // reads `getActiveCompartmentRun` synchronously in the same pass and would
+    // defer queued drop ops for a run that already finished. The no-op must clear
+    // the registration synchronously.
+    it("clears the active-run registration synchronously when the runner no-ops", async () => {
+        useTempDataHome("compartment-runner-sync-noop-clear-");
+        createOpenCodeDb("ses-sync-noop", [
+            { id: "m-1", role: "user", text: "only protected 1" },
+            { id: "m-2", role: "user", text: "only protected 2" },
+            { id: "m-3", role: "user", text: "only protected 3" },
+        ]);
+        const db = openDatabase();
+
+        // protectedTailStart === offset (1) → "nothing to compact" no-op, which
+        // returns synchronously before any await. Empty fingerprint skips the
+        // validation branch so we land squarely on the nothing-to-compact path.
+        const noopSnapshot = {
+            sessionId: "ses-sync-noop",
+            mode: "trigger" as const,
+            offset: 1,
+            offsetMessageId: "m-1",
+            protectedTailStart: 1,
+            protectedTailStartMessageId: "m-1",
+            eligibleEndOrdinal: 1,
+            eligibleEndMessageId: null,
+            rawMessageCountAtTrigger: 3,
+            rawLastMessageIdAtTrigger: "m-3",
+            N: 1_000,
+            usagePercentage: 10,
+            usageInputTokens: 1_000,
+            usageSource: "live" as const,
+            contextLimit: 128_000,
+            executeThresholdPercentage: 65,
+            triggerBudget: 5_000,
+            priorBoundaryOrdinal: 1,
+            migrationFloorActive: false,
+            providerShapeVersion: "opencode-v1" as const,
+            cacheNamespace: "test:ses-sync-noop",
+            createdAt: Date.now(),
+            rawRangeFingerprint: "",
+            trueRawEligibleTokens: 0,
+            oversizeAtomicUnit: false,
+            boundaryReason: "size-walk",
+        };
+
+        const client = {
+            session: {
+                get: mock(async () => ({ data: { directory: "/tmp/sync-noop" } })),
+                create: mock(async () => ({ data: { id: "ses-agent-sync-noop" } })),
+                prompt: mock(async () => ({})),
+                messages: mock(async () => ({ data: [] })),
+                delete: mock(async () => ({})),
+            },
+        } as unknown as PluginContext["client"];
+
+        startCompartmentAgent({
+            client,
+            db,
+            sessionId: "ses-sync-noop",
+            historianChunkTokens: 10_000,
+            directory: "/tmp",
+            boundarySnapshot: noopSnapshot,
+            currentContextLimit: 128_000,
+        });
+
+        // SYNCHRONOUS assertion (no await): the no-op already cleared the
+        // registration, so the same transform pass sees no active run and can
+        // materialize queued drops instead of deferring them forever.
+        expect(getActiveCompartmentRun("ses-sync-noop")).toBeUndefined();
+        expect(getOrCreateSessionMeta(db, "ses-sync-noop").compartmentInProgress).toBe(false);
+
+        // Let the fire-and-forget promise settle so its finally clears the lease
+        // renewal interval before the db closes.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        expect(getActiveCompartmentRun("ses-sync-noop")).toBeUndefined();
     });
 });
 
