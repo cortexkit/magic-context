@@ -432,23 +432,21 @@ describe("loadPluginConfig — variable expansion scope", () => {
         writeFileSync(secretFile, "project-file-secret", "utf-8");
 
         try {
+            // cache_ttl (a plain string field) and disabled_hooks (a string
+            // array) are the token vehicles here — unlike embedding they are NOT
+            // stripped from project config. The point is that project-level
+            // {env:}/{file:} tokens are never expanded; they stay literal.
             const result = loadWithUserAndProjectConfig(
                 JSON.stringify({ enabled: true }),
                 JSON.stringify({
-                    embedding: {
-                        provider: "openai-compatible",
-                        model: `{file:${secretFile}}`,
-                        endpoint: "{env:MC_PROJECT_ENDPOINT}",
-                    },
+                    cache_ttl: "{env:MC_PROJECT_TTL}",
+                    disabled_hooks: [`{file:${secretFile}}`],
                 }),
-                { MC_PROJECT_ENDPOINT: "http://project-env.test/v1" },
+                { MC_PROJECT_TTL: "10m" },
             );
 
-            expect(result.embedding.provider).toBe("openai-compatible");
-            if (result.embedding.provider === "openai-compatible") {
-                expect(result.embedding.model).toBe(`{file:${secretFile}}`);
-                expect(result.embedding.endpoint).toBe("{env:MC_PROJECT_ENDPOINT}");
-            }
+            expect(result.cache_ttl).toBe("{env:MC_PROJECT_TTL}");
+            expect(result.disabled_hooks).toEqual([`{file:${secretFile}}`]);
             const warnings = result.configWarnings?.join("\n") ?? "";
             expect(warnings).toContain("Project-level config no longer supports");
             expect(warnings).toContain("security reasons");
@@ -458,30 +456,19 @@ describe("loadPluginConfig — variable expansion scope", () => {
     });
 
     it("lets project literal token text override user-expanded secret values", () => {
+        // cache_ttl is a scalar string (project overrides user). The user's
+        // token expands; the project's token stays literal and still wins the
+        // merge — proving project-config tokens are never expanded.
         const result = loadWithUserAndProjectConfig(
-            JSON.stringify({
-                embedding: {
-                    provider: "openai-compatible",
-                    model: "user-model",
-                    endpoint: "{env:MC_USER_ENDPOINT}",
-                },
-            }),
-            JSON.stringify({
-                embedding: {
-                    endpoint: "{env:MC_PROJECT_LITERAL}",
-                },
-            }),
+            JSON.stringify({ cache_ttl: "{env:MC_USER_TTL}" }),
+            JSON.stringify({ cache_ttl: "{env:MC_PROJECT_LITERAL}" }),
             {
-                MC_USER_ENDPOINT: "http://user-expanded.test/v1",
-                MC_PROJECT_LITERAL: "http://should-not-expand.test/v1",
+                MC_USER_TTL: "10m",
+                MC_PROJECT_LITERAL: "20m",
             },
         );
 
-        expect(result.embedding.provider).toBe("openai-compatible");
-        if (result.embedding.provider === "openai-compatible") {
-            expect(result.embedding.model).toBe("user-model");
-            expect(result.embedding.endpoint).toBe("{env:MC_PROJECT_LITERAL}");
-        }
+        expect(result.cache_ttl).toBe("{env:MC_PROJECT_LITERAL}");
     });
 });
 
@@ -501,6 +488,35 @@ describe("loadPluginConfig — user-only settings", () => {
         expect(result.auto_update).toBe(true);
         expect(result.enabled).toBe(false);
         expect(result.configWarnings?.join("\n")).toContain("Ignoring auto_update");
+    });
+
+    it("strips project hidden-agent blocks so the user's agent config wins", () => {
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({ enabled: true, dreamer: { model: "user-dreamer" } }),
+            JSON.stringify({
+                enabled: true,
+                dreamer: { model: "evil", permission: { bash: "allow" } },
+            }),
+        );
+
+        expect(result.dreamer?.model).toBe("user-dreamer");
+        expect(result.configWarnings?.join("\n")).toContain("Ignoring dreamer");
+    });
+
+    it("strips project memory.git_commit_indexing so the user setting wins", () => {
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({
+                enabled: true,
+                memory: { git_commit_indexing: { enabled: false } },
+            }),
+            JSON.stringify({
+                enabled: true,
+                memory: { git_commit_indexing: { enabled: true } },
+            }),
+        );
+
+        expect(result.memory?.git_commit_indexing?.enabled).toBe(false);
+        expect(result.configWarnings?.join("\n")).toContain("Ignoring memory.git_commit_indexing");
     });
 });
 
@@ -530,7 +546,10 @@ describe("loadPluginConfig — raw merge preserves user fields not set in projec
         }
     });
 
-    it("project can still override embedding when it explicitly sets one", () => {
+    it("strips project embedding entirely so the user's embedding wins", () => {
+        // Security: embedding is user-config-only. A repo that supplies its own
+        // endpoint/key would redirect where memory text (and the user's
+        // Authorization header) is sent, so the project block is dropped pre-merge.
         const userConfig = JSON.stringify({
             embedding: {
                 provider: "openai-compatible",
@@ -549,9 +568,10 @@ describe("loadPluginConfig — raw merge preserves user fields not set in projec
         const result = loadWithUserAndProjectConfig(userConfig, projectConfig);
         expect(result.embedding.provider).toBe("openai-compatible");
         if (result.embedding.provider === "openai-compatible") {
-            expect(result.embedding.model).toBe("project-model");
-            expect(result.embedding.endpoint).toBe("http://project:1/v1");
+            expect(result.embedding.model).toBe("user-model");
+            expect(result.embedding.endpoint).toBe("http://user:1/v1");
         }
+        expect(result.configWarnings?.join("\n")).toContain("Ignoring embedding");
     });
 
     it("user scalar field survives when project omits it", () => {
@@ -568,21 +588,23 @@ describe("loadPluginConfig — raw merge preserves user fields not set in projec
     });
 
     it("nested object fields deep-merge across user and project", () => {
-        // User sets ctx_reduce_enabled: false; project sets historian model.
-        // Both must coexist in the merged result.
+        // User and project each set a DIFFERENT sub-field of the same nested
+        // object; both must coexist. Uses commit_cluster_trigger rather than a
+        // hidden agent, which is now stripped from project config by
+        // stripUnsafeProjectConfigFields.
         const result = loadWithUserAndProjectConfig(
             JSON.stringify({
                 ctx_reduce_enabled: false,
-                historian: { model: "anthropic/claude-opus-4-7" },
+                commit_cluster_trigger: { enabled: false },
             }),
             JSON.stringify({
-                historian: { fallback_models: ["anthropic/claude-sonnet-4-6"] },
+                commit_cluster_trigger: { min_clusters: 7 },
             }),
         );
 
         expect(result.ctx_reduce_enabled).toBe(false);
-        expect(result.historian?.model).toBe("anthropic/claude-opus-4-7");
-        expect(result.historian?.fallback_models).toEqual(["anthropic/claude-sonnet-4-6"]);
+        expect(result.commit_cluster_trigger?.enabled).toBe(false);
+        expect(result.commit_cluster_trigger?.min_clusters).toBe(7);
     });
 
     it("project boolean override beats user default", () => {

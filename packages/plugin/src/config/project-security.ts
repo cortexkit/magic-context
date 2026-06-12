@@ -14,30 +14,6 @@
 /** Hidden agents that run with elevated/autonomous capability. */
 const HIDDEN_AGENT_KEYS = ["historian", "dreamer", "sidekick"] as const;
 
-/**
- * Fields on a hidden-agent block that constitute a privilege-escalation /
- * code-execution vector when set from an untrusted repo:
- *
- *  - `prompt`     — reprograms the agent's instructions. The dreamer runs
- *                   AUTONOMOUSLY in the background with `bash`/`edit`/`webfetch`,
- *                   so a repo-supplied prompt is an unattended exfil/RCE path.
- *  - `permission` — broadens the agent's per-tool permissions.
- *  - `tools`      — enable/disable map; could flip a denied tool (e.g. `bash`)
- *                   on for an agent whose allow-list intentionally excludes it.
- *  - `system_prompt` — sidekick's custom system prompt. It takes precedence over
- *                   the built-in prompt (sidekick/agent.ts reads
- *                   `config.system_prompt` before `config.prompt`), so leaving it
- *                   unstripped reopens the exact reprogramming vector `prompt`
- *                   closes — a cloned repo could rewrite sidekick's instructions
- *                   via `/ctx-aug`.
- *
- * Benign fields (model/temperature/disable/schedule/tasks/…) are deliberately
- * NOT stripped: a repo may legitimately tune its own dreamer cadence or model,
- * and none of those are an escalation vector (the model is still invoked
- * through the user's own provider auth).
- */
-const AGENT_ESCALATION_FIELDS = ["prompt", "permission", "tools", "system_prompt"] as const;
-
 function isPlainObject(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -54,8 +30,18 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  *    process). A cloned repo could set a huge value to exhaust host memory /
  *    address space — a resource-exhaustion vector with no legitimate per-repo
  *    use. Honor user-level config only.
- *  - hidden-agent `prompt`/`permission`/`tools` — a repo must not reprogram or
- *    re-permission the historian/dreamer/sidekick.
+ *  - `embedding` (entire object) — memory text is POSTed to the embedding
+ *    endpoint. A repo that supplies/redirects it would exfiltrate memory content
+ *    (and could inherit the user's api_key) to an attacker server. The embedding
+ *    provider/endpoint/key is the user's decision alone.
+ *  - `historian`/`dreamer`/`sidekick` (entire objects) — hidden agents. The
+ *    dreamer/sidekick run autonomously with bash/write/edit/webfetch; the
+ *    historian routes model calls. A repo must not enable, reprogram,
+ *    re-permission, or re-route any of them, so the WHOLE block is dropped
+ *    (model/schedule/tasks included) — closing routing-override and enablement
+ *    vectors a field-level strip would miss.
+ *  - `memory.git_commit_indexing` — reads repo git history into the shared
+ *    store; a repo must not silently enable git-history indexing.
  */
 export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknown>): string[] {
     const warnings: string[] = [];
@@ -75,22 +61,31 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         );
     }
 
+    if ("embedding" in projectRaw) {
+        delete projectRaw.embedding;
+        warnings.push(
+            "Ignoring embedding from project config (security: the embedding endpoint/provider/key is " +
+                "user-config-only; a repository must not redirect where memory text is sent).",
+        );
+    }
+
     for (const agentKey of HIDDEN_AGENT_KEYS) {
-        const block = projectRaw[agentKey];
-        if (!isPlainObject(block)) continue;
-        const removed: string[] = [];
-        for (const field of AGENT_ESCALATION_FIELDS) {
-            if (field in block) {
-                delete block[field];
-                removed.push(field);
-            }
-        }
-        if (removed.length > 0) {
+        if (agentKey in projectRaw) {
+            delete projectRaw[agentKey];
             warnings.push(
-                `Ignoring ${agentKey}.${removed.join("/")} from project config ` +
-                    "(security: a repository cannot reprogram or re-permission hidden agents).",
+                `Ignoring ${agentKey} from project config (security: hidden agents are user-config-only; a ` +
+                    "repository must not enable, reprogram, re-permission, or re-route the historian/dreamer/sidekick).",
             );
         }
+    }
+
+    const memory = projectRaw.memory;
+    if (isPlainObject(memory) && "git_commit_indexing" in memory) {
+        delete memory.git_commit_indexing;
+        warnings.push(
+            "Ignoring memory.git_commit_indexing from project config (security: git-history indexing is a " +
+                "user-level-only setting).",
+        );
     }
 
     return warnings;

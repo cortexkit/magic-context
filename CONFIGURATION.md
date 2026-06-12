@@ -27,6 +27,18 @@ Key files are project-scoped in SQLite. `project_key_files` stores one row per f
 
 Project config always merges on top of user config in both harnesses. The unified setup wizard (`npx @cortexkit/magic-context@latest setup`) auto-detects which harnesses you have installed and writes the user-level file for each with sensible defaults; pass `--harness opencode` or `--harness pi` to target one.
 
+#### Project-config trust boundary (security)
+
+A project config lives inside a repository you cloned, so it is **untrusted input**. Opening a repo must never let its config escalate privilege or exfiltrate secrets. The following are **user-config-only**: they are silently dropped from project config (with a warning) and honored only from your user-level file:
+
+- `auto_update` — a repo must not suppress plugin self-updates (which can carry security fixes).
+- `sqlite` — its PRAGMAs apply to the process-global shared DB handle; a repo could set huge cache/mmap values to exhaust host memory.
+- `embedding` (entire object) — memory text is POSTed to the embedding endpoint, so a repo-supplied/redirected endpoint would exfiltrate memory content (and could inherit your `api_key`). The embedding provider/endpoint/key is your decision alone.
+- `historian`, `dreamer`, `sidekick` (entire objects) — hidden agents. The dreamer/sidekick run autonomously with `bash`/`write`/`edit`/`webfetch` and the historian routes model calls, so a repo must not enable, reprogram, re-permission, or re-route any of them — the whole block is dropped (including `model`/`schedule`/`tasks`).
+- `memory.git_commit_indexing` — a repo must not silently turn on indexing of its own git history into the shared store.
+
+Additionally, `{env:}` / `{file:}` token expansion is **disabled in project config** (tokens are left literal and a warning is emitted); move any secret expansion to your user-level config.
+
 ### Cross-harness scoping
 
 Both plugins write to the same SQLite database at `~/.local/share/cortexkit/magic-context/context.db`. Tables are scoped by:
