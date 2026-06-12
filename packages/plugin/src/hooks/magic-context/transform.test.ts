@@ -23,6 +23,7 @@ import {
     getLastNudgeUndropped,
     getOrCreateSessionMeta,
     getPendingOps,
+    getSourceContents,
     getTagById,
     getTagsBySession,
     incrementHistorianFailure,
@@ -205,6 +206,142 @@ describe("createTransform", () => {
         expect(text(messages[0], 0)).toStartWith("§1§ ");
         expect(text(messages[1], 0)).toContain("§2§ ");
         expect(toolOutput(messages[1], 1)).toStartWith("§3§ ");
+    });
+
+    it("restores message content when tagging throws mid-pass (no partial §N§ prefixes)", async () => {
+        //#given
+        useTempDataHome("context-transform-tag-rollback-");
+        const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
+        const db = openDatabase();
+        // Real tagger whose assignTag throws on the SECOND call: the first text
+        // part is tagged + §1§-prefixed in place, then the second throws, so the
+        // pass aborts with message[0] already carrying a partial prefix.
+        const realTagger = createTagger();
+        let assignCalls = 0;
+        const tagger: ReturnType<typeof createTagger> = {
+            ...realTagger,
+            assignTag(...args: Parameters<typeof realTagger.assignTag>) {
+                assignCalls += 1;
+                if (assignCalls >= 2) {
+                    throw new Error("forced tag failure after first assign");
+                }
+                return realTagger.assignTag(...args);
+            },
+        };
+        const transform = createTransform({
+            tagger,
+            scheduler,
+            contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
+                [
+                    "ses-rollback",
+                    { usage: { percentage: 46, inputTokens: 92_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            db,
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 0,
+        });
+        const messages: TestMessage[] = [
+            {
+                info: { id: "m-user", role: "user", sessionID: "ses-rollback" },
+                parts: [{ type: "text", text: "Plan this change" }],
+            },
+            {
+                info: { id: "m-assistant", role: "assistant" },
+                parts: [{ type: "text", text: "Implemented the change" }],
+            },
+        ];
+
+        //#when — tagging throws after the first part was already prefixed.
+        await transform({}, { messages });
+
+        //#then — the in-memory rollback leaves NO partial §N§ prefixes behind.
+        expect(assignCalls).toBeGreaterThanOrEqual(2);
+        for (const message of messages) {
+            for (const part of message.parts) {
+                if (part.type === "text") {
+                    expect(part.text).not.toMatch(/§\d+§/);
+                }
+            }
+        }
+        expect(text(messages[0], 0)).toBe("Plan this change");
+        expect(text(messages[1], 0)).toBe("Implemented the change");
+    });
+
+    it("keeps persisting source_contents and replaying drops on the happy path", async () => {
+        //#given
+        useTempDataHome("context-transform-snapshot-happy-");
+        const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
+        const db = openDatabase();
+        const tagger = createTagger();
+        const makeTransform = () =>
+            createTransform({
+                tagger,
+                scheduler,
+                contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
+                    [
+                        "ses-snapshot-happy",
+                        { usage: { percentage: 30, inputTokens: 60_000 }, updatedAt: Date.now() },
+                    ],
+                ]),
+                db,
+                historyRefreshSessions: new Set<string>(),
+                pendingMaterializationSessions: new Set<string>(),
+                lastHeuristicsTurnId: new Map<string, string>(),
+                clearReasoningAge: 50,
+                protectedTags: 0,
+            });
+        const firstPass: TestMessage[] = [
+            {
+                info: { id: "m-user", role: "user", sessionID: "ses-snapshot-happy" },
+                parts: [{ type: "text", text: "Plan this change carefully" }],
+            },
+            {
+                info: { id: "m-assistant", role: "assistant" },
+                parts: [{ type: "text", text: "Implemented the whole thing in detail" }],
+            },
+        ];
+
+        //#when — first (successful) pass tags both messages.
+        await makeTransform()({}, { messages: firstPass });
+
+        //#then — source_contents persisted the PRE-PREFIX original text per tag.
+        const tags = getTagsBySession(db, "ses-snapshot-happy");
+        const userTag = tags.find((tag) => tag.messageId === "m-user:p0");
+        const assistantTag = tags.find((tag) => tag.messageId === "m-assistant:p0");
+        expect(userTag).toBeDefined();
+        expect(assistantTag).toBeDefined();
+        const sources = getSourceContents(db, "ses-snapshot-happy", [
+            userTag!.tagNumber,
+            assistantTag!.tagNumber,
+        ]);
+        expect(sources.get(userTag!.tagNumber)).toBe("Plan this change carefully");
+        expect(sources.get(assistantTag!.tagNumber)).toBe("Implemented the whole thing in detail");
+
+        //#given — the assistant tag is dropped out of band.
+        updateTagStatus(db, "ses-snapshot-happy", assistantTag!.tagNumber, "dropped");
+
+        //#when — a second successful pass replays the dropped status.
+        const secondPass: TestMessage[] = [
+            {
+                info: { id: "m-user", role: "user", sessionID: "ses-snapshot-happy" },
+                parts: [{ type: "text", text: "Plan this change carefully" }],
+            },
+            {
+                info: { id: "m-assistant", role: "assistant" },
+                parts: [{ type: "text", text: "Implemented the whole thing in detail" }],
+            },
+        ];
+        await makeTransform()({}, { messages: secondPass });
+
+        //#then — active user tag keeps prefixed content; dropped assistant tag is
+        // replayed to the [dropped §N§] sentinel (snapshot/restore is a no-op here).
+        expect(text(secondPass[0], 0)).toStartWith("§");
+        expect(text(secondPass[0], 0)).toContain("Plan this change carefully");
+        expect(text(secondPass[1], 0)).toBe(`[dropped §${assistantTag!.tagNumber}§]`);
     });
 
     it("does not inject user messages for emergency nudges (handled by promptAsync)", async () => {

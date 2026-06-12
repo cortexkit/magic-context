@@ -158,6 +158,26 @@ function findLastAssistantModel(
     return null;
 }
 
+/**
+ * Deep-clone the visible message window before tagMessages() mutates it.
+ *
+ * tagMessages walks the array and rewrites part text in place (assignTag →
+ * prependTag injects §N§ prefixes, and persisted source restores rewrite
+ * textPart.text). It intentionally runs WITHOUT an outer DB transaction (see
+ * tag-messages.ts) so a mid-walk throw can leave earlier messages carrying
+ * partial §N§ prefixes while the DB has no record of them — silently
+ * corrupting the prompt sent to the LLM. We snapshot {info, parts} so the
+ * catch path can roll the in-memory array back to its pre-tag state.
+ *
+ * Parts are JSON-like OpenCode payloads, so structuredClone is sufficient.
+ */
+function snapshotMessagesForTagging(messages: MessageLike[]): MessageLike[] {
+    return messages.map((message) => ({
+        info: structuredClone(message.info),
+        parts: structuredClone(message.parts),
+    }));
+}
+
 export interface TransformDeps {
     tagger: Tagger;
     scheduler: Scheduler;
@@ -1102,6 +1122,10 @@ export function createTransform(deps: TransformDeps) {
             logTransformTiming(sessionId, "injectTemporalMarkers", tTemporal);
         }
 
+        // Snapshot the pre-tag message window so a mid-walk tagging failure can be
+        // rolled back. tagMessages mutates parts in place and has no outer
+        // transaction, so without this a partial pass leaves stray §N§ prefixes.
+        const preTagSnapshot = snapshotMessagesForTagging(messages);
         let taggingSucceeded = false;
         try {
             const t0 = performance.now();
@@ -1145,6 +1169,13 @@ export function createTransform(deps: TransformDeps) {
                 "transform tag persistence failed; continuing without tagging:",
                 error,
             );
+            // Roll back the in-memory mutations applied before the throw.
+            // tagMessages prefixes/rewrites part text in place, so a mid-walk
+            // failure can leave earlier messages with partial §N§ prefixes.
+            // Restore the ARRAY CONTENTS (not a local rebind) so the emitted
+            // prompt matches the pre-tag state; taggingSucceeded stays false so
+            // the downstream mutation stages remain gated.
+            messages.splice(0, messages.length, ...preTagSnapshot);
             // Drop in-memory tagger state for this session so the next pass
             // re-loads from the DB. Without this, a stale counter or stale
             // assignments map can keep producing the same UNIQUE collision
