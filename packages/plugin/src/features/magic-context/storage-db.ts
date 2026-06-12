@@ -1,4 +1,4 @@
-import { copyFileSync, cpSync, existsSync, mkdirSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
     getLegacyOpenCodeMagicContextStorageDir,
@@ -37,6 +37,52 @@ export function getSchemaFenceRejection(): {
 }
 
 export const LATEST_SUPPORTED_VERSION = 32;
+
+// chmod is meaningless on Windows (POSIX modes are not honored), so all
+// permission tightening is skipped there. mkdir's `mode` is likewise ignored.
+const PERMISSIONS_ENFORCEABLE = process.platform !== "win32";
+
+/**
+ * Create `dir` (recursively) owner-only and tighten an existing dir to 0o700.
+ *
+ * The storage tree holds project memories, raw conversation history, and
+ * embeddings. Created with the default umask these can be group/world-readable,
+ * leaking that content to other local users. We create with mode 0o700 and
+ * additionally chmod (mkdir's `mode` is masked by umask and a no-op when the
+ * dir already exists). Best-effort: a chmod failure is logged, not fatal.
+ */
+function ensureSecureStorageDir(dir: string): void {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (!PERMISSIONS_ENFORCEABLE) return;
+    try {
+        chmodSync(dir, 0o700);
+    } catch (error) {
+        log(
+            `[magic-context] could not restrict storage dir permissions on ${dir}: ${getErrorMessage(error)}`,
+        );
+    }
+}
+
+/**
+ * Restrict the SQLite DB file and its WAL/SHM sidecars to owner-only (0o600).
+ * They are created with the process umask, which can be group/world-readable;
+ * since they hold the same durable state as the storage dir, tighten them once
+ * they exist. Best-effort per file.
+ */
+function restrictDatabaseFilePermissions(dbPath: string): void {
+    if (!PERMISSIONS_ENFORCEABLE) return;
+    for (const suffix of ["", "-wal", "-shm"]) {
+        const file = `${dbPath}${suffix}`;
+        if (!existsSync(file)) continue;
+        try {
+            chmodSync(file, 0o600);
+        } catch (error) {
+            log(
+                `[magic-context] could not restrict DB file permissions on ${file}: ${getErrorMessage(error)}`,
+            );
+        }
+    }
+}
 
 export interface OpenDatabaseOptions {
     dbPath?: string;
@@ -95,7 +141,7 @@ function migrateLegacyStorageIfNeeded(targetDbPath: string, targetDbDir: string)
     log(
         `[magic-context] migrating legacy plugin storage: ${legacyDir} -> ${targetDbDir} (legacy left in place as backup)`,
     );
-    mkdirSync(targetDbDir, { recursive: true });
+    ensureSecureStorageDir(targetDbDir);
 
     // Fold the legacy WAL into the main DB FIRST so the copied target is one
     // crash-consistent file. Copying .db/-wal/-shm as three separate files is
@@ -1266,7 +1312,7 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
         if (!explicitDbPath) {
             migrateLegacyStorageIfNeeded(dbPath, dbDir);
         }
-        mkdirSync(dbDir, { recursive: true });
+        ensureSecureStorageDir(dbDir);
 
         const db = new Database(dbPath);
         if (!enforceSchemaFence(db, dbPath, latestSupportedVersion)) {
@@ -1318,6 +1364,9 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
         // sidebar regression report.
         setToolDefinitionDatabase(db);
         loadToolDefinitionMeasurements(db);
+        // Tighten the DB + WAL/SHM sidecars to owner-only now that WAL mode has
+        // created the sidecars; best-effort, never fatal.
+        restrictDatabaseFilePermissions(dbPath);
         databases.set(dbPath, db);
         persistenceByDatabase.set(db, true);
         persistenceErrorByDatabase.delete(db);

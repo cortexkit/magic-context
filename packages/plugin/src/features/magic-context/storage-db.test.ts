@@ -1,9 +1,9 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { closeDatabase, isDatabasePersisted, openDatabase } from "./storage-db";
@@ -56,6 +56,26 @@ describe("storage-db", () => {
             expect(Object.values(timeout)[0]).toBe(5000);
             expect(existsSync(resolveDbPath(dataHome))).toBe(true);
             expect(isDatabasePersisted(db)).toBe(true);
+        });
+
+        it("#when called first time #then restricts storage dir to 0o700 and DB files to 0o600", () => {
+            // POSIX-only: chmod is a no-op on Windows (modes are not honored).
+            if (process.platform === "win32") return;
+            const dataHome = useTempDataHome("storage-db-perms-");
+
+            openDatabase();
+
+            const dbPath = resolveDbPath(dataHome);
+            const dbDir = dirname(dbPath);
+            // Low 9 permission bits only (mask off file-type/setuid bits).
+            expect(statSync(dbDir).mode & 0o777).toBe(0o700);
+            expect(statSync(dbPath).mode & 0o777).toBe(0o600);
+            for (const suffix of ["-wal", "-shm"]) {
+                const sidecar = `${dbPath}${suffix}`;
+                if (existsSync(sidecar)) {
+                    expect(statSync(sidecar).mode & 0o777).toBe(0o600);
+                }
+            }
         });
 
         it("#when called first time #then creates required tables", () => {

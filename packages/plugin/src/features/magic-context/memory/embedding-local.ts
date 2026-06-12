@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { open, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -399,7 +399,17 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
                 // or buffer" failures. Using our own storage dir survives plugin updates too.
                 const modelCacheDir = join(getMagicContextStorageDir(), "models");
                 try {
-                    mkdirSync(modelCacheDir, { recursive: true });
+                    // Owner-only: the cache lives under the same storage tree as
+                    // memories/history. mkdir's mode is masked by umask, so chmod
+                    // afterwards (no-op on Windows, where POSIX modes are ignored).
+                    mkdirSync(modelCacheDir, { recursive: true, mode: 0o700 });
+                    if (process.platform !== "win32") {
+                        try {
+                            chmodSync(modelCacheDir, 0o700);
+                        } catch {
+                            // Non-fatal — leave default perms if chmod is rejected.
+                        }
+                    }
                     env.cacheDir = modelCacheDir;
                 } catch {
                     // Non-fatal — fall back to library default if we can't create the dir
