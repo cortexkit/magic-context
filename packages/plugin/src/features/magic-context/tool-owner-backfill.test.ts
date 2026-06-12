@@ -522,4 +522,59 @@ describe("runToolOwnerBackfill", () => {
 
         closeQuietly(mc);
     });
+
+    test("ATTACH succeeds when the OpenCode DB path contains a single quote", () => {
+        // Regression guard: the OpenCode DB path is interpolated into an
+        // `ATTACH '<path>'` statement (SQLite/bun:sqlite reject a bound
+        // parameter there), so an unescaped single quote in the path would
+        // break out of the SQL string literal and throw a syntax error. The
+        // path is resolved from XDG_DATA_HOME via getDataDir(), so a data home
+        // containing a quote exercises the escaping end-to-end.
+        const fs = require("node:fs");
+        const base = createTempDir("mc-backfill-quote-");
+        const dataHome = join(base, "o'brien");
+        fs.mkdirSync(dataHome, { recursive: true });
+        process.env.XDG_DATA_HOME = dataHome;
+
+        // OpenCode DB at $XDG_DATA_HOME/opencode/opencode.db with one tool part.
+        const ocDir = join(dataHome, "opencode");
+        fs.mkdirSync(ocDir, { recursive: true });
+        const oc = new Database(join(ocDir, "opencode.db"));
+        oc.exec(`
+            CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            CREATE TABLE part (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+        `);
+        oc.prepare(
+            "INSERT INTO message (id, session_id, time_created, data) VALUES (?, ?, ?, ?)",
+        ).run("msg-A", "ses-1", 1000, JSON.stringify({ role: "assistant" }));
+        oc.prepare("INSERT INTO part (id, message_id, time_created, data) VALUES (?, ?, ?, ?)").run(
+            "p-A",
+            "msg-A",
+            1100,
+            JSON.stringify({ type: "tool", callID: "read:1" }),
+        );
+        oc.close();
+
+        const mc = createMcDb();
+        insertTag(mc, "ses-1", "read:1", "tool", 100, 1);
+
+        // No throw + the session is backfilled proves ATTACH parsed the quoted path.
+        const result = runToolOwnerBackfill(mc);
+        expect(result.sessionsCompleted).toBe(1);
+        expect(result.rowsUpdated).toBe(1);
+        const tags = getTagsBySession(mc, "ses-1");
+        expect(tags[0].toolOwnerMessageId).toBe("msg-A");
+
+        closeQuietly(mc);
+    });
 });

@@ -151,7 +151,13 @@ export function runToolOwnerBackfill(db: Database): BackfillResult {
         return result;
     }
 
-    db.exec(`ATTACH '${opencodeDbPath}' AS oc_backfill`);
+    // Escape single quotes in the path: SQLite's ATTACH does not accept bound
+    // parameters (bun:sqlite/node:sqlite reject `ATTACH ?`), so the path is
+    // interpolated as a string literal. Doubling embedded single quotes is the
+    // standard SQL-literal escape and prevents a path like `/tmp/o'brien` from
+    // breaking out of the literal.
+    const escapedDbPath = opencodeDbPath.replaceAll("'", "''");
+    db.exec(`ATTACH '${escapedDbPath}' AS oc_backfill`);
     try {
         backfillToolOwnersInChunks(db, result);
     } finally {
