@@ -85,6 +85,12 @@ The wizard auto-detects which harnesses you have (OpenCode, Pi, or both), adds t
 
 **Troubleshooting:** `npx @cortexkit/magic-context@latest doctor` auto-detects your harnesses, checks for conflicts (compaction, OMO hooks, DCP), verifies the plugin and TUI sidebar, runs an integrity check on the database, and fixes what it can. Add `--issue` to file a ready-to-submit bug report.
 
+### Adding Magic Context to an existing project
+
+Magic Context is not limited to greenfield work. Run the setup wizard from the root of the project you already use with OpenCode or Pi, then restart the harness in that same directory so the plugin can attach to the existing project identity. New turns will be captured automatically, and older raw session history is summarized as the historian runs.
+
+If you want to start organizing existing knowledge right away, use `/ctx-recomp` after setup to rebuild compartments from available history and `/ctx-dream` to run dreamer maintenance on demand. The dashboard can also inspect the shared CortexKit database, memories, compartments, and dreamer runs without starting a coding session.
+
 <details>
 <summary><strong>Compatibility with other context-management plugins</strong></summary>
 
