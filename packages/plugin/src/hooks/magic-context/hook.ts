@@ -45,6 +45,10 @@ import {
 } from "../../features/magic-context/project-embedding-registry";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import {
+    createSkillLoadRegistry,
+    type SkillLoadRegistry,
+} from "../../features/magic-context/skill-memory/provenance";
+import {
     getDatabasePersistenceError,
     getSessionsWithPendingMarker,
     isDatabasePersisted,
@@ -108,7 +112,9 @@ import {
     createChatMessageHook,
     createCommandExecuteBeforeHook,
     createEventHook,
+    createIntentByCallIdMap,
     createToolExecuteAfterHook,
+    createToolExecuteBeforeHook,
     getLiveNotificationParams,
 } from "./hook-handlers";
 import type { LiveSessionState } from "./live-session-state";
@@ -420,6 +426,17 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         deps.liveSessionState?.channel1StateBySession ??
         new Map<string, import("./ctx-reduce-nudge").Channel1State>();
     const channel2DirectiveTextBySession = new Map<string, string>();
+    // intentByCallId: stash for skill tool intent captured pre-validation in
+    // tool.execute.before. Bounded: 60s TTL + 256-entry hard cap + finally-delete
+    // in after-hook. Cleared in onSessionDeleted.
+    const intentByCallId = createIntentByCallIdMap();
+    // skillLoadRegistry: session-scoped registry of (skillId → SkillProvenance +
+    // frontmatterConfig), populated in tool.execute.after for the skill tool.
+    // Per-session cleanup in onSessionDeleted (keyed as `${sessionId}:${skillId}`).
+    // Exposed on the hook's return value so the same instance flows to
+    // createCtxSkillNoteTool (index.ts, Task 8) — otherwise the tool sees a
+    // disconnected empty Map and recall is dead on arrival.
+    const skillLoadRegistry: SkillLoadRegistry = createSkillLoadRegistry();
 
     /**
      * Return the live provider/model for a session.
@@ -1190,6 +1207,21 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             channel1StateBySession.delete(sessionId);
             channel2DirectiveTextBySession.delete(sessionId);
             clearEmbedSessionState(sessionId);
+            // NOTE: intentByCallId is keyed by callID (not sessionID:callID), so .clear() removes
+            // entries from ALL concurrent sessions, not just the deleted one. This is an accepted
+            // design trade-off: the 60s TTL + 256-entry hard cap are the real leak guards; the
+            // .clear() here is a belt-and-braces backstop for long-lived sessions. Cross-session
+            // clearing degrades quality (lost intents for concurrent sessions) but is not fatal.
+            // If concurrent multi-session use becomes common, key entries as `${sessionID}:${callID}`
+            // and filter on delete. For P1, document-as-intentional is the chosen fix.
+            intentByCallId.clear(); // clear all entries on session delete (bounded map; cross-session clear is intentional — see note above)
+            // skillLoadRegistry is keyed as `${sessionId}:${skillId}` so we can prune
+            // per-session entries without cross-session bleed. Without this, deleted
+            // sessions' skill loads would persist in the registry for the plugin's
+            // lifetime (potentially days/weeks), slowly leaking memory.
+            for (const key of skillLoadRegistry.keys()) {
+                if (key.startsWith(`${sessionId}:`)) skillLoadRegistry.delete(key);
+            }
         },
     });
 
@@ -1520,7 +1552,19 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                               },
                           })
                     : undefined,
+            skillLoadRegistry,
+            // Resolve session-specific directory from the map populated by the
+            // transform pass; fall back to the hook's own directory (deps.directory)
+            // for the first-turn case where the map isn't seeded yet.
+            sessionDirectoryBySession,
+            defaultDirectory: deps.directory,
         }),
+        "tool.execute.before": createToolExecuteBeforeHook({ intentByCallId }),
+        // Exposed so index.ts can pass the SAME instance to createCtxSkillNoteTool.
+        // The after-hook populates this registry; the tool reads from it. Without
+        // this, the tool would receive a fresh empty Map and ctx_skill_note would
+        // always return "No recent skill load found".
+        skillLoadRegistry,
     };
     const hooksWithBackends = hooks as typeof hooks & {
         rustToolBackends?: RustToolBackends;

@@ -219,6 +219,16 @@ export interface StatusDetail extends SidebarSnapshot {
         /** Highest context.db schema version this plugin build supports. */
         plugin_supported_version: number;
     };
+    /**
+     * Per-skill cross-session recall store (skill_memory table) stats scoped
+     * to the session's project identity. Null when no project identity is
+     * available (status dialog will hide the section).
+     */
+    skillMemory?: {
+        totalNotes: number;
+        skillsWithNotes: number;
+        pinnedNotes: number;
+    } | null;
 }
 
 /** Embedding coverage for `/ctx-embed` status (mirrors getEmbeddingCoverageStatus). */

@@ -33,6 +33,7 @@ describe("migration v38 — transform decisions", () => {
         const db = new Database(":memory:");
         try {
             initializeDatabase(db);
+
             runMigrations(db);
 
             expect(tableNames(db)).toContain("transform_decisions");

@@ -123,7 +123,7 @@ export function registerCtxStatusCommand(
 					persistedPercentage: meta.lastContextPercentage,
 				});
 				const usableContextLimit = windowGeometry?.usableSoft;
-				const statusText = executeStatus(
+				const statusText = await executeStatus(
 					currentDeps.db,
 					sessionId,
 					currentDeps.protectedTags ?? 20,

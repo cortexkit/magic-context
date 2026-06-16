@@ -237,6 +237,7 @@ Because it runs during idle time, the dreamer pairs well with local models, even
 
 - **`ctx_expand`**: pull a compressed history range back to the original `U:`/`A:` transcript when the agent needs the exact details.
 - **`ctx_note`**: a scratchpad for deferred intentions. Notes resurface at natural boundaries (after commits, after historian runs, when todos finish). **Smart notes** carry an open-ended condition the dreamer watches for.
+- **Skill-memory (motor memory for skills)**: a per-skill `<skill-memory>` block is appended to the skill tool's RESULT on every load, surfacing accumulated gotchas, discoveries, fixes, and workflow steps the agent has recorded for that skill. Per-skill opt-in via the skill's `SKILL.md` frontmatter (`skill-memory: { enabled: true }`); write back with **`ctx_skill_note`**, recall without re-loading with **`ctx_skill_recall`**. The block lands in the tool result, not the cached prompt prefix, so it never thrashes the cache.
 
 Recall works **across sessions** (a new session inherits everything) and **across harnesses** (write a memory in OpenCode, retrieve it in Pi or OMP).
 
@@ -251,6 +252,8 @@ Recall works **across sessions** (a new session inherits everything) and **acros
 | `ctx_search` | Recall | Search memories, conversation history, git commits, notes, and primers |
 | `ctx_expand` | Recall | Decompress a history range back to the transcript |
 | `ctx_note` | Recall | Deferred intentions and dreamer-evaluated smart notes |
+| `ctx_skill_note` | Recall | Write back a per-skill note (gotcha/discovery/fix/workflow) for future loads |
+| `ctx_skill_recall` | Recall | Explicitly recall skill-memory notes without re-loading the skill |
 
 ---
 

@@ -1,8 +1,11 @@
+import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import {
     clearSessionTracking,
     scheduleIncrementalIndex,
     scheduleReconciliation,
 } from "../../features/magic-context/message-index-async";
+import type { SkillMemoryConfig } from "../../features/magic-context/skill-memory/frontmatter";
+import { recallSkillMemoryBlock } from "../../features/magic-context/skill-memory/recall";
 import { clearPersistedReasoningWatermark } from "../../features/magic-context/storage";
 import {
     getOrCreateSessionMeta,
@@ -22,6 +25,7 @@ import {
 import { clearSidebarSnapshotCache } from "../../plugin/sidebar-snapshot-cache";
 import type { PluginContext } from "../../plugin/types";
 import { sessionLog } from "../../shared/logger";
+import type { Database } from "../../shared/sqlite";
 import { clearAutoSearchForSession } from "./auto-search-runner";
 import {
     cachedToolPermissionDenied,
@@ -507,6 +511,99 @@ function maybeInjectChannel1Nudge(
     );
 }
 
+// ── intentByCallId stash map ────────────────────────────────────────────────
+// Keyed by callID (= options.toolCallId, identical before↔after).
+// Bounded: 60s TTL + 256-entry hard cap. The after-hook deletes in a finally;
+// this map is the backstop for callIDs whose after-hook never fires (crash,
+// swallowed exception, tool error).
+// Spike C (Task 0a) confirmed: tool.execute.before fires PRE-validation on
+// raw output.args, so intent is present before Effect-Schema strips it.
+
+export type IntentByCallIdMap = Map<string, { intent: string; ts: number }>;
+
+export function createIntentByCallIdMap(): IntentByCallIdMap {
+    return new Map();
+}
+
+const INTENT_TTL_MS = 60_000;
+const INTENT_MAP_CAP = 256;
+
+export function stashIntent(map: IntentByCallIdMap, callId: string, intent: string): void {
+    // Sweep stale entries (TTL backstop)
+    const now = Date.now();
+    for (const [key, entry] of map) {
+        if (now - entry.ts > INTENT_TTL_MS) {
+            map.delete(key);
+        }
+    }
+    // Hard cap: evict oldest if at limit
+    if (map.size >= INTENT_MAP_CAP) {
+        let oldestKey: string | undefined;
+        let oldestTs = Infinity;
+        for (const [key, entry] of map) {
+            if (entry.ts < oldestTs) {
+                oldestTs = entry.ts;
+                oldestKey = key;
+            }
+        }
+        if (oldestKey !== undefined) map.delete(oldestKey);
+    }
+    map.set(callId, { intent, ts: now });
+}
+
+export function getAndDeleteIntent(map: IntentByCallIdMap, callId: string): string | null {
+    const entry = map.get(callId);
+    if (!entry) return null;
+    map.delete(callId);
+    return entry.intent;
+}
+
+// ── createToolExecuteBeforeHook ─────────────────────────────────────────────
+
+/**
+ * Append a <skill-memory> block to output.output when:
+ * 1. frontmatterConfig is non-null (skill has skill-memory: enabled: true)
+ * 2. Notes exist for this skill in the DB
+ * 3. output.output is a non-empty string
+ *
+ * Delegates to recallSkillMemoryBlock (feature layer) for the shared recall+format core.
+ * Append ordering: this runs BEFORE maybeInjectChannel1Nudge (skill-memory
+ * content before Channel-1 meta-reminder). See design §2.6.
+ */
+export function maybeInjectSkillMemory(
+    db: Database,
+    skillId: string,
+    tier: "project" | "global",
+    projectIdentity: string,
+    frontmatterConfig: SkillMemoryConfig | null,
+    output: { output?: unknown },
+): void {
+    if (typeof output.output !== "string" || output.output.length === 0) return;
+
+    // Delegate to shared recall core (also used by ctx_skill_recall tool)
+    const block = recallSkillMemoryBlock(db, {
+        skill: skillId,
+        scope: tier,
+        projectIdentity,
+        frontmatterConfig,
+    });
+    if (block) {
+        output.output = `${output.output}\n\n${block}`;
+    }
+}
+
+export function createToolExecuteBeforeHook(args: { intentByCallId: IntentByCallIdMap }) {
+    return async (input: unknown, output?: unknown) => {
+        const typedInput = input as { tool?: string; callID?: string };
+        const typedOutput = output as { args?: Record<string, unknown> } | undefined;
+        if (typedInput.tool !== "skill") return;
+        if (!typedInput.callID) return;
+        const intent = typedOutput?.args?.intent;
+        if (typeof intent !== "string") return;
+        stashIntent(args.intentByCallId, typedInput.callID, intent);
+    };
+}
+
 export function createToolExecuteAfterHook(args: {
     db: Parameters<typeof getOrCreateSessionMeta>[0];
     channel1StateBySession: Map<string, Channel1State>;
@@ -517,6 +614,13 @@ export function createToolExecuteAfterHook(args: {
         stateJson: string;
         ownerMessageId: string;
     }) => Promise<unknown>;
+    skillLoadRegistry: import("../../features/magic-context/skill-memory/provenance").SkillLoadRegistry;
+    /** Resolved session.directory values, used to compute projectIdentity for
+     *  the skill-memory recall. The hook's transform pass populates this on
+     *  every message turn; on the first skill call before the map is seeded,
+     *  we fall back to `defaultDirectory` (deps.directory). */
+    sessionDirectoryBySession: Map<string, string>;
+    defaultDirectory: string;
 }) {
     return async (input: unknown, output?: unknown) => {
         const typedInput = input as {
@@ -533,6 +637,93 @@ export function createToolExecuteAfterHook(args: {
         // boundary. The queue helper re-checks the read-only mid-turn signal,
         // so this is a no-op until the assistant is actually idle.
         await flushIgnoredMessages(typedInput.sessionID);
+
+        // Skill-memory: populate registry when skill tool completes.
+        // Frontmatter MUST be read from DISK (proven in Task 0b: opencode's
+        // skill loader strips the skill-memory: block from the model-facing
+        // output). Reading output.output would always yield null. We re-read
+        // SKILL.md from provenance.resolvedPath (which IS present in the
+        // output's "Base directory for this skill:" line).
+        if (typedInput.tool === "skill") {
+            const typedOutput = output as { output?: unknown } | undefined;
+            if (typeof typedOutput?.output === "string") {
+                const skillArgs = typedInput.args as { name?: unknown } | undefined;
+                const skillId = typeof skillArgs?.name === "string" ? skillArgs.name : null;
+                if (skillId) {
+                    try {
+                        const { parseSkillProvenance, registryKey } = await import(
+                            "../../features/magic-context/skill-memory/provenance"
+                        );
+                        const { parseFrontmatterConfig } = await import(
+                            "../../features/magic-context/skill-memory/frontmatter"
+                        );
+                        const provenance = parseSkillProvenance(typedOutput.output, skillId);
+                        if (provenance) {
+                            let frontmatterConfig:
+                                | import("../../features/magic-context/skill-memory/frontmatter").SkillMemoryConfig
+                                | null = null;
+                            try {
+                                const { readFileSync } = await import("node:fs");
+                                const rawSkillContent = readFileSync(
+                                    provenance.resolvedPath,
+                                    "utf-8",
+                                );
+                                frontmatterConfig = parseFrontmatterConfig(rawSkillContent);
+                            } catch {
+                                // Non-fatal: SKILL.md unreadable → frontmatterConfig stays null
+                                // (skill-memory disabled for this skill load)
+                            }
+                            args.skillLoadRegistry.set(registryKey(typedInput.sessionID, skillId), {
+                                ...provenance,
+                                frontmatterConfig,
+                            });
+                        }
+                    } catch {
+                        // Non-fatal: registry miss means ctx_skill_note will surface an actionable error
+                    }
+
+                    // Skill-memory injection (BEFORE Channel-1 nudge — design §2.6).
+                    // Re-read skillId/args from typedInput; resolve sessionDir to
+                    // projectIdentity; delegate to maybeInjectSkillMemory which
+                    // appends the <skill-memory> block to output.output.
+                    // Non-fatal: recall failure must never block the tool result.
+                    try {
+                        const { registryKey: rKey } = await import(
+                            "../../features/magic-context/skill-memory/provenance"
+                        );
+                        const registryEntry = args.skillLoadRegistry.get(
+                            rKey(typedInput.sessionID, skillId),
+                        );
+                        if (registryEntry) {
+                            // First-turn fallback: if the map has no entry yet
+                            // (skill tool fires before sessionDirectoryBySession
+                            // is populated), fall back to args.defaultDirectory.
+                            // Intentional: multi-project / Desktop-launched sessions
+                            // may misattribute on the very first skill call;
+                            // subsequent calls resolve correctly.
+                            const sessionDir =
+                                args.sessionDirectoryBySession.get(typedInput.sessionID) ??
+                                args.defaultDirectory;
+                            const projectIdentity = resolveProjectIdentity(sessionDir);
+                            maybeInjectSkillMemory(
+                                args.db,
+                                skillId,
+                                registryEntry.tier,
+                                projectIdentity,
+                                registryEntry.frontmatterConfig,
+                                output as { output?: unknown },
+                            );
+                        }
+                    } catch (error) {
+                        sessionLog(
+                            typedInput.sessionID,
+                            "skill-memory injection failed (ignored):",
+                            error,
+                        );
+                    }
+                }
+            }
+        }
 
         if (typedInput.tool === "ctx_reduce") {
             // Mark the Channel 1 baseline dirty so the next nudge re-measures the

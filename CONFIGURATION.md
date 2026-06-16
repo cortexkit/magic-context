@@ -525,6 +525,7 @@ To disable the dreamer entirely, set `dreamer.disable: true`. To disable a singl
 | `refresh-primers` | `0 3 * * *` | Re-investigate stale primers against current code and refresh their answers. |
 | `evaluate-smart-notes` | `0 3 * * *` | Surface smart notes whose `ctx_note` conditions have come true. |
 | `review-user-memories` | `0 3 * * *` | Promote recurring behavioral observations into the `<user-profile>` block (privacy-sensitive). |
+| `distill-skill-memory` | `""` (off) | **Opt-in** — add a schedule to enable. Merge near-duplicate skill notes, prune stale low-hit notes, promote recurring gotchas to `pinned=1`, enforce per-skill note caps. Requires the `skill_memory` table (migration v50) — auto-created on upgrade. |
 
 ### Retrospective privacy
 
@@ -765,6 +766,39 @@ Tier boundaries are hardcoded to keep behavior predictable and prevent cache-bus
 **Cross-version note.** Once you enable `smart_drops`, all binaries that share your Magic Context database (e.g. multiple OpenCode instances, or OpenCode + Pi) should be on the release that introduced it. If a stale older binary co-runs with the feature on, the worst case is a one-time cache bust (the older binary fully drops what the newer one compressed); it never corrupts data.
 
 **When to enable.** Turn it on if you run very long, edit-heavy sessions and want to reclaim more context without losing the agent's record of what it did. The default stays off while cache stability is being validated in the wild. Requires a restart to take effect.
+
+## Skill-Memory (per-skill frontmatter)
+
+Skill-memory is the "motor memory" for skills — per-skill, cross-session recall of gotchas, discoveries, fixes, and workflow steps. The plugin transparently augments opencode's built-in `skill` tool: when a skill declares `skill-memory: { enabled: true }` in its YAML frontmatter, accumulated notes for that skill surface in a `<skill-memory>` block appended to the skill tool's RESULT on every load. Agents write back via `ctx_skill_note`; explicit recall (without re-loading) is `ctx_skill_recall`.
+
+Unlike every other setting in this file, **skill-memory is configured per-skill in each `SKILL.md`'s frontmatter, not in `magic-context.jsonc`**. Absent or malformed block = inert. A bad config in one skill cannot break other skills.
+
+```yaml
+---
+name: test-driven-development
+description: ...
+skill-memory:
+  enabled: true                # required: true to activate
+  max_tokens: 1500             # default 1500 — token budget for unpinned notes
+  max_pinned_tokens: 4000      # default 4000 — separate cap for pinned notes
+  dedup_threshold: 0.92        # default 0.92 — P2 cosine near-dedup threshold
+---
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | `boolean` | (required `true`) | Master switch per skill. When absent or `false`, the transparent after-hook skips this skill entirely and `ctx_skill_recall` returns "skill-memory is not enabled for '<skill>'". |
+| `max_tokens` | `number` | `1500` | Hard cap on tokens for unpinned notes in the injected block. Greedy fill by composite score (P1: recency × hit_count). |
+| `max_pinned_tokens` | `number` | `4000` | Separate cap for pinned notes. Pinned notes are always included first; on cap overflow, least-used pinned notes are truncated in ascending `hit_count` order with an "N pinned notes omitted" marker. |
+| `dedup_threshold` | `number` | `0.92` | P2 cosine near-dedup threshold. P1 ships without embeddings, so this is reserved for the P2 rollout. Tune per-skill in the `0.85`–`0.95` range. |
+
+**Cache safety.** The injected block lands in the tool RESULT = conversation tail, never the cached m[0]/m[1] prefix. This is the same pattern as Channel-1 (`maybeInjectChannel1Nudge`) and is why skill-memory cannot regress the prompt-cache hit rate.
+
+**Write-back (`ctx_skill_note`).** The injected block's footer prompts: *"After using this skill, call `ctx_skill_note` — record only gotchas, novel discoveries, or error→fix; skip routine successes."* The `kind` parameter is a hard gate: `kind: "general"` is rejected at the tool level — general observations belong in `ctx_memory` with an appropriate category.
+
+**Dreamer integration.** Add `"distill-skill-memory"` to your `dreamer.tasks` list to opt in to overnight maintenance (merges near-duplicates, prunes stale zero-hit notes older than 30 days, promotes recurring gotchas to pinned). It is **not** a default task — the feature is opt-in like `maintain-docs`.
+
+**P1 vs P2.** P1 (shipped) is flat recall (recency × hit_count, no embeddings). P2 (planned) adds intent-aware ranking via the project's existing embedding provider. The per-skill `dedup_threshold` field is reserved for P2 cosine near-dedup and has no effect on P1.
 
 ## Commands
 

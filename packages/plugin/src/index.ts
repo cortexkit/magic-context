@@ -42,6 +42,7 @@ import { createLiveSessionState } from "./hooks/magic-context/live-session-state
 import { SubcModuleTransport } from "./hooks/magic-context/module-transport";
 import { preloadTokenizer } from "./hooks/magic-context/read-session-formatting";
 import type { RustModeModuleClient } from "./hooks/magic-context/rust-mode-transform";
+import { injectSkillIntentParam } from "./hooks/magic-context/skill-tool-definition";
 import { beginBootQuietPeriod, scheduleAfterBootQuiet } from "./plugin/boot-quiet";
 import { cleanupConflictWarnings, sendConflictWarning } from "./plugin/conflict-warning-hook";
 import { startDreamScheduleTimer } from "./plugin/dream-timer";
@@ -259,12 +260,28 @@ const server: Plugin = async (ctx) => {
         }
     };
 
+    // Fail-loud guard: skillLoadRegistry is required for ctx_skill_note to
+    // verify the skill was loaded this session. If the after-hook wiring
+    // is broken, ctx_skill_note would silently read an empty Map and
+    // every note would return "No recent skill load found" — the exact
+    // opposite of "fail loud". Catch a wiring regression at startup, not
+    // at the first ctx_skill_note call from an agent. Guard only applies
+    // when the runtime actually constructed (fail-closed storage failures
+    // legitimately leave magicContext null — handled above).
+    if (magicContextRuntime.magicContext && !magicContextRuntime.magicContext.skillLoadRegistry) {
+        throw new Error(
+            "[magic-context] ctx_skill_note registration failed: " +
+                "hooks.magicContext.skillLoadRegistry is missing. " +
+                "Ensure createMagicContextHook() returns skillLoadRegistry in its return object.",
+        );
+    }
     const tools = createToolRegistry({
         ctx,
         pluginConfig,
         rustToolBackends: magicContextRuntime.rustToolBackends,
         promptSurfaceRuntime,
         registrationPromptSurface: loadedPluginConfig.registrationPromptSurface,
+        skillLoadRegistry: magicContextRuntime.magicContext?.skillLoadRegistry,
     });
 
     // v22 deferred legacy-memory identity backfill. createSessionHooks() opens
@@ -653,7 +670,16 @@ const server: Plugin = async (ctx) => {
             // land correctly on the next flight.
             if (!lastChatContext) return;
             const typedInput = input as { toolID?: string };
-            const typedOutput = output as { description?: unknown; parameters?: unknown };
+            const typedOutput = output as {
+                description?: unknown;
+                parameters?: unknown;
+                jsonSchema?: {
+                    type?: string;
+                    properties?: Record<string, unknown>;
+                    required?: string[];
+                    additionalProperties?: boolean;
+                };
+            };
             if (!typedInput.toolID) return;
             recordToolDefinition(
                 lastChatContext.providerID,
@@ -663,9 +689,17 @@ const server: Plugin = async (ctx) => {
                 typeof typedOutput.description === "string" ? typedOutput.description : "",
                 typedOutput.parameters,
             );
+            // Inject optional intent param for skill-memory recall
+            injectSkillIntentParam(
+                typedInput.toolID,
+                typedOutput as Parameters<typeof injectSkillIntentParam>[1],
+            );
         },
         "tool.execute.after": async (input, output) => {
             await magicContextRuntime.magicContext?.["tool.execute.after"]?.(input, output);
+        },
+        "tool.execute.before": async (input, output) => {
+            await hooks.magicContext?.["tool.execute.before"]?.(input, output);
         },
         "experimental.text.complete": async (input, output) => {
             await magicContextRuntime.magicContext?.["experimental.text.complete"]?.(input, output);

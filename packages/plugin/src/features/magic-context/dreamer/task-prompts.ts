@@ -374,6 +374,52 @@ const STRUCTURE_TEMPLATE = `
 **Tests:** co-located with source as \\\`*.test.ts\\\`
 \`\`\``;
 
+// ── Distill Skill Memory ───────────────────────────────────────────────────
+
+function buildDistillSkillMemoryPrompt(projectPath: string): string {
+    return `## Task: Distill Skill Memory
+
+**Project:** ${projectPath}
+
+### Goal
+Maintain the skill_memory table: merge near-duplicate notes, prune stale low-hit notes,
+promote recurring gotchas to pinned, enforce per-skill note caps.
+
+### Process
+1. Query skill_memory for skills with note_count > 20 (the distill threshold):
+   \`\`\`sql
+   SELECT skill_id, tier, project_identity, COUNT(*) as note_count
+   FROM skill_memory
+   WHERE project_identity = (SELECT project_identity FROM skill_memory LIMIT 1)
+   GROUP BY skill_id, tier, project_identity
+   HAVING note_count > 20
+   ORDER BY note_count DESC
+   LIMIT 5;
+   \`\`\`
+2. For each qualifying skill:
+   a. List notes ordered by hit_count DESC, created_at DESC.
+   b. Merge near-duplicate notes (same kind, similar delta — use judgment).
+      Use ctx_skill_note with action="distill" and merge: [id, id].
+   c. Prune notes with hit_count=0 AND created_at < now-30d (stale, never recalled).
+      Use ctx_skill_note with action="distill" and prune: id.
+   d. Promote notes with hit_count >= 5 to pinned=1 if not already pinned.
+      Use ctx_skill_note with action="distill" and promote: id.
+   e. If note count > 100 after pruning, archive oldest low-hit unpinned notes.
+3. Log a quality alert if >30% of kind='gotcha' notes appear to be general observations
+   (not skill-specific). Use ctx_memory to record the alert.
+4. Process at most 5 skill groups per run (rotating by last_distilled_at).
+
+### Tools available
+- ctx_skill_note (with action="distill" — dreamer-only action for merge/prune/promote)
+- Read, bash (for verification queries)
+
+### Success criteria
+- No skill has >100 notes in the project tier.
+- Pinned notes reflect genuinely recurring gotchas (hit_count >= 5).
+- Stale zero-hit notes older than 30 days are pruned.
+- Quality alert logged if >30% of gotcha notes are general-quality.`;
+}
+
 // ── Dispatcher ─────────────────────────────────────────────────────────────
 
 export function buildDreamTaskPrompt(
@@ -401,5 +447,7 @@ export function buildDreamTaskPrompt(
                 args.lastDreamAt ?? null,
                 args.existingDocs ?? { architecture: false, structure: false },
             );
+        case "distill-skill-memory":
+            return buildDistillSkillMemoryPrompt(args.projectPath);
     }
 }
