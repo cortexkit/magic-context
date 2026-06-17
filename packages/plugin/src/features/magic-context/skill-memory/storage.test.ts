@@ -1,14 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
+import { float32ArrayToBlob } from "../memory/storage-memory-embeddings";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import {
     bumpHitCount,
+    bumpHitCountById,
+    bumpRecallCountByIds,
+    getDedupCandidates,
+    getPinnedNotes,
+    getRankingCandidates,
     getSkillMemoryNotes,
     getSkillMemoryStats,
     type InsertSkillMemoryNoteArgs,
     insertSkillMemoryNote,
+    searchSkillMemoryFts,
 } from "./storage";
 
 function makeDb(): Database {
@@ -65,6 +72,35 @@ describe("skill_memory storage", () => {
         }
     });
 
+    test("insertSkillMemoryNote stores intent_embedding/delta_embedding/embedding_model_version", () => {
+        const db = makeDb();
+        try {
+            const iv = float32ArrayToBlob(new Float32Array([1, 0, 0]));
+            const dv = float32ArrayToBlob(new Float32Array([0, 1, 0]));
+            const id = insertSkillMemoryNote(db, {
+                skillId: "s",
+                resolvedPath: "/p",
+                tier: "global",
+                skillSource: null,
+                projectIdentity: "git:x",
+                intent: "i",
+                kind: "fix",
+                delta: "d",
+                normalizedHash: "emb-hash",
+                createdAt: 1,
+                intentEmbedding: iv,
+                deltaEmbedding: dv,
+                embeddingModelVersion: "m1",
+            });
+            const row = db
+                .prepare("SELECT embedding_model_version FROM skill_memory WHERE id=?")
+                .get(id) as { embedding_model_version: string };
+            expect(row.embedding_model_version).toBe("m1");
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
     test("getSkillMemoryNotes returns notes ordered by recency × hit_count", () => {
         const db = makeDb();
         try {
@@ -107,6 +143,29 @@ describe("skill_memory storage", () => {
         }
     });
 
+    test("bumpHitCountById increments by id", () => {
+        const db = makeDb();
+        try {
+            const id = Number(
+                (
+                    db
+                        .prepare(
+                            `INSERT INTO skill_memory (skill_id,resolved_path,tier,project_identity,intent,kind,delta,normalized_hash,hit_count,pinned,created_at)
+                         VALUES ('s','/p','global','git:x','i','fix','d','h',0,0,1) RETURNING id`,
+                        )
+                        .get() as { id: number }
+                ).id,
+            );
+            bumpHitCountById(db, id);
+            const row = db.prepare("SELECT hit_count FROM skill_memory WHERE id=?").get(id) as {
+                hit_count: number;
+            };
+            expect(row.hit_count).toBe(1);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
     test("bumpHitCount increments hit_count and updates last_used_at", () => {
         const db = makeDb();
         try {
@@ -127,6 +186,63 @@ describe("skill_memory storage", () => {
             const notes = getSkillMemoryNotes(db, "tdd", "global", "git:abc", 10);
             expect(notes[0].hit_count).toBe(2);
             expect(notes[0].last_used_at).not.toBeNull();
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("bumpRecallCountByIds increments recall_count without touching last_used_at or hit_count", () => {
+        const db = makeDb();
+        try {
+            const mkId = (hash: string): number =>
+                insertSkillMemoryNote(db, {
+                    skillId: "tdd",
+                    resolvedPath: "/p",
+                    tier: "global",
+                    skillSource: "opencode-global",
+                    projectIdentity: "git:abc",
+                    intent: "i",
+                    kind: "fix",
+                    delta: `d-${hash}`,
+                    normalizedHash: hash,
+                    createdAt: Date.now(),
+                }) as number;
+            const id1 = mkId("r1");
+            const id2 = mkId("r2");
+            const id3 = mkId("r3");
+
+            // Surface only id1 + id2 twice; id3 never recalled.
+            bumpRecallCountByIds(db, [id1, id2]);
+            bumpRecallCountByIds(db, [id1, id2]);
+
+            const rows = db
+                .prepare(
+                    "SELECT id, recall_count, hit_count, last_used_at FROM skill_memory ORDER BY id",
+                )
+                .all() as Array<{
+                id: number;
+                recall_count: number;
+                hit_count: number;
+                last_used_at: number | null;
+            }>;
+            const byId = new Map(rows.map((r) => [r.id, r]));
+            expect(byId.get(id1)?.recall_count).toBe(2);
+            expect(byId.get(id2)?.recall_count).toBe(2);
+            expect(byId.get(id3)?.recall_count).toBe(0);
+            // read-counter must NOT pollute write-side salience or recency
+            expect(byId.get(id1)?.hit_count).toBe(0);
+            expect(byId.get(id1)?.last_used_at).toBeNull();
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("bumpRecallCountByIds is a no-op on empty ids", () => {
+        const db = makeDb();
+        try {
+            // must not throw
+            bumpRecallCountByIds(db, []);
+            expect(true).toBe(true);
         } finally {
             closeQuietly(db);
         }
@@ -214,6 +330,26 @@ describe("skill_memory storage", () => {
         }
     });
 
+    test("getSkillMemoryNotes: equal timestamps don't break ordering (NULLIF guard)", () => {
+        const db = makeDb();
+        try {
+            const ts = 1_000_000;
+            const ins = (hash: string, hits: number) =>
+                db
+                    .prepare(
+                        `INSERT INTO skill_memory (skill_id,resolved_path,tier,project_identity,intent,kind,delta,normalized_hash,hit_count,pinned,created_at,last_used_at)
+                     VALUES ('s','/p','global','git:x','i','fix','d',?,?,0,?,?)`,
+                    )
+                    .run(hash, hits, ts, ts);
+            ins("a", 1);
+            ins("b", 5);
+            const notes = getSkillMemoryNotes(db, "s", "global", "git:x", 10);
+            expect(notes[0].normalized_hash).toBe("b"); // higher hit_count first when timestamps equal
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
     test("getSkillMemoryStats returns all-zeros when no notes exist for the project", () => {
         const db = makeDb();
         try {
@@ -221,6 +357,122 @@ describe("skill_memory storage", () => {
             expect(stats.totalNotes).toBe(0);
             expect(stats.skillsWithNotes).toBe(0);
             expect(stats.pinnedNotes).toBe(0);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("getDedupCandidates returns top-N same-scope rows with delta_embedding + model version", () => {
+        const db = makeDb();
+        try {
+            insertSkillMemoryNote(db, {
+                skillId: "s",
+                resolvedPath: "/p",
+                tier: "global",
+                skillSource: null,
+                projectIdentity: "git:x",
+                intent: "i",
+                kind: "fix",
+                delta: "d1",
+                normalizedHash: "dedup-h1",
+                createdAt: 1,
+                deltaEmbedding: float32ArrayToBlob(new Float32Array([1, 0])),
+                embeddingModelVersion: "m1",
+            });
+            const cands = getDedupCandidates(db, "s", "global", "git:x", 200);
+            expect(cands.length).toBe(1);
+            expect(cands[0].delta_embedding).toBeTruthy();
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("getRankingCandidates returns scope-filtered rows ordered by recency", () => {
+        const db = makeDb();
+        try {
+            insertSkillMemoryNote(db, {
+                skillId: "s",
+                resolvedPath: "/p",
+                tier: "global",
+                skillSource: null,
+                projectIdentity: "git:x",
+                intent: "i",
+                kind: "fix",
+                delta: "d",
+                normalizedHash: "rank-h1",
+                createdAt: 1,
+            });
+            const cands = getRankingCandidates(db, "s", "global", "git:x", 10);
+            expect(cands.length).toBe(1);
+            expect(cands[0].skill_id).toBe("s");
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("searchSkillMemoryFts returns scope-filtered BM25 matches", () => {
+        const db = makeDb();
+        try {
+            insertSkillMemoryNote(db, {
+                skillId: "s",
+                resolvedPath: "/p",
+                tier: "global",
+                skillSource: null,
+                projectIdentity: "git:x",
+                intent: "fix flaky auth test",
+                kind: "fix",
+                delta: "mock Date.now",
+                normalizedHash: "fts-h1",
+                createdAt: 1,
+            });
+            insertSkillMemoryNote(db, {
+                skillId: "OTHER",
+                resolvedPath: "/p",
+                tier: "global",
+                skillSource: null,
+                projectIdentity: "git:x",
+                intent: "auth",
+                kind: "fix",
+                delta: "x",
+                normalizedHash: "fts-h2",
+                createdAt: 1,
+            });
+            const hits = searchSkillMemoryFts(db, "s", "global", "git:x", '"auth"', 10);
+            expect(hits.every((h) => h.skill_id === "s")).toBe(true);
+            expect(hits.length).toBe(1);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("getPinnedNotes returns only pinned same-scope rows", () => {
+        const db = makeDb();
+        try {
+            insertSkillMemoryNote(db, {
+                skillId: "s",
+                resolvedPath: "/p",
+                tier: "global",
+                skillSource: null,
+                projectIdentity: "git:x",
+                intent: "i",
+                kind: "fix",
+                delta: "unpinned",
+                normalizedHash: "pin-h1",
+                createdAt: 1,
+            });
+            const pid = Number(
+                (
+                    db
+                        .prepare(
+                            `INSERT INTO skill_memory (skill_id,resolved_path,tier,project_identity,intent,kind,delta,normalized_hash,hit_count,pinned,created_at)
+                         VALUES ('s','/p','global','git:x','i','fix','pinned','pin-h2',0,1,2) RETURNING id`,
+                        )
+                        .get() as { id: number }
+                ).id,
+            );
+            const pinned = getPinnedNotes(db, "s", "global", "git:x");
+            expect(pinned.length).toBe(1);
+            expect(pinned[0].id).toBe(pid);
         } finally {
             closeQuietly(db);
         }

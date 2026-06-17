@@ -44,4 +44,29 @@ describe("parseFrontmatterConfig", () => {
         const content = `---\nskill-memory: true\n---\n# Skill`;
         expect(parseFrontmatterConfig(content)).toBeNull();
     });
+
+    test("parses flat ranking_* keys as numbers", () => {
+        const md = `---
+skill-memory:
+  enabled: true
+  ranking_relevance: 0.7
+  ranking_recency: 0.2
+  ranking_hit: 0.1
+---
+body`;
+        const cfg = parseFrontmatterConfig(md);
+        expect(cfg?.ranking_relevance).toBe(0.7);
+        expect(cfg?.ranking_recency).toBe(0.2);
+        expect(cfg?.ranking_hit).toBe(0.1);
+    });
+
+    test("ranking_* default to undefined when omitted (recall applies defaults)", () => {
+        const md = `---
+skill-memory:
+  enabled: true
+---
+body`;
+        const cfg = parseFrontmatterConfig(md);
+        expect(cfg?.ranking_relevance).toBeUndefined();
+    });
 });

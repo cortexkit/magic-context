@@ -570,19 +570,21 @@ export function getAndDeleteIntent(map: IntentByCallIdMap, callId: string): stri
  * Append ordering: this runs BEFORE maybeInjectChannel1Nudge (skill-memory
  * content before Channel-1 meta-reminder). See design §2.6.
  */
-export function maybeInjectSkillMemory(
+export async function maybeInjectSkillMemory(
     db: Database,
     skillId: string,
     tier: "project" | "global",
     projectIdentity: string,
     frontmatterConfig: SkillMemoryConfig | null,
     output: { output?: unknown },
-): void {
+    intent?: string,
+): Promise<void> {
     if (typeof output.output !== "string" || output.output.length === 0) return;
 
     // Delegate to shared recall core (also used by ctx_skill_recall tool)
-    const block = recallSkillMemoryBlock(db, {
+    const block = await recallSkillMemoryBlock(db, {
         skill: skillId,
+        intent,
         scope: tier,
         projectIdentity,
         frontmatterConfig,
@@ -621,11 +623,13 @@ export function createToolExecuteAfterHook(args: {
      *  we fall back to `defaultDirectory` (deps.directory). */
     sessionDirectoryBySession: Map<string, string>;
     defaultDirectory: string;
+    intentByCallId: IntentByCallIdMap;
 }) {
     return async (input: unknown, output?: unknown) => {
         const typedInput = input as {
             tool?: string;
             sessionID?: string;
+            callID?: string;
             args?: unknown;
             agent?: string;
         };
@@ -705,13 +709,18 @@ export function createToolExecuteAfterHook(args: {
                                 args.sessionDirectoryBySession.get(typedInput.sessionID) ??
                                 args.defaultDirectory;
                             const projectIdentity = resolveProjectIdentity(sessionDir);
-                            maybeInjectSkillMemory(
+                            const stashed = typedInput.callID
+                                ? (getAndDeleteIntent(args.intentByCallId, typedInput.callID) ??
+                                  undefined)
+                                : undefined;
+                            await maybeInjectSkillMemory(
                                 args.db,
                                 skillId,
                                 registryEntry.tier,
                                 projectIdentity,
                                 registryEntry.frontmatterConfig,
                                 output as { output?: unknown },
+                                stashed,
                             );
                         }
                     } catch (error) {

@@ -377,47 +377,32 @@ const STRUCTURE_TEMPLATE = `
 // ── Distill Skill Memory ───────────────────────────────────────────────────
 
 function buildDistillSkillMemoryPrompt(projectPath: string): string {
-    return `## Task: Distill Skill Memory
+    return `## Task: Distill Skill Memory (P2 — read-only health report)
 
 **Project:** ${projectPath}
 
-### Goal
-Maintain the skill_memory table: merge near-duplicate notes, prune stale low-hit notes,
-promote recurring gotchas to pinned, enforce per-skill note caps.
+### Important context
+- Embedding refresh for NULL/stale vectors already ran programmatically BEFORE this prompt — no need to re-embed.
+- Merge (action="distill" + merge), prune, and promote are P3 / NOT YET IMPLEMENTED. Do NOT call ctx_skill_note with action="distill".
 
-### Process
-1. Query skill_memory for skills with note_count > 20 (the distill threshold):
+### Your task: produce a short read-only summary of skill-memory corpus health
+1. Query aggregate counts and flag obvious issues:
    \`\`\`sql
-   SELECT skill_id, tier, project_identity, COUNT(*) as note_count
+   SELECT skill_id, tier, COUNT(*) as note_count,
+          SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END) as pinned_count,
+          SUM(CASE WHEN intent_embedding IS NULL OR delta_embedding IS NULL THEN 1 ELSE 0 END) as missing_embedding_count
    FROM skill_memory
    WHERE project_identity = (SELECT project_identity FROM skill_memory LIMIT 1)
-   GROUP BY skill_id, tier, project_identity
-   HAVING note_count > 20
+   GROUP BY skill_id, tier
    ORDER BY note_count DESC
-   LIMIT 5;
+   LIMIT 20;
    \`\`\`
-2. For each qualifying skill:
-   a. List notes ordered by hit_count DESC, created_at DESC.
-   b. Merge near-duplicate notes (same kind, similar delta — use judgment).
-      Use ctx_skill_note with action="distill" and merge: [id, id].
-   c. Prune notes with hit_count=0 AND created_at < now-30d (stale, never recalled).
-      Use ctx_skill_note with action="distill" and prune: id.
-   d. Promote notes with hit_count >= 5 to pinned=1 if not already pinned.
-      Use ctx_skill_note with action="distill" and promote: id.
-   e. If note count > 100 after pruning, archive oldest low-hit unpinned notes.
-3. Log a quality alert if >30% of kind='gotcha' notes appear to be general observations
-   (not skill-specific). Use ctx_memory to record the alert.
-4. Process at most 5 skill groups per run (rotating by last_distilled_at).
-
-### Tools available
-- ctx_skill_note (with action="distill" — dreamer-only action for merge/prune/promote)
-- Read, bash (for verification queries)
+2. Note any skills with >100 notes, >30% gotcha-kind notes, or obvious near-duplicates (same skill + kind + very similar delta text).
+3. Report findings as a short summary — no tool calls beyond read-only SQL queries.
 
 ### Success criteria
-- No skill has >100 notes in the project tier.
-- Pinned notes reflect genuinely recurring gotchas (hit_count >= 5).
-- Stale zero-hit notes older than 30 days are pruned.
-- Quality alert logged if >30% of gotcha notes are general-quality.`;
+- A concise health summary is logged (via ctx_memory) for the project maintainer to review.
+- No tool calls to unimplemented actions.`;
 }
 
 // ── Dispatcher ─────────────────────────────────────────────────────────────

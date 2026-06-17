@@ -1558,6 +1558,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             // for the first-turn case where the map isn't seeded yet.
             sessionDirectoryBySession,
             defaultDirectory: deps.directory,
+            intentByCallId,
         }),
         "tool.execute.before": createToolExecuteBeforeHook({ intentByCallId }),
         // Exposed so index.ts can pass the SAME instance to createCtxSkillNoteTool.

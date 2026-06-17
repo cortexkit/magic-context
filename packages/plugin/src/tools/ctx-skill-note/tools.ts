@@ -1,10 +1,18 @@
 import { type ToolContext, type ToolDefinition, tool } from "@opencode-ai/plugin";
+import { cosineSimilarity } from "../../features/magic-context/memory/cosine-similarity";
+import { embedTextForProject } from "../../features/magic-context/memory/embedding";
 import { computeNormalizedHash } from "../../features/magic-context/memory/normalize-hash";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
+import {
+    float32ArrayToBlob,
+    toFloat32Array,
+} from "../../features/magic-context/memory/storage-memory-embeddings";
 import { getSkillLoad } from "../../features/magic-context/skill-memory/provenance";
 import {
     bumpHitCount,
+    bumpHitCountById,
     findExistingNote,
+    getDedupCandidates,
     insertSkillMemoryNote,
 } from "../../features/magic-context/skill-memory/storage";
 import {
@@ -104,6 +112,38 @@ export function createCtxSkillNoteTool(deps: CtxSkillNoteToolDeps): ToolDefiniti
                 );
             }
 
+            // Embed both fields (best-effort; null on provider-off/unseeded — note still inserts).
+            let intentEmb = await embedTextForProject(projectIdentity, args.intent);
+            const deltaEmb = await embedTextForProject(projectIdentity, args.delta);
+            // Guard mixed vector spaces: if a re-registration happened between the two embeds, discard intent to keep one space.
+            if (intentEmb && deltaEmb && intentEmb.modelId !== deltaEmb.modelId) {
+                intentEmb = null;
+            }
+            const modelVersion = deltaEmb?.modelId ?? intentEmb?.modelId ?? null;
+
+            // Delta-only semantic dedup (bounded top-200, model-matched).
+            if (deltaEmb) {
+                const cands = getDedupCandidates(
+                    deps.db,
+                    args.skill,
+                    registryEntry.tier,
+                    projectIdentity,
+                    200,
+                );
+                const threshold = registryEntry.frontmatterConfig?.dedup_threshold ?? 0.92;
+                for (const c of cands) {
+                    if (!c.delta_embedding || c.embedding_model_version !== deltaEmb.modelId)
+                        continue;
+                    if (
+                        cosineSimilarity(deltaEmb.vector, toFloat32Array(c.delta_embedding)) >=
+                        threshold
+                    ) {
+                        bumpHitCountById(deps.db, c.id);
+                        return "Note already recorded (semantic duplicate — hit_count bumped).";
+                    }
+                }
+            }
+
             // Insert new note
             const id = insertSkillMemoryNote(deps.db, {
                 skillId: args.skill,
@@ -116,6 +156,9 @@ export function createCtxSkillNoteTool(deps: CtxSkillNoteToolDeps): ToolDefiniti
                 delta: args.delta,
                 tags: args.tags,
                 normalizedHash,
+                intentEmbedding: intentEmb ? float32ArrayToBlob(intentEmb.vector) : null,
+                deltaEmbedding: deltaEmb ? float32ArrayToBlob(deltaEmb.vector) : null,
+                embeddingModelVersion: modelVersion,
                 createdAt: Date.now(),
             });
 

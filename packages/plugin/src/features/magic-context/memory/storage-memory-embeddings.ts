@@ -37,13 +37,18 @@ function isEmbeddingRow(row: unknown): row is EmbeddingRow {
     );
 }
 
-function toFloat32Array(blob: Uint8Array | ArrayBuffer): Float32Array {
+export function toFloat32Array(blob: Uint8Array | ArrayBuffer): Float32Array {
     if (blob instanceof Uint8Array) {
         const buffer = blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength);
         return new Float32Array(buffer);
     }
 
     return new Float32Array(blob.slice(0));
+}
+
+/** Serialize a Float32Array to a SQLite BLOB (Buffer). Canonical — reuse, do not duplicate. */
+export function float32ArrayToBlob(vector: Float32Array): Buffer {
+    return Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength);
 }
 
 function getSaveEmbeddingStatement(db: Database): PreparedStatement {

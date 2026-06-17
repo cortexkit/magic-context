@@ -15,7 +15,7 @@ function makeDb(): Database {
 }
 
 describe("recallSkillMemoryBlock (shared recall core)", () => {
-    test("returns non-empty string containing <skill-memory when notes exist and enabled", () => {
+    test("returns non-empty string containing <skill-memory when notes exist and enabled", async () => {
         const db = makeDb();
         try {
             insertSkillMemoryNote(db, {
@@ -30,7 +30,7 @@ describe("recallSkillMemoryBlock (shared recall core)", () => {
                 normalizedHash: "h-recall-1",
                 createdAt: Date.now(),
             });
-            const block = recallSkillMemoryBlock(db, {
+            const block = await recallSkillMemoryBlock(db, {
                 skill: "tdd",
                 scope: "global",
                 projectIdentity: "git:abc",
@@ -48,7 +48,7 @@ describe("recallSkillMemoryBlock (shared recall core)", () => {
         }
     });
 
-    test("returns empty string when frontmatterConfig is null (not opted in)", () => {
+    test("returns empty string when frontmatterConfig is null (not opted in)", async () => {
         const db = makeDb();
         try {
             insertSkillMemoryNote(db, {
@@ -63,7 +63,7 @@ describe("recallSkillMemoryBlock (shared recall core)", () => {
                 normalizedHash: "h-recall-2",
                 createdAt: Date.now(),
             });
-            const block = recallSkillMemoryBlock(db, {
+            const block = await recallSkillMemoryBlock(db, {
                 skill: "tdd",
                 scope: "global",
                 projectIdentity: "git:abc",
@@ -75,10 +75,10 @@ describe("recallSkillMemoryBlock (shared recall core)", () => {
         }
     });
 
-    test("returns empty string when no notes exist (cold-start)", () => {
+    test("returns empty string when no notes exist (cold-start)", async () => {
         const db = makeDb();
         try {
-            const block = recallSkillMemoryBlock(db, {
+            const block = await recallSkillMemoryBlock(db, {
                 skill: "nonexistent-skill",
                 scope: "global",
                 projectIdentity: "git:abc",
@@ -97,7 +97,7 @@ describe("recallSkillMemoryBlock (shared recall core)", () => {
 });
 
 describe("maybeInjectSkillMemory", () => {
-    test("appends skill-memory block to output.output when notes exist", () => {
+    test("appends skill-memory block to output.output when notes exist", async () => {
         const db = makeDb();
         try {
             insertSkillMemoryNote(db, {
@@ -116,7 +116,7 @@ describe("maybeInjectSkillMemory", () => {
             const output = { output: "# TDD Skill\nContent here." };
             // Pass enabled frontmatterConfig — null triggers the early-return guard
             // (`if (!frontmatterConfig?.enabled) return;`) and the block is never injected.
-            maybeInjectSkillMemory(
+            await maybeInjectSkillMemory(
                 db,
                 "tdd",
                 "global",
@@ -133,18 +133,18 @@ describe("maybeInjectSkillMemory", () => {
         }
     });
 
-    test("does NOT append when no notes exist (cold-start)", () => {
+    test("does NOT append when no notes exist (cold-start)", async () => {
         const db = makeDb();
         try {
             const output = { output: "# TDD Skill\nContent here." };
-            maybeInjectSkillMemory(db, "tdd", "global", "git:abc", null, output);
+            await maybeInjectSkillMemory(db, "tdd", "global", "git:abc", null, output);
             expect(output.output).not.toContain("<skill-memory");
         } finally {
             closeQuietly(db);
         }
     });
 
-    test("does NOT append when frontmatterConfig is null (skill-memory not opted in)", () => {
+    test("does NOT append when frontmatterConfig is null (skill-memory not opted in)", async () => {
         const db = makeDb();
         try {
             insertSkillMemoryNote(db, {
@@ -161,14 +161,14 @@ describe("maybeInjectSkillMemory", () => {
             });
             const output = { output: "# TDD Skill\nContent here." };
             // null frontmatterConfig = skill-memory not enabled for this skill
-            maybeInjectSkillMemory(db, "tdd", "global", "git:abc", null, output);
+            await maybeInjectSkillMemory(db, "tdd", "global", "git:abc", null, output);
             expect(output.output).not.toContain("<skill-memory");
         } finally {
             closeQuietly(db);
         }
     });
 
-    test("skill-memory block appears AFTER existing output content (append semantics)", () => {
+    test("skill-memory block appears AFTER existing output content (append semantics)", async () => {
         // maybeInjectSkillMemory APPENDS to output.output — it does NOT prepend.
         // So if a sentinel is already in the output, the skill-memory block lands AFTER it.
         // This test verifies the append contract: skillMemoryPos > channel1Pos.
@@ -193,7 +193,7 @@ describe("maybeInjectSkillMemory", () => {
                 createdAt: Date.now(),
             });
             const output = { output: "# TDD Skill\nContent here.\n<!-- CHANNEL1_SENTINEL -->" };
-            maybeInjectSkillMemory(
+            await maybeInjectSkillMemory(
                 db,
                 "tdd",
                 "global",

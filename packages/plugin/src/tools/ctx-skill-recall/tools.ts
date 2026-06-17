@@ -55,7 +55,7 @@ export function createCtxSkillRecallTool(deps: CtxSkillRecallToolDeps): ToolDefi
                     resolveProjectIdentity(toolContext.directory ?? deps.projectDirectory);
                 const frontmatterConfig = deps._testFrontmatterConfig ?? null;
                 const tier: "project" | "global" = "global"; // default for test injection
-                const block = recallSkillMemoryBlock(deps.db, {
+                const block = await recallSkillMemoryBlock(deps.db, {
                     skill: args.skill,
                     intent: args.intent,
                     scope: tier,
@@ -167,7 +167,7 @@ export function createCtxSkillRecallTool(deps: CtxSkillRecallToolDeps): ToolDefi
             }
 
             // Delegate to shared recall core (feature layer — same as transparent path)
-            const block = recallSkillMemoryBlock(deps.db, {
+            const block = await recallSkillMemoryBlock(deps.db, {
                 skill: args.skill,
                 intent: args.intent,
                 scope: tier,

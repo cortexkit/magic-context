@@ -11,6 +11,9 @@ export interface SkillMemoryConfig {
     max_tokens: number;
     max_pinned_tokens: number;
     dedup_threshold: number;
+    ranking_relevance?: number;
+    ranking_recency?: number;
+    ranking_hit?: number;
 }
 
 const FRONTMATTER_REGEX = /^---\r?\n([\s\S]*?)\r?\n---/m;
@@ -32,6 +35,9 @@ export function parseFrontmatterConfig(content: string): SkillMemoryConfig | nul
             max_tokens: toNumber(skillMemoryBlock.max_tokens, 1500),
             max_pinned_tokens: toNumber(skillMemoryBlock.max_pinned_tokens, 4000),
             dedup_threshold: toNumber(skillMemoryBlock.dedup_threshold, 0.92),
+            ranking_relevance: toOptionalNumber(skillMemoryBlock.ranking_relevance),
+            ranking_recency: toOptionalNumber(skillMemoryBlock.ranking_recency),
+            ranking_hit: toOptionalNumber(skillMemoryBlock.ranking_hit),
         };
     } catch {
         // Non-choke: malformed config = inert
@@ -46,6 +52,15 @@ function toNumber(value: unknown, defaultValue: number): number {
         if (Number.isFinite(parsed)) return parsed;
     }
     return defaultValue;
+}
+
+function toOptionalNumber(value: unknown): number | undefined {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+        const parsed = Number(value);
+        if (Number.isFinite(parsed)) return parsed;
+    }
+    return undefined;
 }
 
 /**
