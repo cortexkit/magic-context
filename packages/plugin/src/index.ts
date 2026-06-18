@@ -2,6 +2,7 @@ import type { Plugin } from "@opencode-ai/plugin";
 import { DREAMER_AGENT } from "./agents/dreamer";
 import { HISTORIAN_AGENT, HISTORIAN_EDITOR_AGENT } from "./agents/historian";
 import {
+    applyDisallowedTools,
     buildAllowOnlyPermission,
     DREAMER_ALLOWED_TOOLS,
     HISTORIAN_ALLOWED_TOOLS,
@@ -564,15 +565,27 @@ const plugin: Plugin = async (ctx) => {
                       return agentOverrides;
                   })()
                 : undefined;
-            // Strip two_pass from historian overrides — it's consumed by the runner,
-            // not a valid OpenCode agent config field. Both historian and historian-editor
-            // agents use the remaining overrides (same model, fallbacks, etc.).
+            // Strip two_pass + disallowed_tools from historian overrides —
+            // two_pass is consumed by the runner, disallowed_tools is consumed
+            // below to build the permission map. Neither is a valid OpenCode
+            // agent config field. Both historian and historian-editor agents use
+            // the remaining overrides (same model, fallbacks, etc.).
             const historianAgentOverrides = pluginConfig.historian
                 ? (() => {
-                      const { two_pass: _twoPass, ...agentOverrides } = pluginConfig.historian;
+                      const {
+                          two_pass: _twoPass,
+                          disallowed_tools: _disallowedTools,
+                          ...agentOverrides
+                      } = pluginConfig.historian;
                       return agentOverrides;
                   })()
                 : undefined;
+            // Apply disallowed_tools to the default allow-list. "*" removes all.
+            const historianDisallowed = pluginConfig.historian?.disallowed_tools ?? [];
+            const historianAllowedTools = applyDisallowedTools(
+                HISTORIAN_ALLOWED_TOOLS,
+                historianDisallowed,
+            );
 
             config.agent = {
                 ...(config.agent ?? {}),
@@ -596,17 +609,14 @@ const plugin: Plugin = async (ctx) => {
                     // (gated in the runner). Keeping the system prompt constant
                     // preserves prompt-cache byte stability.
                     COMPARTMENT_AGENT_SYSTEM_PROMPT,
-                    HISTORIAN_ALLOWED_TOOLS,
-                    // The historian reads its (often inline) prompt and emits
-                    // compartments — a handful of steps at most; the cap is pure
-                    // loop insurance for a weak model.
+                    historianAllowedTools,
                     HISTORIAN_MAX_STEPS,
                     historianAgentOverrides,
                 ),
                 [HISTORIAN_EDITOR_AGENT]: buildHiddenAgentConfig(
                     HISTORIAN_EDITOR_AGENT,
                     HISTORIAN_EDITOR_SYSTEM_PROMPT,
-                    HISTORIAN_ALLOWED_TOOLS,
+                    historianAllowedTools,
                     HISTORIAN_MAX_STEPS,
                     historianAgentOverrides,
                 ),

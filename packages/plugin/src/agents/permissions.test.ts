@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+    applyDisallowedTools,
     buildAllowOnlyPermission,
     DREAMER_ALLOWED_TOOLS,
     HISTORIAN_ALLOWED_TOOLS,
@@ -80,6 +81,47 @@ describe("HISTORIAN_ALLOWED_TOOLS", () => {
         // Repo-wide exploration belongs to dreamer / primary agents.
         expect(HISTORIAN_ALLOWED_TOOLS).not.toContain("grep");
         expect(HISTORIAN_ALLOWED_TOOLS).not.toContain("glob");
+    });
+});
+
+describe("applyDisallowedTools", () => {
+    it("returns the defaults unchanged when disallowed is empty", () => {
+        expect(applyDisallowedTools(HISTORIAN_ALLOWED_TOOLS, [])).toEqual([
+            ...HISTORIAN_ALLOWED_TOOLS,
+        ]);
+    });
+
+    it('removes all tools when "*" is in the disallowed list', () => {
+        expect(applyDisallowedTools(HISTORIAN_ALLOWED_TOOLS, ["*"])).toEqual([]);
+    });
+
+    it('removes all tools when "*" appears alongside other entries', () => {
+        expect(applyDisallowedTools(HISTORIAN_ALLOWED_TOOLS, ["*", "read"])).toEqual([]);
+    });
+
+    it("removes a single tool by name", () => {
+        const result = applyDisallowedTools(HISTORIAN_ALLOWED_TOOLS, ["read"]);
+        expect(result).not.toContain("read");
+        expect(result).toContain("aft_outline");
+        expect(result).toContain("aft_zoom");
+        expect(result).toContain("aft_search");
+    });
+
+    it("removes multiple tools by name", () => {
+        const result = applyDisallowedTools(HISTORIAN_ALLOWED_TOOLS, ["read", "aft_search"]);
+        expect(result).toEqual(["aft_outline", "aft_zoom"]);
+    });
+
+    it("silently ignores unknown tool names (defense-in-depth)", () => {
+        expect(applyDisallowedTools(HISTORIAN_ALLOWED_TOOLS, ["nonexistent"])).toEqual([
+            ...HISTORIAN_ALLOWED_TOOLS,
+        ]);
+    });
+
+    it("produces empty allow-list → buildAllowOnlyPermission yields wildcard deny only", () => {
+        const allowed = applyDisallowedTools(HISTORIAN_ALLOWED_TOOLS, ["*"]);
+        const perm = buildAllowOnlyPermission(allowed);
+        expect(perm).toEqual({ "*": "deny" });
     });
 });
 

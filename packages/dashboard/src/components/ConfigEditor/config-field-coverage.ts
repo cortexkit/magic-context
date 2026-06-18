@@ -75,6 +75,7 @@ export const OMITTED_BY_DESIGN: Readonly<Record<string, string>> = {
   "historian.disable":
     "historian is core to magic-context; disabling it is an advanced raw-JSONC choice, not a form toggle",
   "historian.two_pass": "advanced historian tuning; raw JSONC",
+  "historian.disallowed_tools": "advanced historian tuning; raw JSONC",
   "dreamer.max_runtime_minutes": "advanced dreamer scheduling; raw JSONC",
   "dreamer.tasks": "advanced dreamer task list; raw JSONC",
   "dreamer.task_timeout_minutes": "advanced dreamer scheduling; raw JSONC",

@@ -144,6 +144,12 @@ export const HistorianConfigSchema = AgentOverrideConfigSchema.extend({
     thinking_level: PiThinkingLevelSchema.describe(
         "Pi only: explicit thinking level passed as --thinking <level> to Pi historian subagent invocations. Required when using reasoning models (e.g. github-copilot/gpt-5.4) because Pi's default thinking-level resolution can pick a value the provider rejects. OpenCode users set variant instead. Valid: off | minimal | low | medium | high | xhigh",
     ),
+    disallowed_tools: z
+        .array(z.enum(["*", "read", "aft_outline", "aft_zoom", "aft_search"]))
+        .default([])
+        .describe(
+            'OpenCode only. Tools to REMOVE from the historian\'s default allow-list [read, aft_outline, aft_zoom, aft_search]. Applies to both historian and historian-editor agents. Use ["*"] to strip all tool definitions from the model request — this prevents weak instruction-following models (e.g. mistral-small-latest) from entering tool-calling loops. Individual tool names remove just that tool. Note: a user-supplied historian.permission override can re-allow a tool that disallowed_tools removed — disallowed_tools sets the baseline, permission overrides take precedence. (default: [])',
+        ),
 }).optional();
 export type HistorianConfig = NonNullable<z.infer<typeof HistorianConfigSchema>>;
 

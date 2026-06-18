@@ -109,6 +109,19 @@ export function buildAllowOnlyPermission(
 export const HISTORIAN_ALLOWED_TOOLS = ["read", "aft_outline", "aft_zoom", "aft_search"] as const;
 
 /**
+ * Subtract `disallowed` from the default historian allow-list. `"*"` removes
+ * all tools. Unknown tool names are silently ignored (the Zod enum in the
+ * config schema rejects them at parse time, so this is defense-in-depth).
+ */
+export function applyDisallowedTools(
+    defaults: readonly string[],
+    disallowed: readonly string[],
+): readonly string[] {
+    if (disallowed.includes("*")) return [];
+    return defaults.filter((t) => !disallowed.includes(t));
+}
+
+/**
  * Tools the dreamer agent needs. This is the broadest hidden-agent
  * surface because dreamer's tasks legitimately require local-repo
  * exploration plus external command execution:
