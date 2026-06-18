@@ -11,6 +11,7 @@ import {
     recallSkillMemoryBlock,
     sanitizeSkillIntentForFts,
 } from "./recall";
+import { promoteSkillObservations } from "./promote";
 import { insertSkillMemoryNote } from "./storage";
 
 function makeDb(): Database {
@@ -335,7 +336,7 @@ describe("recallSkillMemoryBlock (intent-scoped rungs)", () => {
         EMBED_UP = true;
         db.prepare(
             `INSERT INTO skill_memory (skill_id,resolved_path,tier,project_identity,intent,kind,delta,normalized_hash,hit_count,pinned,created_at)
-             VALUES ('s','/p','global','git:x','old auth fix','fix','rotate token','h1',0,1,1)`,
+             VALUES ('s','/p','global','*','old auth fix','fix','rotate token','h1',0,1,1)`,
         ).run();
         for (let i = 0; i < 10; i++) {
             insertSkillMemoryNote(db, {
@@ -401,6 +402,30 @@ describe("buildSkillMemoryBlock", () => {
         expect(block).toContain('kind="gotcha"');
         expect(block).toContain("Always mock the clock");
         expect(block).toContain("ctx_skill_note");
+    });
+});
+
+describe("cross-project global recall", () => {
+    test("a global note learned in repo A surfaces when recalled from repo B", async () => {
+        const db = makeDb();
+        try {
+            promoteSkillObservations(db, "git:repoA", [
+                {
+                    skillId: "council",
+                    kind: "gotcha",
+                    lesson: "aggregator needs a fast model",
+                },
+            ]);
+            const block = await recallSkillMemoryBlock(db, {
+                skill: "council",
+                scope: "global",
+                projectIdentity: "git:repoB",
+                frontmatterConfig: cfg,
+            });
+            expect(block).toContain("aggregator needs a fast model");
+        } finally {
+            closeQuietly(db);
+        }
     });
 });
 

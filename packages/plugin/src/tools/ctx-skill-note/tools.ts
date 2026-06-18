@@ -14,6 +14,7 @@ import {
     findExistingNote,
     getDedupCandidates,
     insertSkillMemoryNote,
+    partitionKey,
 } from "../../features/magic-context/skill-memory/storage";
 import {
     CTX_SKILL_NOTE_TOOL_NAME,
@@ -88,6 +89,7 @@ export function createCtxSkillNoteTool(deps: CtxSkillNoteToolDeps): ToolDefiniti
             // a launch dir. This matches ctx_memory's pattern and correctly handles
             // `opencode -s` launched outside the project root.
             const projectIdentity = resolveProjectIdentity(toolContext.directory);
+            const part = partitionKey(registryEntry.tier, projectIdentity);
             const normalizedHash = computeNormalizedHash(args.delta);
 
             // Check for exact duplicate
@@ -95,7 +97,7 @@ export function createCtxSkillNoteTool(deps: CtxSkillNoteToolDeps): ToolDefiniti
                 deps.db,
                 args.skill,
                 registryEntry.tier,
-                projectIdentity,
+                part,
                 normalizedHash,
             );
             if (existing) {
@@ -103,7 +105,7 @@ export function createCtxSkillNoteTool(deps: CtxSkillNoteToolDeps): ToolDefiniti
                     deps.db,
                     args.skill,
                     registryEntry.tier,
-                    projectIdentity,
+                    part,
                     normalizedHash,
                 );
                 return (
@@ -127,7 +129,7 @@ export function createCtxSkillNoteTool(deps: CtxSkillNoteToolDeps): ToolDefiniti
                     deps.db,
                     args.skill,
                     registryEntry.tier,
-                    projectIdentity,
+                    part,
                     200,
                 );
                 const threshold = registryEntry.frontmatterConfig?.dedup_threshold ?? 0.92;
@@ -150,7 +152,8 @@ export function createCtxSkillNoteTool(deps: CtxSkillNoteToolDeps): ToolDefiniti
                 resolvedPath: registryEntry.resolvedPath,
                 tier: registryEntry.tier,
                 skillSource: registryEntry.skillSource,
-                projectIdentity,
+                projectIdentity: part,
+                originProject: projectIdentity,
                 intent: args.intent,
                 kind: args.kind,
                 delta: args.delta,
@@ -168,7 +171,7 @@ export function createCtxSkillNoteTool(deps: CtxSkillNoteToolDeps): ToolDefiniti
                     deps.db,
                     args.skill,
                     registryEntry.tier,
-                    projectIdentity,
+                    part,
                     normalizedHash,
                 );
                 return "Note already recorded (concurrent insert detected — hit count bumped).";

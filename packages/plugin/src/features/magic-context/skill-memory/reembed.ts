@@ -20,8 +20,8 @@ export async function reembedStaleSkillNotes(
     const stale = db
         .prepare(
             `SELECT id, intent, delta FROM skill_memory
-         WHERE project_identity = ?
-           AND (intent_embedding IS NULL OR delta_embedding IS NULL OR embedding_model_version IS NOT ?)
+         WHERE (project_identity = ? OR project_identity = '*')
+            AND (intent_embedding IS NULL OR delta_embedding IS NULL OR embedding_model_version IS NOT ?)
          LIMIT ?`,
         )
         .all(projectIdentity, currentModel, REEMBED_CAP) as Array<{

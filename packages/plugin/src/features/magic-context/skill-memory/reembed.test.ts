@@ -4,13 +4,18 @@ import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 
+const embedCalls: string[] = [];
+
 // Provider "up" with a deterministic model — MUST precede the reembed.ts import.
 mock.module("../memory/embedding", () => ({
-    embedTextForProject: async (_p: string, _text: string) => ({
-        vector: new Float32Array([0.1, 0.2, 0.3]),
-        modelId: "test-model",
-        generation: 1,
-    }),
+	embedTextForProject: async (projectIdentity: string, _text: string) => {
+		embedCalls.push(projectIdentity);
+		return {
+			vector: new Float32Array([0.1, 0.2, 0.3]),
+			modelId: "test-model",
+			generation: 1,
+		};
+	},
 }));
 const { reembedStaleSkillNotes } = await import("./reembed");
 
@@ -39,6 +44,25 @@ test("reembedStaleSkillNotes fills NULL embeddings (bounded, idempotent)", async
         expect(row.embedding_model_version).toBe("test-model");
         const result2 = await reembedStaleSkillNotes(db, "git:abc");
         expect(result2.reembedded).toBe(0);
+    } finally {
+        closeQuietly(db);
+    }
+});
+
+test("reembed selects global '*' notes and embeds them under the real identity", async () => {
+    const { promoteSkillObservations } = await import("./promote");
+    const db = new Database(":memory:");
+    try {
+        initializeDatabase(db);
+        runMigrations(db);
+        promoteSkillObservations(db, "git:repoA", [{ skillId: "council", kind: "fix", lesson: "L7" }]);
+        embedCalls.length = 0;
+
+        const res = await reembedStaleSkillNotes(db, "git:repoA");
+
+        expect(res.reembedded).toBe(1);
+        expect(embedCalls.length).toBeGreaterThan(0);
+        expect(embedCalls.every((c) => c === "git:repoA")).toBe(true);
     } finally {
         closeQuietly(db);
     }

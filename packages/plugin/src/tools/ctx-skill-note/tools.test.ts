@@ -105,6 +105,42 @@ describe("ctx_skill_note tool", () => {
         }
     });
 
+    test("global-tier note is written under '*' with origin_project = real repo", async () => {
+        const db = makeDb();
+        const registry: SkillLoadRegistry = createSkillLoadRegistry();
+        try {
+            registry.set(registryKey("ses_test", "council"), {
+                resolvedPath: "/home/user/.config/opencode/skills/council/SKILL.md",
+                tier: "global",
+                skillSource: "opencode-global",
+                skillId: "council",
+                loadedAt: Date.now(),
+                frontmatterConfig: {
+                    enabled: true,
+                    max_tokens: 1500,
+                    max_pinned_tokens: 4000,
+                    dedup_threshold: 0.92,
+                },
+            });
+
+            const t = createCtxSkillNoteTool({ db, skillLoadRegistry: registry });
+            await t.execute(
+                { skill: "council", intent: "x", kind: "gotcha", delta: "global lesson xyz" },
+                toolContext(),
+            );
+            const row = db
+                .prepare(
+                    "SELECT project_identity, origin_project FROM skill_memory WHERE delta='global lesson xyz'",
+                )
+                .get() as { project_identity: string; origin_project: string };
+            expect(row.project_identity).toBe("*");
+            expect(row.origin_project).not.toBe("*");
+            expect(row.origin_project.length).toBeGreaterThan(0);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
     test("deduplicates: bumps hit_count on exact duplicate delta", async () => {
         const db = makeDb();
         const registry: SkillLoadRegistry = createSkillLoadRegistry();

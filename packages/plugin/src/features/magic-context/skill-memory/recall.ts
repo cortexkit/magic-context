@@ -8,6 +8,7 @@ import {
     getPinnedNotes,
     getRankingCandidates,
     getSkillMemoryNotes,
+    partitionKey,
     type SkillMemoryNote,
     searchSkillMemoryFts,
 } from "./storage";
@@ -193,6 +194,7 @@ export async function recallSkillMemoryBlock(
 ): Promise<string> {
     if (!opts.frontmatterConfig?.enabled) return "";
     try {
+        const part = partitionKey(opts.scope, opts.projectIdentity);
         const maxTokens = opts.maxTokens ?? opts.frontmatterConfig.max_tokens;
         const maxPinned = opts.frontmatterConfig.max_pinned_tokens;
         const intent = opts.intent?.trim();
@@ -218,7 +220,7 @@ export async function recallSkillMemoryBlock(
 
         // Rung 2: no intent → flat recency×hit (nothing to embed/FTS-match → always "no-intent").
         if (!intent) {
-            const notes = flatRecall(db, opts.skill, opts.scope, opts.projectIdentity, {
+            const notes = flatRecall(db, opts.skill, opts.scope, part, {
                 maxTokens,
                 maxPinnedTokens: maxPinned,
             });
@@ -231,7 +233,7 @@ export async function recallSkillMemoryBlock(
                 db,
                 opts.skill,
                 opts.scope,
-                opts.projectIdentity,
+                part,
                 200,
             );
             const matched = candidates.filter(
@@ -257,7 +259,7 @@ export async function recallSkillMemoryBlock(
                     .map((r) => byId.get(r.id))
                     .filter((n): n is SkillMemoryNote => n != null);
                 const ordered = unionPinnedFirst(
-                    getPinnedNotes(db, opts.skill, opts.scope, opts.projectIdentity),
+                    getPinnedNotes(db, opts.skill, opts.scope, part),
                     rankedNotes,
                 );
                 const selected = budgetFill(ordered, maxTokens, maxPinned);
@@ -268,7 +270,7 @@ export async function recallSkillMemoryBlock(
 
         const match = sanitizeSkillIntentForFts(intent);
         if (match === "") {
-            const notes = flatRecall(db, opts.skill, opts.scope, opts.projectIdentity, {
+            const notes = flatRecall(db, opts.skill, opts.scope, part, {
                 maxTokens,
                 maxPinnedTokens: maxPinned,
             });
@@ -278,12 +280,12 @@ export async function recallSkillMemoryBlock(
             db,
             opts.skill,
             opts.scope,
-            opts.projectIdentity,
+            part,
             match,
             50,
         );
         const ordered = unionPinnedFirst(
-            getPinnedNotes(db, opts.skill, opts.scope, opts.projectIdentity),
+            getPinnedNotes(db, opts.skill, opts.scope, part),
             ftsNotes,
         );
         const selected = budgetFill(ordered, maxTokens, maxPinned);

@@ -75,6 +75,14 @@ export function extractToolCallSummaries(parts: unknown[]): string[] {
         const input = state.input as Record<string, unknown> | null;
         const metadata = state.metadata as Record<string, unknown> | null;
 
+        // Skill tool: surface the skill name (input.name) before the description
+        // fallback, which would otherwise mask it if metadata.description exists.
+        if (p.tool === "skill") {
+            const name = input && typeof input.name === "string" ? input.name : "";
+            summaries.push(name ? `TC: skill(${truncateArg(name)})` : "TC: skill");
+            continue;
+        }
+
         // Prefer explicit description (bash tool always has one)
         const description =
             (input && typeof input.description === "string" && input.description) ||
