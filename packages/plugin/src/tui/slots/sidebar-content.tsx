@@ -1,5 +1,5 @@
 /** @jsxImportSource @opentui/solid */
-import { createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
+import { Show, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
 import type { TuiSlotPlugin, TuiPluginApi, TuiThemeCurrent } from "@opencode-ai/plugin/tui"
 import packageJson from "../../../package.json"
 import { loadSidebarSnapshot, type SidebarSnapshot } from "../data/context-db"
@@ -755,9 +755,11 @@ const SidebarContent = (props: {
                             C:{s()?.compartmentCount ?? 0} Q:{s()?.pendingOpsCount ?? 0} N:{s()?.sessionNoteCount ?? 0}
                         </text>
                     </box>
-                    {s()?.recompProgress && (
-                        <RecompProgressSection theme={props.theme} progress={s()!.recompProgress!} />
-                    )}
+                    <Show when={s()?.recompProgress}>
+                        {(progress) => (
+                            <RecompProgressSection theme={props.theme} progress={progress()} />
+                        )}
+                    </Show>
                 </box>
             )}
 
@@ -789,9 +791,11 @@ const SidebarContent = (props: {
             />
 
             {/* Recomp / session-upgrade live progress */}
-            {s()?.recompProgress && (
-                <RecompProgressSection theme={props.theme} progress={s()!.recompProgress!} />
-            )}
+            <Show when={s()?.recompProgress}>
+                {(progress) => (
+                    <RecompProgressSection theme={props.theme} progress={progress()} />
+                )}
+            </Show>
                 </>
             )}
 
