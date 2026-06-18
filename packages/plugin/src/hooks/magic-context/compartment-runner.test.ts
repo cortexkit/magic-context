@@ -1329,6 +1329,59 @@ describe("runCompartmentAgent", () => {
         expect(promptSession.mock.calls[0]?.[0]?.body.agent).toBe("historian");
     });
 
+    it("promotes skillObservations as global '*' notes (gated, non-discard-last)", async () => {
+        useTempDataHome("compartment-runner-skillobs-");
+        createOpenCodeDb("ses-skillobs", [
+            { id: "m-1", role: "user", text: "First" },
+            { id: "m-2", role: "assistant", text: "Second" },
+            { id: "m-3", role: "user", text: "protected 1" },
+            { id: "m-4", role: "user", text: "protected 2" },
+            { id: "m-5", role: "user", text: "protected 3" },
+            { id: "m-6", role: "user", text: "protected 4" },
+            { id: "m-7", role: "user", text: "protected 5" },
+        ]);
+        const db = openDatabase();
+        const client = {
+            session: {
+                get: mock(async () => ({ data: { directory: "/tmp/skillobs" } })),
+                create: mock(async () => ({ data: { id: "ses-agent" } })),
+                prompt: mock(async () => ({})),
+                messages: mock(async () => ({
+                    data: [
+                        {
+                            info: { role: "assistant", time: { created: 1 } },
+                            parts: [
+                                {
+                                    type: "text",
+                                    text: `<compartment start="1" end="2" title="T">Summary</compartment>\n<skill_observations>\n* council | gotcha | fast aggregator\n</skill_observations>`,
+                                },
+                            ],
+                        },
+                    ],
+                })),
+                delete: mock(async () => ({})),
+            },
+        } as unknown as PluginContext["client"];
+        try {
+            await runCompartmentAgentWithLease({
+                client,
+                db,
+                sessionId: "ses-skillobs",
+                historianChunkTokens: 10_000,
+                directory: "/tmp",
+            });
+            const row = db
+                .prepare(
+                    "SELECT project_identity, source_type FROM skill_memory WHERE skill_id='council'",
+                )
+                .get() as { project_identity: string; source_type: string } | undefined;
+            expect(row?.project_identity).toBe("*");
+            expect(row?.source_type).toBe("historian");
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
     it("keeps a committed publish succeeded and signaled when post-commit project registration throws", async () => {
         useTempDataHome("compartment-runner-post-commit-registration-throw-");
         createOpenCodeDb("ses-post-commit-registration", [

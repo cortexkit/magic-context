@@ -107,6 +107,12 @@ export const TASKS: TaskMeta[] = [
     description: "Refresh answers for active project Primers",
     defaultSchedule: "0 3 * * *",
   },
+  {
+    name: "distill-skill-memory",
+    label: "Distill skill memory",
+    description: "Opt-in: distills per-skill memory (merge/prune/promote)",
+    defaultSchedule: "",
+  },
 ];
 
 const PRESETS: { label: string; cron: string }[] = [

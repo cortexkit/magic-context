@@ -229,13 +229,7 @@ export async function recallSkillMemoryBlock(
 
         const q = await embedTextForProject(opts.projectIdentity, intent);
         if (q) {
-            const candidates = getRankingCandidates(
-                db,
-                opts.skill,
-                opts.scope,
-                part,
-                200,
-            );
+            const candidates = getRankingCandidates(db, opts.skill, opts.scope, part, 200);
             const matched = candidates.filter(
                 (n) =>
                     n.embedding_model_version === q.modelId &&
@@ -276,14 +270,7 @@ export async function recallSkillMemoryBlock(
             });
             return finalize("flat-fts", notes);
         }
-        const ftsNotes = searchSkillMemoryFts(
-            db,
-            opts.skill,
-            opts.scope,
-            part,
-            match,
-            50,
-        );
+        const ftsNotes = searchSkillMemoryFts(db, opts.skill, opts.scope, part, match, 50);
         const ordered = unionPinnedFirst(
             getPinnedNotes(db, opts.skill, opts.scope, part),
             ftsNotes,

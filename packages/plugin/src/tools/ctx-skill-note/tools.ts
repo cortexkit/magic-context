@@ -101,13 +101,7 @@ export function createCtxSkillNoteTool(deps: CtxSkillNoteToolDeps): ToolDefiniti
                 normalizedHash,
             );
             if (existing) {
-                bumpHitCount(
-                    deps.db,
-                    args.skill,
-                    registryEntry.tier,
-                    part,
-                    normalizedHash,
-                );
+                bumpHitCount(deps.db, args.skill, registryEntry.tier, part, normalizedHash);
                 return (
                     `Note already recorded (hit_count now ${existing.hit_count + 1}). ` +
                     `Exact duplicate detected — hit count bumped to reinforce recall priority.`
@@ -167,13 +161,7 @@ export function createCtxSkillNoteTool(deps: CtxSkillNoteToolDeps): ToolDefiniti
 
             if (id === null) {
                 // Race condition: another process inserted the same hash
-                bumpHitCount(
-                    deps.db,
-                    args.skill,
-                    registryEntry.tier,
-                    part,
-                    normalizedHash,
-                );
+                bumpHitCount(deps.db, args.skill, registryEntry.tier, part, normalizedHash);
                 return "Note already recorded (concurrent insert detected — hit count bumped).";
             }
 

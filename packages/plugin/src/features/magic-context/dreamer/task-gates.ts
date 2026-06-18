@@ -389,6 +389,13 @@ export function evaluateTaskGate(task: DreamTaskName, ctx: TaskGateContext): boo
                     (primer.lastObservedAt ?? 0) > primer.answerRefreshedAt,
             );
 
+        case "distill-skill-memory":
+            // Agentic opt-in task: when scheduled, always eligible. The reembed
+            // pre-step + distill prompt no-op gracefully on an empty corpus, so a
+            // cheap always-true gate avoids coupling the scheduler to skill_memory
+            // table internals.
+            return true;
+
         default: {
             const _exhaustive: never = task;
             return Boolean(_exhaustive);

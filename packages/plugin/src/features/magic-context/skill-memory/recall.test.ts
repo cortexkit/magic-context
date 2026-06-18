@@ -4,6 +4,7 @@ import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { float32ArrayToBlob } from "../memory/storage-memory-embeddings";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
+import { promoteSkillObservations } from "./promote";
 import {
     buildSkillMemoryBlock,
     flatRecall,
@@ -11,7 +12,6 @@ import {
     recallSkillMemoryBlock,
     sanitizeSkillIntentForFts,
 } from "./recall";
-import { promoteSkillObservations } from "./promote";
 import { insertSkillMemoryNote } from "./storage";
 
 function makeDb(): Database {

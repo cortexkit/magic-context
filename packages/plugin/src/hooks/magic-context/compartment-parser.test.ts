@@ -430,3 +430,43 @@ the full p1 narrative
         expect(c.content).toBe("just flat content, no tiers here");
     });
 });
+
+describe("parseCompartmentOutput — skill_observations", () => {
+    it("parses skill observations into {skillId, kind, lesson}", () => {
+        const xml = `<output>
+<compartments></compartments>
+<skill_observations>
+* council | gotcha | aggregator needs a fast non-deficit model
+* test-driven-development | fix | mock the clock in auth tests
+</skill_observations>
+</output>`;
+        const parsed = parseCompartmentOutput(xml);
+        expect(parsed.skillObservations).toEqual([
+            {
+                skillId: "council",
+                kind: "gotcha",
+                lesson: "aggregator needs a fast non-deficit model",
+            },
+            {
+                skillId: "test-driven-development",
+                kind: "fix",
+                lesson: "mock the clock in auth tests",
+            },
+        ]);
+    });
+
+    it("absent block -> empty array", () => {
+        expect(parseCompartmentOutput("<output></output>").skillObservations).toEqual([]);
+    });
+
+    it("malformed lines (bad kind, missing fields) are skipped, non-choke", () => {
+        const xml = `<skill_observations>
+* council | general | invalid kind dropped
+* onlyskill | fix
+* good | discovery | kept
+</skill_observations>`;
+        expect(parseCompartmentOutput(xml).skillObservations).toEqual([
+            { skillId: "good", kind: "discovery", lesson: "kept" },
+        ]);
+    });
+});

@@ -11,12 +11,12 @@ import {
     getDedupCandidates,
     getPinnedNotes,
     getRankingCandidates,
-	getSkillMemoryNotes,
-	getSkillMemoryStats,
-	type InsertSkillMemoryNoteArgs,
-	insertSkillMemoryNote,
-	partitionKey,
-	searchSkillMemoryFts,
+    getSkillMemoryNotes,
+    getSkillMemoryStats,
+    type InsertSkillMemoryNoteArgs,
+    insertSkillMemoryNote,
+    partitionKey,
+    searchSkillMemoryFts,
 } from "./storage";
 
 function makeDb(): Database {
@@ -308,13 +308,13 @@ describe("skill_memory storage", () => {
                 createdAt: Date.now(),
             });
 
-			// Seed 1 project-tier note under a DIFFERENT project — must NOT be counted.
-			insertSkillMemoryNote(db, {
-				skillId: "tdd",
-				resolvedPath: "/p",
-				tier: "project",
-				skillSource: "opencode-global",
-				projectIdentity: "git:other",
+            // Seed 1 project-tier note under a DIFFERENT project — must NOT be counted.
+            insertSkillMemoryNote(db, {
+                skillId: "tdd",
+                resolvedPath: "/p",
+                tier: "project",
+                skillSource: "opencode-global",
+                projectIdentity: "git:other",
                 intent: "i5",
                 kind: "gotcha",
                 delta: "n5",
@@ -335,12 +335,12 @@ describe("skill_memory storage", () => {
         const db = makeDb();
         try {
             const ts = 1_000_000;
-			const ins = (hash: string, hits: number) =>
-				db
-					.prepare(
-						`INSERT INTO skill_memory (skill_id,resolved_path,tier,project_identity,intent,kind,delta,normalized_hash,hit_count,pinned,created_at,last_used_at)
+            const ins = (hash: string, hits: number) =>
+                db
+                    .prepare(
+                        `INSERT INTO skill_memory (skill_id,resolved_path,tier,project_identity,intent,kind,delta,normalized_hash,hit_count,pinned,created_at,last_used_at)
 				     VALUES ('s','/p','global','*','i','fix','d',?,?,0,?,?)`,
-					)
+                    )
                     .run(hash, hits, ts, ts);
             ins("a", 1);
             ins("b", 5);
@@ -464,10 +464,10 @@ describe("skill_memory storage", () => {
             const pid = Number(
                 (
                     db
-						.prepare(
-							`INSERT INTO skill_memory (skill_id,resolved_path,tier,project_identity,intent,kind,delta,normalized_hash,hit_count,pinned,created_at)
+                        .prepare(
+                            `INSERT INTO skill_memory (skill_id,resolved_path,tier,project_identity,intent,kind,delta,normalized_hash,hit_count,pinned,created_at)
 				         VALUES ('s','/p','global','*','i','fix','pinned','pin-h2',0,1,2) RETURNING id`,
-						)
+                        )
                         .get() as { id: number }
                 ).id,
             );
@@ -481,79 +481,79 @@ describe("skill_memory storage", () => {
 });
 
 describe("partitionKey", () => {
-	test("global tier maps to '*' sentinel", () => {
-		expect(partitionKey("global", "git:repoA")).toBe("*");
-	});
-	test("project tier passes through the real identity", () => {
-		expect(partitionKey("project", "git:repoA")).toBe("git:repoA");
-	});
+    test("global tier maps to '*' sentinel", () => {
+        expect(partitionKey("global", "git:repoA")).toBe("*");
+    });
+    test("project tier passes through the real identity", () => {
+        expect(partitionKey("project", "git:repoA")).toBe("git:repoA");
+    });
 });
 
 describe("storage v41 fields", () => {
-	test("insert stamps origin_project + source_type; null resolvedPath -> ''", () => {
-		const db = makeDb();
-		try {
-			const id = insertSkillMemoryNote(db, {
-				skillId: "council",
-				resolvedPath: null,
-				tier: "global",
-				skillSource: null,
-				projectIdentity: "*",
-				originProject: "git:repoA",
-				sourceType: "historian",
-				intent: "i",
-				kind: "fix",
-				delta: "d",
-				normalizedHash: "h1",
-				createdAt: 1,
-			});
-			expect(id).not.toBeNull();
-			const row = db
-				.prepare(
-					"SELECT resolved_path, origin_project, source_type FROM skill_memory WHERE id=?",
-				)
-				.get(id) as { resolved_path: string; origin_project: string; source_type: string };
-			expect(row.resolved_path).toBe("");
-			expect(row.origin_project).toBe("git:repoA");
-			expect(row.source_type).toBe("historian");
-		} finally {
-			closeQuietly(db);
-		}
-	});
+    test("insert stamps origin_project + source_type; null resolvedPath -> ''", () => {
+        const db = makeDb();
+        try {
+            const id = insertSkillMemoryNote(db, {
+                skillId: "council",
+                resolvedPath: null,
+                tier: "global",
+                skillSource: null,
+                projectIdentity: "*",
+                originProject: "git:repoA",
+                sourceType: "historian",
+                intent: "i",
+                kind: "fix",
+                delta: "d",
+                normalizedHash: "h1",
+                createdAt: 1,
+            });
+            expect(id).not.toBeNull();
+            const row = db
+                .prepare(
+                    "SELECT resolved_path, origin_project, source_type FROM skill_memory WHERE id=?",
+                )
+                .get(id) as { resolved_path: string; origin_project: string; source_type: string };
+            expect(row.resolved_path).toBe("");
+            expect(row.origin_project).toBe("git:repoA");
+            expect(row.source_type).toBe("historian");
+        } finally {
+            closeQuietly(db);
+        }
+    });
 
-	test("getSkillMemoryStats counts global ('*') notes alongside the project's own", () => {
-		const db = makeDb();
-		try {
-			insertSkillMemoryNote(db, {
-				skillId: "s",
-				resolvedPath: "/p",
-				tier: "project",
-				skillSource: null,
-				projectIdentity: "git:repoA",
-				intent: "i",
-				kind: "fix",
-				delta: "d1",
-				normalizedHash: "p1",
-				createdAt: 1,
-			});
-			insertSkillMemoryNote(db, {
-				skillId: "council",
-				resolvedPath: "",
-				tier: "global",
-				skillSource: null,
-				projectIdentity: "*",
-				originProject: "git:repoB",
-				sourceType: "historian",
-				intent: "i",
-				kind: "fix",
-				delta: "d2",
-				normalizedHash: "g1",
-				createdAt: 2,
-			});
-			const stats = getSkillMemoryStats(db, "git:repoA");
-			expect(stats.totalNotes).toBe(2);
-		} finally {
-			closeQuietly(db);
-		}
-	});
+    test("getSkillMemoryStats counts global ('*') notes alongside the project's own", () => {
+        const db = makeDb();
+        try {
+            insertSkillMemoryNote(db, {
+                skillId: "s",
+                resolvedPath: "/p",
+                tier: "project",
+                skillSource: null,
+                projectIdentity: "git:repoA",
+                intent: "i",
+                kind: "fix",
+                delta: "d1",
+                normalizedHash: "p1",
+                createdAt: 1,
+            });
+            insertSkillMemoryNote(db, {
+                skillId: "council",
+                resolvedPath: "",
+                tier: "global",
+                skillSource: null,
+                projectIdentity: "*",
+                originProject: "git:repoB",
+                sourceType: "historian",
+                intent: "i",
+                kind: "fix",
+                delta: "d2",
+                normalizedHash: "g1",
+                createdAt: 2,
+            });
+            const stats = getSkillMemoryStats(db, "git:repoA");
+            expect(stats.totalNotes).toBe(2);
+        } finally {
+            closeQuietly(db);
+        }
+    });
 });

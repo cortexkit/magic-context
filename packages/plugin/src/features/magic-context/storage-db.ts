@@ -1183,6 +1183,40 @@ export function initializeDatabase(db: Database): void {
     CREATE INDEX IF NOT EXISTS idx_memory_mutation_log_target
       ON memory_mutation_log(project_path, target_memory_id, id);
 
+    CREATE TABLE IF NOT EXISTS skill_memory (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      skill_id        TEXT NOT NULL,
+      resolved_path   TEXT NOT NULL,
+      tier            TEXT NOT NULL CHECK(tier IN ('project', 'global')),
+      skill_source    TEXT CHECK(skill_source IN (
+                        'opencode-project', 'opencode-global',
+                        'claude-skills', 'agents-skills'
+                      )),
+      project_identity TEXT NOT NULL,
+      intent          TEXT NOT NULL,
+      intent_embedding BLOB,
+      embedding_model_version TEXT,
+      kind            TEXT NOT NULL CHECK(kind IN ('gotcha', 'discovery', 'fix', 'workflow')),
+      delta           TEXT NOT NULL,
+      tags            TEXT,
+      hit_count       INTEGER NOT NULL DEFAULT 0,
+      pinned          INTEGER NOT NULL DEFAULT 0 CHECK(pinned IN (0, 1)),
+      normalized_hash TEXT NOT NULL,
+      created_at      INTEGER NOT NULL,
+      last_used_at    INTEGER,
+      delta_embedding BLOB,
+      recall_count INTEGER NOT NULL DEFAULT 0,
+      origin_project TEXT,
+      source_type TEXT,
+      UNIQUE(skill_id, tier, project_identity, normalized_hash)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_skill_memory_lookup
+      ON skill_memory(skill_id, tier, project_identity, last_used_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_skill_memory_fts_prep
+      ON skill_memory(skill_id, tier, project_identity, kind);
+
     CREATE TABLE IF NOT EXISTS dream_state (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -1338,6 +1372,14 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       tokenize='porter unicode61'
     );
 
+    CREATE VIRTUAL TABLE IF NOT EXISTS skill_memory_fts USING fts5(
+      intent,
+      delta,
+      content='skill_memory',
+      content_rowid='id',
+      tokenize='porter unicode61'
+    );
+
     CREATE VIRTUAL TABLE IF NOT EXISTS message_history_fts USING fts5(
       session_id UNINDEXED,
       message_ordinal UNINDEXED,
@@ -1395,6 +1437,19 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
       INSERT INTO memories_fts(memories_fts, rowid, content, category) VALUES ('delete', old.id, old.content, old.category);
       INSERT INTO memories_fts(rowid, content, category) VALUES (new.id, new.content, new.category);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS skill_memory_ai AFTER INSERT ON skill_memory BEGIN
+      INSERT INTO skill_memory_fts(rowid, intent, delta) VALUES (new.id, new.intent, new.delta);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS skill_memory_ad AFTER DELETE ON skill_memory BEGIN
+      INSERT INTO skill_memory_fts(skill_memory_fts, rowid, intent, delta) VALUES ('delete', old.id, old.intent, old.delta);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS skill_memory_au AFTER UPDATE ON skill_memory BEGIN
+      INSERT INTO skill_memory_fts(skill_memory_fts, rowid, intent, delta) VALUES ('delete', old.id, old.intent, old.delta);
+      INSERT INTO skill_memory_fts(rowid, intent, delta) VALUES (new.id, new.intent, new.delta);
     END;
 
     CREATE TABLE IF NOT EXISTS session_meta (
@@ -1725,6 +1780,10 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "compartments", "start_message_id", "TEXT DEFAULT ''");
     ensureColumn(db, "compartments", "end_message_id", "TEXT DEFAULT ''");
     ensureColumn(db, "memory_embeddings", "model_id", "TEXT");
+    ensureColumn(db, "skill_memory", "delta_embedding", "BLOB");
+    ensureColumn(db, "skill_memory", "recall_count", "INTEGER NOT NULL DEFAULT 0");
+    ensureColumn(db, "skill_memory", "origin_project", "TEXT");
+    ensureColumn(db, "skill_memory", "source_type", "TEXT");
     ensureColumn(db, "session_meta", "memory_block_cache", "TEXT DEFAULT ''");
     ensureColumn(db, "session_meta", "memory_block_count", "INTEGER DEFAULT 0");
     ensureColumn(db, "session_meta", "pi_stable_id_scheme", "INTEGER");

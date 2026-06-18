@@ -490,6 +490,25 @@ describe("runPiHistorian", () => {
 			closeQuietly(db);
 		}
 	});
+	it("promotes skillObservations as global '*' notes", async () => {
+		const xml = `${successXml()}\n<skill_observations>\n* council | gotcha | fast aggregator\n</skill_observations>`;
+		const { db } = await runHistorianWith({
+			outputs: [xml],
+			memoryEnabled: true,
+			autoPromote: true,
+		});
+		try {
+			const row = db
+				.prepare(
+					"SELECT project_identity, source_type FROM skill_memory WHERE skill_id='council'",
+				)
+				.get() as { project_identity: string; source_type: string } | undefined;
+			expect(row?.project_identity).toBe("*");
+			expect(row?.source_type).toBe("historian");
+		} finally {
+			closeQuietly(db);
+		}
+	});
 	it("runs the Pi subagent, parses output, and publishes compartments and facts", async () => {
 		const { db, runner } = await runHistorianWith({ outputs: [successXml()] });
 		try {

@@ -225,6 +225,11 @@ Off-hours maintenance (Dreamer) and on-demand prompt augmentation (Sidekick).
 | `dreamer.tasks.refresh-primers.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |
 | `dreamer.tasks.refresh-primers.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` \\| `"max"` | — | Pi only: per-task thinking level |
 | `dreamer.tasks.refresh-primers.timeout_minutes` | number (5–) | `20` | Minutes allowed for this task before it is aborted |
+| `dreamer.tasks.distill-skill-memory.schedule` | string | `""` | 5-field cron schedule (e.g. "0 3 * * *"), or "" to disable this task. |
+| `dreamer.tasks.distill-skill-memory.model` | string | — | Per-task model override (inherits dreamer.model) |
+| `dreamer.tasks.distill-skill-memory.fallback_models` | string \\| string[] | — | Per-task fallback chain (inherits dreamer.fallback_models) |
+| `dreamer.tasks.distill-skill-memory.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` | — | Pi only: per-task thinking level |
+| `dreamer.tasks.distill-skill-memory.timeout_minutes` | number (5–) | `20` | Minutes allowed for this task before it is aborted |
 | `dreamer.inject_docs` | boolean | `true` | Inject ARCHITECTURE.md and STRUCTURE.md into the m[0] `<project-docs>` block (default true) |
 | `dreamer.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` \\| `"max"` | — | Pi only: default thinking level for dreamer subagent invocations. See historian.thinking_level. |
 | `sidekick` | object | — | Optional sidekick agent configuration for session-start memory retrieval |

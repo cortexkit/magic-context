@@ -25,6 +25,7 @@ import {
     type Memory,
 } from "../memory";
 import { runCompressCues } from "../mural/compress-cues";
+import { reembedStaleSkillNotes } from "../skill-memory/reembed";
 import { recordChildInvocation } from "../subagent-token-capture";
 import { reviewUserMemories } from "../user-memory/review-user-memories";
 import { getActiveUserMemories } from "../user-memory/storage-user-memory";
@@ -666,7 +667,18 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 };
             }
 
-            // Agentic tasks: verify / curate / maintain-docs.
+            // Skill-memory P2: re-embed stale/NULL skill-note vectors BEFORE the
+            // distill agentic pass so the prompt sees a fully-embedded corpus and
+            // P1-era notes promote from the FTS rung to the cosine rung.
+            if (config.task === "distill-skill-memory") {
+                try {
+                    await reembedStaleSkillNotes(db, projectIdentity);
+                } catch (e) {
+                    log(`[dreamer] distill-skill-memory reembed pre-step failed: ${e}`);
+                }
+            }
+
+            // Agentic tasks: curate / maintain-docs / distill-skill-memory.
             return await runAgenticTask(config, ctx, {
                 deps,
                 deadline,

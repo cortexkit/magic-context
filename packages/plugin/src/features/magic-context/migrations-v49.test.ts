@@ -158,6 +158,9 @@ describe("migration v49 — per-model embedding coexistence", () => {
                  ) VALUES (999999, 'ses-orphan', 'git:orphan', 'opencode', 0, 0, 1, 'h', 'm', 4, x'01020304', 1)`,
             ).run();
             db.exec("PRAGMA foreign_keys=ON");
+            // Delete v49 AND everything above it (upstream v50/51/52 + our skill
+            // migrations v53/54/55) so getCurrentVersion drops below 49 and the
+            // v49 body actually re-runs.
             db.prepare("DELETE FROM schema_migrations WHERE version >= 49").run();
 
             expect(() => runMigrations(db)).not.toThrow();

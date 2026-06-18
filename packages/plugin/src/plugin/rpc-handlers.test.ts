@@ -733,16 +733,16 @@ describe("buildStatusDetail — skill memory section", () => {
         }
     });
 
-    test("no project identity (directory is not a git repo / fallback fails) → skillMemory is null", async () => {
+    test("project-tier note under a different project identity does not count toward this project's stats (scoping isolation)", async () => {
         const db = createTestDb();
         try {
             const sessionId = "ses-status-skillmem-noproj";
-            // Use a non-existent directory to force resolveProjectIdentity to
-            // either throw or land on the dir: fallback. Either way we should
-            // get a deterministic identity — but to specifically exercise the
-            // "no identity" path we'd need to stub resolveProjectIdentity.
-            // Simpler check: insert a row under a project that does NOT match
-            // the resolved one, and assert stats are 0 (proves scoping works).
+            // Scoping check: a PROJECT-tier note under a different project identity
+            // must NOT count toward the resolved project's stats. (Global-tier notes
+            // are intentionally cross-project — stored under the '*' sentinel and
+            // counted everywhere per the F5 design — so a global fixture here would
+            // legitimately count; global counting is covered in storage.test.ts.
+            // Project-tier still partitions by real identity, which is what isolates.)
             const directory = process.cwd();
 
             db.prepare(
@@ -752,8 +752,8 @@ describe("buildStatusDetail — skill memory section", () => {
             insertSkillMemoryNote(db, {
                 skillId: "tdd",
                 resolvedPath: "/p",
-                tier: "global",
-                skillSource: "opencode-global",
+                tier: "project",
+                skillSource: "opencode-project",
                 projectIdentity: "git:some-other-project",
                 intent: "i",
                 kind: "gotcha",

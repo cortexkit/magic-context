@@ -145,7 +145,7 @@ export function getSkillMemoryNotes(
                created_at DESC
              LIMIT ?`,
         )
-		.all(skillId, tier, partitionKey(tier, projectIdentity), limit) as SkillMemoryNote[];
+        .all(skillId, tier, partitionKey(tier, projectIdentity), limit) as SkillMemoryNote[];
 }
 
 /**
@@ -160,10 +160,10 @@ export function bumpHitCount(
     normalizedHash: string,
 ): void {
     db.prepare(
-		`UPDATE skill_memory
+        `UPDATE skill_memory
 		 SET hit_count = hit_count + 1, last_used_at = ?
 		 WHERE skill_id = ? AND tier = ? AND project_identity = ? AND normalized_hash = ?`,
-	).run(Date.now(), skillId, tier, partitionKey(tier, projectIdentity), normalizedHash);
+    ).run(Date.now(), skillId, tier, partitionKey(tier, projectIdentity), normalizedHash);
 }
 
 /**
@@ -212,7 +212,7 @@ export function findExistingNote(
                 `SELECT id, hit_count FROM skill_memory
                  WHERE skill_id = ? AND tier = ? AND project_identity = ? AND normalized_hash = ?`,
             )
-			.get(skillId, tier, partitionKey(tier, projectIdentity), normalizedHash) as {
+            .get(skillId, tier, partitionKey(tier, projectIdentity), normalizedHash) as {
             id: number;
             hit_count: number;
         } | null) ?? null
@@ -237,7 +237,7 @@ export function getDedupCandidates(
          WHERE skill_id=? AND tier=? AND project_identity=?
          ORDER BY COALESCE(last_used_at, created_at) DESC LIMIT ?`,
         )
-		.all(skillId, tier, partitionKey(tier, projectIdentity), limit) as Array<
+        .all(skillId, tier, partitionKey(tier, projectIdentity), limit) as Array<
         Pick<SkillMemoryNote, "id" | "delta_embedding" | "embedding_model_version">
     >;
 }
@@ -255,7 +255,7 @@ export function getRankingCandidates(
          WHERE skill_id=? AND tier=? AND project_identity=?
          ORDER BY COALESCE(last_used_at, created_at) DESC LIMIT ?`,
         )
-		.all(skillId, tier, partitionKey(tier, projectIdentity), limit) as SkillMemoryNote[];
+        .all(skillId, tier, partitionKey(tier, projectIdentity), limit) as SkillMemoryNote[];
 }
 
 export function searchSkillMemoryFts(
@@ -275,7 +275,13 @@ export function searchSkillMemoryFts(
          ORDER BY bm25(skill_memory_fts) ASC, COALESCE(m.last_used_at, m.created_at) DESC
          LIMIT ?`,
         )
-		.all(matchQuery, skillId, tier, partitionKey(tier, projectIdentity), limit) as SkillMemoryNote[];
+        .all(
+            matchQuery,
+            skillId,
+            tier,
+            partitionKey(tier, projectIdentity),
+            limit,
+        ) as SkillMemoryNote[];
 }
 
 export function getPinnedNotes(
@@ -290,7 +296,7 @@ export function getPinnedNotes(
          WHERE skill_id=? AND tier=? AND project_identity=? AND pinned=1
          ORDER BY COALESCE(last_used_at, created_at) DESC`,
         )
-		.all(skillId, tier, partitionKey(tier, projectIdentity)) as SkillMemoryNote[];
+        .all(skillId, tier, partitionKey(tier, projectIdentity)) as SkillMemoryNote[];
 }
 
 export function getSkillMemoryStats(
@@ -298,14 +304,14 @@ export function getSkillMemoryStats(
     projectIdentity: string,
 ): { totalNotes: number; skillsWithNotes: number; pinnedNotes: number } {
     const row = db
-		.prepare(
-			`SELECT
+        .prepare(
+            `SELECT
 				COUNT(*) AS total,
 				COUNT(DISTINCT skill_id) AS skills,
 				COALESCE(SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END), 0) AS pinned
 			 FROM skill_memory
 			 WHERE project_identity = ? OR project_identity = '*'`,
-		)
+        )
         .get(projectIdentity) as { total: number; skills: number; pinned: number } | undefined;
     return {
         totalNotes: Number(row?.total ?? 0),

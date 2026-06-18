@@ -390,3 +390,24 @@ describe("validateHistorianOutput primer candidate contract", () => {
         }
     });
 });
+
+describe("validateHistorianOutput — skillObservations", () => {
+    test("validated pass surfaces skillObservations when present", () => {
+        const xml = `<output>
+<compartments>
+<compartment start="1" end="2" title="t">summary</compartment>
+</compartments>
+<skill_observations>
+* council | gotcha | use a fast aggregator
+</skill_observations>
+<meta><messages_processed>1-2</messages_processed><unprocessed_from>3</unprocessed_from></meta>
+</output>`;
+        const result = validateHistorianOutput(xml, "ses-test", buildChunk(1, 2), [], 0);
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+            expect(result.skillObservations).toEqual([
+                { skillId: "council", kind: "gotcha", lesson: "use a fast aggregator" },
+            ]);
+        }
+    });
+});

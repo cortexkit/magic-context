@@ -8,14 +8,14 @@ const embedCalls: string[] = [];
 
 // Provider "up" with a deterministic model — MUST precede the reembed.ts import.
 mock.module("../memory/embedding", () => ({
-	embedTextForProject: async (projectIdentity: string, _text: string) => {
-		embedCalls.push(projectIdentity);
-		return {
-			vector: new Float32Array([0.1, 0.2, 0.3]),
-			modelId: "test-model",
-			generation: 1,
-		};
-	},
+    embedTextForProject: async (projectIdentity: string, _text: string) => {
+        embedCalls.push(projectIdentity);
+        return {
+            vector: new Float32Array([0.1, 0.2, 0.3]),
+            modelId: "test-model",
+            generation: 1,
+        };
+    },
 }));
 const { reembedStaleSkillNotes } = await import("./reembed");
 
@@ -55,7 +55,9 @@ test("reembed selects global '*' notes and embeds them under the real identity",
     try {
         initializeDatabase(db);
         runMigrations(db);
-        promoteSkillObservations(db, "git:repoA", [{ skillId: "council", kind: "fix", lesson: "L7" }]);
+        promoteSkillObservations(db, "git:repoA", [
+            { skillId: "council", kind: "fix", lesson: "L7" },
+        ]);
         embedCalls.length = 0;
 
         const res = await reembedStaleSkillNotes(db, "git:repoA");

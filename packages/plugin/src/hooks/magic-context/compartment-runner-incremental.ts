@@ -26,6 +26,7 @@ import {
     getMemoriesByProject,
     ModuleMemoryAuthorityError,
 } from "../../features/magic-context/memory/storage-memory";
+import { promoteSkillObservations } from "../../features/magic-context/skill-memory/promote";
 import {
     clearEmergencyDrainLatch,
     clearEmergencyRecovery,
@@ -913,6 +914,28 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
                 );
             } catch (error) {
                 sessionLog(sessionId, "failed to store primer candidates:", error);
+            }
+        }
+
+        // Skill-memory historian extraction: promote <skill_observations> the
+        // historian emitted into per-skill notes. Same promotionActive +
+        // !discardedLast gate as facts/primers so a provisional tail does not
+        // double-emit.
+        if (
+            promotionActive &&
+            !discardedLast &&
+            validatedPass.skillObservations &&
+            validatedPass.skillObservations.length > 0
+        ) {
+            try {
+                const written = promoteSkillObservations(
+                    db,
+                    promotionProjectIdentity,
+                    validatedPass.skillObservations,
+                );
+                sessionLog(sessionId, `promoted ${written} skill observation(s)`);
+            } catch (error) {
+                sessionLog(sessionId, "failed to promote skill observations:", error);
             }
         }
     } catch (error: unknown) {

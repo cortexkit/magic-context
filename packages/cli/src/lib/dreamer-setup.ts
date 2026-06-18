@@ -37,6 +37,7 @@ const TASK_DESCRIPTIONS: Record<DreamTaskName, string> = {
     "review-user-memories": "Promote recurring behaviors into your user profile",
     "promote-primers": "Promote recurring project questions into Primers",
     "refresh-primers": "Refresh answers for active project Primers",
+    "distill-skill-memory": "Opt-in: distills per-skill memory (merge/prune/promote)",
 };
 
 /** v1-behavior-preserving default schedules (must match the Zod schema defaults). */
@@ -53,6 +54,7 @@ const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
     "review-user-memories": "0 3 * * *",
     "promote-primers": "0 3 * * *",
     "refresh-primers": "0 3 * * *",
+    "distill-skill-memory": "",
 };
 
 const PRESET_CUSTOM = "__custom__";

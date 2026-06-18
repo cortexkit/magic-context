@@ -179,6 +179,8 @@ const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
     "review-user-memories": "0 3 * * *",
     "promote-primers": "0 3 * * *",
     "refresh-primers": "0 3 * * *",
+    // Opt-in (NOT a default): distills per-skill memory. Off until scheduled.
+    "distill-skill-memory": "",
 };
 
 function defaultTaskConfig(task: DreamTaskName): z.input<typeof DreamTaskConfigSchema> {
@@ -230,6 +232,9 @@ export const DreamTasksSchema = z
         ),
         "refresh-primers": DreamTaskBaseConfigSchema.default(() =>
             DreamTaskBaseConfigSchema.parse(defaultTaskConfig("refresh-primers")),
+        ),
+        "distill-skill-memory": DreamTaskBaseConfigSchema.default(() =>
+            DreamTaskBaseConfigSchema.parse(defaultTaskConfig("distill-skill-memory")),
         ),
     })
     .describe(
