@@ -386,6 +386,30 @@ export async function runDream(args: {
                         signal: taskAbortController.signal,
                         fallbackModels: args.fallbackModels,
                         callContext: `dreamer:${taskName}`,
+                        validateResponse: async (validateClient, validateSessionId) => {
+                            // Detect empty responses (0 output tokens) that some
+                            // providers return on quota exhaustion with HTTP 200
+                            // instead of a proper error code. Without this, the
+                            // fallback chain is never activated for such responses.
+                            const messagesResponse = await validateClient.session.messages({
+                                path: { id: validateSessionId },
+                                query: {
+                                    directory: args.sessionDirectory ?? args.projectIdentity,
+                                    limit: 50,
+                                },
+                            });
+                            const messages = shared.normalizeSDKResponse(
+                                messagesResponse,
+                                [] as unknown[],
+                                { preferResponseOnMissingData: true },
+                            );
+                            const output = extractLatestAssistantText(messages);
+                            if (!output) {
+                                throw new Error(
+                                    `[dreamer:${taskName}] model returned empty response (0 tokens) — possible quota exhaustion`,
+                                );
+                            }
+                        },
                     },
                 );
                 if (lostLease) {
@@ -859,6 +883,26 @@ Only include notes whose conditions you could definitively evaluate against exte
                 signal: abortController.signal,
                 fallbackModels: args.fallbackModels,
                 callContext: "dreamer:smart-notes",
+                validateResponse: async (validateClient, validateSessionId) => {
+                    const messagesResponse = await validateClient.session.messages({
+                        path: { id: validateSessionId },
+                        query: {
+                            directory: args.sessionDirectory ?? args.projectIdentity,
+                            limit: 50,
+                        },
+                    });
+                    const messages = shared.normalizeSDKResponse(
+                        messagesResponse,
+                        [] as unknown[],
+                        { preferResponseOnMissingData: true },
+                    );
+                    const output = extractLatestAssistantText(messages);
+                    if (!output) {
+                        throw new Error(
+                            "[dreamer:smart-notes] model returned empty response (0 tokens) — possible quota exhaustion",
+                        );
+                    }
+                },
             },
         );
 

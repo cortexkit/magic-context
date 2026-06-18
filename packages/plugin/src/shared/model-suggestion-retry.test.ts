@@ -308,4 +308,75 @@ describe("promptSyncWithModelSuggestionRetry", () => {
         ).rejects.toBe(originalError);
         expect(prompt).toHaveBeenCalledTimes(1);
     });
+
+    // --- validateResponse: empty-response detection ---
+
+    test("validateResponse: primary returns empty → fallback[0] succeeds", async () => {
+        const prompt = mock(async () => ({})); // both succeed (HTTP 200)
+        const client = createClient(prompt);
+        const validate = mock(async () => {
+            // primary attempt (call 1): empty → throw
+            if (validate.mock.calls.length === 1) {
+                throw new Error("empty response (0 tokens)");
+            }
+            // fallback attempt (call 2): non-empty → ok
+        });
+
+        await promptSyncWithModelSuggestionRetry(client, createArgs(), {
+            fallbackModels: ["anthropic/claude-sonnet-4-6"],
+            validateResponse: validate,
+        });
+
+        expect(prompt).toHaveBeenCalledTimes(2);
+        expect(validate).toHaveBeenCalledTimes(2);
+        expect((prompt.mock.calls[1]?.[0] as PromptCall).body.model).toEqual({
+            providerID: "anthropic",
+            modelID: "claude-sonnet-4-6",
+        });
+    });
+
+    test("validateResponse: all attempts return empty → throws last error", async () => {
+        const prompt = mock(async () => ({}));
+        const client = createClient(prompt);
+        const emptyError = new Error("empty response (0 tokens)");
+        const validate = mock(async () => {
+            throw emptyError;
+        });
+
+        await expect(
+            promptSyncWithModelSuggestionRetry(client, createArgs(), {
+                fallbackModels: ["anthropic/claude-sonnet-4-6", "google/gemini-3-flash"],
+                validateResponse: validate,
+            }),
+        ).rejects.toBe(emptyError);
+
+        expect(prompt).toHaveBeenCalledTimes(3); // primary + 2 fallbacks
+        expect(validate).toHaveBeenCalledTimes(3);
+    });
+
+    test("validateResponse: primary non-empty → no fallback tried", async () => {
+        const prompt = mock(async () => ({}));
+        const client = createClient(prompt);
+        const validate = mock(async () => {}); // always passes
+
+        await promptSyncWithModelSuggestionRetry(client, createArgs(), {
+            fallbackModels: ["anthropic/claude-sonnet-4-6"],
+            validateResponse: validate,
+        });
+
+        expect(prompt).toHaveBeenCalledTimes(1);
+        expect(validate).toHaveBeenCalledTimes(1);
+    });
+
+    test("validateResponse absent → backward compatible", async () => {
+        const prompt = mock(async () => ({}));
+        const client = createClient(prompt);
+
+        await promptSyncWithModelSuggestionRetry(client, createArgs(), {
+            fallbackModels: ["anthropic/claude-sonnet-4-6"],
+            // no validateResponse — legacy behavior
+        });
+
+        expect(prompt).toHaveBeenCalledTimes(1);
+    });
 });

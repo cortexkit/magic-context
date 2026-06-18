@@ -45,6 +45,24 @@ export interface PromptRetryOptions {
      * "subagent" if not provided.
      */
     callContext?: string;
+    /**
+     * Optional validator invoked after each successful prompt attempt (both
+     * the primary and every fallback). If it throws, the error is treated as
+     * retryable — the next fallback model is tried (or the error propagates
+     * if no fallbacks remain).
+     *
+     * Use this to detect "empty response" conditions where the model API
+     * returns HTTP 200 with zero output tokens instead of a proper error
+     * (e.g. shared-quota providers that return empty bodies on quota
+     * exhaustion). Without this validator, such responses are indistinguishable
+     * from success and the fallback chain is never activated — the task
+     * silently fails and only surfaces a post-hoc "no assistant output" error
+     * in the caller's catch block, after the fallback opportunity is lost.
+     *
+     * The validator receives the client and the session ID so it can fetch
+     * messages and inspect the model's output.
+     */
+    validateResponse?: (client: Client, sessionId: string) => Promise<void>;
 }
 
 export interface ModelSuggestionInfo {
@@ -310,6 +328,9 @@ export async function promptSyncWithModelSuggestionRetry(
             callContext,
             explicitPrimaryLabel,
         );
+        if (options.validateResponse) {
+            await options.validateResponse(client, args.path.id);
+        }
         return;
     } catch (error) {
         lastError = error;
@@ -343,6 +364,9 @@ export async function promptSyncWithModelSuggestionRetry(
 
         try {
             await attemptOnce(client, attemptArgs, timeoutMs, options.signal, callContext, label);
+            if (options.validateResponse) {
+                await options.validateResponse(client, args.path.id);
+            }
             log(
                 `[${callContext}] fallback succeeded with ${label} (attempt ${i + 2}/${fallbacks.length + 1})`,
             );
