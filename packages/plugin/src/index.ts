@@ -564,12 +564,17 @@ const plugin: Plugin = async (ctx) => {
                       return agentOverrides;
                   })()
                 : undefined;
-            // Strip two_pass from historian overrides — it's consumed by the runner,
-            // not a valid OpenCode agent config field. Both historian and historian-editor
+            // Strip two_pass + thinking_level from historian overrides — two_pass
+            // is consumed by the runner, thinking_level is Pi-only. Neither is a
+            // valid OpenCode agent config field. Both historian and historian-editor
             // agents use the remaining overrides (same model, fallbacks, etc.).
             const historianAgentOverrides = pluginConfig.historian
                 ? (() => {
-                      const { two_pass: _twoPass, ...agentOverrides } = pluginConfig.historian;
+                      const {
+                          two_pass: _twoPass,
+                          thinking_level: _thinkingLevel,
+                          ...agentOverrides
+                      } = pluginConfig.historian;
                       return agentOverrides;
                   })()
                 : undefined;
