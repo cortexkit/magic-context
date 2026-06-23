@@ -3,7 +3,6 @@ import { DREAMER_AGENT } from "./agents/dreamer";
 import { HISTORIAN_AGENT, HISTORIAN_EDITOR_AGENT } from "./agents/historian";
 import {
     applyDisallowedTools,
-    buildAllowOnlyPermission,
     DREAMER_ALLOWED_TOOLS,
     HISTORIAN_ALLOWED_TOOLS,
     SIDEKICK_ALLOWED_TOOLS,
@@ -23,6 +22,7 @@ import {
 } from "./features/magic-context/storage-db";
 import { recordToolDefinition } from "./features/magic-context/tool-definition-tokens";
 import { runDeferredV22Backfill } from "./features/magic-context/v22-deferred-backfill";
+import { buildHiddenAgentConfig } from "./hidden-agent-config";
 import { createAutoUpdateCheckerHook } from "./hooks/auto-update-checker";
 import {
     COMPARTMENT_AGENT_SYSTEM_PROMPT,
@@ -51,47 +51,6 @@ import { MagicContextRpcServer } from "./shared/rpc-server";
 const HISTORIAN_MAX_STEPS = 40;
 const SIDEKICK_MAX_STEPS = 40;
 const DREAMER_MAX_STEPS = 150;
-
-function clampHiddenAgentStepLimit(value: unknown, cap: number): number {
-    return typeof value === "number" && Number.isFinite(value) ? Math.min(value, cap) : cap;
-}
-
-/**
- * Build a hidden-agent config with a deny-everything-by-default permission
- * baseline and a hard tool-iteration ceiling. User overrides may lower
- * `steps`/`maxSteps`, but cannot raise either above the built-in cap.
- */
-export function buildHiddenAgentConfig(
-    prompt: string,
-    allowedTools: readonly string[],
-    maxSteps: number,
-    overrides?: Record<string, unknown>,
-) {
-    const { permission: overridePermission, ...restOverrides } = (overrides ?? {}) as {
-        permission?: Record<string, unknown>;
-        [key: string]: unknown;
-    };
-    const basePermission = buildAllowOnlyPermission(allowedTools);
-    return {
-        prompt,
-        // No builtin fallback chain: the user's `fallback_models` (if any) flow
-        // through `restOverrides`. A hardcoded chain names providers the user may
-        // not have, producing `Model not found` retry storms.
-        ...restOverrides,
-        steps: clampHiddenAgentStepLimit(restOverrides.steps, maxSteps),
-        maxSteps: clampHiddenAgentStepLimit(restOverrides.maxSteps, maxSteps),
-        // Permission baseline goes after `restOverrides` so that accidental
-        // `permission` keys in user overrides we DIDN'T explicitly destructure
-        // can't bypass the deny. The explicit override (destructured above) is
-        // then layered on top.
-        permission: {
-            ...basePermission,
-            ...(overridePermission ?? {}),
-        },
-        mode: "subagent" as const,
-        hidden: true,
-    };
-}
 
 const plugin: Plugin = async (ctx) => {
     const pluginConfig = loadPluginConfig(ctx.directory);

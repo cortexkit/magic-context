@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { buildHiddenAgentConfig } from "./index";
+import { buildHiddenAgentConfig } from "./hidden-agent-config";
 
 describe("plugin model-limit cache warmup", () => {
     test("warms model limits once at startup and does not schedule periodic refresh", () => {
