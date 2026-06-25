@@ -53,12 +53,13 @@ describe("flatRecall", () => {
                     createdAt: now - i * 1000,
                 });
             }
-            // Token-budget truncation test (arithmetic verified):
-            // delta = "note N — " (9 chars) + 40 "x"s = 49 chars → Math.ceil(49/4) = 13 tokens each.
-            // maxTokens: 30 → first note fits (13 ≤ 30), second note fits (13+13=26 ≤ 30),
-            // third note would exceed (26+13=39 > 30) → exactly 2 notes fit.
+            // Token-budget truncation test (arithmetic verified, framing-inclusive):
+            // delta = "note N — " (9 chars) + 40 "x"s = 49 chars → Math.ceil(49/4) = 13 tokens,
+            // plus NOTE_FRAMING_TOKENS (20) for the <note>…</note> wrapper = 33 tokens each.
+            // maxTokens: 70 → 1st fits (33 ≤ 70), 2nd fits (33+33=66 ≤ 70),
+            // 3rd would exceed (66+33=99 > 70) → exactly 2 notes fit.
             const notes = flatRecall(db, "tdd", "global", "git:abc", {
-                maxTokens: 30, // 2 notes × 13 tokens = 26 ≤ 30; 3rd note would push to 39 > 30
+                maxTokens: 70, // 2 notes × 33 tokens = 66 ≤ 70; 3rd would push to 99 > 70
                 maxPinnedTokens: 4000,
             });
             expect(notes.length).toBe(2);

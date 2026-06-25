@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { type ToolContext, type ToolDefinition, tool } from "@opencode-ai/plugin";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { parseFrontmatterConfig } from "../../features/magic-context/skill-memory/frontmatter";
@@ -151,7 +152,7 @@ export function createCtxSkillRecallTool(deps: CtxSkillRecallToolDeps): ToolDefi
                         `SKILL.md not found for '${args.skill}' in any known skill directory. ` +
                         `Load the skill first with the skill tool, or verify the skill name is correct. ` +
                         `Searched: project .opencode/skill/, .opencode/skills/, .agents/skills/, .claude/skills/; ` +
-                        `global ~/.config/opencode/skills/, ~/.agents/skills/, ~/.claude/skills/.`
+                        `global ~/.config/opencode/skill/, ~/.config/opencode/skills/, ~/.agents/skills/, ~/.claude/skills/.`
                     );
                 }
 
@@ -159,8 +160,9 @@ export function createCtxSkillRecallTool(deps: CtxSkillRecallToolDeps): ToolDefi
                 frontmatterConfig = rawSkillContent
                     ? parseFrontmatterConfig(rawSkillContent)
                     : null;
-                // Derive tier from resolved path
-                tier = deriveSkillTier(resolvedPath.replace("/SKILL.md", ""));
+                // Derive tier from the skill's directory (dirname, not a fragile
+                // string replace that would mis-handle a path containing "SKILL.md").
+                tier = deriveSkillTier(dirname(resolvedPath));
             }
 
             if (!frontmatterConfig?.enabled) {

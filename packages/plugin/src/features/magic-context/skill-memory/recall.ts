@@ -19,6 +19,12 @@ export interface FlatRecallOptions {
     maxPinnedTokens: number;
 }
 
+// Per-note <note kind=… intent=… hit_count=… pinned=…><delta>…</delta></note>
+// framing that budgetFill's delta-only estimate would otherwise ignore (~80
+// chars ≈ 20 tokens/note). Counting it keeps the rendered block within max_tokens
+// instead of overshooting ~13% on a 10-note block (rev-1 S1).
+const NOTE_FRAMING_TOKENS = 20;
+
 // Rough token estimate: 1 token ≈ 4 chars (conservative for XML overhead)
 function estimateTokens(text: string): number {
     return Math.ceil(text.length / 4);
@@ -115,11 +121,15 @@ function budgetFill(
     const result: SkillMemoryNote[] = [];
     let pinnedTokens = 0;
     let totalTokens = 0;
+    // The total budget is the hard ceiling, so the pinned sub-budget can never
+    // exceed it — clamp so the default max_pinned_tokens (4000) > max_tokens
+    // (1500) can't imply pinned notes get more room than the whole block (rev-2).
+    const effectiveMaxPinned = Math.min(maxPinnedTokens, maxTokens);
 
     for (const note of notes) {
-        const tokens = estimateTokens(note.delta);
+        const tokens = estimateTokens(note.delta) + NOTE_FRAMING_TOKENS;
         if (note.pinned === 1) {
-            if (pinnedTokens + tokens > maxPinnedTokens) continue;
+            if (pinnedTokens + tokens > effectiveMaxPinned) continue;
             pinnedTokens += tokens;
         }
         if (totalTokens + tokens > maxTokens) continue;
