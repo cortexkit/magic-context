@@ -69,4 +69,26 @@ describe("parseSkillProvenance", () => {
         expect(result!.tier).toBe("global");
         expect(result!.skillSource).toBe("opencode-global");
     });
+
+    test("takes the LAST line-anchored match when skill CONTENT echoes the marker phrase", () => {
+        // A skill that documents skill-memory itself could contain the marker
+        // phrase in its body. opencode appends the REAL provenance line last, so
+        // last-match must win — a first-match parse would resolve the bogus URL.
+        const output =
+            `# Skill: skill-memory internals\n` +
+            `Example: Base directory for this skill: file:///decoy/path/evil-skill\n` +
+            `more prose\n` +
+            `Base directory for this skill: file://${HOME}/.config/opencode/skills/real-skill`;
+        const result = parseSkillProvenance(output, "real-skill");
+        expect(result!.resolvedPath).toBe(`${HOME}/.config/opencode/skills/real-skill/SKILL.md`);
+        expect(result!.tier).toBe("global");
+    });
+
+    test("ignores a mid-line (non-line-anchored) marker mention", () => {
+        // "see the Base directory for this skill: file:///x" embedded mid-sentence
+        // (not at column 0) must NOT be captured.
+        const output = `Note: see the Base directory for this skill: file:///wrong/x for details.\nBase directory for this skill: file://${HOME}/.config/opencode/skills/right`;
+        const result = parseSkillProvenance(output, "right");
+        expect(result!.resolvedPath).toBe(`${HOME}/.config/opencode/skills/right/SKILL.md`);
+    });
 });

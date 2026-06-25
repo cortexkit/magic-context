@@ -10,13 +10,20 @@ export interface SkillProvenance {
 
 // Matches: "Base directory for this skill: file:///abs/path/to/skill/dir"
 // Uses fileURLToPath (not naive regex capture) for cross-platform correctness.
-const BASE_DIR_REGEX = /Base directory for this skill: (file:\/\/\/[^\n\r]+)/m;
+// Anchored to line-start (`^…/gm`) AND we take the LAST match: opencode appends
+// this provenance line at the END of the tool output, so if the skill's own
+// CONTENT contains the same phrase (e.g. a skill documenting skill-memory
+// provenance), a first-match/unanchored parse would capture the wrong URL and
+// misdirect recall to a bogus skill identity. Line-anchoring rejects mid-prose
+// mentions; last-match ensures the real trailing provenance line wins even if an
+// example block reproduces it at column 0.
+const BASE_DIR_REGEX = /^Base directory for this skill: (file:\/\/\/[^\n\r]+)/gm;
 
 export function parseSkillProvenance(output: string, skillId: string): SkillProvenance | null {
-    const match = output.match(BASE_DIR_REGEX);
-    if (!match) return null;
+    const matches = [...output.matchAll(BASE_DIR_REGEX)];
+    if (matches.length === 0) return null;
 
-    const fileUrl = match[1].trim();
+    const fileUrl = matches[matches.length - 1][1].trim();
     let absDir: string;
     try {
         // Normalize OS-native separators to forward slashes: on Windows

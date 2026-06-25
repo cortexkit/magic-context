@@ -86,7 +86,14 @@ export function extractToolCallSummaries(parts: unknown[]): string[] {
         // mutated identity.
         if (p.tool === "skill") {
             const rawName = input && typeof input.name === "string" ? input.name : "";
-            const markerSafe = rawName !== "" && !/[\r\n\t)]/.test(rawName);
+            // Only CR/LF/tab genuinely corrupt the single-line `TC: skill(<name>)`
+            // marker; a ")" does NOT break the line and the historian reads the
+            // marker as natural language (not a strict paren-matched parse), so a
+            // ")"-containing name is preserved VERBATIM rather than dropped —
+            // dropping the name loses historian attribution + recall keying, which
+            // is worse than a cosmetically-ambiguous paren. (Real skill directory
+            // names are slugs; this is defensive.)
+            const markerSafe = rawName !== "" && !/[\r\n\t]/.test(rawName);
             summaries.push(markerSafe ? `TC: skill(${rawName})` : "TC: skill");
             continue;
         }
