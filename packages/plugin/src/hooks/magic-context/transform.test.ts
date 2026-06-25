@@ -23,6 +23,7 @@ import {
     getLastNudgeUndropped,
     getOrCreateSessionMeta,
     getPendingOps,
+    getOverflowState,
     getTagById,
     getTagsBySession,
     incrementHistorianFailure,
@@ -2544,5 +2545,128 @@ describe("createTransform historian failure handling", () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
 
         expect(createSession).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe("createTransform model switch large→small context", () => {
+    it("arms emergency recovery when switching from a large-context to a small-context model that would overflow", async () => {
+        // Reproduces: user switches from GLM-5.2 (512k) to GPT-5.5 (272k).
+        // The session had ~300k input tokens on the old model (~58% of 512k —
+        // well under any trigger threshold). After the switch, that same 300k
+        // is ~110% of the new 272k limit — a guaranteed overflow.
+        //
+        // The model-change branch (transform.ts:502) detects the switch and
+        // currently clears lastContextPercentage / lastInputTokens to 0. This
+        // suppresses every reduction path:
+        //   - historian trigger: 0% < proactive floor → shouldFire=false
+        //   - 95% emergency block: 0% < 95% → no block
+        //   - overflow recovery bump: needsEmergencyRecovery was just cleared
+        // The oversized prompt is sent to the small model → "Input exceeds
+        // context window" error. Recovery only fires on the SECOND pass (after
+        // the real overflow error arms needsEmergencyRecovery via the event
+        // handler). The user sees the error on the first request.
+        //
+        // Expected behavior: when the model-change branch detects that the old
+        // model's lastInputTokens exceed the NEW model's context limit, it
+        // should arm emergency recovery (recordOverflowDetected with the new
+        // limit) so the existing bump-to-95% path fires on the SAME pass —
+        // historian + emergency drops run BEFORE the prompt is sent.
+        //#given
+        useTempDataHome("transform-model-switch-large-small-");
+        const sessionId = "ses-model-shrink";
+        createOpenCodeDbForTransform(sessionId, [
+            { id: "m-raw-1", role: "user", text: "earlier work" },
+            {
+                id: "m-raw-assistant-old",
+                role: "assistant",
+                text: "old model response",
+                providerID: "openrouter",
+                modelID: "z-ai/glm-5.2",
+            },
+            { id: "m-raw-2", role: "user", text: "continue" },
+        ]);
+        const db = openDatabase();
+        // Persist the old model's usage: 300k input tokens at 58% of 512k.
+        // This is a realistic mid-session state — high token mass, moderate
+        // pressure, no historian fire yet.
+        updateSessionMeta(db, sessionId, {
+            lastContextPercentage: 58,
+            lastInputTokens: 300_000,
+            lastObservedModelKey: "openrouter/z-ai/glm-5.2",
+            lastUsageContextLimit: 512_000,
+        });
+
+        // The NEW model (GPT-5.5, 272k) is already in liveModelBySession —
+        // simulating that hook-handlers.ts set it on the chat.message event
+        // before this transform pass.
+        const liveModelBySession = new Map<string, { providerID: string; modelID: string }>([
+            [sessionId, { providerID: "openrouter", modelID: "openai/gpt-5.5" }],
+        ]);
+
+        const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler,
+            contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
+                [
+                    sessionId,
+                    {
+                        usage: { percentage: 58, inputTokens: 300_000 },
+                        updatedAt: Date.now(),
+                    },
+                ],
+            ]),
+            db,
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 0,
+            liveModelBySession,
+        });
+
+        // The messages array: last assistant is from the OLD model (GLM-5.2).
+        // The transform's findLastAssistantModel will return GLM-5.2, which
+        // mismatches liveModelBySession (GPT-5.5) → model-change branch fires.
+        // The large tool output (~50k tokens) represents content that, combined
+        // with the rest of the 300k-token context, would overflow the new 272k
+        // model — but is NOT individually droppable at 0% pressure.
+        const bigOutput = "const value = compute(input, options); // step output line\n".repeat(
+            3400,
+        );
+        const messages: TestMessage[] = [
+            {
+                info: { id: "m-user", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "continue" }],
+            },
+            {
+                info: {
+                    id: "m-assistant-old",
+                    role: "assistant",
+                    providerID: "openrouter",
+                    modelID: "z-ai/glm-5.2",
+                },
+                parts: [
+                    { type: "text", text: "ok" },
+                    { type: "tool", callID: "call-1", state: { output: bigOutput } },
+                ],
+            },
+        ];
+
+        //#when
+        await transform({}, { messages });
+
+        //#then — the model-change branch armed emergency recovery on this pass
+        // (oldInputTokens 300k > new 272k limit), so the 95% bump path fired
+        // and the historian/emergency-drop machinery ran BEFORE the prompt left.
+        const overflow = getOverflowState(db, sessionId);
+        expect(overflow.needsEmergencyRecovery).toBe(true);
+
+        // The oversized tool output was dropped by the emergency drop path that
+        // the 95% bump armed — it's no longer on the wire that would overflow
+        // the new model.
+        const tags = getTagsBySession(db, sessionId);
+        const toolTag = tags.find((tag) => tag.type === "tool");
+        expect(toolTag?.status).toBe("dropped");
     });
 });
