@@ -1,3 +1,4 @@
+import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
 import { computeNormalizedHash } from "../memory/normalize-hash";
 import { bumpHitCount, findExistingNote, insertSkillMemoryNote, partitionKey } from "./storage";
@@ -51,8 +52,13 @@ export function promoteSkillObservations(
                 createdAt: Date.now(),
             });
             if (id !== null) written++;
-        } catch {
-            // Best-effort: one bad observation must not block the publish.
+        } catch (err) {
+            // Best-effort: one bad observation must not block the publish, but
+            // log it so silent persistence failures (schema drift, DB lock,
+            // constraint violation) remain observable.
+            log(
+                `[skill-memory] promoteSkillObservations: skipped observation for skill "${obs.skillId}" — ${err instanceof Error ? err.message : String(err)}`,
+            );
         }
     }
 

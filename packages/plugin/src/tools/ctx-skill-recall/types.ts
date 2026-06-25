@@ -18,7 +18,16 @@ export interface CtxSkillRecallToolDeps {
     // In production, pass hooks.magicContext.skillLoadRegistry.
     // In tests, inject directly to avoid SKILL.md fixture files.
     skillLoadRegistry?: SkillLoadRegistry;
-    // Test-only DI overrides (bypass disk resolution entirely):
+}
+
+/**
+ * Test-only DI overrides — kept OUT of the public production contract so a
+ * production call site cannot accidentally pass them to bypass disk resolution,
+ * frontmatter loading, and project-identity resolution. Tests pass this wider
+ * type (structurally assignable to CtxSkillRecallToolDeps); the tool impl reads
+ * the overrides via an internal cast.
+ */
+export interface CtxSkillRecallToolTestDeps extends CtxSkillRecallToolDeps {
     _testFrontmatterConfig?: SkillMemoryConfig | null;
     _testProjectIdentity?: string;
 }

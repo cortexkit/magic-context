@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { createIntentByCallIdMap, getAndDeleteIntent, stashIntent } from "./hook-handlers";
+import {
+    createIntentByCallIdMap,
+    getAndDeleteIntent,
+    intentKey,
+    pruneIntentsForSession,
+    stashIntent,
+} from "./hook-handlers";
 
 describe("intentByCallId stash map", () => {
     test("stashIntent stores intent keyed by callId", () => {
@@ -36,11 +42,21 @@ describe("intentByCallId stash map", () => {
         expect(map.has("call-overflow")).toBe(true);
     });
 
-    test("clearIntentMap removes all entries (onSessionDeleted)", () => {
+    test("pruneIntentsForSession removes ONLY the deleted session's entries", () => {
+        // Regression (P1): a bare-callID key + .clear() on session delete wiped
+        // EVERY concurrent session's in-flight intents. Keying by
+        // `${sessionId}:${callId}` + prefix-prune isolates the delete.
         const map = createIntentByCallIdMap();
-        stashIntent(map, "call-a", "intent a");
-        stashIntent(map, "call-b", "intent b");
-        map.clear();
-        expect(map.size).toBe(0);
+        stashIntent(map, intentKey("ses-A", "call-1"), "A intent");
+        stashIntent(map, intentKey("ses-B", "call-1"), "B intent");
+        stashIntent(map, intentKey("ses-B", "call-2"), "B intent 2");
+
+        pruneIntentsForSession(map, "ses-A");
+
+        // ses-A's entry is gone; ses-B's two survive (callID "call-1" collides
+        // across sessions but the composite key keeps them distinct).
+        expect(getAndDeleteIntent(map, intentKey("ses-A", "call-1"))).toBeNull();
+        expect(getAndDeleteIntent(map, intentKey("ses-B", "call-1"))).toBe("B intent");
+        expect(getAndDeleteIntent(map, intentKey("ses-B", "call-2"))).toBe("B intent 2");
     });
 });

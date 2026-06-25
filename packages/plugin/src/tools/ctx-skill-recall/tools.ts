@@ -12,6 +12,7 @@ import {
     CTX_SKILL_RECALL_TOOL_NAME,
     type CtxSkillRecallArgs,
     type CtxSkillRecallToolDeps,
+    type CtxSkillRecallToolTestDeps,
 } from "./types";
 
 // NOTE on tool() API: same pattern as ctx_skill_note (Task 8).
@@ -45,15 +46,18 @@ export function createCtxSkillRecallTool(deps: CtxSkillRecallToolDeps): ToolDefi
                 ),
         },
         execute: async (args: CtxSkillRecallArgs, toolContext: ToolContext) => {
-            // Test-only DI overrides (bypass all resolution)
+            // Test-only DI overrides (bypass all resolution). Read via an internal
+            // cast to the test-deps type so the seams stay OUT of the public
+            // CtxSkillRecallToolDeps contract (production callers can't pass them).
+            const testDeps = deps as CtxSkillRecallToolTestDeps;
             if (
-                deps._testFrontmatterConfig !== undefined ||
-                deps._testProjectIdentity !== undefined
+                testDeps._testFrontmatterConfig !== undefined ||
+                testDeps._testProjectIdentity !== undefined
             ) {
                 const projectIdentity =
-                    deps._testProjectIdentity ??
+                    testDeps._testProjectIdentity ??
                     resolveProjectIdentity(toolContext.directory ?? deps.projectDirectory);
-                const frontmatterConfig = deps._testFrontmatterConfig ?? null;
+                const frontmatterConfig = testDeps._testFrontmatterConfig ?? null;
                 const tier: "project" | "global" = "global"; // default for test injection
                 const block = await recallSkillMemoryBlock(deps.db, {
                     skill: args.skill,

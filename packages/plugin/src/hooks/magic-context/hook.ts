@@ -116,6 +116,7 @@ import {
     createToolExecuteAfterHook,
     createToolExecuteBeforeHook,
     getLiveNotificationParams,
+    pruneIntentsForSession,
 } from "./hook-handlers";
 import type { LiveSessionState } from "./live-session-state";
 import { type NotificationParams, sendIgnoredMessage } from "./send-session-notification";
@@ -1207,14 +1208,12 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             channel1StateBySession.delete(sessionId);
             channel2DirectiveTextBySession.delete(sessionId);
             clearEmbedSessionState(sessionId);
-            // NOTE: intentByCallId is keyed by callID (not sessionID:callID), so .clear() removes
-            // entries from ALL concurrent sessions, not just the deleted one. This is an accepted
-            // design trade-off: the 60s TTL + 256-entry hard cap are the real leak guards; the
-            // .clear() here is a belt-and-braces backstop for long-lived sessions. Cross-session
-            // clearing degrades quality (lost intents for concurrent sessions) but is not fatal.
-            // If concurrent multi-session use becomes common, key entries as `${sessionID}:${callID}`
-            // and filter on delete. For P1, document-as-intentional is the chosen fix.
-            intentByCallId.clear(); // clear all entries on session delete (bounded map; cross-session clear is intentional — see note above)
+            // intentByCallId is keyed `${sessionID}:${callID}` — prune only THIS
+            // session's entries by prefix so a concurrent session's delete can't
+            // evict another session's in-flight intents (which would silently
+            // degrade its skill-memory recall to the flat rung). The 60s TTL +
+            // 256-entry cap remain the leak backstops.
+            pruneIntentsForSession(intentByCallId, sessionId);
             // skillLoadRegistry is keyed as `${sessionId}:${skillId}` so we can prune
             // per-session entries without cross-session bleed. Without this, deleted
             // sessions' skill loads would persist in the registry for the plugin's

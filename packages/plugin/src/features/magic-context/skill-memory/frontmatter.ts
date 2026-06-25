@@ -16,7 +16,11 @@ export interface SkillMemoryConfig {
     ranking_hit?: number;
 }
 
-const FRONTMATTER_REGEX = /^---\r?\n([\s\S]*?)\r?\n---/m;
+// Anchored to the very start of the file (NO `m` flag): frontmatter is only
+// valid as the first bytes of the document. With `m`, `^` matches any line
+// start, so a later `--- ... ---` block (e.g. a markdown horizontal rule) could
+// be misparsed as config.
+const FRONTMATTER_REGEX = /^---\r?\n([\s\S]*?)\r?\n---/;
 
 export function parseFrontmatterConfig(content: string): SkillMemoryConfig | null {
     try {
@@ -76,7 +80,9 @@ function extractSkillMemoryBlock(fmText: string): Record<string, unknown> | null
 
     for (const line of lines) {
         if (!inSkillMemory) {
-            if (/^skill-memory:\s*$/.test(line)) {
+            // Tolerate a trailing inline comment after the block header
+            // (`skill-memory:   # motor memory`), which is valid YAML.
+            if (/^skill-memory:\s*(#.*)?$/.test(line)) {
                 inSkillMemory = true;
                 found = true;
             }
@@ -97,6 +103,17 @@ function extractSkillMemoryBlock(fmText: string): Record<string, unknown> | null
 }
 
 function parseYamlScalar(raw: string): unknown {
+    // Strip an inline `# comment` for UNQUOTED scalars (YAML requires whitespace
+    // before the `#`). Quoted values keep their content verbatim so a literal
+    // "#" inside quotes survives. Without this, `enabled: true # on` would parse
+    // as the string "true # on" and silently fail the strict true/false check.
+    const isQuoted =
+        (raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"));
+    if (!isQuoted) {
+        const commentIdx = raw.search(/\s#/);
+        if (commentIdx >= 0) raw = raw.slice(0, commentIdx).trim();
+    }
+
     if (raw === "true") return true;
     if (raw === "false") return false;
     if (raw === "null" || raw === "~") return null;

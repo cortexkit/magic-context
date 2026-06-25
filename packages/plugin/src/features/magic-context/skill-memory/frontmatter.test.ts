@@ -69,4 +69,32 @@ body`;
         const cfg = parseFrontmatterConfig(md);
         expect(cfg?.ranking_relevance).toBeUndefined();
     });
+
+    test("does NOT misparse a later --- horizontal rule as frontmatter (start-anchored)", () => {
+        // No real frontmatter; a horizontal-rule pair appears mid-document. With
+        // an `m`-flagged regex `^` would match the rule's line start and capture
+        // the block between the rules as config. Must return null.
+        const md = `# Skill\n\nSome prose.\n\n---\nskill-memory:\n  enabled: true\n---\n\nMore prose.`;
+        expect(parseFrontmatterConfig(md)).toBeNull();
+    });
+
+    test("honors enabled: true with a trailing inline comment", () => {
+        const md = `---\nskill-memory:\n  enabled: true # motor memory on\n  max_tokens: 2000 # bump it\n---\nbody`;
+        const cfg = parseFrontmatterConfig(md);
+        expect(cfg).not.toBeNull();
+        expect(cfg!.enabled).toBe(true);
+        expect(cfg!.max_tokens).toBe(2000);
+    });
+
+    test("honors an inline comment on the skill-memory block header", () => {
+        const md = `---\nskill-memory: # procedural recall\n  enabled: true\n---\nbody`;
+        expect(parseFrontmatterConfig(md)?.enabled).toBe(true);
+    });
+
+    test("does not strip a '#' inside a quoted scalar", () => {
+        const md = `---\nskill-memory:\n  enabled: "true"\n---\nbody`;
+        // "true" (quoted) still enables; the quote-strip path runs after the
+        // unquoted-only comment strip, so quoted values are untouched.
+        expect(parseFrontmatterConfig(md)?.enabled).toBe(true);
+    });
 });

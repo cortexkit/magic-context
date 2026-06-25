@@ -386,13 +386,14 @@ function buildDistillSkillMemoryPrompt(projectPath: string): string {
 - Merge (action="distill" + merge), prune, and promote are P3 / NOT YET IMPLEMENTED. Do NOT call ctx_skill_note with action="distill".
 
 ### Your task: produce a short read-only summary of skill-memory corpus health
-1. Query aggregate counts and flag obvious issues:
+1. Query aggregate counts and flag obvious issues (scoped to THIS project's
+   own notes plus the cross-project global '*' partition):
    \`\`\`sql
    SELECT skill_id, tier, COUNT(*) as note_count,
           SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END) as pinned_count,
           SUM(CASE WHEN intent_embedding IS NULL OR delta_embedding IS NULL THEN 1 ELSE 0 END) as missing_embedding_count
    FROM skill_memory
-   WHERE project_identity = (SELECT project_identity FROM skill_memory LIMIT 1)
+   WHERE project_identity IN ('${projectPath}', '*')
    GROUP BY skill_id, tier
    ORDER BY note_count DESC
    LIMIT 20;

@@ -6,6 +6,7 @@ import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createCtxSkillRecallTool } from "./tools";
+import type { CtxSkillRecallToolTestDeps } from "./types";
 
 // DI-based tests: inject _testFrontmatterConfig + _testProjectIdentity via deps
 // to bypass SKILL.md disk resolution and resolveProjectIdentity() entirely.
@@ -43,12 +44,13 @@ describe("ctx_skill_recall tool", () => {
             });
 
             // Inject frontmatterConfig + projectIdentity via DI — no SKILL.md needed
-            const tool = createCtxSkillRecallTool({
+            const testDeps: CtxSkillRecallToolTestDeps = {
                 db,
                 projectDirectory: "/tmp/test",
                 _testFrontmatterConfig: ENABLED_FRONTMATTER,
                 _testProjectIdentity: TEST_PROJECT_IDENTITY,
-            });
+            };
+            const tool = createCtxSkillRecallTool(testDeps);
             const result = await tool.execute({ skill: "tdd", intent: "fix flaky test" }, {
                 sessionID: "ses_test",
                 agent: "general",
@@ -66,12 +68,13 @@ describe("ctx_skill_recall tool", () => {
         const db = makeDb();
         try {
             // Inject enabled frontmatter + matching projectIdentity, but no notes inserted
-            const tool = createCtxSkillRecallTool({
+            const testDeps: CtxSkillRecallToolTestDeps = {
                 db,
                 projectDirectory: "/tmp/test",
                 _testFrontmatterConfig: ENABLED_FRONTMATTER,
                 _testProjectIdentity: TEST_PROJECT_IDENTITY,
-            });
+            };
+            const tool = createCtxSkillRecallTool(testDeps);
             const result = await tool.execute({ skill: "nonexistent-skill" }, {
                 sessionID: "ses_test",
                 agent: "general",

@@ -1680,6 +1680,26 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     CREATE INDEX IF NOT EXISTS idx_message_history_index_updated_at ON message_history_index(updated_at);
   `);
 
+    // Self-heal: backfill skill_memory_fts if it's empty while skill_memory has
+    // rows. The CREATE TABLE/TRIGGER block above only indexes FUTURE writes; rows
+    // that predate the FTS table (e.g. a DB where v50 ran but v51 hadn't, or a
+    // lost migration row) would be invisible to FTS rung-3 recall until re-saved.
+    // Guarded so this fires once (on the gap), not on every boot. Mirrors v51's
+    // INSERT INTO skill_memory_fts(skill_memory_fts) VALUES('rebuild').
+    try {
+        const ftsCount = (
+            db.prepare("SELECT COUNT(*) AS n FROM skill_memory_fts").get() as { n: number }
+        ).n;
+        const rowCount = (
+            db.prepare("SELECT COUNT(*) AS n FROM skill_memory").get() as { n: number }
+        ).n;
+        if (ftsCount === 0 && rowCount > 0) {
+            db.exec("INSERT INTO skill_memory_fts(skill_memory_fts) VALUES('rebuild');");
+        }
+    } catch {
+        // Non-fatal: FTS rung-3 degrades gracefully (embedding + flat recall unaffected).
+    }
+
     ensureColumn(db, "primer_candidates", "harness", "TEXT NOT NULL DEFAULT 'opencode'");
     ensureColumn(db, "primer_candidates", "source_start_message_id", "TEXT NOT NULL DEFAULT ''");
     ensureColumn(db, "primer_candidates", "source_end_message_id", "TEXT NOT NULL DEFAULT ''");

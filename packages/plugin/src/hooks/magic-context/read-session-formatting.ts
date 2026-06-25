@@ -77,9 +77,14 @@ export function extractToolCallSummaries(parts: unknown[]): string[] {
 
         // Skill tool: surface the skill name (input.name) before the description
         // fallback, which would otherwise mask it if metadata.description exists.
+        // The name is an IDENTITY key (the historian extracts skill-id from this
+        // marker), so do NOT truncate it. Sanitize newlines/control chars and a
+        // stray ")" so the single-line `TC: skill(<name>)` marker can't be
+        // corrupted — skill names are normally slugs, this is defensive only.
         if (p.tool === "skill") {
-            const name = input && typeof input.name === "string" ? input.name : "";
-            summaries.push(name ? `TC: skill(${truncateArg(name)})` : "TC: skill");
+            const rawName = input && typeof input.name === "string" ? input.name : "";
+            const name = rawName.replace(/[\r\n\t)]/g, " ").trim();
+            summaries.push(name ? `TC: skill(${name})` : "TC: skill");
             continue;
         }
 

@@ -663,12 +663,6 @@ const server: Plugin = async (ctx) => {
             await magicContextRuntime.magicContext?.["chat.message"]?.(input);
         },
         "tool.definition": async (input, output) => {
-            // Attribute tool schema tokens to the most recent chat-message context.
-            // If no chat.message has fired yet in this process (e.g. a subagent
-            // flight that reuses a historian/dreamer/sidekick agent whose
-            // chat.message preceded plugin init), skip — the measurement will
-            // land correctly on the next flight.
-            if (!lastChatContext) return;
             const typedInput = input as { toolID?: string };
             const typedOutput = output as {
                 description?: unknown;
@@ -681,6 +675,21 @@ const server: Plugin = async (ctx) => {
                 };
             };
             if (!typedInput.toolID) return;
+            // Inject optional intent param for skill-memory recall FIRST — it only
+            // mutates the skill tool's advertised JSON schema and does NOT need
+            // chat context, so it must run even on a tool.definition flight that
+            // fires before any chat.message (otherwise the model never sees the
+            // `intent` param that flight and skill-memory recall silently degrades).
+            injectSkillIntentParam(
+                typedInput.toolID,
+                typedOutput as Parameters<typeof injectSkillIntentParam>[1],
+            );
+            // Attribute tool schema tokens to the most recent chat-message context.
+            // If no chat.message has fired yet in this process (e.g. a subagent
+            // flight that reuses a historian/dreamer/sidekick agent whose
+            // chat.message preceded plugin init), skip the attribution — the
+            // measurement will land correctly on the next flight.
+            if (!lastChatContext) return;
             recordToolDefinition(
                 lastChatContext.providerID,
                 lastChatContext.modelID,
@@ -688,11 +697,6 @@ const server: Plugin = async (ctx) => {
                 typedInput.toolID,
                 typeof typedOutput.description === "string" ? typedOutput.description : "",
                 typedOutput.parameters,
-            );
-            // Inject optional intent param for skill-memory recall
-            injectSkillIntentParam(
-                typedInput.toolID,
-                typedOutput as Parameters<typeof injectSkillIntentParam>[1],
             );
         },
         "tool.execute.after": async (input, output) => {

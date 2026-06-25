@@ -525,6 +525,23 @@ export function createIntentByCallIdMap(): IntentByCallIdMap {
     return new Map();
 }
 
+/**
+ * Composite key for the intent stash: `${sessionId}:${callId}`. Keying by
+ * session (not bare callID) lets onSessionDeleted prune one session's entries
+ * by prefix without evicting concurrent sessions' in-flight intents.
+ */
+export function intentKey(sessionId: string, callId: string): string {
+    return `${sessionId}:${callId}`;
+}
+
+/** Delete all stash entries belonging to one session (prefix prune on delete). */
+export function pruneIntentsForSession(map: IntentByCallIdMap, sessionId: string): void {
+    const prefix = `${sessionId}:`;
+    for (const key of map.keys()) {
+        if (key.startsWith(prefix)) map.delete(key);
+    }
+}
+
 const INTENT_TTL_MS = 60_000;
 const INTENT_MAP_CAP = 256;
 
@@ -596,13 +613,19 @@ export async function maybeInjectSkillMemory(
 
 export function createToolExecuteBeforeHook(args: { intentByCallId: IntentByCallIdMap }) {
     return async (input: unknown, output?: unknown) => {
-        const typedInput = input as { tool?: string; callID?: string };
+        const typedInput = input as { tool?: string; callID?: string; sessionID?: string };
         const typedOutput = output as { args?: Record<string, unknown> } | undefined;
         if (typedInput.tool !== "skill") return;
-        if (!typedInput.callID) return;
+        if (!typedInput.callID || !typedInput.sessionID) return;
         const intent = typedOutput?.args?.intent;
         if (typeof intent !== "string") return;
-        stashIntent(args.intentByCallId, typedInput.callID, intent);
+        // Key by sessionID:callID so a concurrent session's delete (which prunes
+        // by prefix) can't evict this session's in-flight intents.
+        stashIntent(
+            args.intentByCallId,
+            intentKey(typedInput.sessionID, typedInput.callID),
+            intent,
+        );
     };
 }
 
@@ -654,10 +677,13 @@ export function createToolExecuteAfterHook(args: {
                 const skillArgs = typedInput.args as { name?: unknown } | undefined;
                 const skillId = typeof skillArgs?.name === "string" ? skillArgs.name : null;
                 if (skillId) {
+                    // One dynamic import of the provenance module shared by both
+                    // the registry-populate and the injection blocks below
+                    // (lazy-loaded only when the skill tool actually fires).
+                    const { parseSkillProvenance, registryKey } = await import(
+                        "../../features/magic-context/skill-memory/provenance"
+                    );
                     try {
-                        const { parseSkillProvenance, registryKey } = await import(
-                            "../../features/magic-context/skill-memory/provenance"
-                        );
                         const { parseFrontmatterConfig } = await import(
                             "../../features/magic-context/skill-memory/frontmatter"
                         );
@@ -692,11 +718,8 @@ export function createToolExecuteAfterHook(args: {
                     // appends the <skill-memory> block to output.output.
                     // Non-fatal: recall failure must never block the tool result.
                     try {
-                        const { registryKey: rKey } = await import(
-                            "../../features/magic-context/skill-memory/provenance"
-                        );
                         const registryEntry = args.skillLoadRegistry.get(
-                            rKey(typedInput.sessionID, skillId),
+                            registryKey(typedInput.sessionID, skillId),
                         );
                         if (registryEntry) {
                             // First-turn fallback: if the map has no entry yet
@@ -710,8 +733,10 @@ export function createToolExecuteAfterHook(args: {
                                 args.defaultDirectory;
                             const projectIdentity = resolveProjectIdentity(sessionDir);
                             const stashed = typedInput.callID
-                                ? (getAndDeleteIntent(args.intentByCallId, typedInput.callID) ??
-                                  undefined)
+                                ? (getAndDeleteIntent(
+                                      args.intentByCallId,
+                                      intentKey(typedInput.sessionID, typedInput.callID),
+                                  ) ?? undefined)
                                 : undefined;
                             await maybeInjectSkillMemory(
                                 args.db,

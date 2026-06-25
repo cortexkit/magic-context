@@ -19,7 +19,11 @@ export function parseSkillProvenance(output: string, skillId: string): SkillProv
     const fileUrl = match[1].trim();
     let absDir: string;
     try {
-        absDir = fileURLToPath(new URL(fileUrl));
+        // Normalize OS-native separators to forward slashes: on Windows
+        // fileURLToPath yields backslash paths, which would fail the
+        // forward-slash startsWith/includes tier/source checks below and
+        // misclassify global skills as project-local.
+        absDir = fileURLToPath(new URL(fileUrl)).replace(/\\/g, "/");
     } catch {
         return null;
     }
@@ -36,7 +40,7 @@ export function deriveSkillTier(absDir: string): "project" | "global" {
     //   ~/.config/opencode/skills/ — via config.directories() + {skill,skills}/**/SKILL.md
     //   ~/.agents/skills/          — via AGENTS_EXTERNAL_DIR + skills/**/SKILL.md
     //   ~/.claude/skills/          — via CLAUDE_EXTERNAL_DIR + skills/**/SKILL.md
-    const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+    const home = (process.env.HOME ?? process.env.USERPROFILE ?? "").replace(/\\/g, "/");
     if (
         absDir.startsWith(`${home}/.config/opencode/skills/`) ||
         absDir.startsWith(`${home}/.agents/skills/`) ||
@@ -50,7 +54,7 @@ export function deriveSkillTier(absDir: string): "project" | "global" {
 export function deriveSkillSource(
     absDir: string,
 ): "opencode-project" | "opencode-global" | "claude-skills" | "agents-skills" {
-    const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+    const home = (process.env.HOME ?? process.env.USERPROFILE ?? "").replace(/\\/g, "/");
     if (absDir.startsWith(`${home}/.config/opencode/skills/`)) return "opencode-global";
     if (absDir.startsWith(`${home}/.claude/skills/`)) return "claude-skills";
     if (absDir.includes("/.agents/skills/")) return "agents-skills";
