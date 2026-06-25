@@ -51,4 +51,22 @@ describe("parseSkillProvenance", () => {
         expect(result!.tier).toBe("project");
         expect(result!.skillSource).toBe("opencode-project");
     });
+
+    test("handles the SINGULAR ~/.config/opencode/skill/ global path (OPENCODE_SKILL_PATTERN covers both)", () => {
+        // Regression: opencode's pattern is {skill,skills}/**/SKILL.md, so the
+        // global config dir resolves under singular `skill/` too. Before the fix,
+        // deriveSkillTier classified it as project → notes written to the wrong
+        // partition + cold recall couldn't find SKILL.md.
+        const output = `Base directory for this skill: file://${HOME}/.config/opencode/skill/my-skill`;
+        const result = parseSkillProvenance(output, "my-skill");
+        expect(result!.tier).toBe("global");
+        expect(result!.skillSource).toBe("opencode-global");
+    });
+
+    test("handles the plural ~/.config/opencode/skills/ global path", () => {
+        const output = `Base directory for this skill: file://${HOME}/.config/opencode/skills/my-skill`;
+        const result = parseSkillProvenance(output, "my-skill");
+        expect(result!.tier).toBe("global");
+        expect(result!.skillSource).toBe("opencode-global");
+    });
 });

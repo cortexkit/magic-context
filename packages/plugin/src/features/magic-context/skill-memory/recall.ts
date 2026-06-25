@@ -1,3 +1,4 @@
+import { log } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
 import { cosineSimilarity } from "../memory/cosine-similarity";
 import { embedTextForProject } from "../memory/embedding";
@@ -277,7 +278,14 @@ export async function recallSkillMemoryBlock(
         );
         const selected = budgetFill(ordered, maxTokens, maxPinned);
         return finalize("fts5-fallback", selected);
-    } catch {
+    } catch (err) {
+        // Cache-safe + non-choking: never throw from recall (a thrown error here
+        // would surface in the skill tool result). But log it — a broken FTS
+        // table or bad vector blob would otherwise look identical to "no notes",
+        // making durable skill-memory data loss undiagnosable.
+        log(
+            `[skill-memory] recallSkillMemoryBlock failed for skill "${opts.skill}": ${err instanceof Error ? err.message : String(err)}`,
+        );
         return "";
     }
 }

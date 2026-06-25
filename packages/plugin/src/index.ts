@@ -265,9 +265,14 @@ const server: Plugin = async (ctx) => {
     // is broken, ctx_skill_note would silently read an empty Map and
     // every note would return "No recent skill load found" — the exact
     // opposite of "fail loud". Catch a wiring regression at startup, not
-    // at the first ctx_skill_note call from an agent. Guard only applies
-    // when the runtime actually constructed (fail-closed storage failures
-    // legitimately leave magicContext null — handled above).
+    // at the first ctx_skill_note call from an agent.
+    //
+    // Guard only fires when the runtime actually constructed: when disabled by
+    // config (`enabled: false`) or a detected conflict, createSessionHooks
+    // returns `{ magicContext: null }` by design — throwing there would crash
+    // plugin init on the disabled path (an entry-module throw — the exact
+    // load-crash class this plugin must avoid). A fail-closed storage failure
+    // (enabled but magicContext null) is likewise handled above, not here.
     if (magicContextRuntime.magicContext && !magicContextRuntime.magicContext.skillLoadRegistry) {
         throw new Error(
             "[magic-context] ctx_skill_note registration failed: " +
@@ -281,7 +286,10 @@ const server: Plugin = async (ctx) => {
         rustToolBackends: magicContextRuntime.rustToolBackends,
         promptSurfaceRuntime,
         registrationPromptSurface: loadedPluginConfig.registrationPromptSurface,
-        skillLoadRegistry: magicContextRuntime.magicContext?.skillLoadRegistry,
+        // Disabled/fail-closed path: magicContext is null and createToolRegistry
+        // early-returns {} without using the registry. Pass a throwaway Map so
+        // the argument expression never dereferences null.
+        skillLoadRegistry: magicContextRuntime.magicContext?.skillLoadRegistry ?? new Map(),
     });
 
     // v22 deferred legacy-memory identity backfill. createSessionHooks() opens

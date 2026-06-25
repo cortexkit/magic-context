@@ -91,6 +91,30 @@ body`;
         expect(parseFrontmatterConfig(md)?.enabled).toBe(true);
     });
 
+    test("parses the inline flow-mapping form the docs/remediation advertise", () => {
+        // ctx_skill_recall remediation + ARCHITECTURE/CONFIGURATION/README all tell
+        // users to add `skill-memory: { enabled: true }`. The parser MUST accept it
+        // or the guidance is dead-on-arrival.
+        const cfg = parseFrontmatterConfig("---\nskill-memory: { enabled: true }\n---\n# Skill");
+        expect(cfg).not.toBeNull();
+        expect(cfg!.enabled).toBe(true);
+    });
+
+    test("parses inline flow-mapping with multiple keys", () => {
+        const cfg = parseFrontmatterConfig(
+            "---\nskill-memory: { enabled: true, max_tokens: 2000, dedup_threshold: 0.8 }\n---\nbody",
+        );
+        expect(cfg!.enabled).toBe(true);
+        expect(cfg!.max_tokens).toBe(2000);
+        expect(cfg!.dedup_threshold).toBe(0.8);
+    });
+
+    test("inline form with enabled: false stays inert", () => {
+        expect(
+            parseFrontmatterConfig("---\nskill-memory: { enabled: false }\n---\nbody"),
+        ).toBeNull();
+    });
+
     test("a plain quoted scalar still enables", () => {
         const md = `---\nskill-memory:\n  enabled: "true"\n---\nbody`;
         expect(parseFrontmatterConfig(md)?.enabled).toBe(true);

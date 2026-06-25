@@ -42,7 +42,10 @@ export function deriveSkillTier(absDir: string): "project" | "global" {
     //   ~/.claude/skills/          — via CLAUDE_EXTERNAL_DIR + skills/**/SKILL.md
     const home = (process.env.HOME ?? process.env.USERPROFILE ?? "").replace(/\\/g, "/");
     if (
+        // opencode's OPENCODE_SKILL_PATTERN is `{skill,skills}/**/SKILL.md`, so
+        // the global config dir resolves under BOTH singular and plural.
         absDir.startsWith(`${home}/.config/opencode/skills/`) ||
+        absDir.startsWith(`${home}/.config/opencode/skill/`) ||
         absDir.startsWith(`${home}/.agents/skills/`) ||
         absDir.startsWith(`${home}/.claude/skills/`)
     ) {
@@ -55,7 +58,11 @@ export function deriveSkillSource(
     absDir: string,
 ): "opencode-project" | "opencode-global" | "claude-skills" | "agents-skills" {
     const home = (process.env.HOME ?? process.env.USERPROFILE ?? "").replace(/\\/g, "/");
-    if (absDir.startsWith(`${home}/.config/opencode/skills/`)) return "opencode-global";
+    if (
+        absDir.startsWith(`${home}/.config/opencode/skills/`) ||
+        absDir.startsWith(`${home}/.config/opencode/skill/`)
+    )
+        return "opencode-global";
     if (absDir.startsWith(`${home}/.claude/skills/`)) return "claude-skills";
     if (absDir.includes("/.agents/skills/")) return "agents-skills";
     // Both singular .opencode/skill/ and plural .opencode/skills/ are valid —

@@ -128,6 +128,7 @@ export function createCtxSkillRecallTool(deps: CtxSkillRecallToolDeps): ToolDefi
                     `${projectDirectory}/.claude/skills/${args.skill}`,
                     // Global dirs second
                     `${home}/.config/opencode/skills/${args.skill}`, // via Global.Path.config + {skill,skills}/**/SKILL.md
+                    `${home}/.config/opencode/skill/${args.skill}`, // singular — OPENCODE_SKILL_PATTERN covers both
                     `${home}/.agents/skills/${args.skill}`, // via AGENTS_EXTERNAL_DIR
                     `${home}/.claude/skills/${args.skill}`, // via CLAUDE_EXTERNAL_DIR
                 ];

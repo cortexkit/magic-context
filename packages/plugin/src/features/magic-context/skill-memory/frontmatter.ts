@@ -83,6 +83,25 @@ function extractSkillMemoryBlock(fmText: string): Record<string, unknown> | null
 
     for (const line of lines) {
         if (!inSkillMemory) {
+            // Inline flow-mapping form on the header line:
+            //   `skill-memory: { enabled: true, max_tokens: 2000 }`
+            // This is the form the ctx_skill_recall remediation message and the
+            // root docs advertise, so it MUST parse — otherwise a user following
+            // the guidance silently gets an inert config. Parse the {...} body
+            // into the same flat map the block form produces, then stop (a flow
+            // mapping is self-contained on one line).
+            const inlineMatch = line.match(/^skill-memory:\s*\{(.*)\}\s*(#.*)?$/);
+            if (inlineMatch) {
+                found = true;
+                for (const pair of splitFlowEntries(inlineMatch[1])) {
+                    const sep = pair.indexOf(":");
+                    if (sep < 0) continue;
+                    const key = pair.slice(0, sep).trim();
+                    if (!/^\w+$/.test(key)) continue;
+                    result[key] = parseYamlScalar(pair.slice(sep + 1).trim());
+                }
+                break;
+            }
             // Tolerate a trailing inline comment after the block header
             // (`skill-memory:   # motor memory`), which is valid YAML.
             if (/^skill-memory:\s*(#.*)?$/.test(line)) {
@@ -103,6 +122,37 @@ function extractSkillMemoryBlock(fmText: string): Record<string, unknown> | null
     }
 
     return found ? result : null;
+}
+
+/**
+ * Split a YAML flow-mapping body (the text inside `{...}`) on top-level commas,
+ * leaving quoted segments intact. Minimal — the skill-memory config is a flat
+ * map of scalar values, so we don't need nested {}/[] handling.
+ */
+function splitFlowEntries(body: string): string[] {
+    const entries: string[] = [];
+    let current = "";
+    let quote: '"' | "'" | null = null;
+    for (const ch of body) {
+        if (quote) {
+            current += ch;
+            if (ch === quote) quote = null;
+            continue;
+        }
+        if (ch === '"' || ch === "'") {
+            quote = ch;
+            current += ch;
+            continue;
+        }
+        if (ch === ",") {
+            entries.push(current);
+            current = "";
+            continue;
+        }
+        current += ch;
+    }
+    if (current.trim()) entries.push(current);
+    return entries;
 }
 
 function parseYamlScalar(raw: string): unknown {
