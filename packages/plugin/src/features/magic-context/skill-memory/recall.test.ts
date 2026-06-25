@@ -427,6 +427,66 @@ describe("cross-project global recall", () => {
             closeQuietly(db);
         }
     });
+
+    test("a PROJECT-LOCAL skill surfaces a historian-written global note (P1 regression)", async () => {
+        // Regression: promoteSkillObservations always writes tier='global'/'*',
+        // but recall for a project-local skill uses scope='project'. Before the
+        // union-on-recall fix, the project-tier query never matched the global
+        // '*' rows, so historian notes were orphaned for project-local skills.
+        const db = makeDb();
+        try {
+            promoteSkillObservations(db, "git:repoA", [
+                {
+                    skillId: "tdd",
+                    kind: "discovery",
+                    lesson: "spike the parser before writing the plan",
+                },
+            ]);
+            // Recall as a PROJECT-tier skill (the failing case pre-fix).
+            const block = await recallSkillMemoryBlock(db, {
+                skill: "tdd",
+                scope: "project",
+                projectIdentity: "git:repoA",
+                frontmatterConfig: cfg,
+            });
+            expect(block).toContain("spike the parser before writing the plan");
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("a project-local AGENT note and a global HISTORIAN note both surface for the same skill", async () => {
+        const db = makeDb();
+        try {
+            // Agent-written, project-tier note.
+            insertSkillMemoryNote(db, {
+                skillId: "tdd",
+                resolvedPath: "/repo/.opencode/skills/tdd/SKILL.md",
+                tier: "project",
+                skillSource: "opencode-project",
+                projectIdentity: "git:repoLocal",
+                intent: "local lesson",
+                kind: "gotcha",
+                delta: "project-local agent note",
+                normalizedHash: "pl1",
+                createdAt: Date.now(),
+            });
+            // Historian-written, global note for the same skill.
+            promoteSkillObservations(db, "git:repoLocal", [
+                { skillId: "tdd", kind: "discovery", lesson: "global historian note" },
+            ]);
+            const block = await recallSkillMemoryBlock(db, {
+                skill: "tdd",
+                scope: "project",
+                projectIdentity: "git:repoLocal",
+                frontmatterConfig: cfg,
+            });
+            expect(block).toContain("project-local agent note");
+            expect(block).toContain("global historian note");
+        } finally {
+            closeQuietly(db);
+        }
+    });
 });
 
 describe("recallSkillMemoryBlock bumps recall_count for surfaced notes", () => {

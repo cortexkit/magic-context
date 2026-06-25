@@ -91,10 +91,20 @@ body`;
         expect(parseFrontmatterConfig(md)?.enabled).toBe(true);
     });
 
-    test("does not strip a '#' inside a quoted scalar", () => {
+    test("a plain quoted scalar still enables", () => {
         const md = `---\nskill-memory:\n  enabled: "true"\n---\nbody`;
-        // "true" (quoted) still enables; the quote-strip path runs after the
-        // unquoted-only comment strip, so quoted values are untouched.
         expect(parseFrontmatterConfig(md)?.enabled).toBe(true);
+    });
+
+    test("does NOT strip a '#' inside a quoted scalar (comment-strip is unquoted-only)", () => {
+        // Quoted value containing a '#': the inline-comment strip must NOT fire,
+        // so the value stays the literal "true # x" (≠ "true") and the config is
+        // inert. If the '#' WERE wrongly stripped, it would collapse to "true"
+        // and enable — so a passing assertion proves the '#' was preserved.
+        const quoted = `---\nskill-memory:\n  enabled: "true # x"\n---\nbody`;
+        expect(parseFrontmatterConfig(quoted)).toBeNull();
+        // Contrast: the SAME text UNquoted is a real inline comment → stripped → enables.
+        const unquoted = `---\nskill-memory:\n  enabled: true # x\n---\nbody`;
+        expect(parseFrontmatterConfig(unquoted)?.enabled).toBe(true);
     });
 });

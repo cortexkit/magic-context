@@ -19,8 +19,11 @@ export interface SkillMemoryConfig {
 // Anchored to the very start of the file (NO `m` flag): frontmatter is only
 // valid as the first bytes of the document. With `m`, `^` matches any line
 // start, so a later `--- ... ---` block (e.g. a markdown horizontal rule) could
-// be misparsed as config.
-const FRONTMATTER_REGEX = /^---\r?\n([\s\S]*?)\r?\n---/;
+// be misparsed as config. A leading UTF-8 BOM and leading whitespace/blank
+// lines are tolerated (`\uFEFF?\s*`) so an editor-saved SKILL.md with a BOM or a
+// stray blank first line still parses; this stays start-anchored because `\s*`
+// only spans leading whitespace before the first `---`, never a mid-document rule.
+const FRONTMATTER_REGEX = /^\uFEFF?\s*---\r?\n([\s\S]*?)\r?\n---/;
 
 export function parseFrontmatterConfig(content: string): SkillMemoryConfig | null {
     try {

@@ -10,6 +10,37 @@ export function partitionKey(tier: "project" | "global", projectIdentity: string
     return tier === "global" ? "*" : projectIdentity;
 }
 
+/**
+ * RECALL-path partition predicate: a note is recallable for (tier, projectIdentity)
+ * when it is either in the skill's OWN partition OR in the cross-project global
+ * '*' partition (where historian-extracted lessons live). This is why a
+ * project-local skill still surfaces global historian notes — without the global
+ * branch, recall for a project-tier skill (`tier='project'`) would never match the
+ * `tier='global'/project_identity='*'` rows that promoteSkillObservations writes.
+ *
+ * For a global-tier skill the two branches are identical (both `tier='global' AND
+ * project_identity='*'`), so the OR is a harmless no-op — a row still matches once
+ * (it's a row filter, not a join, so no duplication).
+ *
+ * WRITE/dedup paths (insert, findExistingNote, bumpHitCount, getDedupCandidates)
+ * deliberately do NOT use this — they must target one exact partition.
+ *
+ * Returns `{ clause, binds }`; callers splice `clause` into the WHERE and spread
+ * `binds` (tier, ownPartition) at the matching `?` positions.
+ */
+function recallPartitionPredicate(
+    tier: "project" | "global",
+    projectIdentity: string,
+    columnPrefix = "",
+): { clause: string; binds: [string, string] } {
+    const t = `${columnPrefix}tier`;
+    const p = `${columnPrefix}project_identity`;
+    return {
+        clause: `((${t} = ? AND ${p} = ?) OR (${t} = 'global' AND ${p} = '*'))`,
+        binds: [tier, partitionKey(tier, projectIdentity)],
+    };
+}
+
 export interface SkillMemoryNote {
     id: number;
     skill_id: string;
@@ -123,11 +154,12 @@ export function getSkillMemoryNotes(
     projectIdentity: string,
     limit: number,
 ): SkillMemoryNote[] {
+    const { clause, binds } = recallPartitionPredicate(tier, projectIdentity);
     return db
         .prepare(
             `SELECT *
              FROM skill_memory
-             WHERE skill_id = ? AND tier = ? AND project_identity = ?
+             WHERE skill_id = ? AND ${clause}
              ORDER BY
                 pinned DESC,
                (
@@ -145,7 +177,7 @@ export function getSkillMemoryNotes(
                created_at DESC
              LIMIT ?`,
         )
-        .all(skillId, tier, partitionKey(tier, projectIdentity), limit) as SkillMemoryNote[];
+        .all(skillId, ...binds, limit) as SkillMemoryNote[];
 }
 
 /**
@@ -249,13 +281,14 @@ export function getRankingCandidates(
     projectIdentity: string,
     limit: number,
 ): SkillMemoryNote[] {
+    const { clause, binds } = recallPartitionPredicate(tier, projectIdentity);
     return db
         .prepare(
             `SELECT * FROM skill_memory
-         WHERE skill_id=? AND tier=? AND project_identity=?
+         WHERE skill_id=? AND ${clause}
          ORDER BY COALESCE(last_used_at, created_at) DESC LIMIT ?`,
         )
-        .all(skillId, tier, partitionKey(tier, projectIdentity), limit) as SkillMemoryNote[];
+        .all(skillId, ...binds, limit) as SkillMemoryNote[];
 }
 
 export function searchSkillMemoryFts(
@@ -271,15 +304,14 @@ export function searchSkillMemoryFts(
             `SELECT m.* FROM skill_memory_fts f
          JOIN skill_memory m ON m.id = f.rowid
          WHERE skill_memory_fts MATCH ?
-           AND m.skill_id=? AND m.tier=? AND m.project_identity=?
+           AND m.skill_id=? AND ${recallPartitionPredicate(tier, projectIdentity, "m.").clause}
          ORDER BY bm25(skill_memory_fts) ASC, COALESCE(m.last_used_at, m.created_at) DESC
          LIMIT ?`,
         )
         .all(
             matchQuery,
             skillId,
-            tier,
-            partitionKey(tier, projectIdentity),
+            ...recallPartitionPredicate(tier, projectIdentity, "m.").binds,
             limit,
         ) as SkillMemoryNote[];
 }
@@ -290,13 +322,14 @@ export function getPinnedNotes(
     tier: "project" | "global",
     projectIdentity: string,
 ): SkillMemoryNote[] {
+    const { clause, binds } = recallPartitionPredicate(tier, projectIdentity);
     return db
         .prepare(
             `SELECT * FROM skill_memory
-         WHERE skill_id=? AND tier=? AND project_identity=? AND pinned=1
+         WHERE skill_id=? AND ${clause} AND pinned=1
          ORDER BY COALESCE(last_used_at, created_at) DESC`,
         )
-        .all(skillId, tier, partitionKey(tier, projectIdentity)) as SkillMemoryNote[];
+        .all(skillId, ...binds) as SkillMemoryNote[];
 }
 
 export function getSkillMemoryStats(

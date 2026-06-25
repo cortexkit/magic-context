@@ -393,7 +393,7 @@ function buildDistillSkillMemoryPrompt(projectPath: string): string {
           SUM(CASE WHEN pinned = 1 THEN 1 ELSE 0 END) as pinned_count,
           SUM(CASE WHEN intent_embedding IS NULL OR delta_embedding IS NULL THEN 1 ELSE 0 END) as missing_embedding_count
    FROM skill_memory
-   WHERE project_identity IN ('${projectPath}', '*')
+   WHERE project_identity IN ('${projectPath.replace(/'/g, "''")}', '*')
    GROUP BY skill_id, tier
    ORDER BY note_count DESC
    LIMIT 20;

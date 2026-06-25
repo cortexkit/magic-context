@@ -77,14 +77,17 @@ export function extractToolCallSummaries(parts: unknown[]): string[] {
 
         // Skill tool: surface the skill name (input.name) before the description
         // fallback, which would otherwise mask it if metadata.description exists.
-        // The name is an IDENTITY key (the historian extracts skill-id from this
-        // marker), so do NOT truncate it. Sanitize newlines/control chars and a
-        // stray ")" so the single-line `TC: skill(<name>)` marker can't be
-        // corrupted — skill names are normally slugs, this is defensive only.
+        // The name is an IDENTITY key — the historian extracts the skill-id from
+        // this marker and recall keys on the raw input.name, so the marker name
+        // MUST equal the raw name (no truncation, no mutation) or the stored id
+        // won't match recall. Emit it VERBATIM when marker-safe; if it contains a
+        // marker-breaking char (CR/LF/tab/")") — which a real skill directory name
+        // never does — drop the name (`TC: skill`) rather than emit a corrupted or
+        // mutated identity.
         if (p.tool === "skill") {
             const rawName = input && typeof input.name === "string" ? input.name : "";
-            const name = rawName.replace(/[\r\n\t)]/g, " ").trim();
-            summaries.push(name ? `TC: skill(${name})` : "TC: skill");
+            const markerSafe = rawName !== "" && !/[\r\n\t)]/.test(rawName);
+            summaries.push(markerSafe ? `TC: skill(${rawName})` : "TC: skill");
             continue;
         }
 
