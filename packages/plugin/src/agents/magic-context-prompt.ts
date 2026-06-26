@@ -77,13 +77,20 @@ function memoryGuidanceBlock(memoryEnabled: boolean): string {
 // `ctx_skill_recall` rehydrates accumulated notes for a skill without re-loading it.
 // Distinct from `ctx_memory`, which captures general project knowledge (not tied
 // to a specific skill). NOT gated on memory.enabled — skill-memory is an
-// independent store (its own table + tool-result-tail injection).
-const CTX_SKILL_MEMORY_GUIDANCE = `Use \`ctx_skill_note\` after using a skill when you hit a non-obvious issue, found a better approach, or fixed a skill-specific error. Skip routine successes — only record gotchas, discoveries, fixes, and workflow steps that would save time on the next use.
+// independent store (its own table + tool-result-tail injection) — BUT the
+// `ctx_memory` cross-reference is dropped when memory is off, since ctx_memory is
+// then unregistered and pointing at it would be misleading (mirrors MEMORY_GUIDANCE).
+function ctxSkillMemoryGuidance(memoryEnabled: boolean): string {
+    const generalObservationsLine = memoryEnabled
+        ? "Do NOT use `ctx_skill_note` for general project observations — those belong in `ctx_memory`."
+        : "Do NOT use `ctx_skill_note` for general project observations.";
+    return `Use \`ctx_skill_note\` after using a skill when you hit a non-obvious issue, found a better approach, or fixed a skill-specific error. Skip routine successes — only record gotchas, discoveries, fixes, and workflow steps that would save time on the next use.
 Example: \`ctx_skill_note({skill: 'trilium', intent: 'bulk-retag a subtree', kind: 'gotcha', delta: 'ETAPI note PUT needs Content-Type: text/plain even for HTML content'})\`
 Example: \`ctx_skill_note({skill: 'test-driven-development', intent: 'fix flaky auth test', kind: 'fix', delta: 'Always mock Date.now() in auth tests — real timers cause intermittent failures'})\`
-Do NOT use \`ctx_skill_note\` for general project observations — those belong in \`ctx_memory\`.
+${generalObservationsLine}
 
 Use \`ctx_skill_recall\` to explicitly query accumulated notes for a skill without re-loading it. Call it when you want to recall gotchas/discoveries for a skill you have already loaded this session, or when you need notes without triggering a full skill load. Returns the \`<skill-memory>\` block directly as a tool result. Example: \`ctx_skill_recall({skill: 'trilium', intent: 'bulk-retag a subtree'})\`.`;
+}
 
 const BASE_INTRO = (
     protectedTags: number,
@@ -92,7 +99,7 @@ const BASE_INTRO = (
 Use \`ctx_reduce\` to mark spent tagged content as discardable and reclaim space. Marking is NOT an immediate delete — it queues the content, which stays fully visible until space is actually needed (as soon as the next turn if you're already under pressure, much later if not), so mark a tool output as soon as you're done with it rather than hoarding the call for the end of the turn. The last ${protectedTags} tags are protected (marking one just queues it until it ages out). Syntax: "3-5", "1,2,9", or "1-5,8,12-15".
 Do not announce or narrate \`ctx_reduce\` drops — just call the tool silently. Saying "I'll drop these outputs" wastes tokens the user does not care about.
 ${CTX_NOTE_GUIDANCE}
-${memoryGuidanceBlock(memoryEnabled)}${CTX_SKILL_MEMORY_GUIDANCE}
+${memoryGuidanceBlock(memoryEnabled)}${ctxSkillMemoryGuidance(memoryEnabled)}
 Use \`ctx_search\` to search across project memories, indexed git commits, and this session's full conversation history (including compacted parts) from one query.
 Use \`ctx_expand\` to recover the raw conversation behind a summary under a \`## start-end · date · title\` heading inside \`<session-history>\` — pass the heading's start/end range when the summary is not enough (exact wording, values, error text).
 **Search before asking the user**: If you can't remember or don't know something that might have been discussed before or stored in project memory, use \`ctx_search\` before asking the user. Examples:
@@ -115,7 +122,7 @@ Before your turn finishes, consider using \`ctx_reduce\` to drop large tool outp
  *  wastes tokens and (empirically) primes some models to emit malformed `§N">§`
  *  tokens at the start of their own text. */
 const BASE_INTRO_NO_REDUCE = (memoryEnabled: boolean): string => `${CTX_NOTE_GUIDANCE}
-${memoryGuidanceBlock(memoryEnabled)}${CTX_SKILL_MEMORY_GUIDANCE}
+${memoryGuidanceBlock(memoryEnabled)}${ctxSkillMemoryGuidance(memoryEnabled)}
 Use \`ctx_search\` to search across project memories, indexed git commits, and this session's full conversation history (including compacted parts) from one query.
 Use \`ctx_expand\` to recover the raw conversation behind a summary under a \`## start-end · date · title\` heading inside \`<session-history>\` — pass the heading's start/end range when the summary is not enough (exact wording, values, error text).
 **Search before asking the user**: If you can't remember or don't know something that might have been discussed before or stored in project memory, use \`ctx_search\` before asking the user. Examples:
