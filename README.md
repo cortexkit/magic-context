@@ -280,7 +280,7 @@ Magic Context also writes to a few other locations:
 |---|---|---|
 | `~/.local/share/cortexkit/magic-context/context.db` | SQLite database — tags, compartments, memories, all durable state (XDG-equivalent on Windows) | **Must persist.** Losing it loses your memory/history. |
 | `~/.local/share/cortexkit/magic-context/models/` | Local embedding model cache (~90 MB `Xenova/all-MiniLM-L6-v2` ONNX), downloaded on first use when local embeddings are enabled | Should persist, else re-downloaded each run. Not used when `memory.enabled: false` or an `openai_compatible`/`ollama` embedding backend is configured. |
-| `${TMPDIR}/opencode/magic-context/magic-context.log` (`pi/` for Pi) | Diagnostic log | Disposable. |
+| `MAGIC_CONTEXT_LOG_PATH` (fallback: `${TMPDIR}/opencode/magic-context/magic-context.log`, `pi/` for Pi) | Diagnostic log | Disposable. |
 
 **Sandboxed / ephemeral environments (Docker, CI, disposable containers):** mount the `~/.local/share/cortexkit/magic-context/` directory on a persistent volume so the database and model cache survive between runs. If only the model cache is ephemeral, the model is simply re-downloaded; if the database is ephemeral, memory and history don't accumulate. To avoid the ~90 MB model download entirely, set `memory.enabled: false` or point `embedding` at a remote `openai_compatible`/`ollama` backend.
 

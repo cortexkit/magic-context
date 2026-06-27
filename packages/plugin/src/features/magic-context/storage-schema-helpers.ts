@@ -1,4 +1,4 @@
-import { Database } from "../../shared/sqlite";
+import type { Database } from "../../shared/sqlite";
 
 /**
  * Schema-mutation helpers shared by storage-db (fresh-DB init) and migrations

@@ -33,6 +33,14 @@ impl Harness {
 /// in sync manually because the dashboard doesn't import any TypeScript
 /// source.
 pub fn resolve_log_path_for(harness: Harness) -> PathBuf {
+    if let Some(env_path) = std::env::var("MAGIC_CONTEXT_LOG_PATH")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return PathBuf::from(env_path);
+    }
+
     std::env::temp_dir()
         .join(harness.as_str())
         .join("magic-context")
@@ -435,4 +443,77 @@ pub fn read_log_tail(path: &PathBuf, max_lines: usize) -> Vec<LogEntry> {
         .iter()
         .filter_map(|line| parse_log_line(line))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_log_path_for, Harness};
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn resolve_log_path_for_uses_harness_fallback_when_env_unset() {
+        let _guard = env_lock();
+        std::env::remove_var("MAGIC_CONTEXT_LOG_PATH");
+
+        assert_eq!(
+            resolve_log_path_for(Harness::Opencode),
+            std::env::temp_dir()
+                .join("opencode")
+                .join("magic-context")
+                .join("magic-context.log")
+        );
+        assert_eq!(
+            resolve_log_path_for(Harness::Pi),
+            std::env::temp_dir()
+                .join("pi")
+                .join("magic-context")
+                .join("magic-context.log")
+        );
+    }
+
+    #[test]
+    fn resolve_log_path_for_honors_magic_context_log_path_override() {
+        let _guard = env_lock();
+        let custom = std::env::temp_dir()
+            .join("custom")
+            .join("magic-context.log");
+        std::env::set_var(
+            "MAGIC_CONTEXT_LOG_PATH",
+            custom.to_string_lossy().to_string(),
+        );
+
+        assert_eq!(
+            resolve_log_path_for(Harness::Opencode),
+            PathBuf::from(&custom)
+        );
+        assert_eq!(resolve_log_path_for(Harness::Pi), PathBuf::from(&custom));
+
+        std::env::remove_var("MAGIC_CONTEXT_LOG_PATH");
+    }
+
+    #[test]
+    fn resolve_log_path_for_ignores_blank_magic_context_log_path() {
+        let _guard = env_lock();
+        std::env::set_var("MAGIC_CONTEXT_LOG_PATH", "   ");
+
+        assert_eq!(
+            resolve_log_path_for(Harness::Pi),
+            std::env::temp_dir()
+                .join("pi")
+                .join("magic-context")
+                .join("magic-context.log")
+        );
+
+        std::env::remove_var("MAGIC_CONTEXT_LOG_PATH");
+    }
 }

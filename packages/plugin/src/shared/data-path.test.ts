@@ -7,6 +7,7 @@ import {
     getCacheDir,
     getDataDir,
     getLegacyOpenCodeMagicContextStorageDir,
+    getMagicContextLogPath,
     getMagicContextStorageDir,
     getOpenCodeCacheDir,
     getOpenCodeStorageDir,
@@ -18,6 +19,7 @@ const savedEnv = {
     XDG_CACHE_HOME: process.env.XDG_CACHE_HOME,
     XDG_DATA_HOME: process.env.XDG_DATA_HOME,
     LOCALAPPDATA: process.env.LOCALAPPDATA,
+    MAGIC_CONTEXT_LOG_PATH: process.env.MAGIC_CONTEXT_LOG_PATH,
 };
 
 describe("data-path", () => {
@@ -25,10 +27,12 @@ describe("data-path", () => {
         process.env.XDG_CACHE_HOME = undefined;
         process.env.XDG_DATA_HOME = undefined;
         process.env.LOCALAPPDATA = undefined;
+        process.env.MAGIC_CONTEXT_LOG_PATH = undefined;
         // Bun's env handling: explicit delete for unset
         delete process.env.XDG_CACHE_HOME;
         delete process.env.XDG_DATA_HOME;
         delete process.env.LOCALAPPDATA;
+        delete process.env.MAGIC_CONTEXT_LOG_PATH;
     });
 
     afterEach(() => {
@@ -37,6 +41,9 @@ describe("data-path", () => {
         if (savedEnv.XDG_DATA_HOME !== undefined)
             process.env.XDG_DATA_HOME = savedEnv.XDG_DATA_HOME;
         if (savedEnv.LOCALAPPDATA !== undefined) process.env.LOCALAPPDATA = savedEnv.LOCALAPPDATA;
+        if (savedEnv.MAGIC_CONTEXT_LOG_PATH !== undefined)
+            process.env.MAGIC_CONTEXT_LOG_PATH = savedEnv.MAGIC_CONTEXT_LOG_PATH;
+        else delete process.env.MAGIC_CONTEXT_LOG_PATH;
     });
 
     test("getCacheDir falls back to <homedir>/.cache when XDG_CACHE_HOME is unset (all platforms)", () => {
@@ -156,6 +163,24 @@ describe("data-path", () => {
         // worry about how the project directory was constructed.
         expect(getProjectMagicContextDir("/some/project/")).toBe(
             path.join("/some/project/", ".cortexkit", "magic-context"),
+        );
+    });
+
+    test("getMagicContextLogPath falls back to harness temp dir when env unset", () => {
+        expect(getMagicContextLogPath("opencode")).toBe(
+            path.join(os.tmpdir(), "opencode", "magic-context", "magic-context.log"),
+        );
+    });
+
+    test("getMagicContextLogPath honors MAGIC_CONTEXT_LOG_PATH", () => {
+        process.env.MAGIC_CONTEXT_LOG_PATH = "/tmp/custom/magic-context.log";
+        expect(getMagicContextLogPath("pi")).toBe("/tmp/custom/magic-context.log");
+    });
+
+    test("getMagicContextLogPath ignores blank MAGIC_CONTEXT_LOG_PATH", () => {
+        process.env.MAGIC_CONTEXT_LOG_PATH = "   ";
+        expect(getMagicContextLogPath("pi")).toBe(
+            path.join(os.tmpdir(), "pi", "magic-context", "magic-context.log"),
         );
     });
 });

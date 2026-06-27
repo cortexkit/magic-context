@@ -91,7 +91,6 @@ export interface DreamTaskExecutorDeps {
     ) => Promise<RawMessageProvider | null> | RawMessageProvider | null;
     language?: string;
 }
-
 /** A failed task either hot-retries (transient: provider/network/rate-limit/
  *  timeout/abort/lease/busy) or advances to the next cron slot (permanent:
  *  model-not-found, validation, parse). Classify off the error shape. */
