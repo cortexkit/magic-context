@@ -2,12 +2,13 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { getOpenCodeCacheDir } from "@magic-context/core/shared/data-path";
 
-const PLUGIN_NAME = "@cortexkit/opencode-magic-context";
-const PLUGIN_ENTRY_WITH_VERSION = `${PLUGIN_NAME}@latest`;
+export const OPENCODE_PLUGIN_NAME = "@cortexkit/opencode-magic-context";
+export const OPENCODE_PLUGIN_ENTRY_WITH_VERSION = `${OPENCODE_PLUGIN_NAME}@latest`;
 
 export interface PluginCacheResult {
     action: "cleared" | "up_to_date" | "not_found" | "error";
     path: string;
+    paths?: string[];
     cached?: string;
     latest?: string;
     error?: string;
@@ -16,8 +17,8 @@ export interface PluginCacheResult {
 export function getOpenCodePluginCacheRoots(): string[] {
     const cacheDir = getOpenCodeCacheDir();
     return [
-        join(cacheDir, "packages", PLUGIN_ENTRY_WITH_VERSION),
-        join(cacheDir, "packages", PLUGIN_NAME),
+        join(cacheDir, "packages", OPENCODE_PLUGIN_ENTRY_WITH_VERSION),
+        join(cacheDir, "packages", OPENCODE_PLUGIN_NAME),
     ];
 }
 
@@ -45,39 +46,55 @@ function readCachedPluginVersion(pluginCacheDir: string): string | undefined {
 export async function clearPluginCache(
     options: { force?: boolean; latestVersion?: string | null } = {},
 ): Promise<PluginCacheResult> {
-    const [pluginCacheDir] = getOpenCodePluginCacheRoots();
+    const pluginCacheRoots = getOpenCodePluginCacheRoots();
+    const existingRoots = pluginCacheRoots.filter((root) => existsSync(root));
 
-    if (!existsSync(pluginCacheDir)) {
-        return { action: "not_found", path: pluginCacheDir };
+    if (existingRoots.length === 0) {
+        return { action: "not_found", path: pluginCacheRoots[0] ?? "" };
     }
 
-    const cachedVersion = readCachedPluginVersion(pluginCacheDir);
     const latestVersion = options.latestVersion ?? undefined;
+    const cacheEntries = existingRoots.map((path) => ({
+        path,
+        cached: readCachedPluginVersion(path),
+    }));
+    const clearTargets = cacheEntries.filter(
+        (entry) =>
+            options.force === true ||
+            latestVersion === undefined ||
+            entry.cached === undefined ||
+            entry.cached !== latestVersion,
+    );
 
-    if (
-        options.force !== true &&
-        cachedVersion &&
-        latestVersion &&
-        cachedVersion === latestVersion
-    ) {
+    if (clearTargets.length === 0) {
+        const firstEntry = cacheEntries[0];
         return {
             action: "up_to_date",
-            path: pluginCacheDir,
-            cached: cachedVersion,
+            path: firstEntry?.path ?? pluginCacheRoots[0] ?? "",
+            paths: cacheEntries.map((entry) => entry.path),
+            cached: firstEntry?.cached,
             latest: latestVersion,
         };
     }
 
     try {
-        rmSync(pluginCacheDir, { recursive: true, force: true });
+        for (const entry of clearTargets) {
+            rmSync(entry.path, { recursive: true, force: true });
+        }
+        const firstTarget = clearTargets[0];
         return {
             action: "cleared",
-            path: pluginCacheDir,
-            cached: cachedVersion,
+            path: firstTarget?.path ?? pluginCacheRoots[0] ?? "",
+            paths: clearTargets.map((entry) => entry.path),
+            cached: firstTarget?.cached,
             latest: latestVersion,
         };
     } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
-        return { action: "error", path: pluginCacheDir, error: message };
+        return {
+            action: "error",
+            path: clearTargets[0]?.path ?? existingRoots[0] ?? "",
+            error: message,
+        };
     }
 }

@@ -29,10 +29,13 @@ import { isOpenCodeInstalled } from "../lib/opencode-helpers";
 import { detectConfigPaths, getMagicContextLogPath } from "../lib/paths";
 import { confirm, intro, log, outro, selectOne, spinner, text } from "../lib/prompts";
 import { runV22BackfillCommands, type V22BackfillCommandArgs } from "../lib/v22-backfill-commands";
-import { clearPluginCache, getOpenCodePluginCacheRoots } from "./doctor-opencode-cache";
+import {
+    clearPluginCache,
+    getOpenCodePluginCacheRoots,
+    OPENCODE_PLUGIN_ENTRY_WITH_VERSION as PLUGIN_ENTRY_WITH_VERSION,
+    OPENCODE_PLUGIN_NAME as PLUGIN_NAME,
+} from "./doctor-opencode-cache";
 
-const PLUGIN_NAME = "@cortexkit/opencode-magic-context";
-const PLUGIN_ENTRY_WITH_VERSION = `${PLUGIN_NAME}@latest`;
 const CLI_PACKAGE_NAME = "@cortexkit/magic-context";
 
 export interface DoctorMigrationLogSink {
@@ -1089,13 +1092,16 @@ export async function runDoctor(
     // 8. Check plugin npm cache — clear only if outdated
     const cacheResult = await clearPluginCache({
         force: options.force,
-        latestVersion: pluginNpmLatest ?? npmLatest ?? selfVersion,
+        latestVersion: pluginNpmLatest,
     });
     if (cacheResult.action === "cleared") {
         const versionInfo = cacheResult.cached
             ? ` (cached: ${cacheResult.cached}${cacheResult.latest ? `, latest: ${cacheResult.latest}` : ""})`
             : "";
-        pass(`Cleared outdated plugin cache${versionInfo} — latest will download on restart`);
+        const reason = cacheResult.latest
+            ? "outdated plugin cache"
+            : "plugin cache (latest version check unavailable)";
+        pass(`Cleared ${reason}${versionInfo} — latest will download on restart`);
         log.info(`  ${cacheResult.path}`);
         fixed++;
     } else if (cacheResult.action === "up_to_date") {
