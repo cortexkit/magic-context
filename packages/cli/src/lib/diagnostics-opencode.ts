@@ -14,12 +14,15 @@ import { join } from "node:path";
 
 import { parseCompartmentOutput } from "@magic-context/core/hooks/magic-context/compartment-parser";
 import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
-import {
-    getOpenCodeCacheDir,
-    getProjectMagicContextHistorianDir,
-} from "@magic-context/core/shared/data-path";
+import { getProjectMagicContextHistorianDir } from "@magic-context/core/shared/data-path";
 import { parse as parseJsonc } from "comment-json";
 import { getOpenCodeVersion, isOpenCodeInstalled } from "./opencode-helpers";
+import {
+    getOpenCodePluginCacheRoots,
+    getOpenCodePluginPackageJsonPaths,
+    OPENCODE_PLUGIN_ENTRY_WITH_VERSION,
+    OPENCODE_PLUGIN_NAME,
+} from "./opencode-plugin-cache";
 import {
     type ConfigPaths,
     detectConfigPaths,
@@ -27,9 +30,6 @@ import {
     getMagicContextLogPath,
 } from "./paths";
 import { sanitizeConfigValue, sanitizeDiagnosticText, sanitizePathString } from "./redaction";
-
-const PLUGIN_NAME = "@cortexkit/opencode-magic-context";
-const PLUGIN_ENTRY_WITH_VERSION = `${PLUGIN_NAME}@latest`;
 
 export interface DiagnosticReport {
     timestamp: string;
@@ -216,24 +216,20 @@ function getSelfVersion(): string {
 }
 
 function getPluginCacheInfo(): { path: string; cached?: string; latest?: string } {
-    const path = join(getOpenCodeCacheDir(), "packages", PLUGIN_ENTRY_WITH_VERSION);
+    const [path = ""] = getOpenCodePluginCacheRoots();
     let cached: string | undefined;
-    try {
-        const installedPkgPath = join(
-            path,
-            "node_modules",
-            "@cortexkit",
-            "opencode-magic-context",
-            "package.json",
-        );
-        if (existsSync(installedPkgPath)) {
-            const pkg = JSON.parse(readFileSync(installedPkgPath, "utf-8")) as {
-                version?: unknown;
-            };
-            cached = typeof pkg.version === "string" ? pkg.version : undefined;
+    for (const installedPkgPath of getOpenCodePluginPackageJsonPaths()) {
+        try {
+            if (existsSync(installedPkgPath)) {
+                const pkg = JSON.parse(readFileSync(installedPkgPath, "utf-8")) as {
+                    version?: unknown;
+                };
+                cached = typeof pkg.version === "string" ? pkg.version : undefined;
+                if (cached) break;
+            }
+        } catch {
+            cached = undefined;
         }
-    } catch {
-        cached = undefined;
     }
     return { path, cached, latest: getSelfVersion() };
 }
@@ -283,8 +279,9 @@ function configHasPluginEntry(config: Record<string, unknown> | null): boolean {
     const plugins = Array.isArray(config?.plugin) ? config.plugin : [];
     return plugins.some((entry) => {
         if (typeof entry !== "string") return false;
-        if (entry === PLUGIN_NAME) return true;
-        if (entry.startsWith(`${PLUGIN_NAME}@`)) return true;
+        if (entry === OPENCODE_PLUGIN_NAME) return true;
+        if (entry === OPENCODE_PLUGIN_ENTRY_WITH_VERSION) return true;
+        if (entry.startsWith(`${OPENCODE_PLUGIN_NAME}@`)) return true;
         // Local dev paths
         if (entry.includes("opencode-magic-context")) return true;
         return false;

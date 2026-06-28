@@ -4,6 +4,11 @@ import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { writeFileAtomic } from "../lib/atomic-write";
 import { isOpenCodeInstalledOnSystem } from "../lib/opencode-install";
 import {
+    getOpenCodePluginPackageJsonPaths,
+    OPENCODE_PLUGIN_ENTRY_WITH_VERSION as PLUGIN_ENTRY,
+    OPENCODE_PLUGIN_NAME as PLUGIN_NAME,
+} from "../lib/opencode-plugin-cache";
+import {
     detectConfigPaths,
     dirSizeBytes,
     getMagicContextLogPath,
@@ -15,9 +20,6 @@ import type {
     PluginCacheInfo,
     PluginEntryResult,
 } from "./types";
-
-const PLUGIN_NAME = "@cortexkit/opencode-magic-context";
-const PLUGIN_ENTRY = `${PLUGIN_NAME}@latest`;
 
 export class OpenCodeAdapter implements HarnessAdapter {
     readonly kind = "opencode" as const;
@@ -214,12 +216,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
 
     getInstalledPluginVersion(): string | null {
         // Look in OpenCode's plugin cache for the installed package version.
-        const cacheDir = getOpenCodePluginCacheDir();
-        const candidates = [
-            `${cacheDir}/${PLUGIN_NAME}@latest/node_modules/${PLUGIN_NAME}/package.json`,
-            `${cacheDir}/${PLUGIN_NAME}/node_modules/${PLUGIN_NAME}/package.json`,
-        ];
-        for (const candidate of candidates) {
+        for (const candidate of getOpenCodePluginPackageJsonPaths()) {
             if (!existsSync(candidate)) continue;
             try {
                 const raw = readFileSync(candidate, "utf-8");

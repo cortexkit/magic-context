@@ -26,15 +26,15 @@ import { bundleIssueReport } from "../lib/logs-opencode";
 import { migrateDreamerV2ForDoctor } from "../lib/migrate-dreamer-v2-doctor";
 import { migrateExperimentalPinKeyFilesForDoctor } from "../lib/migrate-experimental-doctor";
 import { isOpenCodeInstalled } from "../lib/opencode-helpers";
-import { detectConfigPaths, getMagicContextLogPath } from "../lib/paths";
-import { confirm, intro, log, outro, selectOne, spinner, text } from "../lib/prompts";
-import { runV22BackfillCommands, type V22BackfillCommandArgs } from "../lib/v22-backfill-commands";
 import {
-    clearPluginCache,
     getOpenCodePluginCacheRoots,
     OPENCODE_PLUGIN_ENTRY_WITH_VERSION as PLUGIN_ENTRY_WITH_VERSION,
     OPENCODE_PLUGIN_NAME as PLUGIN_NAME,
-} from "./doctor-opencode-cache";
+} from "../lib/opencode-plugin-cache";
+import { detectConfigPaths, getMagicContextLogPath } from "../lib/paths";
+import { confirm, intro, log, outro, selectOne, spinner, text } from "../lib/prompts";
+import { runV22BackfillCommands, type V22BackfillCommandArgs } from "../lib/v22-backfill-commands";
+import { clearPluginCache } from "./doctor-opencode-cache";
 
 const CLI_PACKAGE_NAME = "@cortexkit/magic-context";
 
@@ -1106,6 +1106,10 @@ export async function runDoctor(
         fixed++;
     } else if (cacheResult.action === "up_to_date") {
         pass(`Plugin cache up to date (v${cacheResult.cached})`);
+    } else if (cacheResult.action === "check_unavailable") {
+        warn(
+            `Plugin cache version check unavailable; preserving cached plugin${cacheResult.cached ? ` (cached: ${cacheResult.cached})` : ""}. Use doctor --force to reinstall it.`,
+        );
     } else if (cacheResult.action === "error") {
         warn(`Could not clear plugin cache: ${cacheResult.error}`);
         log.info(`  Manually delete: ${cacheResult.path}`);

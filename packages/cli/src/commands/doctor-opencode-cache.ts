@@ -1,12 +1,11 @@
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
-import { getOpenCodeCacheDir } from "@magic-context/core/shared/data-path";
-
-export const OPENCODE_PLUGIN_NAME = "@cortexkit/opencode-magic-context";
-export const OPENCODE_PLUGIN_ENTRY_WITH_VERSION = `${OPENCODE_PLUGIN_NAME}@latest`;
+import {
+    getOpenCodePluginCacheRoots,
+    getOpenCodePluginPackageJsonPath,
+} from "../lib/opencode-plugin-cache";
 
 export interface PluginCacheResult {
-    action: "cleared" | "up_to_date" | "not_found" | "error";
+    action: "cleared" | "up_to_date" | "not_found" | "check_unavailable" | "error";
     path: string;
     paths?: string[];
     cached?: string;
@@ -14,27 +13,9 @@ export interface PluginCacheResult {
     error?: string;
 }
 
-export function getOpenCodePluginCacheRoots(): string[] {
-    const cacheDir = getOpenCodeCacheDir();
-    return [
-        join(cacheDir, "packages", OPENCODE_PLUGIN_ENTRY_WITH_VERSION),
-        join(cacheDir, "packages", OPENCODE_PLUGIN_NAME),
-    ];
-}
-
-function cachedPluginPackagePath(pluginCacheDir: string): string {
-    return join(
-        pluginCacheDir,
-        "node_modules",
-        "@cortexkit",
-        "opencode-magic-context",
-        "package.json",
-    );
-}
-
 function readCachedPluginVersion(pluginCacheDir: string): string | undefined {
     try {
-        const installedPkgPath = cachedPluginPackagePath(pluginCacheDir);
+        const installedPkgPath = getOpenCodePluginPackageJsonPath(pluginCacheDir);
         if (!existsSync(installedPkgPath)) return undefined;
         const pkg = JSON.parse(readFileSync(installedPkgPath, "utf-8")) as { version?: unknown };
         return typeof pkg.version === "string" ? pkg.version : undefined;
@@ -58,12 +39,20 @@ export async function clearPluginCache(
         path,
         cached: readCachedPluginVersion(path),
     }));
+
+    if (options.force !== true && latestVersion === undefined) {
+        const firstEntry = cacheEntries[0];
+        return {
+            action: "check_unavailable",
+            path: firstEntry?.path ?? pluginCacheRoots[0] ?? "",
+            paths: cacheEntries.map((entry) => entry.path),
+            cached: firstEntry?.cached,
+        };
+    }
+
     const clearTargets = cacheEntries.filter(
         (entry) =>
-            options.force === true ||
-            latestVersion === undefined ||
-            entry.cached === undefined ||
-            entry.cached !== latestVersion,
+            options.force === true || entry.cached === undefined || entry.cached !== latestVersion,
     );
 
     if (clearTargets.length === 0) {

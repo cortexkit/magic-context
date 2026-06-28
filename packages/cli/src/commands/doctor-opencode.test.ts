@@ -9,13 +9,13 @@ import {
 import { computeLegacyRustDirIdentity } from "@magic-context/core/features/magic-context/v22-deferred-backfill";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
-import { runV22BackfillCommands } from "../lib/v22-backfill-commands";
-import { migrateLegacyAgentEnabledConfigForDoctor } from "./doctor-opencode";
 import {
-    clearPluginCache,
     OPENCODE_PLUGIN_ENTRY_WITH_VERSION,
     OPENCODE_PLUGIN_NAME,
-} from "./doctor-opencode-cache";
+} from "../lib/opencode-plugin-cache";
+import { runV22BackfillCommands } from "../lib/v22-backfill-commands";
+import { migrateLegacyAgentEnabledConfigForDoctor } from "./doctor-opencode";
+import { clearPluginCache } from "./doctor-opencode-cache";
 
 function migrate(input: Record<string, unknown>) {
     const logs: Array<{ level: "success" | "warn"; message: string }> = [];
@@ -218,13 +218,31 @@ describe("doctor OpenCode plugin cache", () => {
         expect(existsSync(versionlessCachePath)).toBe(false);
     });
 
-    it("clears existing cache when plugin npm latest is unavailable", async () => {
+    it("preserves existing cache when plugin npm latest is unavailable", async () => {
         const cacheRoot = makeTempDir("mc-opencode-cache-");
         originalXdgCacheHome = process.env.XDG_CACHE_HOME;
         process.env.XDG_CACHE_HOME = cacheRoot;
         const pluginCachePath = createCachedOpenCodePlugin(cacheRoot, "0.29.1");
 
         const result = await clearPluginCache({ latestVersion: null });
+
+        expect(result).toMatchObject({
+            action: "check_unavailable",
+            cached: "0.29.1",
+            path: pluginCachePath,
+            paths: [pluginCachePath],
+        });
+        expect(result.latest).toBeUndefined();
+        expect(existsSync(pluginCachePath)).toBe(true);
+    });
+
+    it("force-clears existing cache even when plugin npm latest is unavailable", async () => {
+        const cacheRoot = makeTempDir("mc-opencode-cache-");
+        originalXdgCacheHome = process.env.XDG_CACHE_HOME;
+        process.env.XDG_CACHE_HOME = cacheRoot;
+        const pluginCachePath = createCachedOpenCodePlugin(cacheRoot, "0.29.1");
+
+        const result = await clearPluginCache({ force: true, latestVersion: null });
 
         expect(result).toMatchObject({
             action: "cleared",

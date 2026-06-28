@@ -16,11 +16,13 @@ import {
     getOpenCodeVersion,
     isOpenCodeInstalled,
 } from "../lib/opencode-helpers";
+import {
+    OPENCODE_PLUGIN_ENTRY_WITH_VERSION as PLUGIN_ENTRY,
+    OPENCODE_PLUGIN_NAME as PLUGIN_NAME,
+} from "../lib/opencode-plugin-cache";
 import { detectConfigPaths } from "../lib/paths";
 import { confirm, intro, log, note, outro, promptIO, spinner } from "../lib/prompts";
 
-const PLUGIN_NAME = "@cortexkit/opencode-magic-context";
-const PLUGIN_ENTRY = "@cortexkit/opencode-magic-context@latest";
 const DCP_PLUGIN_NAME = "@tarquinen/opencode-dcp";
 
 // ─── Helpers ──────────────────────────────────────────────
