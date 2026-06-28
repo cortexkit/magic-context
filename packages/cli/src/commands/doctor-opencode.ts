@@ -1,5 +1,5 @@
 import { execSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -13,10 +13,7 @@ import {
 import { closeDatabase, openDatabase } from "@magic-context/core/features/magic-context/storage";
 import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
 import { fixConflicts } from "@magic-context/core/shared/conflict-fixer";
-import {
-    getMagicContextStorageDir,
-    getOpenCodeCacheDir,
-} from "@magic-context/core/shared/data-path";
+import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { ensureTuiPluginEntry } from "@magic-context/core/shared/tui-config";
 import { parse, stringify } from "comment-json";
@@ -32,6 +29,7 @@ import { isOpenCodeInstalled } from "../lib/opencode-helpers";
 import { detectConfigPaths, getMagicContextLogPath } from "../lib/paths";
 import { confirm, intro, log, outro, selectOne, spinner, text } from "../lib/prompts";
 import { runV22BackfillCommands, type V22BackfillCommandArgs } from "../lib/v22-backfill-commands";
+import { clearPluginCache, getOpenCodePluginCacheRoots } from "./doctor-opencode-cache";
 
 const PLUGIN_NAME = "@cortexkit/opencode-magic-context";
 const PLUGIN_ENTRY_WITH_VERSION = `${PLUGIN_NAME}@latest`;
@@ -148,78 +146,6 @@ function compareVersions(a: string, b: string): number {
         if (x > y) return 1;
     }
     return 0;
-}
-
-async function clearPluginCache(force = false): Promise<{
-    action: "cleared" | "up_to_date" | "not_found" | "error";
-    path: string;
-    cached?: string;
-    latest?: string;
-    error?: string;
-}> {
-    const cacheDir = getOpenCodeCacheDir();
-    const pluginCacheDir = join(cacheDir, "packages", PLUGIN_ENTRY_WITH_VERSION);
-
-    if (!existsSync(pluginCacheDir)) {
-        return { action: "not_found", path: pluginCacheDir };
-    }
-
-    // Read cached version from the installed package.json (more reliable than package-lock.json)
-    let cachedVersion: string | undefined;
-    try {
-        const installedPkgPath = join(
-            pluginCacheDir,
-            "node_modules",
-            "@cortexkit",
-            "opencode-magic-context",
-            "package.json",
-        );
-        if (existsSync(installedPkgPath)) {
-            const pkg = JSON.parse(readFileSync(installedPkgPath, "utf-8"));
-            if (typeof pkg?.version === "string") {
-                cachedVersion = pkg.version;
-            }
-        }
-    } catch {
-        // Can't read cached version — proceed with clearing
-    }
-
-    // Compare against our own version — when running via `npx @cortexkit/opencode-magic-context@latest doctor`,
-    // our package.json IS the latest published version. No network call needed.
-    // Try multiple relative paths to handle both src/ and dist/ build output locations.
-    const require = createRequire(import.meta.url);
-    let selfVersion: string | undefined;
-    for (const relPath of ["../../package.json", "../package.json"]) {
-        try {
-            selfVersion = (require(relPath) as { version?: string }).version;
-            if (selfVersion) break;
-        } catch {
-            // Try next path
-        }
-    }
-
-    // If we know both versions and they match, skip (unless forced)
-    if (!force && cachedVersion && cachedVersion === selfVersion) {
-        return {
-            action: "up_to_date",
-            path: pluginCacheDir,
-            cached: cachedVersion,
-            latest: selfVersion,
-        };
-    }
-
-    try {
-        rmSync(pluginCacheDir, { recursive: true, force: true });
-        return {
-            action: "cleared",
-            path: pluginCacheDir,
-            cached: cachedVersion,
-            latest: selfVersion,
-        };
-    } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return { action: "error", path: pluginCacheDir, error: msg };
-    }
 }
 
 // ── Issue flow ──────────────────────────────────────────────────────
@@ -370,10 +296,7 @@ async function runIssueFlow(): Promise<number> {
 // no-config / default-provider path (local is the default, so a missing config
 // still means local embeddings).
 function checkLocalEmbeddingRuntimeForDoctor(): { issues: number; localRuntimeBroken?: boolean } {
-    const runtime = checkLocalEmbeddingRuntime([
-        join(getOpenCodeCacheDir(), "packages", PLUGIN_ENTRY_WITH_VERSION),
-        join(getOpenCodeCacheDir(), "packages", PLUGIN_NAME),
-    ]);
+    const runtime = checkLocalEmbeddingRuntime(getOpenCodePluginCacheRoots());
     if (runtime.state === "package-missing" || runtime.state === "binary-missing") {
         log.warn(
             "Embedding provider: local — but the native runtime (onnxruntime-node) " +
@@ -619,7 +542,10 @@ export async function runDoctor(
 
     // 1b. CLI vs npm latest
     const selfVersion = getSelfVersion();
-    const npmLatest = await fetchNpmLatest(CLI_PACKAGE_NAME);
+    const [npmLatest, pluginNpmLatest] = await Promise.all([
+        fetchNpmLatest(CLI_PACKAGE_NAME),
+        fetchNpmLatest(PLUGIN_NAME),
+    ]);
     if (!npmLatest) {
         log.info(`Magic Context CLI v${selfVersion}; npm latest check unavailable`);
     } else if (compareVersions(selfVersion, npmLatest) < 0) {
@@ -1161,7 +1087,10 @@ export async function runDoctor(
     }
 
     // 8. Check plugin npm cache — clear only if outdated
-    const cacheResult = await clearPluginCache(options.force);
+    const cacheResult = await clearPluginCache({
+        force: options.force,
+        latestVersion: pluginNpmLatest ?? npmLatest ?? selfVersion,
+    });
     if (cacheResult.action === "cleared") {
         const versionInfo = cacheResult.cached
             ? ` (cached: ${cacheResult.cached}${cacheResult.latest ? `, latest: ${cacheResult.latest}` : ""})`

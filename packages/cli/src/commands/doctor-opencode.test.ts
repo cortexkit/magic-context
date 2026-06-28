@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
     initializeDatabase,
     runMigrations,
@@ -11,6 +11,7 @@ import { Database } from "@magic-context/core/shared/sqlite";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { runV22BackfillCommands } from "../lib/v22-backfill-commands";
 import { migrateLegacyAgentEnabledConfigForDoctor } from "./doctor-opencode";
+import { clearPluginCache } from "./doctor-opencode-cache";
 
 function migrate(input: Record<string, unknown>) {
     const logs: Array<{ level: "success" | "warn"; message: string }> = [];
@@ -71,6 +72,7 @@ describe("doctor OpenCode legacy agent enabled migration", () => {
 
 const tempDirs: string[] = [];
 const dbs: Database[] = [];
+let originalXdgCacheHome: string | undefined;
 
 function makeTempDir(prefix = "mc-v22-doctor-"): string {
     const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -121,12 +123,74 @@ function makeHarness(database: Database, messages: string[]) {
 }
 
 afterEach(() => {
+    if (originalXdgCacheHome === undefined) {
+        delete process.env.XDG_CACHE_HOME;
+    } else {
+        process.env.XDG_CACHE_HOME = originalXdgCacheHome;
+    }
+    originalXdgCacheHome = undefined;
     for (const db of dbs.splice(0)) {
         db.close();
     }
     for (const dir of tempDirs.splice(0)) {
         rmSync(dir, { recursive: true, force: true });
     }
+});
+
+function createCachedOpenCodePlugin(root: string, version: string): string {
+    const pluginCachePath = join(
+        root,
+        "opencode",
+        "packages",
+        "@cortexkit",
+        "opencode-magic-context@latest",
+    );
+    const installedPackagePath = join(
+        pluginCachePath,
+        "node_modules",
+        "@cortexkit",
+        "opencode-magic-context",
+        "package.json",
+    );
+    mkdirSync(dirname(installedPackagePath), { recursive: true });
+    writeFileSync(installedPackagePath, `${JSON.stringify({ version })}\n`);
+    return pluginCachePath;
+}
+
+describe("doctor OpenCode plugin cache", () => {
+    it("clears stale @latest cache when cached plugin is older than npm latest", async () => {
+        const cacheRoot = makeTempDir("mc-opencode-cache-");
+        originalXdgCacheHome = process.env.XDG_CACHE_HOME;
+        process.env.XDG_CACHE_HOME = cacheRoot;
+        const pluginCachePath = createCachedOpenCodePlugin(cacheRoot, "0.26.0");
+
+        const result = await clearPluginCache({ latestVersion: "0.29.1" });
+
+        expect(result).toMatchObject({
+            action: "cleared",
+            cached: "0.26.0",
+            latest: "0.29.1",
+            path: pluginCachePath,
+        });
+        expect(existsSync(pluginCachePath)).toBe(false);
+    });
+
+    it("keeps @latest cache when cached plugin matches npm latest", async () => {
+        const cacheRoot = makeTempDir("mc-opencode-cache-");
+        originalXdgCacheHome = process.env.XDG_CACHE_HOME;
+        process.env.XDG_CACHE_HOME = cacheRoot;
+        const pluginCachePath = createCachedOpenCodePlugin(cacheRoot, "0.29.1");
+
+        const result = await clearPluginCache({ latestVersion: "0.29.1" });
+
+        expect(result).toMatchObject({
+            action: "up_to_date",
+            cached: "0.29.1",
+            latest: "0.29.1",
+            path: pluginCachePath,
+        });
+        expect(existsSync(pluginCachePath)).toBe(true);
+    });
 });
 
 describe("doctor v22 backfill commands", () => {
