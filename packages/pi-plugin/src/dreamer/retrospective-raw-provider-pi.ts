@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import type {
@@ -191,20 +192,27 @@ async function loadDefaultPiSessionDeps(): Promise<
 > {
 	const mod = (await import(/* @vite-ignore */ PI_CODING_AGENT_MODULE)) as {
 		SessionManager?: {
-			listSessions?: (sessionDir?: string) => unknown[] | Promise<unknown[]>;
+			listAll?: (sessionDir?: string) => unknown[] | Promise<unknown[]>;
 		};
 		loadEntriesFromFile?: (filePath: string) => unknown[] | Promise<unknown[]>;
+		parseSessionEntries?: (content: string) => unknown[];
 	};
-	const listSessions = mod.SessionManager?.listSessions;
-	const loadEntriesFromFile = mod.loadEntriesFromFile;
-	if (
-		typeof listSessions !== "function" ||
-		typeof loadEntriesFromFile !== "function"
-	) {
+	const listSessions = mod.SessionManager?.listAll;
+	if (typeof listSessions !== "function") {
 		throw new Error(
-			"Pi session APIs unavailable: expected SessionManager.listSessions and loadEntriesFromFile",
+			"Pi session APIs unavailable: expected SessionManager.listAll on pi-coding-agent",
 		);
 	}
+	// loadEntriesFromFile is NOT part of pi-coding-agent's public API —
+	// fall back to readFileSync + parseSessionEntries (both exported).
+	const loadEntriesFromFile: (
+		filePath: string,
+	) => unknown[] | Promise<unknown[]> =
+		mod.loadEntriesFromFile ??
+		((filePath: string) => {
+			const content = readFileSync(filePath, "utf8");
+			return mod.parseSessionEntries?.(content) ?? [];
+		});
 	return {
 		listSessions: listSessions.bind(mod.SessionManager),
 		loadEntriesFromFile,
