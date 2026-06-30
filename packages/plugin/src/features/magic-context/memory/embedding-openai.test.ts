@@ -153,6 +153,19 @@ describe("OpenAICompatibleEmbeddingProvider request body (NVIDIA NIM fields, iss
         expect(body.input).toBeDefined();
     });
 
+    test("coerces empty / whitespace-only input to a space so the provider can't 400 the batch", async () => {
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "text-embedding-3-small",
+        });
+        fetchSpy.mockImplementation((async () => successResponse()) as FetchLike);
+        await provider.embedBatch(["", "   ", "real text", "\n\t"]);
+        const init = fetchSpy.mock.calls[0]?.[1] as RequestInit;
+        const body = JSON.parse(init.body as string) as { input: string[] };
+        // Empty / whitespace inputs become a single space; real text is untouched.
+        expect(body.input).toEqual([" ", " ", "real text", " "]);
+    });
+
     test("purpose query sends queryInputType when configured (#155)", async () => {
         const provider = new OpenAICompatibleEmbeddingProvider({
             endpoint: "http://127.0.0.1:65535",

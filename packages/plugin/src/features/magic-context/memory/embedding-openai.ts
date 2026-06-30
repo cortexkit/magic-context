@@ -198,6 +198,16 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
             return [];
         }
 
+        // Coerce empty / whitespace-only inputs to a single space before the POST.
+        // Some OpenAI-compatible providers (e.g. jina via litellm) reject an empty
+        // string with HTTP 400 "Input content cannot be empty", which fails the
+        // WHOLE batch (the response is all-null) — so one empty input would block
+        // embedding every other text sent with it. A space embeds fine (verified)
+        // and yields a stable near-zero-information vector. Callers should avoid
+        // sending empty content where possible, but this is the single chokepoint
+        // that guarantees a stray empty string can't 400 the request.
+        const requestTexts = texts.map((t) => (t.trim().length === 0 ? " " : t));
+
         if (!(await this.initialize())) {
             return Array.from({ length: texts.length }, () => null);
         }
@@ -245,7 +255,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                 },
                 body: JSON.stringify({
                     model: this.model,
-                    input: texts,
+                    input: requestTexts,
                     // Optional provider-specific fields (e.g. NVIDIA NIM requires
                     // input_type; truncate is accepted by several providers).
                     // Omitted entirely when unset so standard OpenAI endpoints are
