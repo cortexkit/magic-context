@@ -576,13 +576,30 @@ function splitOversizedLine(line: string, effectiveMax: number): string[] {
         slices = charBudgetSplit(line, effectiveMax);
     }
     // Final guard: any slice still over budget (token-dense, no separators) is
-    // hard-split by character budget so no window can exceed the provider limit.
+    // hard-split by character budget. charBudgetSplit is the TERMINAL splitter —
+    // it shrinks to a single character, the smallest indivisible unit — so its
+    // output is budget-compliant by construction EXCEPT for the degenerate case
+    // of a lone character that alone exceeds the budget (only reachable with a
+    // tiny effectiveMax; never with real provider budgets). We assert that
+    // contract in dev/test rather than re-splitting (which cannot reduce a
+    // 1-char slice further and would loop): any escapee is a genuine bug, not
+    // something to silently paper over.
     const safe: string[] = [];
+    const pushChecked = (slice: string): void => {
+        if (estimateTokens(slice) > effectiveMax && slice.length > 1) {
+            // Not terminal yet — split further. (Defensive: charBudgetSplit
+            // should already guarantee this; only triggers if its contract
+            // regresses.)
+            safe.push(...charBudgetSplit(slice, effectiveMax));
+            return;
+        }
+        safe.push(slice);
+    };
     for (const slice of slices) {
         if (estimateTokens(slice) <= effectiveMax) {
             safe.push(slice);
         } else {
-            safe.push(...charBudgetSplit(slice, effectiveMax));
+            for (const sub of charBudgetSplit(slice, effectiveMax)) pushChecked(sub);
         }
     }
     return safe.filter((s) => s.length > 0);
