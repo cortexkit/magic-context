@@ -390,7 +390,7 @@ describe("project embedding registry", () => {
         expect(await inFlight).toBeNull();
     });
 
-    it("keeps memory, commit, and chunk embeddings coexisting per model", () => {
+    it("keeps memory, commit, and chunk embeddings coexisting per model", async () => {
         const db = useTempDb();
         const projectIdentity = "git:coexist";
         const memory = insertMemory(db, {
@@ -401,7 +401,7 @@ describe("project embedding registry", () => {
         upsertCommits(db, projectIdentity, [makeGitCommit("coexist-a", 1000)]);
         const commitSha = makeGitCommit("coexist-a", 1000).sha;
         const compartmentId = seedCompartmentWithFts(db, "ses-coexist");
-        const windows = chunkCanonicalText("[1] U: hello", 1, 1, 10_000);
+        const windows = await chunkCanonicalText("[1] U: hello", 1, 1, 10_000);
 
         const first = registerProjectEmbedding(
             db,
@@ -493,7 +493,7 @@ describe("project embedding registry", () => {
         expect(loadAllEmbeddings(db, projectIdentity, restored.modelId).has(memory.id)).toBe(true);
     });
 
-    it("garbage-collects only stale inactive embedding identities after the grace window", () => {
+    it("garbage-collects only stale inactive embedding identities after the grace window", async () => {
         const db = useTempDb();
         const projectIdentity = "git:gc";
         const memory = insertMemory(db, {
@@ -504,7 +504,7 @@ describe("project embedding registry", () => {
         upsertCommits(db, projectIdentity, [makeGitCommit("gc-a", 1000)]);
         const commitSha = makeGitCommit("gc-a", 1000).sha;
         const compartmentId = seedCompartmentWithFts(db, "ses-gc");
-        const windows = chunkCanonicalText("[1] U: hello", 1, 1, 10_000);
+        const windows = await chunkCanonicalText("[1] U: hello", 1, 1, 10_000);
         const now = Date.now();
 
         const first = registerProjectEmbedding(
@@ -641,10 +641,10 @@ describe("project embedding registry", () => {
         expect(loadAllEmbeddings(db, projectIdentity, second.modelId).size).toBe(1);
     });
 
-    it("keeps old-model compartment chunk embeddings inert on provider change", () => {
+    it("keeps old-model compartment chunk embeddings inert on provider change", async () => {
         const db = useTempDb();
         const compartmentId = seedCompartmentWithFts(db, "ses-wipe");
-        const windows = chunkCanonicalText("[1] U: hello", 1, 1, 10_000);
+        const windows = await chunkCanonicalText("[1] U: hello", 1, 1, 10_000);
         replaceCompartmentChunkEmbeddings(
             db,
             windows.map((window) => ({
@@ -763,10 +763,10 @@ describe("project embedding registry", () => {
         ).toHaveLength(0);
     });
 
-    it("repairs chunk rows stamped with a different project than their session owner", () => {
+    it("repairs chunk rows stamped with a different project than their session owner", async () => {
         const db = useTempDb();
         const compartmentId = seedCompartmentWithFts(db, "ses-repair");
-        const windows = chunkCanonicalText("[1] U: hello", 1, 1, 10_000);
+        const windows = await chunkCanonicalText("[1] U: hello", 1, 1, 10_000);
         replaceCompartmentChunkEmbeddings(
             db,
             windows.map((window) => ({

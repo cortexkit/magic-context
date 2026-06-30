@@ -34,13 +34,13 @@ const embedQuery = async (text: string) => {
 };
 const isEmbeddingRuntimeEnabled = () => true;
 
-function seedCompartmentChunkEmbedding(
+async function seedCompartmentChunkEmbedding(
     db: Database,
     sessionId: string,
     projectPath: string,
     vector: Float32Array,
     modelId = "mock:model",
-): number {
+): Promise<number> {
     appendCompartments(db, sessionId, [
         {
             sequence: 0,
@@ -54,7 +54,7 @@ function seedCompartmentChunkEmbedding(
         },
     ]);
     const compartment = getCompartments(db, sessionId)[0];
-    const windows = chunkCanonicalText(
+    const windows = await chunkCanonicalText(
         "[1] U: queue saturation problem\n[2] A: bounded drains with backpressure",
         1,
         2,
@@ -782,7 +782,7 @@ describe("unifiedSearch", () => {
         ]);
         ensureMessagesIndexed(db, "ses-chunk", readMessages);
         const snapshot = registerEmbeddingProject(db, "/repo/chunk");
-        const compartmentId = seedCompartmentChunkEmbedding(
+        const compartmentId = await seedCompartmentChunkEmbedding(
             db,
             "ses-chunk",
             "/repo/chunk",
@@ -829,7 +829,7 @@ describe("unifiedSearch", () => {
         ]);
         ensureMessagesIndexed(db, "ses-dedup", readMessages);
         const snapshot = registerEmbeddingProject(db, "/repo/chunk");
-        seedCompartmentChunkEmbedding(
+        await seedCompartmentChunkEmbedding(
             db,
             "ses-dedup",
             "/repo/chunk",
@@ -863,7 +863,12 @@ describe("unifiedSearch", () => {
             { ordinal: 2, id: "a2", role: "assistant", parts: [{ type: "text", text: "second" }] },
         ]);
         ensureMessagesIndexed(db, "ses-cutoff", readMessages);
-        seedCompartmentChunkEmbedding(db, "ses-cutoff", "/repo/cutoff", new Float32Array([0, 1]));
+        await seedCompartmentChunkEmbedding(
+            db,
+            "ses-cutoff",
+            "/repo/cutoff",
+            new Float32Array([0, 1]),
+        );
         queryEmbedding = new Float32Array([0, 1]);
 
         const cutoffResults = await unifiedSearch(db, "ses-cutoff", "/repo/cutoff", "concept", {

@@ -975,7 +975,7 @@ async function embedCandidateChunkBatch(
 
     type Prepared = {
         candidate: CompartmentChunkBackfillCandidate;
-        windows: ReturnType<typeof chunkCanonicalText>;
+        windows: Awaited<ReturnType<typeof chunkCanonicalText>>;
     };
     const prepared: Prepared[] = [];
     for (const candidate of candidates) {
@@ -994,7 +994,7 @@ async function embedCandidateChunkBatch(
             noWork.push(candidate.id);
             continue;
         }
-        const windows = chunkCanonicalText(
+        const windows = await chunkCanonicalText(
             canonicalText,
             candidate.startMessage,
             candidate.endMessage,

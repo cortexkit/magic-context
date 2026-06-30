@@ -73,7 +73,7 @@ export async function embedAndStoreCompartmentChunks(
                 buildCompartmentSummaryFallbackText(db, compartment.id);
             if (canonicalText.length === 0) continue;
 
-            const windows = chunkCanonicalText(
+            const windows = await chunkCanonicalText(
                 canonicalText,
                 compartment.startMessage,
                 compartment.endMessage,

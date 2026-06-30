@@ -126,19 +126,25 @@ describe("compartment chunk embedding core", () => {
         }
     });
 
-    test("chunker uses one whole-compartment row when it fits and windows on line boundaries otherwise", () => {
+    test("chunker uses one whole-compartment row when it fits and windows on line boundaries otherwise", async () => {
         const text = [
             "[1] U: alpha beta gamma",
             "[2] A: delta epsilon zeta",
             "[3] U: eta theta iota",
         ].join("\n");
 
-        const whole = chunkCanonicalText(text, 1, 3, 10_000);
+        const whole = await chunkCanonicalText(text, 1, 3, 10_000);
         expect(whole).toHaveLength(1);
         expect(whole[0]).toMatchObject({ windowIndex: 0, startOrdinal: 1, endOrdinal: 3 });
         expect(whole[0]?.text).toBe(text);
 
-        const windowed = chunkCanonicalText(text, 1, 3, 1);
+        // Budget that fits any single line but not two together → one window per
+        // line on line boundaries. effectiveMax = floor(budget * 0.9); each line is
+        // ~7 tokens, so a budget of ~9 (effective 8) holds exactly one line.
+        const perLineBudget = Math.ceil(
+            (estimateTokens("[1] U: alpha beta gamma") + 1) / CHUNK_WINDOW_SAFETY_RATIO,
+        );
+        const windowed = await chunkCanonicalText(text, 1, 3, perLineBudget);
         expect(windowed.map((window) => window.windowIndex)).toEqual([1, 2, 3]);
         expect(windowed.map((window) => [window.startOrdinal, window.endOrdinal])).toEqual([
             [1, 1],
@@ -147,7 +153,7 @@ describe("compartment chunk embedding core", () => {
         ]);
     });
 
-    test("every window stays under the safety-margined budget (never exceeds the provider ceiling)", () => {
+    test("every window stays under the safety-margined budget (never exceeds the provider ceiling)", async () => {
         // Many short lines so windowing is driven by the token budget, not by
         // line count. With a ceiling of 200, the effective budget is 180 (90%),
         // leaving headroom for cross-tokenizer drift below the hard ceiling.
@@ -157,7 +163,7 @@ describe("compartment chunk embedding core", () => {
             { length: 60 },
             (_, i) => `[${i + 1}] U: lorem ipsum dolor sit amet consectetur adipiscing elit ${i}`,
         );
-        const windows = chunkCanonicalText(lines.join("\n"), 1, 60, maxInputTokens);
+        const windows = await chunkCanonicalText(lines.join("\n"), 1, 60, maxInputTokens);
         expect(windows.length).toBeGreaterThan(1);
         for (const window of windows) {
             // Each window's own estimate stays at/under the 90% budget, so the
@@ -167,7 +173,51 @@ describe("compartment chunk embedding core", () => {
         }
     });
 
-    test("storage replaces chunks idempotently and clearSession removes rows", () => {
+    test("splits a single oversized canonical line so no window exceeds the budget (#206)", async () => {
+        // One canonical line (a single A: span) far larger than the budget — e.g.
+        // a big file dump rendered into one message. The old chunker emitted this
+        // whole, producing one window that blew past the provider's context window.
+        const maxInputTokens = 200;
+        const effective = Math.floor(maxInputTokens * CHUNK_WINDOW_SAFETY_RATIO);
+        const huge = Array.from(
+            { length: 4000 },
+            (_, i) => `word${i} alpha beta gamma delta epsilon`,
+        ).join(" ");
+        const line = `[1] A: ${huge}`;
+        expect(estimateTokens(line)).toBeGreaterThan(effective * 10); // genuinely oversized
+
+        const windows = await chunkCanonicalText(line, 1, 1, maxInputTokens);
+
+        expect(windows.length).toBeGreaterThan(1);
+        // The invariant that #206 violated: NO window may exceed the budget.
+        for (const window of windows) {
+            expect(estimateTokens(window.text)).toBeLessThanOrEqual(effective);
+        }
+        // Sub-windows all carry the owning line's ordinal range.
+        for (const window of windows) {
+            expect(window.startOrdinal).toBe(1);
+            expect(window.endOrdinal).toBe(1);
+        }
+        // windowIndex stays 1-based and contiguous (stable chunk identity).
+        expect(windows.map((w) => w.windowIndex)).toEqual(windows.map((_, i) => i + 1));
+    });
+
+    test("mixes split sub-windows with normal line windows without index gaps", async () => {
+        const maxInputTokens = 200;
+        const effective = Math.floor(maxInputTokens * CHUNK_WINDOW_SAFETY_RATIO);
+        const huge = Array.from({ length: 2000 }, (_, i) => `tok${i}`).join(" ");
+        const text = ["[1] U: short opener", `[2] A: ${huge}`, "[3] U: short closer"].join("\n");
+
+        const windows = await chunkCanonicalText(text, 1, 3, maxInputTokens);
+
+        expect(windows.length).toBeGreaterThan(2);
+        for (const window of windows) {
+            expect(estimateTokens(window.text)).toBeLessThanOrEqual(effective);
+        }
+        expect(windows.map((w) => w.windowIndex)).toEqual(windows.map((_, i) => i + 1));
+    });
+
+    test("storage replaces chunks idempotently and clearSession removes rows", async () => {
         const db = createDb();
         try {
             appendCompartments(db, "ses-store", [
@@ -184,7 +234,7 @@ describe("compartment chunk embedding core", () => {
             ]);
             const compartment = getCompartments(db, "ses-store")[0];
             expect(compartment).toBeDefined();
-            const windows = chunkCanonicalText("[1] U: hello\n[2] A: world", 1, 2, 10_000);
+            const windows = await chunkCanonicalText("[1] U: hello\n[2] A: world", 1, 2, 10_000);
             replaceCompartmentChunkEmbeddings(
                 db,
                 windows.map((window) => ({
