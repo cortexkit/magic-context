@@ -126,7 +126,7 @@ describe("compartment chunk embedding core", () => {
         }
     });
 
-    test("chunker uses one whole-compartment row when it fits and windows on line boundaries otherwise", async () => {
+    test("chunker uses one whole-compartment row when it fits and windows on line boundaries otherwise", () => {
         const text = [
             "[1] U: alpha beta gamma",
             "[2] A: delta epsilon zeta",
@@ -153,7 +153,7 @@ describe("compartment chunk embedding core", () => {
         ]);
     });
 
-    test("every window stays under the safety-margined budget (never exceeds the provider ceiling)", async () => {
+    test("every window stays under the safety-margined budget (never exceeds the provider ceiling)", () => {
         // Many short lines so windowing is driven by the token budget, not by
         // line count. With a ceiling of 200, the effective budget is 180 (90%),
         // leaving headroom for cross-tokenizer drift below the hard ceiling.
@@ -173,7 +173,7 @@ describe("compartment chunk embedding core", () => {
         }
     });
 
-    test("splits a single oversized canonical line so no window exceeds the budget (#206)", async () => {
+    test("splits a single oversized canonical line so no window exceeds the budget (#206)", () => {
         // One canonical line (a single A: span) far larger than the budget — e.g.
         // a big file dump rendered into one message. The old chunker emitted this
         // whole, producing one window that blew past the provider's context window.
@@ -202,7 +202,7 @@ describe("compartment chunk embedding core", () => {
         expect(windows.map((w) => w.windowIndex)).toEqual(windows.map((_, i) => i + 1));
     });
 
-    test("mixes split sub-windows with normal line windows without index gaps", async () => {
+    test("mixes split sub-windows with normal line windows without index gaps", () => {
         const maxInputTokens = 200;
         const effective = Math.floor(maxInputTokens * CHUNK_WINDOW_SAFETY_RATIO);
         const huge = Array.from({ length: 2000 }, (_, i) => `tok${i}`).join(" ");
@@ -217,7 +217,7 @@ describe("compartment chunk embedding core", () => {
         expect(windows.map((w) => w.windowIndex)).toEqual(windows.map((_, i) => i + 1));
     });
 
-    test("storage replaces chunks idempotently and clearSession removes rows", async () => {
+    test("storage replaces chunks idempotently and clearSession removes rows", () => {
         const db = createDb();
         try {
             appendCompartments(db, "ses-store", [

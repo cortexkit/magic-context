@@ -420,7 +420,7 @@ describe("project embedding registry", () => {
         expect(await inFlight).toBeNull();
     });
 
-    it("keeps memory, commit, and chunk embeddings coexisting per model", async () => {
+    it("keeps memory, commit, and chunk embeddings coexisting per model", () => {
         const db = useTempDb();
         const projectIdentity = "git:coexist";
         const memory = insertMemory(db, {
@@ -523,7 +523,7 @@ describe("project embedding registry", () => {
         expect(loadAllEmbeddings(db, projectIdentity, restored.modelId).has(memory.id)).toBe(true);
     });
 
-    it("garbage-collects only stale inactive embedding identities after the grace window", async () => {
+    it("garbage-collects only stale inactive embedding identities after the grace window", () => {
         const db = useTempDb();
         const projectIdentity = "git:gc";
         const memory = insertMemory(db, {
