@@ -42,7 +42,6 @@
   "dependencies": {
     "@huggingface/transformers": "^4.1.0",
     "@jitl/quickjs-singlefile-cjs-release-asyncify": "0.32.0",
-    "@langchain/textsplitters": "^1.0.1",
     "@opencode-ai/plugin": "^1.17.11",
     "@opencode-ai/sdk": "^1.17.11",
     "@opentui/core": "^0.4.2",

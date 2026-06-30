@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
-import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
+
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import { getHarness } from "../../shared/harness";
+import { log } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
+import { recursiveCharacterSplit } from "./recursive-text-splitter";
 
 export const DEFAULT_COMPARTMENT_CHUNK_MAX_INPUT_TOKENS = 512;
 
@@ -446,12 +448,12 @@ export function canonicalizeInMemoryChunkTextForEmbedding(
     return lines.join("\n");
 }
 
-export async function chunkCanonicalText(
+export function chunkCanonicalText(
     canonicalText: string,
     startOrdinal: number,
     endOrdinal: number,
     maxInputTokens: number,
-): Promise<CompartmentChunkWindow[]> {
+): CompartmentChunkWindow[] {
     const lines = canonicalText
         .split(/\r?\n/)
         .map((line) => line.trim())
@@ -512,7 +514,7 @@ export async function chunkCanonicalText(
         // emit each sub-slice as its own window carrying this line's ordinal range.
         if (lineTokens > effectiveMax) {
             flush();
-            for (const slice of await splitOversizedLine(line, effectiveMax)) {
+            for (const slice of splitOversizedLine(line, effectiveMax)) {
                 windows.push({
                     windowIndex: windows.length + 1,
                     startOrdinal: lineStart,
@@ -552,19 +554,22 @@ export async function chunkCanonicalText(
  * no provider call, cache-stable. A hard char-level safety cap guarantees
  * termination even if a single token-dense fragment resists separator splitting.
  */
-async function splitOversizedLine(line: string, effectiveMax: number): Promise<string[]> {
-    const splitter = new RecursiveCharacterTextSplitter({
-        chunkSize: effectiveMax,
-        chunkOverlap: 0,
-        lengthFunction: estimateTokens,
-    });
-    // Recursive split on the best-in-class separator hierarchy, measured with our
-    // real tokenizer. Fall back to a deterministic char-budget split if the
-    // splitter throws (never leave an oversized line un-split).
+function splitOversizedLine(line: string, effectiveMax: number): string[] {
+    // Recursive split on the best-in-class separator hierarchy (paragraph → line
+    // → word → char), measured with our real tokenizer. Fall back to a
+    // deterministic char-budget split if the splitter throws or yields nothing
+    // (never leave an oversized line un-split).
     let slices: string[] = [];
     try {
-        slices = await splitter.splitText(line);
-    } catch {
+        slices = recursiveCharacterSplit(line, {
+            chunkSize: effectiveMax,
+            lengthFunction: estimateTokens,
+        });
+    } catch (error) {
+        // Surface the regression instead of degrading silently: if the splitter
+        // consistently fails for some input shape the char-budget fallback still
+        // embeds, but we want a signal.
+        log("[magic-context] recursiveCharacterSplit failed; using char-budget fallback:", error);
         slices = [];
     }
     if (slices.length === 0) {
@@ -586,7 +591,14 @@ async function splitOversizedLine(line: string, effectiveMax: number): Promise<s
 /**
  * Deterministic character-budget fallback split. Estimates a chars-per-token
  * ratio from the input and slices on that, then trims each slice down until it
- * fits the token budget. Always terminates and never emits an over-budget slice.
+ * fits the token budget. Always terminates.
+ *
+ * Budget guarantee: every emitted slice is within `effectiveMax` tokens EXCEPT
+ * the degenerate case where a single character already exceeds the budget (only
+ * reachable when `effectiveMax` is tiny — e.g. 1 — and one char tokenizes to
+ * multiple tokens). In that case the slice is a single character: it cannot be
+ * split further, so emitting it is the only progress-making choice. With real
+ * provider budgets (thousands of tokens) this case never arises.
  */
 function charBudgetSplit(text: string, effectiveMax: number): string[] {
     const totalTokens = Math.max(1, estimateTokens(text));
@@ -598,6 +610,9 @@ function charBudgetSplit(text: string, effectiveMax: number): string[] {
         let end = Math.min(text.length, pos + sliceChars);
         let slice = text.slice(pos, end);
         // Shrink until the slice fits the token budget (handles dense regions).
+        // Floor at one character: a single char is the smallest indivisible unit,
+        // so we stop there even if it alone exceeds the budget (degenerate tiny
+        // budget) — otherwise the loop could not make progress.
         while (slice.length > 1 && estimateTokens(slice) > effectiveMax) {
             end = pos + Math.max(1, Math.floor((end - pos) / 2));
             slice = text.slice(pos, end);

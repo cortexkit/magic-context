@@ -784,6 +784,46 @@ export async function embedBatchForProject(
     return { vectors, modelId, generation };
 }
 
+/**
+ * Embed `texts` while keeping each provider HTTP call bounded to
+ * `MAX_WINDOWS_PER_EMBED_CALL` inputs, concatenating the vectors back into one
+ * array aligned 1:1 with `texts`. This holds the per-request payload bound even
+ * when the caller's slice contains a single compartment whose window count
+ * exceeds the cap (the candidate-batch slice builder always includes at least
+ * one compartment whole). If any sub-batch fails (provider returns null), the
+ * whole call returns null so the caller's existing all-or-nothing retry/failure
+ * accounting is unchanged. modelId/generation come from the first sub-batch; a
+ * mid-stream generation change surfaces as a null sub-batch result.
+ */
+async function embedTextsWindowBounded(
+    projectIdentity: string,
+    texts: string[],
+    signal?: AbortSignal,
+): Promise<Awaited<ReturnType<typeof embedBatchForProject>>> {
+    if (texts.length <= MAX_WINDOWS_PER_EMBED_CALL) {
+        return embedBatchForProject(projectIdentity, texts, signal);
+    }
+    const vectors: (Float32Array | null)[] = [];
+    let modelId: string | null = null;
+    let generation: number | null = null;
+    for (let start = 0; start < texts.length; start += MAX_WINDOWS_PER_EMBED_CALL) {
+        if (signal?.aborted) return null;
+        const sub = texts.slice(start, start + MAX_WINDOWS_PER_EMBED_CALL);
+        const result = await embedBatchForProject(projectIdentity, sub, signal);
+        if (!result) return null;
+        // Guard against a mid-stream identity change splitting vector spaces.
+        if (modelId === null) {
+            modelId = result.modelId;
+            generation = result.generation;
+        } else if (result.modelId !== modelId || result.generation !== generation) {
+            return null;
+        }
+        vectors.push(...result.vectors);
+    }
+    if (modelId === null || generation === null) return null;
+    return { vectors, modelId, generation };
+}
+
 function isUnembeddedMemoryRow(row: unknown): row is UnembeddedMemoryRow {
     if (row === null || typeof row !== "object") return false;
     const candidate = row as Record<string, unknown>;
@@ -975,7 +1015,7 @@ async function embedCandidateChunkBatch(
 
     type Prepared = {
         candidate: CompartmentChunkBackfillCandidate;
-        windows: Awaited<ReturnType<typeof chunkCanonicalText>>;
+        windows: ReturnType<typeof chunkCanonicalText>;
     };
     const prepared: Prepared[] = [];
     for (const candidate of candidates) {
@@ -994,7 +1034,7 @@ async function embedCandidateChunkBatch(
             noWork.push(candidate.id);
             continue;
         }
-        const windows = await chunkCanonicalText(
+        const windows = chunkCanonicalText(
             canonicalText,
             candidate.startMessage,
             candidate.endMessage,
@@ -1059,7 +1099,15 @@ async function embedCandidateChunkBatch(
             let result: Awaited<ReturnType<typeof embedBatchForProject>> = null;
             const attemptStart = Date.now();
             try {
-                result = await embedBatchForProject(projectIdentity, texts, signal);
+                // Sub-batch the provider call by window count so the per-request
+                // payload stays bounded even when a SINGLE compartment contributed
+                // more than MAX_WINDOWS_PER_EMBED_CALL windows (e.g. a huge file
+                // dump split into many sub-windows by chunkCanonicalText). Without
+                // this, the slice builder's "always include at least one
+                // compartment" rule could hand the provider one enormous text array
+                // in a single HTTP call, defeating the payload bound and risking
+                // provider timeouts/rejections (PR #207 review).
+                result = await embedTextsWindowBounded(projectIdentity, texts, signal);
             } catch (error) {
                 log("[magic-context] failed to proactively embed compartment chunks:", error);
             }

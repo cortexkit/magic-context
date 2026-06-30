@@ -133,7 +133,7 @@ describe("compartment chunk embedding core", () => {
             "[3] U: eta theta iota",
         ].join("\n");
 
-        const whole = await chunkCanonicalText(text, 1, 3, 10_000);
+        const whole = chunkCanonicalText(text, 1, 3, 10_000);
         expect(whole).toHaveLength(1);
         expect(whole[0]).toMatchObject({ windowIndex: 0, startOrdinal: 1, endOrdinal: 3 });
         expect(whole[0]?.text).toBe(text);
@@ -144,7 +144,7 @@ describe("compartment chunk embedding core", () => {
         const perLineBudget = Math.ceil(
             (estimateTokens("[1] U: alpha beta gamma") + 1) / CHUNK_WINDOW_SAFETY_RATIO,
         );
-        const windowed = await chunkCanonicalText(text, 1, 3, perLineBudget);
+        const windowed = chunkCanonicalText(text, 1, 3, perLineBudget);
         expect(windowed.map((window) => window.windowIndex)).toEqual([1, 2, 3]);
         expect(windowed.map((window) => [window.startOrdinal, window.endOrdinal])).toEqual([
             [1, 1],
@@ -163,7 +163,7 @@ describe("compartment chunk embedding core", () => {
             { length: 60 },
             (_, i) => `[${i + 1}] U: lorem ipsum dolor sit amet consectetur adipiscing elit ${i}`,
         );
-        const windows = await chunkCanonicalText(lines.join("\n"), 1, 60, maxInputTokens);
+        const windows = chunkCanonicalText(lines.join("\n"), 1, 60, maxInputTokens);
         expect(windows.length).toBeGreaterThan(1);
         for (const window of windows) {
             // Each window's own estimate stays at/under the 90% budget, so the
@@ -186,7 +186,7 @@ describe("compartment chunk embedding core", () => {
         const line = `[1] A: ${huge}`;
         expect(estimateTokens(line)).toBeGreaterThan(effective * 10); // genuinely oversized
 
-        const windows = await chunkCanonicalText(line, 1, 1, maxInputTokens);
+        const windows = chunkCanonicalText(line, 1, 1, maxInputTokens);
 
         expect(windows.length).toBeGreaterThan(1);
         // The invariant that #206 violated: NO window may exceed the budget.
@@ -208,7 +208,7 @@ describe("compartment chunk embedding core", () => {
         const huge = Array.from({ length: 2000 }, (_, i) => `tok${i}`).join(" ");
         const text = ["[1] U: short opener", `[2] A: ${huge}`, "[3] U: short closer"].join("\n");
 
-        const windows = await chunkCanonicalText(text, 1, 3, maxInputTokens);
+        const windows = chunkCanonicalText(text, 1, 3, maxInputTokens);
 
         expect(windows.length).toBeGreaterThan(2);
         for (const window of windows) {
@@ -234,7 +234,7 @@ describe("compartment chunk embedding core", () => {
             ]);
             const compartment = getCompartments(db, "ses-store")[0];
             expect(compartment).toBeDefined();
-            const windows = await chunkCanonicalText("[1] U: hello\n[2] A: world", 1, 2, 10_000);
+            const windows = chunkCanonicalText("[1] U: hello\n[2] A: world", 1, 2, 10_000);
             replaceCompartmentChunkEmbeddings(
                 db,
                 windows.map((window) => ({
