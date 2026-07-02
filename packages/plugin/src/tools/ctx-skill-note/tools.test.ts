@@ -69,6 +69,43 @@ describe("ctx_skill_note tool", () => {
         }
     });
 
+    test("rejects note when skill-memory is disabled in frontmatter (no orphan insert)", async () => {
+        const db = makeDb();
+        const registry: SkillLoadRegistry = createSkillLoadRegistry();
+        try {
+            // Registry entry WITHOUT skill-memory opt-in (frontmatterConfig null —
+            // the shape the after-hook stores for skills that never enabled it).
+            registry.set(registryKey("ses_test", "tdd"), {
+                resolvedPath: "/home/user/.config/opencode/skills/tdd/SKILL.md",
+                tier: "global",
+                skillSource: "opencode-global",
+                skillId: "tdd",
+                loadedAt: Date.now(),
+                frontmatterConfig: null,
+            });
+
+            const t = createCtxSkillNoteTool({ db, skillLoadRegistry: registry });
+            const result = await t.execute(
+                {
+                    skill: "tdd",
+                    intent: "fix flaky test",
+                    kind: "gotcha",
+                    delta: "Always mock the clock",
+                },
+                toolContext(),
+            );
+            expect(result).toContain("not enabled");
+            expect(result).not.toContain("saved");
+            // No orphaned row inserted
+            const row = db
+                .prepare("SELECT COUNT(*) AS n FROM skill_memory WHERE skill_id = 'tdd'")
+                .get() as { n: number };
+            expect(row.n).toBe(0);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
     test("inserts note when skill is in registry", async () => {
         const db = makeDb();
         const registry: SkillLoadRegistry = createSkillLoadRegistry();

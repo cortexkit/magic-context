@@ -85,6 +85,17 @@ export function createCtxSkillNoteTool(deps: CtxSkillNoteToolDeps): ToolDefiniti
                 );
             }
 
+            // Counterpart to ctx_skill_recall's enabled-guard: without it, notes for
+            // skills that never opted in would insert successfully but be permanently
+            // orphaned (recallSkillMemoryBlock returns "" when frontmatter is disabled),
+            // while the agent sees a convincing "Skill note saved" response.
+            if (!registryEntry.frontmatterConfig?.enabled) {
+                return (
+                    `skill-memory is not enabled for '${args.skill}', so this note would never be surfaced. ` +
+                    `To enable it, add \`skill-memory: { enabled: true }\` to the skill's SKILL.md frontmatter, reload the skill, then record the note.`
+                );
+            }
+
             // Use toolContext.directory (the session's working directory) rather than
             // a launch dir. This matches ctx_memory's pattern and correctly handles
             // `opencode -s` launched outside the project root.
