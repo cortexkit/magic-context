@@ -104,6 +104,9 @@ describe("parseSkillProvenance", () => {
     test("parses a PLAIN filesystem path for a PROJECT skill", () => {
         const output = `Base directory for this skill: ${HOME}/projects/foo/.opencode/skills/my-skill`;
         const result = parseSkillProvenance(output, "my-skill");
+        expect(result!.resolvedPath).toBe(
+            `${HOME}/projects/foo/.opencode/skills/my-skill/SKILL.md`,
+        );
         expect(result!.tier).toBe("project");
         expect(result!.skillSource).toBe("opencode-project");
     });
