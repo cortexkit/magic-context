@@ -91,4 +91,36 @@ describe("parseSkillProvenance", () => {
         const result = parseSkillProvenance(output, "right");
         expect(result!.resolvedPath).toBe(`${HOME}/.config/opencode/skills/right/SKILL.md`);
     });
+
+    test("parses a PLAIN filesystem path (opencode #33580 — no file:// prefix)", () => {
+        const output = `# Skill: council\nsome content\nBase directory for this skill: ${HOME}/.config/opencode/skills/council`;
+        const result = parseSkillProvenance(output, "council");
+        expect(result).not.toBeNull();
+        expect(result!.resolvedPath).toBe(`${HOME}/.config/opencode/skills/council/SKILL.md`);
+        expect(result!.tier).toBe("global");
+        expect(result!.skillSource).toBe("opencode-global");
+    });
+
+    test("parses a PLAIN filesystem path for a PROJECT skill", () => {
+        const output = `Base directory for this skill: ${HOME}/projects/foo/.opencode/skills/my-skill`;
+        const result = parseSkillProvenance(output, "my-skill");
+        expect(result!.tier).toBe("project");
+        expect(result!.skillSource).toBe("opencode-project");
+    });
+
+    test("takes the LAST match with a plain-path decoy followed by the real plain line", () => {
+        const output =
+            `# Skill: skill-memory internals\n` +
+            `Example: Base directory for this skill: /decoy/evil\n` +
+            `more prose\n` +
+            `Base directory for this skill: ${HOME}/.config/opencode/skills/real`;
+        const result = parseSkillProvenance(output, "real");
+        expect(result!.resolvedPath).toBe(`${HOME}/.config/opencode/skills/real/SKILL.md`);
+    });
+
+    test("ignores a mid-line (non-line-anchored) plain-path mention", () => {
+        const output = `Note: see Base directory for this skill: /wrong/x for details.\nBase directory for this skill: ${HOME}/.config/opencode/skills/right`;
+        const result = parseSkillProvenance(output, "right");
+        expect(result!.resolvedPath).toBe(`${HOME}/.config/opencode/skills/right/SKILL.md`);
+    });
 });

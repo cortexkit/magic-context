@@ -8,31 +8,35 @@ export interface SkillProvenance {
     loadedAt: number;
 }
 
-// Matches: "Base directory for this skill: file:///abs/path/to/skill/dir"
-// Uses fileURLToPath (not naive regex capture) for cross-platform correctness.
-// Anchored to line-start (`^…/gm`) AND we take the LAST match: opencode appends
-// this provenance line at the END of the tool output, so if the skill's own
-// CONTENT contains the same phrase (e.g. a skill documenting skill-memory
-// provenance), a first-match/unanchored parse would capture the wrong URL and
-// misdirect recall to a bogus skill identity. Line-anchoring rejects mid-prose
-// mentions; last-match ensures the real trailing provenance line wins even if an
-// example block reproduces it at column 0.
-const BASE_DIR_REGEX = /^Base directory for this skill: (file:\/\/\/[^\n\r]+)/gm;
+// Matches: "Base directory for this skill: <path-or-file-url>"
+// opencode #33580 changed the emit from a file:// URL to a PLAIN filesystem
+// path, so we accept BOTH forms. Anchored to line-start (^…/gm) + last-match:
+// opencode appends this provenance line at the END of the tool output, so if
+// the skill's own CONTENT contains the phrase at column 0, last-match ensures
+// the real trailing line wins; line-anchoring rejects mid-prose mentions.
+const BASE_DIR_REGEX = /^Base directory for this skill: (.+)$/gm;
 
 export function parseSkillProvenance(output: string, skillId: string): SkillProvenance | null {
     const matches = [...output.matchAll(BASE_DIR_REGEX)];
     if (matches.length === 0) return null;
 
-    const fileUrl = matches[matches.length - 1][1].trim();
+    const raw = matches[matches.length - 1][1].trim();
+    if (!raw) return null;
+
     let absDir: string;
-    try {
-        // Normalize OS-native separators to forward slashes: on Windows
-        // fileURLToPath yields backslash paths, which would fail the
-        // forward-slash startsWith/includes tier/source checks below and
-        // misclassify global skills as project-local.
-        absDir = fileURLToPath(new URL(fileUrl)).replace(/\\/g, "/");
-    } catch {
-        return null;
+    if (raw.startsWith("file://")) {
+        // Legacy opencode (pre-#33580) emitted a file:// URL. Use fileURLToPath
+        // (not naive slice) for cross-platform + percent-decoding correctness.
+        try {
+            absDir = fileURLToPath(new URL(raw)).replace(/\\/g, "/");
+        } catch {
+            return null;
+        }
+    } else {
+        // Current opencode (#33580) emits a plain filesystem path. Normalize
+        // OS-native backslashes to forward slashes so the tier/source
+        // startsWith/includes checks below match on every platform.
+        absDir = raw.replace(/\\/g, "/");
     }
 
     const resolvedPath = `${absDir}/SKILL.md`;
