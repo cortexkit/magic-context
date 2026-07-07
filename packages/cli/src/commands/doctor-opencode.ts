@@ -108,6 +108,25 @@ export function migrateLegacyAgentEnabledConfigForDoctor(
 }
 
 /**
+ * Check whether the `review-user-memories` dreamer task is scheduled while the
+ * dreamer itself is disabled, a no-op combination where candidate promotions
+ * will never run. In v2, user-memory collection is gated by the task schedule
+ * (non-empty = enabled), replacing the v1 `dreamer.user_memories` block.
+ * Returns the warning message when the combination is wrong, or null otherwise.
+ */
+export function checkUserMemoriesDreamerCompatibility(
+    mcConfig: Record<string, unknown>,
+): string | null {
+    const dreamerObj = mcConfig?.dreamer as Record<string, unknown> | undefined;
+    if (dreamerObj?.disable !== true) return null;
+    const tasksObj = dreamerObj.tasks as Record<string, unknown> | undefined;
+    const reviewTask = tasksObj?.["review-user-memories"] as Record<string, unknown> | undefined;
+    const schedule = reviewTask?.schedule;
+    if (typeof schedule !== "string" || schedule.trim() === "") return null;
+    return 'dreamer.tasks["review-user-memories"] is scheduled but dreamer.disable=true, so new promotions will not run. Remove dreamer.disable or set dreamer.tasks["review-user-memories"].schedule="" to disable the task.';
+}
+
+/**
  * Fetch the latest version of an npm package from the registry. Returns null
  * on any error so the doctor can report "check unavailable" rather than fail.
  */
@@ -1042,23 +1061,17 @@ export async function runDoctor(
     }
 
     // 7. Check user memories + dreamer compatibility.
-    // user_memories graduated from experimental to dreamer.user_memories in
-    // v0.14, and the default is now enabled. Candidate extraction still
-    // requires dreamer to actually promote candidates into stable memories,
+    // In v2, user-memory collection is gated by the `review-user-memories` task
+    // schedule (non-empty = enabled), replacing the v1 `dreamer.user_memories`
+    // block. The task needs the dreamer to actually run to promote candidates,
     // so warn loudly when the combination is wrong.
     if (existsSync(paths.magicContextConfig)) {
         try {
             const mcRaw = readFileSync(paths.magicContextConfig, "utf-8");
             const mcConfig = parse(mcRaw) as Record<string, unknown>;
-            const dreamerObj = mcConfig?.dreamer as Record<string, unknown> | undefined;
-            const dreamerDisabled = dreamerObj?.disable === true;
-            const userMemObj = dreamerObj?.user_memories as Record<string, unknown> | undefined;
-            // user_memories defaults to enabled, so treat `undefined` as true.
-            const userMemEnabled = userMemObj?.enabled !== false;
-            if (userMemEnabled && dreamerDisabled) {
-                log.warn(
-                    "dreamer.user_memories is enabled but dreamer.disable=true, so new promotions will not run. Remove dreamer.disable or set dreamer.user_memories.enabled=false.",
-                );
+            const warning = checkUserMemoriesDreamerCompatibility(mcConfig);
+            if (warning) {
+                log.warn(warning);
                 issues++;
             }
         } catch {

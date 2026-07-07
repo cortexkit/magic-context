@@ -15,6 +15,7 @@ import {
 } from "../lib/opencode-plugin-cache";
 import { runV22BackfillCommands } from "../lib/v22-backfill-commands";
 import {
+    checkUserMemoriesDreamerCompatibility,
     collectNpmReleaseAgeWarnings,
     getUserNpmrcPath,
     isPinnedOpenCodePluginSpecifier,
@@ -76,6 +77,79 @@ describe("doctor OpenCode legacy agent enabled migration", () => {
 
         expect(serialized).toContain('"disable": true');
         expect(serialized).not.toContain('"enabled"');
+    });
+});
+
+describe("checkUserMemoriesDreamerCompatibility", () => {
+    const WARNING =
+        'dreamer.tasks["review-user-memories"] is scheduled but dreamer.disable=true, so new promotions will not run. Remove dreamer.disable or set dreamer.tasks["review-user-memories"].schedule="" to disable the task.';
+
+    it("warns when review-user-memories is scheduled and dreamer.disable=true", () => {
+        const result = checkUserMemoriesDreamerCompatibility({
+            dreamer: {
+                disable: true,
+                tasks: { "review-user-memories": { schedule: "0 2 * * *" } },
+            },
+        });
+        expect(result).toBe(WARNING);
+    });
+
+    it("returns null when dreamer is not disabled", () => {
+        const result = checkUserMemoriesDreamerCompatibility({
+            dreamer: {
+                disable: false,
+                tasks: { "review-user-memories": { schedule: "0 2 * * *" } },
+            },
+        });
+        expect(result).toBeNull();
+    });
+
+    it("returns null when review-user-memories schedule is empty", () => {
+        const result = checkUserMemoriesDreamerCompatibility({
+            dreamer: {
+                disable: true,
+                tasks: { "review-user-memories": { schedule: "" } },
+            },
+        });
+        expect(result).toBeNull();
+    });
+
+    it("returns null when review-user-memories schedule is whitespace-only", () => {
+        const result = checkUserMemoriesDreamerCompatibility({
+            dreamer: {
+                disable: true,
+                tasks: { "review-user-memories": { schedule: "   " } },
+            },
+        });
+        expect(result).toBeNull();
+    });
+
+    it("returns null when review-user-memories task is absent", () => {
+        const result = checkUserMemoriesDreamerCompatibility({
+            dreamer: { disable: true, tasks: { verify: { schedule: "0 2 * * *" } } },
+        });
+        expect(result).toBeNull();
+    });
+
+    it("returns null when dreamer block is absent", () => {
+        expect(checkUserMemoriesDreamerCompatibility({})).toBeNull();
+    });
+
+    it("returns null when tasks block is absent (legacy v1 shape without user_memories)", () => {
+        const result = checkUserMemoriesDreamerCompatibility({
+            dreamer: { disable: true },
+        });
+        expect(result).toBeNull();
+    });
+
+    it("does not read legacy dreamer.user_memories (v1 key, migrated away in v2)", () => {
+        const result = checkUserMemoriesDreamerCompatibility({
+            dreamer: {
+                disable: true,
+                user_memories: { enabled: true },
+            },
+        });
+        expect(result).toBeNull();
     });
 });
 
