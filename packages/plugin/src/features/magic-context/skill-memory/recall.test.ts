@@ -1,6 +1,13 @@
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
+import {
+    _resetProjectEmbeddingRegistryForTests,
+    _setTestProviderFactoryForProject,
+    type ProjectEmbeddingRegistrationSnapshot,
+    registerProjectEmbedding,
+} from "../memory/embedding";
+import type { EmbeddingProvider, EmbeddingPurpose } from "../memory/embedding-provider";
 import { float32ArrayToBlob } from "../memory/storage-memory-embeddings";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
@@ -19,6 +26,45 @@ function makeDb(): Database {
     initializeDatabase(db);
     runMigrations(db);
     return db;
+}
+
+let EMBED_UP = true;
+
+function installRecallTestProvider(): void {
+    _setTestProviderFactoryForProject(
+        (): EmbeddingProvider => ({
+            modelId: "test-provider-model",
+            initialize: async () => true,
+            embed: async (text: string, _signal?: AbortSignal, _purpose?: EmbeddingPurpose) => {
+                if (!EMBED_UP) return null;
+                return text.includes("auth") ? new Float32Array([1, 0]) : new Float32Array([0, 1]);
+            },
+            embedBatch: async (
+                texts: string[],
+                _signal?: AbortSignal,
+                _purpose?: EmbeddingPurpose,
+            ) =>
+                texts.map((t) => {
+                    if (!EMBED_UP) return new Float32Array();
+                    return t.includes("auth") ? new Float32Array([1, 0]) : new Float32Array([0, 1]);
+                }),
+            dispose: async () => {},
+            isLoaded: () => true,
+        }),
+    );
+}
+
+function registerRecallTestProject(
+    db: Database,
+    identity: string,
+): ProjectEmbeddingRegistrationSnapshot {
+    return registerProjectEmbedding(
+        db,
+        identity,
+        { provider: "local", model: "mock-model" },
+        { memoryEnabled: true, gitCommitEnabled: false },
+        identity,
+    );
 }
 
 describe("flatRecall", () => {
@@ -119,20 +165,6 @@ describe("rankRung1", () => {
     });
 });
 
-let EMBED_UP = true;
-mock.module("../memory/embedding", () => ({
-    embedTextForProject: async (_p: string, text: string) =>
-        EMBED_UP
-            ? {
-                  vector: text.includes("auth")
-                      ? new Float32Array([1, 0])
-                      : new Float32Array([0, 1]),
-                  modelId: "m1",
-                  generation: 1,
-              }
-            : null,
-}));
-
 function modeOf(block: string): string | null {
     return block.match(/<skill-memory[^>]*\bmode="([^"]+)"/)?.[1] ?? null;
 }
@@ -144,9 +176,21 @@ const cfg = {
 };
 
 describe("recallSkillMemoryBlock (intent-scoped rungs)", () => {
+    beforeEach(() => {
+        _resetProjectEmbeddingRegistryForTests();
+        _setTestProviderFactoryForProject(null);
+        installRecallTestProvider();
+    });
+
+    afterEach(() => {
+        _resetProjectEmbeddingRegistryForTests();
+        _setTestProviderFactoryForProject(null);
+    });
+
     test("rung 1 full: provider up + intent + a model-matched embedded note", async () => {
         const db = makeDb();
         EMBED_UP = true;
+        const snap = registerRecallTestProject(db, "git:x");
         insertSkillMemoryNote(db, {
             skillId: "s",
             resolvedPath: "/p",
@@ -160,7 +204,7 @@ describe("recallSkillMemoryBlock (intent-scoped rungs)", () => {
             createdAt: 1,
             intentEmbedding: float32ArrayToBlob(new Float32Array([1, 0])),
             deltaEmbedding: float32ArrayToBlob(new Float32Array([1, 0])),
-            embeddingModelVersion: "m1",
+            embeddingModelVersion: snap.modelId,
         });
         const block = await recallSkillMemoryBlock(db, {
             skill: "s",
@@ -175,6 +219,7 @@ describe("recallSkillMemoryBlock (intent-scoped rungs)", () => {
     test("rung 2 no-intent: provider up, no intent → flat", async () => {
         const db = makeDb();
         EMBED_UP = true;
+        registerRecallTestProject(db, "git:x");
         insertSkillMemoryNote(db, {
             skillId: "s",
             resolvedPath: "/p",
@@ -199,6 +244,7 @@ describe("recallSkillMemoryBlock (intent-scoped rungs)", () => {
     test("rung 3 fts5-fallback: provider down + intent → FTS", async () => {
         const db = makeDb();
         EMBED_UP = false;
+        registerRecallTestProject(db, "git:x");
         insertSkillMemoryNote(db, {
             skillId: "s",
             resolvedPath: "/p",
@@ -224,6 +270,7 @@ describe("recallSkillMemoryBlock (intent-scoped rungs)", () => {
     test("rung 4 flat-fts: provider down + UNINDEXABLE intent (sanitize→empty) → flat", async () => {
         const db = makeDb();
         EMBED_UP = false;
+        registerRecallTestProject(db, "git:x");
         insertSkillMemoryNote(db, {
             skillId: "s",
             resolvedPath: "/p",
@@ -249,6 +296,7 @@ describe("recallSkillMemoryBlock (intent-scoped rungs)", () => {
     test("rung 5 cold: no notes → empty block", async () => {
         const db = makeDb();
         EMBED_UP = true;
+        registerRecallTestProject(db, "git:x");
         const block = await recallSkillMemoryBlock(db, {
             skill: "s",
             intent: "x",
@@ -262,6 +310,7 @@ describe("recallSkillMemoryBlock (intent-scoped rungs)", () => {
     test("zero model-matched → falls to rung 3, never empty full block", async () => {
         const db = makeDb();
         EMBED_UP = true;
+        registerRecallTestProject(db, "git:x");
         insertSkillMemoryNote(db, {
             skillId: "s",
             resolvedPath: "/p",
@@ -289,6 +338,7 @@ describe("recallSkillMemoryBlock (intent-scoped rungs)", () => {
     test("intent-scoped recall matches a note sharing SOME (not all) intent tokens (OR semantics)", async () => {
         const db = makeDb();
         EMBED_UP = false; // force rung 3 FTS path
+        registerRecallTestProject(db, "git:abc");
         try {
             insertSkillMemoryNote(db, {
                 skillId: "tdd",
@@ -335,6 +385,7 @@ describe("recallSkillMemoryBlock (intent-scoped rungs)", () => {
     test("pinned notes appear even when intent doesn't match them (M2)", async () => {
         const db = makeDb();
         EMBED_UP = true;
+        const snap = registerRecallTestProject(db, "git:x");
         db.prepare(
             `INSERT INTO skill_memory (skill_id,resolved_path,tier,project_identity,intent,kind,delta,normalized_hash,hit_count,pinned,created_at)
              VALUES ('s','/p','global','*','old auth fix','fix','rotate token','h1',0,1,1)`,
@@ -353,7 +404,7 @@ describe("recallSkillMemoryBlock (intent-scoped rungs)", () => {
                 createdAt: 1000 + i,
                 intentEmbedding: float32ArrayToBlob(new Float32Array([0, 1])),
                 deltaEmbedding: float32ArrayToBlob(new Float32Array([0, 1])),
-                embeddingModelVersion: "m1",
+                embeddingModelVersion: snap.modelId,
             });
         }
         const block = await recallSkillMemoryBlock(db, {
@@ -407,9 +458,23 @@ describe("buildSkillMemoryBlock", () => {
 });
 
 describe("cross-project global recall", () => {
+    beforeEach(() => {
+        _resetProjectEmbeddingRegistryForTests();
+        _setTestProviderFactoryForProject(null);
+        installRecallTestProvider();
+        EMBED_UP = true;
+    });
+
+    afterEach(() => {
+        _resetProjectEmbeddingRegistryForTests();
+        _setTestProviderFactoryForProject(null);
+    });
+
     test("a global note learned in repo A surfaces when recalled from repo B", async () => {
         const db = makeDb();
         try {
+            registerRecallTestProject(db, "git:repoA");
+            registerRecallTestProject(db, "git:repoB");
             promoteSkillObservations(db, "git:repoA", [
                 {
                     skillId: "council",
@@ -436,6 +501,7 @@ describe("cross-project global recall", () => {
         // '*' rows, so historian notes were orphaned for project-local skills.
         const db = makeDb();
         try {
+            registerRecallTestProject(db, "git:repoA");
             promoteSkillObservations(db, "git:repoA", [
                 {
                     skillId: "tdd",
@@ -459,6 +525,7 @@ describe("cross-project global recall", () => {
     test("a project-local AGENT note and a global HISTORIAN note both surface for the same skill", async () => {
         const db = makeDb();
         try {
+            registerRecallTestProject(db, "git:repoLocal");
             // Agent-written, project-tier note.
             insertSkillMemoryNote(db, {
                 skillId: "tdd",
@@ -491,9 +558,22 @@ describe("cross-project global recall", () => {
 });
 
 describe("recallSkillMemoryBlock bumps recall_count for surfaced notes", () => {
+    beforeEach(() => {
+        _resetProjectEmbeddingRegistryForTests();
+        _setTestProviderFactoryForProject(null);
+        installRecallTestProvider();
+        EMBED_UP = true;
+    });
+
+    afterEach(() => {
+        _resetProjectEmbeddingRegistryForTests();
+        _setTestProviderFactoryForProject(null);
+    });
+
     test("a surfaced note's recall_count increments per recall (no-intent rung)", async () => {
         const db = makeDb();
         try {
+            registerRecallTestProject(db, "git:abc");
             insertSkillMemoryNote(db, {
                 skillId: "tdd",
                 resolvedPath: "/p/SKILL.md",
@@ -537,6 +617,7 @@ describe("recallSkillMemoryBlock bumps recall_count for surfaced notes", () => {
     test("a cold-start recall (no notes) bumps nothing and returns empty", async () => {
         const db = makeDb();
         try {
+            registerRecallTestProject(db, "git:abc");
             const block = await recallSkillMemoryBlock(db, {
                 skill: "ghost",
                 scope: "global",

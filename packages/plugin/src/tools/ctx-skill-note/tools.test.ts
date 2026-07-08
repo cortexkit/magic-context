@@ -1,4 +1,15 @@
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import {
+    _resetProjectEmbeddingRegistryForTests,
+    _setTestProviderFactoryForProject,
+    type ProjectEmbeddingRegistrationSnapshot,
+    registerProjectEmbedding,
+} from "../../features/magic-context/memory/embedding";
+import type { EmbeddingProvider } from "../../features/magic-context/memory/embedding-provider";
+import {
+    __resetProjectIdentityForTests,
+    resolveProjectIdentity,
+} from "../../features/magic-context/memory/project-identity";
 import { runMigrations } from "../../features/magic-context/migrations";
 import {
     createSkillLoadRegistry,
@@ -10,16 +21,6 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createCtxSkillNoteTool } from "./tools";
 
-mock.module("../../features/magic-context/memory/embedding", () => ({
-    embedTextForProject: async (_p: string, text: string) => ({
-        vector: text.includes("mock Date.now")
-            ? new Float32Array([1, 0])
-            : new Float32Array([0, 1]),
-        modelId: "test-model",
-        generation: 1,
-    }),
-}));
-
 function makeDb(): Database {
     const db = new Database(":memory:");
     initializeDatabase(db);
@@ -27,10 +28,57 @@ function makeDb(): Database {
     return db;
 }
 
+function installSkillNoteTestProvider(): void {
+    _setTestProviderFactoryForProject(
+        (): EmbeddingProvider => ({
+            modelId: "test-provider-model",
+            initialize: async () => true,
+            embed: async (text: string) => {
+                return text.includes("mock Date.now")
+                    ? new Float32Array([1, 0])
+                    : new Float32Array([0, 1]);
+            },
+            embedBatch: async (texts: string[]) =>
+                texts.map((t) =>
+                    t.includes("mock Date.now")
+                        ? new Float32Array([1, 0])
+                        : new Float32Array([0, 1]),
+                ),
+            dispose: async () => {},
+            isLoaded: () => true,
+        }),
+    );
+}
+
+function registerSkillNoteTestProject(
+    db: Database,
+    identity: string,
+): ProjectEmbeddingRegistrationSnapshot {
+    return registerProjectEmbedding(
+        db,
+        identity,
+        { provider: "local", model: "mock-model" },
+        { memoryEnabled: true, gitCommitEnabled: false },
+        identity,
+    );
+}
+
 const toolContext = (sessionID = "ses_test", agent = "general") =>
     ({ sessionID, agent, directory: "/tmp/test" }) as never;
 
 describe("ctx_skill_note tool", () => {
+    beforeEach(() => {
+        _resetProjectEmbeddingRegistryForTests();
+        _setTestProviderFactoryForProject(null);
+        __resetProjectIdentityForTests();
+        installSkillNoteTestProvider();
+    });
+
+    afterEach(() => {
+        _resetProjectEmbeddingRegistryForTests();
+        _setTestProviderFactoryForProject(null);
+    });
+
     test("rejects kind='general' with actionable error (hard gate)", async () => {
         const db = makeDb();
         const registry = createSkillLoadRegistry();
@@ -108,6 +156,8 @@ describe("ctx_skill_note tool", () => {
 
     test("inserts note when skill is in registry", async () => {
         const db = makeDb();
+        const projectIdentity = resolveProjectIdentity("/tmp/test");
+        registerSkillNoteTestProject(db, projectIdentity);
         const registry: SkillLoadRegistry = createSkillLoadRegistry();
         try {
             // Pre-populate registry
@@ -144,6 +194,8 @@ describe("ctx_skill_note tool", () => {
 
     test("global-tier note is written under '*' with origin_project = real repo", async () => {
         const db = makeDb();
+        const projectIdentity = resolveProjectIdentity("/tmp/test");
+        registerSkillNoteTestProject(db, projectIdentity);
         const registry: SkillLoadRegistry = createSkillLoadRegistry();
         try {
             registry.set(registryKey("ses_test", "council"), {
@@ -180,6 +232,8 @@ describe("ctx_skill_note tool", () => {
 
     test("deduplicates: bumps hit_count on exact duplicate delta", async () => {
         const db = makeDb();
+        const projectIdentity = resolveProjectIdentity("/tmp/test");
+        registerSkillNoteTestProject(db, projectIdentity);
         const registry: SkillLoadRegistry = createSkillLoadRegistry();
         try {
             registry.set(registryKey("ses_test", "tdd"), {
@@ -213,6 +267,8 @@ describe("ctx_skill_note tool", () => {
 
     test("near-duplicate delta under a different intent bumps hit_count (one row)", async () => {
         const db = makeDb();
+        const projectIdentity = resolveProjectIdentity("/tmp/test");
+        registerSkillNoteTestProject(db, projectIdentity);
         const registry: SkillLoadRegistry = createSkillLoadRegistry();
         try {
             registry.set(registryKey("ses_test", "tdd"), {
@@ -260,6 +316,8 @@ describe("ctx_skill_note tool", () => {
 
     test("same-intent different-delta inserts a second row", async () => {
         const db = makeDb();
+        const projectIdentity = resolveProjectIdentity("/tmp/test");
+        registerSkillNoteTestProject(db, projectIdentity);
         const registry: SkillLoadRegistry = createSkillLoadRegistry();
         try {
             registry.set(registryKey("ses_test", "tdd"), {
