@@ -83,7 +83,6 @@
       "current_total_input_tokens": 0,
       "ceiling_tokens": 0,
       "protected_cutoff_ordinal": 0,
-      "last_execute_ordinal": 0,
       "prior_input_sample": 0,
       "has_prior_drop": false,
       "agent_drop_ids": []
@@ -279,7 +278,6 @@
       "current_total_input_tokens": 0,
       "ceiling_tokens": 0,
       "protected_cutoff_ordinal": 0,
-      "last_execute_ordinal": 0,
       "prior_input_sample": 0,
       "has_prior_drop": false,
       "agent_drop_ids": []
@@ -375,7 +373,6 @@
       "current_total_input_tokens": 0,
       "ceiling_tokens": 0,
       "protected_cutoff_ordinal": 0,
-      "last_execute_ordinal": 0,
       "prior_input_sample": 0,
       "has_prior_drop": false,
       "agent_drop_ids": []
@@ -478,7 +475,6 @@
       "current_total_input_tokens": 0,
       "ceiling_tokens": 0,
       "protected_cutoff_ordinal": 0,
-      "last_execute_ordinal": 0,
       "prior_input_sample": 0,
       "has_prior_drop": false,
       "agent_drop_ids": []
@@ -585,7 +581,6 @@
       "current_total_input_tokens": 0,
       "ceiling_tokens": 0,
       "protected_cutoff_ordinal": 0,
-      "last_execute_ordinal": 0,
       "prior_input_sample": 0,
       "has_prior_drop": false,
       "agent_drop_ids": []
@@ -661,7 +656,6 @@
       "current_total_input_tokens": 0,
       "ceiling_tokens": 0,
       "protected_cutoff_ordinal": 0,
-      "last_execute_ordinal": 0,
       "prior_input_sample": 0,
       "has_prior_drop": false,
       "agent_drop_ids": []
@@ -669,153 +663,6 @@
     "smart_drops": true,
     "frozen": [],
     "expected": {}
-  },
-  {
-    "label": "two_pass: drop tools at/under watermark",
-    "items": [
-      {
-        "id": "c1#0",
-        "ordinal": 1,
-        "kind": {
-          "ToolCall": {
-            "name": "bash",
-            "input": {}
-          }
-        },
-        "provider_executed": false,
-        "byte_size": 0,
-        "arc_id": "c1#0"
-      },
-      {
-        "id": "c1#1",
-        "ordinal": 1,
-        "kind": {
-          "ToolResult": {
-            "tool_name": "bash"
-          }
-        },
-        "provider_executed": false,
-        "byte_size": 200,
-        "arc_id": "c1#0"
-      },
-      {
-        "id": "c2#0",
-        "ordinal": 2,
-        "kind": {
-          "ToolCall": {
-            "name": "read",
-            "input": {}
-          }
-        },
-        "provider_executed": false,
-        "byte_size": 0,
-        "arc_id": "c2#0"
-      },
-      {
-        "id": "c2#1",
-        "ordinal": 2,
-        "kind": {
-          "ToolResult": {
-            "tool_name": "read"
-          }
-        },
-        "provider_executed": false,
-        "byte_size": 200,
-        "arc_id": "c2#0"
-      },
-      {
-        "id": "c3#0",
-        "ordinal": 3,
-        "kind": {
-          "ToolCall": {
-            "name": "grep",
-            "input": {}
-          }
-        },
-        "provider_executed": false,
-        "byte_size": 0,
-        "arc_id": "c3#0"
-      },
-      {
-        "id": "c3#1",
-        "ordinal": 3,
-        "kind": {
-          "ToolResult": {
-            "tool_name": "grep"
-          }
-        },
-        "provider_executed": false,
-        "byte_size": 200,
-        "arc_id": "c3#0"
-      },
-      {
-        "id": "c4#0",
-        "ordinal": 4,
-        "kind": {
-          "ToolCall": {
-            "name": "bash",
-            "input": {}
-          }
-        },
-        "provider_executed": false,
-        "byte_size": 0,
-        "arc_id": "c4#0"
-      },
-      {
-        "id": "c4#1",
-        "ordinal": 4,
-        "kind": {
-          "ToolResult": {
-            "tool_name": "bash"
-          }
-        },
-        "provider_executed": false,
-        "byte_size": 200,
-        "arc_id": "c4#0"
-      },
-      {
-        "id": "c5#0",
-        "ordinal": 5,
-        "kind": {
-          "ToolCall": {
-            "name": "edit",
-            "input": {}
-          }
-        },
-        "provider_executed": false,
-        "byte_size": 0,
-        "arc_id": "c5#0"
-      },
-      {
-        "id": "c5#1",
-        "ordinal": 5,
-        "kind": {
-          "ToolResult": {
-            "tool_name": "edit"
-          }
-        },
-        "provider_executed": false,
-        "byte_size": 200,
-        "arc_id": "c5#0"
-      }
-    ],
-    "ctx": {
-      "pass_class": "Execute",
-      "current_total_input_tokens": 0,
-      "ceiling_tokens": 0,
-      "protected_cutoff_ordinal": 0,
-      "last_execute_ordinal": 3,
-      "prior_input_sample": 0,
-      "has_prior_drop": false,
-      "agent_drop_ids": []
-    },
-    "smart_drops": false,
-    "frozen": [],
-    "expected": {
-      "c1#0": "drop",
-      "c2#0": "drop",
-      "c3#0": "drop"
-    }
   },
   {
     "label": "emergency: tier order T3→T2→T1 to headroom",
@@ -926,7 +773,6 @@
       "current_total_input_tokens": 200000,
       "ceiling_tokens": 160000,
       "protected_cutoff_ordinal": 4,
-      "last_execute_ordinal": 0,
       "prior_input_sample": 0,
       "has_prior_drop": false,
       "agent_drop_ids": []
@@ -1047,7 +893,6 @@
       "current_total_input_tokens": 200000,
       "ceiling_tokens": 160000,
       "protected_cutoff_ordinal": 2,
-      "last_execute_ordinal": 0,
       "prior_input_sample": 0,
       "has_prior_drop": false,
       "agent_drop_ids": []
@@ -1093,7 +938,6 @@
       "current_total_input_tokens": 200000,
       "ceiling_tokens": 160000,
       "protected_cutoff_ordinal": 1,
-      "last_execute_ordinal": 0,
       "prior_input_sample": 200000,
       "has_prior_drop": true,
       "agent_drop_ids": []
@@ -1136,7 +980,6 @@
       "current_total_input_tokens": 160500,
       "ceiling_tokens": 160000,
       "protected_cutoff_ordinal": 1,
-      "last_execute_ordinal": 0,
       "prior_input_sample": 0,
       "has_prior_drop": false,
       "agent_drop_ids": []

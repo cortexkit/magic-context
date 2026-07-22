@@ -148,8 +148,8 @@ describe("applyForwardPressureFloor", () => {
 		expect(src).toContain("usagePercentage = Math.max(usagePercentage, 95)");
 		expect(src).not.toContain("usagePercentage = 95;");
 	});
-	describe("two-pass tool reclaim source invariants", () => {
-		it("uses confirmed mutation booleans rather than executedWorkThisPass for the reclaim gate", () => {
+	describe("explicit-only tool reclaim source invariants", () => {
+		it("retains the smart-drops gate without positional synthetic reclaim", () => {
 			const src = readFileSync(
 				join(import.meta.dir, "context-handler.ts"),
 				"utf8",
@@ -160,7 +160,9 @@ describe("applyForwardPressureFloor", () => {
 				"const alreadyMutatingThisPass =\n\t\tpendingOpsDidMutate || heuristicOrReasoningDidMutate",
 			);
 			expect(src).toContain("heuristicsResult.droppedStaleReduceCalls");
-			expect(src).toContain("buildSyntheticToolReclaimOps");
+			expect(src).toContain("args.smartDrops &&");
+			expect(src).not.toContain("buildSyntheticToolReclaimOps");
+			expect(src).not.toContain("advanceToolReclaimWatermarkToCurrentMax");
 			expect(src).not.toContain(
 				"const alreadyMutatingThisPass = executedWorkThisPass",
 			);
@@ -1312,6 +1314,63 @@ describe("registerPiContextHandler", () => {
 			expect(textOf(result.messages[1] as never)).toBe("[dropped §2§]");
 			expect(getPendingOps(db, "ses-context")).toEqual([]);
 		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("does not use a legacy watermark to drop an unrequested tool", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-pi-explicit-only";
+		try {
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				protectedTags: 0,
+				scheduler: { executeThresholdPercentage: 65 },
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			const messages = [
+				userMessage("start", 1),
+				assistantToolCall("call-1", "read", {}, 2),
+				toolResultMessage("call-1", "explicit output", 3),
+				assistantToolCall("call-2", "read", {}, 4),
+				toolResultMessage("call-2", "unrequested output", 5),
+				userMessage("continue", 6),
+			] as never[];
+			const executeCtx = {
+				...fakeContext(sessionId),
+				getContextUsage: () => ({
+					tokens: 70_000,
+					percent: 70,
+					contextWindow: 100_000,
+				}),
+			};
+
+			await handler({ messages }, executeCtx as never);
+			const toolTags = getTagsBySession(db, sessionId).filter(
+				(tag) => tag.type === "tool",
+			);
+			expect(toolTags).toHaveLength(2);
+			queuePendingOp(db, sessionId, toolTags[0].tagNumber, "drop");
+			updateSessionMeta(db, sessionId, {
+				toolReclaimWatermark: toolTags[1].tagNumber,
+			});
+
+			const result = await handler({ messages }, executeCtx as never);
+			const statuses = new Map(
+				getTagsBySession(db, sessionId).map((tag) => [tag.tagNumber, tag.status]),
+			);
+			expect(statuses.get(toolTags[0].tagNumber)).toBe("dropped");
+			expect(statuses.get(toolTags[1].tagNumber)).toBe("active");
+			expect(textOf(result.messages[4] as never)).toContain("unrequested output");
+			expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(
+				toolTags[1].tagNumber,
+			);
+		} finally {
+			clearContextHandlerSession(sessionId);
 			closeQuietly(db);
 		}
 	});

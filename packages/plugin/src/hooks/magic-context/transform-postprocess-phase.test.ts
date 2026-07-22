@@ -8,7 +8,6 @@ import { appendCompartments } from "../../features/magic-context/compartment-sto
 import {
     addProcessedImageStrippedIds,
     addStaleReduceStrippedIds,
-    advanceToolReclaimWatermark,
     getActiveTagsBySession,
     getOrCreateSessionMeta,
     getPendingCompactionMarkerState,
@@ -1372,104 +1371,25 @@ describe("postprocess emergency drop accounting", () => {
     });
 });
 
-describe("two-pass tool reclaim", () => {
+describe("explicit-only tool reclaim", () => {
     function tagStatuses(sessionId: string): Map<number, string> {
         return new Map(getTagsBySession(db, sessionId).map((tag) => [tag.tagNumber, tag.status]));
     }
 
-    it("does not auto-drop on an execute pass with no confirmed wire mutation", async () => {
+    it("does not use a legacy watermark to drop an unrequested tool on execute", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
-        const sessionId = "ses-reclaim-noop";
-        const message = makeToolMessage("tool-1");
-        insertTag(db, sessionId, "tool-1", "tool", 4000, 1, 0, "bash");
-        advanceToolReclaimWatermark(db, sessionId, 1);
-
-        await runPostTransformPhase(
-            basePostTransformArgs(db, sessionId, [message], {
-                schedulerDecision: "execute",
-                tags: getActiveTagsBySession(db, sessionId),
-                targets: new Map([[1, makeDropTarget(message)]]),
-                sessionMeta: getOrCreateSessionMeta(db, sessionId),
-            }),
-        );
-
-        expect(tagStatuses(sessionId).get(1)).toBe("active");
-        expect((message.parts[0] as { state?: { output?: string } }).state?.output).not.toBe(
-            "[dropped]",
-        );
-    });
-
-    it("auto-drops eligible old visible tools only when another confirmed mutation already happened", async () => {
-        db = new Database(":memory:");
-        initializeDatabase(db);
-        const sessionId = "ses-reclaim-mutating";
+        const sessionId = "ses-explicit-only-execute";
         const first = makeToolMessage("tool-1");
         const second = makeToolMessage("tool-2");
         insertTag(db, sessionId, "tool-1", "tool", 4000, 1, 0, "bash");
         insertTag(db, sessionId, "tool-2", "tool", 4000, 2, 0, "read");
         queuePendingOp(db, sessionId, 1, "drop", 1);
-        advanceToolReclaimWatermark(db, sessionId, 2);
+        updateSessionMeta(db, sessionId, { toolReclaimWatermark: 2 });
 
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, [first, second], {
                 schedulerDecision: "execute",
-                tags: getActiveTagsBySession(db, sessionId),
-                targets: new Map([
-                    [1, makeDropTarget(first)],
-                    [2, makeDropTarget(second)],
-                ]),
-                sessionMeta: getOrCreateSessionMeta(db, sessionId),
-            }),
-        );
-
-        const statuses = tagStatuses(sessionId);
-        expect(statuses.get(1)).toBe("dropped");
-        expect(statuses.get(2)).toBe("dropped");
-        expect((second.parts[0] as { state?: { output?: string } }).state?.output).toBe(
-            "[dropped]",
-        );
-    });
-
-    it("does not persist a synthetic drop for an absent old DB tag", async () => {
-        db = new Database(":memory:");
-        initializeDatabase(db);
-        const sessionId = "ses-reclaim-absent";
-        const visible = makeToolMessage("tool-2");
-        insertTag(db, sessionId, "tool-1", "tool", 4000, 1, 0, "bash");
-        insertTag(db, sessionId, "tool-2", "tool", 4000, 2, 0, "bash");
-        queuePendingOp(db, sessionId, 2, "drop", 1);
-        advanceToolReclaimWatermark(db, sessionId, 1);
-
-        await runPostTransformPhase(
-            basePostTransformArgs(db, sessionId, [visible], {
-                schedulerDecision: "execute",
-                tags: getActiveTagsBySession(db, sessionId),
-                targets: new Map([[2, makeDropTarget(visible)]]),
-                sessionMeta: getOrCreateSessionMeta(db, sessionId),
-            }),
-        );
-
-        const statuses = tagStatuses(sessionId);
-        expect(statuses.get(1)).toBe("active");
-        expect(statuses.get(2)).toBe("dropped");
-    });
-
-    it("suppresses two-pass reclaim in the emergency band but still advances the watermark on execute", async () => {
-        db = new Database(":memory:");
-        initializeDatabase(db);
-        const sessionId = "ses-reclaim-emergency";
-        const first = makeToolMessage("tool-1");
-        const second = makeToolMessage("tool-2");
-        insertTag(db, sessionId, "tool-1", "tool", 4000, 1, 0, "bash");
-        insertTag(db, sessionId, "tool-2", "tool", 4000, 2, 0, "read");
-        queuePendingOp(db, sessionId, 1, "drop", 1);
-        advanceToolReclaimWatermark(db, sessionId, 2);
-
-        await runPostTransformPhase(
-            basePostTransformArgs(db, sessionId, [first, second], {
-                schedulerDecision: "execute",
-                contextUsage: { percentage: 90, inputTokens: 9000 },
                 tags: getActiveTagsBySession(db, sessionId),
                 targets: new Map([
                     [1, makeDropTarget(first)],
@@ -1482,47 +1402,10 @@ describe("two-pass tool reclaim", () => {
         const statuses = tagStatuses(sessionId);
         expect(statuses.get(1)).toBe("dropped");
         expect(statuses.get(2)).toBe("active");
+        expect((second.parts[0] as { state?: { output?: string } }).state?.output).not.toBe(
+            "[dropped]",
+        );
         expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(2);
-    });
-
-    it("advances the watermark on execute even when the auto-drop gate is closed", async () => {
-        db = new Database(":memory:");
-        initializeDatabase(db);
-        const sessionId = "ses-reclaim-advance";
-        const message = makeToolMessage("tool-1");
-        insertTag(db, sessionId, "tool-1", "tool", 4000, 1, 0, "bash");
-
-        await runPostTransformPhase(
-            basePostTransformArgs(db, sessionId, [message], {
-                schedulerDecision: "execute",
-                tags: getActiveTagsBySession(db, sessionId),
-                targets: new Map([[1, makeDropTarget(message)]]),
-                sessionMeta: getOrCreateSessionMeta(db, sessionId),
-            }),
-        );
-
-        expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(1);
-        expect(tagStatuses(sessionId).get(1)).toBe("active");
-    });
-
-    it("does not advance the watermark on a non-execute force-materialization pass", async () => {
-        db = new Database(":memory:");
-        initializeDatabase(db);
-        const sessionId = "ses-reclaim-force-defer";
-        const message = makeToolMessage("tool-1");
-        insertTag(db, sessionId, "tool-1", "tool", 4000, 1, 0, "bash");
-
-        await runPostTransformPhase(
-            basePostTransformArgs(db, sessionId, [message], {
-                schedulerDecision: "defer",
-                contextUsage: { percentage: 90, inputTokens: 9000 },
-                tags: getActiveTagsBySession(db, sessionId),
-                targets: new Map([[1, makeDropTarget(message)]]),
-                sessionMeta: getOrCreateSessionMeta(db, sessionId),
-            }),
-        );
-
-        expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(0);
     });
 });
 
@@ -1531,10 +1414,9 @@ describe("smart-drops supersession reclaim (flag-gated)", () => {
         return new Map(getTagsBySession(db, sessionId).map((tag) => [tag.tagNumber, tag.status]));
     }
 
-    // tag 1 performs a real drop, which enables the reclaim block this pass;
+    // tag 1 performs a real drop, which enables the smart-drops block this pass;
     // tags 2 & 3 are todowrite where the older (2) is superseded by the newer
-    // (3). watermark=1 makes the age-based sweep skip tags 2/3, so only the
-    // smart-drops supersession path can touch them.
+    // (3), so only the independently configured supersession rule can touch it.
     function seedTodowriteSession(sessionId: string): {
         trigger: MessageLike;
         older: MessageLike;
@@ -1547,7 +1429,6 @@ describe("smart-drops supersession reclaim (flag-gated)", () => {
         insertTag(db, sessionId, "tool-2", "tool", 4000, 2, 0, "todowrite");
         insertTag(db, sessionId, "tool-3", "tool", 4000, 3, 0, "todowrite");
         queuePendingOp(db, sessionId, 1, "drop", 1);
-        advanceToolReclaimWatermark(db, sessionId, 1);
         return { trigger, older, newer };
     }
 
@@ -1737,7 +1618,7 @@ describe("known m[0] hard-fold folds the execute pass in", () => {
         );
     });
 
-    it("drains two-pass reclaim and advances its watermark on a DEFER scheduler pass when m[0] HARD-folds", async () => {
+    it("does not use a legacy watermark to drop an unrequested tool when m[0] HARD-folds", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-hardfold-reclaim-drain";
@@ -1750,7 +1631,7 @@ describe("known m[0] hard-fold folds the execute pass in", () => {
         insertTag(db, sessionId, "tool-2", "tool", 4000, 2, 0, "bash");
         insertTag(db, sessionId, "tool-3", "tool", 4000, 3, 0, "read");
         queuePendingOp(db, sessionId, 1, "drop", 1);
-        advanceToolReclaimWatermark(db, sessionId, 2);
+        updateSessionMeta(db, sessionId, { toolReclaimWatermark: 2 });
         const messages = [trigger, reclaimable, newer];
         const targets = new Map<number, TagTarget>([
             [1, makeDropTarget(trigger)],
@@ -1781,9 +1662,9 @@ describe("known m[0] hard-fold folds the execute pass in", () => {
             getTagsBySession(db, sessionId).map((tag) => [tag.tagNumber, tag.status]),
         );
         expect(statuses.get(1)).toBe("dropped");
-        expect(statuses.get(2)).toBe("dropped");
+        expect(statuses.get(2)).toBe("active");
         expect(statuses.get(3)).toBe("active");
-        expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(3);
+        expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(2);
 
         const deferReplayBytes = JSON.stringify(messages);
         await runPostTransformPhase(
@@ -2107,7 +1988,7 @@ describe("postprocess empty-sentinel provider gate", () => {
 });
 
 describe("final message representation", () => {
-    it("serializes a late auto-reclaim clear identically on execute and defer", async () => {
+    it("serializes a late explicit reclaim clear identically on execute and defer", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-final-representation-late-clear";
@@ -2147,7 +2028,7 @@ describe("final message representation", () => {
         insertTag(db, sessionId, "call-survivor", "tool", 100, 3, 0, "read");
         padRecentToolSkeletonWindow(sessionId, 3);
         queuePendingOp(db, sessionId, 1, "drop", 1);
-        advanceToolReclaimWatermark(db, sessionId, 2);
+        queuePendingOp(db, sessionId, 2, "drop", 2);
 
         const foldMessages = cloneMessages(template);
         const foldBatch = new ToolMutationBatch(foldMessages);
@@ -2291,7 +2172,7 @@ describe("final message representation", () => {
         insertTag(db, sessionId, "call-predecessor", "tool", 100, 2, 0, "read");
         padRecentToolSkeletonWindow(sessionId, 2);
         queuePendingOp(db, sessionId, 1, "drop", 1);
-        advanceToolReclaimWatermark(db, sessionId, 2);
+        queuePendingOp(db, sessionId, 2, "drop", 2);
 
         const foldMessages = cloneMessages(template);
         const foldBatch = new ToolMutationBatch(foldMessages);

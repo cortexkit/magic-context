@@ -4,8 +4,7 @@ import { isEditTool } from "./edit-marker";
 import type { TagTarget } from "./tag-messages";
 
 // Smart-drops Phase 1: select provably-superseded "spent control-plane" tool
-// outputs for reclaim, on top of the positional watermark sweep. These classes
-// are dead by SUPERSESSION (not age), so selection ignores the watermark — but
+// outputs for reclaim. These classes are dead by SUPERSESSION (not age), and
 // the caller only ACTS on the result inside the existing
 // execute + already-mutating gate, so this never originates a cache bust.
 //
@@ -26,8 +25,7 @@ const CTX_NOTE_ZERO_VALUE_ACTIONS = new Set(["read", "dismiss"]);
 
 /**
  * Build synthetic drop ops for superseded spent-control-plane tool outputs.
- * Mirrors `buildSyntheticToolReclaimOps`'s op shape. The caller merges these
- * into the same gated `applyPendingOperations` call as the positional sweep.
+ * The caller merges these into a gated `applyPendingOperations` call.
  */
 export function buildSupersessionReclaimOps(input: {
     db: ContextDatabase;
@@ -86,9 +84,8 @@ export function buildSupersessionReclaimOps(input: {
 /**
  * Select superseded edit/write tool calls for COMPRESSION (not full drop).
  * Among active edit/write tags grouped by their `filePath`, the newest stays
- * full; every older edit to the same file is an edit_marker target. Like the
- * control-plane selector, supersession is age-independent so the watermark is
- * ignored, but the caller only acts inside the gated pass.
+ * full; every older edit to the same file is an edit_marker target. The caller
+ * only acts inside the gated pass.
  *
  * Returns both the drop ops AND the set of tag ids that must be compressed as
  * edit_marker (the caller passes the set to applyPendingOperations).

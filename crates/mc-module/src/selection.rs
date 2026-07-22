@@ -6,9 +6,9 @@
 //! Determinism is the cache invariant: same (items, frozen_keys, ctx, cfg) → same
 //! decisions → the slice-3 freeze/replay stays byte-identical.
 //!
-//! Faithful port of the five OpenCode selectors (differential-golden'd vs the TS
+//! Faithful port of the four OpenCode selectors (differential-golden'd vs the TS
 //! source): control-plane supersession, edit supersession, emergency tiered drop,
-//! age-based two-pass, and ctx_reduce agent-drop.
+//! and ctx_reduce agent-drop.
 //!
 //! Cache-critical invariants (enforced structurally here):
 //! - **frozen_keys HARD FILTER**: a CK item stays LIVE with original bytes after
@@ -144,9 +144,6 @@ pub struct SelectionContext {
     /// The protected-recent window: items with `ordinal > protected_cutoff_ordinal`
     /// are never emergency-evicted (0 = protect nothing).
     pub protected_cutoff_ordinal: u64,
-    /// The two-pass watermark: tool items with `ordinal <= last_execute_ordinal` are
-    /// age-drop candidates (0 = none).
-    pub last_execute_ordinal: u64,
     /// Emergency idempotence latch: the input-token reading at the prior emergency
     /// drop (0 if never), and whether any emergency drop has happened.
     pub prior_input_sample: f64,
@@ -171,7 +168,7 @@ pub struct SelectionContext {
 /// Which scheduler class this pass is — gates which selectors run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PassClass {
-    /// A normal execute+bust pass: control-plane / edit / two-pass / ctx_reduce run.
+    /// A normal execute+bust pass: control-plane / edit / ctx_reduce run.
     Execute,
     /// A ≥85% force pass: the emergency tiered drop runs (in addition).
     EmergencyForce,
@@ -539,19 +536,7 @@ fn select_supersession(arcs: &[&ToolArc]) -> HashMap<String, ArcIntent> {
     intents
 }
 
-/// 1.4 Age-based two-pass: tool arcs whose age (ToolCall ordinal) is at/under the
-/// last-execute watermark. Add-only (the watermark advances forward). Returns arc ids.
-fn select_two_pass(arcs: &[&ToolArc], last_execute_ordinal: u64) -> HashSet<String> {
-    if last_execute_ordinal == 0 {
-        return HashSet::new();
-    }
-    arcs.iter()
-        .filter(|a| a.ordinal <= last_execute_ordinal)
-        .map(|a| a.arc_id.clone())
-        .collect()
-}
-
-/// 1.5 ctx_reduce agent-drop: the caller-supplied marked ids (a control-plane side
+/// 1.4 ctx_reduce agent-drop: the caller-supplied marked ids (a control-plane side
 /// input). These are already flat block ids; emitted directly as drops (arc-atomic
 /// isn't needed — the agent marks specific blocks). Frozen/absent filtered by caller.
 fn select_agent_drops(
@@ -745,17 +730,9 @@ pub fn select_reductions(
             }
         }
         PassClass::Execute => {
-            // Order = two-pass (drop) → control-plane (drop) → edit (edit_marker).
-            // drop wins: a later edit_marker never overrides an assigned drop.
-            for arc_id in select_two_pass(&active_arcs, ctx.last_execute_ordinal) {
-                arc_shapes.insert(arc_id, ArcShape::FullDrop);
-            }
             if cfg.smart_drops {
                 let intents = select_supersession(&active_arcs);
                 for (arc_id, intent) in intents {
-                    if arc_shapes.contains_key(&arc_id) {
-                        continue; // already a drop (two-pass) → drop wins
-                    }
                     arc_shapes.insert(
                         arc_id,
                         if intent.edit_marker {
@@ -957,7 +934,6 @@ mod tests {
             current_total_input_tokens: 0.0,
             ceiling_tokens: 0.0,
             protected_cutoff_ordinal: 0,
-            last_execute_ordinal: 0,
             prior_input_sample: 0.0,
             has_prior_drop: false,
             agent_drop_ids: Vec::new(),
@@ -1024,7 +1000,6 @@ mod tests {
         current_total_input_tokens: f64,
         ceiling_tokens: f64,
         protected_cutoff_ordinal: u64,
-        last_execute_ordinal: u64,
         prior_input_sample: f64,
         has_prior_drop: bool,
         agent_drop_ids: Vec<String>,
@@ -1133,7 +1108,6 @@ mod tests {
                 current_total_input_tokens: case.ctx.current_total_input_tokens,
                 ceiling_tokens: case.ctx.ceiling_tokens,
                 protected_cutoff_ordinal: case.ctx.protected_cutoff_ordinal,
-                last_execute_ordinal: case.ctx.last_execute_ordinal,
                 prior_input_sample: case.ctx.prior_input_sample,
                 has_prior_drop: case.ctx.has_prior_drop,
                 agent_drop_ids: case.ctx.agent_drop_ids.clone(),
@@ -1170,12 +1144,12 @@ mod tests {
 
     #[test]
     fn provider_executed_arc_never_targeted() {
-        // A server-side tool arc must be skipped even under the two-pass watermark.
+        // A server-side tool arc must be skipped by automatic smart-drops.
         let mut items = vec![
-            tool_call("c1", 1, "bash", serde_json::json!({}), 200),
-            tool_result("c1", 1, "bash", 200),
-            tool_call("c2", 2, "web_search", serde_json::json!({}), 200),
-            tool_result("c2", 2, "web_search", 200),
+            tool_call("c1", 1, "bash_status", serde_json::json!({}), 200),
+            tool_result("c1", 1, "bash_status", 200),
+            tool_call("c2", 2, "bash_status", serde_json::json!({}), 200),
+            tool_result("c2", 2, "bash_status", 200),
         ];
         let c2_arc = call_block_id("c2");
         for it in items.iter_mut() {
@@ -1183,9 +1157,13 @@ mod tests {
                 it.provider_executed = true;
             }
         }
-        let mut ctx = base_ctx(PassClass::Execute);
-        ctx.last_execute_ordinal = 2; // both arcs at/under watermark
-        let out = select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default());
+        let ctx = base_ctx(PassClass::Execute);
+        let out = select_reductions(
+            &items,
+            &HashSet::new(),
+            &ctx,
+            &SelectionConfig { smart_drops: true },
+        );
         let arcs = arc_decisions(&items, &out);
         assert_eq!(
             arcs.get(&call_block_id("c1")).map(String::as_str),
@@ -1201,15 +1179,19 @@ mod tests {
     fn frozen_arc_blocks_never_re_emitted() {
         // c1's result already frozen → the arc is inactive; no decision for ANY c1 block.
         let items = vec![
-            tool_call("c1", 1, "bash", serde_json::json!({}), 200),
-            tool_result("c1", 1, "bash", 200),
-            tool_call("c2", 2, "bash", serde_json::json!({}), 200),
-            tool_result("c2", 2, "bash", 200),
+            tool_call("c1", 1, "bash_status", serde_json::json!({}), 200),
+            tool_result("c1", 1, "bash_status", 200),
+            tool_call("c2", 2, "bash_status", serde_json::json!({}), 200),
+            tool_result("c2", 2, "bash_status", 200),
         ];
-        let mut ctx = base_ctx(PassClass::Execute);
-        ctx.last_execute_ordinal = 2;
+        let ctx = base_ctx(PassClass::Execute);
         let frozen: HashSet<String> = [result_block_id("c1")].into_iter().collect();
-        let out = select_reductions(&items, &frozen, &ctx, &SelectionConfig::default());
+        let out = select_reductions(
+            &items,
+            &frozen,
+            &ctx,
+            &SelectionConfig { smart_drops: true },
+        );
         assert!(
             out.iter().all(|d| !d.target_id.starts_with("c1")),
             "no c1 block may be re-emitted once the arc is frozen: {out:?}"
@@ -1223,18 +1205,22 @@ mod tests {
     #[test]
     fn dynamic_block_protection_filters_automatic_and_agent_drop_decisions() {
         let items = vec![
-            tool_call("c1", 1, "bash", serde_json::json!({}), 200),
-            tool_result("c1", 1, "bash", 200),
-            tool_call("c2", 2, "bash", serde_json::json!({}), 200),
-            tool_result("c2", 2, "bash", 200),
+            tool_call("c1", 1, "bash_status", serde_json::json!({}), 200),
+            tool_result("c1", 1, "bash_status", 200),
+            tool_call("c2", 2, "bash_status", serde_json::json!({}), 200),
+            tool_result("c2", 2, "bash_status", 200),
         ];
         let protected = result_block_id("c1");
         let mut ctx = base_ctx(PassClass::Execute);
-        ctx.last_execute_ordinal = 2;
         ctx.agent_drop_ids = vec![protected.clone()];
         ctx.protected_block_ids.insert(protected.clone());
 
-        let out = select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default());
+        let out = select_reductions(
+            &items,
+            &HashSet::new(),
+            &ctx,
+            &SelectionConfig { smart_drops: true },
+        );
         assert!(out.iter().all(|decision| decision.target_id != protected));
         assert!(
             out.iter()
@@ -1251,12 +1237,16 @@ mod tests {
         // permanently fences the session to raw serving.
         let items = vec![
             reasoning("c1", 1, 100),
-            tool_call("c1", 1, "bash", serde_json::json!({}), 50),
-            tool_result("c1", 1, "bash", 300),
+            tool_call("c1", 1, "bash_status", serde_json::json!({}), 50),
+            tool_result("c1", 1, "bash_status", 300),
         ];
-        let mut ctx = base_ctx(PassClass::Execute);
-        ctx.last_execute_ordinal = 1;
-        let out = select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default());
+        let ctx = base_ctx(PassClass::Execute);
+        let out = select_reductions(
+            &items,
+            &HashSet::new(),
+            &ctx,
+            &SelectionConfig { smart_drops: true },
+        );
         let ids: HashSet<&str> = out.iter().map(|d| d.target_id.as_str()).collect();
         assert!(
             ids.contains(call_block_id("c1").as_str())
@@ -1279,7 +1269,6 @@ mod tests {
             tool_result("c1", 1, "bash", 300),
         ];
         let mut ctx = base_ctx(PassClass::Execute);
-        ctx.last_execute_ordinal = 1;
         ctx.agent_drop_ids = vec![reasoning_block_id("c1")];
         let out = select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default());
         assert!(
@@ -1298,24 +1287,28 @@ mod tests {
                 "turn1#0",
                 "turn1#0",
                 1,
-                "bash",
+                "bash_status",
                 serde_json::json!({"provider_call_id":"call_0"}),
                 50,
             ),
-            tool_result_with_ids("turn1-tool#0", "turn1#0", 1, "bash", 300),
+            tool_result_with_ids("turn1-tool#0", "turn1#0", 1, "bash_status", 300),
             tool_call_with_ids(
                 "turn2#0",
                 "turn2#0",
                 2,
-                "bash",
+                "bash_status",
                 serde_json::json!({"provider_call_id":"call_0"}),
                 50,
             ),
-            tool_result_with_ids("turn2-tool#0", "turn2#0", 2, "bash", 300),
+            tool_result_with_ids("turn2-tool#0", "turn2#0", 2, "bash_status", 300),
         ];
-        let mut ctx = base_ctx(PassClass::Execute);
-        ctx.last_execute_ordinal = 2;
-        let out = select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default());
+        let ctx = base_ctx(PassClass::Execute);
+        let out = select_reductions(
+            &items,
+            &HashSet::new(),
+            &ctx,
+            &SelectionConfig { smart_drops: true },
+        );
         let arcs = arc_decisions(&items, &out);
         assert_eq!(arcs.get("turn1#0").map(String::as_str), Some("drop"));
         assert_eq!(arcs.get("turn2#0").map(String::as_str), Some("drop"));
@@ -1339,15 +1332,19 @@ mod tests {
             items.push(tool_call(
                 &format!("c{n}"),
                 n,
-                "bash",
+                "bash_status",
                 serde_json::json!({"cmd": "x".repeat(20)}),
                 50,
             ));
-            items.push(tool_result(&format!("c{n}"), n, "bash", 200));
+            items.push(tool_result(&format!("c{n}"), n, "bash_status", 200));
         }
-        let mut ctx = base_ctx(PassClass::Execute);
-        ctx.last_execute_ordinal = 22; // all arcs are drop candidates
-        let out = select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default());
+        let ctx = base_ctx(PassClass::Execute);
+        let out = select_reductions(
+            &items,
+            &HashSet::new(),
+            &ctx,
+            &SelectionConfig { smart_drops: true },
+        );
         let call_kind = |arc: &str| -> String {
             out.iter()
                 .find(|d| d.target_id == call_block_id(arc))
@@ -1361,54 +1358,6 @@ mod tests {
     }
 
     #[test]
-    fn drop_wins_over_edit_marker() {
-        // c1 is an older edit to a.ts (edit_marker candidate) AND under the two-pass
-        // watermark (drop candidate). Drop must win.
-        let items = vec![
-            tool_call(
-                "c1",
-                1,
-                "edit",
-                serde_json::json!({"filePath":"a.ts","oldString":"x".repeat(80)}),
-                500,
-            ),
-            tool_result("c1", 1, "edit", 100),
-            tool_call(
-                "c2",
-                2,
-                "edit",
-                serde_json::json!({"filePath":"a.ts","oldString":"y".repeat(80)}),
-                500,
-            ),
-            tool_result("c2", 2, "edit", 100),
-        ];
-        let mut ctx = base_ctx(PassClass::Execute);
-        ctx.last_execute_ordinal = 1; // c1 under watermark → two-pass drop
-        let out = select_reductions(
-            &items,
-            &HashSet::new(),
-            &ctx,
-            &SelectionConfig { smart_drops: true },
-        );
-        let c1_call = out
-            .iter()
-            .find(|d| d.target_id == call_block_id("c1"))
-            .map(|d| d.kind.clone());
-        // Drop wins: the arc is on the DROP path (skeleton in-window, or full-drop
-        // older), NEVER edit_marker. With only 2 arcs c1 is in the skeleton window, so
-        // the winning drop shapes to "skeleton" — a drop variant, not an edit_marker.
-        assert!(
-            matches!(c1_call.as_deref(), Some("drop") | Some("skeleton")),
-            "drop beats edit_marker for c1 (got {c1_call:?})"
-        );
-        assert_ne!(
-            c1_call.as_deref(),
-            Some("edit_marker"),
-            "edit_marker must NOT win"
-        );
-    }
-
-    #[test]
     fn payload_purity_independent_of_pressure() {
         // The cache-critical monotonicity pin: a payload = f(id, immutable block bytes)
         // with ZERO pass-varying state, so a frozen target can never be re-emitted with
@@ -1418,9 +1367,8 @@ mod tests {
         // c1/c2/c3 are all edits to a.ts; c3 (newest) stays full, c1+c2 are older →
         // edit_marker candidates. Context B varies agent_drop_ids (drops UNRELATED c9,
         // so the produced set genuinely differs) plus the pressure/latch fields, chosen
-        // so c1 stays an edit_marker in BOTH (last_execute_ordinal stays 0, so c1 is
-        // never a two-pass FullDrop that would change its shape). A payload fn that
-        // accidentally read ctx would diverge here; a pure one cannot.
+        // so c1 stays an edit_marker in BOTH. A payload fn that accidentally read
+        // ctx would diverge here; a pure one cannot.
         let items = vec![
             tool_call(
                 "c1",
@@ -1464,8 +1412,7 @@ mod tests {
         // Context A: no agent drops, zero pressure fields.
         let ctx_a = base_ctx(PassClass::Execute);
         // Context B: a genuinely different produced set — an unrelated agent drop (c9)
-        // plus non-zero pressure/latch fields. last_execute_ordinal stays 0 so c1 is NOT
-        // a two-pass drop candidate (keeps it an edit_marker in both).
+        // plus non-zero pressure/latch fields.
         let ctx_b = SelectionContext {
             agent_drop_ids: vec![result_block_id("c9")],
             current_total_input_tokens: 123_456.0,
@@ -1622,7 +1569,6 @@ mod tests {
             tool_result("c1", 1, "bash", 300),
         ];
         let mut ctx = base_ctx(PassClass::Defer);
-        ctx.last_execute_ordinal = 1;
         ctx.agent_drop_ids = vec![result_block_id("c1")];
         let out = select_reductions(
             &items,

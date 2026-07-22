@@ -148,20 +148,6 @@ export function updateSessionMeta(
     })();
 }
 
-export function advanceToolReclaimWatermark(
-    db: Database,
-    sessionId: string,
-    maxTagNumber: number,
-): void {
-    if (maxTagNumber <= 0) return;
-    db.transaction(() => {
-        ensureSessionMetaRow(db, sessionId);
-        db.prepare(
-            "UPDATE session_meta SET tool_reclaim_watermark = MAX(COALESCE(tool_reclaim_watermark, 0), ?) WHERE session_id = ?",
-        ).run(maxTagNumber, sessionId);
-    })();
-}
-
 export function clearSession(db: Database, sessionId: string): void {
     // Every session-scoped table must be cleared here; the structural storage-db
     // test discovers tables with session_id and seeds each one to enforce this list.

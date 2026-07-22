@@ -1238,11 +1238,6 @@ fn apply_once(
                     * ctx.execute_threshold_percentage.clamp(1.0, 100.0)
                     / 100.0,
                 protected_cutoff_ordinal: 0,
-                last_execute_ordinal: if loaded.core.reconcile_pending {
-                    0
-                } else {
-                    loaded.meta.last_execute_ordinal
-                },
                 prior_input_sample: loaded.meta.last_emergency_input_sample,
                 has_prior_drop: loaded.meta.has_prior_emergency_drop,
                 agent_drop_ids,
@@ -1457,10 +1452,6 @@ fn apply_once(
                             },
                             estimate_tokens,
                         )?;
-                        meta.last_execute_ordinal = meta
-                            .last_execute_ordinal
-                            .min(comp.coverage_ordinal.unwrap_or(0));
-
                         if let Some(stray) = first_uncovered_live_block(
                             &recut_compartments,
                             &live,
@@ -1641,26 +1632,6 @@ fn apply_once(
         }
     }
 
-    // The two-pass watermark advances on EVERY scheduler execute-class decision
-    // (Execute/Force85/Emergency95), not only on passes that froze reductions: this
-    // execute's tail is the NEXT execute's age-drop candidate set, so a zero-drop execute
-    // must still stamp the max ordinal or completed arcs never age in. It does NOT advance
-    // when the producer gate opened via a hard advisory on a scheduler-Defer pass
-    // (first-fold, render-config change): those busts are not execute cadence, and
-    // stamping there would age the current tail into the very next execute. The write may
-    // be the only meta change on the pass — a metadata-only commit with byte-identical
-    // output, not a cache bust. Held back under reconcile (the watermark may be stale-high
-    // against a store about to be re-cut; the re-cut arm re-clamps it).
-    let scheduler_execute_class =
-        tail_reclaim_enabled && !matches!(scheduler_outcome.pass, scheduler::PassDecision::Defer);
-    if scheduler_execute_class && !loaded.core.reconcile_pending {
-        meta.last_execute_ordinal = tail_for_selection
-            .iter()
-            .map(|item| item.ordinal)
-            .max()
-            .unwrap_or(0)
-            .max(meta.last_execute_ordinal);
-    }
     if is_bust_pass && reductions_pending_now && selection_class == PassClass::EmergencyForce {
         meta.last_emergency_input_sample = usage_input_tokens;
         meta.has_prior_emergency_drop = true;
@@ -6263,7 +6234,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_pending_disables_two_pass_selector() {
+    fn reconcile_pending_ignores_legacy_reclaim_watermark() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         bootstrap_covering_a(&s);
@@ -6309,15 +6280,12 @@ mod tests {
         let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
         ctx.observed_last_response_at_ms = Some(0);
         let execute = transform(&s, &boot_req, &ctx).unwrap();
-        // A zero-drop execute is byte-identical (no bust) but MAY commit metadata: the
-        // two-pass watermark stamps this tail as the next execute's candidate set.
+        // A zero-drop execute is byte-identical and does not revive the retired
+        // positional reclaim watermark.
         assert_eq!(execute.action, "SOFT+");
         assert_eq!(serde_json::to_vec(&execute.ck_messages).unwrap(), before);
         let meta = s.load("ses").unwrap().meta;
-        assert_eq!(
-            meta.last_execute_ordinal, 1,
-            "zero-drop execute still advances the two-pass watermark"
-        );
+        assert_eq!(meta.last_execute_ordinal, 0);
         // And the pass after it, with an unchanged tail, is a true no-write defer.
         let again = transform(&s, &boot_req, &ctx).unwrap();
         assert!(!again.committed);
@@ -6325,13 +6293,11 @@ mod tests {
     }
 
     #[test]
-    fn zero_drop_execute_watermark_ages_arcs_into_next_execute() {
+    fn legacy_reclaim_watermark_never_ages_arcs_into_a_later_execute() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        // Two-pass aging requires a FOLDED session: a new reduction can only freeze on
-        // a SOFT pass, and the classifier admits a SOFT only when a boundary is present.
-        // Seed one compartment covering ordinal 1 and fold it, then drive executes over
-        // the post-coverage tail.
+        // Seed one compartment covering ordinal 1 and fold it, then persist a
+        // pre-removal watermark to model an upgraded session.
         s.replace_compartments("ses", &[comp(1, 1, 1, "a", "SUMMARY")])
             .unwrap();
         let msgs = vec![
@@ -6342,10 +6308,14 @@ mod tests {
         ];
         let boot = run(&s, &req("ses", "cfg0", msgs.clone()), &spine());
         assert_eq!(boot.action, "HARD");
-        // Execute pass 1 over the completed tool arc: nothing to drop yet (the arc is
-        // newer than the 0 watermark), but the watermark must stamp its ordinal.
-        // 70% usage: above the execute threshold (65) but below Force85, so the
-        // scheduler classes the pass Execute and the two-pass selector runs.
+        let loaded = s.load("ses").unwrap();
+        let mut meta = loaded.meta.clone();
+        meta.last_execute_ordinal = 9;
+        s.commit("ses", loaded.row_version, &loaded.core, &meta)
+            .unwrap();
+
+        // 70% usage is execute-class. Neither this pass nor the next may select
+        // an unrequested tool from the inert legacy watermark.
         let exec_req = with_usage(req("ses", "cfg0", msgs.clone()), 70, 100);
         let mut ctx = pctx("git:proj", "/nonexistent-docs", 0);
         ctx.observed_last_response_at_ms = Some(0);
@@ -6357,13 +6327,9 @@ mod tests {
                 .frozen_units
                 .iter()
                 .all(|unit| !unit.key.starts_with("red:m1#") && !unit.key.starts_with("red:m2#")),
-            "first execute has no candidates old enough to drop"
+            "execute must not synthesize an unrequested drop"
         );
-        assert!(
-            after_first.meta.last_execute_ordinal >= 9,
-            "watermark stamped from the execute tail"
-        );
-        // Execute pass 2: the same arc is now at-or-below the watermark → age-drops.
+        assert_eq!(after_first.meta.last_execute_ordinal, 9);
         let _ = transform(&s, &exec_req, &ctx).unwrap();
         let after_second = s.load("ses").unwrap();
         assert!(
@@ -6371,9 +6337,10 @@ mod tests {
                 .core
                 .frozen_units
                 .iter()
-                .any(|unit| unit.key.starts_with("red:m1#") || unit.key.starts_with("red:m2#")),
-            "completed arc aged in by the prior execute's watermark must freeze a drop"
+                .all(|unit| !unit.key.starts_with("red:m1#") && !unit.key.starts_with("red:m2#")),
+            "later execute must still preserve the unrequested tool"
         );
+        assert_eq!(after_second.meta.last_execute_ordinal, 9);
     }
 
     #[test]
@@ -7439,7 +7406,7 @@ mod tests {
             .unwrap()
             .contains("dropped seq 2"));
         assert_eq!(loaded.meta.folded_compartment_seq, 1);
-        assert_eq!(loaded.meta.last_execute_ordinal, 1);
+        assert_eq!(loaded.meta.last_execute_ordinal, 99);
         assert_eq!(loaded.row_version.unwrap(), before_recut + 2);
         assert_eq!(s.load_compartments("ses").unwrap().len(), 1);
 
@@ -11788,7 +11755,7 @@ mod tests {
         let tail = vec![
             item("m1", 1, "covered raw"),
             assistant_tool_call("m2", 2, "call_old"),
-            tool_result("m3", 3, "call_old", "big old tool output that age-drops"),
+            tool_result("m3", 3, "call_old", "big old tool output marked for drop"),
             todowrite_call(
                 "m4",
                 4,

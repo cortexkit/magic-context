@@ -585,7 +585,7 @@ Tier boundaries are hardcoded to keep behavior predictable and prevent cache-bus
 
 **Always compressed from the original.** The pristine pre-caveman text is persisted in `source_contents` per tag. When a tag shifts deeper (lite → full → ultra), caveman compresses the ORIGINAL text at the new target depth rather than the already-cavemaned intermediate, so repeated tier shifts converge to exactly the same output as direct compression at the final depth.
 
-**Cache safety.** Runs only on execute-threshold heuristic passes (same gate as automatic tool drops), so the single cache-busting pass materializes both tool drops and caveman compression together. Defer passes don't run caveman, and tier assignments are persisted in `tags.caveman_depth` so the next pass re-compresses only the tags that have shifted tiers.
+**Cache safety.** Runs only on execute-threshold heuristic passes, so a cache-busting pass can materialize queued tool drops and caveman compression together. Defer passes don't run caveman, and tier assignments are persisted in `tags.caveman_depth` so the next pass re-compresses only the tags that have shifted tiers.
 
 **Relationship to `ctx_reduce`.** Caveman compression is independent of the agent-driven `ctx_reduce` tool. `ctx_reduce` is still best for tool outputs the agent knows are spent; caveman targets old prose only, and dropped tags always win over caveman rewriting. To hide the reduce surface for a particular agent, remove or deny `ctx_reduce` in that agent's tool allow-list; Magic Context then omits `§N§` prefixes, nudges, and reduce guidance for that session.
 
@@ -597,7 +597,7 @@ Tier boundaries are hardcoded to keep behavior predictable and prevent cache-bus
 |-----|------|---------|
 | `smart_drops` | `boolean` | `false` |
 
-**Experimental, opt-in.** Content-aware reclaim of tool output that a later call has made obsolete, layered on top of the normal age-based auto-drop. The age-based drop reclaims the *oldest* tool outputs first; smart-drops additionally reclaims outputs that are dead by *supersession*, regardless of age:
+**Experimental, opt-in.** Content-aware reclaim of tool output that a later call has made obsolete. This is separate from agent-controlled `ctx_reduce`: smart-drops targets outputs that are dead by *supersession*, never merely because they are old:
 
 | Class | Behavior |
 |---|---|
@@ -606,7 +606,7 @@ Tier boundaries are hardcoded to keep behavior predictable and prevent cache-bus
 | Zero-value meta (`bash_status`, `bash_kill`, `ctx_note` read/dismiss) | Drop all (worthless once the call ran; `ctx_note` write/update carry intent and are never dropped). |
 | Superseded edits | When a file is edited more than once, the newest edit stays in full and each older edit is compressed to a marker that keeps its `filePath` and a short region hint of the diff, so the agent still sees which file and region it edited. This is the largest source of reclaimable bytes. |
 
-**Cache safety.** Selection is age-independent, but smart-drops only *acts* during a transform pass that is already rewriting the message array (the same execute-threshold gate the age-based drop uses), so it never causes a prompt-cache miss on its own. Every drop resolves to the same deterministic placeholder as the normal drops, so defer passes replay byte-for-byte identically. **When `smart_drops` is off, the messages sent to the model are byte-identical to the age-based-only behavior** — the entire feature is inert.
+**Cache safety.** Selection is age-independent, but smart-drops only *acts* during a transform pass that is already rewriting the message array, so it never causes a prompt-cache miss on its own. Every drop resolves to the same deterministic placeholder as an explicit drop, so defer passes replay byte-for-byte identically. **When `smart_drops` is off, the entire supersession feature is inert:** routine tool outputs are reclaimed only when the agent explicitly queues them with `ctx_reduce`, or by the emergency safety valve.
 
 **Cross-version note.** Once you enable `smart_drops`, all binaries that share your Magic Context database (e.g. multiple OpenCode instances, or OpenCode + Pi) should be on the release that introduced it. If a stale older binary co-runs with the feature on, the worst case is a one-time cache bust (the older binary fully drops what the newer one compressed); it never corrupts data.
 

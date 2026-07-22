@@ -97,7 +97,6 @@ export {
     type WrapupInProgressState,
 } from "./storage-meta-persisted";
 export {
-    advanceToolReclaimWatermark,
     clearSession,
     getOrCreateSessionMeta,
     updateSessionMeta,

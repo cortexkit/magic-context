@@ -116,7 +116,7 @@ export function applyPendingOperations(
             const isToolTag = tagTypeById.get(pendingOp.tagId) === "tool";
 
             if (synthetic) {
-                // Synthetic two-pass reclaim must never persist a DB-only drop for
+                // A smart-drop must never persist a DB-only drop for
                 // a tag that is absent/incomplete on this pass's visible wire. It
                 // only rides an already-mutating pass when the target can actually
                 // reclaim bytes right now; real pending ops keep their legacy

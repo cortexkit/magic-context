@@ -101,7 +101,6 @@ export {
     acquireWrapupInProgress,
     addProcessedImageStrippedIds,
     addStaleReduceStrippedIds,
-    advanceToolReclaimWatermark,
     appendAutoSearchHintDecision,
     appendNoteNudgeAnchor,
     applyStrippedPlaceholderDelta,

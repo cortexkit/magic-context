@@ -147,10 +147,6 @@ import {
 	buildEditSupersessionReclaim,
 	buildSupersessionReclaimOps,
 } from "@magic-context/core/hooks/magic-context/supersession-reclaim";
-import {
-	advanceToolReclaimWatermarkToCurrentMax,
-	buildSyntheticToolReclaimOps,
-} from "@magic-context/core/hooks/magic-context/tool-reclaim";
 import { log, sessionLog } from "@magic-context/core/shared/logger";
 import { isSaneLimit } from "@magic-context/core/shared/models-dev-cache";
 import type { SubagentRunner } from "@magic-context/core/shared/subagent-runner";
@@ -4004,7 +4000,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let droppedCount = 0;
 	const droppedTokens = 0;
 	let emergency = false;
-	let autoReclaimDidMutateThisPass = false;
+	let smartDropsDidMutateThisPass = false;
 	let suppressDeferredHistoryDrain = false;
 	let deferredMaterializationConsumedThisPass = false;
 	let casLost = false;
@@ -4740,78 +4736,61 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		}
 	}
 
-	const toolReclaimExecutePass = args.schedulerDecision === "execute";
+	const smartDropsExecutePass = args.schedulerDecision === "execute";
 	const alreadyMutatingThisPass =
 		pendingOpsDidMutate || heuristicOrReasoningDidMutate;
 	const emergencyDropEligible =
 		args.forceMaterialization === true ||
 		args.contextUsage.percentage >= FORCE_MATERIALIZATION_PERCENTAGE;
-	let autoReclaimTargetCount = 0;
-	let autoReclaimDidMutate = false;
+	let smartDropTargetCount = 0;
+	let smartDropsDidMutate = false;
 	if (
-		toolReclaimExecutePass &&
+		args.smartDrops &&
+		smartDropsExecutePass &&
 		alreadyMutatingThisPass &&
 		!emergencyDropEligible
 	) {
-		const reclaimMeta = args.sessionMeta;
-		const syntheticPendingOps = buildSyntheticToolReclaimOps({
+		// Smart-drops are an independently configured feature. They select
+		// outputs that a later call superseded; age or a prior execute watermark
+		// cannot select a tool.
+		const smartDropOps = buildSupersessionReclaimOps({
 			db: args.db,
 			sessionId: args.sessionId,
 			targets,
-			watermark: reclaimMeta.toolReclaimWatermark ?? 0,
 			pendingOps,
 		});
-		// Smart-drops: also reclaim older todowrite/ctx_reduce/meta outputs that
-		// a later call supersedes, and compress superseded edits to an
-		// edit_marker (keep filePath + region hint). Merged into the same
-		// already-gated drop apply as the age-based sweep above. Dedupe (a tag
-		// can qualify under more than one rule).
 		const editMarkerTagIds = new Set<number>();
-		if (args.smartDrops) {
-			const selectedIds = new Set(syntheticPendingOps.map((op) => op.tagId));
-			const supersessionOps = buildSupersessionReclaimOps({
-				db: args.db,
-				sessionId: args.sessionId,
-				targets,
-				pendingOps,
-			});
-			for (const op of supersessionOps) {
-				if (!selectedIds.has(op.tagId)) {
-					syntheticPendingOps.push(op);
-					selectedIds.add(op.tagId);
-				}
-			}
-			const editReclaim = buildEditSupersessionReclaim({
-				db: args.db,
-				sessionId: args.sessionId,
-				targets,
-				pendingOps,
-			});
-			for (const op of editReclaim.ops) {
-				// Drop wins over compress: only compress an edit no earlier rule
-				// already selected for a full/skeleton drop.
-				if (!selectedIds.has(op.tagId)) {
-					syntheticPendingOps.push(op);
-					selectedIds.add(op.tagId);
-					editMarkerTagIds.add(op.tagId);
-				}
+		const selectedIds = new Set(smartDropOps.map((op) => op.tagId));
+		const editReclaim = buildEditSupersessionReclaim({
+			db: args.db,
+			sessionId: args.sessionId,
+			targets,
+			pendingOps,
+		});
+		for (const op of editReclaim.ops) {
+			// A superseded edit only compresses if the control-plane rule did
+			// not already select it for a full drop.
+			if (!selectedIds.has(op.tagId)) {
+				smartDropOps.push(op);
+				selectedIds.add(op.tagId);
+				editMarkerTagIds.add(op.tagId);
 			}
 		}
-		autoReclaimTargetCount = syntheticPendingOps.length;
-		if (syntheticPendingOps.length > 0) {
-			autoReclaimDidMutate = applyPendingOperations(
+		smartDropTargetCount = smartDropOps.length;
+		if (smartDropOps.length > 0) {
+			smartDropsDidMutate = applyPendingOperations(
 				args.sessionId,
 				args.db,
 				targets,
 				args.protectedTags,
 				undefined,
 				[],
-				syntheticPendingOps,
+				smartDropOps,
 				editMarkerTagIds,
 			);
-			if (autoReclaimDidMutate) {
-				droppedCount += syntheticPendingOps.length;
-				autoReclaimDidMutateThisPass = true;
+			if (smartDropsDidMutate) {
+				droppedCount += smartDropOps.length;
+				smartDropsDidMutateThisPass = true;
 			}
 		}
 	}
@@ -4859,13 +4838,10 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const tTranscriptCommit = performance.now();
 	transcript.commit();
 	logTransformTiming(args.sessionId, "transcriptCommit", tTranscriptCommit);
-	if (toolReclaimExecutePass) {
-		advanceToolReclaimWatermarkToCurrentMax(args.db, args.sessionId);
-	}
-	if (autoReclaimTargetCount > 0) {
+	if (smartDropTargetCount > 0) {
 		sessionLog(
 			args.sessionId,
-			`tool reclaim auto-drop: targets=${autoReclaimTargetCount} mutated=${autoReclaimDidMutate}`,
+			`smart-drops reclaim: targets=${smartDropTargetCount} mutated=${smartDropsDidMutate}`,
 		);
 	}
 
@@ -5181,7 +5157,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		didMutateFromFlushedStatuses ||
 		pendingOpsDidMutate ||
 		heuristicOrReasoningDidMutate ||
-		autoReclaimDidMutateThisPass ||
+		smartDropsDidMutateThisPass ||
 		materialized ||
 		historyWasConsumedThisPass;
 

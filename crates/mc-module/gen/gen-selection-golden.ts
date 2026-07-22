@@ -1,13 +1,13 @@
 /**
  * Generate the differential SELECTION golden for the Rust mc-module port.
  *
- * Drives the REAL OpenCode TS selectors (supersession, edit-supersession, two-pass,
+ * Drives the REAL OpenCode TS selectors (supersession, edit-supersession,
  * emergency) over tag fixtures, extracts the DECISION set (which tool → drop vs
  * edit_marker), and emits (a) the equivalent flat typed-CK tail (SelItem[]) and (b)
  * the expected ARC-LEVEL decisions. The Rust `selection_golden` test runs
  * `select_reductions` over the same tail, projects its per-block output back to
  * arc-level, and asserts equality — proving the SELECTOR logic (keep-N, tier
- * ordering, reserve, headroom, watermark, file-supersession, ctx_note actions) is
+ * ordering, reserve, headroom, file-supersession, ctx_note actions) is
  * bit-faithful to TS.
  *
  * SCOPE: the golden is DECISION-LEVEL (which arcs, what intent) — that is the
@@ -35,7 +35,6 @@ const resolve = (m: string) => Bun.resolveSync(m, pluginDir);
 
 const storage = await import(resolve("./src/features/magic-context/storage"));
 const supersession = await import(resolve("./src/hooks/magic-context/supersession-reclaim"));
-const toolReclaim = await import(resolve("./src/hooks/magic-context/tool-reclaim"));
 const emergency = await import(resolve("./src/hooks/magic-context/emergency-drop"));
 
 const { openDatabase, closeDatabase, insertTag } = storage as {
@@ -64,7 +63,7 @@ interface TagFixture {
     providerExecuted?: boolean;
 }
 
-type SelectorKind = "supersession" | "edit" | "two_pass" | "emergency";
+type SelectorKind = "supersession" | "edit" | "emergency";
 
 interface CaseSpec {
     label: string;
@@ -73,8 +72,6 @@ interface CaseSpec {
     /** pass class for the Rust ctx. */
     passClass: "Execute" | "EmergencyForce";
     smartDrops: boolean;
-    /** two_pass: the watermark ordinal. */
-    lastExecuteOrdinal?: number;
     /** emergency inputs. */
     emergency?: {
         currentTotalInputTokens: number;
@@ -276,17 +273,6 @@ function runTsSelector(spec: CaseSpec): Record<string, string> {
                 const arc = tagNumberToArc.get(op.tagId);
                 if (arc) expected[arc] = "edit_marker";
             }
-        } else if (spec.selector === "two_pass") {
-            const ops = toolReclaim.buildSyntheticToolReclaimOps({
-                db,
-                sessionId: SES,
-                targets,
-                watermark: spec.lastExecuteOrdinal ?? 0,
-            });
-            for (const op of ops) {
-                const arc = tagNumberToArc.get(op.tagId);
-                if (arc) expected[arc] = "drop";
-            }
         }
     } finally {
         closeDatabase();
@@ -303,7 +289,6 @@ function buildCtx(spec: CaseSpec): Record<string, unknown> {
         ceiling_tokens: em?.ceilingTokens ?? 0,
         // protected tail cutoff = maxTag − protectedTags (ordinal space == tag space).
         protected_cutoff_ordinal: em ? Math.max(maxN - em.protectedTags, 0) : 0,
-        last_execute_ordinal: spec.lastExecuteOrdinal ?? 0,
         prior_input_sample: em?.priorInputSample ?? 0,
         has_prior_drop: em?.hasPriorDrop ?? false,
         agent_drop_ids: [],
@@ -377,20 +362,6 @@ const cases: CaseSpec[] = [
         tags: [
             { id: "c1", toolName: "edit", n: 1, byteSize: 500, input: { oldString: "x", newString: "y" } },
             { id: "c2", toolName: "edit", n: 2, byteSize: 500, input: { oldString: "p", newString: "q" } },
-        ],
-    },
-    {
-        label: "two_pass: drop tools at/under watermark",
-        selector: "two_pass",
-        smartDrops: false,
-        passClass: "Execute",
-        lastExecuteOrdinal: 3,
-        tags: [
-            { id: "c1", toolName: "bash", n: 1, byteSize: 200 },
-            { id: "c2", toolName: "read", n: 2, byteSize: 200 },
-            { id: "c3", toolName: "grep", n: 3, byteSize: 200 },
-            { id: "c4", toolName: "bash", n: 4, byteSize: 200 },
-            { id: "c5", toolName: "edit", n: 5, byteSize: 200 },
         ],
     },
     {
