@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { runMigrations } from "../../features/magic-context/migrations";
@@ -230,7 +230,20 @@ describe("createToolExecuteAfterHook skill registry (truncation fallback)", () =
         "---\nskill-memory:\n  enabled: true\n  max_tokens: 1500\n---\n\n# Truncated Skill\n",
     );
 
+    // Isolate HOME to an empty tmpdir so the global-dir fallback walk
+    // doesn't accidentally hit a real developer skill (e.g. a global
+    // skill named "truncated-skill" or "nonexistent-skill"). Without
+    // this, negative-registry assertions flake on contaminated machines.
+    const savedHome = process.env.HOME;
+    const isolatedHome = `${tmpdir()}/skill-truncation-home-${Date.now()}`;
+    beforeAll(() => {
+        mkdirSync(isolatedHome, { recursive: true });
+        process.env.HOME = isolatedHome;
+    });
+
     afterAll(() => {
+        process.env.HOME = savedHome;
+        rmSync(isolatedHome, { recursive: true, force: true });
         rmSync(projectDir, { recursive: true, force: true });
     });
 
