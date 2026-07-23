@@ -680,14 +680,38 @@ export function createToolExecuteAfterHook(args: {
                     // One dynamic import of the provenance module shared by both
                     // the registry-populate and the injection blocks below
                     // (lazy-loaded only when the skill tool actually fires).
-                    const { parseSkillProvenance, registryKey } = await import(
-                        "../../features/magic-context/skill-memory/provenance"
-                    );
+                    const { parseSkillProvenance, resolveSkillPathByName, registryKey } =
+                        await import("../../features/magic-context/skill-memory/provenance");
+                    // Compute sessionDir once so it's shared between the
+                    // provenance-resolve and injection blocks below.
+                    // First-turn fallback: skill tool fires before
+                    // sessionDirectoryBySession is populated → fall back
+                    // to args.defaultDirectory.
+                    const sessionDir =
+                        args.sessionDirectoryBySession.get(typedInput.sessionID) ??
+                        args.defaultDirectory;
                     try {
                         const { parseFrontmatterConfig } = await import(
                             "../../features/magic-context/skill-memory/frontmatter"
                         );
-                        const provenance = parseSkillProvenance(typedOutput.output, skillId);
+                        // PRIMARY path: parse the "Base directory for this skill:" line
+                        let provenance = parseSkillProvenance(typedOutput.output, skillId);
+                        // FALLBACK: name-based disk resolution when the provenance
+                        // line was truncated (MAX_BYTES=51200 cutoff) or absent.
+                        // For large skills (e.g. delegating at 52KB), the line
+                        // sits past the cutoff and is dropped from output.
+                        if (!provenance) {
+                            const resolved = resolveSkillPathByName(skillId, sessionDir);
+                            if (resolved) {
+                                provenance = {
+                                    resolvedPath: resolved.resolvedPath,
+                                    tier: resolved.tier,
+                                    skillSource: resolved.skillSource,
+                                    skillId,
+                                    loadedAt: Date.now(),
+                                };
+                            }
+                        }
                         if (provenance) {
                             let frontmatterConfig:
                                 | import("../../features/magic-context/skill-memory/frontmatter").SkillMemoryConfig
@@ -722,15 +746,8 @@ export function createToolExecuteAfterHook(args: {
                             registryKey(typedInput.sessionID, skillId),
                         );
                         if (registryEntry) {
-                            // First-turn fallback: if the map has no entry yet
-                            // (skill tool fires before sessionDirectoryBySession
-                            // is populated), fall back to args.defaultDirectory.
-                            // Intentional: multi-project / Desktop-launched sessions
-                            // may misattribute on the very first skill call;
-                            // subsequent calls resolve correctly.
-                            const sessionDir =
-                                args.sessionDirectoryBySession.get(typedInput.sessionID) ??
-                                args.defaultDirectory;
+                            // sessionDir was already computed above (shared with the
+                            // provenance-resolve block) — reuse it here.
                             const projectIdentity = resolveProjectIdentity(sessionDir);
                             const stashed = typedInput.callID
                                 ? (getAndDeleteIntent(

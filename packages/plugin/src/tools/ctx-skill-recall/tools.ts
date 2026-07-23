@@ -1,11 +1,10 @@
 import { readFileSync } from "node:fs";
-import { dirname } from "node:path";
 import { type ToolContext, type ToolDefinition, tool } from "@opencode-ai/plugin";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { parseFrontmatterConfig } from "../../features/magic-context/skill-memory/frontmatter";
 import {
-    deriveSkillTier,
     getSkillLoad,
+    resolveSkillPathByName,
     type SkillProvenance,
 } from "../../features/magic-context/skill-memory/provenance";
 import { recallSkillMemoryBlock } from "../../features/magic-context/skill-memory/recall";
@@ -118,35 +117,10 @@ export function createCtxSkillRecallTool(deps: CtxSkillRecallToolDeps): ToolDefi
                 resolvedPath = registryEntry.resolvedPath;
                 tier = registryEntry.tier;
             } else {
-                // Cold-start disk fallback: search in opencode discovery order
-                // Project dirs first (shadows global), then global dirs
-                const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
-                const candidateDirs = [
-                    // Project-local dirs first (project shadows global — finding U3)
-                    `${projectDirectory}/.opencode/skill/${args.skill}`,
-                    `${projectDirectory}/.opencode/skills/${args.skill}`,
-                    `${projectDirectory}/.agents/skills/${args.skill}`,
-                    `${projectDirectory}/.claude/skills/${args.skill}`,
-                    // Global dirs second
-                    `${home}/.config/opencode/skills/${args.skill}`, // via Global.Path.config + {skill,skills}/**/SKILL.md
-                    `${home}/.config/opencode/skill/${args.skill}`, // singular — OPENCODE_SKILL_PATTERN covers both
-                    `${home}/.agents/skills/${args.skill}`, // via AGENTS_EXTERNAL_DIR
-                    `${home}/.claude/skills/${args.skill}`, // via CLAUDE_EXTERNAL_DIR
-                ];
-
-                let rawSkillContent: string | null = null;
-                for (const dir of candidateDirs) {
-                    const candidate = `${dir}/SKILL.md`;
-                    try {
-                        rawSkillContent = readFileSync(candidate, "utf-8");
-                        resolvedPath = candidate;
-                        break;
-                    } catch {
-                        // Not found in this dir — try next
-                    }
-                }
-
-                if (!resolvedPath) {
+                // Cold-start disk fallback: resolve via shared name-based walker
+                // (same order as opencode's discoverSkills()).
+                const resolved = resolveSkillPathByName(args.skill, projectDirectory);
+                if (!resolved) {
                     // SKILL.md not found anywhere — distinct message from "no notes" cold-start
                     return (
                         `SKILL.md not found for '${args.skill}' in any known skill directory. ` +
@@ -156,13 +130,20 @@ export function createCtxSkillRecallTool(deps: CtxSkillRecallToolDeps): ToolDefi
                     );
                 }
 
+                resolvedPath = resolved.resolvedPath;
+                tier = resolved.tier;
+
                 // Parse frontmatter from on-disk SKILL.md
+                let rawSkillContent: string | null = null;
+                try {
+                    rawSkillContent = readFileSync(resolvedPath, "utf-8");
+                } catch {
+                    // SKILL.md exists per resolveSkillPathByName, so this is a read race;
+                    // treat as not-found (unlikely but guard non-fatally).
+                }
                 frontmatterConfig = rawSkillContent
                     ? parseFrontmatterConfig(rawSkillContent)
                     : null;
-                // Derive tier from the skill's directory (dirname, not a fragile
-                // string replace that would mis-handle a path containing "SKILL.md").
-                tier = deriveSkillTier(dirname(resolvedPath));
             }
 
             if (!frontmatterConfig?.enabled) {

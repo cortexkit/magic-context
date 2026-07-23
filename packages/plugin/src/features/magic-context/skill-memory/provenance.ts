@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 export interface SkillProvenance {
@@ -82,6 +83,55 @@ export function deriveSkillSource(
         return "opencode-project";
     }
     return "opencode-project"; // default for unknown project-local paths
+}
+
+/**
+ * Name-based skill-path resolution — walks known skill directories in opencode
+ * discovery order, returning the first match. This is the cold-start fallback
+ * when the "Base directory for this skill:" provenance line is absent or
+ * truncated from the skill tool output (MAX_BYTES=51200 cutoff).
+ *
+ * Search order matches opencode's `discoverSkills()`:
+ *   - Project dirs first (project shadows global — finding U3)
+ *   - Global dirs second
+ *
+ * Does NOT read SKILL.md content — callers are responsible for their own
+ * frontmatter parsing.
+ */
+export function resolveSkillPathByName(
+    skillName: string,
+    projectDirectory: string,
+): {
+    resolvedPath: string;
+    tier: "project" | "global";
+    skillSource: SkillProvenance["skillSource"];
+} | null {
+    const home = (process.env.HOME ?? process.env.USERPROFILE ?? "").replace(/\\/g, "/");
+    const candidateDirs = [
+        // Project-local dirs first (project shadows global — finding U3)
+        `${projectDirectory}/.opencode/skill/${skillName}`,
+        `${projectDirectory}/.opencode/skills/${skillName}`,
+        `${projectDirectory}/.agents/skills/${skillName}`,
+        `${projectDirectory}/.claude/skills/${skillName}`,
+        // Global dirs second
+        `${home}/.config/opencode/skills/${skillName}`, // Global.Path.config + {skill,skills}/**/SKILL.md
+        `${home}/.config/opencode/skill/${skillName}`, // singular — OPENCODE_SKILL_PATTERN covers both
+        `${home}/.agents/skills/${skillName}`, // AGENTS_EXTERNAL_DIR
+        `${home}/.claude/skills/${skillName}`, // CLAUDE_EXTERNAL_DIR
+    ];
+
+    for (const dir of candidateDirs) {
+        const candidate = `${dir}/SKILL.md`;
+        if (existsSync(candidate)) {
+            return {
+                resolvedPath: candidate,
+                tier: deriveSkillTier(dir),
+                skillSource: deriveSkillSource(dir),
+            };
+        }
+    }
+
+    return null;
 }
 
 // ── Session-scoped skill-load registry ─────────────────────────────────────

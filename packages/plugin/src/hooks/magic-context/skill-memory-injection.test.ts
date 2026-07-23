@@ -1,11 +1,21 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { runMigrations } from "../../features/magic-context/migrations";
+import {
+    createSkillLoadRegistry,
+    registryKey,
+} from "../../features/magic-context/skill-memory/provenance";
 import { recallSkillMemoryBlock } from "../../features/magic-context/skill-memory/recall";
 import { insertSkillMemoryNote } from "../../features/magic-context/skill-memory/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { maybeInjectSkillMemory } from "../magic-context/hook-handlers";
+import {
+    createIntentByCallIdMap,
+    createToolExecuteAfterHook,
+    maybeInjectSkillMemory,
+} from "../magic-context/hook-handlers";
 
 function makeDb(): Database {
     const db = new Database(":memory:");
@@ -208,5 +218,93 @@ describe("maybeInjectSkillMemory", () => {
         } finally {
             closeQuietly(db);
         }
+    });
+});
+
+describe("createToolExecuteAfterHook skill registry (truncation fallback)", () => {
+    const projectDir = `${tmpdir()}/skill-truncation-test-${Date.now()}`;
+    const skillDir = `${projectDir}/.opencode/skills/truncated-skill`;
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(
+        `${skillDir}/SKILL.md`,
+        "---\nskill-memory:\n  enabled: true\n  max_tokens: 1500\n---\n\n# Truncated Skill\n",
+    );
+
+    afterAll(() => {
+        rmSync(projectDir, { recursive: true, force: true });
+    });
+
+    test("populates registry via name-based fallback when Base-dir line is absent (truncation simulation)", async () => {
+        // Simulates the bug: MAX_BYTES=51200 truncation drops the
+        // "Base directory for this skill:" line, making parseSkillProvenance
+        // return null. The fallback resolveSkillPathByName must populate
+        // the registry so ctx_skill_note doesn't hard-fail with
+        // "No recent skill load found... provenance parse failure".
+        const db = makeDb();
+        const registry = createSkillLoadRegistry();
+        const hook = createToolExecuteAfterHook({
+            db,
+            channel1StateBySession: new Map(),
+            skillLoadRegistry: registry,
+            sessionDirectoryBySession: new Map(),
+            defaultDirectory: projectDir,
+            intentByCallId: createIntentByCallIdMap(),
+        });
+
+        // Simulated truncated skill output: NO "Base directory for this skill:" line
+        const output = {
+            output: [
+                '<skill_content name="truncated-skill">',
+                "# Truncated Skill",
+                "",
+                "Some skill content that would normally be long enough",
+                "to push the provenance line past the 51200-byte cutoff.",
+                "",
+                "More content...",
+                "</skill_content>",
+            ].join("\n"),
+        };
+
+        await hook(
+            { tool: "skill", sessionID: "ses_trunc", args: { name: "truncated-skill" } },
+            output,
+        );
+
+        const entry = registry.get(registryKey("ses_trunc", "truncated-skill"));
+        // Without the name-based fallback this would be undefined (RED test).
+        expect(entry).not.toBeUndefined();
+        expect(entry!.resolvedPath).toBe(`${skillDir}/SKILL.md`);
+        expect(entry!.tier).toBe("project");
+        expect(entry!.skillSource).toBe("opencode-project");
+        expect(entry!.skillId).toBe("truncated-skill");
+        // Frontmatter should be parsed from the on-disk SKILL.md
+        expect(entry!.frontmatterConfig).not.toBeNull();
+        expect(entry!.frontmatterConfig!.enabled).toBe(true);
+    });
+
+    test("registry stays empty when fallback also cannot find SKILL.md", async () => {
+        const db = makeDb();
+        const registry = createSkillLoadRegistry();
+        const hook = createToolExecuteAfterHook({
+            db,
+            channel1StateBySession: new Map(),
+            skillLoadRegistry: registry,
+            sessionDirectoryBySession: new Map(),
+            defaultDirectory: projectDir,
+            intentByCallId: createIntentByCallIdMap(),
+        });
+
+        // Skill that doesn't exist on disk at all
+        const output = {
+            output: "# Nonexistent Skill\n\nNo base dir here either.",
+        };
+
+        await hook(
+            { tool: "skill", sessionID: "ses_miss", args: { name: "nonexistent-skill" } },
+            output,
+        );
+
+        const entry = registry.get(registryKey("ses_miss", "nonexistent-skill"));
+        expect(entry).toBeUndefined();
     });
 });
