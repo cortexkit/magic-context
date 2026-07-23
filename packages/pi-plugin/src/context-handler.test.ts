@@ -1361,11 +1361,16 @@ describe("registerPiContextHandler", () => {
 
 			const result = await handler({ messages }, executeCtx as never);
 			const statuses = new Map(
-				getTagsBySession(db, sessionId).map((tag) => [tag.tagNumber, tag.status]),
+				getTagsBySession(db, sessionId).map((tag) => [
+					tag.tagNumber,
+					tag.status,
+				]),
 			);
 			expect(statuses.get(toolTags[0].tagNumber)).toBe("dropped");
 			expect(statuses.get(toolTags[1].tagNumber)).toBe("active");
-			expect(textOf(result.messages[4] as never)).toContain("unrequested output");
+			expect(textOf(result.messages[4] as never)).toContain(
+				"unrequested output",
+			);
 			expect(getOrCreateSessionMeta(db, sessionId).toolReclaimWatermark).toBe(
 				toolTags[1].tagNumber,
 			);
