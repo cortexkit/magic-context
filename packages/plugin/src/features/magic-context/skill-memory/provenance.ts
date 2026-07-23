@@ -92,35 +92,73 @@ export function deriveSkillSource(
  * truncated from the skill tool output (MAX_BYTES=51200 cutoff).
  *
  * Search order matches opencode's `discoverSkills()`:
- *   - Project dirs first (project shadows global — finding U3)
- *   - Global dirs second
+ *   - Project-dir ancestors first (project shadows global — finding U3).
+ *     When `projectDirectory` is non-null, walks UP the ancestor chain from
+ *     that directory (each level checking the 4 project patterns in order —
+ *     nearest dir first), stopping at $HOME or the filesystem root, with a
+ *     hard bound of 20 levels.
+ *   - Global dirs second (always checked, regardless of projectDirectory).
+ *
+ * When `projectDirectory` is null, project-tier candidates are SKIPPED
+ * entirely — only global dirs are searched. Callers should pass null when
+ * the directory is a guess (e.g. Desktop-launched session without an
+ * authoritative sessionDirectoryBySession entry); a wrong dir could resolve
+ * a same-named project skill and poison the registry.
  *
  * Does NOT read SKILL.md content — callers are responsible for their own
  * frontmatter parsing.
  */
 export function resolveSkillPathByName(
     skillName: string,
-    projectDirectory: string,
+    projectDirectory: string | null,
 ): {
     resolvedPath: string;
     tier: "project" | "global";
     skillSource: SkillProvenance["skillSource"];
 } | null {
     const home = (process.env.HOME ?? process.env.USERPROFILE ?? "").replace(/\\/g, "/");
-    const candidateDirs = [
-        // Project-local dirs first (project shadows global — finding U3)
-        `${projectDirectory}/.opencode/skill/${skillName}`,
-        `${projectDirectory}/.opencode/skills/${skillName}`,
-        `${projectDirectory}/.agents/skills/${skillName}`,
-        `${projectDirectory}/.claude/skills/${skillName}`,
-        // Global dirs second
+    const projectPatterns = [
+        ".opencode/skill",
+        ".opencode/skills",
+        ".agents/skills",
+        ".claude/skills",
+    ] as const;
+    const globalDirs = [
         `${home}/.config/opencode/skills/${skillName}`, // Global.Path.config + {skill,skills}/**/SKILL.md
         `${home}/.config/opencode/skill/${skillName}`, // singular — OPENCODE_SKILL_PATTERN covers both
         `${home}/.agents/skills/${skillName}`, // AGENTS_EXTERNAL_DIR
         `${home}/.claude/skills/${skillName}`, // CLAUDE_EXTERNAL_DIR
     ];
 
-    for (const dir of candidateDirs) {
+    // ── Project-tier ancestor walk ──────────────────────────────────────
+    if (projectDirectory !== null) {
+        const normalizedHome = home.endsWith("/") ? home.slice(0, -1) : home;
+        let current = projectDirectory;
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        for (let depth = 0; depth < 20 && current.length > 0; depth++) {
+            // Stop at $HOME (exclusive) or filesystem root
+            if (current === normalizedHome || current === "/") break;
+
+            for (const pat of projectPatterns) {
+                const dir = `${current}/${pat}/${skillName}`;
+                const candidate = `${dir}/SKILL.md`;
+                if (existsSync(candidate)) {
+                    return {
+                        resolvedPath: candidate,
+                        tier: deriveSkillTier(dir),
+                        skillSource: deriveSkillSource(dir),
+                    };
+                }
+            }
+
+            // Walk up: strip last path segment (or empty string if none left)
+            const sep = current.lastIndexOf("/");
+            current = sep > 0 ? current.slice(0, sep) : "";
+        }
+    }
+
+    // ── Global dirs (always checked) ────────────────────────────────────
+    for (const dir of globalDirs) {
         const candidate = `${dir}/SKILL.md`;
         if (existsSync(candidate)) {
             return {

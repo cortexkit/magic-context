@@ -272,4 +272,81 @@ describe("resolveSkillPathByName", () => {
             rmSync(globalHome, { recursive: true, force: true });
         }
     });
+
+    test("null projectDirectory skips project candidates, resolves global only", () => {
+        const savedHome = process.env.HOME;
+        const projectRoot = `${tmpdir()}/skill-null-proj-${Date.now()}`;
+        const globalHome = `${tmpdir()}/skill-null-global-${Date.now()}`;
+        try {
+            // Create a project-local skill — should be IGNORED when null is passed
+            const projectSkillDir = `${projectRoot}/.opencode/skills/null-guard-skill`;
+            mkdirSync(projectSkillDir, { recursive: true });
+            writeFileSync(`${projectSkillDir}/SKILL.md`, "---\n---\n\n# Project\n");
+
+            // Create a global skill with a DIFFERENT name — should resolve
+            const globalSkillDir = `${globalHome}/.config/opencode/skills/null-global-skill`;
+            mkdirSync(globalSkillDir, { recursive: true });
+            writeFileSync(`${globalSkillDir}/SKILL.md`, "---\n---\n\n# Global\n");
+
+            process.env.HOME = globalHome;
+            // Pass null → project candidates are skipped
+            const resultNull = resolveSkillPathByName("null-guard-skill", null);
+            // The project skill exists but should NOT be found (null skips project)
+            expect(resultNull).toBeNull();
+
+            // The global skill with different name SHOULD resolve
+            const resultGlobal = resolveSkillPathByName("null-global-skill", null);
+            expect(resultGlobal).not.toBeNull();
+            expect(resultGlobal!.resolvedPath).toBe(`${globalSkillDir}/SKILL.md`);
+            expect(resultGlobal!.tier).toBe("global");
+        } finally {
+            process.env.HOME = savedHome;
+            rmSync(projectRoot, { recursive: true, force: true });
+            rmSync(globalHome, { recursive: true, force: true });
+        }
+    });
+
+    test("finds skill from ancestor walk (subdir misses, root has it)", () => {
+        const root = `${tmpdir()}/skill-ancestor-root-${Date.now()}`;
+        const subdir = `${root}/sub/deep/here`;
+        try {
+            // Skill at root level: .opencode/skills/ancestor-skill/SKILL.md
+            const skillDir = `${root}/.opencode/skills/ancestor-skill`;
+            mkdirSync(subdir, { recursive: true });
+            mkdirSync(skillDir, { recursive: true });
+            writeFileSync(`${skillDir}/SKILL.md`, "---\n---\n\n# Ancestor\n");
+
+            // Call from deep subdir — ancestor walk should find it at root
+            const result = resolveSkillPathByName("ancestor-skill", subdir);
+            expect(result).not.toBeNull();
+            expect(result!.resolvedPath).toBe(`${skillDir}/SKILL.md`);
+            expect(result!.tier).toBe("project");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("ancestor walk: nearest ancestor wins when two levels both have the skill", () => {
+        const root = `${tmpdir()}/skill-nearest-wins-${Date.now()}`;
+        const child = `${root}/child`;
+        try {
+            // Root-level skill (farther ancestor)
+            const rootSkillDir = `${root}/.opencode/skills/nearest-skill`;
+            mkdirSync(rootSkillDir, { recursive: true });
+            writeFileSync(`${rootSkillDir}/SKILL.md`, "---\n---\n\n# Root\n");
+
+            // Child-level skill (nearer ancestor) — should win
+            const childSkillDir = `${child}/.opencode/skills/nearest-skill`;
+            mkdirSync(childSkillDir, { recursive: true });
+            writeFileSync(`${childSkillDir}/SKILL.md`, "---\n---\n\n# Child\n");
+
+            // Call from child — nearest ancestor (child dir) should win
+            const result = resolveSkillPathByName("nearest-skill", child);
+            expect(result).not.toBeNull();
+            expect(result!.resolvedPath).toBe(`${childSkillDir}/SKILL.md`);
+            expect(result!.tier).toBe("project");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
 });

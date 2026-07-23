@@ -242,44 +242,48 @@ describe("createToolExecuteAfterHook skill registry (truncation fallback)", () =
         // "No recent skill load found... provenance parse failure".
         const db = makeDb();
         const registry = createSkillLoadRegistry();
+        // Seed the map so project-tier resolution is authoritative (P1 fix).
         const hook = createToolExecuteAfterHook({
             db,
             channel1StateBySession: new Map(),
             skillLoadRegistry: registry,
-            sessionDirectoryBySession: new Map(),
-            defaultDirectory: projectDir,
+            sessionDirectoryBySession: new Map([["ses_trunc", projectDir]]),
+            defaultDirectory: "/tmp/irrelevant",
             intentByCallId: createIntentByCallIdMap(),
         });
+        try {
+            // Simulated truncated skill output: NO "Base directory for this skill:" line
+            const output = {
+                output: [
+                    '<skill_content name="truncated-skill">',
+                    "# Truncated Skill",
+                    "",
+                    "Some skill content that would normally be long enough",
+                    "to push the provenance line past the 51200-byte cutoff.",
+                    "",
+                    "More content...",
+                    "</skill_content>",
+                ].join("\n"),
+            };
 
-        // Simulated truncated skill output: NO "Base directory for this skill:" line
-        const output = {
-            output: [
-                '<skill_content name="truncated-skill">',
-                "# Truncated Skill",
-                "",
-                "Some skill content that would normally be long enough",
-                "to push the provenance line past the 51200-byte cutoff.",
-                "",
-                "More content...",
-                "</skill_content>",
-            ].join("\n"),
-        };
+            await hook(
+                { tool: "skill", sessionID: "ses_trunc", args: { name: "truncated-skill" } },
+                output,
+            );
 
-        await hook(
-            { tool: "skill", sessionID: "ses_trunc", args: { name: "truncated-skill" } },
-            output,
-        );
-
-        const entry = registry.get(registryKey("ses_trunc", "truncated-skill"));
-        // Without the name-based fallback this would be undefined (RED test).
-        expect(entry).not.toBeUndefined();
-        expect(entry!.resolvedPath).toBe(`${skillDir}/SKILL.md`);
-        expect(entry!.tier).toBe("project");
-        expect(entry!.skillSource).toBe("opencode-project");
-        expect(entry!.skillId).toBe("truncated-skill");
-        // Frontmatter should be parsed from the on-disk SKILL.md
-        expect(entry!.frontmatterConfig).not.toBeNull();
-        expect(entry!.frontmatterConfig!.enabled).toBe(true);
+            const entry = registry.get(registryKey("ses_trunc", "truncated-skill"));
+            // Without the name-based fallback this would be undefined (RED test).
+            expect(entry).not.toBeUndefined();
+            expect(entry!.resolvedPath).toBe(`${skillDir}/SKILL.md`);
+            expect(entry!.tier).toBe("project");
+            expect(entry!.skillSource).toBe("opencode-project");
+            expect(entry!.skillId).toBe("truncated-skill");
+            // Frontmatter should be parsed from the on-disk SKILL.md
+            expect(entry!.frontmatterConfig).not.toBeNull();
+            expect(entry!.frontmatterConfig!.enabled).toBe(true);
+        } finally {
+            closeQuietly(db);
+        }
     });
 
     test("registry stays empty when fallback also cannot find SKILL.md", async () => {
@@ -289,22 +293,65 @@ describe("createToolExecuteAfterHook skill registry (truncation fallback)", () =
             db,
             channel1StateBySession: new Map(),
             skillLoadRegistry: registry,
-            sessionDirectoryBySession: new Map(),
-            defaultDirectory: projectDir,
+            sessionDirectoryBySession: new Map([["ses_miss", projectDir]]),
+            defaultDirectory: "/tmp/irrelevant",
             intentByCallId: createIntentByCallIdMap(),
         });
+        try {
+            // Skill that doesn't exist on disk at all
+            const output = {
+                output: "# Nonexistent Skill\n\nNo base dir here either.",
+            };
 
-        // Skill that doesn't exist on disk at all
-        const output = {
-            output: "# Nonexistent Skill\n\nNo base dir here either.",
-        };
+            await hook(
+                { tool: "skill", sessionID: "ses_miss", args: { name: "nonexistent-skill" } },
+                output,
+            );
 
-        await hook(
-            { tool: "skill", sessionID: "ses_miss", args: { name: "nonexistent-skill" } },
-            output,
-        );
+            const entry = registry.get(registryKey("ses_miss", "nonexistent-skill"));
+            expect(entry).toBeUndefined();
+        } finally {
+            closeQuietly(db);
+        }
+    });
 
-        const entry = registry.get(registryKey("ses_miss", "nonexistent-skill"));
-        expect(entry).toBeUndefined();
+    test("map-miss does NOT resolve a project-local skill (P1 guard)", async () => {
+        // When sessionDirectoryBySession has no entry for the session,
+        // the fallback receives null as projectDirectory and MUST NOT
+        // resolve project-tier candidates — the defaultDirectory is a guess.
+        const db = makeDb();
+        const registry = createSkillLoadRegistry();
+        // Empty map (no entry for ses_guess) → mappedDir is undefined → null → skip project
+        const hook = createToolExecuteAfterHook({
+            db,
+            channel1StateBySession: new Map(),
+            skillLoadRegistry: registry,
+            sessionDirectoryBySession: new Map(),
+            defaultDirectory: projectDir, // projectDir HAS the skill, but it's a guess
+            intentByCallId: createIntentByCallIdMap(),
+        });
+        try {
+            const output = {
+                output: [
+                    '<skill_content name="truncated-skill">',
+                    "# Truncated Skill",
+                    "",
+                    "Some content...",
+                    "</skill_content>",
+                ].join("\n"),
+            };
+
+            await hook(
+                { tool: "skill", sessionID: "ses_guess", args: { name: "truncated-skill" } },
+                output,
+            );
+
+            // Registry must NOT contain the project-local skill — the fallback
+            // skips project candidates when mappedDir is null.
+            const entry = registry.get(registryKey("ses_guess", "truncated-skill"));
+            expect(entry).toBeUndefined();
+        } finally {
+            closeQuietly(db);
+        }
     });
 });

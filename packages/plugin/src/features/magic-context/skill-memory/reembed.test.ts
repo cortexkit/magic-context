@@ -50,7 +50,8 @@ function registerReembedTestProject(
 describe("reembed", () => {
     test("reembedStaleSkillNotes fills NULL embeddings (bounded, idempotent)", async () => {
         _resetProjectEmbeddingRegistryForTests();
-        _setTestProviderFactoryForProject(null);
+        // installReembedTestProvider() unconditionally sets the factory, so
+        // a null-reset before it is redundant.
         installReembedTestProvider();
 
         const db = new Database(":memory:");

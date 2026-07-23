@@ -682,14 +682,16 @@ export function createToolExecuteAfterHook(args: {
                     // (lazy-loaded only when the skill tool actually fires).
                     const { parseSkillProvenance, resolveSkillPathByName, registryKey } =
                         await import("../../features/magic-context/skill-memory/provenance");
-                    // Compute sessionDir once so it's shared between the
-                    // provenance-resolve and injection blocks below.
-                    // First-turn fallback: skill tool fires before
-                    // sessionDirectoryBySession is populated → fall back
-                    // to args.defaultDirectory.
-                    const sessionDir =
-                        args.sessionDirectoryBySession.get(typedInput.sessionID) ??
-                        args.defaultDirectory;
+                    // Split sessionDir into two signals:
+                    //   - mappedDir: authoritative (from sessionDirectoryBySession)
+                    //     → fed to the fallback's project-tier resolution.
+                    //   - sessionDir: the injection block's fallback (mappedDir ?? defaultDirectory)
+                    //     → same pre-existing behaviour, not changed here.
+                    // When mappedDir is undefined (map miss), the fallback receives null
+                    // and SKIPS project-tier candidates — a wrong launch-dir guess
+                    // must not resolve a same-named project skill and poison the registry.
+                    const mappedDir = args.sessionDirectoryBySession.get(typedInput.sessionID);
+                    const sessionDir = mappedDir ?? args.defaultDirectory;
                     try {
                         const { parseFrontmatterConfig } = await import(
                             "../../features/magic-context/skill-memory/frontmatter"
@@ -701,7 +703,11 @@ export function createToolExecuteAfterHook(args: {
                         // For large skills (e.g. delegating at 52KB), the line
                         // sits past the cutoff and is dropped from output.
                         if (!provenance) {
-                            const resolved = resolveSkillPathByName(skillId, sessionDir);
+                            // mappedDir is authoritative (from sessionDirectoryBySession);
+                            // null means "don't resolve project-tier candidates" — the
+                            // session directory is a guess and could resolve the wrong
+                            // same-named project skill.
+                            const resolved = resolveSkillPathByName(skillId, mappedDir ?? null);
                             if (resolved) {
                                 provenance = {
                                     resolvedPath: resolved.resolvedPath,
