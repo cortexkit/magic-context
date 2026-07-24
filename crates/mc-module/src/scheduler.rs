@@ -288,6 +288,9 @@ struct CompiledPattern {
 /// Parse a cache idle TTL string into milliseconds.
 pub fn parse_cache_ttl(ttl: &str) -> Result<u64, CacheTtlParseError> {
     let normalized = ttl.trim();
+    if normalized.eq_ignore_ascii_case("never") {
+        return Ok(u64::MAX);
+    }
     let (number, multiplier) =
         if !normalized.is_empty() && normalized.chars().all(|c| c.is_ascii_digit()) {
             (normalized, 1.0)
@@ -1216,5 +1219,39 @@ mod tests {
             to_selection_pass_class(PassDecision::Emergency95),
             PassClass::EmergencyForce
         );
+    }
+
+    #[test]
+    fn parse_cache_ttl_never_returns_u64_max() {
+        assert_eq!(parse_cache_ttl("never"), Ok(u64::MAX));
+        assert_eq!(parse_cache_ttl("NEVER"), Ok(u64::MAX));
+        assert_eq!(parse_cache_ttl(" never "), Ok(u64::MAX));
+        assert_eq!(parse_cache_ttl("Never"), Ok(u64::MAX));
+        assert_eq!(parse_cache_ttl("5m"), Ok(300_000));
+        assert_eq!(parse_cache_ttl("bad-format"), Err(CacheTtlParseError));
+    }
+
+    #[test]
+    fn never_ttl_predicates_are_always_false() {
+        // Scheduler: elapsed > u64::MAX is never true.
+        assert!(!ttl_execute_fired(u64::MAX, 0, u64::MAX));
+        assert!(!ttl_execute_fired(1_000_000, 0, u64::MAX));
+        // Hard: elapsed >= u64::MAX is never true.
+        assert!(!ttl_hard_expired(u64::MAX, 1, u64::MAX));
+        assert!(!ttl_hard_expired(1_000_000, 1, u64::MAX));
+    }
+
+    #[test]
+    fn never_ttl_scheduler_stays_deferred() {
+        let mut inputs = base_inputs();
+        // 10-day-old last response, well past any normal TTL
+        inputs.session.last_response_time_ms = 1_000;
+        inputs.session.cache_ttl = "never".to_string();
+        inputs.now_ms = 1_000 + 10 * 24 * 60 * 60 * 1000;
+        // Below threshold, so TTL is the only path to execute
+        inputs.usage.percentage = 50.0;
+        let outcome = decide(&inputs);
+        assert!(!outcome.idle_ttl_fired);
+        assert_eq!(outcome.pass, PassDecision::Defer);
     }
 }

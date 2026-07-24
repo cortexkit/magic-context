@@ -30,6 +30,12 @@ interface SchedulerConfig {
 export function parseCacheTtl(ttl: string): number {
     const normalizedTtl = ttl.trim();
 
+    // "never" sentinel: lanes kept warm by external keepwarm proxies — the idle
+    // heuristic is disabled, so MC never initiates a rebuild based on elapsed time.
+    if (normalizedTtl.toLowerCase() === "never") {
+        return Number.POSITIVE_INFINITY;
+    }
+
     // Intentional: bare numeric strings are treated as milliseconds. The setup CLI writes
     // "5m" or "59m" so users don't encounter bare numbers through normal config paths.
     if (NUMERIC_PATTERN.test(normalizedTtl)) {

@@ -8,6 +8,7 @@ import { getMostRecentTaskRunAt } from "../features/magic-context/dreamer/storag
 import { resolveProjectIdentity } from "../features/magic-context/memory/project-identity";
 import { getMural } from "../features/magic-context/mural/storage-mural";
 import { getEmbeddingCoverageStatus } from "../features/magic-context/project-embedding-registry";
+import { parseCacheTtl } from "../features/magic-context/scheduler";
 import {
     type ContextDatabase as Database,
     openDatabase,
@@ -149,20 +150,11 @@ async function loadRustSessionStatus(
     }
 }
 
-function parseTtlString(ttl: string): number {
-    const match = ttl.match(/^(\d+)(s|m|h)$/);
-    if (!match) return 5 * 60 * 1000;
-    const val = Number.parseInt(match[1], 10);
-    const unit = match[2];
-    switch (unit) {
-        case "s":
-            return val * 1000;
-        case "m":
-            return val * 60 * 1000;
-        case "h":
-            return val * 3600 * 1000;
-        default:
-            return 5 * 60 * 1000;
+function safeParseTtl(ttl: string): number {
+    try {
+        return parseCacheTtl(ttl);
+    } catch {
+        return 5 * 60 * 1000;
     }
 }
 
@@ -599,6 +591,7 @@ export function buildStatusDetail(
         cacheTtlMs: 0,
         cacheRemainingMs: 0,
         cacheExpired: false,
+        cacheNeverExpires: false,
         executeThreshold: 65,
         executeThresholdMode: "percentage",
         protectedTagCount: 20,
@@ -741,11 +734,19 @@ export function buildStatusDetail(
         } else if (base.usagePercentage > 0) {
             detail.contextLimit = Math.round(base.inputTokens / (base.usagePercentage / 100));
         }
-        detail.cacheTtlMs = parseTtlString(detail.cacheTtl);
+        detail.cacheTtlMs = safeParseTtl(detail.cacheTtl);
+        if (detail.cacheTtlMs === Number.POSITIVE_INFINITY) {
+            detail.cacheNeverExpires = true;
+            detail.cacheTtlMs = 0;
+        }
         if (detail.lastResponseTime > 0) {
             const elapsed = Date.now() - detail.lastResponseTime;
-            detail.cacheRemainingMs = Math.max(0, detail.cacheTtlMs - elapsed);
-            detail.cacheExpired = detail.cacheRemainingMs === 0;
+            if (detail.cacheNeverExpires) {
+                detail.cacheRemainingMs = Number.POSITIVE_INFINITY;
+            } else {
+                detail.cacheRemainingMs = Math.max(0, detail.cacheTtlMs - elapsed);
+                detail.cacheExpired = detail.cacheRemainingMs === 0;
+            }
         }
 
         // History compression

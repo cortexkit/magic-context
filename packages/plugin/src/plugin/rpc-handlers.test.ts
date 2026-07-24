@@ -464,3 +464,27 @@ describe("buildStatusDetail — storage versions probe", () => {
         }
     });
 });
+
+describe("buildStatusDetail — cacheNeverExpires with 'never' TTL", () => {
+    test("sets cacheNeverExpires: true when cache_ttl is 'never'", () => {
+        const db = createTestDb();
+        try {
+            const sessionId = "ses-status-never";
+            const directory = process.cwd();
+
+            // Force-create the session meta row so the UPDATE lands on an existing row.
+            db.prepare(`INSERT INTO session_meta (session_id) VALUES (?)`).run(sessionId);
+            db.prepare("UPDATE session_meta SET cache_ttl = ? WHERE session_id = ?").run(
+                "never",
+                sessionId,
+            );
+
+            const detail = buildStatusDetail(db, sessionId, directory);
+
+            expect(detail.cacheNeverExpires).toBe(true);
+            expect(detail.cacheExpired).toBe(false);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+});

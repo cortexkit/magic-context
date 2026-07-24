@@ -240,6 +240,28 @@ export function __getMessageTokensCacheForTest(
 }
 
 /**
+ * Compute whether the provider cache expired due to idle time.
+ * Extracted so callers that don't run the full transform pipeline can still
+ * evaluate the TTL idle window with the same parseCacheTtl semantics.
+ *
+ * Returns false when cacheTtl is "never" (Infinity) because any finite
+ * elapsed time is < Infinity.
+ */
+export function computeHardCacheExpired(
+    cacheTtl: string,
+    lastResponseTime: number,
+    now: number,
+): boolean {
+    let ttlMs: number;
+    try {
+        ttlMs = parseCacheTtl(cacheTtl);
+    } catch {
+        ttlMs = 5 * 60 * 1000;
+    }
+    return lastResponseTime > 0 && now - lastResponseTime >= ttlMs;
+}
+
+/**
  * Extract the provider/model from the last assistant message in the array.
  * Used for early model-change detection before loadContextUsage.
  */
@@ -2023,16 +2045,11 @@ export function createTransform(deps: TransformDeps) {
         const hardModelKey = hardModel ? `${hardModel.providerID}/${hardModel.modelID}` : "";
         const hardSystemHash =
             typeof sessionMeta.systemPromptHash === "string" ? sessionMeta.systemPromptHash : "";
-        let hardTtlMs = 5 * 60 * 1000;
-        try {
-            hardTtlMs = parseCacheTtl(sessionMeta.cacheTtl);
-        } catch (error) {
-            passOutcome.record("invalid-cache-ttl-fallback");
-            sessionLog(sessionId, "invalid cache_ttl; using the 5m default:", error);
-        }
-        const hardCacheExpired =
-            sessionMeta.lastResponseTime > 0 &&
-            Date.now() - sessionMeta.lastResponseTime >= hardTtlMs;
+        const hardCacheExpired = computeHardCacheExpired(
+            sessionMeta.cacheTtl,
+            sessionMeta.lastResponseTime,
+            Date.now(),
+        );
         const m0HardSignals = {
             systemHash: hardSystemHash,
             modelKey: hardModelKey,

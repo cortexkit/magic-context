@@ -195,6 +195,7 @@ export async function loadStatusDetail(
         cacheTtlMs: 0,
         cacheRemainingMs: 0,
         cacheExpired: false,
+        cacheNeverExpires: false,
         executeThreshold: 65,
         executeThresholdMode: "percentage",
         protectedTagCount: 20,

@@ -638,7 +638,7 @@ const StatusDialog = props => {
           },
           l: "Remaining",
           get v() {
-            return _$memo(() => !!s().cacheExpired)() ? "expired" : `${Math.round(s().cacheRemainingMs / 1000)}s`;
+            return _$memo(() => !!s().cacheExpired)() ? "expired" : _$memo(() => !!s().cacheNeverExpires)() ? "never expires (always-warm lane)" : `${Math.round(s().cacheRemainingMs / 1000)}s`;
           },
           get fg() {
             return _$memo(() => !!s().cacheExpired)() ? t().warning : t().textMuted;
@@ -650,7 +650,7 @@ const StatusDialog = props => {
           },
           l: "Auto-execute",
           get v() {
-            return _$memo(() => !!s().cacheExpired)() ? "yes (expired)" : `at TTL or ≥${formatThresholdPercent(s().executeThreshold)}%`;
+            return _$memo(() => !!s().cacheExpired)() ? "yes (expired)" : _$memo(() => !!s().cacheNeverExpires)() ? `at ≥${formatThresholdPercent(s().executeThreshold)}%` : `at TTL or ≥${formatThresholdPercent(s().executeThreshold)}%`;
           },
           get fg() {
             return t().textMuted;

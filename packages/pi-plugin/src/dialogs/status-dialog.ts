@@ -12,6 +12,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import { getMemoryCount } from "@magic-context/core/features/magic-context/memory/storage-memory";
+import { parseCacheTtl } from "@magic-context/core/features/magic-context/scheduler";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
 import { getSessionWorkMetrics } from "@magic-context/core/features/magic-context/storage-meta-persisted";
@@ -322,7 +323,9 @@ function renderInner(
 		} · ${
 			s.cacheExpired
 				? theme.fg("warning", "expired")
-				: `${Math.round(s.cacheRemainingMs / 1000)}s remaining`
+				: s.cacheRemainingMs === Number.POSITIVE_INFINITY
+					? "never expires (always-warm lane)"
+					: `${Math.round(s.cacheRemainingMs / 1000)}s remaining`
 		}`,
 	);
 	lines.push("");
@@ -519,11 +522,20 @@ export function buildPiStatusDetail(
 		},
 	);
 	const cacheTtl = meta.cacheTtl || "5m";
-	const cacheTtlMs = parseTtlString(cacheTtl);
+	let cacheTtlMs: number;
+	try {
+		cacheTtlMs = parseCacheTtl(cacheTtl);
+	} catch {
+		cacheTtlMs = 5 * 60 * 1000;
+	}
+	const neverExpires = cacheTtlMs === Number.POSITIVE_INFINITY;
 	const elapsed =
 		meta.lastResponseTime > 0 ? Date.now() - meta.lastResponseTime : 0;
-	const cacheRemainingMs =
-		meta.lastResponseTime > 0 ? Math.max(0, cacheTtlMs - elapsed) : cacheTtlMs;
+	const cacheRemainingMs = neverExpires
+		? Number.POSITIVE_INFINITY
+		: meta.lastResponseTime > 0
+			? Math.max(0, cacheTtlMs - elapsed)
+			: cacheTtlMs;
 	const cacheExpired = meta.lastResponseTime > 0 && cacheRemainingMs === 0;
 	const historyBlockTokens = compartmentTokens + factTokens;
 	const historyBudgetPercentage = deps.historyBudgetPercentage ?? 0.15;
@@ -745,22 +757,6 @@ function readPendingOpsCount(db: ContextDatabase, sessionId: string): number {
 		return row?.count ?? 0;
 	} catch {
 		return 0;
-	}
-}
-
-function parseTtlString(ttl: string): number {
-	const match = ttl.match(/^(\d+)(s|m|h)$/);
-	if (!match) return 5 * 60 * 1000;
-	const val = Number.parseInt(match[1] ?? "5", 10);
-	switch (match[2]) {
-		case "s":
-			return val * 1000;
-		case "m":
-			return val * 60 * 1000;
-		case "h":
-			return val * 3600 * 1000;
-		default:
-			return 5 * 60 * 1000;
 	}
 }
 

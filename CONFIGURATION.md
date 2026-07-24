@@ -88,6 +88,13 @@ Per-model overrides for mixed-model workflows:
 
 Supported formats: `"30s"`, `"5m"`, `"1h"`.
 
+**`"never"` sentinel:** set `cache_ttl` to `"never"` to disable the idle-TTL heuristic entirely. Both consumers —
+the scheduler (which converts defer passes to execute after TTL expiry) and the HARD-fold trigger (which folds
+m[1] into m[0] on a "free" prefix rebuild) — no longer act on idle time. Use this on lanes kept warm by an
+external keepwarm mechanism (prewarm proxies, dedicated cache-keep tools) where the idle heuristic false-positives
+and causes paid full-prefix cache-writes. After a genuine cold start (e.g. the keepwarm process died), MC
+won't detect the free-fold window on that lane — mutations then apply only at the execute threshold.
+
 Higher-tier models with longer cache windows benefit from a longer TTL. Setting it too low wastes cache hits. Setting it too high delays reduction on long sessions.
 
 ---

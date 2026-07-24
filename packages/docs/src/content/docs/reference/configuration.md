@@ -46,7 +46,7 @@ When and how aggressively Magic Context manages the session's context window. Pe
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `cache_ttl` | string \\| map<string, string> | `"5m"` | Cache TTL: string (e.g. "5m") or per-model object ({ default: "5m", "model-id": "10m" }) |
+| `cache_ttl` | string \\| map<string, string> | `"5m"` | Cache TTL: string (e.g. "5m", "1h", "30s") or per-model object ({ default: "5m", "model-id": "10m" }). Set to "never" for lanes kept warm by an external keepwarm proxy — disables the idle-TTL heuristic so MC never initiates a rebuild based on elapsed time. |
 | `execute_threshold_percentage` | number (20–80) \\| map<string, number (20–80)> | `65` | Context percentage that forces queued operations to execute. Number or per-model object ({ default: 65, "provider/model": 45 }). Values above 80 are rejected because the runtime caps at 80% for cache safety (MAX_EXECUTE_THRESHOLD). Default: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE |
 | `execute_threshold_tokens` | object | — | Absolute token thresholds per model. When matched, overrides execute_threshold_percentage for that model. Accepts `default` for all models or per-model keys. Values above 80% × context_limit are clamped with a warning log. Min 5_000, max 2_000_000. |
 | `execute_threshold_tokens.default` | number (5000–2000000) | — |  |

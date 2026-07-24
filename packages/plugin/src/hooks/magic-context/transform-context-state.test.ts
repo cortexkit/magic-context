@@ -10,6 +10,7 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import type { ContextUsage } from "../../features/magic-context/types";
+import { computeHardCacheExpired } from "./transform";
 import { loadContextUsage } from "./transform-context-state";
 
 const tempDirs: string[] = [];
@@ -130,5 +131,36 @@ describe("loadContextUsage", () => {
             inputTokens: 0,
         });
         expect(contextUsageMap.has("ses-missing")).toBe(false);
+    });
+});
+
+describe("computeHardCacheExpired", () => {
+    it("returns false for 'never' even with a 10-day-old lastResponseTime", () => {
+        const now = Date.now();
+        const tenDaysAgo = now - 10 * 24 * 60 * 60 * 1000;
+        expect(computeHardCacheExpired("never", tenDaysAgo, now)).toBe(false);
+        expect(computeHardCacheExpired("NEVER", tenDaysAgo, now)).toBe(false);
+    });
+
+    it("returns true when idle exceeds the TTL", () => {
+        const now = Date.now();
+        const tenMinutesAgo = now - 10 * 60 * 1000;
+        expect(computeHardCacheExpired("5m", tenMinutesAgo, now)).toBe(true);
+    });
+
+    it("returns false when idle is within the TTL", () => {
+        const now = Date.now();
+        const oneMinuteAgo = now - 60 * 1000;
+        expect(computeHardCacheExpired("5m", oneMinuteAgo, now)).toBe(false);
+    });
+
+    it("returns false when lastResponseTime is 0 (never responded)", () => {
+        expect(computeHardCacheExpired("5m", 0, Date.now())).toBe(false);
+    });
+
+    it("falls back to 5m on invalid TTL", () => {
+        const now = Date.now();
+        const sixMinutesAgo = now - 6 * 60 * 1000;
+        expect(computeHardCacheExpired("garbage", sixMinutesAgo, now)).toBe(true);
     });
 });

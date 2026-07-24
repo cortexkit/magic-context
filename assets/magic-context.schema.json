@@ -1089,7 +1089,7 @@
     },
     "cache_ttl": {
       "default": "5m",
-      "description": "Cache TTL: string (e.g. \"5m\") or per-model object ({ default: \"5m\", \"model-id\": \"10m\" })",
+      "description": "Cache TTL: string (e.g. \"5m\", \"1h\", \"30s\") or per-model object ({ default: \"5m\", \"model-id\": \"10m\" }). Set to \"never\" for lanes kept warm by an external keepwarm proxy — disables the idle-TTL heuristic so MC never initiates a rebuild based on elapsed time.",
       "anyOf": [
         {
           "type": "string"

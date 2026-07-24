@@ -69,4 +69,21 @@ describe("executeStatus", () => {
         expect(status).not.toContain("[clamped:");
         db.close();
     });
+
+    test("renders 'never expires' for cacheTtl 'never'", () => {
+        const db = new Database(":memory:");
+        initializeDatabase(db);
+        getOrCreateSessionMeta(db, SESSION_ID);
+        db.prepare("UPDATE session_meta SET cache_ttl = 'never' WHERE session_id = ?").run(
+            SESSION_ID,
+        );
+
+        const status = executeStatus(db, SESSION_ID, 20);
+
+        expect(status).toContain("- Configured: never");
+        expect(status).toContain("- Remaining: never expires (always-warm lane)");
+        expect(status).toContain("never expires");
+        expect(status).not.toContain("Infinity");
+        db.close();
+    });
 });

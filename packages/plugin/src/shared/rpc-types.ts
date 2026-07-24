@@ -129,6 +129,8 @@ export interface StatusDetail extends SidebarSnapshot {
     cacheTtlMs: number;
     cacheRemainingMs: number;
     cacheExpired: boolean;
+    /** True when cacheTtl is "never" — the idle-TTL heuristic is disabled on this lane. */
+    cacheNeverExpires?: boolean;
     executeThreshold: number;
     /**
      * Which config source produced `executeThreshold`. "tokens" means

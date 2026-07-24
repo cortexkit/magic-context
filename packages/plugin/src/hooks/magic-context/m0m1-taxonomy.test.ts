@@ -241,6 +241,30 @@ describe("m[0]/m[1] materialization taxonomy", () => {
         expect(again.reason).not.toBe("ttl_idle");
     });
 
+    it("consumer-contract: mustMaterialize respects cacheExpired=false (never-ttl lanes stay warm)", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        appendCompartments(db, SESSION_ID, [compartment(0, "A", "Alpha baseline")]);
+        pass({ projectDirectory, isCacheBustingPass: true });
+
+        // "never" resolves to Infinity in parseCacheTtl, so hardCacheExpired is
+        // always false. Verify mustMaterialize does NOT fire ttl_idle even when
+        // lastResponseTime is ancient — the "never" lane stays warm.
+        const tPast = Date.now() - 10 * 24 * 60 * 60 * 1000; // 10 days ago
+        db.prepare(
+            "UPDATE session_meta SET cached_m0_materialized_at = ? WHERE session_id = ?",
+        ).run(tPast - 1000, SESSION_ID);
+        const neverHard: M0HardSignals = {
+            ...BASE_HARD,
+            cacheExpired: false, // "never" → hardCacheExpired stays false
+            lastResponseTime: tPast,
+        };
+
+        const result = pass({ projectDirectory, isCacheBustingPass: true, hard: neverHard });
+        expect(result.reason).not.toBe("ttl_idle");
+        expect(result.rematerialized).toBe(false);
+    });
+
     it("pressure backstop: small m[0] + large m[1] folds via the absolute m[1] cap", () => {
         // The ratio test (m1 > 15% of m0) is suppressed when m[0] is below the
         // 2000-char floor, so without an absolute cap a tiny-m[0] session could
