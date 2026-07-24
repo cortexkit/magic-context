@@ -163,4 +163,39 @@ describe("computeHardCacheExpired", () => {
         const sixMinutesAgo = now - 6 * 60 * 1000;
         expect(computeHardCacheExpired("garbage", sixMinutesAgo, now)).toBe(true);
     });
+
+    it("invokes onInvalid callback for invalid TTL but not for valid ones", () => {
+        const now = Date.now();
+        const tenDaysAgo = now - 10 * 24 * 60 * 60 * 1000;
+        const invalidErrors: unknown[] = [];
+
+        // Invalid TTL: callback fires + 5m fallback applied
+        const result = computeHardCacheExpired("bad-format", tenDaysAgo, now, (error) => {
+            invalidErrors.push(error);
+        });
+        expect(invalidErrors.length).toBe(1);
+        expect(invalidErrors[0]).toBeInstanceOf(Error);
+        expect(result).toBe(true); // 5m fallback, 10-day-old → expired
+
+        // Valid TTLs: callback NOT invoked
+        const validErrors: unknown[] = [];
+        computeHardCacheExpired("never", tenDaysAgo, now, (error) => {
+            validErrors.push(error);
+        });
+        expect(validErrors.length).toBe(0);
+
+        computeHardCacheExpired("5m", tenDaysAgo, now, (error) => {
+            validErrors.push(error);
+        });
+        expect(validErrors.length).toBe(0);
+    });
+
+    it("omitting onInvalid is harmless (5m fallback still applies)", () => {
+        const now = Date.now();
+        const tenDaysAgo = now - 10 * 24 * 60 * 60 * 1000;
+        // No callback — should not throw, should still fall back to 5m
+        expect(computeHardCacheExpired("bad-format", tenDaysAgo, now)).toBe(true);
+        // "never" with no callback still works
+        expect(computeHardCacheExpired("never", tenDaysAgo, now)).toBe(false);
+    });
 });

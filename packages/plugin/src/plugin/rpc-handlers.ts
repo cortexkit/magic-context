@@ -742,7 +742,10 @@ export function buildStatusDetail(
         if (detail.lastResponseTime > 0) {
             const elapsed = Date.now() - detail.lastResponseTime;
             if (detail.cacheNeverExpires) {
-                detail.cacheRemainingMs = Number.POSITIVE_INFINITY;
+                // Infinity does not survive JSON-RPC; cacheNeverExpires is the
+                // authoritative flag — the TUI keys on it first.
+                detail.cacheRemainingMs = 0;
+                detail.cacheExpired = false;
             } else {
                 detail.cacheRemainingMs = Math.max(0, detail.cacheTtlMs - elapsed);
                 detail.cacheExpired = detail.cacheRemainingMs === 0;

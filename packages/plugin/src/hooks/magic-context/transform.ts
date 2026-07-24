@@ -246,16 +246,21 @@ export function __getMessageTokensCacheForTest(
  *
  * Returns false when cacheTtl is "never" (Infinity) because any finite
  * elapsed time is < Infinity.
+ *
+ * @param onInvalid Optional callback invoked when cacheTtl fails to parse;
+ *        the 5m fallback is applied AFTER the callback returns.
  */
 export function computeHardCacheExpired(
     cacheTtl: string,
     lastResponseTime: number,
     now: number,
+    onInvalid?: (error: unknown) => void,
 ): boolean {
     let ttlMs: number;
     try {
         ttlMs = parseCacheTtl(cacheTtl);
-    } catch {
+    } catch (error) {
+        onInvalid?.(error);
         ttlMs = 5 * 60 * 1000;
     }
     return lastResponseTime > 0 && now - lastResponseTime >= ttlMs;
@@ -2049,6 +2054,10 @@ export function createTransform(deps: TransformDeps) {
             sessionMeta.cacheTtl,
             sessionMeta.lastResponseTime,
             Date.now(),
+            (error) => {
+                passOutcome.record("invalid-cache-ttl-fallback");
+                sessionLog(sessionId, "invalid cache_ttl; using the 5m default:", error);
+            },
         );
         const m0HardSignals = {
             systemHash: hardSystemHash,

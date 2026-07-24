@@ -474,15 +474,23 @@ describe("buildStatusDetail — cacheNeverExpires with 'never' TTL", () => {
 
             // Force-create the session meta row so the UPDATE lands on an existing row.
             db.prepare(`INSERT INTO session_meta (session_id) VALUES (?)`).run(sessionId);
-            db.prepare("UPDATE session_meta SET cache_ttl = ? WHERE session_id = ?").run(
-                "never",
-                sessionId,
-            );
+            // Seed last_response_time: the cacheNeverExpires branch only runs
+            // inside `if (lastResponseTime > 0)` — without this the test would
+            // pass even if Infinity leaked into cacheRemainingMs.
+            db.prepare(
+                "UPDATE session_meta SET cache_ttl = ?, last_response_time = ? WHERE session_id = ?",
+            ).run("never", Date.now() - 60_000, sessionId);
 
             const detail = buildStatusDetail(db, sessionId, directory);
 
             expect(detail.cacheNeverExpires).toBe(true);
             expect(detail.cacheExpired).toBe(false);
+            // Infinity must NOT leak into the numeric RPC field — JSON.stringify
+            // converts Infinity to null, violating the StatusDetail contract.
+            expect(detail.cacheRemainingMs).toBe(0);
+            const roundTripped = JSON.parse(JSON.stringify(detail));
+            expect(roundTripped.cacheRemainingMs).toBe(0);
+            expect(roundTripped.cacheRemainingMs).not.toBeNull();
         } finally {
             closeQuietly(db);
         }
