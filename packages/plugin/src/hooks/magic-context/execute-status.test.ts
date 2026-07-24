@@ -23,7 +23,7 @@ describe("executeStatus", () => {
         db.close();
     });
 
-    test("annotates the execute threshold when a tokens config is clamped (#241)", () => {
+    test("annotates the execute threshold when a tokens config is clamped (#241)", async () => {
         const db = new Database(":memory:");
         initializeDatabase(db);
         getOrCreateSessionMeta(db, SESSION_ID);
@@ -31,7 +31,7 @@ describe("executeStatus", () => {
         // 190K requested on a 128K model → clamped to 90% × 128K. The status must
         // say so explicitly (configured value + cap) rather than silently showing
         // the reduced value, which is what confused users in issue #241.
-        const status = executeStatus(
+        const status = await executeStatus(
             db,
             SESSION_ID,
             20,
@@ -48,12 +48,12 @@ describe("executeStatus", () => {
         db.close();
     });
 
-    test("omits the clamp annotation when the threshold is not clamped (#241)", () => {
+    test("omits the clamp annotation when the threshold is not clamped (#241)", async () => {
         const db = new Database(":memory:");
         initializeDatabase(db);
         getOrCreateSessionMeta(db, SESSION_ID);
 
-        const status = executeStatus(
+        const status = await executeStatus(
             db,
             SESSION_ID,
             20,

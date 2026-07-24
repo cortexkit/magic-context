@@ -395,7 +395,7 @@ describe("validateHistorianOutput — skillObservations", () => {
     test("validated pass surfaces skillObservations when present", () => {
         const xml = `<output>
 <compartments>
-<compartment start="1" end="2" title="t">summary</compartment>
+<compartment start="1" end="2" title="t"><p1>summary</p1></compartment>
 </compartments>
 <skill_observations>
 * council | gotcha | use a fast aggregator

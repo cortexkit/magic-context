@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:te
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { CATEGORY_DEFAULT_TTL } from "./constants";
+import type { EmbeddingProvider } from "./embedding-provider";
 import { computeNormalizedHash } from "./normalize-hash";
 
 const mockLog = mock(() => {});
@@ -23,6 +24,13 @@ const {
     insertMemory,
 } = await import("./storage-memory");
 const { embedPromotedFacts, promoteSessionFactsDurable } = await import("./promotion");
+const {
+    _resetProjectEmbeddingRegistryForTests,
+    _setTestProviderFactoryForProject,
+    registerProjectEmbedding,
+} = await import("./embedding");
+const { runMigrations } = await import("../migrations");
+const { initializeDatabase } = await import("../storage-db");
 
 let db: Database | null = null;
 
@@ -99,6 +107,8 @@ afterEach(() => {
             db = null;
         }
     }
+    _resetProjectEmbeddingRegistryForTests();
+    _setTestProviderFactoryForProject(null);
 });
 
 describe("promotion", () => {
@@ -385,18 +395,35 @@ describe("promotion", () => {
 
     describe("#given best-effort embedding of promoted facts", () => {
         it("stores the vector under the registered model when the memory is unchanged", async () => {
-            db = makeMemoryDatabase();
+            _resetProjectEmbeddingRegistryForTests();
+
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            runMigrations(db);
+            const snapshot = registerProjectEmbedding(
+                db,
+                "/repo/project",
+                { provider: "local", model: "mock-model" },
+                { memoryEnabled: true, gitCommitEnabled: false },
+                "/repo/project",
+            );
+            _setTestProviderFactoryForProject(
+                (): EmbeddingProvider => ({
+                    modelId: "mock:model",
+                    initialize: async () => true,
+                    embed: async (_text: string) => new Float32Array([1, 2]),
+                    embedBatch: async (texts: string[]) =>
+                        texts.map(() => new Float32Array([1, 2])),
+                    dispose: async () => {},
+                    isLoaded: () => true,
+                }),
+            );
+
             const memory = insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "ARCHITECTURE_DECISIONS",
                 content: "Embed promoted facts eagerly",
             });
-            mockEmbedText.mockImplementation(async () => ({
-                vector: new Float32Array([1, 2]),
-                modelId: "mock:model",
-                chunkModelId: "mock:chunk",
-                generation: 1,
-            }));
 
             await embedPromotedFacts(db, "ses-1", "/repo/project", [
                 { memoryId: memory.id, content: memory.content },
@@ -406,30 +433,51 @@ describe("promotion", () => {
                 model_id: string;
             }>;
             expect(rows).toHaveLength(1);
-            expect(rows[0].model_id).toBe("mock:model");
+            expect(rows[0].model_id).toBe(snapshot.modelId);
         });
 
         it("discards the stale vector when the memory is edited while embedding is in flight", async () => {
-            db = makeMemoryDatabase();
+            _resetProjectEmbeddingRegistryForTests();
+
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            runMigrations(db);
+            registerProjectEmbedding(
+                db,
+                "/repo/project",
+                { provider: "local", model: "mock-model" },
+                { memoryEnabled: true, gitCommitEnabled: false },
+                "/repo/project",
+            );
+
+            let resolveStarted: (() => void) | undefined;
+            const started = new Promise<void>((resolve) => {
+                resolveStarted = resolve;
+            });
+            let releaseBlocker: (() => void) | undefined;
+            const blocker = new Promise<void>((resolve) => {
+                releaseBlocker = resolve;
+            });
+            _setTestProviderFactoryForProject(
+                (): EmbeddingProvider => ({
+                    modelId: "mock:model",
+                    initialize: async () => true,
+                    embed: async (_text: string): Promise<Float32Array> => {
+                        resolveStarted?.();
+                        await blocker;
+                        return new Float32Array([1, 2]);
+                    },
+                    embedBatch: async (texts: string[]) =>
+                        texts.map(() => new Float32Array([1, 2])),
+                    dispose: async () => {},
+                    isLoaded: () => true,
+                }),
+            );
+
             const memory = insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "ARCHITECTURE_DECISIONS",
                 content: "Original promoted content",
-            });
-            let release: (() => void) | undefined;
-            const started = new Promise<void>((resolve) => {
-                mockEmbedText.mockImplementation(async () => {
-                    resolve();
-                    await new Promise<void>((done) => {
-                        release = done;
-                    });
-                    return {
-                        vector: new Float32Array([1, 2]),
-                        modelId: "mock:model",
-                        chunkModelId: "mock:chunk",
-                        generation: 1,
-                    };
-                });
             });
 
             const inFlight = embedPromotedFacts(db, "ses-1", "/repo/project", [
@@ -441,7 +489,7 @@ describe("promotion", () => {
             db.prepare(
                 "UPDATE memories SET content = ?, normalized_hash = ?, updated_at = ? WHERE id = ?",
             ).run("Edited promoted content", "edited-hash", Date.now(), memory.id);
-            release?.();
+            releaseBlocker?.();
             await inFlight;
 
             const count = (
