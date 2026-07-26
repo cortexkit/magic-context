@@ -326,6 +326,109 @@ describe("resolveSkillPathByName", () => {
         }
     });
 
+    test("deep nesting beyond 20 levels resolves (no fixed depth cap)", () => {
+        const root = `${tmpdir()}/skill-deep-root-${Date.now()}`;
+        const skillName = "deep-skill";
+        try {
+            // Git marker at root (worktree boundary)
+            mkdirSync(`${root}/.git`, { recursive: true });
+            // Skill at root level
+            const skillDir = `${root}/.opencode/skills/${skillName}`;
+            mkdirSync(skillDir, { recursive: true });
+            writeFileSync(`${skillDir}/SKILL.md`, "---\n---\n\n# Deep\n");
+
+            // Build a path 22 levels deep (root/l1/l2/.../l22)
+            const segments = Array.from({ length: 22 }, (_, i) => `d${i + 1}`);
+            const deepDir = `${root}/${segments.join("/")}`;
+            mkdirSync(deepDir, { recursive: true });
+
+            // Resolve from the deepest subdirectory — old depth-20 code misses this
+            const result = resolveSkillPathByName(skillName, deepDir);
+            expect(result).not.toBeNull();
+            expect(result!.resolvedPath).toBe(`${skillDir}/SKILL.md`);
+            expect(result!.tier).toBe("project");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("worktree boundary: skill above .git root is NOT resolved", () => {
+        // parent/ (ABOVE the git root — has the skill)
+        // parent/repo/ (worktree root — has .git)
+        // parent/repo/sub/deep/ (session dir)
+        const parent = `${tmpdir()}/skill-boundary-parent-${Date.now()}`;
+        const root = `${parent}/repo`;
+        const skillName = "above-git-skill";
+        try {
+            // Skill exists in parent directory (ABOVE the git root)
+            const parentSkillDir = `${parent}/.opencode/skills/${skillName}`;
+            mkdirSync(parentSkillDir, { recursive: true });
+            writeFileSync(`${parentSkillDir}/SKILL.md`, "---\n---\n\n# Above\n");
+
+            // root is a subdirectory of parent with a .git marker
+            mkdirSync(`${root}/.git`, { recursive: true });
+            const subdir = `${root}/sub/deep`;
+            mkdirSync(subdir, { recursive: true });
+
+            // Resolve from inside the worktree — should NOT cross the .git boundary
+            const result = resolveSkillPathByName(skillName, subdir);
+            expect(result).toBeNull();
+        } finally {
+            rmSync(parent, { recursive: true, force: true });
+        }
+    });
+
+    test("worktree root level is inclusive (skill at git root, session in subdir)", () => {
+        const root = `${tmpdir()}/skill-gitroot-incl-${Date.now()}`;
+        const skillName = "gitroot-skill";
+        try {
+            // Git marker at root
+            mkdirSync(`${root}/.git`, { recursive: true });
+            // Skill at root level
+            const skillDir = `${root}/.opencode/skills/${skillName}`;
+            mkdirSync(skillDir, { recursive: true });
+            writeFileSync(`${skillDir}/SKILL.md`, "---\n---\n\n# GitRoot\n");
+
+            // Session is deeper in the worktree
+            const subdir = `${root}/sub/deep/here`;
+            mkdirSync(subdir, { recursive: true });
+
+            // Should resolve the skill at the worktree root
+            const result = resolveSkillPathByName(skillName, subdir);
+            expect(result).not.toBeNull();
+            expect(result!.resolvedPath).toBe(`${skillDir}/SKILL.md`);
+            expect(result!.tier).toBe("project");
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    });
+
+    test("no-git directory: $HOME backstop still works (exclusive)", () => {
+        // When there is no .git anywhere, the walk must still stop at $HOME.
+        // A skill at the HOME level is NOT reachable from a project inside HOME.
+        const savedHome = process.env.HOME;
+        const fakeHome = `${tmpdir()}/skill-home-backstop-${Date.now()}`;
+        try {
+            process.env.HOME = fakeHome;
+
+            // Project dir inside fake HOME — no .git anywhere
+            const projectDir = `${fakeHome}/projects/myproject`;
+            mkdirSync(projectDir, { recursive: true });
+
+            // Skill at the HOME level (should NOT be found — HOME is exclusive)
+            const homeSkillDir = `${fakeHome}/.opencode/skills/home-skill`;
+            mkdirSync(homeSkillDir, { recursive: true });
+            writeFileSync(`${homeSkillDir}/SKILL.md`, "---\n---\n\n# Home\n");
+
+            // Walk from project dir up to fakeHome → breaks before checking fakeHome level
+            const result = resolveSkillPathByName("home-skill", projectDir);
+            expect(result).toBeNull();
+        } finally {
+            process.env.HOME = savedHome;
+            rmSync(fakeHome, { recursive: true, force: true });
+        }
+    });
+
     test("ancestor walk: nearest ancestor wins when two levels both have the skill", () => {
         const root = `${tmpdir()}/skill-nearest-wins-${Date.now()}`;
         const child = `${root}/child`;

@@ -95,8 +95,11 @@ export function deriveSkillSource(
  *   - Project-dir ancestors first (project shadows global — finding U3).
  *     When `projectDirectory` is non-null, walks UP the ancestor chain from
  *     that directory (each level checking the 4 project patterns in order —
- *     nearest dir first), stopping at $HOME or the filesystem root, with a
- *     hard bound of 20 levels.
+ *     nearest dir first), stopping at the worktree root (a `.git` entry),
+ *     $HOME (exclusive), or the filesystem root, whichever comes first.
+ *     The worktree root level is inclusive — skills at the git root are
+ *     discoverable from any subdirectory. No fixed depth cap; the loop
+ *     terminates naturally when it hits a boundary.
  *   - Global dirs second (always checked, regardless of projectDirectory).
  *
  * When `projectDirectory` is null, project-tier candidates are SKIPPED
@@ -134,9 +137,8 @@ export function resolveSkillPathByName(
     if (projectDirectory !== null) {
         const normalizedHome = home.endsWith("/") ? home.slice(0, -1) : home;
         let current = projectDirectory;
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        for (let depth = 0; depth < 20 && current.length > 0; depth++) {
-            // Stop at $HOME (exclusive) or filesystem root
+        while (current.length > 0) {
+            // Stop at $HOME (exclusive) or filesystem root (absolute backstops)
             if (current === normalizedHome || current === "/") break;
 
             for (const pat of projectPatterns) {
@@ -150,6 +152,10 @@ export function resolveSkillPathByName(
                     };
                 }
             }
+
+            // Stop at the worktree root (detected by presence of .git).
+            // Check AFTER patterns above so the worktree root level is inclusive.
+            if (existsSync(`${current}/.git`)) break;
 
             // Walk up: strip last path segment (or empty string if none left)
             const sep = current.lastIndexOf("/");
