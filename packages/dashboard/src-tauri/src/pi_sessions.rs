@@ -90,18 +90,109 @@ pub fn pi_sessions_root() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".pi/agent/sessions"))
 }
 
-pub fn scan_pi_session_dir() -> Vec<PiSessionMeta> {
-    let Some(root) = pi_sessions_root() else {
+fn normalize_omp_profile(value: Option<std::ffi::OsString>) -> Option<std::ffi::OsString> {
+    let value = value?;
+    let trimmed = value.to_string_lossy().trim().to_string();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
+        None
+    } else {
+        Some(trimmed.into())
+    }
+}
+
+fn resolve_omp_profile(
+    omp_profile: Option<std::ffi::OsString>,
+    pi_profile: Option<std::ffi::OsString>,
+) -> Option<std::ffi::OsString> {
+    normalize_omp_profile(match omp_profile {
+        Some(value) => Some(value),
+        None => pi_profile,
+    })
+}
+
+fn active_omp_profile() -> Option<std::ffi::OsString> {
+    resolve_omp_profile(
+        std::env::var_os("OMP_PROFILE"),
+        std::env::var_os("PI_PROFILE"),
+    )
+}
+
+fn append_omp_profile_roots(roots: &mut Vec<PathBuf>, profiles_dir: &Path, xdg: bool) {
+    let Ok(entries) = fs::read_dir(profiles_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            roots.push(if xdg {
+                entry.path().join("sessions")
+            } else {
+                entry.path().join("agent/sessions")
+            });
+        }
+    }
+}
+
+fn pi_compatible_session_roots() -> Vec<PathBuf> {
+    if let Ok(root) = test_root().read() {
+        if let Some(path) = root.clone() {
+            return vec![path];
+        }
+    }
+
+    let Some(home) = dirs::home_dir() else {
         return Vec::new();
     };
-    scan_pi_session_dir_at(&root)
+    let mut roots = vec![home.join(".pi/agent/sessions")];
+
+    if let Some(agent_dir) = std::env::var_os("PI_CODING_AGENT_DIR").filter(|v| !v.is_empty()) {
+        roots.push(PathBuf::from(agent_dir).join("sessions"));
+    }
+
+    let config_dir = std::env::var_os("PI_CONFIG_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".omp"));
+    let profile = active_omp_profile();
+    let profile_suffix = profile
+        .as_ref()
+        .map(|name| PathBuf::from("profiles").join(name));
+    append_omp_profile_roots(&mut roots, &home.join(&config_dir).join("profiles"), false);
+
+    let mut omp_agent = home.join(&config_dir);
+    if let Some(suffix) = &profile_suffix {
+        omp_agent.push(suffix);
+    }
+    roots.push(omp_agent.join("agent/sessions"));
+
+    if let Some(xdg_data) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
+        let app_root = PathBuf::from(xdg_data).join("omp");
+        append_omp_profile_roots(&mut roots, &app_root.join("profiles"), true);
+        let mut xdg_root = app_root;
+        if let Some(suffix) = profile_suffix {
+            xdg_root.push(suffix);
+        }
+        if xdg_root.exists() {
+            roots.push(xdg_root.join("sessions"));
+        }
+    }
+
+    let mut seen = HashSet::new();
+    roots.retain(|path| seen.insert(path.clone()));
+    roots
+}
+
+pub fn scan_pi_session_dir() -> Vec<PiSessionMeta> {
+    pi_compatible_session_roots()
+        .into_iter()
+        .flat_map(|root| scan_pi_session_dir_at(&root))
+        .collect()
 }
 
 pub fn scan_pi_cache_session_dir() -> Vec<PiSessionMeta> {
-    let Some(root) = pi_sessions_root() else {
-        return Vec::new();
-    };
-    scan_pi_cache_session_dir_at(&root)
+    pi_compatible_session_roots()
+        .into_iter()
+        .flat_map(|root| scan_pi_cache_session_dir_at(&root))
+        .collect()
 }
 
 fn scan_pi_cache_session_dir_at(root: &Path) -> Vec<PiSessionMeta> {
@@ -601,6 +692,39 @@ mod tests {
         let path = session_dir.join("2026-01-01_test.jsonl");
         fs::write(&path, content).unwrap();
         path
+    }
+
+    #[test]
+    fn discovers_named_omp_profile_session_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("profiles/work/agent/sessions")).unwrap();
+        fs::create_dir_all(dir.path().join("profiles/personal/agent/sessions")).unwrap();
+        fs::write(dir.path().join("profiles/not-a-directory"), "").unwrap();
+        let mut roots = Vec::new();
+        append_omp_profile_roots(&mut roots, &dir.path().join("profiles"), false);
+        roots.sort();
+        assert_eq!(
+            roots,
+            vec![
+                dir.path().join("profiles/personal/agent/sessions"),
+                dir.path().join("profiles/work/agent/sessions"),
+            ]
+        );
+    }
+
+    #[test]
+    fn omp_profile_empty_and_default_select_the_default_profile() {
+        assert_eq!(normalize_omp_profile(Some("".into())), None);
+        assert_eq!(normalize_omp_profile(Some("  ".into())), None);
+        assert_eq!(normalize_omp_profile(Some("default".into())), None);
+        assert_eq!(
+            normalize_omp_profile(Some(" work ".into())),
+            Some("work".into())
+        );
+        assert_eq!(
+            resolve_omp_profile(Some("".into()), Some("work".into())),
+            None
+        );
     }
 
     #[test]

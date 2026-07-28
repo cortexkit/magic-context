@@ -1037,6 +1037,86 @@ pub fn parse_pi_models_output(text: &str) -> Vec<String> {
     models.into_iter().collect()
 }
 
+/// Parse `omp models --json`, preserving selectors with scoped or nested model IDs.
+pub fn parse_omp_models_output(text: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Vec::new();
+    };
+    let Some(entries) = value.get("models").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+
+    let mut models = std::collections::BTreeSet::new();
+    for entry in entries {
+        if let Some(selector) = entry.get("selector").and_then(serde_json::Value::as_str) {
+            if !selector.is_empty() {
+                models.insert(selector.to_string());
+                continue;
+            }
+        }
+        if let (Some(provider), Some(id)) = (
+            entry.get("provider").and_then(serde_json::Value::as_str),
+            entry.get("id").and_then(serde_json::Value::as_str),
+        ) {
+            if !provider.is_empty() && !id.is_empty() {
+                models.insert(format!("{provider}/{id}"));
+            }
+        }
+    }
+    models.into_iter().collect()
+}
+
+async fn get_available_omp_models() -> Vec<String> {
+    let candidates = if cfg!(target_os = "windows") {
+        let appdata = std::env::var("APPDATA").unwrap_or_default();
+        let mut list = Vec::new();
+        if !appdata.is_empty() {
+            list.push(format!("{}\\npm\\omp.cmd", appdata));
+            list.push(format!("{}\\npm\\omp.exe", appdata));
+        }
+        list.push("omp".to_string());
+        list.push("omp.exe".to_string());
+        list
+    } else {
+        let home = std::env::var("HOME").unwrap_or_default();
+        vec![
+            format!("{}/.bun/bin/omp", home),
+            "omp".to_string(),
+            format!("{}/.local/bin/omp", home),
+            "/usr/local/bin/omp".to_string(),
+            "/opt/homebrew/bin/omp".to_string(),
+            format!("{}/.local/share/mise/shims/omp", home),
+            format!("{}/.asdf/shims/omp", home),
+            format!("{}/.volta/bin/omp", home),
+        ]
+    };
+
+    for bin in &candidates {
+        if let Some(text) = run_bounded_binary(bin, &["models", "--json"]).await {
+            let models = parse_omp_models_output(&text);
+            if !models.is_empty() {
+                return models;
+            }
+        }
+    }
+
+    if cfg!(target_os = "windows") {
+        if let Some(bin) = resolve_via_where("omp").await {
+            if let Some(text) = run_bounded_binary(&bin, &["models", "--json"]).await {
+                let models = parse_omp_models_output(&text);
+                if !models.is_empty() {
+                    return models;
+                }
+            }
+        }
+    }
+
+    if let Some(text) = run_via_login_shell("omp models --json".to_string()).await {
+        return parse_omp_models_output(&text);
+    }
+    Vec::new()
+}
+
 #[tauri::command]
 pub async fn get_available_pi_models() -> Vec<String> {
     // GUI apps on macOS don't inherit shell PATH; try common locations.
@@ -1109,6 +1189,10 @@ pub async fn get_available_pi_models() -> Vec<String> {
         }
     }
 
+    let omp_models = get_available_omp_models().await;
+    if !omp_models.is_empty() {
+        return omp_models;
+    }
     // Last resort: resolve `pi` through the user's login shell. This is the
     // universal fallback for version managers (mise/nvm/fnm) that install into
     // per-version dirs the candidates above can't enumerate — the login shell
@@ -1319,9 +1403,9 @@ pub fn get_db_health(state: State<'_, AppState>) -> db::DbHealth {
 #[cfg(test)]
 mod tests {
     use super::{
-        opencode_desktop_detected_for_env, parse_pi_models_output, pick_first_line,
-        prepare_embedding_probe_options, run_bounded_binary, windows_opencode_candidates,
-        DesktopPlatform, OpencodeDesktopEnv, OPENCODE_DESKTOP_APP_IDS,
+        opencode_desktop_detected_for_env, parse_omp_models_output, parse_pi_models_output,
+        pick_first_line, prepare_embedding_probe_options, run_bounded_binary,
+        windows_opencode_candidates, DesktopPlatform, OpencodeDesktopEnv, OPENCODE_DESKTOP_APP_IDS,
     };
     use crate::embedding_probe::EmbeddingProbeOutcome;
     use std::path::{Path, PathBuf};
@@ -1575,6 +1659,19 @@ mod tests {
         let input = "\x1b[32manthropic\x1b[0m  claude-sonnet-4-5";
         let result = parse_pi_models_output(input);
         assert_eq!(result, vec!["anthropic/claude-sonnet-4-5"]);
+    }
+
+    #[test]
+    fn test_parse_omp_models_output_preserves_selectors() {
+        let input = r#"{"models":[{"provider":"anthropic","id":"claude-opus-4-5","selector":"anthropic/claude-opus-4-5"},{"provider":"modal","id":"@modal/qwen/model-v1","selector":"modal/@modal/qwen/model-v1"},{"provider":"openai","id":"fallback/model"}]}"#;
+        assert_eq!(
+            parse_omp_models_output(input),
+            vec![
+                "anthropic/claude-opus-4-5",
+                "modal/@modal/qwen/model-v1",
+                "openai/fallback/model",
+            ]
+        );
     }
 
     #[test]
