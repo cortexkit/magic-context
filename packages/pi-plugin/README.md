@@ -34,7 +34,7 @@ npx @cortexkit/magic-context@latest setup --harness pi
 
 This handles everything for you:
 1. Adds `npm:@cortexkit/pi-magic-context` to Pi's `packages` array in `~/.pi/agent/settings.json` (the same place `pi install` writes to)
-2. Creates `~/.pi/agent/magic-context.jsonc` with defaults
+2. Creates `~/.config/cortexkit/magic-context.jsonc` with defaults
 3. Prompts you for historian, dreamer, sidekick, and embedding model choices
 4. Warns about provider-specific gotchas (e.g. GitHub Copilot reasoning models need an explicit `thinking_level`)
 
@@ -44,7 +44,7 @@ If you'd rather register the Pi extension package directly with Pi (skipping the
 pi install npm:@cortexkit/pi-magic-context
 ```
 
-This adds the extension to `~/.pi/agent/settings.json` but won't write `magic-context.jsonc` for you — you'll need to create it manually (see Configuration below).
+This adds the extension to `~/.pi/agent/settings.json` but won't write `magic-context.jsonc` for you — create the shared config manually at `~/.config/cortexkit/magic-context.jsonc` (see Configuration below).
 
 To check installation health later:
 
@@ -102,7 +102,7 @@ The host's agent directory still controls session discovery and relative `pi.sub
 }
 ```
 
-For the full configuration reference (including dreamer, sidekick, auto-search, and experimental features), see [CONFIGURATION.md](https://github.com/cortexkit/magic-context/blob/master/CONFIGURATION.md) in the main repository — the schema is shared between both plugins.
+For the full configuration reference (including dreamer, sidekick, auto-search, and experimental features), see [CONFIGURATION.md](https://github.com/cortexkit/magic-context/blob/master/CONFIGURATION.md) in the main repository — OpenCode, Pi, and OMP share the same schema.
 
 ---
 
@@ -141,7 +141,7 @@ Storage failures are fatal — Magic Context will refuse to register hooks rathe
 
 ## Cross-harness coherence
 
-For semantic search to work across harnesses, both plugins must use the **same embedding model**. Magic Context detects mismatch on Pi startup and warns:
+For semantic search to work across harnesses, every host must use the **same embedding model**. Magic Context detects a mismatch on Pi or OMP startup and warns:
 
 ```
 WARN embedding model mismatch detected for project ...:
@@ -149,7 +149,7 @@ stored vectors use "openai-compatible:Qwen/Qwen3-Embedding-8B" but Pi is configu
 Cross-harness search will return zero results until vectors are re-embedded.
 ```
 
-Easiest fix: configure `embedding` once in `~/.pi/agent/magic-context.jsonc` (Pi) and `~/.config/opencode/magic-context.jsonc` (OpenCode) with identical settings.
+Configure `embedding` once in the shared `~/.config/cortexkit/magic-context.jsonc`; OpenCode, Pi, and OMP all read it. Use `$cwd/.cortexkit/magic-context.jsonc` only when that project intentionally needs an override.
 
 ---
 
@@ -160,8 +160,10 @@ Easiest fix: configure `embedding` once in `~/.pi/agent/magic-context.jsonc` (Pi
 | `ctx_search` | n/a | Search memories + raw session history; returns ranked results with previews |
 | `ctx_memory` | `write`, `delete` | Manage project memories explicitly (most writes happen via dreamer instead) |
 | `ctx_note` | `read`, `write`, `update`, `dismiss` | Defer intentions for later — surfaced via note nudges at work boundaries |
+| `ctx_expand` | `start`/`end`, `message`, `verbose` | Recover complete messages or expand a compressed conversation range |
+| `ctx_reduce` | `drop` | Queue tagged turns for cache-safe removal from the live context |
 
-`ctx_expand` and `ctx_reduce` from the OpenCode plugin are **intentionally not exposed on Pi** — they depend on raw OpenCode message ordinals, while Pi has its own message identity model. Drops still happen automatically via threshold-driven historian; you don't need an explicit `ctx_reduce` to trigger reduction.
+`ctx_note`, `ctx_expand`, and `ctx_reduce` are session-scoped and are exposed in primary Pi/OMP sessions. Magic Context omits them only from ephemeral `--no-session` child processes, where they would otherwise target the hidden child session.
 
 ---
 
