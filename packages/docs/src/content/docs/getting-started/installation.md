@@ -1,6 +1,6 @@
 ---
 title: Installation
-description: How to install Magic Context on OpenCode or Pi using the interactive setup wizard, and how to verify your install.
+description: How to install Magic Context on OpenCode, Pi, or Oh My Pi using the interactive setup wizard, and how to verify your install.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
@@ -12,6 +12,7 @@ The setup wizard detects which harnesses you have installed, configures the plug
 - **Node.js >= 24** for the CLI
 - **OpenCode** (current version) — for OpenCode installs
 - **Pi >= 0.74.0** — for Pi installs
+- **OMP >= 17.1.7** — for Oh My Pi installs
 
 ## Run setup
 
@@ -19,18 +20,19 @@ The setup wizard detects which harnesses you have installed, configures the plug
 npx @cortexkit/magic-context@latest setup
 ```
 
-The wizard auto-detects whether you have OpenCode, Pi, or both installed. It then:
+The wizard auto-detects OpenCode, Pi, and OMP. It then:
 
-1. Registers the plugin in your harness config
-2. Disables built-in compaction (OpenCode only — Magic Context replaces it)
-3. Prompts you to pick models for the historian and dreamer agents
-4. Resolves any conflicts with other context-management plugins
-5. Writes a `magic-context.jsonc` config file with sensible defaults
+1. Registers the plugin using the harness's native package manager
+2. Disables built-in compaction where Magic Context takes ownership
+3. Disables OMP automatic memory to prevent duplicate recall/retention
+4. Prompts you to pick models for the historian and dreamer agents
+5. Resolves conflicts with other context-management plugins
+6. Writes a shared `magic-context.jsonc` with sensible defaults
 
-To target one harness explicitly, pass `--harness opencode` or `--harness pi`.
+Target one harness explicitly with `--harness opencode`, `--harness pi`, or `--harness omp`.
 
 :::note
-**Why is compaction disabled?** Magic Context manages context itself. OpenCode's built-in compaction would interfere with the historian and double-compress your history. Setup turns it off automatically. See [compatibility](/help/compatibility/) for details on other plugins that conflict.
+**Why is compaction disabled?** Magic Context manages context itself. Host compaction would interfere with the historian and double-compress history. Setup turns it off automatically. OMP's automatic memory backend is also disabled because two memory injectors would duplicate context and writes. Existing OMP memory data is not deleted.
 :::
 
 ## What gets configured
@@ -47,7 +49,7 @@ Setup adds the plugin to your `opencode.jsonc` and turns off compaction:
 }
 ```
 
-It also creates a `magic-context.jsonc` config file in the shared CortexKit location (the same for both harnesses; project overrides user):
+It also creates a `magic-context.jsonc` config file in the shared CortexKit location (the same across all harnesses; project overrides user):
 
 | Path | Scope |
 |---|---|
@@ -57,7 +59,7 @@ It also creates a `magic-context.jsonc` config file in the shared CortexKit loca
 </TabItem>
 <TabItem label="Pi">
 
-Setup adds the extension to Pi's settings and creates a `magic-context.jsonc` config file in the shared CortexKit location (the same for both harnesses; project overrides user):
+Setup adds the extension to Pi's settings and creates a `magic-context.jsonc` config file in the shared CortexKit location (the same across all harnesses; project overrides user):
 
 | Path | Scope |
 |---|---|
@@ -67,6 +69,20 @@ Setup adds the extension to Pi's settings and creates a `magic-context.jsonc` co
 :::note
 Pi setup prompts for `thinking_level` if you pick a `github-copilot/*` reasoning model — Copilot requires it and rejects the default value Pi would send otherwise. The wizard handles this for you.
 :::
+
+</TabItem>
+<TabItem label="Oh My Pi (OMP)">
+
+Setup installs `@cortexkit/pi-magic-context` through `omp plugin`, verifies it is effectively enabled for the current project, and writes the same shared CortexKit config used by OpenCode and Pi. It honors named OMP profiles, `PI_CODING_AGENT_DIR`, `PI_CONFIG_DIR`, and initialized XDG layouts.
+
+OMP setup transactionally applies:
+
+```bash
+omp config set compaction.enabled false
+omp config set memory.backend off
+```
+
+If plugin registration or config writing fails, the prior OMP settings are restored.
 
 </TabItem>
 </Tabs>
@@ -99,7 +115,7 @@ User-level config is `~/.config/cortexkit/magic-context.jsonc` on macOS/Linux an
 
 ## Verify the install
 
-After setup, restart your harness (reload OpenCode or restart Pi) so the plugin loads.
+After setup, restart your harness (or run `/reload-plugins` in OMP) so the plugin loads.
 
 <Tabs>
 <TabItem label="OpenCode">
@@ -110,6 +126,11 @@ Run `/ctx-status` in the OpenCode TUI or Desktop. You should see a status view w
 <TabItem label="Pi">
 
 Run `/ctx-status` in Pi. You should see a status line with context usage and Magic Context state. Pi also shows a status line in the footer when the plugin is active.
+
+</TabItem>
+<TabItem label="Oh My Pi (OMP)">
+
+Run `/ctx-status` in OMP. The Magic Context footer/status should be active, and `doctor --harness omp` should report native compaction and automatic memory as disabled.
 
 </TabItem>
 </Tabs>

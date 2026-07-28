@@ -1,8 +1,8 @@
-# Magic Context — Pi extension
+# Magic Context — Pi / OMP extension
 
-Cross-session memory and context management for [Pi coding agent](https://github.com/earendil-works/pi-mono). Shares the same SQLite database as the [OpenCode plugin](https://www.npmjs.com/package/@cortexkit/opencode-magic-context), so memories, embeddings, dreamer state, and project knowledge follow you across both harnesses.
+Cross-session memory and context management for [Pi coding agent](https://github.com/earendil-works/pi-mono) and [Oh My Pi (OMP)](https://github.com/can1357/oh-my-pi). The same extension package runs on both hosts and shares its SQLite database with the [OpenCode plugin](https://www.npmjs.com/package/@cortexkit/opencode-magic-context).
 
-Requires `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` `>= 0.74.0`.
+Requires Pi `>= 0.74.0` or OMP `>= 17.1.7`.
 
 ---
 
@@ -52,16 +52,40 @@ To check installation health later:
 npx @cortexkit/magic-context@latest doctor --harness pi
 ```
 
+### Oh My Pi (OMP)
+
+Use the OMP-specific setup path. It installs the package through OMP's plugin manager, disables OMP native compaction and automatic memory to prevent duplicate context managers, and verifies the effective project plugin state:
+
+```bash
+npx @cortexkit/magic-context@latest setup --harness omp
+```
+
+Manual installation is also supported:
+
+```bash
+omp plugin install @cortexkit/pi-magic-context
+omp config set compaction.enabled false
+omp config set memory.backend off
+```
+
+Verify with:
+
+```bash
+npx @cortexkit/magic-context@latest doctor --harness omp
+```
+
+OMP's legacy Pi loader maps `@earendil-works/*` imports to its bundled `@oh-my-pi/*` runtime. Magic Context also re-invokes the current host executable for historian, dreamer, and sidekick children, so OMP children remain OMP processes.
+
 ---
 
 ## Configuration
 
-Magic Context reads two config files (in this priority order):
+Magic Context reads the shared CortexKit config (project overrides user):
 
-1. `$cwd/.pi/magic-context.jsonc` (project-level overrides)
-2. `~/.pi/agent/magic-context.jsonc` (user-level defaults)
+1. `$cwd/.cortexkit/magic-context.jsonc`
+2. `~/.config/cortexkit/magic-context.jsonc`
 
-Both are merged through a Zod schema. Invalid fields fall back to defaults — bad config never disables the plugin entirely.
+The host's agent directory still controls session discovery and relative `pi.subagent_extensions`; `PI_CODING_AGENT_DIR` is honored by both Pi and OMP.
 
 ### Minimal config
 
@@ -105,11 +129,11 @@ Magic Context stores everything in a single shared SQLite database at:
 ~/.local/share/cortexkit/magic-context/context.db
 ```
 
-This is the **same database** the OpenCode plugin uses. Tables are scoped by:
-- `harness` column (`'pi'` or `'opencode'`) for session-scoped data (tags, compartments, facts, notes)
+This is the **same database** the OpenCode plugin and OMP extension use. Tables are scoped by:
+- `harness` column (`'pi'` or `'opencode'`) for session-scoped data; OMP intentionally uses `'pi'`
 - `project_path` (resolved git root) for project-scoped data (memories, embeddings, dreamer runs)
 
-So memories and dreamer state are shared across both harnesses for the same project; per-session tagging stays correctly attributed.
+Memories and dreamer state are shared across all three harnesses for the same project; per-session tagging stays correctly attributed.
 
 Storage failures are fatal — Magic Context will refuse to register hooks rather than run with ephemeral state, since that would let context grow unbounded across restarts.
 
@@ -143,19 +167,19 @@ Easiest fix: configure `embedding` once in `~/.pi/agent/magic-context.jsonc` (Pi
 
 ## Architecture & implementation
 
-This package is part of the [magic-context monorepo](https://github.com/cortexkit/magic-context). The Pi extension shares the core implementation with the OpenCode plugin via the `@magic-context/core` workspace dependency, exposing only the Pi-specific adapter layer:
+This package is part of the [magic-context monorepo](https://github.com/cortexkit/magic-context). Pi and OMP share the same adapter layer and core implementation:
 
 | Pi-specific module | Responsibility |
 |---|---|
 | `context-handler.ts` | Pi `pi.on("context", ...)` adapter — tags, drops, runs nudges and auto-search |
-| `subagent-runner.ts` | Spawns `pi --print --mode json --no-session ...` for historian/sidekick/dreamer subagents, keeps extension discovery on for provider/AFT extensions, sets `MAGIC_CONTEXT_PI_SUBAGENT=1` so the full Magic Context entry no-ops, and applies a per-agent `--tools`/`--no-tools` allow-list plus a 2-second terminal drain |
+| `subagent-runner.ts` | Re-invokes the current Pi/OMP host with `--print --mode json --no-session`, resolves relative allowlisted extensions from `PI_CODING_AGENT_DIR`, and applies per-agent tool isolation |
 | `tools/` | Pi `pi.registerTool` wrappers around the shared tool implementations |
 | `commands/` | Pi `pi.registerCommand` wrappers for the five `/ctx-*` slash commands |
 | `dreamer/` | Pi-side adapter for the shared dreamer scheduler |
 | `system-prompt.ts` | Pi `before_agent_start` injector for `<session-history>`, `<project-memory>`, `<project-docs>` |
-| `config/` | Pi-convention config loader (`$cwd/.pi/magic-context.jsonc` + `~/.pi/agent/magic-context.jsonc`) |
+| `config/` | Shared CortexKit config loader with legacy Pi migration fallback |
 
-The CLI lives in the unified [`@cortexkit/magic-context`](https://www.npmjs.com/package/@cortexkit/magic-context) package — `setup --harness pi` and `doctor --harness pi` route to the Pi-specific code paths in `packages/cli/src/commands/`.
+The unified [`@cortexkit/magic-context`](https://www.npmjs.com/package/@cortexkit/magic-context) CLI exposes separate `pi` and `omp` setup/doctor pipelines while both use this runtime adapter.
 
 For deeper architectural detail, see the main repo's [ARCHITECTURE.md](https://github.com/cortexkit/magic-context/blob/master/ARCHITECTURE.md).
 

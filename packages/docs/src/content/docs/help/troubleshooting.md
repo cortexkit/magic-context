@@ -15,11 +15,11 @@ Add `--force` to auto-fix what it can. Add `--issue` to generate a sanitized bug
 
 ## Plugin not loading
 
-**Symptom:** The TUI sidebar doesn't appear in OpenCode, `/ctx-status` returns an unknown command, or the Pi footer shows no Magic Context status.
+**Symptom:** The TUI sidebar doesn't appear in OpenCode, `/ctx-status` returns an unknown command, or the Pi/OMP footer shows no Magic Context status.
 
 **Fix — try in order:**
 
-1. **Restart the harness.** After install, you must restart OpenCode or Pi for the plugin to register. Simply quitting and reopening is enough.
+1. **Restart the harness.** After installation, restart OpenCode or Pi; in OMP, restart or run `/reload-plugins`.
 
 2. **Run doctor.** Doctor verifies the plugin entry in your config, checks for version mismatches, and confirms the plugin package is present:
    ```bash

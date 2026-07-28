@@ -68,7 +68,7 @@ The landing view is a grid of **project cards** sorted by last activity, each sh
 
 ### Sessions
 
-Browse the project's OpenCode and Pi sessions: compartments, facts, notes, smart notes, token breakdown, and subagent stats.
+Browse the project's OpenCode and Pi-compatible sessions (including OMP): compartments, facts, notes, smart notes, token breakdown, and subagent stats.
 
 - Filter by harness and search; hide subagent sessions.
 - Open a session and switch tabs: messages, **compartments**, facts, notes, historian runs, tokens.
@@ -137,11 +137,11 @@ Collection is driven by the **`review-user-memories`** dreamer task: schedule it
 
 ## Config
 
-Visual editor for Magic Context JSONC. Because both harnesses now read one shared CortexKit config, this is a single **User Config** surface plus **per-project** overrides (no separate OpenCode/Pi tabs).
+Visual editor for Magic Context JSONC. Because every harness reads one shared CortexKit config, this is a single **User Config** surface plus **per-project** overrides (no separate harness tabs).
 
 - Toggle and edit fields that mirror `magic-context.schema.json` (the editor links the schema URL and parses JSONC including comments and trailing commas; saves abort on a parse error so comments and sibling keys are preserved).
 - **Save** writes real files on disk via the Tauri backend, not a preview buffer.
-- Model pickers merge OpenCode and Pi model lists (with provider prefixes normalized), and you can always type a model id directly even when a discovered list is present — discovery is never exhaustive.
+- Model pickers merge OpenCode and available Pi/OMP model lists (with provider prefixes normalized), and you can always type a model id directly when a discovered list is present — discovery is never exhaustive.
 
 Use [Configuration](/reference/configuration/) for the full generated key reference; use this section for day-to-day edits.
 

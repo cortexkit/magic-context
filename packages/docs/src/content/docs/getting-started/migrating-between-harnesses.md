@@ -1,19 +1,19 @@
 ---
 title: Migrating between harnesses
-description: How to move an existing OpenCode session to Pi, carrying messages and Magic Context state with it.
+description: How to move an existing OpenCode session to Pi or OMP, carrying messages and Magic Context state with it.
 ---
 
-If you have an active OpenCode session and want to continue it in Pi, the `doctor migrate` command converts it into a Pi session file — including the session's messages, compartments, and session facts.
+If you have an active OpenCode session and want to continue it in Pi or OMP, the `doctor migrate` command converts it into a Pi-compatible session file — including the session's messages, compartments, and session facts.
 
 :::note
-Migration currently supports **OpenCode → Pi** only. Pi → OpenCode is not yet supported.
+Migration currently supports **OpenCode → Pi/OMP** only. Reverse migration is not yet supported.
 :::
 
 ## When you'd want this
 
 - You want to switch primary coding environments mid-project without losing session context
-- You want to try Pi on a session that has built up significant history in OpenCode
-- You're migrating your workflow from OpenCode to Pi and want to bring existing sessions along
+- You want to try Pi or OMP on a session that has built up significant history in OpenCode
+- You're migrating your workflow from OpenCode to a Pi-compatible host and want to bring existing sessions along
 
 ## What carries over
 
@@ -27,7 +27,7 @@ Migration currently supports **OpenCode → Pi** only. Pi → OpenCode is not ye
 | File attachments | ⚠️ Replaced with `<file omitted: name>` markers |
 | Reasoning signatures | ❌ Stripped |
 
-Project memories are **always shared** between OpenCode and Pi sessions for the same project — they live in the shared database and do not need to be migrated. The migration is only for session-level state (messages and compartments).
+Project memories are **always shared** among OpenCode, Pi, and OMP sessions for the same project — they live in the shared database and do not need migration. Migration only copies session-level state (messages and compartments).
 
 ## Run the migration
 
@@ -38,6 +38,13 @@ Then run:
 ```bash
 npx @cortexkit/magic-context@latest doctor migrate \
   --from opencode --to pi --session <session-id>
+```
+
+Use `--to omp` instead to write into OMP's active profile/XDG session directory:
+
+```bash
+npx @cortexkit/magic-context@latest doctor migrate \
+  --from opencode --to omp --session <session-id>
 ```
 
 To preview what the migration would do without writing any files:

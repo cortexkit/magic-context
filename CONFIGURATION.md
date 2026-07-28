@@ -1,10 +1,10 @@
 # Configuration Reference
 
-All settings are flat top-level keys in `magic-context.jsonc`. The schema is **shared between the OpenCode plugin and the Pi extension** — every setting documented here applies to both unless explicitly marked **Pi only** or **OpenCode only**.
+All settings are flat top-level keys in `magic-context.jsonc`. The schema is shared by the OpenCode plugin and the Pi-compatible extension used on both Pi and OMP.
 
 ### Configuration locations
 
-Magic Context reads config from **one shared CortexKit location**, the same for both harnesses (project overrides user):
+Magic Context reads config from one shared CortexKit location across OpenCode, Pi, and OMP (project overrides user):
 
 | Path | Scope |
 |---|---|
@@ -19,12 +19,12 @@ Project config always merges on top of user config. The unified setup wizard (`n
 
 Both plugins write to the same SQLite database at `~/.local/share/cortexkit/magic-context/context.db`. Tables are scoped by:
 
-- `harness` column (`'opencode'` or `'pi'`) for **session-scoped** data — tags, compartments, session facts, notes
+- `harness` column (`'opencode'` or `'pi'`) for **session-scoped** data — OMP intentionally uses the Pi-compatible `'pi'` discriminator
 - `project_path` (resolved git root) for **project-scoped** data — memories, embeddings, dreamer runs, key-file pins, smart notes
 
-So memories you write in OpenCode appear in Pi sessions for the same project (and vice versa), while per-session compartments and tags stay correctly attributed to their originating harness.
+Project memories therefore flow across OpenCode, Pi, and OMP, while per-session state remains scoped to the OpenCode or Pi-compatible runtime.
 
-For semantic search to work cross-harness, both plugins resolve embedding config per project identity on every retrieval path. OpenCode and Pi can run in the same process against different projects without sharing one process-global embedding provider. For one project, keep the effective `embedding` block consistent across the OpenCode and Pi config stack; Magic Context tags stored vectors with the resolved model identity and clears stale vectors for that project when the provider/model changes.
+For semantic search to work cross-harness, every host resolves embedding config per project identity on each retrieval path. Keep the effective `embedding` block consistent across OpenCode, Pi, and OMP for the same project.
 
 ### Trusted-group shared storage
 
@@ -92,19 +92,22 @@ A guidance override must be a readable complete `## Magic Context` section with 
 If something isn't working, run the unified doctor to auto-detect installed harnesses and fix common issues:
 
 ```bash
-# Auto-detect installed harnesses; if both, picks the first or asks
+# Auto-detect installed harnesses; if multiple are present, pick or prompt
 npx @cortexkit/magic-context@latest doctor
 
 # Target a specific harness explicitly
 npx @cortexkit/magic-context@latest doctor --harness opencode
 npx @cortexkit/magic-context@latest doctor --harness pi
+npx @cortexkit/magic-context@latest doctor --harness omp
 ```
 
 The OpenCode doctor checks: installation, CLI version vs npm latest, plugin registration (preserves local dev paths), `magic-context.jsonc` parses + loads through the schema, conflicts (compaction, DCP, OMO hooks), TUI sidebar configuration, embedding endpoint, shared-DB existence + `PRAGMA integrity_check` + row counts, plugin npm cache, and historian debug dumps.
 
 The Pi doctor checks: Pi binary + version (requires `>= 0.71.0`), CLI version vs npm latest, settings registration, config validity, embedding endpoint reachability, shared-DB integrity, stale Pi extension caches, and historian debug dumps.
 
-Both report `PASS X / WARN Y / FAIL Z` summary counts. Use `--force` to auto-fix what doctor can (clears stale plugin cache, repairs config) and `--issue` to produce a sanitized issue report.
+The OMP doctor checks the OMP version, effective plugin enable state, `PI_CODING_AGENT_DIR`/profile/XDG path agreement, native compaction and automatic-memory conflicts, config validity, and shared DB integrity. `--force` installs/enables the plugin and repairs conflicting OMP settings.
+
+All doctors report `PASS X / WARN Y / FAIL Z` summary counts. Use `--force` for safe repairs and `--issue` to produce a sanitized issue report.
 
 ### SQLite backend
 

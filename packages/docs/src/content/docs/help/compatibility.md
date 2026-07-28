@@ -25,6 +25,22 @@ This fail-safe behavior is intentional. Magic Context staying off is better than
 
 Run `doctor` or `doctor --force` if you ever re-enable these by accident; doctor will detect and offer to fix them.
 
+### OMP native compaction
+
+**Key:** `compaction.enabled` in OMP's `config.yml`
+
+**Why it conflicts:** OMP's native compaction and Magic Context both own the same history boundary. Running both can create repeated cancellation attempts or competing summaries.
+
+**Resolution:** `setup --harness omp` asks once, then sets the key to `false` transactionally. `doctor --harness omp` detects drift; `doctor --harness omp --force` repairs it.
+
+### OMP automatic memory
+
+**Key:** `memory.backend` in OMP's `config.yml`
+
+**Why it conflicts:** OMP local/Mnemopi/Hindsight backends inject and retain memory independently. Enabling one alongside Magic Context duplicates recall context and background writes.
+
+**Resolution:** OMP setup sets the backend to `off`. This disables future OMP memory injection/retention but does not delete existing OMP memory data.
+
 ### DCP (`opencode-dcp`)
 
 **Plugin name:** `opencode-dcp`
@@ -51,8 +67,9 @@ When a conflict is active:
 
 - **OpenCode TUI/Desktop:** The sidebar shows "Magic Context disabled" with a brief reason. Run `/ctx-status` for the full conflict list.
 - **Pi:** The footer shows a disabled state. Run `/ctx-status` for details.
+- **OMP:** The Pi-compatible extension uses the same Magic Context footer and `/ctx-status` command.
 
-Both surfaces tell you exactly which conflict was found. Once you resolve it and restart the harness, Magic Context re-enables itself automatically — no other action needed.
+All three surfaces tell you exactly which conflict was found. Once you resolve it and restart the harness, Magic Context re-enables itself automatically — no other action needed.
 
 ## Resolving conflicts
 
