@@ -781,6 +781,12 @@ describe("migrate CLI parsing", () => {
         ).toEqual({ from: "opencode", to: "pi", session: "ses_x", maxMessages: 5, dryRun: true });
     });
 
+    it("accepts OMP as a Pi-compatible migration target", () => {
+        expect(
+            parseMigrateArgs(["--from", "opencode", "--to", "omp", "--session", "ses_x"]),
+        ).toEqual({ from: "opencode", to: "omp", session: "ses_x" });
+    });
+
     it("rejects unsupported migration directions clearly", async () => {
         const originalError = console.error;
         const errors: string[] = [];

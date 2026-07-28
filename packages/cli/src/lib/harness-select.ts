@@ -2,7 +2,7 @@
  * Harness selection logic for the unified Magic Context CLI.
  *
  * Resolves which adapter(s) a command should target based on:
- *   1. `--harness opencode|pi` flag (hard override, no prompts)
+ *   1. `--harness opencode|pi|omp` flag (hard override, no prompts)
  *   2. Auto-detect installed harnesses, prompting only when ambiguous
  *
  * Mirrors AFT's selection model — battle-tested cross-harness UX.
@@ -21,7 +21,9 @@ function parseHarnessFlag(argv: string[]): HarnessFlagResult {
     if (idx === -1) return { kind: "absent" };
     const value = argv[idx + 1];
     if (!value || value.startsWith("--")) return { kind: "invalid", value: null };
-    if (value === "opencode" || value === "pi") return { kind: "valid", harness: value };
+    if (value === "opencode" || value === "pi" || value === "omp") {
+        return { kind: "valid", harness: value };
+    }
     return { kind: "invalid", value };
 }
 
@@ -36,7 +38,7 @@ export interface ResolveOptions {
  * Resolve which adapter(s) to act on for the given command invocation.
  *
  * Decision tree:
- *   - `--harness opencode|pi` → return that single adapter (hard override)
+ *   - `--harness opencode|pi|omp` → return that single adapter (hard override)
  *   - 0 installed → prompt user to pick one (gives install hints)
  *   - 1 installed → use it silently
  *   - 2+ installed:
@@ -52,15 +54,15 @@ export async function resolveAdaptersForCommand(
     if (flag.kind === "invalid") {
         throw new Error(
             flag.value === null
-                ? "Missing value for --harness (expected opencode or pi)"
-                : `Invalid --harness value: ${flag.value} (expected opencode or pi)`,
+                ? "Missing value for --harness (expected opencode, pi, or omp)"
+                : `Invalid --harness value: ${flag.value} (expected opencode, pi, or omp)`,
         );
     }
 
     const installed = getInstalledAdapters();
 
     if (installed.length === 0) {
-        log.warn("No supported harness was detected on PATH (opencode, pi).");
+        log.warn("No supported harness was detected on PATH (opencode, pi, omp).");
         const pick = await selectOne(`Which harness do you want to ${options.verb}?`, [
             {
                 label: "OpenCode",
@@ -70,6 +72,11 @@ export async function resolveAdaptersForCommand(
             {
                 label: "Pi",
                 value: "pi",
+                hint: "@cortexkit/pi-magic-context",
+            },
+            {
+                label: "Oh My Pi (OMP)",
+                value: "omp",
                 hint: "@cortexkit/pi-magic-context",
             },
         ]);

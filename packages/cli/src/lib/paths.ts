@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { resolveCortexKitUserConfigPath } from "@magic-context/core/config/migrate-config-location";
 import {
     getMagicContextHistorianDir as getMagicContextHistorianDirCore,
@@ -148,6 +148,92 @@ export function getPiUserConfigPath(): string {
  */
 export function getPiUserExtensionsPath(): string {
     return join(getPiAgentConfigDir(), "settings.json");
+}
+
+// ============================================================================
+// OMP paths
+// ============================================================================
+
+export interface OmpPaths {
+    configRoot: string;
+    agentDir: string;
+    dataRoot: string;
+    dataAgentRoot: string;
+    pluginsDir: string;
+    sessionsRoot: string;
+}
+
+/** Mirror OMP's profile/custom-dir/XDG resolution without importing the host. */
+export function resolveOmpPaths(): OmpPaths {
+    const rawProfile = process.env.OMP_PROFILE ?? process.env.PI_PROFILE;
+    const normalizedProfile = rawProfile?.trim();
+    const profile =
+        normalizedProfile &&
+        normalizedProfile !== "default" &&
+        /^[a-z0-9][a-z0-9._-]{0,63}$/.test(normalizedProfile)
+            ? normalizedProfile
+            : undefined;
+    const configDirName = process.env.PI_CONFIG_DIR?.trim() || ".omp";
+    const baseConfigRoot = join(envFirstHomeDir(), configDirName);
+    const configRoot = profile ? join(baseConfigRoot, "profiles", profile) : baseConfigRoot;
+    const defaultAgentDir = join(configRoot, "agent");
+    // Named profiles deliberately ignore PI_CODING_AGENT_DIR. OMP sets the env
+    // to the derived profile path for children, but the profile remains the
+    // authority so a stale/custom override cannot escape its root.
+    const override = profile ? undefined : process.env.PI_CODING_AGENT_DIR?.trim();
+    const agentDir = override ? resolve(override) : defaultAgentDir;
+    const canUseXdg =
+        (process.platform === "linux" || process.platform === "darwin") &&
+        agentDir === defaultAgentDir;
+    let dataRoot = configRoot;
+    if (canUseXdg) {
+        const xdgDataHome = process.env.XDG_DATA_HOME?.trim();
+        if (xdgDataHome) {
+            const appRoot = join(xdgDataHome, "omp");
+            const candidate = profile ? join(appRoot, "profiles", profile) : appRoot;
+            if (existsSync(candidate)) dataRoot = candidate;
+        }
+    }
+    // OMP flattens the `agent/` prefix when XDG data is active.
+    const dataAgentRoot = dataRoot === configRoot ? agentDir : dataRoot;
+    return {
+        configRoot,
+        agentDir,
+        dataRoot,
+        dataAgentRoot,
+        pluginsDir: join(dataRoot, "plugins"),
+        sessionsRoot: join(dataAgentRoot, "sessions"),
+    };
+}
+
+/** OMP's active agent dir, including named profiles and explicit overrides. */
+export function getOmpAgentDir(): string {
+    return resolveOmpPaths().agentDir;
+}
+
+/** OMP session JSONL root, including its XDG data layout. */
+export function getOmpSessionsRoot(): string {
+    return resolveOmpPaths().sessionsRoot;
+}
+
+/** OMP's global YAML settings file. */
+export function getOmpConfigPath(): string {
+    return join(resolveOmpPaths().agentDir, "config.yml");
+}
+
+/** OMP's npm/link plugin root, including profile and XDG data layout. */
+export function getOmpPluginsDir(): string {
+    return resolveOmpPaths().pluginsDir;
+}
+
+/** OMP's plugin runtime lock file. */
+export function getOmpPluginsLockPath(): string {
+    return join(resolveOmpPaths().pluginsDir, "omp-plugins.lock.json");
+}
+
+/** Shared Magic Context config used by OMP's Pi-compatible extension. */
+export function getOmpUserConfigPath(): string {
+    return resolveCortexKitUserConfigPath();
 }
 
 // ============================================================================

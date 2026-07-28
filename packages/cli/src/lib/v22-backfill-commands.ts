@@ -101,7 +101,7 @@ export async function runV22BackfillCommands(
         harness.log.info(`Magic Context schema: v${schemaVersionBefore} → v${schemaVersionAfter}`);
         if (!readonly) {
             harness.log.warn(
-                "If OpenCode or Pi is running, restart it before creating new sessions so every process reloads the same schema fence.",
+                "If OpenCode, Pi, or OMP is running, restart it before creating new sessions so every process reloads the same schema fence.",
             );
         }
         return { handled: true, exitCode: 0 };

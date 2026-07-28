@@ -11,7 +11,7 @@ import {
     openExistingDatabase,
 } from "../lib/database-access";
 import { getOpenCodeDatabasePath, projectPathToPiSessionSlug } from "../lib/migration-paths";
-import { getPiSessionsRoot } from "../lib/paths";
+import { getOmpSessionsRoot, getPiSessionsRoot } from "../lib/paths";
 
 export interface MigrateOpenCodeSessionToPiOptions {
     /**
@@ -908,15 +908,15 @@ function ensureValidOptions(
 ): asserts opts is Required<Pick<MigrateCliOptions, "from" | "to" | "session">> &
     MigrateCliOptions {
     if (!opts.from) throw new Error("Missing required flag: --from <opencode>");
-    if (!opts.to) throw new Error("Missing required flag: --to <pi>");
-    if (opts.from !== "opencode" || opts.to !== "pi") {
-        if (opts.from === "pi" && opts.to === "opencode") {
+    if (!opts.to) throw new Error("Missing required flag: --to <pi|omp>");
+    if (opts.from !== "opencode" || (opts.to !== "pi" && opts.to !== "omp")) {
+        if ((opts.from === "pi" || opts.from === "omp") && opts.to === "opencode") {
             throw new Error(
-                "Migration pi → opencode is not yet supported (V1 supports only opencode → pi)",
+                `Migration ${opts.from} → opencode is not yet supported (supported: opencode → pi|omp)`,
             );
         }
         throw new Error(
-            `Unsupported migration: ${opts.from} → ${opts.to} (V1 supports only opencode → pi)`,
+            `Unsupported migration: ${opts.from} → ${opts.to} (supported: opencode → pi|omp)`,
         );
     }
     if (!opts.session) throw new Error("Missing required flag: --session <id>");
@@ -1101,16 +1101,17 @@ export function printMigrateHelp(): void {
   Magic Context doctor migrate
   ─────────────────────────────
 
-  Copy OpenCode session message content into a new Pi JSONL session,
+  Copy OpenCode session message content into a new Pi-compatible JSONL session,
   PLUS the source session's Magic Context state (compartments + facts)
-  into the shared cortexkit database under the new Pi session id.
+  into the shared cortexkit database under the new session id.
 
-  Supported pairs (V1):
+  Supported pairs:
     --from opencode --to pi
+    --from opencode --to omp
 
   Usage:
-    npx @cortexkit/opencode-magic-context@latest doctor migrate \\
-      --from opencode --to pi --session ses_xxx [--max-messages N] [--dry-run]
+    npx @cortexkit/magic-context@latest doctor migrate \\
+      --from opencode --to <pi|omp> --session ses_xxx [--max-messages N] [--dry-run]
 
   Fidelity:
     - text, reasoning text, tool calls, and tool results are preserved
@@ -1129,15 +1130,17 @@ export async function runMigrateCli(args: string[]): Promise<number> {
     try {
         const parsed = parseMigrateArgs(args);
         ensureValidOptions(parsed);
+        const target = parsed.to === "omp" ? "OMP" : "Pi";
         const result = migrateOpenCodeSessionToPi({
             sessionId: parsed.session,
             maxMessages: parsed.maxMessages,
             dryRun: parsed.dryRun,
+            piSessionsRoot: parsed.to === "omp" ? getOmpSessionsRoot() : undefined,
         });
         const action = result.dryRun ? "Would write" : "Wrote";
-        console.log(`${action} Pi session JSONL:`);
+        console.log(`${action} ${target} session JSONL:`);
         console.log(`  path: ${result.outputPath}`);
-        console.log(`  pi session id: ${result.piSessionId}`);
+        console.log(`  pi-compatible session id: ${result.piSessionId}`);
         console.log(`  source messages: ${result.sourceMessageCount}`);
         console.log(`  migrated entries: ${result.messageCount}`);
         console.log(`  bytes: ${result.byteCount}`);
@@ -1161,7 +1164,7 @@ export async function runMigrateCli(args: string[]): Promise<number> {
             );
         }
         if (!result.dryRun) {
-            console.log("Pi may need to be restarted to pick up the new session file.");
+            console.log(`${target} may need to be restarted to pick up the new session file.`);
             if (result.cortexkitSchemaVersionBefore !== undefined) {
                 console.log(
                     "If OpenCode or another harness is running, restart it before creating new sessions so it reloads the same schema fence.",

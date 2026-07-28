@@ -25,6 +25,7 @@ import {
     runV22BackfillCommands,
     type V22BackfillCommandArgs,
 } from "../lib/v22-backfill-commands";
+import { runDoctor as runOmpDoctor } from "./doctor-omp";
 import { runDoctor as runOpenCodeDoctor } from "./doctor-opencode";
 import { doctor as runPiDoctor } from "./doctor-pi";
 
@@ -104,6 +105,11 @@ async function dispatchDoctor(adapter: HarnessAdapter, options: RunDoctorOptions
             if (options.issue) piArgs.push("--issue");
             return runPiDoctor(piArgs);
         }
+        case "omp":
+            return runOmpDoctor({
+                force: options.force,
+                issue: options.issue,
+            });
     }
 }
 
