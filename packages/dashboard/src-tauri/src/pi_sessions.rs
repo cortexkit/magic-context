@@ -121,15 +121,19 @@ fn append_omp_profile_roots(roots: &mut Vec<PathBuf>, profiles_dir: &Path, xdg: 
     let Ok(entries) = fs::read_dir(profiles_dir) else {
         return;
     };
-    for entry in entries.flatten() {
-        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            roots.push(if xdg {
+    let mut discovered = entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| {
+            if xdg {
                 entry.path().join("sessions")
             } else {
                 entry.path().join("agent/sessions")
-            });
-        }
-    }
+            }
+        })
+        .collect::<Vec<_>>();
+    discovered.sort();
+    roots.extend(discovered);
 }
 
 fn pi_compatible_session_roots() -> Vec<PathBuf> {
@@ -181,18 +185,42 @@ fn pi_compatible_session_roots() -> Vec<PathBuf> {
     roots
 }
 
+fn deduplicate_pi_sessions(mut sessions: Vec<PiSessionMeta>) -> Vec<PiSessionMeta> {
+    sessions.sort_by(|left, right| {
+        right
+            .modified
+            .cmp(&left.modified)
+            .then_with(|| left.jsonl_path.cmp(&right.jsonl_path))
+    });
+    let mut seen_paths = HashSet::new();
+    let mut seen_ids = HashSet::new();
+    sessions.retain(|session| {
+        let canonical_path =
+            fs::canonicalize(&session.jsonl_path).unwrap_or_else(|_| session.jsonl_path.clone());
+        if !seen_paths.insert(canonical_path) {
+            return false;
+        }
+        session.session_id.is_empty() || seen_ids.insert(session.session_id.clone())
+    });
+    sessions
+}
+
 pub fn scan_pi_session_dir() -> Vec<PiSessionMeta> {
-    pi_compatible_session_roots()
-        .into_iter()
-        .flat_map(|root| scan_pi_session_dir_at(&root))
-        .collect()
+    deduplicate_pi_sessions(
+        pi_compatible_session_roots()
+            .into_iter()
+            .flat_map(|root| scan_pi_session_dir_at(&root))
+            .collect(),
+    )
 }
 
 pub fn scan_pi_cache_session_dir() -> Vec<PiSessionMeta> {
-    pi_compatible_session_roots()
-        .into_iter()
-        .flat_map(|root| scan_pi_cache_session_dir_at(&root))
-        .collect()
+    deduplicate_pi_sessions(
+        pi_compatible_session_roots()
+            .into_iter()
+            .flat_map(|root| scan_pi_cache_session_dir_at(&root))
+            .collect(),
+    )
 }
 
 fn scan_pi_cache_session_dir_at(root: &Path) -> Vec<PiSessionMeta> {
@@ -769,6 +797,28 @@ mod tests {
 
         assert_eq!(scan_pi_session_dir_at(dir.path()).len(), 1);
         assert!(scan_pi_cache_session_dir_at(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn multi_root_discovery_deduplicates_logical_sessions() {
+        clear_caches_for_tests();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let content = r#"{"type":"session","id":"same-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp/proj"}"#;
+        fixture_path(&first, content);
+        fixture_path(&second, content);
+
+        let mut first_sessions = scan_pi_session_dir_at(first.path());
+        first_sessions[0].modified = 100;
+        let mut second_sessions = scan_pi_session_dir_at(second.path());
+        second_sessions[0].modified = 200;
+        let newest_path = second_sessions[0].jsonl_path.clone();
+        let sessions =
+            deduplicate_pi_sessions(first_sessions.into_iter().chain(second_sessions).collect());
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "same-session");
+        assert_eq!(sessions[0].jsonl_path, newest_path);
     }
 
     #[test]
