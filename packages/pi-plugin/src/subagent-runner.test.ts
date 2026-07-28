@@ -309,6 +309,29 @@ describe("subagent-runner pure helpers", () => {
 		expect(args).toContain("--no-extensions");
 	});
 
+	it("resolves relative allowlist entries from the active host agent dir", () => {
+		const previous = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = "/tmp/omp-profile/agent";
+		try {
+			const args = buildArgsForTest(
+				{ ...baseOptions, model: "anthropic/claude-sonnet" },
+				{
+					subagentExtensions: ["provider-package", "./extensions/provider.ts"],
+				},
+			);
+			const firstExtension = args.indexOf("--extension");
+			expect(args.slice(firstExtension, firstExtension + 4)).toEqual([
+				"--extension",
+				"/tmp/omp-profile/agent/provider-package",
+				"--extension",
+				"/tmp/omp-profile/agent/extensions/provider.ts",
+			]);
+		} finally {
+			if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = previous;
+		}
+	});
+
 	it("keeps the current all-extension argv shape when no allowlist is configured", () => {
 		const args = buildArgsForTest({
 			...baseOptions,

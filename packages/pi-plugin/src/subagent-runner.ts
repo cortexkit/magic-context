@@ -176,13 +176,14 @@ const TERMINAL_DRAIN_GRACE_MS = 2_000;
 
 export const MAGIC_CONTEXT_PI_SUBAGENT_ENV = "MAGIC_CONTEXT_PI_SUBAGENT";
 
-// Pi resolves local entries in its user settings package list from the
-// settings directory, not from the spawned child's project cwd. Keep the same
-// base for explicit --extension entries; the installed Pi package is not
-// available in every development worktree to import its resolver directly.
-// Pi's current resolver treats bare names as local paths too; npm packages
-// should use the explicit `npm:` source form.
-const PI_AGENT_SETTINGS_DIR = join(homedir(), ".pi", "agent");
+// Pi and OMP both expose their active agent directory through
+// PI_CODING_AGENT_DIR. OMP sets it for named profiles too. Resolve it at argv
+// construction time so profile switches and test seams cannot freeze a stale
+// user root; upstream Pi falls back to its stock ~/.pi/agent directory.
+function getHostAgentSettingsDir(): string {
+	const configured = process.env.PI_CODING_AGENT_DIR?.trim();
+	return configured ? resolvePath(configured) : join(homedir(), ".pi", "agent");
+}
 let configuredSubagentExtensions: readonly string[] | undefined;
 
 /** Configure the user-tier extension allowlist used by new Pi child runners. */
@@ -196,7 +197,7 @@ function resolveSubagentExtensionEntry(entry: string): string {
 	const trimmed = entry.trim();
 	const isNpmSource = trimmed.startsWith("npm:");
 	return !isNpmSource && !isAbsolute(trimmed)
-		? resolvePath(PI_AGENT_SETTINGS_DIR, trimmed)
+		? resolvePath(getHostAgentSettingsDir(), trimmed)
 		: trimmed;
 }
 
