@@ -106,6 +106,20 @@ function endpointFor(provider: string, auth: AuthEntry): ProviderEndpoint {
                 maxTokensField: "max_tokens",
                 supportsTools: true,
             };
+        case "minimax":
+            return {
+                url: "https://api.minimax.io/v1/chat/completions",
+                headers,
+                maxTokensField: "max_tokens",
+                supportsTools: true,
+            };
+        case "minimax-cn":
+            return {
+                url: "https://api.minimaxi.com/v1/chat/completions",
+                headers,
+                maxTokensField: "max_tokens",
+                supportsTools: true,
+            };
         default:
             throw new Error(`Unknown provider: ${provider}`);
     }

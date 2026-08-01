@@ -132,6 +132,30 @@
             "provider": "openrouter",
             "modelId": "anthropic/claude-sonnet-4.6",
             "tokenizerKey": "anthropic/claude-sonnet-4.5"
+        },
+        {
+            "label": "minimax/MiniMax-M3",
+            "provider": "minimax",
+            "modelId": "MiniMax-M3",
+            "tokenizerKey": null
+        },
+        {
+            "label": "minimax/MiniMax-M2.7",
+            "provider": "minimax",
+            "modelId": "MiniMax-M2.7",
+            "tokenizerKey": null
+        },
+        {
+            "label": "minimax-cn/MiniMax-M3",
+            "provider": "minimax-cn",
+            "modelId": "MiniMax-M3",
+            "tokenizerKey": null
+        },
+        {
+            "label": "minimax-cn/MiniMax-M2.7",
+            "provider": "minimax-cn",
+            "modelId": "MiniMax-M2.7",
+            "tokenizerKey": null
         }
     ]
 }
