@@ -81,6 +81,11 @@ fn test_root() -> &'static RwLock<Option<PathBuf>> {
     TEST_ROOT.get_or_init(|| RwLock::new(None))
 }
 
+fn trimmed_env_path(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let trimmed = value?.to_string_lossy().trim().to_string();
+    (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+}
+
 fn normalize_omp_profile(value: Option<std::ffi::OsString>) -> Option<std::ffi::OsString> {
     let value = value?;
     let trimmed = value.to_string_lossy().trim().to_string();
@@ -144,13 +149,11 @@ fn pi_compatible_session_roots() -> Vec<PathBuf> {
     };
     let mut roots = vec![home.join(".pi/agent/sessions")];
 
-    if let Some(agent_dir) = std::env::var_os("PI_CODING_AGENT_DIR").filter(|v| !v.is_empty()) {
-        roots.push(PathBuf::from(agent_dir).join("sessions"));
+    if let Some(agent_dir) = trimmed_env_path(std::env::var_os("PI_CODING_AGENT_DIR")) {
+        roots.push(agent_dir.join("sessions"));
     }
 
-    let config_dir = std::env::var_os("PI_CONFIG_DIR")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
+    let config_dir = trimmed_env_path(std::env::var_os("PI_CONFIG_DIR"))
         .unwrap_or_else(|| PathBuf::from(".omp"));
     let profile = active_omp_profile();
     let profile_suffix = profile
@@ -164,8 +167,8 @@ fn pi_compatible_session_roots() -> Vec<PathBuf> {
     }
     roots.push(omp_agent.join("agent/sessions"));
 
-    if let Some(xdg_data) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
-        let app_root = PathBuf::from(xdg_data).join("omp");
+    if let Some(xdg_data) = trimmed_env_path(std::env::var_os("XDG_DATA_HOME")) {
+        let app_root = xdg_data.join("omp");
         append_omp_profile_roots(&mut roots, &app_root.join("profiles"), true);
         let mut xdg_root = app_root;
         if let Some(suffix) = profile_suffix {
@@ -724,6 +727,16 @@ mod tests {
         let path = session_dir.join("2026-01-01_test.jsonl");
         fs::write(&path, content).unwrap();
         path
+    }
+
+    #[test]
+    fn environment_paths_are_trimmed_and_blank_values_are_ignored() {
+        assert_eq!(
+            trimmed_env_path(Some("  /tmp/omp-agent  ".into())),
+            Some(PathBuf::from("/tmp/omp-agent"))
+        );
+        assert_eq!(trimmed_env_path(Some("   ".into())), None);
+        assert_eq!(trimmed_env_path(None), None);
     }
 
     #[test]
