@@ -77,11 +77,11 @@ describe("runDreamerSetup", () => {
         const prompts = new MockPrompts({
             confirms: [false],
             autos: ["x/y"],
-            selects: Array(12).fill("cron:0 3 * * *"),
+            selects: Array(13).fill("cron:0 3 * * *"),
         });
         const result = await runDreamerSetup(prompts, ["x/y"]);
         expect(result.tasks).toBeDefined();
-        expect(Object.keys(result.tasks ?? {}).length).toBe(12);
+        expect(Object.keys(result.tasks ?? {}).length).toBe(13);
         expect(result.tasks?.verify.schedule).toBe("0 3 * * *");
         expect(result.tasks?.curate.schedule).toBe("0 3 * * *");
         expect(result.tasks?.["classify-memories"].schedule).toBe("0 3 * * *");

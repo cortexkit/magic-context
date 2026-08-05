@@ -3,7 +3,7 @@ import {
     AGENTIC_DREAM_TASKS,
     CANONICAL_DREAM_TASKS,
 } from "../../features/magic-context/dreamer/task-registry";
-import { DREAMER_TASKS, DreamingTaskSchema, DreamTasksSchema } from "./magic-context";
+import { DreamTasksSchema } from "./magic-context";
 
 describe("distill-skill-memory dreamer task", () => {
     test("distill-skill-memory is a canonical dream task", () => {
@@ -12,12 +12,15 @@ describe("distill-skill-memory dreamer task", () => {
 
     test("distill-skill-memory is agentic (prompt-driven)", () => {
         expect(AGENTIC_DREAM_TASKS).toContain("distill-skill-memory");
-        // DREAMER_TASKS (the schema enum) re-exports AGENTIC_DREAM_TASKS.
-        expect(DREAMER_TASKS).toContain("distill-skill-memory");
     });
 
-    test("DreamingTaskSchema accepts distill-skill-memory", () => {
-        expect(() => DreamingTaskSchema.parse("distill-skill-memory")).not.toThrow();
+    test("DreamTasksSchema accepts a distill-skill-memory config", () => {
+        // v2 model: tasks are per-key objects on DreamTasksSchema, not a string
+        // enum. Validity is "the key parses with a schedule", not enum membership.
+        const parsed = DreamTasksSchema.parse({
+            "distill-skill-memory": { schedule: "0 4 * * *" },
+        });
+        expect(parsed["distill-skill-memory"].schedule).toBe("0 4 * * *");
     });
 
     test("distill-skill-memory defaults to OFF (empty schedule = opt-in)", () => {

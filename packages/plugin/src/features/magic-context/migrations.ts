@@ -2819,8 +2819,8 @@ export const MIGRATIONS: Migration[] = [
         },
     },
     {
-        // Skill-memory historian extraction: was v41/v44/v56/v75 across earlier
-        // rebases; renumbered across upstream migrations — now v77 after
+        // Skill-memory historian extraction: was v41/v44/v56/v72/v75 across
+        // earlier rebases; renumbered across upstream migrations — now v77 after
         // upstream v0.34.0 took v73-v74 (skill is now v75/76/77).
         version: 77,
         description:

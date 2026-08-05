@@ -1,12 +1,14 @@
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
+
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
 import { CATEGORY_DEFAULT_TTL } from "./constants";
 import type { EmbeddingProvider } from "./embedding-provider";
 import { computeNormalizedHash } from "./normalize-hash";
 
+const mockEmbedText = mock(async (): Promise<{ vector: Float32Array } | null> => null);
 const mockLog = mock(() => {});
 
 mock.module("../../../shared/logger", () => ({
@@ -16,6 +18,11 @@ mock.module("../../../shared/logger", () => ({
 }));
 
 const {
+    _resetProjectEmbeddingRegistryForTests,
+    _setTestProviderFactoryForProject,
+    registerProjectEmbedding,
+} = await import("../project-embedding-registry");
+const {
     archiveMemory,
     getMemoryByHash,
     getMemoryById,
@@ -24,15 +31,31 @@ const {
     insertMemory,
 } = await import("./storage-memory");
 const { embedPromotedFacts, promoteSessionFactsDurable } = await import("./promotion");
-const {
-    _resetProjectEmbeddingRegistryForTests,
-    _setTestProviderFactoryForProject,
-    registerProjectEmbedding,
-} = await import("./embedding");
-const { runMigrations } = await import("../migrations");
-const { initializeDatabase } = await import("../storage-db");
 
+const TEST_PROJECT_PATH = "/repo/project";
 let db: Database | null = null;
+
+class TestEmbeddingProvider implements EmbeddingProvider {
+    readonly modelId = "mock:model";
+
+    async initialize(): Promise<boolean> {
+        return true;
+    }
+
+    async embed(text: string): Promise<Float32Array | null> {
+        return (await mockEmbedText(text))?.vector ?? null;
+    }
+
+    async embedBatch(texts: string[]): Promise<(Float32Array | null)[]> {
+        return Promise.all(texts.map((text) => this.embed(text)));
+    }
+
+    async dispose(): Promise<void> {}
+
+    isLoaded(): boolean {
+        return true;
+    }
+}
 
 function makeMemoryDatabase(): Database {
     const database = new Database(":memory:");
@@ -93,12 +116,26 @@ function makeMemoryDatabase(): Database {
     return database;
 }
 
+function registerTestEmbeddingProvider(database: Database): string {
+    return registerProjectEmbedding(
+        database,
+        TEST_PROJECT_PATH,
+        { provider: "local", model: "mock:model" },
+        { memoryEnabled: false, gitCommitEnabled: false },
+        TEST_PROJECT_PATH,
+    ).modelId;
+}
+
 beforeEach(() => {
+    _setTestProviderFactoryForProject(() => new TestEmbeddingProvider());
+    mockEmbedText.mockReset();
+    mockEmbedText.mockImplementation(async () => null);
     mockLog.mockReset();
     mockLog.mockImplementation(() => {});
 });
 
 afterEach(() => {
+    _resetProjectEmbeddingRegistryForTests();
     if (db) {
         try {
             closeQuietly(db);
@@ -107,8 +144,6 @@ afterEach(() => {
             db = null;
         }
     }
-    _resetProjectEmbeddingRegistryForTests();
-    _setTestProviderFactoryForProject(null);
 });
 
 describe("promotion", () => {
@@ -395,37 +430,18 @@ describe("promotion", () => {
 
     describe("#given best-effort embedding of promoted facts", () => {
         it("stores the vector under the registered model when the memory is unchanged", async () => {
-            _resetProjectEmbeddingRegistryForTests();
-
-            db = new Database(":memory:");
-            initializeDatabase(db);
-            runMigrations(db);
-            const snapshot = registerProjectEmbedding(
-                db,
-                "/repo/project",
-                { provider: "local", model: "mock-model" },
-                { memoryEnabled: true, gitCommitEnabled: false },
-                "/repo/project",
-            );
-            _setTestProviderFactoryForProject(
-                (): EmbeddingProvider => ({
-                    modelId: "mock:model",
-                    initialize: async () => true,
-                    embed: async (_text: string) => new Float32Array([1, 2]),
-                    embedBatch: async (texts: string[]) =>
-                        texts.map(() => new Float32Array([1, 2])),
-                    dispose: async () => {},
-                    isLoaded: () => true,
-                }),
-            );
-
+            db = makeMemoryDatabase();
             const memory = insertMemory(db, {
-                projectPath: "/repo/project",
+                projectPath: TEST_PROJECT_PATH,
                 category: "ARCHITECTURE_DECISIONS",
                 content: "Embed promoted facts eagerly",
             });
+            const registeredModelId = registerTestEmbeddingProvider(db);
+            mockEmbedText.mockImplementation(async () => ({
+                vector: new Float32Array([1, 2]),
+            }));
 
-            await embedPromotedFacts(db, "ses-1", "/repo/project", [
+            await embedPromotedFacts(db, "ses-1", TEST_PROJECT_PATH, [
                 { memoryId: memory.id, content: memory.content },
             ]);
 
@@ -433,54 +449,31 @@ describe("promotion", () => {
                 model_id: string;
             }>;
             expect(rows).toHaveLength(1);
-            expect(rows[0].model_id).toBe(snapshot.modelId);
+            expect(rows[0].model_id).toBe(registeredModelId);
         });
 
         it("discards the stale vector when the memory is edited while embedding is in flight", async () => {
-            _resetProjectEmbeddingRegistryForTests();
-
-            db = new Database(":memory:");
-            initializeDatabase(db);
-            runMigrations(db);
-            registerProjectEmbedding(
-                db,
-                "/repo/project",
-                { provider: "local", model: "mock-model" },
-                { memoryEnabled: true, gitCommitEnabled: false },
-                "/repo/project",
-            );
-
-            let resolveStarted: (() => void) | undefined;
-            const started = new Promise<void>((resolve) => {
-                resolveStarted = resolve;
-            });
-            let releaseBlocker: (() => void) | undefined;
-            const blocker = new Promise<void>((resolve) => {
-                releaseBlocker = resolve;
-            });
-            _setTestProviderFactoryForProject(
-                (): EmbeddingProvider => ({
-                    modelId: "mock:model",
-                    initialize: async () => true,
-                    embed: async (_text: string): Promise<Float32Array> => {
-                        resolveStarted?.();
-                        await blocker;
-                        return new Float32Array([1, 2]);
-                    },
-                    embedBatch: async (texts: string[]) =>
-                        texts.map(() => new Float32Array([1, 2])),
-                    dispose: async () => {},
-                    isLoaded: () => true,
-                }),
-            );
-
+            db = makeMemoryDatabase();
             const memory = insertMemory(db, {
-                projectPath: "/repo/project",
+                projectPath: TEST_PROJECT_PATH,
                 category: "ARCHITECTURE_DECISIONS",
                 content: "Original promoted content",
             });
+            registerTestEmbeddingProvider(db);
+            let release: (() => void) | undefined;
+            const started = new Promise<void>((resolve) => {
+                mockEmbedText.mockImplementation(async () => {
+                    resolve();
+                    await new Promise<void>((done) => {
+                        release = done;
+                    });
+                    return {
+                        vector: new Float32Array([1, 2]),
+                    };
+                });
+            });
 
-            const inFlight = embedPromotedFacts(db, "ses-1", "/repo/project", [
+            const inFlight = embedPromotedFacts(db, "ses-1", TEST_PROJECT_PATH, [
                 { memoryId: memory.id, content: memory.content },
             ]);
             await started;
@@ -489,7 +482,7 @@ describe("promotion", () => {
             db.prepare(
                 "UPDATE memories SET content = ?, normalized_hash = ?, updated_at = ? WHERE id = ?",
             ).run("Edited promoted content", "edited-hash", Date.now(), memory.id);
-            releaseBlocker?.();
+            release?.();
             await inFlight;
 
             const count = (

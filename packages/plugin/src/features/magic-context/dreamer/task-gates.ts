@@ -292,6 +292,14 @@ export function getDreamTaskBacklog(
             const total = countActivePrimers(db, projectPath);
             return { pending: countStalePrimers(db, projectPath), total };
         }
+        case "distill-skill-memory": {
+            // Mirrors the always-eligible gate in evaluateTaskGate: the distill
+            // pass is whole-corpus maintenance with no per-item queue, so there
+            // is no meaningful pending count to surface. Reported as 0/0 rather
+            // than reaching into skill_memory internals the scheduler does not
+            // otherwise depend on.
+            return { pending: 0, total: 0 };
+        }
         default: {
             const _exhaustive: never = task;
             return _exhaustive;
