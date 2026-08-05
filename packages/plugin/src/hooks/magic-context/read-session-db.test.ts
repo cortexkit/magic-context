@@ -93,10 +93,15 @@ describe("isMidTurnFromOpenCodeDb", () => {
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
     });
 
-    it("does not release mid-turn for synthetic user messages after a stale tool-calls tail", () => {
+    it("does not release mid-turn for synthetic-part user messages after a stale tool-calls tail", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
-        insertUser(db, "session-1", "user-1", { content: "agent nudge", synthetic: true }, 200);
+        insertUser(db, "session-1", "user-1", { content: "agent nudge" }, 200);
+        insertPart(db, "session-1", "user-1", "part-1", {
+            type: "text",
+            text: "agent nudge",
+            synthetic: true,
+        });
 
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
     });
@@ -139,6 +144,62 @@ describe("isMidTurnFromOpenCodeDb", () => {
         const db = createMidTurnDb();
         insertAssistant(db, "session-1", "assistant-1", { finish: "stop" });
         insertPart(db, "session-1", "assistant-1", "part-1", { type: "text", text: "done" });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
+
+    it("does not release mid-turn for marker-part user messages after a stale tool-calls tail", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
+        insertUser(db, "session-1", "user-1", { content: "inbox notification" }, 200);
+        insertPart(db, "session-1", "user-1", "part-1", {
+            type: "text",
+            text: "✉ Inbox from peer",
+            metadata: { marker: { kind: "inbox" } },
+        });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(true);
+    });
+
+    it("releases mid-turn for an @mention operator prompt with a synthetic agent part", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
+        insertUser(db, "session-1", "user-1", { content: "do the thing @research-deep" }, 200);
+        insertPart(db, "session-1", "user-1", "part-1", {
+            type: "text",
+            text: "do the thing @research-deep",
+        });
+        insertPart(db, "session-1", "user-1", "part-2", {
+            type: "agent",
+            name: "research-deep",
+            synthetic: true,
+        });
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
+
+    it("releases mid-turn for a partless user message (vacuous-ALL fence)", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
+        insertUser(db, "session-1", "user-1", { content: "new turn" }, 200);
+        // No parts inserted — partless messages must count as real.
+
+        expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
+    });
+
+    it("releases mid-turn when a user message has a marker part AND a real text part", () => {
+        const db = createMidTurnDb();
+        insertAssistant(db, "session-1", "assistant-1", { finish: "tool-calls" }, 100);
+        insertUser(db, "session-1", "user-1", { content: "real input with marker" }, 200);
+        insertPart(db, "session-1", "user-1", "part-1", {
+            type: "text",
+            text: "✉ Inbox from peer",
+            metadata: { marker: { kind: "inbox" } },
+        });
+        insertPart(db, "session-1", "user-1", "part-2", {
+            type: "text",
+            text: "real input with marker",
+        });
 
         expect(isMidTurnFromOpenCodeDb(db, "session-1")).toBe(false);
     });

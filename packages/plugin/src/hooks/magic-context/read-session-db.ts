@@ -139,18 +139,35 @@ function hasNewerRealUserMessage(
     const row = db
         .prepare(
             `SELECT 1 as one
-             FROM message
-             WHERE session_id = ?
-               AND time_created > ?
-               AND json_extract(data, '$.role') = 'user'
-               AND COALESCE(json_extract(data, '$.synthetic'), 0) NOT IN (1, 'true')
+             FROM message m
+             WHERE m.session_id = ?
+               AND m.time_created > ?
+               AND json_extract(m.data, '$.role') = 'user'
+               AND NOT (
+                 EXISTS (SELECT 1 FROM part p WHERE p.message_id = m.id)
+                 AND NOT EXISTS (
+                   SELECT 1 FROM part p
+                   WHERE p.message_id = m.id
+                     AND COALESCE(json_extract(p.data, '$.synthetic'), 0) NOT IN (1, 'true')
+                     AND json_extract(p.data, '$.metadata.marker.kind') IS NULL
+                 )
+               )
              LIMIT 1`,
         )
         .get(sessionId, latestAssistantTimeCreated) as ExistenceRow | null;
-    // OpenCode persists promptAsync/channel-2 synthetic prompts as
-    // message.info.synthetic, which is the top-level $.synthetic field in the
-    // message table's data JSON. Those agent-directed nudges should not end a
-    // still-accumulating tool-use turn, but a later real user message does.
+    // OpenCode persists synthetic as an annotation on the PART row's data, never
+    // on the message row. So separating injected from real user messages requires
+    // a part join. A user message is injected iff it HAS at least one part AND
+    // EVERY part is machine-generated — where a part is machine-generated if it
+    // carries either synthetic=true or a marker part (metadata.marker.kind).
+    // Marker parts are deliberately NON-synthetic so the TUI renders them as
+    // visible system-event lines; they are identified structurally. ALL-parts
+    // semantics is load-bearing: a real operator prompt may include a synthetic
+    // `agent` part from an @mention — classifying that as injected would release
+    // the mid-turn lock on genuine human input (the inverse bug, and worse).
+    // The EXISTS guard on part rows is the vacuous-ALL fence: a partless message
+    // satisfies "every part is machine-generated" trivially, so it must count as
+    // real to avoid incorrectly suppressing a lock release.
     return row?.one === 1;
 }
 
