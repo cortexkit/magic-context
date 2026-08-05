@@ -93,7 +93,7 @@ describe("OMP doctor", () => {
                 ],
                 getOmpSetting: ((_path: string, key: string) =>
                     key === "compaction.enabled" ? false : "off") as never,
-                runOmpCommand: () => ({ ok: true, stdout: agentDir, stderr: "" }),
+                runOmpCommand: () => ({ ok: true, stdout: `${agentDir}/./`, stderr: "" }),
             },
         });
 

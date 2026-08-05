@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { MagicContextConfigSchema } from "@magic-context/core/config/schema/magic-context";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
@@ -215,16 +215,20 @@ async function runHealthChecks(options: {
         } else add(results, "fail", "Could not read OMP memory.backend");
 
         const reportedAgentDir = options.deps.runOmpCommand(omp.path, ["config", "path"], 10_000);
-        if (!reportedAgentDir.ok)
+        if (!reportedAgentDir.ok) {
             add(results, "warn", "Could not verify OMP active agent directory");
-        else if (reportedAgentDir.stdout === getOmpAgentDir()) {
-            add(results, "pass", `OMP agent directory resolved to ${getOmpAgentDir()}`);
         } else {
-            add(
-                results,
-                "fail",
-                `OMP reports agent directory ${reportedAgentDir.stdout}, but Magic Context resolved ${getOmpAgentDir()}`,
-            );
+            const reportedPath = resolve(reportedAgentDir.stdout);
+            const expectedPath = resolve(getOmpAgentDir());
+            if (reportedPath === expectedPath) {
+                add(results, "pass", `OMP agent directory resolved to ${getOmpAgentDir()}`);
+            } else {
+                add(
+                    results,
+                    "fail",
+                    `OMP reports agent directory ${reportedAgentDir.stdout}, but Magic Context resolved ${getOmpAgentDir()}`,
+                );
+            }
         }
     }
 
