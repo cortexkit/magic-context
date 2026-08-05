@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
@@ -100,5 +100,26 @@ describe("OMP doctor", () => {
         expect(code).toBe(0);
         expect(prompts.messages.join("\n")).toContain("OMP 17.1.7 detected");
         expect(prompts.messages.join("\n")).toContain("FAIL 0");
+    });
+
+    it("writes an independent default config even when OMP is missing", async () => {
+        const root = mkdtempSync(join(tmpdir(), "mc-omp-doctor-no-bin-"));
+        roots.push(root);
+        process.env.HOME = root;
+        process.env.XDG_CONFIG_HOME = join(root, ".config");
+        delete process.env.XDG_DATA_HOME;
+        delete process.env.PI_CODING_AGENT_DIR;
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({
+            cwd: root,
+            force: true,
+            prompts,
+            deps: { detectOmpBinary: () => null },
+        });
+
+        expect(code).toBe(1);
+        expect(existsSync(join(root, ".config", "cortexkit", "magic-context.jsonc"))).toBe(true);
+        expect(prompts.messages.join("\n")).toContain("Wrote default Magic Context config");
     });
 });

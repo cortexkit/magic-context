@@ -43,12 +43,13 @@ export function runOmpCommand(ompPath: string, args: string[], timeout = 30_000)
         const result = spawnSync(invocation.command, invocation.args, {
             encoding: "utf-8",
             timeout,
+            maxBuffer: 10 * 1024 * 1024,
             stdio: ["ignore", "pipe", "pipe"],
         });
         return {
             ok: result.status === 0 && !result.error,
             stdout: result.stdout?.trim() ?? "",
-            stderr: result.stderr?.trim() ?? result.error?.message ?? "",
+            stderr: result.stderr?.trim() || result.error?.message || "",
         };
     } catch (error) {
         return {

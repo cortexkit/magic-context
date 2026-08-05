@@ -5,7 +5,12 @@ import { join } from "node:path";
 
 import { parse as parseJsonc } from "comment-json";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
-import { runSetup, type SetupEnvironment, writePiSettingsPackage } from "./setup-pi";
+import {
+    removePiSettingsPackage,
+    runSetup,
+    type SetupEnvironment,
+    writePiSettingsPackage,
+} from "./setup-pi";
 
 const tempRoots: string[] = [];
 const originalHome = process.env.HOME;
@@ -94,6 +99,23 @@ afterEach(() => {
     for (const path of tempRoots.splice(0)) {
         rmSync(path, { recursive: true, force: true });
     }
+});
+
+describe("Pi settings rollback", () => {
+    it("removes only the package entry added by setup", () => {
+        const root = makeTempRoot();
+        const settingsPath = join(root, "settings.json");
+        writeFileSync(
+            settingsPath,
+            JSON.stringify({ packages: ["unrelated-package", "npm:@cortexkit/pi-magic-context"] }),
+        );
+
+        expect(removePiSettingsPackage(settingsPath)).toBe(true);
+        expect(parseJsonc(readFileSync(settingsPath, "utf-8"))).toEqual({
+            packages: ["unrelated-package"],
+        });
+        expect(removePiSettingsPackage(settingsPath)).toBe(false);
+    });
 });
 
 describe("runSetup", () => {

@@ -107,6 +107,11 @@ const DEFAULT_HOST: PiCompatibleSetupHost = {
             configPath: settingsPath,
         };
     },
+    rollbackPluginEntry: async (registration) => {
+        if (registration.action === "added") {
+            removePiSettingsPackage(registration.configPath);
+        }
+    },
 };
 
 function ensureDir(path: string): void {
@@ -160,6 +165,19 @@ export function writePiSettingsPackage(
     settings.packages = packages;
     writeFileAtomic(settingsPath, `${stringifyJsonc(settings, null, 2)}\n`);
     return !hasPackage;
+}
+export function removePiSettingsPackage(
+    settingsPath: string,
+    packageSource = PI_PACKAGE_SOURCE,
+): boolean {
+    const settings = readJsoncConfigForUpdate(settingsPath);
+    if (!Array.isArray(settings.packages)) return false;
+    const packages = settings.packages;
+    const filtered = packages.filter((entry) => entry !== packageSource);
+    if (filtered.length === packages.length) return false;
+    settings.packages = filtered;
+    writeFileAtomic(settingsPath, `${stringifyJsonc(settings, null, 2)}\n`);
+    return true;
 }
 
 export function writeMagicContextConfig(
@@ -282,7 +300,9 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
     const binary = env.detectPiBinary();
     if (!binary) {
         spinner.stop(`${host.displayName} not found`);
-        prompts.log.warn(`Could not find \`${host.cliName}\` on PATH.`);
+        prompts.log.warn(
+            `Could not find \`${host.cliName}\` on PATH or in standard user install directories.`,
+        );
         prompts.log.message(`Install ${host.displayName} first, then rerun setup.`);
         prompts.outro(`Setup stopped — install ${host.displayName} and try again`);
         return 1;

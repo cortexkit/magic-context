@@ -297,9 +297,14 @@ function writeDefaultConfig(path: string): void {
 }
 
 async function repair(plan: RepairPlan, deps: DoctorDeps, prompts: PromptIO): Promise<number> {
-    const omp = deps.detectOmpBinary();
-    if (!omp) return 0;
     let fixed = 0;
+    if (plan.writeUserConfig && !existsSync(getOmpUserConfigPath())) {
+        writeDefaultConfig(getOmpUserConfigPath());
+        prompts.log.success(`Wrote default Magic Context config to ${getOmpUserConfigPath()}`);
+        fixed += 1;
+    }
+    const omp = deps.detectOmpBinary();
+    if (!omp) return fixed;
     if (plan.installPlugin) {
         const result = await new OmpAdapter().ensurePluginEntry();
         if (result.ok) {
@@ -318,11 +323,7 @@ async function repair(plan: RepairPlan, deps: DoctorDeps, prompts: PromptIO): Pr
             fixed += 1;
         } else prompts.log.error(result.stderr || `Could not set OMP ${key}`);
     }
-    if (plan.writeUserConfig && !existsSync(getOmpUserConfigPath())) {
-        writeDefaultConfig(getOmpUserConfigPath());
-        prompts.log.success(`Wrote default Magic Context config to ${getOmpUserConfigPath()}`);
-        fixed += 1;
-    }
+
     return fixed;
 }
 
@@ -362,27 +363,36 @@ async function runIssueFlow(options: {
     writeFileAtomic(path, `${body}\n`);
     options.prompts.log.success(`Sanitized report written to ${path}`);
     try {
-        options.deps.execFileSync("gh", ["auth", "status"], { stdio: "ignore" });
-        if (await options.prompts.confirm("Submit this issue on GitHub now?", false)) {
-            const result = options.deps.spawnSync(
-                "gh",
-                [
-                    "issue",
-                    "create",
-                    "-R",
-                    "cortexkit/magic-context",
-                    "--title",
-                    `[omp] ${title}`,
-                    "--body-file",
-                    path,
-                ],
-                { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
-            );
-            if (result.status === 0) options.prompts.log.success(String(result.stdout).trim());
-            else options.prompts.log.warn(String(result.stderr).trim());
-        }
+        options.deps.execFileSync("gh", ["--version"], { stdio: "ignore" });
     } catch {
         options.prompts.log.info("gh CLI unavailable; submit the generated report manually");
+        return 0;
+    }
+    try {
+        options.deps.execFileSync("gh", ["auth", "status"], { stdio: "ignore" });
+    } catch {
+        options.prompts.log.info(
+            "gh CLI is installed but not authenticated; submit the generated report manually",
+        );
+        return 0;
+    }
+    if (await options.prompts.confirm("Submit this issue on GitHub now?", false)) {
+        const result = options.deps.spawnSync(
+            "gh",
+            [
+                "issue",
+                "create",
+                "-R",
+                "cortexkit/magic-context",
+                "--title",
+                `[omp] ${title}`,
+                "--body-file",
+                path,
+            ],
+            { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+        );
+        if (result.status === 0) options.prompts.log.success(String(result.stdout).trim());
+        else options.prompts.log.warn(String(result.stderr).trim());
     }
     return 0;
 }

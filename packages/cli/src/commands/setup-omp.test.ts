@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
 import { __test } from "./setup-omp";
 
@@ -63,7 +63,7 @@ function makeFakeOmp(): { binary: string; state: string } {
     writeFileSync(state, JSON.stringify({ compaction: true, memory: "mnemopi" }));
     writeFileSync(
         binary,
-        `#!/usr/bin/node
+        `#!/usr/bin/env node
 const fs = require("fs");
 const statePath = ${JSON.stringify(state)};
 const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
@@ -81,7 +81,7 @@ if (args[0] === "config" && args[1] === "get") {
 `,
     );
     chmodSync(binary, 0o755);
-    process.env.PATH = root;
+    process.env.PATH = [root, original.PATH].filter(Boolean).join(delimiter);
     process.env.HOME = root;
     return { binary, state };
 }
