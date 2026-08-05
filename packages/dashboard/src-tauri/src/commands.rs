@@ -1189,16 +1189,19 @@ pub async fn get_available_pi_models() -> Vec<String> {
         }
     }
 
+    // Resolve Pi through the user's login shell before falling back to OMP.
+    // Otherwise an OMP install can mask a real Pi install managed by an
+    // uncommon version manager whose shims are only present in login-shell PATH.
+    if let Some(text) = run_via_login_shell("pi --list-models".to_string()).await {
+        let models = parse_pi_models_output(&text);
+        if !models.is_empty() {
+            return models;
+        }
+    }
+
     let omp_models = get_available_omp_models().await;
     if !omp_models.is_empty() {
         return omp_models;
-    }
-    // Last resort: resolve `pi` through the user's login shell. This is the
-    // universal fallback for version managers (mise/nvm/fnm) that install into
-    // per-version dirs the candidates above can't enumerate — the login shell
-    // carries the same PATH the user's terminal uses to find `pi`.
-    if let Some(text) = run_via_login_shell("pi --list-models".to_string()).await {
-        return parse_pi_models_output(&text);
     }
 
     Vec::new()

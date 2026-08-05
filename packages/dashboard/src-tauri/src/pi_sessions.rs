@@ -81,23 +81,19 @@ fn test_root() -> &'static RwLock<Option<PathBuf>> {
     TEST_ROOT.get_or_init(|| RwLock::new(None))
 }
 
-pub fn pi_sessions_root() -> Option<PathBuf> {
-    if let Ok(root) = test_root().read() {
-        if let Some(path) = root.clone() {
-            return Some(path);
-        }
-    }
-    Some(dirs::home_dir()?.join(".pi/agent/sessions"))
-}
-
 fn normalize_omp_profile(value: Option<std::ffi::OsString>) -> Option<std::ffi::OsString> {
     let value = value?;
     let trimmed = value.to_string_lossy().trim().to_string();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
-        None
-    } else {
-        Some(trimmed.into())
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") || trimmed.len() > 64 {
+        return None;
     }
+    let mut chars = trimmed.chars();
+    let first = chars.next()?;
+    let valid = (first.is_ascii_lowercase() || first.is_ascii_digit())
+        && chars.all(|ch| {
+            ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-')
+        });
+    valid.then(|| trimmed.into())
 }
 
 fn resolve_omp_profile(
@@ -181,35 +177,38 @@ fn pi_compatible_session_roots() -> Vec<PathBuf> {
     }
 
     let mut seen = HashSet::new();
-    roots.retain(|path| seen.insert(path.clone()));
+    roots.retain(|path| {
+        let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+        seen.insert(canonical)
+    });
     roots
 }
 
-fn deduplicate_pi_sessions(mut sessions: Vec<PiSessionMeta>) -> Vec<PiSessionMeta> {
-    sessions.sort_by(|left, right| {
+fn deduplicate_pi_sessions(mut sessions: Vec<(usize, PiSessionMeta)>) -> Vec<PiSessionMeta> {
+    sessions.sort_by(|(left_priority, left), (right_priority, right)| {
         right
             .modified
             .cmp(&left.modified)
+            .then_with(|| left_priority.cmp(right_priority))
             .then_with(|| left.jsonl_path.cmp(&right.jsonl_path))
     });
-    let mut seen_paths = HashSet::new();
     let mut seen_ids = HashSet::new();
-    sessions.retain(|session| {
-        let canonical_path =
-            fs::canonicalize(&session.jsonl_path).unwrap_or_else(|_| session.jsonl_path.clone());
-        if !seen_paths.insert(canonical_path) {
-            return false;
-        }
+    sessions.retain(|(_, session)| {
         session.session_id.is_empty() || seen_ids.insert(session.session_id.clone())
     });
-    sessions
+    sessions.into_iter().map(|(_, session)| session).collect()
 }
 
 pub fn scan_pi_session_dir() -> Vec<PiSessionMeta> {
     deduplicate_pi_sessions(
         pi_compatible_session_roots()
             .into_iter()
-            .flat_map(|root| scan_pi_session_dir_at(&root))
+            .enumerate()
+            .flat_map(|(priority, root)| {
+                scan_pi_session_dir_at(&root)
+                    .into_iter()
+                    .map(move |session| (priority, session))
+            })
             .collect(),
     )
 }
@@ -218,7 +217,12 @@ pub fn scan_pi_cache_session_dir() -> Vec<PiSessionMeta> {
     deduplicate_pi_sessions(
         pi_compatible_session_roots()
             .into_iter()
-            .flat_map(|root| scan_pi_cache_session_dir_at(&root))
+            .enumerate()
+            .flat_map(|(priority, root)| {
+                scan_pi_cache_session_dir_at(&root)
+                    .into_iter()
+                    .map(move |session| (priority, session))
+            })
             .collect(),
     )
 }
@@ -741,10 +745,14 @@ mod tests {
     }
 
     #[test]
-    fn omp_profile_empty_and_default_select_the_default_profile() {
+    fn omp_profile_rejects_unsafe_names_and_preserves_default_semantics() {
         assert_eq!(normalize_omp_profile(Some("".into())), None);
         assert_eq!(normalize_omp_profile(Some("  ".into())), None);
         assert_eq!(normalize_omp_profile(Some("default".into())), None);
+        assert_eq!(normalize_omp_profile(Some("../escape".into())), None);
+        assert_eq!(normalize_omp_profile(Some("UPPER".into())), None);
+        assert_eq!(normalize_omp_profile(Some("bad/name".into())), None);
+        assert_eq!(normalize_omp_profile(Some("a".repeat(65).into())), None);
         assert_eq!(
             normalize_omp_profile(Some(" work ".into())),
             Some("work".into())
@@ -813,12 +821,32 @@ mod tests {
         let mut second_sessions = scan_pi_session_dir_at(second.path());
         second_sessions[0].modified = 200;
         let newest_path = second_sessions[0].jsonl_path.clone();
-        let sessions =
-            deduplicate_pi_sessions(first_sessions.into_iter().chain(second_sessions).collect());
+        let sessions = deduplicate_pi_sessions(
+            first_sessions
+                .into_iter()
+                .map(|session| (0, session))
+                .chain(second_sessions.into_iter().map(|session| (1, session)))
+                .collect(),
+        );
 
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "same-session");
         assert_eq!(sessions[0].jsonl_path, newest_path);
+    }
+
+    #[test]
+    fn tied_duplicates_keep_the_higher_priority_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = r#"{"type":"session","id":"same-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp/proj"}"#;
+        fixture_path(&dir, content);
+        let original = scan_pi_session_dir_at(dir.path()).remove(0);
+        let mut lower_priority = original.clone();
+        lower_priority.jsonl_path = PathBuf::from("/lower-priority/session.jsonl");
+
+        let sessions = deduplicate_pi_sessions(vec![(1, lower_priority), (0, original.clone())]);
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].jsonl_path, original.jsonl_path);
     }
 
     #[test]
