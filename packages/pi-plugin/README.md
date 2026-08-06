@@ -85,7 +85,7 @@ Magic Context reads the shared CortexKit config (project overrides user):
 1. `$cwd/.cortexkit/magic-context.jsonc`
 2. `~/.config/cortexkit/magic-context.jsonc`
 
-The host's agent directory still controls session discovery and relative `pi.subagent_extensions`; `PI_CODING_AGENT_DIR` is honored by both Pi and OMP.
+Session discovery follows the active host. Relative `pi.subagent_extensions` are deliberately isolated by host: plain Pi resolves them from `~/.pi/agent`, while a positively identified OMP process uses `PI_CODING_AGENT_DIR` when set and otherwise derives the active `~/.omp` config/profile agent directory.
 
 ### Minimal config
 
@@ -174,7 +174,7 @@ This package is part of the [magic-context monorepo](https://github.com/cortexki
 | Pi-specific module | Responsibility |
 |---|---|
 | `context-handler.ts` | Pi `pi.on("context", ...)` adapter — tags, drops, runs nudges and auto-search |
-| `subagent-runner.ts` | Re-invokes the current Pi/OMP host with `--print --mode json --no-session`, resolves relative allowlisted extensions from `PI_CODING_AGENT_DIR`, and applies per-agent tool isolation |
+| `subagent-runner.ts` | Re-invokes the current Pi/OMP host with `--print --mode json --no-session`; resolves relative allowlisted extensions from plain Pi's `~/.pi/agent` or an identified OMP host's active agent directory; and applies per-agent tool isolation |
 | `tools/` | Pi `pi.registerTool` wrappers around the shared tool implementations |
 | `commands/` | Pi `pi.registerCommand` wrappers for the five `/ctx-*` slash commands |
 | `dreamer/` | Pi-side adapter for the shared dreamer scheduler |
