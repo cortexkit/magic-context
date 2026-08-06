@@ -9,7 +9,10 @@ import { loadPiConfig } from "@magic-context/pi-core/config";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { OmpAdapter } from "../adapters/omp";
 import { writeFileAtomic } from "../lib/atomic-write";
-import { migrateConfigLocationsForCli } from "../lib/config-location-migration";
+import {
+    hasUserConfigLocationMigrationRefusal,
+    migrateConfigLocationsForCli,
+} from "../lib/config-location-migration";
 import { openExistingContextDatabase } from "../lib/database-access";
 import {
     detectOmpBinary,
@@ -24,6 +27,8 @@ import {
     getMagicContextLogPath,
     getOmpAgentDir,
     getOmpConfigPath,
+    getOmpNonGlobalConfigSources,
+    getOmpPackageDir,
     getOmpPluginsLockPath,
     getOmpSessionsRoot,
     getOmpUserConfigPath,
@@ -128,7 +133,9 @@ function readConfig(path: string): { error?: string } {
     if (!existsSync(path)) return {};
     try {
         const parsed = parseJsonc(readFileSync(path, "utf-8"));
-        return parsed && typeof parsed === "object" ? {} : { error: "top level is not an object" };
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+            ? {}
+            : { error: "top level is not an object" };
     } catch (error) {
         return { error: error instanceof Error ? error.message : String(error) };
     }
@@ -214,6 +221,19 @@ async function runHealthChecks(options: {
             repairPlan.disableMemory = true;
         } else add(results, "fail", "Could not read OMP memory.backend");
 
+        const nonGlobalSources = getOmpNonGlobalConfigSources(options.cwd);
+        if (
+            nonGlobalSources.length > 0 &&
+            (repairPlan.disableCompaction || repairPlan.disableMemory)
+        ) {
+            add(
+                results,
+                "warn",
+                "OMP project/overlay config owns effective conflicting settings; automatic global repair is disabled: " +
+                    nonGlobalSources.join(", "),
+            );
+        }
+
         const reportedAgentDir = options.deps.runOmpCommand(omp.path, ["config", "path"], 10_000);
         if (!reportedAgentDir.ok) {
             add(results, "warn", "Could not verify OMP active agent directory");
@@ -273,6 +293,11 @@ async function runHealthChecks(options: {
     add(results, "info", `OMP config: ${getOmpConfigPath()}`);
     add(results, "info", `OMP plugin lock: ${getOmpPluginsLockPath()}`);
     add(results, "info", `OMP sessions: ${getOmpSessionsRoot()}`);
+    const packageDir = getOmpPackageDir();
+    if (packageDir) add(results, "info", `OMP package override: ${packageDir}`);
+    for (const source of getOmpNonGlobalConfigSources(options.cwd)) {
+        add(results, "info", `OMP non-global config: ${source}`);
+    }
     const logPath = getMagicContextLogPath("pi");
     add(
         results,
@@ -300,7 +325,12 @@ function writeDefaultConfig(path: string): void {
     writeFileAtomic(path, `${stringifyJsonc(config, null, 2)}\n`);
 }
 
-async function repair(plan: RepairPlan, deps: DoctorDeps, prompts: PromptIO): Promise<number> {
+async function repair(
+    plan: RepairPlan,
+    deps: DoctorDeps,
+    prompts: PromptIO,
+    cwd: string,
+): Promise<number> {
     let fixed = 0;
     if (plan.writeUserConfig && !existsSync(getOmpUserConfigPath())) {
         writeDefaultConfig(getOmpUserConfigPath());
@@ -316,11 +346,18 @@ async function repair(plan: RepairPlan, deps: DoctorDeps, prompts: PromptIO): Pr
             fixed += 1;
         } else prompts.log.error(result.message);
     }
+    const nonGlobalSources = getOmpNonGlobalConfigSources(cwd);
     for (const [enabled, key, value] of [
         [plan.disableCompaction, "compaction.enabled", "false"],
         [plan.disableMemory, "memory.backend", "off"],
     ] as const) {
         if (!enabled) continue;
+        if (nonGlobalSources.length > 0) {
+            prompts.log.error(
+                `Refusing to set global OMP ${key}: effective settings include ${nonGlobalSources.join(", ")}`,
+            );
+            continue;
+        }
         const result = deps.runOmpCommand(omp.path, ["config", "set", key, value], 10_000);
         if (result.ok) {
             prompts.log.success(`Set OMP ${key}=${value}`);
@@ -409,15 +446,22 @@ export async function runDoctor(options: RunOmpDoctorOptions = {}): Promise<numb
     };
     const prompts = options.prompts ?? deps.prompts;
     const cwd = options.cwd ?? process.cwd();
-    migrateConfigLocationsForCli(cwd, prompts.log);
+    const migrationWarnings = migrateConfigLocationsForCli(cwd, prompts.log);
+    const migrationRefused = hasUserConfigLocationMigrationRefusal(migrationWarnings);
     if (options.issue) return runIssueFlow({ cwd, prompts, deps });
 
     prompts.intro("Magic Context for Oh My Pi (OMP) Doctor");
     const first = await runHealthChecks({ cwd, prompts, deps });
     prompts.log.message(`Summary: PASS ${first.pass} / WARN ${first.warn} / FAIL ${first.fail}`);
     if (!options.force || first.fail === 0) return first.fail === 0 ? 0 : 1;
+    if (migrationRefused && first.repairPlan.writeUserConfig) {
+        first.repairPlan.writeUserConfig = false;
+        prompts.log.error(
+            "Refusing to write a default shared config while legacy user-config migration is unresolved.",
+        );
+    }
 
-    const fixed = await repair(first.repairPlan, deps, prompts);
+    const fixed = await repair(first.repairPlan, deps, prompts, cwd);
     prompts.log.info(`Applied ${fixed} repair(s); re-checking`);
     const second = await runHealthChecks({ cwd, prompts, deps });
     prompts.log.message(`Summary: PASS ${second.pass} / WARN ${second.warn} / FAIL ${second.fail}`);

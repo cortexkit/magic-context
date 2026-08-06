@@ -1,12 +1,13 @@
 import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { findOnPath, isExecutableFile } from "./find-on-path";
+import { getOmpPackageDir } from "./paths";
 import { getPiCommandInvocation } from "./pi-helpers";
-
 export interface OmpBinaryInfo {
     path: string;
-    source: "path" | "home";
+    source: "path" | "home" | "package";
 }
 
 export interface OmpCommandResult {
@@ -24,15 +25,46 @@ export interface OmpPluginInfo {
 
 export const OMP_PLUGIN_PACKAGE = "@cortexkit/pi-magic-context";
 
+function detectOmpPackageCli(): string | null {
+    const packageDir = getOmpPackageDir();
+    if (!packageDir) return null;
+    try {
+        const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf-8")) as {
+            name?: unknown;
+        };
+        if (manifest.name !== "@oh-my-pi/pi-coding-agent") return null;
+        const cli = join(packageDir, "dist", "cli.js");
+        return existsSync(cli) ? cli : null;
+    } catch {
+        return null;
+    }
+}
+
+export function getOmpFallbackCandidates(
+    platform: NodeJS.Platform,
+    home: string,
+    appData?: string,
+): string[] {
+    if (platform !== "win32") {
+        return [join(home, ".bun", "bin", "omp"), join(home, ".local", "bin", "omp")];
+    }
+    const npmRoot = appData?.trim();
+    return [
+        ...(npmRoot ? [join(npmRoot, "npm", "omp.cmd"), join(npmRoot, "npm", "omp.exe")] : []),
+        join(home, ".bun", "bin", "omp.exe"),
+        join(home, ".bun", "bin", "omp.cmd"),
+    ];
+}
+
 export function detectOmpBinary(): OmpBinaryInfo | null {
     const fromPath = findOnPath("omp");
     if (fromPath) return { path: fromPath, source: "path" };
 
+    const fromPackage = detectOmpPackageCli();
+    if (fromPackage) return { path: fromPackage, source: "package" };
+
     const home = process.env.HOME?.trim() || homedir();
-    const candidates =
-        process.platform === "win32"
-            ? [join(home, ".bun", "bin", "omp.exe"), join(home, ".bun", "bin", "omp.cmd")]
-            : [join(home, ".bun", "bin", "omp"), join(home, ".local", "bin", "omp")];
+    const candidates = getOmpFallbackCandidates(process.platform, home, process.env.APPDATA);
     const candidate = candidates.find((path) => isExecutableFile(path));
     return candidate ? { path: candidate, source: "home" } : null;
 }

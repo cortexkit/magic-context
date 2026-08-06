@@ -2,48 +2,57 @@
  * Provider-id translation between the canonical (OpenCode) form stored in the
  * shared magic-context config and Pi's harness-native provider ids.
  *
- * OpenCode and Pi now share ONE config, but a few auth-plugin providers were
- * named differently on each side. The model id AFTER the slash is identical;
- * only the provider prefix differs:
+ * Provider IDs are a harness boundary, not a database identity. Shared config
+ * always stores the canonical OpenCode form. Each non-OpenCode harness owns an
+ * explicit pair of edge transforms:
  *
- *   canonical (OpenCode)   Pi's preferred auth-plugin form
- *   --------------------   ------------------------------
+ *   canonical (OpenCode)   Pi / OMP selector
+ *   --------------------   -----------------
  *   openai/<model>         openai-codex/<model>
  *   google/<model>         google-antigravity/<model>
  *   anthropic/<model>      anthropic/<model> (same; every other provider too)
  *
- * The mapping is intentionally not a one-to-one provider identity. Pi also
- * exposes plain `openai` and `google` providers for direct API keys, while the
- * canonical prefix does not record whether a subscription or API-key backend
- * should win. Pi therefore starts with the preferred auth-plugin form at the
- * spawn boundary and subagent-runner may retry once with the untranslated
- * canonical form when that form reports missing credentials. The runner caches
- * the winning form per provider prefix in memory only; setup writes still use
- * the reverse mapping below so configs remain canonical.
+ * Pi and OMP currently expose the same two subscription-provider aliases, but
+ * their exported functions remain distinct deliberately. A future OMP catalog
+ * rename must not silently change plain-Pi behavior (or vice versa).
  *
- * Canonical = OpenCode: the config always stores the OpenCode form. Pi
- * translates at its edges:
- *   - read:  canonical -> Pi when spawning a configured model (subagent-runner),
- *            with the runtime credential fallback described above.
- *   - write: Pi -> canonical in the Pi setup wizard, so a config written from
- *            the Pi side stays readable by OpenCode.
+ * The mapping is intentionally not a one-to-one provider identity. Both
+ * harnesses also expose plain `openai` and `google` providers for direct API
+ * keys, while the canonical prefix does not record whether a subscription or
+ * API-key backend should win. The runtime starts with the preferred
+ * subscription form and subagent-runner may retry once with the untranslated
+ * canonical form when that form reports missing credentials.
  *
- * OpenCode needs no translation (canonical IS the OpenCode form).
+ * Only the provider prefix before the first slash is translated. Model IDs,
+ * including nested IDs containing more slashes, are preserved byte-for-byte.
+ * Scoped or otherwise unknown provider prefixes are identities.
+ *
+ * OpenCode needs no translation because canonical is its native form.
  */
 
-const CANONICAL_TO_PI_PROVIDER: Record<string, string> = {
+const CANONICAL_TO_PI_PROVIDER: Readonly<Record<string, string>> = {
     openai: "openai-codex",
     google: "google-antigravity",
 };
 
-const PI_TO_CANONICAL_PROVIDER: Record<string, string> = {
+const PI_TO_CANONICAL_PROVIDER: Readonly<Record<string, string>> = {
+    "openai-codex": "openai",
+    "google-antigravity": "google",
+};
+
+const CANONICAL_TO_OMP_PROVIDER: Readonly<Record<string, string>> = {
+    openai: "openai-codex",
+    google: "google-antigravity",
+};
+
+const OMP_TO_CANONICAL_PROVIDER: Readonly<Record<string, string>> = {
     "openai-codex": "openai",
     "google-antigravity": "google",
 };
 
 /** Remap only the provider prefix (text before the first "/"), preserving the
  *  model id verbatim. No "/", empty provider, or unmapped provider -> unchanged. */
-function remapProviderPrefix(ref: string, map: Record<string, string>): string {
+function remapProviderPrefix(ref: string, map: Readonly<Record<string, string>>): string {
     if (typeof ref !== "string") return ref;
     const slash = ref.indexOf("/");
     if (slash <= 0) return ref;
@@ -63,4 +72,14 @@ export function piModelRefToCanonical(ref: string): string {
  *  is safe on a config that already holds Pi-form ids (hand-edited or pre-fix). */
 export function resolveModelRefForPi(ref: string): string {
     return remapProviderPrefix(piModelRefToCanonical(ref), CANONICAL_TO_PI_PROVIDER);
+}
+
+/** OMP-native selector -> canonical shared-config model reference. */
+export function ompModelRefToCanonical(ref: string): string {
+    return remapProviderPrefix(ref, OMP_TO_CANONICAL_PROVIDER);
+}
+
+/** Canonical shared-config model reference -> OMP-native selector. */
+export function resolveModelRefForOmp(ref: string): string {
+    return remapProviderPrefix(ompModelRefToCanonical(ref), CANONICAL_TO_OMP_PROVIDER);
 }

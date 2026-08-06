@@ -116,6 +116,18 @@ describe("Pi settings rollback", () => {
         });
         expect(removePiSettingsPackage(settingsPath)).toBe(false);
     });
+
+    it("restores an absent packages field when setup added the only entry", () => {
+        const root = makeTempRoot();
+        const settingsPath = join(root, "settings.json");
+        writeFileSync(settingsPath, "{}");
+
+        expect(writePiSettingsPackage(settingsPath)).toBe(true);
+        expect(removePiSettingsPackage(settingsPath, "npm:@cortexkit/pi-magic-context", true)).toBe(
+            true,
+        );
+        expect(parseJsonc(readFileSync(settingsPath, "utf-8"))).toEqual({});
+    });
 });
 
 describe("runSetup", () => {

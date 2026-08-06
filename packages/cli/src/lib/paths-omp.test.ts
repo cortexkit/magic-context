@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveOmpPaths } from "./paths";
+import { getOmpNonGlobalConfigSources, getOmpPackageDir, resolveOmpPaths } from "./paths";
 
 const KEYS = [
     "HOME",
@@ -11,6 +11,8 @@ const KEYS = [
     "OMP_PROFILE",
     "PI_PROFILE",
     "XDG_DATA_HOME",
+    "PI_PACKAGE_DIR",
+    "PI_CONFIG_FILES",
 ] as const;
 const original = new Map<string, string | undefined>();
 let root: string;
@@ -94,5 +96,24 @@ describe("OMP path compatibility", () => {
             expect(paths.pluginsDir).toBe(join(xdg, "omp", "profiles", "work", "plugins"));
             expect(paths.sessionsRoot).toBe(join(xdg, "omp", "profiles", "work", "sessions"));
         }
+    });
+
+    it("resolves PI_PACKAGE_DIR and PI_CONFIG_FILES using OMP semantics", () => {
+        const cwd = join(root, "project");
+        mkdirSync(join(cwd, ".omp"), { recursive: true });
+        mkdirSync(join(root, "omp-package"), { recursive: true });
+        process.env.PI_PACKAGE_DIR = "~/omp-package";
+        process.env.PI_CONFIG_FILES = ["config/first.yml", join(root, "absolute.yml")].join(
+            process.platform === "win32" ? ";" : ":",
+        );
+        const projectConfig = join(cwd, ".omp", "config.yml");
+        writeFileSync(projectConfig, "memory:\n  backend: off\n");
+
+        expect(getOmpPackageDir()).toBe(join(root, "omp-package"));
+        expect(getOmpNonGlobalConfigSources(cwd)).toEqual([
+            join(cwd, "config", "first.yml"),
+            join(root, "absolute.yml"),
+            projectConfig,
+        ]);
     });
 });

@@ -1,3 +1,4 @@
+import { ompModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { OmpAdapter } from "../adapters/omp";
 import {
     detectOmpBinary,
@@ -7,7 +8,12 @@ import {
     OMP_PLUGIN_PACKAGE,
     runOmpCommand,
 } from "../lib/omp-helpers";
-import { getOmpAgentDir, getOmpPluginsLockPath, getOmpUserConfigPath } from "../lib/paths";
+import {
+    getOmpAgentDir,
+    getOmpNonGlobalConfigSources,
+    getOmpPluginsLockPath,
+    getOmpUserConfigPath,
+} from "../lib/paths";
 import {
     type PiCompatibleSetupHost,
     type RunSetupOptions,
@@ -35,8 +41,9 @@ const OMP_HOST: PiCompatibleSetupHost = {
     versionWarning: (version, minimum) =>
         `OMP ${version} is older than the tested minimum ${minimum}. ` +
         "Upgrade with `omp update` before enabling Magic Context.",
+    modelRefToCanonical: ompModelRefToCanonical,
     ensurePluginEntry: async () => new OmpAdapter().ensurePluginEntry(),
-    beforeWrite: async ({ binaryPath, prompts, dryRun, configureHost }) => {
+    beforeWrite: async ({ binaryPath, cwd, prompts, dryRun, configureHost }) => {
         if (!configureHost && !new OmpAdapter().hasPluginEntry()) {
             return async () => {};
         }
@@ -77,6 +84,15 @@ const OMP_HOST: PiCompatibleSetupHost = {
                 return false;
             }
             changes.push({ key: "memory.backend", from: memoryBackend, to: "off" });
+        }
+        const nonGlobalSources = getOmpNonGlobalConfigSources(cwd);
+        if (changes.length > 0 && nonGlobalSources.length > 0) {
+            prompts.log.error(
+                "OMP effective settings come from project/overlay config; refusing to mutate the global config.\n" +
+                    nonGlobalSources.map((path) => `- ${path}`).join("\n") +
+                    "\nEdit those files directly, then rerun setup.",
+            );
+            return false;
         }
 
         if (dryRun) {

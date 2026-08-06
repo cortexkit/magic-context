@@ -31,7 +31,7 @@ type EmbeddingChoice =
       };
 
 export interface SetupEnvironment {
-    detectPiBinary: typeof detectPiBinary;
+    detectPiBinary: () => { path: string } | null;
     getPiVersion: typeof getPiVersion;
     getAvailableModels: typeof getAvailableModels;
     paths: {
@@ -50,9 +50,12 @@ export interface PiCompatibleSetupHost {
     installCommand: string;
     minimumVersion?: string;
     versionWarning?: (version: string, minimum: string) => string;
+    /** Convert this host's model selector to the shared canonical config form. */
+    modelRefToCanonical?: (ref: string) => string;
     ensurePluginEntry: (settingsPath: string) => Promise<PluginEntryResult>;
     beforeWrite?: (options: {
         binaryPath: string;
+        cwd: string;
         prompts: PromptIO;
         dryRun: boolean;
         configureHost: boolean;
@@ -97,6 +100,8 @@ const DEFAULT_HOST: PiCompatibleSetupHost = {
         `targets the new scope, so older Pi installs cannot load this extension.\n` +
         `Run \`pi update --self\` (or \`npm install -g @earendil-works/pi-coding-agent@latest\`) before continuing.`,
     ensurePluginEntry: async (settingsPath) => {
+        const settings = readJsoncConfigForUpdate(settingsPath);
+        const packagesFieldExisted = Object.hasOwn(settings, "packages");
         const added = writePiSettingsPackage(settingsPath);
         return {
             ok: true,
@@ -105,11 +110,17 @@ const DEFAULT_HOST: PiCompatibleSetupHost = {
                 ? `Added ${PI_PACKAGE_SOURCE} to ${settingsPath}`
                 : `Magic Context package already present in ${settingsPath}`,
             configPath: settingsPath,
+            packagesFieldExisted,
         };
     },
     rollbackPluginEntry: async (registration) => {
         if (registration.action === "added") {
-            removePiSettingsPackage(registration.configPath);
+            removePiSettingsPackage(
+                registration.configPath,
+                PI_PACKAGE_SOURCE,
+                (registration as PluginEntryResult & { packagesFieldExisted?: boolean })
+                    .packagesFieldExisted === false,
+            );
         }
     },
 };
@@ -169,13 +180,15 @@ export function writePiSettingsPackage(
 export function removePiSettingsPackage(
     settingsPath: string,
     packageSource = PI_PACKAGE_SOURCE,
+    removeFieldWhenEmpty = false,
 ): boolean {
     const settings = readJsoncConfigForUpdate(settingsPath);
     if (!Array.isArray(settings.packages)) return false;
     const packages = settings.packages;
     const filtered = packages.filter((entry) => entry !== packageSource);
     if (filtered.length === packages.length) return false;
-    settings.packages = filtered;
+    if (removeFieldWhenEmpty && filtered.length === 0) delete settings.packages;
+    else settings.packages = filtered;
     writeFileAtomic(settingsPath, `${stringifyJsonc(settings, null, 2)}\n`);
     return true;
 }
@@ -192,6 +205,7 @@ export function writeMagicContextConfig(
         sidekickEnabled: boolean;
         sidekickModel?: string;
         embedding: EmbeddingChoice;
+        modelRefToCanonical?: (ref: string) => string;
     },
 ): void {
     const config = readJsoncConfigForUpdate(configPath);
@@ -202,17 +216,17 @@ export function writeMagicContextConfig(
             "https://raw.githubusercontent.com/cortexkit/magic-context/master/assets/magic-context.schema.json";
     }
 
-    // The Pi model picker yields Pi-native provider ids (openai-codex/...,
-    // google-antigravity/...). The shared config is canonical (OpenCode) form so
-    // OpenCode can read the same file; normalize before writing.
+    // Model pickers return harness-native provider IDs. Persist only canonical
+    // OpenCode-form IDs so every harness reads the same shared config.
+    const toCanonical = options.modelRefToCanonical ?? piModelRefToCanonical;
     config.historian = compactObject({
         ...((config.historian as Record<string, unknown> | undefined) ?? {}),
-        model: piModelRefToCanonical(options.historianModel),
+        model: toCanonical(options.historianModel),
         thinking_level: options.historianThinkingLevel,
     });
     const dreamer = {
         ...((config.dreamer as Record<string, unknown> | undefined) ?? {}),
-        model: options.dreamerModel ? piModelRefToCanonical(options.dreamerModel) : undefined,
+        model: options.dreamerModel ? toCanonical(options.dreamerModel) : undefined,
         disable: options.dreamerEnabled ? undefined : true,
         enabled: undefined,
         // Dreamer v2 per-task schedules — only set when the user declined the
@@ -225,7 +239,7 @@ export function writeMagicContextConfig(
         ...((config.sidekick as Record<string, unknown> | undefined) ?? {}),
         model:
             options.sidekickEnabled && options.sidekickModel
-                ? piModelRefToCanonical(options.sidekickModel)
+                ? toCanonical(options.sidekickModel)
                 : undefined,
         disable: options.sidekickEnabled ? undefined : true,
         enabled: undefined,
@@ -352,7 +366,7 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
     );
     if (configureHost && dryRun) {
         prompts.log.message(
-            `[dry-run] would register ${host.packageSource} via \`${host.installCommand}\``,
+            `[dry-run] would register ${host.packageSource} for ${host.displayName} in ${settingsPath}`,
         );
     } else if (!configureHost) {
         prompts.log.warn(
@@ -408,6 +422,7 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
     const rollbackHost =
         (await host.beforeWrite?.({
             binaryPath: binary.path,
+            cwd: process.cwd(),
             prompts,
             dryRun,
             configureHost,
@@ -436,6 +451,7 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
                 sidekickEnabled,
                 sidekickModel,
                 embedding,
+                modelRefToCanonical: host.modelRefToCanonical,
             });
             prompts.log.success(`Config written to ${configPath}`);
         }

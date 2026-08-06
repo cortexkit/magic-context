@@ -1,5 +1,58 @@
-import { describe, expect, it } from "bun:test";
-import { parseOmpModelsOutput, runOmpCommand } from "./omp-helpers";
+import { afterEach, describe, expect, it } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+    detectOmpBinary,
+    getOmpFallbackCandidates,
+    parseOmpModelsOutput,
+    runOmpCommand,
+} from "./omp-helpers";
+
+const originalPath = process.env.PATH;
+const originalPackageDir = process.env.PI_PACKAGE_DIR;
+const roots: string[] = [];
+
+afterEach(() => {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    if (originalPackageDir === undefined) delete process.env.PI_PACKAGE_DIR;
+    else process.env.PI_PACKAGE_DIR = originalPackageDir;
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+describe("OMP binary discovery", () => {
+    it("honors a validated PI_PACKAGE_DIR install root", () => {
+        const root = mkdtempSync(join(tmpdir(), "mc-omp-package-"));
+        roots.push(root);
+        mkdirSync(join(root, "dist"), { recursive: true });
+        writeFileSync(
+            join(root, "package.json"),
+            JSON.stringify({ name: "@oh-my-pi/pi-coding-agent" }),
+        );
+        writeFileSync(join(root, "dist", "cli.js"), "");
+        process.env.PATH = "";
+        process.env.PI_PACKAGE_DIR = root;
+
+        expect(detectOmpBinary()).toEqual({
+            path: join(root, "dist", "cli.js"),
+            source: "package",
+        });
+    });
+});
+
+describe("OMP fallback discovery", () => {
+    it("covers standard Windows npm and Bun install directories", () => {
+        const home = "C:\\Users\\fox";
+        const appData = "C:\\Users\\fox\\AppData\\Roaming";
+        expect(getOmpFallbackCandidates("win32", home, appData)).toEqual([
+            join(appData, "npm", "omp.cmd"),
+            join(appData, "npm", "omp.exe"),
+            join(home, ".bun", "bin", "omp.exe"),
+            join(home, ".bun", "bin", "omp.cmd"),
+        ]);
+    });
+});
 
 describe("OMP model discovery", () => {
     it("parses model selectors without flattening scoped or nested IDs", () => {

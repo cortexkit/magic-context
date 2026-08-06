@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { resolveCortexKitUserConfigPath } from "@magic-context/core/config/migrate-config-location";
 import {
     getMagicContextHistorianDir as getMagicContextHistorianDirCore,
@@ -219,6 +219,42 @@ export function getOmpSessionsRoot(): string {
 /** OMP's global YAML settings file. */
 export function getOmpConfigPath(): string {
     return join(resolveOmpPaths().agentDir, "config.yml");
+}
+
+/** OMP package root override used by Nix/Guix and source installations. */
+export function getOmpPackageDir(): string | undefined {
+    const value = process.env.PI_PACKAGE_DIR?.trim();
+    if (!value) return undefined;
+    if (value === "~") return envFirstHomeDir();
+    if (value.startsWith("~/") || value.startsWith("~\\")) {
+        return resolve(envFirstHomeDir(), value.slice(2));
+    }
+    return resolve(value);
+}
+
+/**
+ * Non-global OMP settings layers that can override `omp config set`.
+ *
+ * `PI_CONFIG_FILES` paths resolve relative to the command cwd. OMP also merges
+ * `<cwd>/.omp/config.yml` above the global agent config. Callers must not mutate
+ * global settings in response to values owned by either higher-precedence layer.
+ */
+export function getOmpNonGlobalConfigSources(cwd = process.cwd()): string[] {
+    const sources =
+        process.env.PI_CONFIG_FILES?.split(delimiter)
+            .map((entry) => entry.trim())
+            .filter(Boolean)
+            .map((entry) => {
+                if (entry === "~") return envFirstHomeDir();
+                const expanded =
+                    entry.startsWith("~/") || entry.startsWith("~\\")
+                        ? join(envFirstHomeDir(), entry.slice(2))
+                        : entry;
+                return resolve(cwd, expanded);
+            }) ?? [];
+    const projectConfig = resolve(cwd, ".omp", "config.yml");
+    if (existsSync(projectConfig)) sources.push(projectConfig);
+    return [...new Set(sources)];
 }
 
 /** OMP's npm/link plugin root, including profile and XDG data layout. */

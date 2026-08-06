@@ -8,7 +8,7 @@ import {
 	spyOn,
 } from "bun:test";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -309,26 +309,95 @@ describe("subagent-runner pure helpers", () => {
 		expect(args).toContain("--no-extensions");
 	});
 
-	it("resolves relative allowlist entries from the active host agent dir", () => {
+	it("keeps plain Pi relative allowlist entries rooted at the stock agent dir", () => {
 		const previous = process.env.PI_CODING_AGENT_DIR;
-		process.env.PI_CODING_AGENT_DIR = "/tmp/omp-profile/agent";
+		process.env.PI_CODING_AGENT_DIR = "/tmp/plain-pi-custom-agent";
 		try {
 			const args = buildArgsForTest(
 				{ ...baseOptions, model: "anthropic/claude-sonnet" },
-				{
-					subagentExtensions: ["provider-package", "./extensions/provider.ts"],
-				},
+				{ subagentExtensions: ["provider-package"] },
 			);
 			const firstExtension = args.indexOf("--extension");
-			expect(args.slice(firstExtension, firstExtension + 4)).toEqual([
+			expect(args.slice(firstExtension, firstExtension + 2)).toEqual([
 				"--extension",
-				"/tmp/omp-profile/agent/provider-package",
-				"--extension",
-				"/tmp/omp-profile/agent/extensions/provider.ts",
+				join(homedir(), ".pi/agent/provider-package"),
 			]);
 		} finally {
 			if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
 			else process.env.PI_CODING_AGENT_DIR = previous;
+		}
+	});
+
+	it("uses PI_CODING_AGENT_DIR only for a positively identified OMP host", () => {
+		const root = mkdtempSync(join(homedir(), ".mc-omp-host-test-"));
+		const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+		const previousPackageDir = process.env.PI_PACKAGE_DIR;
+		writeFileSync(
+			join(root, "package.json"),
+			JSON.stringify({ name: "@oh-my-pi/pi-coding-agent" }),
+		);
+		process.env.PI_PACKAGE_DIR = root;
+		process.env.PI_CODING_AGENT_DIR = "/tmp/omp-profile/agent";
+		try {
+			const args = buildArgsForTest(
+				{ ...baseOptions, model: "anthropic/claude-sonnet" },
+				{ subagentExtensions: ["provider-package"] },
+			);
+			const firstExtension = args.indexOf("--extension");
+			expect(args.slice(firstExtension, firstExtension + 2)).toEqual([
+				"--extension",
+				"/tmp/omp-profile/agent/provider-package",
+			]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+			if (previousAgentDir === undefined)
+				delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+			if (previousPackageDir === undefined) delete process.env.PI_PACKAGE_DIR;
+			else process.env.PI_PACKAGE_DIR = previousPackageDir;
+		}
+	});
+
+	it("uses the OMP default agent dir when PI_CODING_AGENT_DIR is unset", () => {
+		const root = mkdtempSync(join(homedir(), ".mc-omp-default-host-test-"));
+		const previous = {
+			agentDir: process.env.PI_CODING_AGENT_DIR,
+			packageDir: process.env.PI_PACKAGE_DIR,
+			configDir: process.env.PI_CONFIG_DIR,
+			ompProfile: process.env.OMP_PROFILE,
+			piProfile: process.env.PI_PROFILE,
+		};
+		writeFileSync(
+			join(root, "package.json"),
+			JSON.stringify({ name: "@oh-my-pi/pi-coding-agent" }),
+		);
+		process.env.PI_PACKAGE_DIR = root;
+		delete process.env.PI_CODING_AGENT_DIR;
+		delete process.env.PI_CONFIG_DIR;
+		delete process.env.OMP_PROFILE;
+		delete process.env.PI_PROFILE;
+		try {
+			const args = buildArgsForTest(
+				{ ...baseOptions, model: "anthropic/claude-sonnet" },
+				{ subagentExtensions: ["provider-package"] },
+			);
+			const firstExtension = args.indexOf("--extension");
+			expect(args.slice(firstExtension, firstExtension + 2)).toEqual([
+				"--extension",
+				join(homedir(), ".omp/agent/provider-package"),
+			]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+			for (const [key, value] of [
+				["PI_CODING_AGENT_DIR", previous.agentDir],
+				["PI_PACKAGE_DIR", previous.packageDir],
+				["PI_CONFIG_DIR", previous.configDir],
+				["OMP_PROFILE", previous.ompProfile],
+				["PI_PROFILE", previous.piProfile],
+			] as const) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
 		}
 	});
 

@@ -1,5 +1,11 @@
 import * as childProcess from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import {
@@ -16,7 +22,9 @@ import { openDatabase } from "@magic-context/core/features/magic-context/storage
 import type { SubagentKind } from "@magic-context/core/features/magic-context/storage-subagent-invocations";
 import { recordChildInvocation } from "@magic-context/core/features/magic-context/subagent-token-capture";
 import {
+	ompModelRefToCanonical,
 	piModelRefToCanonical,
+	resolveModelRefForOmp,
 	resolveModelRefForPi,
 } from "@magic-context/core/shared/harness-provider-map";
 import { sessionLog } from "@magic-context/core/shared/logger";
@@ -176,13 +184,74 @@ const TERMINAL_DRAIN_GRACE_MS = 2_000;
 
 export const MAGIC_CONTEXT_PI_SUBAGENT_ENV = "MAGIC_CONTEXT_PI_SUBAGENT";
 
-// Pi and OMP both expose their active agent directory through
-// PI_CODING_AGENT_DIR. OMP sets it for named profiles too. Resolve it at argv
-// construction time so profile switches and test seams cannot freeze a stale
-// user root; upstream Pi falls back to its stock ~/.pi/agent directory.
+function packageRootIsOmp(packageRoot: string): boolean {
+	try {
+		const manifest = JSON.parse(
+			readFileSync(join(packageRoot, "package.json"), "utf-8"),
+		) as { name?: unknown };
+		return manifest.name === "@oh-my-pi/pi-coding-agent";
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Positive OMP host identification. PI_CODING_AGENT_DIR alone is deliberately
+ * insufficient because upstream Pi supports the same variable.
+ */
+function isOmpHostProcess(): boolean {
+	const execName = basename(process.execPath).toLowerCase();
+	if (/^omp(?:\.exe)?$/.test(execName)) return true;
+
+	const packageOverride = process.env.PI_PACKAGE_DIR?.trim();
+	if (packageOverride && packageRootIsOmp(resolvePath(packageOverride)))
+		return true;
+
+	let current = process.argv[1] ? dirname(resolvePath(process.argv[1])) : "";
+	while (current) {
+		if (packageRootIsOmp(current)) return true;
+		const parent = dirname(current);
+		if (parent === current) break;
+		current = parent;
+	}
+	return false;
+}
+
+function normalizedOmpProfile(): string | undefined {
+	const raw = (process.env.OMP_PROFILE ?? process.env.PI_PROFILE)?.trim();
+	return raw && raw !== "default" && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(raw)
+		? raw
+		: undefined;
+}
+
+// OMP exposes a profile/custom agent directory via PI_CODING_AGENT_DIR.
+// Default-profile OMP normally leaves it unset, so derive ~/.omp/agent (or the
+// PI_CONFIG_DIR equivalent). Plain Pi also supports PI_CODING_AGENT_DIR; never
+// consume it without the positive host check or plain-Pi argv changes.
 function getHostAgentSettingsDir(): string {
+	if (!isOmpHostProcess()) return join(homedir(), ".pi", "agent");
 	const configured = process.env.PI_CODING_AGENT_DIR?.trim();
-	return configured ? resolvePath(configured) : join(homedir(), ".pi", "agent");
+	if (configured) return resolvePath(configured);
+	const configRoot = join(
+		homedir(),
+		process.env.PI_CONFIG_DIR?.trim() || ".omp",
+	);
+	const profile = normalizedOmpProfile();
+	return profile
+		? join(configRoot, "profiles", profile, "agent")
+		: join(configRoot, "agent");
+}
+
+function modelRefToCanonicalForHost(ref: string): string {
+	return isOmpHostProcess()
+		? ompModelRefToCanonical(ref)
+		: piModelRefToCanonical(ref);
+}
+
+function resolveModelRefForHost(ref: string): string {
+	return isOmpHostProcess()
+		? resolveModelRefForOmp(ref)
+		: resolveModelRefForPi(ref);
 }
 let configuredSubagentExtensions: readonly string[] | undefined;
 
@@ -1425,11 +1494,11 @@ function resolveProviderModelAttempt(
 ): ProviderModelAttempt | undefined {
 	if (typeof model !== "string" || model.length === 0) return undefined;
 
-	const canonicalRef = piModelRefToCanonical(model);
+	const canonicalRef = modelRefToCanonicalForHost(model);
 	const canonicalProvider = providerPrefix(canonicalRef);
 	if (!canonicalProvider) return undefined;
 
-	const translatedRef = resolveModelRefForPi(canonicalRef);
+	const translatedRef = resolveModelRefForHost(canonicalRef);
 	const translatedProvider = providerPrefix(translatedRef);
 	const cachedProvider = PI_PROVIDER_FORM_CACHE.get(canonicalProvider);
 	if (
@@ -1619,7 +1688,10 @@ export function buildArgs(
 		// google->google-antigravity). Translate to Pi's form HERE, at the only
 		// point the model reaches the spawned process, so options.model stays
 		// canonical everywhere else (accounting, logging, fallback selection).
-		args.push("--model", opts?.modelRef ?? resolveModelRefForPi(options.model));
+		args.push(
+			"--model",
+			opts?.modelRef ?? resolveModelRefForHost(options.model),
+		);
 	}
 
 	// Pass --thinking <level> only when explicitly configured.

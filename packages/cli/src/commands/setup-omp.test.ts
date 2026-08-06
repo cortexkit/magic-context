@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
@@ -45,6 +45,7 @@ const roots: string[] = [];
 const original = {
     PATH: process.env.PATH,
     HOME: process.env.HOME,
+    PI_CONFIG_FILES: process.env.PI_CONFIG_FILES,
 };
 
 afterEach(() => {
@@ -55,7 +56,10 @@ afterEach(() => {
     for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function makeFakeOmp(): { binary: string; state: string } {
+function makeFakeOmp(options: { failMemorySet?: boolean } = {}): {
+    binary: string;
+    state: string;
+} {
     const root = mkdtempSync(join(tmpdir(), "mc-omp-setup-"));
     roots.push(root);
     const state = join(root, "state.json");
@@ -67,13 +71,20 @@ function makeFakeOmp(): { binary: string; state: string } {
 const fs = require("fs");
 const statePath = ${JSON.stringify(state)};
 const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+const failMemorySet = ${JSON.stringify(options.failMemorySet === true)};
 const args = process.argv.slice(2);
 if (args[0] === "config" && args[1] === "get") {
   const value = args[2] === "compaction.enabled" ? state.compaction : state.memory;
   process.stdout.write(JSON.stringify({ value }));
 } else if (args[0] === "config" && args[1] === "set") {
   if (args[2] === "compaction.enabled") state.compaction = args[3] === "true";
-  else state.memory = args[3];
+  else {
+    if (failMemorySet) {
+      process.stderr.write("memory set failed");
+      process.exit(1);
+    }
+    state.memory = args[3];
+  }
   fs.writeFileSync(statePath, JSON.stringify(state));
 } else if (args[0] === "plugin" && args[1] === "list") {
   process.stdout.write(JSON.stringify({ npm: [], marketplace: [] }));
@@ -92,6 +103,7 @@ describe("OMP setup transaction", () => {
         const prompts = new MockPrompts([true, true]);
         const rollback = await __test.OMP_HOST.beforeWrite?.({
             binaryPath: binary,
+            cwd: process.cwd(),
             prompts,
             dryRun: false,
             configureHost: true,
@@ -109,11 +121,33 @@ describe("OMP setup transaction", () => {
         });
     });
 
+    it("automatically restores an earlier setting when a later write fails", async () => {
+        const { binary, state } = makeFakeOmp({ failMemorySet: true });
+        const prompts = new MockPrompts([true, true]);
+
+        const result = await __test.OMP_HOST.beforeWrite?.({
+            binaryPath: binary,
+            cwd: process.cwd(),
+            prompts,
+            dryRun: false,
+            configureHost: true,
+        });
+
+        expect(result).toBe(false);
+        expect(JSON.parse(readFileSync(state, "utf-8"))).toEqual({
+            compaction: true,
+            memory: "mnemopi",
+        });
+        expect(prompts.messages.join("\n")).toContain("memory set failed");
+        expect(prompts.messages.join("\n")).toContain("Restored OMP compaction.enabled=true");
+    });
+
     it("does not change native settings when registration is skipped and plugin is absent", async () => {
         const { binary, state } = makeFakeOmp();
         const prompts = new MockPrompts([]);
         const rollback = await __test.OMP_HOST.beforeWrite?.({
             binaryPath: binary,
+            cwd: process.cwd(),
             prompts,
             dryRun: false,
             configureHost: false,
@@ -123,5 +157,52 @@ describe("OMP setup transaction", () => {
             compaction: true,
             memory: "mnemopi",
         });
+    });
+
+    it("refuses global setting writes when a project OMP config is active", async () => {
+        const { binary, state } = makeFakeOmp();
+        const cwd = mkdtempSync(join(tmpdir(), "mc-omp-project-"));
+        roots.push(cwd);
+        mkdirSync(join(cwd, ".omp"), { recursive: true });
+        writeFileSync(join(cwd, ".omp", "config.yml"), "compaction:\n  enabled: true\n");
+        const prompts = new MockPrompts([true, true]);
+
+        const result = await __test.OMP_HOST.beforeWrite?.({
+            binaryPath: binary,
+            cwd,
+            prompts,
+            dryRun: false,
+            configureHost: true,
+        });
+
+        expect(result).toBe(false);
+        expect(JSON.parse(readFileSync(state, "utf-8"))).toEqual({
+            compaction: true,
+            memory: "mnemopi",
+        });
+        expect(prompts.messages.join("\n")).toContain("refusing to mutate the global config");
+    });
+
+    it("refuses global setting writes when PI_CONFIG_FILES overlays are active", async () => {
+        const { binary, state } = makeFakeOmp();
+        const cwd = mkdtempSync(join(tmpdir(), "mc-omp-overlay-"));
+        roots.push(cwd);
+        process.env.PI_CONFIG_FILES = "settings/omp.yml";
+        const prompts = new MockPrompts([true, true]);
+
+        const result = await __test.OMP_HOST.beforeWrite?.({
+            binaryPath: binary,
+            cwd,
+            prompts,
+            dryRun: false,
+            configureHost: true,
+        });
+
+        expect(result).toBe(false);
+        expect(JSON.parse(readFileSync(state, "utf-8"))).toEqual({
+            compaction: true,
+            memory: "mnemopi",
+        });
+        expect(prompts.messages.join("\n")).toContain(join(cwd, "settings", "omp.yml"));
     });
 });
