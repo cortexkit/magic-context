@@ -1069,10 +1069,15 @@ pub fn parse_omp_models_output(text: &str) -> Vec<String> {
 async fn get_available_omp_models() -> Vec<String> {
     let candidates = if cfg!(target_os = "windows") {
         let appdata = std::env::var("APPDATA").unwrap_or_default();
+        let userprofile = std::env::var("USERPROFILE").unwrap_or_default();
         let mut list = Vec::new();
         if !appdata.is_empty() {
             list.push(format!("{}\\npm\\omp.cmd", appdata));
             list.push(format!("{}\\npm\\omp.exe", appdata));
+        }
+        if !userprofile.is_empty() {
+            list.push(format!("{}\\.bun\\bin\\omp.exe", userprofile));
+            list.push(format!("{}\\.bun\\bin\\omp.cmd", userprofile));
         }
         list.push("omp".to_string());
         list.push("omp.exe".to_string());
@@ -1115,6 +1120,17 @@ async fn get_available_omp_models() -> Vec<String> {
         return parse_omp_models_output(&text);
     }
     Vec::new()
+}
+
+fn merge_pi_and_omp_models(mut pi_models: Vec<String>, omp_models: Vec<String>) -> Vec<String> {
+    pi_models.extend(omp_models);
+    pi_models.sort();
+    pi_models.dedup();
+    pi_models
+}
+
+async fn include_omp_models(pi_models: Vec<String>) -> Vec<String> {
+    merge_pi_and_omp_models(pi_models, get_available_omp_models().await)
 }
 
 #[tauri::command]
@@ -1173,7 +1189,7 @@ pub async fn get_available_pi_models() -> Vec<String> {
         if let Some(text) = run_bounded_binary(bin, &["--list-models"]).await {
             let models = parse_pi_models_output(&text);
             if !models.is_empty() {
-                return models;
+                return include_omp_models(models).await;
             }
         }
     }
@@ -1183,7 +1199,7 @@ pub async fn get_available_pi_models() -> Vec<String> {
             if let Some(text) = run_bounded_binary(&bin, &["--list-models"]).await {
                 let models = parse_pi_models_output(&text);
                 if !models.is_empty() {
-                    return models;
+                    return include_omp_models(models).await;
                 }
             }
         }
@@ -1195,16 +1211,11 @@ pub async fn get_available_pi_models() -> Vec<String> {
     if let Some(text) = run_via_login_shell("pi --list-models".to_string()).await {
         let models = parse_pi_models_output(&text);
         if !models.is_empty() {
-            return models;
+            return include_omp_models(models).await;
         }
     }
 
-    let omp_models = get_available_omp_models().await;
-    if !omp_models.is_empty() {
-        return omp_models;
-    }
-
-    Vec::new()
+    get_available_omp_models().await
 }
 
 // ── Embedding test ──────────────────────────────────────────
@@ -1406,9 +1417,10 @@ pub fn get_db_health(state: State<'_, AppState>) -> db::DbHealth {
 #[cfg(test)]
 mod tests {
     use super::{
-        opencode_desktop_detected_for_env, parse_omp_models_output, parse_pi_models_output,
-        pick_first_line, prepare_embedding_probe_options, run_bounded_binary,
-        windows_opencode_candidates, DesktopPlatform, OpencodeDesktopEnv, OPENCODE_DESKTOP_APP_IDS,
+        merge_pi_and_omp_models, opencode_desktop_detected_for_env, parse_omp_models_output,
+        parse_pi_models_output, pick_first_line, prepare_embedding_probe_options,
+        run_bounded_binary, windows_opencode_candidates, DesktopPlatform, OpencodeDesktopEnv,
+        OPENCODE_DESKTOP_APP_IDS,
     };
     use crate::embedding_probe::EmbeddingProbeOutcome;
     use std::path::{Path, PathBuf};
@@ -1674,6 +1686,17 @@ mod tests {
                 "modal/@modal/qwen/model-v1",
                 "openai/fallback/model",
             ]
+        );
+    }
+
+    #[test]
+    fn pi_and_omp_model_catalogs_are_merged_and_deduplicated() {
+        assert_eq!(
+            merge_pi_and_omp_models(
+                vec!["anthropic/shared".into(), "pi/only".into()],
+                vec!["omp/only".into(), "anthropic/shared".into()],
+            ),
+            vec!["anthropic/shared", "omp/only", "pi/only"]
         );
     }
 
