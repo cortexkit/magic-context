@@ -128,6 +128,16 @@ describe("Pi settings rollback", () => {
         );
         expect(parseJsonc(readFileSync(settingsPath, "utf-8"))).toEqual({});
     });
+
+    it("refuses to overwrite a non-array packages value instead of discarding it", () => {
+        const root = makeTempRoot();
+        const settingsPath = join(root, "settings.json");
+        const original = JSON.stringify({ packages: { legacy: true } });
+        writeFileSync(settingsPath, original);
+
+        expect(() => writePiSettingsPackage(settingsPath)).toThrow(/expected an array/);
+        expect(readFileSync(settingsPath, "utf-8")).toBe(original);
+    });
 });
 
 describe("runSetup", () => {

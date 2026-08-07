@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { extname, join } from "node:path";
 import { findOnPath, isExecutableFile } from "./find-on-path";
 import { getOmpPackageDir } from "./paths";
 import { getPiCommandInvocation } from "./pi-helpers";
@@ -25,9 +25,16 @@ export interface OmpPluginInfo {
 
 export const OMP_PLUGIN_PACKAGE = "@cortexkit/pi-magic-context";
 
+/**
+ * OMP's published CLI is a Bun script (`#!/usr/bin/env bun`), not a native
+ * executable, and Windows ignores shebangs entirely. A bare `dist/cli.js` path
+ * is therefore only usable when we can run it through Bun ourselves, so
+ * package-root discovery reports nothing unless Bun is resolvable.
+ */
 function detectOmpPackageCli(): string | null {
     const packageDir = getOmpPackageDir();
     if (!packageDir) return null;
+    if (!findOnPath("bun")) return null;
     try {
         const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf-8")) as {
             name?: unknown;
@@ -38,6 +45,18 @@ function detectOmpPackageCli(): string | null {
     } catch {
         return null;
     }
+}
+
+/** Build the argv for an OMP path, routing Bun scripts through the Bun runtime. */
+export function getOmpCommandInvocation(
+    ompPath: string,
+    args: string[],
+): { command: string; args: string[] } {
+    if (extname(ompPath).toLowerCase() === ".js") {
+        const bun = findOnPath("bun");
+        if (bun) return { command: bun, args: [ompPath, ...args] };
+    }
+    return getPiCommandInvocation(ompPath, args);
 }
 
 export function getOmpFallbackCandidates(
@@ -71,7 +90,7 @@ export function detectOmpBinary(): OmpBinaryInfo | null {
 
 export function runOmpCommand(ompPath: string, args: string[], timeout = 30_000): OmpCommandResult {
     try {
-        const invocation = getPiCommandInvocation(ompPath, args);
+        const invocation = getOmpCommandInvocation(ompPath, args);
         const result = spawnSync(invocation.command, invocation.args, {
             encoding: "utf-8",
             timeout,

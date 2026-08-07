@@ -87,4 +87,18 @@ describe("OMP provider boundary", () => {
         expect(resolveModelRefForOmp(selector)).toBe(selector);
         expect(resolveModelRefForOmp(ompModelRefToCanonical(selector))).toBe(selector);
     });
+
+    it("passes through provider ids that collide with Object.prototype members", () => {
+        for (const ref of [
+            "constructor/model",
+            "toString/model",
+            "__proto__/model",
+            "hasOwnProperty/model",
+        ]) {
+            expect(resolveModelRefForOmp(ref)).toBe(ref);
+            expect(ompModelRefToCanonical(ref)).toBe(ref);
+            expect(resolveModelRefForPi(ref)).toBe(ref);
+            expect(piModelRefToCanonical(ref)).toBe(ref);
+        }
+    });
 });

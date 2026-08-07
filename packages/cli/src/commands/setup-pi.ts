@@ -102,16 +102,25 @@ const DEFAULT_HOST: PiCompatibleSetupHost = {
     ensurePluginEntry: async (settingsPath) => {
         const settings = readJsoncConfigForUpdate(settingsPath);
         const packagesFieldExisted = Object.hasOwn(settings, "packages");
-        const added = writePiSettingsPackage(settingsPath);
-        return {
-            ok: true,
-            action: added ? "added" : "already_present",
-            message: added
-                ? `Added ${PI_PACKAGE_SOURCE} to ${settingsPath}`
-                : `Magic Context package already present in ${settingsPath}`,
-            configPath: settingsPath,
-            packagesFieldExisted,
-        };
+        try {
+            const added = writePiSettingsPackage(settingsPath);
+            return {
+                ok: true,
+                action: added ? "added" : "already_present",
+                message: added
+                    ? `Added ${PI_PACKAGE_SOURCE} to ${settingsPath}`
+                    : `Magic Context package already present in ${settingsPath}`,
+                configPath: settingsPath,
+                packagesFieldExisted,
+            };
+        } catch (error) {
+            return {
+                ok: false,
+                action: "error",
+                message: error instanceof Error ? error.message : String(error),
+                configPath: settingsPath,
+            };
+        }
     },
     rollbackPluginEntry: async (registration) => {
         if (registration.action === "added") {
@@ -168,6 +177,13 @@ export function writePiSettingsPackage(
 ): boolean {
     const settings = readJsoncConfigForUpdate(settingsPath);
     ensureDir(dirname(settingsPath));
+    if (settings.packages !== undefined && !Array.isArray(settings.packages)) {
+        // Overwriting a non-array value would silently discard whatever the user
+        // put there; refuse instead so setup never destroys host configuration.
+        throw new Error(
+            `Refusing to rewrite ${settingsPath}: "packages" is ${typeof settings.packages}, expected an array. Fix it by hand, then rerun setup.`,
+        );
+    }
     const packages = Array.isArray(settings.packages) ? settings.packages : [];
 
     const hasPackage = hasPiMagicContextPackage(packages);

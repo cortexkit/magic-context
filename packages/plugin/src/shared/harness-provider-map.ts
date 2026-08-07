@@ -51,14 +51,17 @@ const OMP_TO_CANONICAL_PROVIDER: Readonly<Record<string, string>> = {
 };
 
 /** Remap only the provider prefix (text before the first "/"), preserving the
- *  model id verbatim. No "/", empty provider, or unmapped provider -> unchanged. */
+ *  model id verbatim. No "/", empty provider, or unmapped provider -> unchanged.
+ *  Lookups are own-property only, so provider ids that collide with
+ *  `Object.prototype` members (`constructor/model`, `toString/model`) stay
+ *  identities instead of becoming garbage prefixes. */
 function remapProviderPrefix(ref: string, map: Readonly<Record<string, string>>): string {
     if (typeof ref !== "string") return ref;
     const slash = ref.indexOf("/");
     if (slash <= 0) return ref;
     const provider = ref.slice(0, slash);
-    const mapped = map[provider];
-    return mapped ? `${mapped}${ref.slice(slash)}` : ref;
+    if (!Object.hasOwn(map, provider)) return ref;
+    return `${map[provider]}${ref.slice(slash)}`;
 }
 
 /** Pi-native `provider/model` -> canonical (OpenCode). Identity when unmapped.
