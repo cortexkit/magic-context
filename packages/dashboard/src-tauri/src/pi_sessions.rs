@@ -175,10 +175,23 @@ fn omp_fallback_binary_candidates(
     ]
 }
 
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
 fn omp_installation_detected(home: &Path) -> bool {
-    if std::env::var_os("OMP_PROFILE").is_some() {
-        return true;
-    }
+    // OMP_PROFILE alone is not proof: the variable can be exported in a shell
+    // that never installed OMP, and treating it as evidence would surface OMP
+    // roots to plain Pi users. Require the same positive package/binary
+    // evidence the Pi runtime uses.
     if trimmed_env_path(std::env::var_os("PI_PACKAGE_DIR"))
         .is_some_and(|path| omp_package_dir_is_valid(&path))
     {
@@ -189,15 +202,24 @@ fn omp_installation_detected(home: &Path) -> bool {
     } else {
         &["omp"]
     };
-    if std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-        .any(|dir| binary_names.iter().any(|name| dir.join(name).is_file()))
-    {
+    if std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).any(|dir| {
+        binary_names
+            .iter()
+            .any(|name| is_executable_file(&dir.join(name)))
+    }) {
         return true;
     }
     let app_data = trimmed_env_path(std::env::var_os("APPDATA"));
     omp_fallback_binary_candidates(home, app_data.as_deref(), cfg!(target_os = "windows"))
         .iter()
-        .any(|path| path.is_file())
+        .any(|path| is_executable_file(path))
+}
+
+/// OMP only relocates data into XDG on Unix while the agent directory is the
+/// one it derives for the active profile. `configured_agent` is the value OMP
+/// exports for children through `PI_CODING_AGENT_DIR`.
+fn omp_xdg_allowed(configured_agent: Option<&Path>, expected_agent: &Path, unix: bool) -> bool {
+    unix && configured_agent.map_or(true, |agent| agent == expected_agent)
 }
 
 fn pi_compatible_session_roots_for_home(home: &Path, include_omp: bool) -> Vec<PathBuf> {
@@ -212,34 +234,37 @@ fn pi_compatible_session_roots_for_home(home: &Path, include_omp: bool) -> Vec<P
             .unwrap_or_else(|| PathBuf::from(".omp"));
         let config_root = home.join(&config_dir);
         let default_agent = config_root.join("agent");
+        let active_profile = active_omp_profile();
 
         // Keep the default root visible even when a named profile is active.
         roots.push(default_agent.join("sessions"));
         append_omp_profile_roots(&mut roots, &config_root.join("profiles"), false);
-        if let Some(profile) = active_omp_profile() {
-            roots.push(
-                config_root
-                    .join("profiles")
-                    .join(profile)
-                    .join("agent/sessions"),
-            );
+
+        // OMP only switches data into XDG on Unix while the agent directory is
+        // the one it derives itself. OMP exports PI_CODING_AGENT_DIR for its
+        // children, including named profiles, so compare against the ACTIVE
+        // profile's agent dir rather than the default one.
+        let expected_agent = match &active_profile {
+            Some(profile) => config_root.join("profiles").join(profile).join("agent"),
+            None => default_agent.clone(),
+        };
+        if active_profile.is_some() {
+            roots.push(expected_agent.join("sessions"));
         }
 
-        // OMP only switches data into XDG on Unix when the default agent dir is
-        // in use. Mirror that guard so stale Windows/custom-agent roots do not
-        // appear in the dashboard.
         let configured_agent = trimmed_env_path(std::env::var_os("PI_CODING_AGENT_DIR"));
-        let can_use_xdg = (cfg!(target_os = "linux") || cfg!(target_os = "macos"))
-            && configured_agent
-                .as_ref()
-                .map_or(true, |agent| agent == &default_agent);
+        let can_use_xdg = omp_xdg_allowed(
+            configured_agent.as_deref(),
+            &expected_agent,
+            cfg!(target_os = "linux") || cfg!(target_os = "macos"),
+        );
         if can_use_xdg {
             if let Some(xdg_data) = trimmed_env_path(std::env::var_os("XDG_DATA_HOME")) {
                 let app_root = xdg_data.join("omp");
                 if app_root.exists() {
                     roots.push(app_root.join("sessions"));
                     append_omp_profile_roots(&mut roots, &app_root.join("profiles"), true);
-                    if let Some(profile) = active_omp_profile() {
+                    if let Some(profile) = &active_profile {
                         roots.push(app_root.join("profiles").join(profile).join("sessions"));
                     }
                 }
@@ -878,6 +903,43 @@ mod tests {
             omp_fallback_binary_candidates(Path::new("C:/Users/fox"), Some(app_data), true);
         assert!(windows.contains(&app_data.join("npm/omp.cmd")));
         assert!(windows.contains(&PathBuf::from("C:/Users/fox/.bun/bin/omp.exe")));
+    }
+
+    #[test]
+    fn xdg_guard_accepts_the_active_profile_agent_dir() {
+        let default_agent = PathBuf::from("/home/fox/.omp/agent");
+        let profile_agent = PathBuf::from("/home/fox/.omp/profiles/work/agent");
+        let custom_agent = PathBuf::from("/home/fox/custom-agent");
+
+        // OMP exports the profile agent dir for its children; that must not
+        // disable XDG discovery for the profile being used.
+        assert!(omp_xdg_allowed(Some(&profile_agent), &profile_agent, true));
+        assert!(omp_xdg_allowed(Some(&default_agent), &default_agent, true));
+        assert!(omp_xdg_allowed(None, &default_agent, true));
+
+        // A genuinely custom agent dir and Windows keep XDG off.
+        assert!(!omp_xdg_allowed(Some(&custom_agent), &default_agent, true));
+        assert!(!omp_xdg_allowed(Some(&default_agent), &profile_agent, true));
+        assert!(!omp_xdg_allowed(None, &default_agent, false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn omp_detection_requires_an_executable_not_just_a_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let candidate = dir.path().join("omp");
+        fs::write(&candidate, "not a real binary").unwrap();
+        assert!(!is_executable_file(&candidate));
+
+        let mut perms = fs::metadata(&candidate).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&candidate, perms).unwrap();
+        assert!(is_executable_file(&candidate));
+
+        assert!(!is_executable_file(dir.path()));
+        assert!(!is_executable_file(&dir.path().join("missing-omp")));
     }
 
     #[test]
