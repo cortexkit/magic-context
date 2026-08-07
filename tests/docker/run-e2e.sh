@@ -2,9 +2,10 @@
 # Run all docker E2E test images locally.
 #
 # Usage:
-#   tests/docker/run-e2e.sh              # both harnesses
+#   tests/docker/run-e2e.sh              # every harness
 #   tests/docker/run-e2e.sh opencode     # OpenCode only
 #   tests/docker/run-e2e.sh pi           # Pi only
+#   tests/docker/run-e2e.sh omp          # Oh My Pi only (installs real OMP)
 #
 # Pre-requisite: run `bun run --cwd packages/plugin build` and
 # `bun run --cwd packages/pi-plugin build` first — the Dockerfiles
@@ -54,6 +55,9 @@ run_target() {
 echo "Pre-building local dist artifacts..."
 bun run --cwd "$REPO_ROOT/packages/plugin" build
 bun run --cwd "$REPO_ROOT/packages/pi-plugin" build
+# Dockerfile.pi and Dockerfile.omp both COPY packages/cli/dist for their
+# `magic-context doctor --harness …` invocations.
+bun run --cwd "$REPO_ROOT/packages/cli" build
 
 # pi-plugin runtime deps are installed inside the Pi Docker image
 # (see Dockerfile.pi) so better-sqlite3 builds against the correct
@@ -64,13 +68,14 @@ case "$TARGET" in
     all)
         run_target opencode || EXIT=1
         run_target pi || EXIT=1
+        run_target omp || EXIT=1
         ;;
-    opencode|pi)
+    opencode|pi|omp)
         run_target "$TARGET" || EXIT=1
         ;;
     *)
         echo "Unknown target: $TARGET" >&2
-        echo "Usage: $0 [opencode|pi|all]" >&2
+        echo "Usage: $0 [opencode|pi|omp|all]" >&2
         exit 2
         ;;
 esac

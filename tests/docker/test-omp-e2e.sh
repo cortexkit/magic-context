@@ -28,7 +28,8 @@ OMP_VERSION=$(omp --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 |
 PLUGIN_LIST=$(omp plugin list --json 2>&1)
 echo "OMP version: ${OMP_VERSION:-unknown}"
 echo "$PLUGIN_LIST"
-check "omp --version returns a value" "test -n \"$OMP_VERSION\""
+check "omp --version reports the tested 17.1.7 floor or newer" \
+    "printf '17.1.7\n%s\n' \"$OMP_VERSION\" | sort -V -C"
 check "OMP lists the linked Magic Context package" \
     "echo \"\$PLUGIN_LIST\" | grep -q '@cortexkit/pi-magic-context'"
 
@@ -101,7 +102,7 @@ tail -20 /tmp/omp.log
 
 check "OMP turn exits successfully" "test \"$OMP_EXIT\" -eq 0"
 check "OMP emits a terminal agent_end protocol event" \
-    "grep -q '\"type\":\"agent_end\"' /tmp/omp.log"
+    "grep -qE '\"type\"[[:space:]]*:[[:space:]]*\"agent_end\"' /tmp/omp.log"
 
 check "OMP produced protocol output" "test -s /tmp/omp.log"
 check "Magic Context extension initialized" "test -s $PLUGIN_LOG"
