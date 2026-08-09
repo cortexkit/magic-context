@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+	A1_HASH_BASELINE_HEADING,
+	A1_TOOL_SECTION_HEADING,
+	a1GoldenSectionOffset,
+	readA1GoldenDocument,
+} from "@magic-context/core/shared/prompt-surface-a1-golden";
 import {
 	createPromptSurfaceRuntime,
 	LIGHT_TOOL_DESCRIPTIONS,
@@ -236,37 +240,14 @@ type RegisteredPromptTool = {
 	parameters: { properties?: Record<string, unknown> };
 };
 
-/**
- * Locate a golden section heading, refusing to continue when it is absent.
- *
- * A bare `indexOf` returns -1 for a missing heading, and `slice(start, -1)`
- * silently yields an empty (or truncated) section rather than failing: the
- * golden then parses as ZERO tools and this test passes by comparing empty to
- * empty. Failing loudly here keeps a malformed golden from reading as a clean
- * run.
- */
-function sectionOffset(document: string, heading: string): number {
-	const offset = document.indexOf(heading);
-	if (offset === -1) {
-		throw new Error(`A1 golden is missing the "${heading}" section heading`);
-	}
-	return offset;
-}
-
 function readA1GoldenTools(): Record<
 	string,
 	{ description: string; parameters: Record<string, unknown> }
 > {
-	const document = readFileSync(
-		join(
-			import.meta.dir,
-			"../../../plugin/src/shared/prompt-surface-a1-golden.md",
-		),
-		"utf8",
-	);
+	const document = readA1GoldenDocument();
 	const toolSection = document.slice(
-		sectionOffset(document, "## 2. Tool surface"),
-		sectionOffset(document, "## 3. System-prompt hash baseline"),
+		a1GoldenSectionOffset(document, A1_TOOL_SECTION_HEADING),
+		a1GoldenSectionOffset(document, A1_HASH_BASELINE_HEADING),
 	);
 	const headings = [...toolSection.matchAll(/^### (ctx_[a-z_]+) —.*$/gm)];
 	return Object.fromEntries(
