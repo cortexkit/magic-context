@@ -12,6 +12,8 @@ import {
     CTX_NOTE_LIGHT_DESCRIPTION,
     CTX_REDUCE_LIGHT_DESCRIPTION,
     CTX_SEARCH_LIGHT_DESCRIPTION,
+    CTX_SKILL_NOTE_LIGHT_DESCRIPTION,
+    CTX_SKILL_RECALL_LIGHT_DESCRIPTION,
 } from "../tools/light-descriptions";
 import { piModelRefToCanonical } from "./harness-provider-map";
 import { detectConfigFile } from "./jsonc-parser";
@@ -35,6 +37,8 @@ export const ACTIVE_TOOL_IDS = [
     "ctx_note",
     "ctx_memory",
     "ctx_search",
+    "ctx_skill_note",
+    "ctx_skill_recall",
 ] as const;
 
 /** @deprecated Use ACTIVE_TOOL_IDS. Kept as an alias for existing consumers. */
@@ -48,6 +52,8 @@ export const LIGHT_TOOL_DESCRIPTIONS = {
     ctx_note: CTX_NOTE_LIGHT_DESCRIPTION,
     ctx_memory: CTX_MEMORY_LIGHT_DESCRIPTION,
     ctx_search: CTX_SEARCH_LIGHT_DESCRIPTION,
+    ctx_skill_note: CTX_SKILL_NOTE_LIGHT_DESCRIPTION,
+    ctx_skill_recall: CTX_SKILL_RECALL_LIGHT_DESCRIPTION,
 } as const satisfies Readonly<Record<PromptSurfaceToolId, string>>;
 
 /**

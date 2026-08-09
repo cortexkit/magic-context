@@ -288,9 +288,39 @@ function captureRegisteredTools(
 	return registered;
 }
 
+/**
+ * Tools present in the A1 golden but NOT registered by Pi.
+ *
+ * The golden is exported from OpenCode's tool surface, and skill-memory
+ * (`ctx_skill_note` / `ctx_skill_recall`) is OpenCode-only: its transparent
+ * recall path hangs off OpenCode's `skill` tool lifecycle hooks, which Pi has no
+ * counterpart for. See PARITY.md.
+ *
+ * Listed explicitly rather than filtered by prefix so that a NEW golden tool Pi
+ * fails to register still breaks this test — the drift guard stays intact for
+ * every tool both hosts are supposed to share.
+ */
+const OPENCODE_ONLY_GOLDEN_TOOLS = new Set([
+	"ctx_skill_note",
+	"ctx_skill_recall",
+]);
+
+function readA1GoldenToolsForPi(): ReturnType<typeof readA1GoldenTools> {
+	const golden = readA1GoldenTools();
+	for (const id of OPENCODE_ONLY_GOLDEN_TOOLS) {
+		if (!(id in golden)) {
+			throw new Error(
+				`OPENCODE_ONLY_GOLDEN_TOOLS lists ${id}, which is absent from the A1 golden; drop it from the list.`,
+			);
+		}
+		delete golden[id];
+	}
+	return golden;
+}
+
 describe("registerMagicContextTools — prompt-surface registration", () => {
 	it("matches the A1 golden for no config and explicit full", () => {
-		const golden = readA1GoldenTools();
+		const golden = readA1GoldenToolsForPi();
 		const implicitDb = createTestDb();
 		const explicitDb = createTestDb();
 		try {
@@ -338,6 +368,7 @@ describe("registerMagicContextTools — prompt-surface registration", () => {
 				promptSurface: { default: "light" },
 			});
 			for (const toolId of Object.keys(LIGHT_TOOL_DESCRIPTIONS)) {
+				if (OPENCODE_ONLY_GOLDEN_TOOLS.has(toolId)) continue;
 				expect(light.get(toolId)?.description).toBe(
 					LIGHT_TOOL_DESCRIPTIONS[
 						toolId as keyof typeof LIGHT_TOOL_DESCRIPTIONS

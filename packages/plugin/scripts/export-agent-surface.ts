@@ -20,6 +20,11 @@ import { createCtxMemoryTools } from "../src/tools/ctx-memory/tools";
 import { createCtxNoteTools } from "../src/tools/ctx-note/tools";
 import { createCtxReduceTools } from "../src/tools/ctx-reduce/tools";
 import { createCtxSearchTools } from "../src/tools/ctx-search/tools";
+import { CTX_SKILL_NOTE_TOOL_NAME, createCtxSkillNoteTool } from "../src/tools/ctx-skill-note";
+import {
+    CTX_SKILL_RECALL_TOOL_NAME,
+    createCtxSkillRecallTool,
+} from "../src/tools/ctx-skill-recall";
 
 const tokenizer = new Tokenizer(claudeEncoding);
 const t = (s: string) => tokenizer.count(s);
@@ -81,6 +86,10 @@ const definitions = {
     ...createCtxNoteTools(stubDeps),
     ...createCtxMemoryTools(stubDeps),
     ...createCtxSearchTools(stubDeps),
+    // Skill-memory tools return a single ToolDefinition each rather than a record,
+    // so they are keyed explicitly instead of spread.
+    [CTX_SKILL_NOTE_TOOL_NAME]: createCtxSkillNoteTool(stubDeps),
+    [CTX_SKILL_RECALL_TOOL_NAME]: createCtxSkillRecallTool(stubDeps),
 };
 
 out.push("## 2. Tool surface (description + parameters as serialized to the provider)");

@@ -178,6 +178,29 @@ shared resolver's log-only dubious-ownership warning while still using the same
 
 ---
 
+## 8b. Skill-memory is OpenCode-only
+
+**OpenCode:** registers `ctx_skill_note` and `ctx_skill_recall`, and transparently
+appends a `<skill-memory>` block to the `skill` tool's result.
+
+**Pi:** registers neither, and has no transparent path.
+
+**Why:** the whole feature hangs off OpenCode's `skill` tool lifecycle
+(`tool.definition` to add the `intent` param, `tool.execute.before` to capture it
+pre-validation, `tool.execute.after` to append recalled notes to the result).
+Pi has no `skill` tool and no equivalent hook trio, so there is nothing to attach
+to — this is an absent host primitive, not a deliberate feature cut.
+
+**Consequence for the shared A1 golden:** the golden is exported from OpenCode's
+tool surface, so it lists seven tools while Pi registers five. Pi's
+prompt-surface parity tests subtract the OpenCode-only pair via an explicit
+`OPENCODE_ONLY_GOLDEN_TOOLS` set (see `src/tools/index.test.ts`) rather than
+filtering by prefix, so a genuinely-shared tool that Pi failed to register would
+still break the test. The set is validated against the golden at read time, so it
+cannot silently rot if a listed tool disappears upstream.
+
+---
+
 ## 8a. Transform-decision attribution binds one prompt later
 
 **OpenCode:** `message.updated` carries the finalized assistant `messageID`, so

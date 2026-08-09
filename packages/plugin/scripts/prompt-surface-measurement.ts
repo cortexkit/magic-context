@@ -15,6 +15,11 @@ import { createCtxMemoryTools } from "../src/tools/ctx-memory/tools";
 import { createCtxNoteTools } from "../src/tools/ctx-note/tools";
 import { createCtxReduceTools } from "../src/tools/ctx-reduce/tools";
 import { createCtxSearchTools } from "../src/tools/ctx-search/tools";
+import { CTX_SKILL_NOTE_TOOL_NAME, createCtxSkillNoteTool } from "../src/tools/ctx-skill-note";
+import {
+    CTX_SKILL_RECALL_TOOL_NAME,
+    createCtxSkillRecallTool,
+} from "../src/tools/ctx-skill-recall";
 
 export const TOKENIZER_PACKAGE = "ai-tokenizer";
 export const TOKENIZER_ENCODING = "claude";
@@ -122,6 +127,12 @@ function buildToolDefinitions() {
         createCtxNoteTools(stubDeps),
         createCtxMemoryTools(stubDeps),
         createCtxSearchTools(stubDeps),
+        // Skill-memory tools return a single ToolDefinition each rather than a
+        // record, so they are keyed explicitly instead of merged as a record.
+        {
+            [CTX_SKILL_NOTE_TOOL_NAME]: createCtxSkillNoteTool(stubDeps),
+            [CTX_SKILL_RECALL_TOOL_NAME]: createCtxSkillRecallTool(stubDeps),
+        },
     );
     const definitionIds = new Set(Object.keys(definitions));
     const canonicalIds = new Set<string>(ACTIVE_TOOL_IDS);
