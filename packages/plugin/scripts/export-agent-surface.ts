@@ -8,6 +8,7 @@
  * Usage: bun packages/plugin/scripts/export-agent-surface.ts [outPath]
  * Default out: .alfonso/agent-surface-export.md (repo root)
  */
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import Tokenizer from "ai-tokenizer";
@@ -111,6 +112,32 @@ for (const [name, definition] of Object.entries(definitions)) {
     out.push("```");
     out.push("");
 }
+
+// ── Section 3: system-prompt hash baseline ───────────────────────────────────
+// Derived, not transcribed: the hash handler persists the MD5 of
+// `output.system.join("\n")`, and in the no-host-prefix baseline each guidance
+// section IS the whole system array — so the hash is just the MD5 of the
+// guidance bytes emitted in section 1.
+out.push("## 3. System-prompt hash baseline");
+out.push("");
+out.push(
+    'The hash handler persists the MD5 of `output.system.join("\\\\n")`. The values below use each captured guidance section as the complete system array, which is the deterministic no-host-prefix baseline for later compatibility tests. The guidance bytes above are the source bytes; this table records the hash bytes that must remain unchanged when the default prompt surface is selected.',
+);
+out.push("");
+out.push("| Variant | Guidance bytes | MD5 system-prompt hash |");
+out.push("|---|---:|---|");
+for (const [label, text] of variants) {
+    // Table labels are the short form ("PRIMARY full"), not the full heading.
+    const shortLabel = label.split(" (")[0];
+    const bytes = Buffer.byteLength(text, "utf8");
+    const md5 = createHash("md5").update(text).digest("hex");
+    out.push(`| ${shortLabel} | ${bytes} | \`${md5}\` |`);
+}
+out.push("");
+out.push(
+    'The OpenCode and Pi runtime compatibility tests consume this snapshot for omitted `prompt_surface` and explicit `{ default: "full" }`: both assert guidance, registered tool descriptions, tool IDs, and hashes; OpenCode also asserts these parameter schemas directly, while Pi asserts its TypeBox-owned schemas stay byte-identical across both config forms.',
+);
+out.push("");
 
 const outPath = resolve(process.argv[2] ?? "../../.alfonso/agent-surface-export.md");
 mkdirSync(dirname(outPath), { recursive: true });

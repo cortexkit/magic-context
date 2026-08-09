@@ -236,6 +236,23 @@ type RegisteredPromptTool = {
 	parameters: { properties?: Record<string, unknown> };
 };
 
+/**
+ * Locate a golden section heading, refusing to continue when it is absent.
+ *
+ * A bare `indexOf` returns -1 for a missing heading, and `slice(start, -1)`
+ * silently yields an empty (or truncated) section rather than failing: the
+ * golden then parses as ZERO tools and this test passes by comparing empty to
+ * empty. Failing loudly here keeps a malformed golden from reading as a clean
+ * run.
+ */
+function sectionOffset(document: string, heading: string): number {
+	const offset = document.indexOf(heading);
+	if (offset === -1) {
+		throw new Error(`A1 golden is missing the "${heading}" section heading`);
+	}
+	return offset;
+}
+
 function readA1GoldenTools(): Record<
 	string,
 	{ description: string; parameters: Record<string, unknown> }
@@ -248,8 +265,8 @@ function readA1GoldenTools(): Record<
 		"utf8",
 	);
 	const toolSection = document.slice(
-		document.indexOf("## 2. Tool surface"),
-		document.indexOf("## 3. System-prompt hash baseline"),
+		sectionOffset(document, "## 2. Tool surface"),
+		sectionOffset(document, "## 3. System-prompt hash baseline"),
 	);
 	const headings = [...toolSection.matchAll(/^### (ctx_[a-z_]+) —.*$/gm)];
 	return Object.fromEntries(
