@@ -18,6 +18,27 @@ check() {
     fi
 }
 
+version_at_least() {
+    local actual="$1"
+    local minimum="$2"
+    local -a actual_parts minimum_parts
+    local index
+
+    [[ "$actual" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    [[ "$minimum" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    IFS=. read -r -a actual_parts <<<"$actual"
+    IFS=. read -r -a minimum_parts <<<"$minimum"
+    for index in 0 1 2; do
+        if ((10#${actual_parts[$index]} > 10#${minimum_parts[$index]})); then
+            return 0
+        fi
+        if ((10#${actual_parts[$index]} < 10#${minimum_parts[$index]})); then
+            return 1
+        fi
+    done
+    return 0
+}
+
 section() {
     echo
     echo "--- $1 ---"
@@ -29,7 +50,7 @@ PLUGIN_LIST=$(omp plugin list --json 2>&1)
 echo "OMP version: ${OMP_VERSION:-unknown}"
 echo "$PLUGIN_LIST"
 check "omp --version reports the tested 17.1.7 floor or newer" \
-    "printf '17.1.7\n%s\n' \"$OMP_VERSION\" | sort -V -C"
+    "version_at_least \"$OMP_VERSION\" 17.1.7"
 check "OMP lists the linked Magic Context package" \
     "echo \"\$PLUGIN_LIST\" | grep -q '@cortexkit/pi-magic-context'"
 
@@ -103,6 +124,26 @@ tail -20 /tmp/omp.log
 check "OMP turn exits successfully" "test \"$OMP_EXIT\" -eq 0"
 check "OMP emits a terminal agent_end protocol event" \
     "grep -qE '\"type\"[[:space:]]*:[[:space:]]*\"agent_end\"' /tmp/omp.log"
+
+section "OMP subagent argv contract"
+cat > /tmp/omp-subagent-system.txt <<'PROMPT'
+Reply once, then stop.
+PROMPT
+set +e
+MAGIC_CONTEXT_PI_SUBAGENT=1 timeout --signal=KILL 60 omp \
+    --print --mode json --no-session --no-skills --no-rules \
+    --tools read,grep,glob \
+    --system-prompt /tmp/omp-subagent-system.txt \
+    --model mock/mock-model \
+    "Run the one-shot child turn." \
+    > /tmp/omp-subagent.log 2>&1
+OMP_SUBAGENT_EXIT=$?
+set -e
+echo "OMP subagent exit: $OMP_SUBAGENT_EXIT"
+tail -20 /tmp/omp-subagent.log
+check "OMP accepts the translated subagent argv" "test \"$OMP_SUBAGENT_EXIT\" -eq 0"
+check "OMP subagent emits a terminal agent_end protocol event" \
+    "grep -qE '\"type\"[[:space:]]*:[[:space:]]*\"agent_end\"' /tmp/omp-subagent.log"
 
 check "OMP produced protocol output" "test -s /tmp/omp.log"
 check "Magic Context extension initialized" "test -s $PLUGIN_LOG"

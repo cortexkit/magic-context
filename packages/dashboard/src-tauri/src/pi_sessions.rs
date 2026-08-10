@@ -152,6 +152,21 @@ fn trimmed_env_path(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
     (!value.is_empty()).then(|| PathBuf::from(value))
 }
 
+fn expand_home_path(path: &Path, home: &Path) -> PathBuf {
+    if path == Path::new("~") {
+        return home.to_path_buf();
+    }
+    if let Some(value) = path.to_str() {
+        if let Some(suffix) = value
+            .strip_prefix("~/")
+            .or_else(|| value.strip_prefix("~\\"))
+        {
+            return home.join(suffix);
+        }
+    }
+    path.to_path_buf()
+}
+
 fn normalize_omp_profile(value: Option<std::ffi::OsString>) -> Option<std::ffi::OsString> {
     let value = value?;
     let trimmed = value.to_string_lossy().trim().to_string();
@@ -257,7 +272,8 @@ fn omp_installation_detected(environment: &OmpEnvironment) -> bool {
     if environment
         .package_dir
         .as_deref()
-        .is_some_and(omp_package_dir_is_valid)
+        .map(|path| expand_home_path(path, &environment.home))
+        .is_some_and(|path| omp_package_dir_is_valid(&path))
     {
         return true;
     }
@@ -1040,7 +1056,7 @@ mod tests {
             r#"{"name":"@oh-my-pi/pi-coding-agent"}"#,
         )
         .unwrap();
-        environment.package_dir = Some(package_dir);
+        environment.package_dir = Some(PathBuf::from("~/omp-package"));
         let _guard = set_test_omp_environment(environment);
 
         let omp_sessions = scan_omp_session_dir();

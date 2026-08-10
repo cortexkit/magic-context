@@ -27,6 +27,11 @@ const ALLOWED_READERS = new Set<string>([
     // The strip operates on a raw Record<string, unknown> by key name, not on
     // a parsed MagicContextConfig.
     "packages/plugin/src/config/project-security.ts",
+    // OMP's own setting key appears only as an external CLI string literal;
+    // these files never read Magic Context's parsed compaction config.
+    "packages/cli/src/lib/omp-helpers.ts",
+    "packages/cli/src/commands/setup-omp.ts",
+    "packages/cli/src/commands/doctor-omp.ts",
 ]);
 
 function sourceFiles(directory: string): string[] {
@@ -42,10 +47,10 @@ function sourceFiles(directory: string): string[] {
     return result;
 }
 
-// Matches direct reads of the config path: `compaction.enabled` or
-// `compaction?.enabled` as a property access (not a string literal). This is a
-// structural grep, not a full AST parse — it is deliberately conservative and
-// may surface false positives, which are then allow-listed only after review.
+// Conservatively matches the textual token `compaction.enabled` or
+// `compaction?.enabled`, including string literals. False positives are
+// allow-listed only after confirming they do not read Magic Context's parsed
+// config path.
 // It does NOT match the DB column `compaction_mode_record`, the accessor name
 // `isCompactionEnabled`, or the schema's own `.object({ enabled: ... })`.
 const COMPACTION_ENABLED_READ = /\bcompaction\??\s*\.\s*enabled\b(?!_)/;
