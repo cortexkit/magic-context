@@ -55,6 +55,7 @@ run_target() {
 echo "Pre-building local dist artifacts..."
 bun run --cwd "$REPO_ROOT/packages/plugin" build
 bun run --cwd "$REPO_ROOT/packages/pi-plugin" build
+bun run --cwd "$REPO_ROOT/packages/pi-plugin" build:e2e-argv
 # Dockerfile.pi and Dockerfile.omp both COPY packages/cli/dist for their
 # `magic-context doctor --harness …` invocations.
 bun run --cwd "$REPO_ROOT/packages/cli" build

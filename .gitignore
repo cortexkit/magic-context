@@ -114,3 +114,4 @@ packages/plugin/scripts/experiments/visual-memory/trials/REPORT.md
 packages/plugin/scripts/mural-test-output/
 AgentLogs/
 .agent-logs/
+tests/docker/.generated/

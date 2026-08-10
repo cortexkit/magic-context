@@ -36,6 +36,7 @@ RUN cd /test && \
     npm install --silent --no-audit --no-fund @copilotkit/aimock
 
 COPY packages/pi-plugin/dist/ /test/mc-pi/dist/
+COPY tests/docker/.generated/subagent-runner-e2e.mjs /test/e2e/subagent-runner-e2e.mjs
 COPY packages/pi-plugin/package.json /test/mc-pi/package.json
 COPY packages/pi-plugin/README.md /test/mc-pi/README.md
 RUN cd /test/mc-pi && \

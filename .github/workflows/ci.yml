@@ -229,8 +229,10 @@ jobs:
       - name: Install workspace deps
         run: bun install --frozen-lockfile
 
-      - name: Build Pi-compatible plugin
-        run: bun run --cwd packages/pi-plugin build
+      - name: Build Pi-compatible plugin and OMP argv renderer
+        run: |
+          bun run --cwd packages/pi-plugin build
+          bun run --cwd packages/pi-plugin build:e2e-argv
 
       - name: Build CLI
         run: bun run --cwd packages/cli build

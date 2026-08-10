@@ -129,14 +129,32 @@ section "OMP subagent argv contract"
 cat > /tmp/omp-subagent-system.txt <<'PROMPT'
 Reply once, then stop.
 PROMPT
+OMP_PACKAGE_DIR="$(npm root -g)/@oh-my-pi/pi-coding-agent"
+MAGIC_CONTEXT_PI_SUBAGENT=1 PI_PACKAGE_DIR="$OMP_PACKAGE_DIR" \
+    node --input-type=module > /tmp/omp-subagent-argv <<'NODE'
+import { buildArgs } from "/test/e2e/subagent-runner-e2e.mjs";
+
+const args = buildArgs(
+    {
+        agent: "historian",
+        systemPrompt: "loaded from the explicit path",
+        userMessage: "Run the one-shot child turn.",
+        model: "mock/mock-model",
+    },
+    {
+        systemPromptPath: "/tmp/omp-subagent-system.txt",
+        modelRef: "mock/mock-model",
+    },
+);
+for (const arg of args) console.log(arg);
+NODE
+mapfile -t OMP_SUBAGENT_ARGS < /tmp/omp-subagent-argv
+printf 'OMP generated subagent argv:'
+printf ' %q' "${OMP_SUBAGENT_ARGS[@]}"
+printf '\n'
 set +e
-MAGIC_CONTEXT_PI_SUBAGENT=1 timeout --signal=KILL 60 omp \
-    --print --mode json --no-session --no-skills --no-rules \
-    --tools read,grep,glob \
-    --system-prompt /tmp/omp-subagent-system.txt \
-    --model mock/mock-model \
-    "Run the one-shot child turn." \
-    > /tmp/omp-subagent.log 2>&1
+MAGIC_CONTEXT_PI_SUBAGENT=1 timeout --signal=KILL 60 \
+    omp "${OMP_SUBAGENT_ARGS[@]}" > /tmp/omp-subagent.log 2>&1
 OMP_SUBAGENT_EXIT=$?
 set -e
 echo "OMP subagent exit: $OMP_SUBAGENT_EXIT"
