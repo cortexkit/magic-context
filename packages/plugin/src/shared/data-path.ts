@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getHarness, type HarnessId } from "./harness";
@@ -176,18 +176,65 @@ export function getOpenCodeStorageDir(): string {
  * `PRAGMA integrity_check` against it. A test that deletes XDG_DATA_HOME to
  * exercise path fallbacks cannot restore isolation by setting
  * `process.env.HOME`: bun caches `os.homedir()` at startup, so `getDataDir()`
- * still resolves to the real home. Honoring MAGIC_CONTEXT_TEST_DATA_DIR here —
- * set by `packages/plugin/test-preload.ts` and mutated by no test — makes the
- * preload's "cannot be defeated" guarantee true for every caller, not just
- * `openDatabase()`. It is never set in production.
+ * still resolves to the real home. MAGIC_CONTEXT_TEST_DATA_DIR — set by
+ * `packages/plugin/test-preload.ts`, and restored by any test that touches it
+ * — is honored here, so the preload's "cannot be defeated" guarantee holds for
+ * every caller, not just `openDatabase()`. It is never set in production.
  *
- * XDG_DATA_HOME still wins: a test that manages its own data home is already
- * controlled, and production has no test dir set at all.
+ * CWD-INDEPENDENT BACKSTOP. The preload only runs when `bun test`'s CWD has a
+ * bunfig wiring `[test] preload`. A run from a dir WITHOUT that wiring (a
+ * package missing its bunfig, or a brand-new one) executes every *.test.ts with
+ * NO preload, and this resolver would hand back the REAL shared path — which is
+ * how the live DB reached v41. Bun sets NODE_ENV=test for EVERY `bun test`
+ * regardless of CWD, and production never sets it, so that window redirects to
+ * a memoized throwaway dir instead. It lives here rather than in
+ * `resolveDatabasePath()` so direct callers (the CLI doctors' own
+ * `PRAGMA integrity_check`, announcements, the models.dev cache) are covered
+ * too — they never go through the DB resolver.
+ *
+ * XDG_DATA_HOME still wins over both: a test that manages its own data home is
+ * already controlled, and production has no test dir set at all.
  */
 export function getMagicContextStorageDir(): string {
-    const testDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
-    const base = testDataDir && !process.env.XDG_DATA_HOME ? testDataDir : getDataDir();
-    return path.join(base, "cortexkit", "magic-context");
+    if (!process.env.XDG_DATA_HOME) {
+        const testDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+        if (testDataDir) {
+            return path.join(testDataDir, "cortexkit", "magic-context");
+        }
+        if (process.env.NODE_ENV === "test") {
+            return getTestBackstopStorageDir();
+        }
+    }
+    return path.join(getDataDir(), "cortexkit", "magic-context");
+}
+
+let testBackstopStorageDir: string | null = null;
+let testBackstopWarned = false;
+
+/**
+ * Memoized per process so repeated calls in the same unisolated test resolve to
+ * the SAME path — `openDatabase()` caches by path, and a fresh temp dir per call
+ * would defeat that cache and hand back different DB handles.
+ */
+function getTestBackstopStorageDir(): string {
+    if (!testBackstopStorageDir) {
+        testBackstopStorageDir = path.join(
+            mkdtempSync(path.join(os.tmpdir(), "mc-test-db-backstop-")),
+            "cortexkit",
+            "magic-context",
+        );
+    }
+    if (!testBackstopWarned) {
+        testBackstopWarned = true;
+        // Deliberately console, not the logger: logger.ts imports this module.
+        console.warn(
+            "[magic-context] TEST BACKSTOP: NODE_ENV=test with no MAGIC_CONTEXT_TEST_DATA_DIR " +
+                `— redirecting storage to a throwaway temp dir (${testBackstopStorageDir}) so no ` +
+                "test can touch the user's real shared database. Wire `[test] preload` in this " +
+                "package's bunfig.toml.",
+        );
+    }
+    return testBackstopStorageDir;
 }
 
 /**

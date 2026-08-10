@@ -93,14 +93,38 @@ describe("data-path", () => {
         // Cross-harness shared path: both OpenCode and Pi plugins read/write here,
         // unlike the legacy opencode/storage/plugin/magic-context location which
         // was OpenCode-specific. See ARCHITECTURE_DECISIONS memory for rationale.
-        // Production shape, so the test-isolation dir set by test-preload.ts is
+        // Production shape, so both test-isolation guards (the preload's data
+        // dir and the NODE_ENV backstop bun sets for every `bun test`) are
         // lifted for the duration of this assertion.
         const savedTestDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+        const savedNodeEnv = process.env.NODE_ENV;
         delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+        delete process.env.NODE_ENV;
         try {
             expect(getMagicContextStorageDir()).toBe(
                 path.join(os.homedir(), ".local", "share", "cortexkit", "magic-context"),
             );
+        } finally {
+            if (savedTestDir !== undefined) process.env.MAGIC_CONTEXT_TEST_DATA_DIR = savedTestDir;
+            if (savedNodeEnv !== undefined) process.env.NODE_ENV = savedNodeEnv;
+        }
+    });
+
+    test("getMagicContextStorageDir backstops to a temp dir under NODE_ENV=test with no guard set", () => {
+        // CWD-independent backstop: a `bun test` from a dir whose bunfig has no
+        // `[test] preload` runs every suite with neither guard env var set. The
+        // DB resolver used to own this branch, so direct callers of this helper
+        // (the CLI doctors' own PRAGMA integrity_check) still reached the real
+        // shared DB. Memoized, so repeated calls must agree — openDatabase()
+        // caches by path.
+        const savedTestDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+        delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+        process.env.NODE_ENV = "test";
+        try {
+            const resolved = getMagicContextStorageDir();
+            expect(resolved).not.toContain(path.join(os.homedir(), ".local", "share"));
+            expect(resolved.endsWith(path.join("cortexkit", "magic-context"))).toBe(true);
+            expect(getMagicContextStorageDir()).toBe(resolved);
         } finally {
             if (savedTestDir !== undefined) process.env.MAGIC_CONTEXT_TEST_DATA_DIR = savedTestDir;
         }
