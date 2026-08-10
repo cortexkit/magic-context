@@ -2,6 +2,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { stringify as stringifyJsonc } from "comment-json";
+import type { PluginEntryResult } from "../adapters/types";
 import { writeFileAtomic } from "../lib/atomic-write";
 import {
     hasUserConfigLocationMigrationRefusal,
@@ -30,7 +31,7 @@ type EmbeddingChoice =
       };
 
 export interface SetupEnvironment {
-    detectPiBinary: typeof detectPiBinary;
+    detectPiBinary: () => { path: string } | null;
     getPiVersion: typeof getPiVersion;
     getAvailableModels: typeof getAvailableModels;
     paths: {
@@ -40,9 +41,32 @@ export interface SetupEnvironment {
     };
 }
 
+export type SetupRollback = () => Promise<void>;
+
+export interface PiCompatibleSetupHost {
+    displayName: string;
+    cliName: string;
+    packageSource: string;
+    installCommand: string;
+    minimumVersion?: string;
+    versionWarning?: (version: string, minimum: string) => string;
+    /** Convert this host's model selector to the shared canonical config form. */
+    modelRefToCanonical?: (ref: string) => string;
+    ensurePluginEntry: (settingsPath: string) => Promise<PluginEntryResult>;
+    beforeWrite?: (options: {
+        binaryPath: string;
+        cwd: string;
+        prompts: PromptIO;
+        dryRun: boolean;
+        configureHost: boolean;
+    }) => Promise<SetupRollback | false>;
+    rollbackPluginEntry?: (registration: PluginEntryResult) => Promise<void>;
+}
+
 export interface RunSetupOptions {
     prompts?: PromptIO;
     env?: SetupEnvironment;
+    host?: PiCompatibleSetupHost;
     /**
      * When true, run the full interactive wizard (detection, model fetch,
      * type-ahead picker, all prompts) but write NO files and register NO
@@ -60,6 +84,53 @@ const DEFAULT_ENV: SetupEnvironment = {
         getPiAgentConfigDir,
         getPiUserConfigPath,
         getPiUserExtensionsPath,
+    },
+};
+
+const DEFAULT_HOST: PiCompatibleSetupHost = {
+    displayName: "Pi",
+    cliName: "pi",
+    packageSource: PI_PACKAGE_SOURCE,
+    installCommand: "pi install npm:@cortexkit/pi-magic-context",
+    minimumVersion: "0.74.0",
+    versionWarning: (version, minimum) =>
+        `Pi ${version} is older than the required ${minimum}.\n` +
+        `Pi 0.74.0 renamed the npm package from \`@mariozechner/pi-coding-agent\` ` +
+        `to \`@earendil-works/pi-coding-agent\`. Magic Context's peer dependency ` +
+        `targets the new scope, so older Pi installs cannot load this extension.\n` +
+        `Run \`pi update --self\` (or \`npm install -g @earendil-works/pi-coding-agent@latest\`) before continuing.`,
+    ensurePluginEntry: async (settingsPath) => {
+        const settings = readJsoncConfigForUpdate(settingsPath);
+        const packagesFieldExisted = Object.hasOwn(settings, "packages");
+        try {
+            const added = writePiSettingsPackage(settingsPath);
+            return {
+                ok: true,
+                action: added ? "added" : "already_present",
+                message: added
+                    ? `Added ${PI_PACKAGE_SOURCE} to ${settingsPath}`
+                    : `Magic Context package already present in ${settingsPath}`,
+                configPath: settingsPath,
+                packagesFieldExisted,
+            };
+        } catch (error) {
+            return {
+                ok: false,
+                action: "error",
+                message: error instanceof Error ? error.message : String(error),
+                configPath: settingsPath,
+            };
+        }
+    },
+    rollbackPluginEntry: async (registration) => {
+        if (registration.action === "added") {
+            removePiSettingsPackage(
+                registration.configPath,
+                PI_PACKAGE_SOURCE,
+                (registration as PluginEntryResult & { packagesFieldExisted?: boolean })
+                    .packagesFieldExisted === false,
+            );
+        }
     },
 };
 
@@ -106,6 +177,13 @@ export function writePiSettingsPackage(
 ): boolean {
     const settings = readJsoncConfigForUpdate(settingsPath);
     ensureDir(dirname(settingsPath));
+    if (settings.packages !== undefined && !Array.isArray(settings.packages)) {
+        // Overwriting a non-array value would silently discard whatever the user
+        // put there; refuse instead so setup never destroys host configuration.
+        throw new Error(
+            `Refusing to rewrite ${settingsPath}: "packages" is ${typeof settings.packages}, expected an array. Fix it by hand, then rerun setup.`,
+        );
+    }
     const packages = Array.isArray(settings.packages) ? settings.packages : [];
 
     const hasPackage = hasPiMagicContextPackage(packages);
@@ -114,6 +192,21 @@ export function writePiSettingsPackage(
     settings.packages = packages;
     writeFileAtomic(settingsPath, `${stringifyJsonc(settings, null, 2)}\n`);
     return !hasPackage;
+}
+export function removePiSettingsPackage(
+    settingsPath: string,
+    packageSource = PI_PACKAGE_SOURCE,
+    removeFieldWhenEmpty = false,
+): boolean {
+    const settings = readJsoncConfigForUpdate(settingsPath);
+    if (!Array.isArray(settings.packages)) return false;
+    const packages = settings.packages;
+    const filtered = packages.filter((entry) => entry !== packageSource);
+    if (filtered.length === packages.length) return false;
+    if (removeFieldWhenEmpty && filtered.length === 0) delete settings.packages;
+    else settings.packages = filtered;
+    writeFileAtomic(settingsPath, `${stringifyJsonc(settings, null, 2)}\n`);
+    return true;
 }
 
 export function writeMagicContextConfig(
@@ -128,6 +221,7 @@ export function writeMagicContextConfig(
         sidekickEnabled: boolean;
         sidekickModel?: string;
         embedding: EmbeddingChoice;
+        modelRefToCanonical?: (ref: string) => string;
     },
 ): void {
     const config = readJsoncConfigForUpdate(configPath);
@@ -138,17 +232,17 @@ export function writeMagicContextConfig(
             "https://raw.githubusercontent.com/cortexkit/magic-context/master/assets/magic-context.schema.json";
     }
 
-    // The Pi model picker yields Pi-native provider ids (openai-codex/...,
-    // google-antigravity/...). The shared config is canonical (OpenCode) form so
-    // OpenCode can read the same file; normalize before writing.
+    // Model pickers return harness-native provider IDs. Persist only canonical
+    // OpenCode-form IDs so every harness reads the same shared config.
+    const toCanonical = options.modelRefToCanonical ?? piModelRefToCanonical;
     config.historian = compactObject({
         ...((config.historian as Record<string, unknown> | undefined) ?? {}),
-        model: piModelRefToCanonical(options.historianModel),
+        model: toCanonical(options.historianModel),
         thinking_level: options.historianThinkingLevel,
     });
     const dreamer = {
         ...((config.dreamer as Record<string, unknown> | undefined) ?? {}),
-        model: options.dreamerModel ? piModelRefToCanonical(options.dreamerModel) : undefined,
+        model: options.dreamerModel ? toCanonical(options.dreamerModel) : undefined,
         disable: options.dreamerEnabled ? undefined : true,
         enabled: undefined,
         // Dreamer v2 per-task schedules — only set when the user declined the
@@ -161,7 +255,7 @@ export function writeMagicContextConfig(
         ...((config.sidekick as Record<string, unknown> | undefined) ?? {}),
         model:
             options.sidekickEnabled && options.sidekickModel
-                ? piModelRefToCanonical(options.sidekickModel)
+                ? toCanonical(options.sidekickModel)
                 : undefined,
         disable: options.sidekickEnabled ? undefined : true,
         enabled: undefined,
@@ -212,9 +306,10 @@ async function chooseEmbedding(prompts: PromptIO): Promise<EmbeddingChoice> {
 export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
     const prompts = options.prompts ?? (await getDefaultPrompts());
     const env = options.env ?? DEFAULT_ENV;
+    const host = options.host ?? DEFAULT_HOST;
     const dryRun = options.dryRun === true;
 
-    prompts.intro("Magic Context for Pi — Setup");
+    prompts.intro(`Magic Context for ${host.displayName} — Setup`);
     if (dryRun) {
         prompts.log.warn("Dry run — no files will be written and no package will be registered.");
         prompts.log.message(
@@ -231,45 +326,42 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
     }
 
     const spinner = prompts.spinner();
-    spinner.start("Checking Pi installation");
-    const pi = env.detectPiBinary();
-    if (!pi) {
-        spinner.stop("Pi not found");
-        prompts.log.warn("Could not find `pi` on PATH or at ~/.pi/bin/pi.");
-        prompts.log.message(
-            "Install Pi first, then rerun setup. If Pi is installed in a custom location, add it to PATH.",
+    spinner.start(`Checking ${host.displayName} installation`);
+    const binary = env.detectPiBinary();
+    if (!binary) {
+        spinner.stop(`${host.displayName} not found`);
+        prompts.log.warn(
+            `Could not find \`${host.cliName}\` on PATH or in standard user install directories.`,
         );
-        prompts.outro("Setup stopped — install Pi and try again");
+        prompts.log.message(`Install ${host.displayName} first, then rerun setup.`);
+        prompts.outro(`Setup stopped — install ${host.displayName} and try again`);
         return 1;
     }
 
-    const version = env.getPiVersion(pi.path);
-    spinner.stop(version ? `Pi ${version} detected at ${pi.path}` : `Pi detected at ${pi.path}`);
+    const version = env.getPiVersion(binary.path);
+    spinner.stop(
+        version
+            ? `${host.displayName} ${version} detected at ${binary.path}`
+            : `${host.displayName} detected at ${binary.path}`,
+    );
 
-    // Pi 0.74.0 moved to the `@earendil-works/pi-coding-agent` package scope.
-    // Magic Context's peerDependency targets that scope, so older Pi versions
-    // (on `@mariozechner/pi-coding-agent`) cannot load this extension.
-    const MIN_PI_VERSION = "0.74.0";
-    if (version && comparePiVersion(version, MIN_PI_VERSION) < 0) {
+    if (version && host.minimumVersion && comparePiVersion(version, host.minimumVersion) < 0) {
         prompts.log.warn(
-            `Pi ${version} is older than the required ${MIN_PI_VERSION}.\n` +
-                `Pi 0.74.0 renamed the npm package from \`@mariozechner/pi-coding-agent\` ` +
-                `to \`@earendil-works/pi-coding-agent\`. Magic Context's peer dependency ` +
-                `targets the new scope, so older Pi installs cannot load this extension.\n` +
-                `Run \`pi update --self\` (or \`npm install -g @earendil-works/pi-coding-agent@latest\`) before continuing.`,
+            host.versionWarning?.(version, host.minimumVersion) ??
+                `${host.displayName} ${version} is older than required ${host.minimumVersion}.`,
         );
         const proceed = await prompts.confirm(
-            "Continue with setup anyway? (subagents will fail at runtime)",
+            "Continue with setup anyway? (subagents may fail at runtime)",
             false,
         );
         if (!proceed) {
-            prompts.outro("Setup cancelled — upgrade Pi and try again.");
+            prompts.outro(`Setup cancelled — upgrade ${host.displayName} and try again.`);
             return 0;
         }
     }
 
-    spinner.start("Fetching available Pi models");
-    const allModels = env.getAvailableModels(pi.path);
+    spinner.start(`Fetching available ${host.displayName} models`);
+    const allModels = env.getAvailableModels(binary.path);
     spinner.stop(`Found ${allModels.length} model choices`);
 
     const settingsPath = env.paths.getPiUserExtensionsPath();
@@ -284,14 +376,17 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
             return 1;
         }
     }
-    const configurePi = await prompts.confirm("Configure Pi to load Magic Context?", true);
-    if (configurePi) {
-        if (dryRun) {
-            prompts.log.message(`[dry-run] would add ${PI_PACKAGE_SOURCE} to ${settingsPath}`);
-        }
-    } else {
+    const configureHost = await prompts.confirm(
+        `Configure ${host.displayName} to load Magic Context?`,
+        true,
+    );
+    if (configureHost && dryRun) {
+        prompts.log.message(
+            `[dry-run] would register ${host.packageSource} for ${host.displayName} in ${settingsPath}`,
+        );
+    } else if (!configureHost) {
         prompts.log.warn(
-            "Skipped Pi package registration; install manually with `pi install npm:@cortexkit/pi-magic-context`.",
+            `Skipped ${host.displayName} package registration; install manually with \`${host.installCommand}\`.`,
         );
     }
 
@@ -340,38 +435,57 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
         : undefined;
     const embedding = await chooseEmbedding(prompts);
 
-    if (dryRun) {
-        prompts.log.message(`[dry-run] would write Magic Context config to ${configPath}`);
-    } else {
-        if (configurePi) {
-            const packageAdded = writePiSettingsPackage(settingsPath);
-            prompts.log.success(
-                packageAdded
-                    ? `Added ${PI_PACKAGE_SOURCE} to ${settingsPath}`
-                    : `Magic Context package already present in ${settingsPath}`,
-            );
-            prompts.log.message(
-                "This mirrors `pi install npm:@cortexkit/pi-magic-context` without running installs during setup verification.",
-            );
+    const rollbackHost =
+        (await host.beforeWrite?.({
+            binaryPath: binary.path,
+            cwd: process.cwd(),
+            prompts,
+            dryRun,
+            configureHost,
+        })) ?? (async () => {});
+    if (rollbackHost === false) {
+        prompts.outro(`Setup stopped — could not configure ${host.displayName}.`);
+        return 1;
+    }
+
+    let registration: PluginEntryResult | undefined;
+    try {
+        if (dryRun) {
+            prompts.log.message(`[dry-run] would write Magic Context config to ${configPath}`);
+        } else {
+            if (configureHost) {
+                registration = await host.ensurePluginEntry(settingsPath);
+                if (!registration.ok) throw new Error(registration.message);
+                prompts.log.success(registration.message);
+            }
+            writeMagicContextConfig(configPath, {
+                historianModel,
+                historianThinkingLevel,
+                dreamerEnabled,
+                dreamerModel,
+                dreamerTasks,
+                sidekickEnabled,
+                sidekickModel,
+                embedding,
+                modelRefToCanonical: host.modelRefToCanonical,
+            });
+            prompts.log.success(`Config written to ${configPath}`);
         }
-        writeMagicContextConfig(configPath, {
-            historianModel,
-            historianThinkingLevel,
-            dreamerEnabled,
-            dreamerModel,
-            dreamerTasks,
-            sidekickEnabled,
-            sidekickModel,
-            embedding,
-        });
-        prompts.log.success(`Config written to ${configPath}`);
+    } catch (error) {
+        if (registration?.ok && host.rollbackPluginEntry) {
+            await host.rollbackPluginEntry(registration);
+        }
+        await rollbackHost();
+        prompts.log.error(error instanceof Error ? error.message : String(error));
+        prompts.outro(`Setup stopped — rolled back ${host.displayName} changes.`);
+        return 1;
     }
 
     const thinkingLevelSuffix = historianThinkingLevel
         ? ` (thinking: ${historianThinkingLevel})`
         : "";
     const summary = [
-        `Pi settings: ${configurePi ? settingsPath : "skipped"}`,
+        `${host.displayName} plugin: ${configureHost ? settingsPath : "skipped"}`,
         `Magic Context config: ${configPath}`,
         `Historian: ${historianModel}${thinkingLevelSuffix}`,
         `Dreamer: ${dreamerEnabled ? dreamerModel : "disabled"}`,
@@ -381,7 +495,9 @@ export async function runSetup(options: RunSetupOptions = {}): Promise<number> {
 
     prompts.note(summary, dryRun ? "Configuration (dry run — not written)" : "Configuration");
     prompts.outro(
-        dryRun ? "Dry run complete — nothing was written." : "Start a Pi session and try /ctx-aug",
+        dryRun
+            ? "Dry run complete — nothing was written."
+            : `Start a ${host.displayName} session and try /ctx-aug`,
     );
     return 0;
 }

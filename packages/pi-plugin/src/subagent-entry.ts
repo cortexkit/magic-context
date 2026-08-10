@@ -43,7 +43,10 @@
  * Discovery remains enabled. The full Magic Context entry no-ops under the env
  * guard; this explicit lean entry supplies the scoped Magic Context tools; and
  * the per-agent `--tools` allow-list strips every built-in or extension tool not
- * named for that child agent.
+ * named for that child agent. On an OMP host the allow-list covers built-ins
+ * only — OMP appends discovered extension tools to the child registry
+ * regardless — so the scoping below is the intended budget, not an enforced
+ * sandbox.
  *
  * Tool/action allowlists via Pi flags:
  *   --magic-context-dreamer-actions  Register ctx_memory with the dreamer

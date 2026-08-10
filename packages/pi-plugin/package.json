@@ -2,13 +2,15 @@
   "name": "@cortexkit/pi-magic-context",
   "version": "0.35.1",
   "type": "module",
-  "description": "Pi coding agent extension for Magic Context — cross-session memory and context management",
+  "description": "Pi and OMP coding agent extension for Magic Context — cross-session memory and context management",
   "main": "dist/index.js",
   "license": "MIT",
   "author": "ualtinok",
   "keywords": [
     "pi",
     "pi-coding-agent",
+    "omp",
+    "oh-my-pi",
     "extension",
     "context",
     "memory",
@@ -58,12 +60,25 @@
     "@earendil-works/pi-coding-agent": "^0.80.2",
     "@earendil-works/pi-tui": "^0.80.2"
   },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
+  },
   "exports": {
     ".": {
       "import": "./dist/index.js"
     }
   },
   "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "omp": {
     "extensions": [
       "./dist/index.js"
     ]

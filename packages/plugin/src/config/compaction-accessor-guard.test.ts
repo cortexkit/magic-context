@@ -27,6 +27,13 @@ const ALLOWED_READERS = new Set<string>([
     // The strip operates on a raw Record<string, unknown> by key name, not on
     // a parsed MagicContextConfig.
     "packages/plugin/src/config/project-security.ts",
+    // The OMP harness surfaces its OWN `compaction.enabled` setting, read via
+    // `omp config get compaction.enabled`. These files carry that key only as a
+    // string literal for the external CLI; they never read Magic Context's
+    // parsed `compaction.enabled` config path.
+    "packages/cli/src/lib/omp-helpers.ts",
+    "packages/cli/src/commands/setup-omp.ts",
+    "packages/cli/src/commands/doctor-omp.ts",
 ]);
 
 function sourceFiles(directory: string): string[] {

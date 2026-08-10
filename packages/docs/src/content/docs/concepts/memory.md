@@ -67,7 +67,7 @@ The desktop app and dashboard provide a memory browser where you can search, fil
 
 ## Project-scoped and shared
 
-Memories are scoped to a **project identity** derived from the repository, not a filesystem path. This means memories follow a project across worktrees, clones, and forks. The same SQLite database is shared between OpenCode and Pi — write a memory in one harness, retrieve it in the other.
+Memories are scoped to a **project identity** derived from the repository, not a filesystem path. This means memories follow a project across worktrees, clones, and forks. The same SQLite database is shared by OpenCode, Pi, and OMP — write a memory in one harness, retrieve it in another.
 
 ## How it connects
 

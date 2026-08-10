@@ -7,7 +7,7 @@ description: Every magic-context.jsonc key, with types, defaults, and where to p
     packages/plugin/src/config/schema/magic-context.ts; regenerate with
     `bun packages/plugin/scripts/build-config-docs.ts`. -->
 
-Magic Context reads `magic-context.jsonc` (or `.json`) from one shared CortexKit location, the same for both harnesses. Project config overrides user config, key by key. Prompt-surface routing is shared by both harnesses; project config may select `default` and `models`, while `guidance_override_path` and `tool_descriptions` are stripped at the project trust boundary.
+Magic Context reads `magic-context.jsonc` (or `.json`) from one shared CortexKit location across OpenCode, Pi, and OMP. Project config overrides user config, key by key. Prompt-surface routing is shared by all harnesses; project config may select `default` and `models`, while `guidance_override_path` and `tool_descriptions` are stripped at the project trust boundary.
 
 - **Project** — `<project>/.cortexkit/magic-context.jsonc`
 - **User-wide** — `~/.config/cortexkit/magic-context.jsonc`

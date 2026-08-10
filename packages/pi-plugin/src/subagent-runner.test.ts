@@ -8,7 +8,13 @@ import {
 	spyOn,
 } from "bun:test";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -39,6 +45,42 @@ const ISOLATED_RETRY_MODEL_UNAVAILABLE_LOG_MESSAGE =
 	"model unavailable in isolated retry: it is provided by a disabled extension; configure it through models.json or add a built-in/provider-configured fallback";
 const ISOLATED_RETRY_SILENT_LOG_MESSAGE =
 	"pi subagent: child exited successfully but emitted no protocol output (no agent_end, zero stdout); a loaded Pi extension likely broke print mode; retrying with an isolated extension set (user extensions disabled for this run)";
+// `omp --tools` validates against this set and exits 2 on anything else
+// (verified against omp 17.2.12: "Unknown tool in --tools: <name>. Valid
+// tools: ...").
+const OMP_BUILTIN_TOOLS = [
+	"read",
+	"bash",
+	"edit",
+	"ast_grep",
+	"ast_edit",
+	"ask",
+	"debug",
+	"eval",
+	"github",
+	"glob",
+	"grep",
+	"lsp",
+	"inspect_image",
+	"browser",
+	"computer",
+	"checkpoint",
+	"rewind",
+	"security_scan",
+	"task",
+	"hub",
+	"todo",
+	"web_search",
+	"write",
+	"memory_edit",
+	"retain",
+	"recall",
+	"reflect",
+	"learn",
+	"manage_skill",
+	"yield",
+	"goal",
+];
 
 beforeEach(() => {
 	__test.resetProviderFormCache();
@@ -217,7 +259,11 @@ describe("subagent-runner pure helpers", () => {
 	it("returns null text when no assistant message exists", () => {
 		expect(
 			__test.extractFinalAssistant([{ role: "user", content: [] }, null]),
-		).toEqual({ text: null, stopReason: null, errorMessage: null });
+		).toEqual({
+			text: null,
+			stopReason: null,
+			errorMessage: null,
+		});
 	});
 
 	it("builds argv with system prompt, primary model, and prompt last", () => {
@@ -307,6 +353,98 @@ describe("subagent-runner pure helpers", () => {
 			join(homedir(), ".pi/shared/provider.ts"),
 		]);
 		expect(args).toContain("--no-extensions");
+	});
+
+	it("keeps plain Pi relative allowlist entries rooted at the stock agent dir", () => {
+		const previous = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = "/tmp/plain-pi-custom-agent";
+		try {
+			const args = buildArgsForTest(
+				{ ...baseOptions, model: "anthropic/claude-sonnet" },
+				{ subagentExtensions: ["provider-package"] },
+			);
+			const firstExtension = args.indexOf("--extension");
+			expect(args.slice(firstExtension, firstExtension + 2)).toEqual([
+				"--extension",
+				join(homedir(), ".pi/agent/provider-package"),
+			]);
+		} finally {
+			if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = previous;
+		}
+	});
+
+	it("uses PI_CODING_AGENT_DIR only for a positively identified OMP host", () => {
+		const root = mkdtempSync(join(homedir(), ".mc-omp-host-test-"));
+		const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+		const previousPackageDir = process.env.PI_PACKAGE_DIR;
+		writeFileSync(
+			join(root, "package.json"),
+			JSON.stringify({ name: "@oh-my-pi/pi-coding-agent" }),
+		);
+		process.env.PI_PACKAGE_DIR = root;
+		process.env.PI_CODING_AGENT_DIR = "/tmp/omp-profile/agent";
+		try {
+			const args = buildArgsForTest(
+				{ ...baseOptions, model: "anthropic/claude-sonnet" },
+				{ subagentExtensions: ["provider-package"] },
+			);
+			const firstExtension = args.indexOf("--extension");
+			expect(args.slice(firstExtension, firstExtension + 2)).toEqual([
+				"--extension",
+				"/tmp/omp-profile/agent/provider-package",
+			]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+			if (previousAgentDir === undefined)
+				delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+			if (previousPackageDir === undefined) delete process.env.PI_PACKAGE_DIR;
+			else process.env.PI_PACKAGE_DIR = previousPackageDir;
+		}
+	});
+
+	it("uses the OMP default agent dir when PI_CODING_AGENT_DIR is unset", () => {
+		const root = mkdtempSync(join(homedir(), ".mc-omp-default-host-test-"));
+		const previous = {
+			agentDir: process.env.PI_CODING_AGENT_DIR,
+			packageDir: process.env.PI_PACKAGE_DIR,
+			configDir: process.env.PI_CONFIG_DIR,
+			ompProfile: process.env.OMP_PROFILE,
+			piProfile: process.env.PI_PROFILE,
+		};
+		writeFileSync(
+			join(root, "package.json"),
+			JSON.stringify({ name: "@oh-my-pi/pi-coding-agent" }),
+		);
+		process.env.PI_PACKAGE_DIR = root;
+		delete process.env.PI_CODING_AGENT_DIR;
+		delete process.env.PI_CONFIG_DIR;
+		delete process.env.OMP_PROFILE;
+		delete process.env.PI_PROFILE;
+		try {
+			const args = buildArgsForTest(
+				{ ...baseOptions, model: "anthropic/claude-sonnet" },
+				{ subagentExtensions: ["provider-package"] },
+			);
+			const firstExtension = args.indexOf("--extension");
+			expect(args.slice(firstExtension, firstExtension + 2)).toEqual([
+				"--extension",
+				join(homedir(), ".omp/agent/provider-package"),
+			]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+			for (const [key, value] of [
+				["PI_CODING_AGENT_DIR", previous.agentDir],
+				["PI_PACKAGE_DIR", previous.packageDir],
+				["PI_CONFIG_DIR", previous.configDir],
+				["OMP_PROFILE", previous.ompProfile],
+				["PI_PROFILE", previous.piProfile],
+			] as const) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
 	});
 
 	it("keeps the current all-extension argv shape when no allowlist is configured", () => {
@@ -405,7 +543,9 @@ describe("subagent-runner pure helpers", () => {
 		const idx = args.indexOf("--tools");
 		expect(idx).toBeGreaterThan(-1);
 		expect(args[idx + 1]).toBe("ctx_search");
-		// --no-tools would disable EVERYTHING including ctx_search — must not appear.
+		// Pi host: `--no-tools` empties the whole registry, the lean extension's
+		// ctx_search included, so it must not appear here. (An OMP host encodes
+		// the same allow-list AS `--no-tools` — see the OMP test below.)
 		expect(args).not.toContain("--no-tools");
 	});
 
@@ -424,6 +564,49 @@ describe("subagent-runner pure helpers", () => {
 		expect(sidekickArgs).toEqual(
 			expect.arrayContaining(["--tools", "read,grep,find,ls,ctx_search"]),
 		);
+	});
+
+	it("translates Pi tool allow-lists into names an OMP child accepts", () => {
+		const { resolveHostToolAllowlist } = __test;
+		// OMP ships no `find`/`ls`; both collapse onto `glob`, deduplicated.
+		expect(
+			resolveHostToolAllowlist(["read", "grep", "find", "ls"], true),
+		).toEqual(["read", "grep", "glob"]);
+		// Extension tools are not addressable through OMP's `--tools`, which
+		// validates against built-ins only and exits 2 on anything else.
+		expect(
+			resolveHostToolAllowlist(["read", "aft_search", "ctx_search"], true),
+		).toEqual(["read"]);
+		// Writer surfaces survive unchanged.
+		expect(
+			resolveHostToolAllowlist(["read", "bash", "write", "edit"], true),
+		).toEqual(["read", "bash", "write", "edit"]);
+		// Pi hosts keep their own names verbatim.
+		expect(
+			resolveHostToolAllowlist(["read", "find", "ls", "aft_search"], false),
+		).toEqual(["read", "find", "ls", "aft_search"]);
+	});
+
+	it("collapses an extension-only allow-list to --no-tools on OMP", () => {
+		// `ctx_search`/`ctx_memory` cannot be named on OMP, so the allow-list
+		// collapses to `--no-tools`. That clears the built-ins; the lean
+		// extension loaded via `--extension` still registers its ctx_* tools,
+		// which is exactly why this encoding preserves the intended surface.
+		// It is NOT an empty registry: OMP appends discovered extension tools
+		// (AFT, MCP) to every child regardless of this flag.
+		expect(__test.resolveHostToolAllowlist(["ctx_search"], true)).toEqual([]);
+		expect(__test.resolveHostToolAllowlist(["ctx_memory"], true)).toEqual([]);
+	});
+
+	it("keeps every strict allow-list expressible on an OMP host", () => {
+		for (const [agent, tools] of __test.STRICT_TOOL_ALLOWLIST) {
+			const resolved = __test.resolveHostToolAllowlist(tools, true);
+			for (const tool of resolved) {
+				// Mirrors `omp --tools` validation: built-in names only.
+				expect(OMP_BUILTIN_TOOLS).toContain(tool);
+			}
+			expect(new Set(resolved).size, agent).toBe(resolved.length);
+		}
 	});
 
 	it("locks base dreamer (curate) to --tools ctx_memory, stripping all built-ins", () => {

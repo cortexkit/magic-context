@@ -67,7 +67,7 @@ The gate keeps small projects from waiting forever while avoiding a mostly empty
 
 - **Vision model required** for the image part. Non-vision models get the same text baseline as with the feature off (no mural marker, no image).
 - **Opt-in** — disabled by default.
-- Works on **OpenCode and Pi** with the same config and shared store. The image envelope differs by harness (file part vs native image content); the PNG and the fold/replay rules match.
+- Works on **OpenCode, Pi, and OMP** with the same config and shared store. The image envelope differs by harness (file part vs native image content); the PNG and the fold/replay rules match.
 
 ## How it connects
 

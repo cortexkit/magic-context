@@ -3,16 +3,14 @@
  *
  * Resolves the harness target via `--harness` flag or auto-detection
  * (`resolveAdaptersForCommand`), then dispatches to the per-harness
- * setup wizard. We deliberately reuse the existing per-harness
- * setup flows (`setup-opencode.ts` and `setup-pi.ts`) instead of
- * collapsing them into a generic flow because each harness has
- * meaningfully different prompts (OpenCode picks historian models +
- * checks for DCP/OMO conflicts; Pi prompts for Pi version compat
- * + thinking_level for Copilot models).
+ * setup flows instead of collapsing them into one generic flow: OpenCode has
+ * DCP/OMO conflicts, while Pi and OMP share the extension runtime but differ in
+ * installation and native context/memory conflict handling.
  */
 import type { HarnessAdapter } from "../adapters/types";
 import { resolveAdaptersForCommand } from "../lib/harness-select";
 import { intro, log, note, outro } from "../lib/prompts";
+import { runSetup as runOmpSetup } from "./setup-omp";
 import { runSetup as runOpenCodeSetup } from "./setup-opencode";
 import { runSetup as runPiSetup } from "./setup-pi";
 
@@ -68,6 +66,8 @@ async function dispatchSetup(adapter: HarnessAdapter, dryRun: boolean): Promise<
             return runOpenCodeSetup(dryRun);
         case "pi":
             return runPiSetup({ dryRun });
+        case "omp":
+            return runOmpSetup({ dryRun });
     }
 }
 
@@ -87,6 +87,15 @@ function printNextSteps(adapter: HarnessAdapter): void {
             [
                 "Restart your Pi session so the extension registers.",
                 "Verify with: npx @cortexkit/magic-context@latest doctor --harness pi",
+            ].join("\n"),
+            "Next steps",
+        );
+    }
+    if (adapter.kind === "omp") {
+        note(
+            [
+                "Restart OMP (or run /reload-plugins) so Magic Context registers.",
+                "Verify with: npx @cortexkit/magic-context@latest doctor --harness omp",
             ].join("\n"),
             "Next steps",
         );

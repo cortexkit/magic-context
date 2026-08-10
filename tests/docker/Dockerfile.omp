@@ -1,0 +1,69 @@
+# Magic Context — real Oh My Pi E2E image
+#
+# Uses the current npm OMP binary, its native plugin manager, and a local mock
+# provider. This catches manifest/loader/config regressions that mocked unit
+# tests and upstream-Pi smoke tests cannot observe.
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    ca-certificates \
+    unzip \
+    python3 \
+    build-essential \
+    sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# OMP's published CLI is a Bun executable (`#!/usr/bin/env bun`) even when
+# installed through npm.
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:$PATH"
+
+# Deliberately float to the current published OMP. Compatibility must be tested
+# against what users install today, not only against a local fork or fake CLI.
+RUN npm install -g @oh-my-pi/pi-coding-agent@latest
+RUN omp --version
+
+RUN mkdir -p /test
+RUN cd /test && \
+    npm init -y > /dev/null && \
+    npm install --silent --no-audit --no-fund @copilotkit/aimock
+
+COPY packages/pi-plugin/dist/ /test/mc-pi/dist/
+COPY packages/pi-plugin/package.json /test/mc-pi/package.json
+COPY packages/pi-plugin/README.md /test/mc-pi/README.md
+RUN cd /test/mc-pi && \
+    npm install --omit=dev --no-audit --no-fund --workspaces=false \
+        --no-package-lock --legacy-peer-deps
+
+COPY packages/cli/dist/ /test/mc-cli/dist/
+COPY packages/cli/package.json /test/mc-cli/package.json
+RUN cd /test/mc-cli && \
+    npm install --omit=dev --no-audit --no-fund --workspaces=false \
+        --no-package-lock --legacy-peer-deps
+RUN chmod +x /test/mc-cli/dist/index.js && \
+    ln -s /test/mc-cli/dist/index.js /usr/local/bin/magic-context
+
+# Exercise OMP's real plugin-manager path. Local installs are linked and listed
+# under the package name declared by packages/pi-plugin/package.json.
+RUN omp plugin install /test/mc-pi
+RUN omp plugin list --json
+
+RUN git config --global user.email "test@cortexkit.local" && \
+    git config --global user.name "Magic Context CI" && \
+    mkdir -p /test/project && cd /test/project && git init -q && \
+    echo '{"name":"test","version":"1.0.0"}' > package.json && \
+    git add -A && git commit -q -m "init"
+
+COPY tests/docker/test-omp-e2e.sh /test/test-omp-e2e.sh
+COPY tests/docker/fixtures/aimock-pi.cjs /test/aimock-server.cjs
+RUN chmod +x /test/test-omp-e2e.sh
+
+WORKDIR /test/project
+ENTRYPOINT ["/test/test-omp-e2e.sh"]

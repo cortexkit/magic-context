@@ -69,7 +69,7 @@ Magic Context gives them one. It is the **hippocampus** for coding agents, the p
 
 - **Capture.** As the historian compresses your history, it lifts the durable knowledge (decisions, constraints, conventions) into project memory. You get a memory system for free, from work you are already doing.
 - **Consolidate.** Overnight, dreamer agents do what sleep does for you: verify memories against the codebase, curate duplicates and stale entries, and promote what recurs.
-- **Recall.** The right memories surface automatically every turn, and the agent can search across memories, past conversations, and git history on demand. Across sessions, and across OpenCode and Pi.
+- **Recall.** The right memories surface automatically every turn, and the agent can search across memories, past conversations, and git history on demand. Across sessions, and across OpenCode, Pi, and OMP.
 
 Two promises: your agent **never stops to manage its context** (no compaction pauses, no broken flow) and it **never forgets**.
 
@@ -96,7 +96,7 @@ irm https://raw.githubusercontent.com/cortexkit/magic-context/master/scripts/ins
 npx @cortexkit/magic-context@latest setup
 ```
 
-The wizard auto-detects which harnesses you have (OpenCode, Pi, or both), adds the plugin, disables built-in compaction, helps you pick models for the historian, dreamer, and sidekick, and resolves conflicts with other context-management plugins. Target a specific harness with `--harness opencode` or `--harness pi`.
+The wizard auto-detects which harnesses you have (OpenCode, Pi, OMP, or any combination), adds the plugin, disables built-in compaction, helps you pick models for the historian, dreamer, and sidekick, and resolves conflicts with other context-management plugins. Target one with `--harness opencode`, `--harness pi`, or `--harness omp`.
 
 > **Why disable built-in compaction?** Magic Context manages context itself. The host's compaction would interfere with its cache-aware deferred operations and double-compress.
 
@@ -128,9 +128,11 @@ User-level config is `~/.config/cortexkit/magic-context.jsonc` on macOS/Linux an
 
 **Pi:** `npx @cortexkit/magic-context@latest setup --harness pi` (requires Pi `>= 0.74.0`). The Pi extension shares the same database as OpenCode; project memories and embeddings pool across both.
 
-**Troubleshooting:** `npx @cortexkit/magic-context@latest doctor` auto-detects your harnesses, checks for conflicts (compaction, OMO hooks, DCP), verifies the plugin and TUI sidebar, runs an integrity check on the database, and fixes what it can. Add `--issue` to file a ready-to-submit bug report.
+**Oh My Pi (OMP):** `npx @cortexkit/magic-context@latest setup --harness omp` (requires OMP `>= 17.1.7`). Setup installs the Pi-compatible extension through `omp plugin`, disables OMP native compaction and automatic memory, and honors OMP profiles, `PI_CODING_AGENT_DIR`, and initialized XDG layouts.
 
-Works the same on a brand-new or a long-running project: install, restart the harness, and Magic Context captures context from that point forward. It does not backfill OpenCode or Pi sessions from before it was installed.
+**Troubleshooting:** `npx @cortexkit/magic-context@latest doctor` auto-detects your harnesses, checks host-specific conflicts, verifies plugin registration and database integrity, and fixes what it can. Add `--issue` to file a ready-to-submit bug report.
+
+Works the same on a brand-new or a long-running project: install, restart the harness, and Magic Context captures context from that point forward. It does not backfill OpenCode, Pi, or OMP sessions from before it was installed.
 
 <details>
 <summary><strong>Compatibility with other context-management plugins</strong></summary>
@@ -140,6 +142,8 @@ Works the same on a brand-new or a long-running project: install, restart the ha
 Magic Context owns context management end to end, so it **disables itself** if another plugin is already doing that job. Running two context managers at once would double-compress your history and thrash the prompt cache. On startup it checks for the following; setup and `doctor` help you resolve each, and until they're resolved Magic Context stays off (fail-safe) and tells you why:
 
 - **OpenCode built-in compaction** (`compaction.auto` / `compaction.prune`) — Magic Context replaces it. Setup turns it off.
+- **OMP native compaction** (`compaction.enabled`) — Magic Context replaces it. OMP setup turns it off transactionally.
+- **OMP automatic memory** (`memory.backend`) — a second memory injector duplicates recall and retention. OMP setup sets it to `off`; existing data is not deleted.
 - **DCP** (`opencode-dcp`) — a separate context-pruning plugin. The two cannot run together; remove it from your `plugin` list.
 - **oh-my-opencode (OMO)** — setup offers to disable the three hooks that overlap:
   - `preemptive-compaction` — triggers compaction that conflicts with the historian.
@@ -232,7 +236,7 @@ Because it runs during idle time, the dreamer pairs well with local models, even
 - **`ctx_expand`**: pull a compressed history range back to the original `U:`/`A:` transcript when the agent needs the exact details.
 - **`ctx_note`**: a scratchpad for deferred intentions. Notes resurface at natural boundaries (after commits, after historian runs, when todos finish). **Smart notes** carry an open-ended condition the dreamer watches for.
 
-Recall works **across sessions** (a new session inherits everything) and **across harnesses** (write a memory in OpenCode, retrieve it in Pi).
+Recall works **across sessions** (a new session inherits everything) and **across harnesses** (write a memory in OpenCode, retrieve it in Pi or OMP).
 
 > **Auto search hints** *(on by default)* run a background `ctx_search` each turn and whisper a "vague recall" when something relevant exists — like almost remembering a note you took. It appends only compact fragments, never full content; set `memory.auto_search.enabled: false` to turn it off. **Git commit indexing** *(opt-in)* makes your project history semantically searchable as an additional `ctx_search` source — enable with `memory.git_commit_indexing.enabled: true`.
 

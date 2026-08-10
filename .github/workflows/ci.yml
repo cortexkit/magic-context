@@ -215,6 +215,37 @@ jobs:
       - name: Run E2E
         run: docker run --rm --platform linux/amd64 mc-e2e-pi
 
+  e2e-omp:
+    name: E2E (Oh My Pi, real Docker)
+    runs-on: ubuntu-latest
+    needs: [check-pi-plugin]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install workspace deps
+        run: bun install --frozen-lockfile
+
+      - name: Build Pi-compatible plugin
+        run: bun run --cwd packages/pi-plugin build
+
+      - name: Build CLI
+        run: bun run --cwd packages/cli build
+
+      - name: Build real OMP E2E image
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            -f tests/docker/Dockerfile.omp \
+            -t mc-e2e-omp \
+            .
+
+      - name: Run real OMP install and session smoke
+        run: docker run --rm --platform linux/amd64 mc-e2e-omp
+
   e2e-host-opencode:
     name: E2E (OpenCode, host behavior)
     runs-on: ubuntu-latest
