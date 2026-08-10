@@ -167,9 +167,27 @@ export function getOpenCodeStorageDir(): string {
  *   - Future cross-harness session migration
  *
  * Layout: <XDG_DATA_HOME>/cortexkit/magic-context/
+ *
+ * TEST-ISOLATION GUARD. `openDatabase()` has been guarded in
+ * `resolveDatabasePath()` since the 2026-06-01 (v26) and 2026-06-19 (v41)
+ * incidents, in which unisolated tests migrated the user's REAL shared DB.
+ * Every OTHER caller bypassed that guard — notably the CLI doctors, which
+ * build `join(getMagicContextStorageDir(), "context.db")` themselves and run
+ * `PRAGMA integrity_check` against it. A test that deletes XDG_DATA_HOME to
+ * exercise path fallbacks cannot restore isolation by setting
+ * `process.env.HOME`: bun caches `os.homedir()` at startup, so `getDataDir()`
+ * still resolves to the real home. Honoring MAGIC_CONTEXT_TEST_DATA_DIR here —
+ * set by `packages/plugin/test-preload.ts` and mutated by no test — makes the
+ * preload's "cannot be defeated" guarantee true for every caller, not just
+ * `openDatabase()`. It is never set in production.
+ *
+ * XDG_DATA_HOME still wins: a test that manages its own data home is already
+ * controlled, and production has no test dir set at all.
  */
 export function getMagicContextStorageDir(): string {
-    return path.join(getDataDir(), "cortexkit", "magic-context");
+    const testDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    const base = testDataDir && !process.env.XDG_DATA_HOME ? testDataDir : getDataDir();
+    return path.join(base, "cortexkit", "magic-context");
 }
 
 /**

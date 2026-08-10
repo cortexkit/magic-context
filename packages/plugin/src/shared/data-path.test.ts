@@ -20,6 +20,7 @@ const savedEnv = {
     XDG_DATA_HOME: process.env.XDG_DATA_HOME,
     LOCALAPPDATA: process.env.LOCALAPPDATA,
     MAGIC_CONTEXT_LOG_PATH: process.env.MAGIC_CONTEXT_LOG_PATH,
+    MAGIC_CONTEXT_TEST_DATA_DIR: process.env.MAGIC_CONTEXT_TEST_DATA_DIR,
 };
 
 describe("data-path", () => {
@@ -44,6 +45,9 @@ describe("data-path", () => {
         if (savedEnv.MAGIC_CONTEXT_LOG_PATH !== undefined)
             process.env.MAGIC_CONTEXT_LOG_PATH = savedEnv.MAGIC_CONTEXT_LOG_PATH;
         else delete process.env.MAGIC_CONTEXT_LOG_PATH;
+        if (savedEnv.MAGIC_CONTEXT_TEST_DATA_DIR !== undefined)
+            process.env.MAGIC_CONTEXT_TEST_DATA_DIR = savedEnv.MAGIC_CONTEXT_TEST_DATA_DIR;
+        else delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
     });
 
     test("getCacheDir falls back to <homedir>/.cache when XDG_CACHE_HOME is unset (all platforms)", () => {
@@ -89,8 +93,38 @@ describe("data-path", () => {
         // Cross-harness shared path: both OpenCode and Pi plugins read/write here,
         // unlike the legacy opencode/storage/plugin/magic-context location which
         // was OpenCode-specific. See ARCHITECTURE_DECISIONS memory for rationale.
+        // Production shape, so the test-isolation dir set by test-preload.ts is
+        // lifted for the duration of this assertion.
+        const savedTestDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+        delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+        try {
+            expect(getMagicContextStorageDir()).toBe(
+                path.join(os.homedir(), ".local", "share", "cortexkit", "magic-context"),
+            );
+        } finally {
+            if (savedTestDir !== undefined) process.env.MAGIC_CONTEXT_TEST_DATA_DIR = savedTestDir;
+        }
+    });
+
+    test("getMagicContextStorageDir honors MAGIC_CONTEXT_TEST_DATA_DIR when XDG_DATA_HOME is unset", () => {
+        // The hole this closes: a test that deletes XDG_DATA_HOME to exercise
+        // path fallbacks used to resolve to the user's REAL shared storage,
+        // because bun caches os.homedir() and a mutated process.env.HOME cannot
+        // move getDataDir(). Callers that build their own context.db path (the
+        // CLI doctors) then ran integrity checks against production data.
+        process.env.MAGIC_CONTEXT_TEST_DATA_DIR = "/tmp/mc-test-isolation";
         expect(getMagicContextStorageDir()).toBe(
-            path.join(os.homedir(), ".local", "share", "cortexkit", "magic-context"),
+            path.join("/tmp/mc-test-isolation", "cortexkit", "magic-context"),
+        );
+    });
+
+    test("getMagicContextStorageDir prefers XDG_DATA_HOME over MAGIC_CONTEXT_TEST_DATA_DIR", () => {
+        // A test managing its own per-test data home is already controlled, and
+        // several suites depend on that dir being honored.
+        process.env.MAGIC_CONTEXT_TEST_DATA_DIR = "/tmp/mc-test-isolation";
+        process.env.XDG_DATA_HOME = "/tmp/custom-data";
+        expect(getMagicContextStorageDir()).toBe(
+            path.join("/tmp/custom-data", "cortexkit", "magic-context"),
         );
     });
 

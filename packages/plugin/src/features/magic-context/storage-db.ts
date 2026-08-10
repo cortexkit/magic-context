@@ -158,27 +158,13 @@ export function resolveDatabasePath(dbPathOverride?: string): { dbDir: string; d
     if (dbPathOverride) {
         return { dbDir: dirname(dbPathOverride), dbPath: dbPathOverride };
     }
-    // Test-isolation guard. Under the test runner the preload
-    // (bunfig.toml `[test] preload`) sets MAGIC_CONTEXT_TEST_DATA_DIR to a
-    // throwaway temp dir AND XDG_DATA_HOME to the same dir. Tests that manage
-    // their OWN XDG_DATA_HOME (per-test temp dirs) keep working — we honor XDG
-    // below via getMagicContextStorageDir(). The guard fires ONLY when
-    // XDG_DATA_HOME is UNSET: that is the dangerous window, because
-    // getMagicContextStorageDir() would otherwise fall back to the REAL
-    // ~/.local/share and a bare openDatabase() would run migrations on the
-    // user's production DB. Some tests delete XDG_DATA_HOME to exercise
-    // path-fallback behavior (2026-06-01 incident: a dormant test migrated the
-    // live DB to v26 and fail-closed every running v25 binary); in that window
-    // we resolve into the dedicated test dir instead of the real path. No test
-    // mutates MAGIC_CONTEXT_TEST_DATA_DIR, so the guard cannot be defeated. It
-    // is never set in production.
-    const testDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
-    if (testDataDir && !process.env.XDG_DATA_HOME) {
-        const dbDir = join(testDataDir, "cortexkit", "magic-context");
-        return { dbDir, dbPath: join(dbDir, "context.db") };
-    }
-    // CWD-INDEPENDENT TEST BACKSTOP. The MAGIC_CONTEXT_TEST_DATA_DIR / XDG guard
-    // above only fires when the bunfig `[test] preload` ran — which depends on
+    // Test-isolation guard: MAGIC_CONTEXT_TEST_DATA_DIR is honored inside
+    // getMagicContextStorageDir() below (see its doc comment), so it covers
+    // this resolver and every other caller alike. The NODE_ENV backstop below
+    // stays here: it needs a memoized throwaway dir, which a pure path helper
+    // has no business creating.
+    // CWD-INDEPENDENT TEST BACKSTOP. The MAGIC_CONTEXT_TEST_DATA_DIR guard only
+    // fires when the bunfig `[test] preload` ran — which depends on
     // `bun test`'s CWD having a bunfig with `[test] preload`. A `bun test` from a
     // dir WITHOUT that wiring (monorepo root, a package missing its bunfig, or a
     // brand-new package) recursively runs every *.test.ts with NO preload, so a
@@ -198,7 +184,11 @@ export function resolveDatabasePath(dbPathOverride?: string): { dbDir: string; d
     // per-test temp dir, e.g. to exercise path fallbacks or share a DB across
     // helper calls), getMagicContextStorageDir() already points inside that
     // controlled dir — honor it, do not override.
-    if (process.env.NODE_ENV === "test" && !process.env.XDG_DATA_HOME) {
+    if (
+        process.env.NODE_ENV === "test" &&
+        !process.env.XDG_DATA_HOME &&
+        !process.env.MAGIC_CONTEXT_TEST_DATA_DIR
+    ) {
         // Memoized per-process so repeated openDatabase() calls in the same
         // unisolated test resolve to the SAME path (openDatabase caches by path;
         // a fresh temp dir per call would defeat the cache and hand back
