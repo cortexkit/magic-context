@@ -163,7 +163,7 @@ Configure `embedding` once in the shared `~/.config/cortexkit/magic-context.json
 | `ctx_expand` | `start`/`end`, `message`, `verbose` | Recover complete messages or expand a compressed conversation range |
 | `ctx_reduce` | `drop` | Queue tagged turns for cache-safe removal from the live context |
 
-`ctx_note`, `ctx_expand`, and `ctx_reduce` are session-scoped and are exposed in primary Pi/OMP sessions. Magic Context omits them only from ephemeral `--no-session` child processes, where they would otherwise target the hidden child session.
+`ctx_note`, `ctx_expand`, and `ctx_reduce` are session-scoped and are exposed in primary Pi/OMP sessions. Magic Context omits them from ephemeral `--no-session` child processes, where they would otherwise target the hidden child session; `ctx_reduce` is additionally omitted when compaction is disabled.
 
 ---
 

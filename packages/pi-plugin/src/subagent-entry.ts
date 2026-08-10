@@ -41,9 +41,10 @@
  *     [other flags...]
  *
  * Discovery remains enabled. The full Magic Context entry no-ops under the env
- * guard; this explicit lean entry supplies the scoped Magic Context tools; and
- * the per-agent `--tools` allow-list strips every built-in or extension tool not
- * named for that child agent.
+ * guard and this explicit lean entry supplies scoped Magic Context tools. Pi
+ * applies the per-agent `--tools` list to the complete registry. OMP applies it
+ * to built-ins only and appends discovered extension tools afterward, so its
+ * list is an intended budget rather than an enforced extension-tool sandbox.
  *
  * Tool/action allowlists via Pi flags:
  *   --magic-context-dreamer-actions  Register ctx_memory with the dreamer
