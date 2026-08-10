@@ -282,11 +282,17 @@ fn omp_installation_detected(environment: &OmpEnvironment) -> bool {
     .any(|path| is_executable_file(path))
 }
 
-/// OMP only relocates data into XDG on Unix while the agent directory is the
-/// one it derives for the active profile. `configured_agent` is the value OMP
-/// exports for children through `PI_CODING_AGENT_DIR`.
-fn omp_xdg_allowed(configured_agent: Option<&Path>, expected_agent: &Path, unix: bool) -> bool {
-    unix && configured_agent.map_or(true, |agent| agent == expected_agent)
+/// OMP only relocates default-profile data into XDG on Unix while the configured
+/// agent directory matches its derived default. A named profile is authoritative:
+/// OMP ignores a stale/custom `PI_CODING_AGENT_DIR` and uses the initialized
+/// profile-specific XDG root.
+fn omp_xdg_allowed(
+    configured_agent: Option<&Path>,
+    expected_agent: &Path,
+    active_named_profile: bool,
+    unix: bool,
+) -> bool {
+    unix && (active_named_profile || configured_agent.map_or(true, |agent| agent == expected_agent))
 }
 
 fn deduplicate_session_roots(mut roots: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -339,6 +345,7 @@ fn omp_session_roots_for_environment(environment: &OmpEnvironment) -> Vec<PathBu
     let can_use_xdg = omp_xdg_allowed(
         environment.configured_agent.as_deref(),
         &expected_agent,
+        active_profile.is_some(),
         environment.unix,
     );
     if can_use_xdg {
@@ -1062,21 +1069,48 @@ mod tests {
     }
 
     #[test]
-    fn xdg_guard_accepts_the_active_profile_agent_dir() {
+    fn xdg_guard_treats_an_active_named_profile_as_authoritative() {
         let default_agent = PathBuf::from("/home/fox/.omp/agent");
         let profile_agent = PathBuf::from("/home/fox/.omp/profiles/work/agent");
         let custom_agent = PathBuf::from("/home/fox/custom-agent");
 
-        // OMP exports the profile agent dir for its children; that must not
-        // disable XDG discovery for the profile being used.
-        assert!(omp_xdg_allowed(Some(&profile_agent), &profile_agent, true));
-        assert!(omp_xdg_allowed(Some(&default_agent), &default_agent, true));
-        assert!(omp_xdg_allowed(None, &default_agent, true));
+        // Named profiles use their initialized XDG root even when the inherited
+        // agent-dir override is stale or custom.
+        assert!(omp_xdg_allowed(
+            Some(&profile_agent),
+            &profile_agent,
+            true,
+            true
+        ));
+        assert!(omp_xdg_allowed(
+            Some(&custom_agent),
+            &profile_agent,
+            true,
+            true
+        ));
+        assert!(omp_xdg_allowed(
+            Some(&default_agent),
+            &profile_agent,
+            true,
+            true
+        ));
 
-        // A genuinely custom agent dir and Windows keep XDG off.
-        assert!(!omp_xdg_allowed(Some(&custom_agent), &default_agent, true));
-        assert!(!omp_xdg_allowed(Some(&default_agent), &profile_agent, true));
-        assert!(!omp_xdg_allowed(None, &default_agent, false));
+        // The default profile still requires its derived agent dir, and Windows
+        // never uses the Unix XDG layout.
+        assert!(omp_xdg_allowed(
+            Some(&default_agent),
+            &default_agent,
+            false,
+            true
+        ));
+        assert!(omp_xdg_allowed(None, &default_agent, false, true));
+        assert!(!omp_xdg_allowed(
+            Some(&custom_agent),
+            &default_agent,
+            false,
+            true
+        ));
+        assert!(!omp_xdg_allowed(None, &profile_agent, true, false));
     }
 
     #[cfg(unix)]
