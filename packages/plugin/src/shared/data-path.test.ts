@@ -21,6 +21,7 @@ const savedEnv = {
     LOCALAPPDATA: process.env.LOCALAPPDATA,
     MAGIC_CONTEXT_LOG_PATH: process.env.MAGIC_CONTEXT_LOG_PATH,
     MAGIC_CONTEXT_TEST_DATA_DIR: process.env.MAGIC_CONTEXT_TEST_DATA_DIR,
+    NODE_ENV: process.env.NODE_ENV,
 };
 
 describe("data-path", () => {
@@ -37,17 +38,14 @@ describe("data-path", () => {
     });
 
     afterEach(() => {
-        if (savedEnv.XDG_CACHE_HOME !== undefined)
-            process.env.XDG_CACHE_HOME = savedEnv.XDG_CACHE_HOME;
-        if (savedEnv.XDG_DATA_HOME !== undefined)
-            process.env.XDG_DATA_HOME = savedEnv.XDG_DATA_HOME;
-        if (savedEnv.LOCALAPPDATA !== undefined) process.env.LOCALAPPDATA = savedEnv.LOCALAPPDATA;
-        if (savedEnv.MAGIC_CONTEXT_LOG_PATH !== undefined)
-            process.env.MAGIC_CONTEXT_LOG_PATH = savedEnv.MAGIC_CONTEXT_LOG_PATH;
-        else delete process.env.MAGIC_CONTEXT_LOG_PATH;
-        if (savedEnv.MAGIC_CONTEXT_TEST_DATA_DIR !== undefined)
-            process.env.MAGIC_CONTEXT_TEST_DATA_DIR = savedEnv.MAGIC_CONTEXT_TEST_DATA_DIR;
-        else delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+        // Restore-or-delete every var this suite touches. Several tests lift a
+        // guard (NODE_ENV, MAGIC_CONTEXT_TEST_DATA_DIR) to assert production
+        // shape, so a restore that skips the unset case would leak state into
+        // the next test and make results order-dependent.
+        for (const [key, value] of Object.entries(savedEnv)) {
+            if (value !== undefined) process.env[key] = value;
+            else delete process.env[key];
+        }
     });
 
     test("getCacheDir falls back to <homedir>/.cache when XDG_CACHE_HOME is unset (all platforms)", () => {
