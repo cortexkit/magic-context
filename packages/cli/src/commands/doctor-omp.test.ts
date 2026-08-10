@@ -75,7 +75,9 @@ describe("OMP doctor", () => {
         process.env.HOME = root;
         process.env.PI_CODING_AGENT_DIR = agentDir;
         process.env.XDG_CONFIG_HOME = join(root, ".config");
-        delete process.env.XDG_DATA_HOME;
+        // Redirect explicitly: Bun caches os.homedir(), so deleting this can
+        // make integrity_check reach the user's real context.db.
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
         const prompts = new MockPrompts();
 
         const code = await runDoctor({
@@ -103,12 +105,55 @@ describe("OMP doctor", () => {
         expect(prompts.messages.join("\n")).toContain("FAIL 0");
     });
 
+    it("repairs a missing config when it is the only health finding", async () => {
+        const root = mkdtempSync(join(tmpdir(), "mc-omp-doctor-config-only-"));
+        roots.push(root);
+        const agentDir = join(root, ".omp", "agent");
+        const pluginDir = join(root, "plugin");
+        mkdirSync(agentDir, { recursive: true });
+        mkdirSync(pluginDir, { recursive: true });
+        writeFileSync(
+            join(pluginDir, "package.json"),
+            JSON.stringify({ omp: { extensions: ["./dist/index.js"] } }),
+        );
+        process.env.HOME = root;
+        process.env.PI_CODING_AGENT_DIR = agentDir;
+        process.env.XDG_CONFIG_HOME = join(root, ".config");
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor({
+            cwd: root,
+            force: true,
+            prompts,
+            deps: {
+                detectOmpBinary: () => ({ path: "/fake/omp", source: "path" }),
+                getOmpVersion: () => "17.1.7",
+                listOmpPlugins: () => [
+                    {
+                        name: "@cortexkit/pi-magic-context",
+                        version: "0.35.1",
+                        enabled: true,
+                        path: pluginDir,
+                    },
+                ],
+                getOmpSetting: ((_path: string, key: string) =>
+                    key === "compaction.enabled" ? false : "off") as never,
+                runOmpCommand: () => ({ ok: true, stdout: agentDir, stderr: "" }),
+            },
+        });
+
+        expect(code).toBe(0);
+        expect(existsSync(join(root, ".config", "cortexkit", "magic-context.jsonc"))).toBe(true);
+        expect(prompts.messages.join("\n")).toContain("Wrote default Magic Context config");
+    });
+
     it("writes an independent default config even when OMP is missing", async () => {
         const root = mkdtempSync(join(tmpdir(), "mc-omp-doctor-no-bin-"));
         roots.push(root);
         process.env.HOME = root;
         process.env.XDG_CONFIG_HOME = join(root, ".config");
-        delete process.env.XDG_DATA_HOME;
+        process.env.XDG_DATA_HOME = join(root, ".local", "share");
         delete process.env.PI_CODING_AGENT_DIR;
         const prompts = new MockPrompts();
 

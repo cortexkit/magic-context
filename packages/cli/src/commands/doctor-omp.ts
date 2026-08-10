@@ -453,7 +453,8 @@ export async function runDoctor(options: RunOmpDoctorOptions = {}): Promise<numb
     prompts.intro("Magic Context for Oh My Pi (OMP) Doctor");
     const first = await runHealthChecks({ cwd, prompts, deps });
     prompts.log.message(`Summary: PASS ${first.pass} / WARN ${first.warn} / FAIL ${first.fail}`);
-    if (!options.force || first.fail === 0) return first.fail === 0 ? 0 : 1;
+    if (!options.force) return first.fail === 0 ? 0 : 1;
+    if (first.fail === 0 && !first.repairPlan.writeUserConfig) return 0;
     if (migrationRefused && first.repairPlan.writeUserConfig) {
         first.repairPlan.writeUserConfig = false;
         prompts.log.error(

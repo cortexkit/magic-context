@@ -57,6 +57,7 @@ afterEach(() => {
 });
 
 function makeFakeOmp(options: { failMemorySet?: boolean } = {}): {
+    root: string;
     binary: string;
     state: string;
 } {
@@ -94,16 +95,16 @@ if (args[0] === "config" && args[1] === "get") {
     chmodSync(binary, 0o755);
     process.env.PATH = [root, original.PATH].filter(Boolean).join(delimiter);
     process.env.HOME = root;
-    return { binary, state };
+    return { root, binary, state };
 }
 
 describe("OMP setup transaction", () => {
     it("restores native settings when a later setup step rolls back", async () => {
-        const { binary, state } = makeFakeOmp();
+        const { root, binary, state } = makeFakeOmp();
         const prompts = new MockPrompts([true, true]);
         const rollback = await __test.OMP_HOST.beforeWrite?.({
             binaryPath: binary,
-            cwd: process.cwd(),
+            cwd: root,
             prompts,
             dryRun: false,
             configureHost: true,
@@ -122,12 +123,12 @@ describe("OMP setup transaction", () => {
     });
 
     it("automatically restores an earlier setting when a later write fails", async () => {
-        const { binary, state } = makeFakeOmp({ failMemorySet: true });
+        const { root, binary, state } = makeFakeOmp({ failMemorySet: true });
         const prompts = new MockPrompts([true, true]);
 
         const result = await __test.OMP_HOST.beforeWrite?.({
             binaryPath: binary,
-            cwd: process.cwd(),
+            cwd: root,
             prompts,
             dryRun: false,
             configureHost: true,
@@ -143,11 +144,11 @@ describe("OMP setup transaction", () => {
     });
 
     it("does not change native settings when registration is skipped and plugin is absent", async () => {
-        const { binary, state } = makeFakeOmp();
+        const { root, binary, state } = makeFakeOmp();
         const prompts = new MockPrompts([]);
         const rollback = await __test.OMP_HOST.beforeWrite?.({
             binaryPath: binary,
-            cwd: process.cwd(),
+            cwd: root,
             prompts,
             dryRun: false,
             configureHost: false,
