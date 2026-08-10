@@ -106,7 +106,7 @@ fn profile_stats_components() {
         );
 
         let t = Instant::now();
-        let pi = pi_sessions::scan_pi_cache_session_dir();
+        let pi = pi_sessions::scan_pi_compatible_cache_session_dir();
         println!(
             "[c] pi metadata:            {:8.1}ms ({} rows)",
             ms(t),

@@ -65,9 +65,29 @@ pub struct PiCompactionEntry {
 type MetaCache = HashMap<PathBuf, (SystemTime, Arc<PiSessionMeta>)>;
 type DetailCache = HashMap<PathBuf, (SystemTime, Arc<PiSessionDetail>)>;
 
+#[derive(Clone)]
+struct OmpEnvironment {
+    home: PathBuf,
+    package_dir: Option<PathBuf>,
+    path: std::ffi::OsString,
+    app_data: Option<PathBuf>,
+    config_dir: Option<PathBuf>,
+    configured_agent: Option<PathBuf>,
+    xdg_data: Option<PathBuf>,
+    active_profile: Option<std::ffi::OsString>,
+    windows: bool,
+    unix: bool,
+}
+
 static META_CACHE: OnceLock<RwLock<MetaCache>> = OnceLock::new();
 static DETAIL_CACHE: OnceLock<RwLock<DetailCache>> = OnceLock::new();
 static TEST_ROOT: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_OMP_ENVIRONMENT: std::cell::RefCell<Option<OmpEnvironment>> =
+        std::cell::RefCell::new(None);
+}
 
 fn meta_cache() -> &'static RwLock<MetaCache> {
     META_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
@@ -79,6 +99,48 @@ fn detail_cache() -> &'static RwLock<DetailCache> {
 
 fn test_root() -> &'static RwLock<Option<PathBuf>> {
     TEST_ROOT.get_or_init(|| RwLock::new(None))
+}
+
+impl OmpEnvironment {
+    fn from_process(home: PathBuf) -> Self {
+        Self {
+            home,
+            package_dir: trimmed_env_path(std::env::var_os("PI_PACKAGE_DIR")),
+            path: std::env::var_os("PATH").unwrap_or_default(),
+            app_data: trimmed_env_path(std::env::var_os("APPDATA")),
+            config_dir: trimmed_env_path(std::env::var_os("PI_CONFIG_DIR")),
+            configured_agent: trimmed_env_path(std::env::var_os("PI_CODING_AGENT_DIR")),
+            xdg_data: trimmed_env_path(std::env::var_os("XDG_DATA_HOME")),
+            active_profile: active_omp_profile(),
+            windows: cfg!(target_os = "windows"),
+            unix: cfg!(target_os = "linux") || cfg!(target_os = "macos"),
+        }
+    }
+}
+
+fn current_omp_environment() -> Option<OmpEnvironment> {
+    #[cfg(test)]
+    if let Some(environment) = TEST_OMP_ENVIRONMENT.with(|value| value.borrow().clone()) {
+        return Some(environment);
+    }
+
+    dirs::home_dir().map(OmpEnvironment::from_process)
+}
+
+#[cfg(test)]
+struct TestOmpEnvironmentGuard;
+
+#[cfg(test)]
+impl Drop for TestOmpEnvironmentGuard {
+    fn drop(&mut self) {
+        TEST_OMP_ENVIRONMENT.with(|value| *value.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+fn set_test_omp_environment(environment: OmpEnvironment) -> TestOmpEnvironmentGuard {
+    TEST_OMP_ENVIRONMENT.with(|value| *value.borrow_mut() = Some(environment));
+    TestOmpEnvironmentGuard
 }
 
 fn trimmed_env_path(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
@@ -187,32 +249,37 @@ fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
-fn omp_installation_detected(home: &Path) -> bool {
+fn omp_installation_detected(environment: &OmpEnvironment) -> bool {
     // OMP_PROFILE alone is not proof: the variable can be exported in a shell
     // that never installed OMP, and treating it as evidence would surface OMP
     // roots to plain Pi users. Require the same positive package/binary
     // evidence the Pi runtime uses.
-    if trimmed_env_path(std::env::var_os("PI_PACKAGE_DIR"))
-        .is_some_and(|path| omp_package_dir_is_valid(&path))
+    if environment
+        .package_dir
+        .as_deref()
+        .is_some_and(omp_package_dir_is_valid)
     {
         return true;
     }
-    let binary_names: &[&str] = if cfg!(target_os = "windows") {
+    let binary_names: &[&str] = if environment.windows {
         &["omp.exe", "omp.cmd"]
     } else {
         &["omp"]
     };
-    if std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).any(|dir| {
+    if std::env::split_paths(&environment.path).any(|dir| {
         binary_names
             .iter()
             .any(|name| is_executable_file(&dir.join(name)))
     }) {
         return true;
     }
-    let app_data = trimmed_env_path(std::env::var_os("APPDATA"));
-    omp_fallback_binary_candidates(home, app_data.as_deref(), cfg!(target_os = "windows"))
-        .iter()
-        .any(|path| is_executable_file(path))
+    omp_fallback_binary_candidates(
+        &environment.home,
+        environment.app_data.as_deref(),
+        environment.windows,
+    )
+    .iter()
+    .any(|path| is_executable_file(path))
 }
 
 /// OMP only relocates data into XDG on Unix while the agent directory is the
@@ -222,56 +289,7 @@ fn omp_xdg_allowed(configured_agent: Option<&Path>, expected_agent: &Path, unix:
     unix && configured_agent.map_or(true, |agent| agent == expected_agent)
 }
 
-fn pi_compatible_session_roots_for_home(home: &Path, include_omp: bool) -> Vec<PathBuf> {
-    let mut roots = vec![home.join(".pi/agent/sessions")];
-
-    if let Some(agent_dir) = trimmed_env_path(std::env::var_os("PI_CODING_AGENT_DIR")) {
-        roots.push(agent_dir.join("sessions"));
-    }
-
-    if include_omp {
-        let config_dir = trimmed_env_path(std::env::var_os("PI_CONFIG_DIR"))
-            .unwrap_or_else(|| PathBuf::from(".omp"));
-        let config_root = home.join(&config_dir);
-        let default_agent = config_root.join("agent");
-        let active_profile = active_omp_profile();
-
-        // Keep the default root visible even when a named profile is active.
-        roots.push(default_agent.join("sessions"));
-        append_omp_profile_roots(&mut roots, &config_root.join("profiles"), false);
-
-        // OMP only switches data into XDG on Unix while the agent directory is
-        // the one it derives itself. OMP exports PI_CODING_AGENT_DIR for its
-        // children, including named profiles, so compare against the ACTIVE
-        // profile's agent dir rather than the default one.
-        let expected_agent = match &active_profile {
-            Some(profile) => config_root.join("profiles").join(profile).join("agent"),
-            None => default_agent.clone(),
-        };
-        if active_profile.is_some() {
-            roots.push(expected_agent.join("sessions"));
-        }
-
-        let configured_agent = trimmed_env_path(std::env::var_os("PI_CODING_AGENT_DIR"));
-        let can_use_xdg = omp_xdg_allowed(
-            configured_agent.as_deref(),
-            &expected_agent,
-            cfg!(target_os = "linux") || cfg!(target_os = "macos"),
-        );
-        if can_use_xdg {
-            if let Some(xdg_data) = trimmed_env_path(std::env::var_os("XDG_DATA_HOME")) {
-                let app_root = xdg_data.join("omp");
-                if app_root.exists() {
-                    roots.push(app_root.join("sessions"));
-                    append_omp_profile_roots(&mut roots, &app_root.join("profiles"), true);
-                    if let Some(profile) = &active_profile {
-                        roots.push(app_root.join("profiles").join(profile).join("sessions"));
-                    }
-                }
-            }
-        }
-    }
-
+fn deduplicate_session_roots(mut roots: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     roots.retain(|path| {
         let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
@@ -280,7 +298,66 @@ fn pi_compatible_session_roots_for_home(home: &Path, include_omp: bool) -> Vec<P
     roots
 }
 
-fn pi_compatible_session_roots() -> Vec<PathBuf> {
+fn pi_session_roots_for_home(home: &Path, configured_agent: Option<&Path>) -> Vec<PathBuf> {
+    let mut roots = vec![home.join(".pi/agent/sessions")];
+    if let Some(agent_dir) = configured_agent {
+        roots.push(agent_dir.join("sessions"));
+    }
+    deduplicate_session_roots(roots)
+}
+
+fn omp_session_roots_for_environment(environment: &OmpEnvironment) -> Vec<PathBuf> {
+    let config_dir = environment
+        .config_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(".omp"));
+    let config_root = environment.home.join(config_dir);
+    let default_agent = config_root.join("agent");
+    let active_profile = &environment.active_profile;
+    let mut roots = Vec::new();
+
+    if let Some(agent_dir) = &environment.configured_agent {
+        roots.push(agent_dir.join("sessions"));
+    }
+
+    // Keep the default root visible even when a named profile is active.
+    roots.push(default_agent.join("sessions"));
+    append_omp_profile_roots(&mut roots, &config_root.join("profiles"), false);
+
+    // OMP only switches data into XDG on Unix while the agent directory is
+    // the one it derives itself. OMP exports PI_CODING_AGENT_DIR for its
+    // children, including named profiles, so compare against the ACTIVE
+    // profile's agent dir rather than the default one.
+    let expected_agent = match active_profile {
+        Some(profile) => config_root.join("profiles").join(profile).join("agent"),
+        None => default_agent,
+    };
+    if active_profile.is_some() {
+        roots.push(expected_agent.join("sessions"));
+    }
+
+    let can_use_xdg = omp_xdg_allowed(
+        environment.configured_agent.as_deref(),
+        &expected_agent,
+        environment.unix,
+    );
+    if can_use_xdg {
+        if let Some(xdg_data) = &environment.xdg_data {
+            let app_root = xdg_data.join("omp");
+            if app_root.exists() {
+                roots.push(app_root.join("sessions"));
+                append_omp_profile_roots(&mut roots, &app_root.join("profiles"), true);
+                if let Some(profile) = active_profile {
+                    roots.push(app_root.join("profiles").join(profile).join("sessions"));
+                }
+            }
+        }
+    }
+
+    deduplicate_session_roots(roots)
+}
+
+fn pi_session_roots() -> Vec<PathBuf> {
     if let Ok(root) = test_root().read() {
         if let Some(path) = root.clone() {
             return vec![path];
@@ -290,7 +367,18 @@ fn pi_compatible_session_roots() -> Vec<PathBuf> {
     let Some(home) = dirs::home_dir() else {
         return Vec::new();
     };
-    pi_compatible_session_roots_for_home(&home, omp_installation_detected(&home))
+    let configured_agent = trimmed_env_path(std::env::var_os("PI_CODING_AGENT_DIR"));
+    pi_session_roots_for_home(&home, configured_agent.as_deref())
+}
+
+fn omp_session_roots() -> Vec<PathBuf> {
+    let Some(environment) = current_omp_environment() else {
+        return Vec::new();
+    };
+    if !omp_installation_detected(&environment) {
+        return Vec::new();
+    }
+    omp_session_roots_for_environment(&environment)
 }
 
 fn deduplicate_pi_sessions(mut sessions: Vec<(usize, PiSessionMeta)>) -> Vec<PiSessionMeta> {
@@ -308,13 +396,16 @@ fn deduplicate_pi_sessions(mut sessions: Vec<(usize, PiSessionMeta)>) -> Vec<PiS
     sessions.into_iter().map(|(_, session)| session).collect()
 }
 
-pub fn scan_pi_session_dir() -> Vec<PiSessionMeta> {
+fn scan_session_roots(
+    roots: Vec<PathBuf>,
+    scan_root: fn(&Path) -> Vec<PiSessionMeta>,
+) -> Vec<PiSessionMeta> {
     deduplicate_pi_sessions(
-        pi_compatible_session_roots()
+        roots
             .into_iter()
             .enumerate()
             .flat_map(|(priority, root)| {
-                scan_pi_session_dir_at(&root)
+                scan_root(&root)
                     .into_iter()
                     .map(move |session| (priority, session))
             })
@@ -322,16 +413,46 @@ pub fn scan_pi_session_dir() -> Vec<PiSessionMeta> {
     )
 }
 
-pub fn scan_pi_cache_session_dir() -> Vec<PiSessionMeta> {
+pub fn scan_pi_session_dir() -> Vec<PiSessionMeta> {
+    scan_session_roots(pi_session_roots(), scan_pi_session_dir_at)
+}
+
+pub fn scan_omp_session_dir() -> Vec<PiSessionMeta> {
+    scan_session_roots(omp_session_roots(), scan_pi_session_dir_at)
+}
+
+pub fn scan_pi_compatible_session_dir() -> Vec<PiSessionMeta> {
     deduplicate_pi_sessions(
-        pi_compatible_session_roots()
+        scan_pi_session_dir()
             .into_iter()
-            .enumerate()
-            .flat_map(|(priority, root)| {
-                scan_pi_cache_session_dir_at(&root)
+            .map(|session| (0, session))
+            .chain(
+                scan_omp_session_dir()
                     .into_iter()
-                    .map(move |session| (priority, session))
-            })
+                    .map(|session| (1, session)),
+            )
+            .collect(),
+    )
+}
+
+pub fn scan_pi_cache_session_dir() -> Vec<PiSessionMeta> {
+    scan_session_roots(pi_session_roots(), scan_pi_cache_session_dir_at)
+}
+
+pub fn scan_omp_cache_session_dir() -> Vec<PiSessionMeta> {
+    scan_session_roots(omp_session_roots(), scan_pi_cache_session_dir_at)
+}
+
+pub fn scan_pi_compatible_cache_session_dir() -> Vec<PiSessionMeta> {
+    deduplicate_pi_sessions(
+        scan_pi_cache_session_dir()
+            .into_iter()
+            .map(|session| (0, session))
+            .chain(
+                scan_omp_cache_session_dir()
+                    .into_iter()
+                    .map(|session| (1, session)),
+            )
             .collect(),
     )
 }
@@ -412,7 +533,7 @@ pub fn read_pi_session_detail(path: &Path) -> Option<PiSessionDetail> {
 }
 
 pub fn find_pi_session_path(session_id: &str) -> Option<PathBuf> {
-    scan_pi_session_dir()
+    scan_pi_compatible_session_dir()
         .into_iter()
         .find(|meta| meta.session_id == session_id)
         .map(|meta| meta.jsonl_path)
@@ -813,6 +934,7 @@ pub fn clear_caches_for_tests() {
     if let Ok(mut root) = test_root().write() {
         *root = None;
     }
+    TEST_OMP_ENVIRONMENT.with(|value| *value.borrow_mut() = None);
 }
 
 #[cfg(test)]
@@ -874,18 +996,52 @@ mod tests {
     }
 
     #[test]
-    fn omp_profile_roots_require_positive_omp_detection() {
+    fn public_omp_scanner_requires_positive_installation_evidence() {
         let home = tempfile::tempdir().unwrap();
-        let profile_root = home.path().join(".omp/profiles/work/agent/sessions");
-        let default_root = home.path().join(".omp/agent/sessions");
-        fs::create_dir_all(&profile_root).unwrap();
+        let session_root = home.path().join(".omp/agent/sessions/--tmp-proj--");
+        fs::create_dir_all(&session_root).unwrap();
+        fs::write(
+            session_root.join("2026-01-01_omp.jsonl"),
+            r#"{"type":"session","id":"omp-split-test","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp/omp-project"}"#,
+        )
+        .unwrap();
 
-        let plain_pi_roots = pi_compatible_session_roots_for_home(home.path(), false);
-        assert!(!plain_pi_roots.contains(&profile_root));
-        assert!(!plain_pi_roots.contains(&default_root));
-        let omp_roots = pi_compatible_session_roots_for_home(home.path(), true);
-        assert!(omp_roots.contains(&profile_root));
-        assert!(omp_roots.contains(&default_root));
+        let mut environment = OmpEnvironment {
+            home: home.path().to_path_buf(),
+            package_dir: None,
+            path: std::ffi::OsString::new(),
+            app_data: None,
+            config_dir: None,
+            configured_agent: None,
+            xdg_data: None,
+            active_profile: None,
+            windows: cfg!(target_os = "windows"),
+            unix: cfg!(target_os = "linux") || cfg!(target_os = "macos"),
+        };
+        {
+            let _guard = set_test_omp_environment(environment.clone());
+            assert!(scan_omp_session_dir().is_empty());
+            assert!(scan_pi_compatible_session_dir()
+                .iter()
+                .all(|session| session.session_id != "omp-split-test"));
+        }
+
+        let package_dir = home.path().join("omp-package");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"@oh-my-pi/pi-coding-agent"}"#,
+        )
+        .unwrap();
+        environment.package_dir = Some(package_dir);
+        let _guard = set_test_omp_environment(environment);
+
+        let omp_sessions = scan_omp_session_dir();
+        assert_eq!(omp_sessions.len(), 1);
+        assert_eq!(omp_sessions[0].session_id, "omp-split-test");
+        assert!(scan_pi_compatible_session_dir()
+            .iter()
+            .any(|session| session.session_id == "omp-split-test"));
     }
 
     #[test]

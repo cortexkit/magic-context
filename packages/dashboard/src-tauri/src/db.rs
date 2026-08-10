@@ -1041,7 +1041,7 @@ pub fn load_raw_pi_cache_events(
     let global_cap = limit.saturating_mul(10);
     let mut all_rows: Vec<RawDbCacheEvent> = Vec::new();
 
-    for meta in pi_sessions::scan_pi_session_dir() {
+    for meta in pi_sessions::scan_pi_compatible_session_dir() {
         let Some(detail) = pi_sessions::read_pi_session_detail(&meta.jsonl_path) else {
             continue;
         };
@@ -1443,10 +1443,11 @@ fn build_db_cache_events_with_attribution(
     if !pi_sessions_in_window.is_empty() {
         // Build a lookup of Pi session_id -> jsonl path so we don't re-scan
         // the directory per session.
-        let pi_meta_by_id: HashMap<String, std::path::PathBuf> = pi_sessions::scan_pi_session_dir()
-            .into_iter()
-            .map(|m| (m.session_id, m.jsonl_path))
-            .collect();
+        let pi_meta_by_id: HashMap<String, std::path::PathBuf> =
+            pi_sessions::scan_pi_compatible_session_dir()
+                .into_iter()
+                .map(|m| (m.session_id, m.jsonl_path))
+                .collect();
         for sid in pi_sessions_in_window {
             let Some(path) = pi_meta_by_id.get(&sid) else {
                 continue;
@@ -2168,7 +2169,7 @@ pub fn load_cache_session_titles(
         }
     }
 
-    for meta in pi_sessions::scan_pi_session_dir() {
+    for meta in pi_sessions::scan_pi_compatible_session_dir() {
         let key = (Harness::Pi, meta.session_id.clone());
         if keys.contains(&key) {
             titles.insert(key, clean_pi_title(meta.session_name, &meta.first_message));
@@ -2246,7 +2247,7 @@ pub fn get_session_cache_stats_from_db(
             });
             let pi = scope.spawn(|| {
                 if includes_harness(Harness::Pi) {
-                    pi_sessions::scan_pi_cache_session_dir()
+                    pi_sessions::scan_pi_compatible_cache_session_dir()
                 } else {
                     Vec::new()
                 }
@@ -2804,7 +2805,7 @@ fn mapped_session_directories(identities: &SessionIdentityMap) -> Vec<(String, S
         }
     }
 
-    for meta in pi_sessions::scan_pi_session_dir() {
+    for meta in pi_sessions::scan_pi_compatible_session_dir() {
         if meta.cwd.is_empty() {
             continue;
         }
@@ -2920,7 +2921,7 @@ fn enumerate_projects_filtered(project_paths_filter: Option<&HashSet<String>>) -
     }
 
     let mut pi_counts: HashMap<String, (String, u32)> = HashMap::new();
-    for meta in pi_sessions::scan_pi_session_dir() {
+    for meta in pi_sessions::scan_pi_compatible_session_dir() {
         if let Some(allowed_paths) = project_paths_filter {
             if !allowed_paths.contains(&meta.cwd) {
                 continue;
@@ -4655,7 +4656,7 @@ pub fn list_pi_sessions(filter: &SessionFilter) -> Vec<SessionRow> {
     }
     let subagent_map = load_subagent_map_for_harness(Harness::Pi);
     let session_identities = load_session_identity_map();
-    pi_sessions::scan_pi_session_dir()
+    pi_sessions::scan_pi_compatible_session_dir()
         .into_iter()
         .map(|meta| {
             let project_identity =
