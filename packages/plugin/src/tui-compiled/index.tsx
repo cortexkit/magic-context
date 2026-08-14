@@ -14,6 +14,7 @@ import packageJson from "../../package.json";
 import { closeRpc, dismissUpgradeReminder, getAnnouncement, getCompartmentCount, getRpcGeneration, initRpcClient, loadEmbedDetail, loadStatusDetail, loadToastDurationMs, markAnnounced, requestRecomp, requestUpgrade } from "./data/context-db";
 import { startNotificationSocket, stopNotificationSocket } from "./data/notification-socket";
 import { formatThresholdPercent } from "../shared/format-threshold";
+import { formatWindowDerivationLine } from "../shared/window-geometry";
 import { compactionOffSidebarRows, nativeCompactionContextLabel } from "./compaction-off";
 import { isCompactionEnabled } from "../config/agent-disable";
 import { loadPluginConfig } from "../config";
@@ -302,84 +303,93 @@ const StatusDialog = props => {
       var _c$2 = _$memo(() => contextLimit() > 0);
       return () => _c$2() ? fmt(contextLimit()) : "?";
     })(), _el$12);
+    _$insert(_el$4, (() => {
+      var _c$3 = _$memo(() => !!s().windowGeometry);
+      return () => _c$3() && (() => {
+        var _el$30 = _$createElement("text");
+        _$insert(_el$30, () => formatWindowDerivationLine(s().inputTokens, s().windowGeometry));
+        _$effect(_$p => _$setProp(_el$30, "fg", t().textMuted, _$p));
+        return _el$30;
+      })();
+    })(), _el$13);
     _$setProp(_el$13, "width", "100%");
     _$setProp(_el$13, "flexDirection", "row");
     _$setProp(_el$13, "height", 1);
     _$insert(_el$13, () => barSegments().map(seg => (() => {
-      var _el$30 = _$createElement("box");
-      _$setProp(_el$30, "flexBasis", 0);
-      _$setProp(_el$30, "height", 1);
+      var _el$31 = _$createElement("box");
+      _$setProp(_el$31, "flexBasis", 0);
+      _$setProp(_el$31, "height", 1);
       _$effect(_p$ => {
         var _v$8 = seg.label,
           _v$9 = Math.max(1, seg.tokens),
           _v$0 = seg.color;
-        _v$8 !== _p$.e && (_p$.e = _$setProp(_el$30, "key", _v$8, _p$.e));
-        _v$9 !== _p$.t && (_p$.t = _$setProp(_el$30, "flexGrow", _v$9, _p$.t));
-        _v$0 !== _p$.a && (_p$.a = _$setProp(_el$30, "backgroundColor", _v$0, _p$.a));
+        _v$8 !== _p$.e && (_p$.e = _$setProp(_el$31, "key", _v$8, _p$.e));
+        _v$9 !== _p$.t && (_p$.t = _$setProp(_el$31, "flexGrow", _v$9, _p$.t));
+        _v$0 !== _p$.a && (_p$.a = _$setProp(_el$31, "backgroundColor", _v$0, _p$.a));
         return _p$;
       }, {
         e: undefined,
         t: undefined,
         a: undefined
       });
-      return _el$30;
+      return _el$31;
     })()));
     _$setProp(_el$14, "flexDirection", "column");
     _$insert(_el$14, () => breakdownSegments().segs.map(seg => {
       const pct = (seg.tokens / breakdownSegments().total * 100).toFixed(1);
       return (() => {
-        var _el$31 = _$createElement("box"),
-          _el$32 = _$createElement("text"),
-          _el$33 = _$createTextNode(` `),
-          _el$34 = _$createElement("text"),
-          _el$35 = _$createTextNode(` (`),
-          _el$36 = _$createTextNode(`%)`);
-        _$insertNode(_el$31, _el$32);
-        _$insertNode(_el$31, _el$34);
-        _$setProp(_el$31, "width", "100%");
-        _$setProp(_el$31, "flexDirection", "row");
-        _$setProp(_el$31, "justifyContent", "space-between");
+        var _el$32 = _$createElement("box"),
+          _el$33 = _$createElement("text"),
+          _el$34 = _$createTextNode(` `),
+          _el$35 = _$createElement("text"),
+          _el$36 = _$createTextNode(` (`),
+          _el$37 = _$createTextNode(`%)`);
         _$insertNode(_el$32, _el$33);
-        _$insert(_el$32, () => seg.label, _el$33);
-        _$insert(_el$32, () => seg.detail ?? "", null);
-        _$insertNode(_el$34, _el$35);
-        _$insertNode(_el$34, _el$36);
-        _$insert(_el$34, () => fmt(seg.tokens), _el$35);
-        _$insert(_el$34, pct, _el$36);
+        _$insertNode(_el$32, _el$35);
+        _$setProp(_el$32, "width", "100%");
+        _$setProp(_el$32, "flexDirection", "row");
+        _$setProp(_el$32, "justifyContent", "space-between");
+        _$insertNode(_el$33, _el$34);
+        _$insert(_el$33, () => seg.label, _el$34);
+        _$insert(_el$33, () => seg.detail ?? "", null);
+        _$insertNode(_el$35, _el$36);
+        _$insertNode(_el$35, _el$37);
+        _$insert(_el$35, () => fmt(seg.tokens), _el$36);
+        _$insert(_el$35, pct, _el$37);
         _$effect(_p$ => {
           var _v$1 = seg.label,
             _v$10 = seg.color,
             _v$11 = t().textMuted;
-          _v$1 !== _p$.e && (_p$.e = _$setProp(_el$31, "key", _v$1, _p$.e));
-          _v$10 !== _p$.t && (_p$.t = _$setProp(_el$32, "fg", _v$10, _p$.t));
-          _v$11 !== _p$.a && (_p$.a = _$setProp(_el$34, "fg", _v$11, _p$.a));
+          _v$1 !== _p$.e && (_p$.e = _$setProp(_el$32, "key", _v$1, _p$.e));
+          _v$10 !== _p$.t && (_p$.t = _$setProp(_el$33, "fg", _v$10, _p$.t));
+          _v$11 !== _p$.a && (_p$.a = _$setProp(_el$35, "fg", _v$11, _p$.a));
           return _p$;
         }, {
           e: undefined,
           t: undefined,
           a: undefined
         });
-        return _el$31;
+        return _el$32;
       })();
     }));
     _$insert(_el$4, (() => {
-      var _c$3 = _$memo(() => !!(!compactionOff() && s().recompProgress));
-      return () => _c$3() && (() => {
+      var _c$4 = _$memo(() => !!(!compactionOff() && s().recompProgress));
+      return () => _c$4() && (() => {
         const p = s().recompProgress;
         // Label follows the flow that started the run, so a plain
         // /ctx-recomp never reads as an "Upgrade" (dogfood 2026-06-04).
         const verb = p.kind === "upgrade" ? "Upgrade" : p.kind === "embed" ? "Embed" : "Recomp";
         return (() => {
-          var _el$37 = _$createElement("box"),
-            _el$38 = _$createElement("text"),
-            _el$39 = _$createElement("b");
-          _$insertNode(_el$37, _el$38);
-          _$setProp(_el$37, "marginTop", 1);
-          _$setProp(_el$37, "width", "100%");
-          _$setProp(_el$37, "flexDirection", "column");
+          var _el$38 = _$createElement("box"),
+            _el$39 = _$createElement("text"),
+            _el$40 = _$createElement("b");
           _$insertNode(_el$38, _el$39);
-          _$insert(_el$39, verb);
-          _$insert(_el$37, () => {
+          _$setProp(_el$38, "marginTop", 1);
+          _$setProp(_el$38, "width", "100%");
+          _$setProp(_el$38, "flexDirection", "column");
+          _$insertNode(_el$39, _el$40);
+          _$insert(_el$40, verb);
+          _$insert(_el$38, () => {
             if (p.phase === "recomp") {
               const frac = p.totalMessages > 0 ? p.processedMessages / p.totalMessages : 0;
               const width = 24;
@@ -479,8 +489,8 @@ const StatusDialog = props => {
               }
             });
           }, null);
-          _$effect(_$p => _$setProp(_el$38, "fg", t().text, _$p));
-          return _el$37;
+          _$effect(_$p => _$setProp(_el$39, "fg", t().text, _$p));
+          return _el$38;
         })();
       })();
     })(), _el$15);
@@ -489,18 +499,18 @@ const StatusDialog = props => {
     _$setProp(_el$15, "marginTop", 1);
     _$setProp(_el$15, "gap", 4);
     _$insert(_el$15, (() => {
-      var _c$4 = _$memo(() => !!compactionOff());
-      return () => _c$4() ? (() => {
-        var _el$40 = _$createElement("box"),
-          _el$41 = _$createElement("text"),
-          _el$42 = _$createElement("b");
-        _$insertNode(_el$40, _el$41);
-        _$setProp(_el$40, "flexDirection", "column");
-        _$setProp(_el$40, "flexGrow", 1);
-        _$setProp(_el$40, "flexBasis", 0);
+      var _c$5 = _$memo(() => !!compactionOff());
+      return () => _c$5() ? (() => {
+        var _el$41 = _$createElement("box"),
+          _el$42 = _$createElement("text"),
+          _el$43 = _$createElement("b");
         _$insertNode(_el$41, _el$42);
-        _$insertNode(_el$42, _$createTextNode(`Knowledge`));
-        _$insert(_el$40, () => compactionOffSidebarRows(s()).map(row => _$createComponent(R, {
+        _$setProp(_el$41, "flexDirection", "column");
+        _$setProp(_el$41, "flexGrow", 1);
+        _$setProp(_el$41, "flexBasis", 0);
+        _$insertNode(_el$42, _el$43);
+        _$insertNode(_el$43, _$createTextNode(`Knowledge`));
+        _$insert(_el$41, () => compactionOffSidebarRows(s()).map(row => _$createComponent(R, {
           get t() {
             return t();
           },
@@ -514,9 +524,9 @@ const StatusDialog = props => {
             return _$memo(() => row.label === "Memories")() ? t().accent : t().textMuted;
           }
         })), null);
-        _$insert(_el$40, (() => {
-          var _c$8 = _$memo(() => s().readySmartNoteCount > 0);
-          return () => _c$8() && _$createComponent(R, {
+        _$insert(_el$41, (() => {
+          var _c$9 = _$memo(() => s().readySmartNoteCount > 0);
+          return () => _c$9() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -529,9 +539,9 @@ const StatusDialog = props => {
             }
           });
         })(), null);
-        _$insert(_el$40, (() => {
-          var _c$9 = _$memo(() => !!s().lastDreamerRunAt);
-          return () => _c$9() && _$createComponent(R, {
+        _$insert(_el$41, (() => {
+          var _c$0 = _$memo(() => !!s().lastDreamerRunAt);
+          return () => _c$0() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -544,31 +554,31 @@ const StatusDialog = props => {
             }
           });
         })(), null);
-        _$effect(_$p => _$setProp(_el$41, "fg", t().text, _$p));
-        return _el$40;
+        _$effect(_$p => _$setProp(_el$42, "fg", t().text, _$p));
+        return _el$41;
       })() : [(() => {
-        var _el$44 = _$createElement("box"),
-          _el$45 = _$createElement("text"),
-          _el$46 = _$createElement("b"),
-          _el$48 = _$createElement("box"),
-          _el$49 = _$createElement("text"),
-          _el$50 = _$createElement("b"),
-          _el$52 = _$createElement("box"),
-          _el$53 = _$createElement("text"),
-          _el$54 = _$createElement("b"),
-          _el$56 = _$createElement("box"),
-          _el$57 = _$createElement("text"),
-          _el$58 = _$createElement("b");
-        _$insertNode(_el$44, _el$45);
-        _$insertNode(_el$44, _el$48);
-        _$insertNode(_el$44, _el$52);
-        _$insertNode(_el$44, _el$56);
-        _$setProp(_el$44, "flexDirection", "column");
-        _$setProp(_el$44, "flexGrow", 1);
-        _$setProp(_el$44, "flexBasis", 0);
+        var _el$45 = _$createElement("box"),
+          _el$46 = _$createElement("text"),
+          _el$47 = _$createElement("b"),
+          _el$49 = _$createElement("box"),
+          _el$50 = _$createElement("text"),
+          _el$51 = _$createElement("b"),
+          _el$53 = _$createElement("box"),
+          _el$54 = _$createElement("text"),
+          _el$55 = _$createElement("b"),
+          _el$57 = _$createElement("box"),
+          _el$58 = _$createElement("text"),
+          _el$59 = _$createElement("b");
         _$insertNode(_el$45, _el$46);
-        _$insertNode(_el$46, _$createTextNode(`Tags`));
-        _$insert(_el$44, _$createComponent(R, {
+        _$insertNode(_el$45, _el$49);
+        _$insertNode(_el$45, _el$53);
+        _$insertNode(_el$45, _el$57);
+        _$setProp(_el$45, "flexDirection", "column");
+        _$setProp(_el$45, "flexGrow", 1);
+        _$setProp(_el$45, "flexBasis", 0);
+        _$insertNode(_el$46, _el$47);
+        _$insertNode(_el$47, _$createTextNode(`Tags`));
+        _$insert(_el$45, _$createComponent(R, {
           get t() {
             return t();
           },
@@ -576,8 +586,8 @@ const StatusDialog = props => {
           get v() {
             return `${s().activeTags} (~${fmtBytes(s().activeBytes)})`;
           }
-        }), _el$48);
-        _$insert(_el$44, _$createComponent(R, {
+        }), _el$49);
+        _$insert(_el$45, _$createComponent(R, {
           get t() {
             return t();
           },
@@ -585,8 +595,8 @@ const StatusDialog = props => {
           get v() {
             return String(s().droppedTags);
           }
-        }), _el$48);
-        _$insert(_el$44, _$createComponent(R, {
+        }), _el$49);
+        _$insert(_el$45, _$createComponent(R, {
           get t() {
             return t();
           },
@@ -597,12 +607,12 @@ const StatusDialog = props => {
           get fg() {
             return t().textMuted;
           }
-        }), _el$48);
-        _$insertNode(_el$48, _el$49);
-        _$setProp(_el$48, "marginTop", 1);
+        }), _el$49);
         _$insertNode(_el$49, _el$50);
-        _$insertNode(_el$50, _$createTextNode(`Pending Queue`));
-        _$insert(_el$44, _$createComponent(R, {
+        _$setProp(_el$49, "marginTop", 1);
+        _$insertNode(_el$50, _el$51);
+        _$insertNode(_el$51, _$createTextNode(`Pending Queue`));
+        _$insert(_el$45, _$createComponent(R, {
           get t() {
             return t();
           },
@@ -613,12 +623,12 @@ const StatusDialog = props => {
           get fg() {
             return _$memo(() => s().pendingOpsCount > 0)() ? t().warning : t().textMuted;
           }
-        }), _el$52);
-        _$insertNode(_el$52, _el$53);
-        _$setProp(_el$52, "marginTop", 1);
+        }), _el$53);
         _$insertNode(_el$53, _el$54);
-        _$insertNode(_el$54, _$createTextNode(`Cache TTL`));
-        _$insert(_el$44, _$createComponent(R, {
+        _$setProp(_el$53, "marginTop", 1);
+        _$insertNode(_el$54, _el$55);
+        _$insertNode(_el$55, _$createTextNode(`Cache TTL`));
+        _$insert(_el$45, _$createComponent(R, {
           get t() {
             return t();
           },
@@ -626,8 +636,8 @@ const StatusDialog = props => {
           get v() {
             return s().cacheTtl;
           }
-        }), _el$56);
-        _$insert(_el$44, _$createComponent(R, {
+        }), _el$57);
+        _$insert(_el$45, _$createComponent(R, {
           get t() {
             return t();
           },
@@ -635,8 +645,8 @@ const StatusDialog = props => {
           get v() {
             return _$memo(() => s().lastResponseTime > 0)() ? `${Math.round(elapsed() / 1000)}s ago` : "never";
           }
-        }), _el$56);
-        _$insert(_el$44, _$createComponent(R, {
+        }), _el$57);
+        _$insert(_el$45, _$createComponent(R, {
           get t() {
             return t();
           },
@@ -647,8 +657,8 @@ const StatusDialog = props => {
           get fg() {
             return _$memo(() => !!s().cacheExpired)() ? t().warning : t().textMuted;
           }
-        }), _el$56);
-        _$insert(_el$44, _$createComponent(R, {
+        }), _el$57);
+        _$insert(_el$45, _$createComponent(R, {
           get t() {
             return t();
           },
@@ -659,12 +669,12 @@ const StatusDialog = props => {
           get fg() {
             return t().textMuted;
           }
-        }), _el$56);
-        _$insertNode(_el$56, _el$57);
-        _$setProp(_el$56, "marginTop", 1);
+        }), _el$57);
         _$insertNode(_el$57, _el$58);
-        _$insertNode(_el$58, _$createTextNode(`Memory`));
-        _$insert(_el$44, _$createComponent(R, {
+        _$setProp(_el$57, "marginTop", 1);
+        _$insertNode(_el$58, _el$59);
+        _$insertNode(_el$59, _$createTextNode(`Memory`));
+        _$insert(_el$45, _$createComponent(R, {
           get t() {
             return t();
           },
@@ -676,7 +686,7 @@ const StatusDialog = props => {
             return t().accent;
           }
         }), null);
-        _$insert(_el$44, _$createComponent(R, {
+        _$insert(_el$45, _$createComponent(R, {
           get t() {
             return t();
           },
@@ -693,10 +703,10 @@ const StatusDialog = props => {
             _v$13 = t().text,
             _v$14 = t().text,
             _v$15 = t().text;
-          _v$12 !== _p$.e && (_p$.e = _$setProp(_el$45, "fg", _v$12, _p$.e));
-          _v$13 !== _p$.t && (_p$.t = _$setProp(_el$49, "fg", _v$13, _p$.t));
-          _v$14 !== _p$.a && (_p$.a = _$setProp(_el$53, "fg", _v$14, _p$.a));
-          _v$15 !== _p$.o && (_p$.o = _$setProp(_el$57, "fg", _v$15, _p$.o));
+          _v$12 !== _p$.e && (_p$.e = _$setProp(_el$46, "fg", _v$12, _p$.e));
+          _v$13 !== _p$.t && (_p$.t = _$setProp(_el$50, "fg", _v$13, _p$.t));
+          _v$14 !== _p$.a && (_p$.a = _$setProp(_el$54, "fg", _v$14, _p$.a));
+          _v$15 !== _p$.o && (_p$.o = _$setProp(_el$58, "fg", _v$15, _p$.o));
           return _p$;
         }, {
           e: undefined,
@@ -704,26 +714,26 @@ const StatusDialog = props => {
           a: undefined,
           o: undefined
         });
-        return _el$44;
+        return _el$45;
       })(), (() => {
-        var _el$60 = _$createElement("box"),
-          _el$61 = _$createElement("text"),
-          _el$62 = _$createElement("b"),
-          _el$64 = _$createElement("box"),
-          _el$65 = _$createElement("text"),
-          _el$66 = _$createElement("b"),
-          _el$68 = _$createElement("box"),
-          _el$69 = _$createElement("text"),
-          _el$70 = _$createElement("b");
-        _$insertNode(_el$60, _el$61);
-        _$insertNode(_el$60, _el$64);
-        _$insertNode(_el$60, _el$68);
-        _$setProp(_el$60, "flexDirection", "column");
-        _$setProp(_el$60, "flexGrow", 1);
-        _$setProp(_el$60, "flexBasis", 0);
+        var _el$61 = _$createElement("box"),
+          _el$62 = _$createElement("text"),
+          _el$63 = _$createElement("b"),
+          _el$65 = _$createElement("box"),
+          _el$66 = _$createElement("text"),
+          _el$67 = _$createElement("b"),
+          _el$69 = _$createElement("box"),
+          _el$70 = _$createElement("text"),
+          _el$71 = _$createElement("b");
         _$insertNode(_el$61, _el$62);
-        _$insertNode(_el$62, _$createTextNode(`Reductions`));
-        _$insert(_el$60, _$createComponent(R, {
+        _$insertNode(_el$61, _el$65);
+        _$insertNode(_el$61, _el$69);
+        _$setProp(_el$61, "flexDirection", "column");
+        _$setProp(_el$61, "flexGrow", 1);
+        _$setProp(_el$61, "flexBasis", 0);
+        _$insertNode(_el$62, _el$63);
+        _$insertNode(_el$63, _$createTextNode(`Reductions`));
+        _$insert(_el$61, _$createComponent(R, {
           get t() {
             return t();
           },
@@ -731,8 +741,8 @@ const StatusDialog = props => {
           get v() {
             return `${formatThresholdPercent(s().executeThreshold)}%${s().executeThresholdClamped ? "*" : ""}`;
           }
-        }), _el$64);
-        _$insert(_el$60, _$createComponent(R, {
+        }), _el$65);
+        _$insert(_el$61, _$createComponent(R, {
           get t() {
             return t();
           },
@@ -740,12 +750,12 @@ const StatusDialog = props => {
           get v() {
             return `${fmt(s().lastNudgeTokens)} tok`;
           }
-        }), _el$64);
-        _$insertNode(_el$64, _el$65);
-        _$setProp(_el$64, "marginTop", 1);
+        }), _el$65);
         _$insertNode(_el$65, _el$66);
-        _$insertNode(_el$66, _$createTextNode(`Context Details`));
-        _$insert(_el$60, _$createComponent(R, {
+        _$setProp(_el$65, "marginTop", 1);
+        _$insertNode(_el$66, _el$67);
+        _$insertNode(_el$67, _$createTextNode(`Context Details`));
+        _$insert(_el$61, _$createComponent(R, {
           get t() {
             return t();
           },
@@ -756,8 +766,8 @@ const StatusDialog = props => {
           get fg() {
             return t().textMuted;
           }
-        }), _el$68);
-        _$insert(_el$60, _$createComponent(R, {
+        }), _el$69);
+        _$insert(_el$61, _$createComponent(R, {
           get t() {
             return t();
           },
@@ -768,14 +778,14 @@ const StatusDialog = props => {
           get fg() {
             return t().textMuted;
           }
-        }), _el$68);
-        _$insertNode(_el$68, _el$69);
-        _$setProp(_el$68, "marginTop", 1);
+        }), _el$69);
         _$insertNode(_el$69, _el$70);
-        _$insertNode(_el$70, _$createTextNode(`History Compression`));
-        _$insert(_el$60, (() => {
-          var _c$0 = _$memo(() => typeof s().boundaryPresent === "boolean");
-          return () => _c$0() && _$createComponent(R, {
+        _$setProp(_el$69, "marginTop", 1);
+        _$insertNode(_el$70, _el$71);
+        _$insertNode(_el$71, _$createTextNode(`History Compression`));
+        _$insert(_el$61, (() => {
+          var _c$1 = _$memo(() => typeof s().boundaryPresent === "boolean");
+          return () => _c$1() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -785,9 +795,9 @@ const StatusDialog = props => {
             }
           });
         })(), null);
-        _$insert(_el$60, (() => {
-          var _c$1 = _$memo(() => s().coverageOrdinal !== undefined);
-          return () => _c$1() && _$createComponent(R, {
+        _$insert(_el$61, (() => {
+          var _c$10 = _$memo(() => s().coverageOrdinal !== undefined);
+          return () => _c$10() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -797,9 +807,9 @@ const StatusDialog = props => {
             }
           });
         })(), null);
-        _$insert(_el$60, (() => {
-          var _c$10 = _$memo(() => typeof s().boundaryPresent === "boolean");
-          return () => _c$10() && _$createComponent(R, {
+        _$insert(_el$61, (() => {
+          var _c$11 = _$memo(() => typeof s().boundaryPresent === "boolean");
+          return () => _c$11() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -809,7 +819,7 @@ const StatusDialog = props => {
             }
           });
         })(), null);
-        _$insert(_el$60, _$createComponent(R, {
+        _$insert(_el$61, _$createComponent(R, {
           get t() {
             return t();
           },
@@ -818,9 +828,9 @@ const StatusDialog = props => {
             return `~${fmt(s().historyBlockTokens)} tok`;
           }
         }), null);
-        _$insert(_el$60, (() => {
-          var _c$11 = _$memo(() => s().compressionBudget != null);
-          return () => _c$11() && _$createComponent(R, {
+        _$insert(_el$61, (() => {
+          var _c$12 = _$memo(() => s().compressionBudget != null);
+          return () => _c$12() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -830,9 +840,9 @@ const StatusDialog = props => {
             }
           });
         })(), null);
-        _$insert(_el$60, (() => {
-          var _c$12 = _$memo(() => !!s().lastDreamerRunAt);
-          return () => _c$12() && _$createComponent(R, {
+        _$insert(_el$61, (() => {
+          var _c$13 = _$memo(() => !!s().lastDreamerRunAt);
+          return () => _c$13() && _$createComponent(R, {
             get t() {
               return t();
             },
@@ -845,22 +855,22 @@ const StatusDialog = props => {
             }
           });
         })(), null);
-        _$insert(_el$60, (() => {
-          var _c$13 = _$memo(() => !!s().skillMemory);
-          return () => _c$13() && (() => {
+        _$insert(_el$61, (() => {
+          var _c$14 = _$memo(() => !!s().skillMemory);
+          return () => _c$14() && (() => {
             const sm = s().skillMemory;
             return (() => {
-              var _el$72 = _$createElement("box"),
-                _el$73 = _$createElement("box"),
-                _el$74 = _$createElement("text"),
-                _el$75 = _$createElement("b");
-              _$insertNode(_el$72, _el$73);
-              _$setProp(_el$72, "flexDirection", "column");
+              var _el$73 = _$createElement("box"),
+                _el$74 = _$createElement("box"),
+                _el$75 = _$createElement("text"),
+                _el$76 = _$createElement("b");
               _$insertNode(_el$73, _el$74);
-              _$setProp(_el$73, "marginTop", 1);
+              _$setProp(_el$73, "flexDirection", "column");
               _$insertNode(_el$74, _el$75);
-              _$insertNode(_el$75, _$createTextNode(`Skill Memory`));
-              _$insert(_el$72, _$createComponent(R, {
+              _$setProp(_el$74, "marginTop", 1);
+              _$insertNode(_el$75, _el$76);
+              _$insertNode(_el$76, _$createTextNode(`Skill Memory`));
+              _$insert(_el$73, _$createComponent(R, {
                 get t() {
                   return t();
                 },
@@ -869,7 +879,7 @@ const StatusDialog = props => {
                   return `${sm.totalNotes} (${sm.skillsWithNotes} ${sm.skillsWithNotes === 1 ? "skill" : "skills"})`;
                 }
               }), null);
-              _$insert(_el$72, _$createComponent(R, {
+              _$insert(_el$73, _$createComponent(R, {
                 get t() {
                   return t();
                 },
@@ -881,8 +891,8 @@ const StatusDialog = props => {
                   return t().textMuted;
                 }
               }), null);
-              _$effect(_$p => _$setProp(_el$74, "fg", t().text, _$p));
-              return _el$72;
+              _$effect(_$p => _$setProp(_el$75, "fg", t().text, _$p));
+              return _el$73;
             })();
           })();
         })(), null);
@@ -890,31 +900,31 @@ const StatusDialog = props => {
           var _v$16 = t().text,
             _v$17 = t().text,
             _v$18 = t().text;
-          _v$16 !== _p$.e && (_p$.e = _$setProp(_el$61, "fg", _v$16, _p$.e));
-          _v$17 !== _p$.t && (_p$.t = _$setProp(_el$65, "fg", _v$17, _p$.t));
-          _v$18 !== _p$.a && (_p$.a = _$setProp(_el$69, "fg", _v$18, _p$.a));
+          _v$16 !== _p$.e && (_p$.e = _$setProp(_el$62, "fg", _v$16, _p$.e));
+          _v$17 !== _p$.t && (_p$.t = _$setProp(_el$66, "fg", _v$17, _p$.t));
+          _v$18 !== _p$.a && (_p$.a = _$setProp(_el$70, "fg", _v$18, _p$.a));
           return _p$;
         }, {
           e: undefined,
           t: undefined,
           a: undefined
         });
-        return _el$60;
+        return _el$61;
       })()];
     })());
     _$insert(_el$4, (() => {
-      var _c$5 = _$memo(() => !!s().lastTransformError);
-      return () => _c$5() && (() => {
-        var _el$77 = _$createElement("box"),
-          _el$78 = _$createElement("text"),
-          _el$79 = _$createTextNode(`⚠ `);
-        _$insertNode(_el$77, _el$78);
-        _$setProp(_el$77, "marginTop", 1);
-        _$setProp(_el$77, "width", "100%");
+      var _c$6 = _$memo(() => !!s().lastTransformError);
+      return () => _c$6() && (() => {
+        var _el$78 = _$createElement("box"),
+          _el$79 = _$createElement("text"),
+          _el$80 = _$createTextNode(`⚠ `);
         _$insertNode(_el$78, _el$79);
-        _$insert(_el$78, () => s().lastTransformError, null);
-        _$effect(_$p => _$setProp(_el$78, "fg", t().error, _$p));
-        return _el$77;
+        _$setProp(_el$78, "marginTop", 1);
+        _$setProp(_el$78, "width", "100%");
+        _$insertNode(_el$79, _el$80);
+        _$insert(_el$79, () => s().lastTransformError, null);
+        _$effect(_$p => _$setProp(_el$79, "fg", t().error, _$p));
+        return _el$78;
       })();
     })(), _el$16);
     _$insertNode(_el$16, _el$17);
@@ -935,8 +945,8 @@ const StatusDialog = props => {
       }
     }), null);
     _$insert(_el$16, (() => {
-      var _c$6 = _$memo(() => !!s().loggerDiagnostics?.lastErrorMessage);
-      return () => _c$6() && _$createComponent(R, {
+      var _c$7 = _$memo(() => !!s().loggerDiagnostics?.lastErrorMessage);
+      return () => _c$7() && _$createComponent(R, {
         get t() {
           return t();
         },
@@ -950,8 +960,8 @@ const StatusDialog = props => {
       });
     })(), null);
     _$insert(_el$16, (() => {
-      var _c$7 = _$memo(() => !!s().loggerDiagnostics?.lastErrorTime);
-      return () => _c$7() && _$createComponent(R, {
+      var _c$8 = _$memo(() => !!s().loggerDiagnostics?.lastErrorTime);
+      return () => _c$8() && _$createComponent(R, {
         get t() {
           return t();
         },
@@ -1136,31 +1146,31 @@ const EmbedDialog = props => {
   const t = () => theme();
   const lines = () => props.detail.statusText.split("\n");
   return (() => {
-    var _el$80 = _$createElement("box"),
-      _el$81 = _$createElement("box"),
-      _el$82 = _$createElement("text"),
-      _el$83 = _$createElement("b");
-    _$insertNode(_el$80, _el$81);
-    _$setProp(_el$80, "flexDirection", "column");
-    _$setProp(_el$80, "width", "100%");
-    _$setProp(_el$80, "paddingLeft", 2);
-    _$setProp(_el$80, "paddingRight", 2);
-    _$setProp(_el$80, "paddingTop", 1);
-    _$setProp(_el$80, "paddingBottom", 1);
+    var _el$81 = _$createElement("box"),
+      _el$82 = _$createElement("box"),
+      _el$83 = _$createElement("text"),
+      _el$84 = _$createElement("b");
     _$insertNode(_el$81, _el$82);
-    _$setProp(_el$81, "justifyContent", "center");
+    _$setProp(_el$81, "flexDirection", "column");
     _$setProp(_el$81, "width", "100%");
-    _$setProp(_el$81, "marginBottom", 1);
+    _$setProp(_el$81, "paddingLeft", 2);
+    _$setProp(_el$81, "paddingRight", 2);
+    _$setProp(_el$81, "paddingTop", 1);
+    _$setProp(_el$81, "paddingBottom", 1);
     _$insertNode(_el$82, _el$83);
-    _$insertNode(_el$83, _$createTextNode(`Embedding`));
-    _$insert(_el$80, () => lines().map(line => (() => {
-      var _el$85 = _$createElement("text");
-      _$insert(_el$85, line);
-      _$effect(_$p => _$setProp(_el$85, "fg", t().text, _$p));
-      return _el$85;
+    _$setProp(_el$82, "justifyContent", "center");
+    _$setProp(_el$82, "width", "100%");
+    _$setProp(_el$82, "marginBottom", 1);
+    _$insertNode(_el$83, _el$84);
+    _$insertNode(_el$84, _$createTextNode(`Embedding`));
+    _$insert(_el$81, () => lines().map(line => (() => {
+      var _el$86 = _$createElement("text");
+      _$insert(_el$86, line);
+      _$effect(_$p => _$setProp(_el$86, "fg", t().text, _$p));
+      return _el$86;
     })()), null);
-    _$effect(_$p => _$setProp(_el$82, "fg", t().accent, _$p));
-    return _el$80;
+    _$effect(_$p => _$setProp(_el$83, "fg", t().accent, _$p));
+    return _el$81;
   })();
 };
 async function showEmbedDialog(api, targetSessionId = getSessionId(api)) {
@@ -1226,11 +1236,11 @@ function renderTuiProbeCustomArm(api, result) {
     api.ui.dialog.replace(() => {
       try {
         return (() => {
-          var _el$86 = _$createElement("box"),
-            _el$87 = _$createElement("text");
-          _$insertNode(_el$86, _el$87);
-          _$insertNode(_el$87, _$createTextNode(`probe`));
-          return _el$86;
+          var _el$87 = _$createElement("box"),
+            _el$88 = _$createElement("text");
+          _$insertNode(_el$87, _el$88);
+          _$insertNode(_el$88, _$createTextNode(`probe`));
+          return _el$87;
         })();
       } catch (error) {
         result.customThrew = probeErrorMessage(error);
@@ -1303,11 +1313,11 @@ function reportTuiProbe(api, result) {
   if (result.customThrew === null) {
     try {
       api.ui.dialog.replace(() => (() => {
-        var _el$89 = _$createElement("box"),
-          _el$90 = _$createElement("text");
-        _$insertNode(_el$89, _el$90);
-        _$insert(_el$90, summary);
-        return _el$89;
+        var _el$90 = _$createElement("box"),
+          _el$91 = _$createElement("text");
+        _$insertNode(_el$90, _el$91);
+        _$insert(_el$91, summary);
+        return _el$90;
       })());
       return;
     } catch (error) {
