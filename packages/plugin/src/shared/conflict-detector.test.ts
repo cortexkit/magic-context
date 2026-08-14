@@ -609,18 +609,68 @@ describe("detectConflicts", () => {
             expect(result).toEqual({ auto: false, prune: true });
         });
 
-        it("mirrors the SDK default semantics when compaction is absent (auto=true, prune=false)", async () => {
-            // The OpenCode schema annotates compaction.auto with default true and
-            // compaction.prune with default false (packages/core/src/v1/config/
-            // config.ts in the opencode repo), so an absent compaction block
-            // resolves to { auto: true, prune: false }.
+        it("returns null when the response carries NO compaction block (absent is not a value)", async () => {
+            // REGRESSION (live 2026-08-14): this previously returned
+            // { auto: true, prune: false }, treating "the host did not report this
+            // field" as "the host resolved the default". Those are different
+            // claims. The SDK's generated Config type has no compaction key at
+            // all, so on such an SDK the block is ALWAYS absent -- the old default
+            // made Magic Context disable itself on every boot regardless of the
+            // user's actual config, which is the very bug #309 set out to fix.
+            // Absent => we learned nothing => fall back to the file-based check.
             const client = {
                 config: {
                     get: async () => ({ data: {} }),
                 },
             };
             const result = await resolveCompactionForBoot(client);
-            expect(result).toEqual({ auto: true, prune: false });
+            expect(result).toBeNull();
+        });
+
+        it("reproduces the live failure: an SDK whose Config omits compaction must not disable the plugin", async () => {
+            // Exactly what opencode 1.18.15 + @opencode-ai/sdk 1.15.13 returns:
+            // a fully-populated resolved config with every key EXCEPT compaction,
+            // because the SDK schema does not declare one. The user's real
+            // opencode.jsonc has compaction.auto=false.
+            const client = {
+                config: {
+                    get: async () => ({
+                        data: {
+                            $schema: "https://opencode.ai/config.json",
+                            model: "anthropic/claude-opus-5",
+                            instructions: ["AGENTS.md"],
+                            plugin: ["file:///home/user/magic-context/packages/plugin"],
+                        },
+                    }),
+                },
+            };
+            const result = await resolveCompactionForBoot(client);
+            // null routes the caller to the file-based check, which reads the
+            // user's actual auto=false. Returning { auto: true } here is what
+            // disabled the plugin on every boot.
+            expect(result).toBeNull();
+        });
+
+        it("a PRESENT block is authoritative and keeps the host's per-field defaults", async () => {
+            // Partial block: the host really is reporting a resolved object, so
+            // per-field defaults (auto true, prune false) still apply within it.
+            const client = {
+                config: {
+                    get: async () => ({ data: { compaction: { prune: true } } }),
+                },
+            };
+            const result = await resolveCompactionForBoot(client);
+            expect(result).toEqual({ auto: true, prune: true });
+        });
+
+        it("an explicit auto=false in a present block is honored", async () => {
+            const client = {
+                config: {
+                    get: async () => ({ data: { compaction: { auto: false } } }),
+                },
+            };
+            const result = await resolveCompactionForBoot(client);
+            expect(result).toEqual({ auto: false, prune: false });
         });
 
         it("returns null when the client throws (file-based fallback used)", async () => {

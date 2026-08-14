@@ -232,14 +232,25 @@ interface ResolvedCompactionBlock {
  * read would be wrongly flagged. We never re-derive what the host will tell
  * us.
  *
- * The OpenCode schema annotates `compaction.auto` with default `true` and
- * `compaction.prune` with default `false` (see
- * packages/core/src/v1/config/config.ts in the opencode repo), so an absent
- * compaction block resolves to `{ auto: true, prune: false }` — mirroring the
- * host's own default semantics rather than inventing our own.
+ * ABSENT IS NOT A VALUE. A response that carries no `compaction` block tells us
+ * NOTHING about the user's setting — it does not tell us the host resolved the
+ * default. Defaulting to `auto: true` there reintroduces exactly the bug #309
+ * set out to fix, one layer up: a plugin-disabling verdict derived from a field
+ * nobody reported. It is not hypothetical. The SDK's generated `Config` type has
+ * no `compaction` key at all (the only `compaction` in the SDK surface is the
+ * message-part variant `type: "compaction"`), so on an SDK whose schema omits it
+ * the block is ALWAYS absent, `?? true` always wins, and Magic Context disables
+ * itself on every boot no matter what the user configured.
  *
- * Returns `null` when the fetch fails or times out (bounded to `timeoutMs` so
- * boot never hangs), so the caller falls back to the file-based check.
+ * So: only a present block is authoritative. Within a present block the host's
+ * documented per-field defaults apply (`auto` true, `prune` false — see
+ * packages/core/src/v1/config/config.ts in the opencode repo), because there the
+ * host really is reporting a resolved object. An absent block returns `null`,
+ * which routes the caller to the file-based check — the same path used when the
+ * fetch fails, and the one that reads the user's actual config.
+ *
+ * Returns `null` when the fetch fails, times out (bounded to `timeoutMs` so boot
+ * never hangs), or reports no compaction block at all.
  */
 export async function resolveCompactionForBoot(
     client: OpencodeConfigClientLike,
@@ -254,11 +265,15 @@ export async function resolveCompactionForBoot(
         ]);
         // The SDK's generated `Config` type has no `compaction` key, so read it
         // defensively from the runtime response.
-        const compaction = (result?.data as ResolvedCompactionBlock | undefined)?.compaction;
-        // Mirror the host's defaults: auto defaults true, prune defaults false.
+        const data = result?.data as ResolvedCompactionBlock | undefined;
+        const compaction = data?.compaction;
+        // Absent block => we learned nothing. Fall back to the file-based check
+        // rather than inventing a plugin-disabling default from silence.
+        if (!compaction || typeof compaction !== "object") return null;
+        // Present block => authoritative, with the host's per-field defaults.
         return {
-            auto: compaction?.auto ?? true,
-            prune: compaction?.prune ?? false,
+            auto: compaction.auto ?? true,
+            prune: compaction.prune ?? false,
         };
     } catch {
         return null;
