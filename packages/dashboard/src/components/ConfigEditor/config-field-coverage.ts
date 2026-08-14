@@ -99,6 +99,11 @@ export const OMITTED_BY_DESIGN: Readonly<Record<string, string>> = {
     "user-only inoperability policy; raw JSONC because project configs cannot change it",
   "smart_notes.retina_handoff":
     "external-events plane flip; stays raw JSONC until the retina consumer ships and the flag has a user-facing meaning",
+  // Listed as the exact leaf rather than omitting the whole `models` subtree, so
+  // a future sibling field still trips this gate instead of being absorbed by a
+  // prefix match.
+  "models.window_overlay_path":
+    "user-only Fusiform overlay path; raw JSONC because it is a filesystem location with a computed default (<dataDir>/fusiform/window-overlay.json), not a value worth a form widget",
 };
 
 /**
