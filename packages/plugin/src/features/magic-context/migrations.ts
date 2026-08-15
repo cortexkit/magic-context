@@ -21,7 +21,7 @@ export const FORK_MIGRATION_VERSION_FLOOR = 10_000;
  * 3. The migration runs in a transaction — if it throws, it rolls back
  */
 
-interface Migration {
+export interface Migration {
     version: number;
     description: string;
     up: (db: Database) => void;
@@ -36,7 +36,7 @@ export class MigrationLockBusyError extends Error {
     }
 }
 
-function isSqliteLockError(error: unknown): boolean {
+export function isSqliteLockError(error: unknown): boolean {
     if (!error || typeof error !== "object") return false;
     const candidate = error as { code?: unknown; message?: unknown };
     if (candidate.code === "SQLITE_BUSY" || candidate.code === "SQLITE_LOCKED") return true;
@@ -2816,85 +2816,6 @@ export const MIGRATIONS: Migration[] = [
                     created_at INTEGER NOT NULL
                 );
             `);
-        },
-    },
-    {
-        // Skill-memory historian extraction: was v41/v44/v56/v72/v75 across
-        // earlier rebases; renumbered across upstream migrations — now v77 after
-        // upstream v0.34.0 took v73-v74 (skill is now v75/76/77).
-        version: 77,
-        description:
-            "Skill-memory historian extraction: origin_project + source_type columns; unify global-tier notes under project_identity='*' (collision-merge)",
-        up: (db: Database) => {
-            db.transaction(() => {
-                if (!columnExists(db, "skill_memory", "origin_project")) {
-                    db.exec(`ALTER TABLE skill_memory ADD COLUMN origin_project TEXT;`);
-                }
-                if (!columnExists(db, "skill_memory", "source_type")) {
-                    db.exec(`ALTER TABLE skill_memory ADD COLUMN source_type TEXT;`);
-                }
-
-                // resolved_path stays TEXT NOT NULL; historian writes the '' sentinel
-                // (handled in storage layer, not here).
-                const groups = db
-                    .prepare(
-                        `SELECT skill_id, normalized_hash, COUNT(*) AS n, MIN(created_at) AS min_created,
-                                SUM(hit_count) AS sum_hit, SUM(recall_count) AS sum_recall, MAX(last_used_at) AS max_used
-                         FROM skill_memory
-                         WHERE tier='global' AND project_identity != '*'
-                         GROUP BY skill_id, normalized_hash HAVING COUNT(*) > 1`,
-                    )
-                    .all() as Array<{
-                    skill_id: string;
-                    normalized_hash: string;
-                    n: number;
-                    min_created: number;
-                    sum_hit: number;
-                    sum_recall: number;
-                    max_used: number | null;
-                }>;
-                for (const g of groups) {
-                    const survivor = db
-                        .prepare(
-                            `SELECT id, project_identity FROM skill_memory
-                             WHERE skill_id=? AND normalized_hash=? AND tier='global' AND project_identity != '*'
-                             ORDER BY created_at ASC, id ASC LIMIT 1`,
-                        )
-                        .get(g.skill_id, g.normalized_hash) as {
-                        id: number;
-                        project_identity: string;
-                    };
-                    db.prepare(
-                        `DELETE FROM skill_memory WHERE skill_id=? AND normalized_hash=? AND tier='global' AND project_identity != '*' AND id != ?`,
-                    ).run(g.skill_id, g.normalized_hash, survivor.id);
-                    db.prepare(
-                        `UPDATE skill_memory SET hit_count=?, recall_count=?, last_used_at=?, origin_project=?, project_identity='*' WHERE id=?`,
-                    ).run(
-                        g.sum_hit,
-                        g.sum_recall,
-                        g.max_used,
-                        survivor.project_identity,
-                        survivor.id,
-                    );
-                }
-
-                // Defensive (S4): drop any pre-'*' row whose (skill_id, normalized_hash)
-                // already has a '*' sibling. Dead code in normal flow — v41 is the only
-                // writer of '*' rows and runs atomically, so a pre-'*' row can't coexist
-                // with a '*' sibling after a clean run. It only fires if a prior v41 run
-                // was interrupted after creating some '*' rows but before finishing; in
-                // that case the '*' row is canonical and the leftover pre-'*' row is
-                // dropped rather than colliding on the singleton UPDATE below.
-                db.prepare(
-                    `DELETE FROM skill_memory AS s
-                     WHERE s.tier='global' AND s.project_identity != '*'
-                       AND EXISTS (SELECT 1 FROM skill_memory g WHERE g.tier='global' AND g.project_identity='*' AND g.skill_id=s.skill_id AND g.normalized_hash=s.normalized_hash)`,
-                ).run();
-
-                db.prepare(
-                    `UPDATE skill_memory SET origin_project = project_identity, project_identity = '*' WHERE tier='global' AND project_identity != '*'`,
-                ).run();
-            })();
         },
     },
 ];
