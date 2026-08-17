@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { LATEST_MIGRATION_VERSION, runMigrations } from "./migrations";
+import {
+    FORK_MIGRATIONS,
+    LATEST_FORK_MIGRATION_VERSION,
+    runForkMigrations,
+} from "./fork-migrations";
+import { FORK_MIGRATION_VERSION_FLOOR, runMigrations } from "./migrations";
 import { initializeDatabase, LATEST_SUPPORTED_VERSION } from "./storage-db"; // ESM import (not require) — matches codebase pattern
 
 function columnNames(db: Database, table: string): string[] {
@@ -16,13 +21,15 @@ function tableExists(db: Database, name: string): boolean {
     );
 }
 
-describe("migration v75 — skill_memory table", () => {
+describe("migration v10000 (fork lane) — skill_memory table", () => {
     test("creates skill_memory table with correct columns on fresh DB, idempotently", () => {
         const db = new Database(":memory:");
         try {
             initializeDatabase(db);
             runMigrations(db);
-            runMigrations(db); // idempotency check
+            runForkMigrations(db);
+            runMigrations(db);
+            runForkMigrations(db); // idempotency check
 
             expect(tableExists(db, "skill_memory")).toBe(true);
 
@@ -49,7 +56,7 @@ describe("migration v75 — skill_memory table", () => {
                 db
                     .prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1")
                     .get(),
-            ).toEqual({ version: LATEST_MIGRATION_VERSION });
+            ).toEqual({ version: LATEST_FORK_MIGRATION_VERSION });
         } finally {
             closeQuietly(db);
         }
@@ -60,6 +67,7 @@ describe("migration v75 — skill_memory table", () => {
         try {
             initializeDatabase(db);
             runMigrations(db);
+            runForkMigrations(db);
 
             const insert = db.prepare(`
                 INSERT INTO skill_memory
@@ -116,11 +124,12 @@ describe("migration v75 — skill_memory table", () => {
         }
     });
 
-    test("LATEST_SUPPORTED_VERSION equals LATEST_MIGRATION_VERSION after v75", () => {
-        // This test will fail until storage-db.ts is bumped to 39.
-        // Belt-and-braces: mirrors schema-version-fence.test.ts but is co-located with the migration.
-        // If this feels redundant, keep it with this comment — co-location aids discoverability.
-        // NOTE: use ESM import at the top of the file (not require()) to match codebase pattern.
-        expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
+    test("this migration lives in the fork lane, outside the schema fence", () => {
+        // Was a mirror of schema-version-fence.test.ts, asserting
+        // LATEST_SUPPORTED_VERSION === the newest migration. That contract belongs to
+        // the UPSTREAM lane only: fork rows are fence-invisible by design, so the
+        // fence stays at upstream's ceiling and never tracks a fork version.
+        expect(FORK_MIGRATIONS.some((m) => m.version === 10_000)).toBe(true);
+        expect(LATEST_SUPPORTED_VERSION).toBeLessThan(FORK_MIGRATION_VERSION_FLOOR);
     });
 });

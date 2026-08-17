@@ -285,16 +285,23 @@ describe("storage-db", () => {
             const dataHome = useTempDataHome("storage-db-fork-rows-");
             const first = openDatabase();
             expect(first).not.toBeNull();
+            // Use versions no real fork migration claims. Upstream seeds floor+0/+1,
+            // but this fork actually OWNS those (skill-memory P1/P2), so seeding them
+            // collides with the rows runForkMigrations already inserted. Picking a
+            // high unallocated pair keeps the test measuring what it means: hand-
+            // inserted downstream rows survive and stay invisible to the fence.
+            const seededA = FORK_MIGRATION_VERSION_FLOOR + 9_000;
+            const seededB = FORK_MIGRATION_VERSION_FLOOR + 9_001;
             first
                 ?.prepare(
                     "INSERT INTO schema_migrations(version, description, applied_at) VALUES (?, ?, ?), (?, ?, ?)",
                 )
                 .run(
-                    FORK_MIGRATION_VERSION_FLOOR,
-                    "fork migration 10000",
+                    seededA,
+                    `fork migration ${seededA}`,
                     0,
-                    FORK_MIGRATION_VERSION_FLOOR + 1,
-                    "fork migration 10001",
+                    seededB,
+                    `fork migration ${seededB}`,
                     0,
                 );
             closeDatabase();
@@ -302,10 +309,17 @@ describe("storage-db", () => {
             const reopened = openDatabase();
             expect(reopened).not.toBeNull();
             expect(readPersistedVersion(resolveDbPath(dataHome))).toBe(LATEST_SUPPORTED_VERSION);
+            // Assert the two hand-inserted downstream rows SURVIVED, rather than
+            // that they are the only downstream rows. A total count breaks for any
+            // fork that actually uses the lane (this one owns v10100), which is the
+            // feature's whole purpose — upstream's version passes only because
+            // upstream itself ships no fork migrations.
             expect(
                 reopened
-                    ?.prepare("SELECT COUNT(*) AS count FROM schema_migrations WHERE version >= ?")
-                    .get(FORK_MIGRATION_VERSION_FLOOR),
+                    ?.prepare(
+                        "SELECT COUNT(*) AS count FROM schema_migrations WHERE version IN (?, ?)",
+                    )
+                    .get(seededA, seededB),
             ).toEqual({ count: 2 });
         });
 

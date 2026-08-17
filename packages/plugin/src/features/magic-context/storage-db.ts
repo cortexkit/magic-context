@@ -32,6 +32,7 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import { shouldEnforcePrivateStoragePermissions } from "../../shared/storage-permissions";
 import { ensureContextStoreUuid } from "./context-authority";
 import type { FailClosedBlockingProcess, FailClosedProcessKind } from "./fail-closed-block";
+import { runForkMigrations } from "./fork-migrations";
 import { FORK_MIGRATION_VERSION_FLOOR, runMigrations, runMigrationsWithRetry } from "./migrations";
 import { ensureColumn, healAllNullColumns } from "./storage-schema-helpers";
 import {
@@ -2247,6 +2248,7 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
         }
         initializeDatabase(db);
         runMigrations(db);
+        runForkMigrations(db);
         ensureContextStoreUuid(db);
         return finishDatabaseOpen(db, dbPath, explicitDbPath, latestSupportedVersion);
     } catch (error) {
@@ -2303,6 +2305,7 @@ export async function openDatabaseAsync(
             }
             initializeDatabase(db);
             await runMigrationsWithRetry(db);
+            runForkMigrations(db);
             ensureContextStoreUuid(db);
             return finishDatabaseOpen(db, dbPath, explicitDbPath, latestSupportedVersion);
         } catch (error) {
