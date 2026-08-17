@@ -40,7 +40,6 @@ import {
     type Migration,
     MigrationLockBusyError,
 } from "./migrations";
-import { ensureColumn } from "./storage-schema-helpers";
 
 function columnExists(db: Database, table: string, column: string): boolean {
     const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>;

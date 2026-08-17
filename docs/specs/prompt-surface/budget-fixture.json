@@ -1,97 +1,171 @@
 {
-  "artifactId": "prompt-surface-budget",
-  "revision": "s2-r1",
-  "status": "PENDING-RATIFICATION",
-  "policy": {
-    "expression": "floor(0.50 * mutableProseBaseline)",
-    "fraction": 0.5,
-    "ceilingFirst": true
-  },
-  "tokenizer": {
-    "package": "ai-tokenizer",
-    "encoding": "claude",
-    "version": "1.0.6",
-    "method": "new Tokenizer(claudeEncoding).count(rawText)",
-    "immutabilityPoint": "This fixture's tokenizer identity, primary variant, inclusion/exclusion lists, and ceiling are immutable after Ufuk ratification; source drift requires a reviewed fixture revision."
-  },
-  "primaryVariant": {
-    "id": "primary-full-reduce-memory-on",
-    "guidance": "buildMagicContextSection(null, 20, true, true, true, false, false, undefined, true)",
-    "features": {
-      "ctxReduceCallable": true,
-      "dreamerEnabled": true,
-      "temporalAwarenessEnabled": true,
-      "cavemanTextCompressionEnabled": false,
-      "subagentMode": false,
-      "language": null,
-      "memoryEnabled": true,
-      "protectedTags": 20
-    }
-  },
-  "activeTools": [
-    "ctx_reduce",
-    "ctx_expand",
-    "ctx_note",
-    "ctx_memory",
-    "ctx_search"
-  ],
-  "fullMeasurements": {
-    "guidance": {
-      "primary-full-reduce-memory-on": { "chars": 8714, "tokens": 2003 },
-      "primary-full-reduce-memory-off": { "chars": 7679, "tokens": 1744 },
-      "primary-full-no-reduce-memory-on": { "chars": 6429, "tokens": 1477 },
-      "primary-full-no-reduce-memory-off": { "chars": 5394, "tokens": 1218 },
-      "primary-full-reduce-dreamer-off": { "chars": 8385, "tokens": 1926 },
-      "primary-full-reduce-temporal-off": { "chars": 8279, "tokens": 1896 },
-      "primary-full-reduce-caveman-on": { "chars": 9329, "tokens": 2129 },
-      "primary-full-reduce-language-on": { "chars": 8914, "tokens": 2049 },
-      "subagent-reduce": { "chars": 679, "tokens": 185 }
+    "artifactId": "prompt-surface-budget",
+    "revision": "s2-r1",
+    "status": "PENDING-RATIFICATION",
+    "policy": {
+        "expression": "floor(0.50 * mutableProseBaseline)",
+        "fraction": 0.5,
+        "ceilingFirst": true
     },
-    "toolDescriptions": {
-      "ctx_reduce": { "chars": 1335, "tokens": 318 },
-      "ctx_expand": { "chars": 1586, "tokens": 395 },
-      "ctx_note": { "chars": 1608, "tokens": 391 },
-      "ctx_memory": { "chars": 980, "tokens": 234 },
-      "ctx_search": { "chars": 1253, "tokens": 309 }
+    "tokenizer": {
+        "package": "ai-tokenizer",
+        "encoding": "claude",
+        "version": "1.0.6",
+        "method": "new Tokenizer(claudeEncoding).count(rawText)",
+        "immutabilityPoint": "This fixture's tokenizer identity, primary variant, inclusion/exclusion lists, and ceiling are immutable after Ufuk ratification; source drift requires a reviewed fixture revision."
     },
-    "serializedParameterSchemas": {
-      "ctx_reduce": { "chars": 91, "tokens": 31 },
-      "ctx_expand": { "chars": 791, "tokens": 177 },
-      "ctx_note": { "chars": 1366, "tokens": 317 },
-      "ctx_memory": { "chars": 840, "tokens": 201 },
-      "ctx_search": { "chars": 777, "tokens": 184 },
-      "totalTokens": 910
+    "primaryVariant": {
+        "id": "primary-full-reduce-memory-on",
+        "guidance": "buildMagicContextSection(null, 20, true, true, true, false, false, undefined, true)",
+        "features": {
+            "ctxReduceCallable": true,
+            "dreamerEnabled": true,
+            "temporalAwarenessEnabled": true,
+            "cavemanTextCompressionEnabled": false,
+            "subagentMode": false,
+            "language": null,
+            "memoryEnabled": true,
+            "protectedTags": 20
+        }
     },
-    "builtInProviderVisibleTotal": 4560
-  },
-  "mutableProseBaseline": 3650,
-  "integerLightCeiling": 1825,
-  "includedSurfaces": [
-    "The primary built-in full guidance section for the exact feature variant above.",
-    "One built-in full top-level description for every active ctx_* tool above.",
-    "The same raw-text tokenizer method for built-in light guidance and descriptions.",
-    "All four runtime serving combinations: full/full, full/light, light/full, and light/light guidance/description pairs.",
-    "Claude Code built-in guidance_light_primary.txt and guidance_light_no_reduce.txt assets."
-  ],
-  "excludedSurfaces": [
-    "Serialized parameter schemas; they are reported separately and added only to provider-visible totals.",
-    "USER guidance and tool-description overrides; runtime estimates use a named method and are not combined with this fixture metric.",
-    "Project documentation, profile, memory rendering, compartments, m0, temporal overlays, and other session adjuncts; no static counts are fabricated.",
-    "Non-primary guidance variants from ceiling enforcement; they remain measured and reported."
-  ],
-  "lightMeasurement": {
-    "status": "PENDING-LIGHT-AUTHORING",
-    "manifest": null,
-    "note": "S3 authors light prose only after this fixture and the checklist have been ratified. Until then the gate reports no light counts rather than fabricating zeroes."
-  },
-  "source": {
-    "guidance": "packages/plugin/src/agents/magic-context-prompt.ts#buildMagicContextSection",
-    "tools": [
-      "packages/plugin/src/tools/ctx-reduce/constants.ts#CTX_REDUCE_DESCRIPTION",
-      "packages/plugin/src/tools/ctx-expand/constants.ts#CTX_EXPAND_DESCRIPTION",
-      "packages/plugin/src/tools/ctx-note/constants.ts#CTX_NOTE_DESCRIPTION",
-      "packages/plugin/src/tools/ctx-memory/constants.ts#CTX_MEMORY_DESCRIPTION",
-      "packages/plugin/src/tools/ctx-search/constants.ts#CTX_SEARCH_DESCRIPTION"
-    ]
-  }
+    "activeTools": [
+        "ctx_reduce",
+        "ctx_expand",
+        "ctx_note",
+        "ctx_memory",
+        "ctx_search",
+        "ctx_skill_note",
+        "ctx_skill_recall"
+    ],
+    "fullMeasurements": {
+        "guidance": {
+            "primary-full-reduce-memory-on": {
+                "chars": 9833,
+                "tokens": 2294
+            },
+            "primary-full-reduce-memory-off": {
+                "chars": 8767,
+                "tokens": 2027
+            },
+            "primary-full-no-reduce-memory-on": {
+                "chars": 7548,
+                "tokens": 1768
+            },
+            "primary-full-no-reduce-memory-off": {
+                "chars": 6482,
+                "tokens": 1501
+            },
+            "primary-full-reduce-dreamer-off": {
+                "chars": 9504,
+                "tokens": 2217
+            },
+            "primary-full-reduce-temporal-off": {
+                "chars": 9398,
+                "tokens": 2187
+            },
+            "primary-full-reduce-caveman-on": {
+                "chars": 10448,
+                "tokens": 2420
+            },
+            "primary-full-reduce-language-on": {
+                "chars": 10033,
+                "tokens": 2340
+            },
+            "subagent-reduce": {
+                "chars": 679,
+                "tokens": 185
+            }
+        },
+        "toolDescriptions": {
+            "ctx_reduce": {
+                "chars": 1335,
+                "tokens": 318
+            },
+            "ctx_expand": {
+                "chars": 1586,
+                "tokens": 395
+            },
+            "ctx_note": {
+                "chars": 1608,
+                "tokens": 391
+            },
+            "ctx_memory": {
+                "chars": 980,
+                "tokens": 234
+            },
+            "ctx_search": {
+                "chars": 1253,
+                "tokens": 309
+            },
+            "ctx_skill_note": {
+                "chars": 300,
+                "tokens": 67
+            },
+            "ctx_skill_recall": {
+                "chars": 359,
+                "tokens": 79
+            }
+        },
+        "serializedParameterSchemas": {
+            "ctx_reduce": {
+                "chars": 91,
+                "tokens": 31
+            },
+            "ctx_expand": {
+                "chars": 791,
+                "tokens": 177
+            },
+            "ctx_note": {
+                "chars": 1366,
+                "tokens": 317
+            },
+            "ctx_memory": {
+                "chars": 840,
+                "tokens": 201
+            },
+            "ctx_search": {
+                "chars": 777,
+                "tokens": 184
+            },
+            "ctx_skill_note": {
+                "chars": 690,
+                "tokens": 168
+            },
+            "ctx_skill_recall": {
+                "chars": 396,
+                "tokens": 95
+            },
+            "totalTokens": 1173
+        },
+        "builtInProviderVisibleTotal": 5260
+    },
+    "mutableProseBaseline": 4087,
+    "integerLightCeiling": 2043,
+    "includedSurfaces": [
+        "The primary built-in full guidance section for the exact feature variant above.",
+        "One built-in full top-level description for every active ctx_* tool above.",
+        "The same raw-text tokenizer method for the future built-in light guidance and descriptions."
+    ],
+    "excludedSurfaces": [
+        "Serialized parameter schemas; they are reported separately and added only to provider-visible totals.",
+        "USER guidance and tool-description overrides; runtime estimates use a named method and are not combined with this fixture metric.",
+        "Project documentation, profile, memory rendering, compartments, m0, temporal overlays, and other session adjuncts; no static counts are fabricated.",
+        "Non-primary guidance variants from ceiling enforcement; they remain measured and reported."
+    ],
+    "lightMeasurement": {
+        "status": "PENDING-LIGHT-AUTHORING",
+        "manifest": null,
+        "note": "S3 authors light prose only after this fixture and the checklist have been ratified. Until then the gate reports no light counts rather than fabricating zeroes."
+    },
+    "source": {
+        "guidance": "packages/plugin/src/agents/magic-context-prompt.ts#buildMagicContextSection",
+        "tools": [
+            "packages/plugin/src/tools/ctx-reduce/constants.ts#CTX_REDUCE_DESCRIPTION",
+            "packages/plugin/src/tools/ctx-expand/constants.ts#CTX_EXPAND_DESCRIPTION",
+            "packages/plugin/src/tools/ctx-note/constants.ts#CTX_NOTE_DESCRIPTION",
+            "packages/plugin/src/tools/ctx-memory/constants.ts#CTX_MEMORY_DESCRIPTION",
+            "packages/plugin/src/tools/ctx-search/constants.ts#CTX_SEARCH_DESCRIPTION"
+        ]
+    },
+    "downstreamNote": "DOWNSTREAM MEASUREMENT, NOT A RATIFICATION. This fork adds ctx_skill_note and ctx_skill_recall (skill-memory), so the measured surface is larger than the upstream s2-r1 numbers. Values here are re-measured from source with the same tokenizer identity and the same floor(0.50 * mutableProseBaseline) policy; only the measurements moved, never the policy, the tokenizer, the primary variant, or the inclusion/exclusion lists. Upstream baseline for reference: mutableProseBaseline 3650, integerLightCeiling 1825, builtInProviderVisibleTotal 4560, 5 active tools. The ceiling is a derived consequence of the larger surface, not a request to relax the budget -- ratifying the increase is upstream's call."
 }
