@@ -79,6 +79,17 @@ function createTestDb(dbPath = ":memory:"): Database {
             PRIMARY KEY (memory_id, model_id)
         );
 
+        CREATE TABLE IF NOT EXISTS memory_evidence
+        (
+            memory_id        INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+            content_hash     TEXT NOT NULL,
+            source_session_id TEXT NOT NULL,
+            source_message_id TEXT,
+            source_type       TEXT NOT NULL,
+            observed_at       INTEGER NOT NULL,
+            PRIMARY KEY (memory_id, content_hash, source_session_id)
+        );
+
         CREATE TABLE IF NOT EXISTS embedding_identity_active (
             project_path   TEXT NOT NULL,
             scope          TEXT NOT NULL,
@@ -214,7 +225,12 @@ function createTestDb(dbPath = ":memory:"): Database {
 }
 
 const toolContext = (sessionID = "ses-memory", agent = "general") =>
-    ({ sessionID, agent, directory: "/repo/project" }) as never;
+    ({
+        sessionID,
+        messageID: "msg-assistant-tool-owner",
+        agent,
+        directory: "/repo/project",
+    }) as never;
 
 const dreamerToolContext = (directory: string) =>
     ({ sessionID: "ses-dream", agent: DREAMER_AGENT, directory }) as never;
@@ -368,6 +384,17 @@ describe("createCtxMemoryTools", () => {
             expect(getMemoriesByProject(db, "/repo/project")).toHaveLength(1);
             expect(syncSessions).toEqual(["ses-memory"]);
 
+            const duplicate = await rustTools.ctx_memory.execute(
+                {
+                    action: "write",
+                    category: "USER_DIRECTIVES",
+                    content: "Keep the context database authoritative.",
+                },
+                toolContext("ses-second"),
+            );
+            expect(duplicate).toContain("Memory already exists");
+            expect(syncSessions).toEqual(["ses-memory", "ses-second"]);
+
             const tsTools = createCtxMemoryTools({
                 db,
                 resolveProjectPath: () => "/repo/project",
@@ -382,7 +409,7 @@ describe("createCtxMemoryTools", () => {
                 },
                 toolContext(),
             );
-            expect(syncSessions).toEqual(["ses-memory"]);
+            expect(syncSessions).toEqual(["ses-memory", "ses-second"]);
         });
 
         it("routes all module-owned memory actions without writing the TS table", async () => {
@@ -489,7 +516,7 @@ describe("createCtxMemoryTools", () => {
             expect(getMemoriesByProject(db, "/repo/project")).toHaveLength(0);
         });
 
-        it("creates a new memory with agent source type", async () => {
+        it("attributes primary writes to the agent-owned tool-call message", async () => {
             const result = await tools.ctx_memory.execute(
                 {
                     action: "write",
@@ -506,6 +533,13 @@ describe("createCtxMemoryTools", () => {
             expect(memories[0]?.sourceType).toBe("agent");
             expect(memories[0]?.sourceSessionId).toBe("ses-memory");
             expect(memories[0]?.category).toBe("USER_DIRECTIVES");
+            expect(
+                db
+                    .prepare(
+                        "SELECT source_message_id, source_type FROM memory_evidence WHERE memory_id = ?",
+                    )
+                    .get(memories[0]?.id),
+            ).toEqual({ source_message_id: "msg-assistant-tool-owner", source_type: "agent" });
         });
 
         it("does not bump project memory epoch for additive writes", async () => {

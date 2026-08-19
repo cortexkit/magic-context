@@ -569,6 +569,7 @@ mod tests {
             category,
             content,
             source_session_id: None,
+            source_message_id: None,
             source_type: Some("tool"),
             importance: Some(70),
             expires_at: None,

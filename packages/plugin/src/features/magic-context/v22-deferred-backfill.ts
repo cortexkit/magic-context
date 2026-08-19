@@ -308,6 +308,16 @@ export async function runDeferredV22Backfill(
                 `INSERT OR IGNORE INTO memory_embeddings (memory_id, embedding, model_id)
                  SELECT ?, embedding, model_id FROM memory_embeddings WHERE memory_id = ?`,
             );
+            const preserveEvidence = db.prepare(
+                `INSERT OR IGNORE INTO memory_evidence (
+                    memory_id, content_hash, source_session_id, source_message_id, source_type, observed_at
+                 )
+                 SELECT ?, content_hash, source_session_id, source_message_id, source_type, observed_at
+                   FROM memory_evidence WHERE memory_id = ?`,
+            );
+            const evidenceCount = db.prepare(
+                "SELECT COUNT(DISTINCT source_session_id) AS count FROM memory_evidence WHERE memory_id = ?",
+            );
             const deleteMemoryRow = db.prepare("DELETE FROM memories WHERE id = ?");
 
             for (const row of resolvedRows) {
@@ -321,7 +331,13 @@ export async function runDeferredV22Backfill(
                     // delete the source legacy row. The embedding row FK-cascades on
                     // delete. The mutation log is unaffected (no render-visible
                     // change — both rows held identical content).
-                    const mergedSeen = Math.max(collision.seen_count ?? 1, row.seen_count ?? 1);
+                    preserveEvidence.run(collision.id, row.id);
+                    const count = evidenceCount.get(collision.id) as { count?: number } | undefined;
+                    const mergedSeen = Math.max(
+                        collision.seen_count ?? 1,
+                        row.seen_count ?? 1,
+                        count?.count ?? 0,
+                    );
                     if (mergedSeen !== (collision.seen_count ?? 1)) {
                         bumpSeenCount.run(mergedSeen, collision.id);
                     }

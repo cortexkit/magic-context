@@ -166,6 +166,15 @@ Agent-initiated writes and deletes: the `ctx_memory` tool allows explicit write/
 
 Two counters track different signals:
 - **`seen_count`**: incremented when historian re-extracts the same fact in a later session. Indicates the fact is being repeatedly discovered, suggesting durability.
+
+Episode provenance lives in `memory_evidence`, keyed by `(memory_id, content_hash,
+source_session_id)`. `content_hash` is the memory's normalized content hash at the
+time of observation, so edits and semantic merges retain the evidence for each
+wording instead of rebinding old sessions to new text. `source_session_id` is the
+host session/conversation key in every runtime. `source_message_id` means a
+host-native owner message only: OpenCode supplies the assistant message that owns a
+tool call; Pi and the Rust facade leave it NULL because they expose no trustworthy
+message link. Primary tool writes are therefore `agent`, never inferred as `user`.
 - **`retrieval_count`**: incremented only when the agent actively searches for and retrieves this memory via `ctx_memory(action="search", ...)`. Indicates the fact is actively useful.
 
 Permanence promotion keys off `retrieval_count >= 3`, not `seen_count`. A fact that gets re-extracted 10 times but never retrieved may just be noise. A fact retrieved 3 times is proven useful.

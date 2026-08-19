@@ -15,7 +15,6 @@ import {
     mergeMemoryStats,
     saveEmbeddingIfHashMatches,
     supersededMemory,
-    updateMemorySeenCount,
     V2_MEMORY_CATEGORIES,
 } from "../../features/magic-context/memory";
 import {
@@ -28,6 +27,7 @@ import { computeNormalizedHash } from "../../features/magic-context/memory/norma
 import {
     hasMemoryClassifiedAtColumn,
     hasMemoryShareableColumn,
+    recordMemoryEvidence,
 } from "../../features/magic-context/memory/storage-memory";
 import {
     normalizeStoredProjectPath,
@@ -554,28 +554,18 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     return `Error: Unknown memory category '${rawCategory}'.`;
                 }
 
-                const existingMemory = getMemoryByHash(
-                    deps.db,
-                    projectPath,
-                    category,
-                    computeNormalizedHash(content),
-                );
-                if (existingMemory) {
-                    updateMemorySeenCount(deps.db, existingMemory.id);
-                    requestRustMemorySync(deps, toolContext.sessionID);
-                    return `Memory already exists [ID: ${existingMemory.id}] in ${category} (seen count incremented).`;
-                }
-
                 const insertResult = insertMemoryIdempotent(deps.db, {
                     projectPath: projectPath,
                     category,
                     content,
                     sourceSessionId: toolContext.sessionID,
+                    sourceMessageId: toolContext.messageID,
                     sourceType:
                         toolContext.agent === DREAMER_AGENT ? "dreamer" : getSourceType(deps),
                 });
                 if (!insertResult.inserted) {
-                    return `Memory already exists [ID: ${insertResult.memory.id}] in ${category} (seen count incremented).`;
+                    requestRustMemorySync(deps, toolContext.sessionID);
+                    return `Memory already exists [ID: ${insertResult.memory.id}] in ${category}.`;
                 }
 
                 queueMemoryEmbedding({
@@ -675,6 +665,15 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                         targetMemoryId: memory.id,
                         category: memory.category,
                         newContent: content,
+                    });
+                    recordMemoryEvidence(deps.db, memory.id, {
+                        projectPath,
+                        category: memory.category,
+                        content,
+                        sourceSessionId: toolContext.sessionID,
+                        sourceMessageId: toolContext.messageID,
+                        sourceType:
+                            toolContext.agent === DREAMER_AGENT ? "dreamer" : getSourceType(deps),
                     });
                 });
                 queueMemoryEmbedding({
@@ -821,6 +820,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                                   category,
                                   content,
                                   sourceSessionId: toolContext.sessionID,
+                                  sourceMessageId: toolContext.messageID,
                                   sourceType:
                                       toolContext.agent === DREAMER_AGENT
                                           ? "dreamer"
@@ -847,6 +847,15 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                         mergedFrom,
                         mergedStatus,
                     );
+                    recordMemoryEvidence(deps.db, nextCanonical.id, {
+                        projectPath,
+                        category,
+                        content,
+                        sourceSessionId: toolContext.sessionID,
+                        sourceMessageId: toolContext.messageID,
+                        sourceType:
+                            toolContext.agent === DREAMER_AGENT ? "dreamer" : getSourceType(deps),
+                    });
 
                     for (const memory of sourceMemories) {
                         if (memory.id === nextCanonical.id) {

@@ -1112,3 +1112,133 @@ describe("createCtxMemoryTool", () => {
 		});
 	});
 });
+
+describe("Pi ctx_memory provenance", () => {
+	it("advances a migrated legacy baseline only for a distinct session", async () => {
+		const db = createTestDb();
+		try {
+			let sessionId = "pi-session-a";
+			const tool = createCtxMemoryTool({
+				db,
+				resolveProjectIdentity: () => "git:project",
+			});
+			const ctx = {
+				cwd: "/repo",
+				sessionManager: { getSessionId: () => sessionId },
+			} as never;
+			const write = () =>
+				tool.execute(
+					"call-write",
+					{
+						action: "write",
+						category: "CONSTRAINTS",
+						content: "Migrated Pi fact",
+					},
+					new AbortController().signal,
+					() => undefined,
+					ctx,
+				);
+
+			await write();
+			const memory = db
+				.prepare<unknown[], { id: number }>("SELECT id FROM memories")
+				.get();
+			expect(memory).toBeDefined();
+			db.prepare("UPDATE memories SET seen_count = 10 WHERE id = ?").run(
+				memory?.id,
+			);
+
+			await write();
+			expect(getMemoryById(db, memory?.id ?? -1)?.seenCount).toBe(10);
+			sessionId = "pi-session-b";
+			await write();
+			expect(getMemoryById(db, memory?.id ?? -1)?.seenCount).toBe(11);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("preserves content-bound evidence when memories merge", async () => {
+		const db = createTestDb();
+		try {
+			const tool = createCtxMemoryTool({
+				db,
+				resolveProjectIdentity: () => "git:project",
+			});
+			const ctx = {
+				cwd: "/repo",
+				sessionManager: { getSessionId: () => "pi-session" },
+			} as never;
+			await tool.execute(
+				"call-1",
+				{ action: "write", category: "CONSTRAINTS", content: "First phrasing" },
+				new AbortController().signal,
+				() => undefined,
+				ctx,
+			);
+			await tool.execute(
+				"call-2",
+				{
+					action: "write",
+					category: "CONSTRAINTS",
+					content: "Second phrasing",
+				},
+				new AbortController().signal,
+				() => undefined,
+				ctx,
+			);
+			const ids = db
+				.prepare<unknown[], { id: number }>(
+					"SELECT id FROM memories ORDER BY id",
+				)
+				.all()
+				.map((row) => row.id);
+
+			await tool.execute(
+				"call-3",
+				{
+					action: "merge",
+					ids,
+					category: "CONSTRAINTS",
+					content: "Canonical phrasing",
+				},
+				new AbortController().signal,
+				() => undefined,
+				ctx,
+			);
+
+			const canonical = db
+				.prepare<unknown[], { id: number }>(
+					"SELECT id FROM memories WHERE content = 'Canonical phrasing'",
+				)
+				.get();
+			expect(canonical).toBeDefined();
+			expect(
+				db
+					.prepare(
+						`SELECT content_hash, source_message_id, source_type
+						   FROM memory_evidence WHERE memory_id = ? ORDER BY observed_at`,
+					)
+					.all(canonical?.id),
+			).toEqual([
+				{
+					content_hash: expect.any(String),
+					source_message_id: null,
+					source_type: "agent",
+				},
+				{
+					content_hash: expect.any(String),
+					source_message_id: null,
+					source_type: "agent",
+				},
+				{
+					content_hash: expect.any(String),
+					source_message_id: null,
+					source_type: "agent",
+				},
+			]);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+});

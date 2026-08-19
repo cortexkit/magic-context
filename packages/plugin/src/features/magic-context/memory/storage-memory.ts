@@ -108,6 +108,7 @@ const memoryImportanceColumnCache = new WeakMap<Database, boolean>();
 const memoryScopeColumnCache = new WeakMap<Database, boolean>();
 const memoryShareableColumnCache = new WeakMap<Database, boolean>();
 const memoryClassifiedAtColumnCache = new WeakMap<Database, boolean>();
+const memoryEvidenceTableCache = new WeakMap<Database, boolean>();
 
 export interface MemoryCountsByStatus {
     total: number;
@@ -235,6 +236,96 @@ function isUniqueConstraintError(error: unknown): boolean {
         "code" in error &&
         (error as { code?: unknown }).code === "SQLITE_CONSTRAINT_UNIQUE"
     );
+}
+
+function hasMemoryEvidenceTable(db: Database): boolean {
+    const cached = memoryEvidenceTableCache.get(db);
+    if (cached !== undefined) return cached;
+    const present = Boolean(
+        db
+            .prepare(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_evidence'",
+            )
+            .get(),
+    );
+    memoryEvidenceTableCache.set(db, present);
+    return present;
+}
+
+export interface MemoryEvidence {
+    readonly content_hash: string;
+    readonly source_session_id: string;
+    readonly source_message_id: string | null;
+    readonly source_type: MemorySourceType;
+    readonly observed_at: number;
+}
+
+export function getMemoryEvidence(db: Database, memoryId: number): MemoryEvidence[] {
+    if (!hasMemoryEvidenceTable(db)) return [];
+    return db
+        .prepare(
+            `SELECT content_hash, source_session_id, source_message_id, source_type, observed_at
+               FROM memory_evidence WHERE memory_id = ?
+               ORDER BY content_hash, source_session_id`,
+        )
+        .all(memoryId) as MemoryEvidence[];
+}
+
+function recordMemoryEvidenceInCurrentTransaction(
+    db: Database,
+    memoryId: number,
+    input: MemoryInput,
+): void {
+    if (!input.sourceSessionId || !hasMemoryEvidenceTable(db)) return;
+    const memory = db
+        .prepare(
+            `SELECT normalized_hash, source_session_id,
+                    (SELECT COUNT(DISTINCT source_session_id)
+                       FROM memory_evidence WHERE memory_id = ?) AS evidence_count
+               FROM memories WHERE id = ?`,
+        )
+        .get(memoryId, memoryId) as
+        | { normalized_hash?: string; source_session_id?: string | null; evidence_count?: number }
+        | undefined;
+    if (!memory?.normalized_hash) return;
+    const now = Date.now();
+    const result = db
+        .prepare(
+            `INSERT OR IGNORE INTO memory_evidence (
+                memory_id, content_hash, source_session_id, source_message_id, source_type, observed_at
+            ) VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+            memoryId,
+            memory.normalized_hash,
+            input.sourceSessionId,
+            input.sourceMessageId ?? null,
+            input.sourceType ?? "historian",
+            now,
+        ) as { changes?: number };
+    if ((result.changes ?? 0) === 0) return;
+    db.prepare(
+        `UPDATE memories
+            SET seen_count = MAX(COALESCE(seen_count, 1) - ?, 0)
+                    + (SELECT COUNT(DISTINCT source_session_id) FROM memory_evidence WHERE memory_id = ?),
+                last_seen_at = ?,
+                updated_at = ?
+          WHERE id = ?`,
+    ).run(
+        (memory.evidence_count ?? 0) > 0
+            ? memory.evidence_count
+            : memory.source_session_id === input.sourceSessionId
+              ? 1
+              : 0,
+        memoryId,
+        now,
+        now,
+        memoryId,
+    );
+}
+
+export function recordMemoryEvidence(db: Database, memoryId: number, input: MemoryInput): void {
+    db.transaction(() => recordMemoryEvidenceInCurrentTransaction(db, memoryId, input))();
 }
 
 function isNullableString(value: unknown): value is string | null {
@@ -480,7 +571,7 @@ function getMergeMemoryStatsStatement(db: Database): PreparedStatement {
     let stmt = mergeMemoryStatsStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "UPDATE memories SET seen_count = ?, retrieval_count = ?, merged_from = ?, status = ?, updated_at = ? WHERE id = ?",
+            "UPDATE memories SET seen_count = MAX(COALESCE(seen_count, 1), ?), retrieval_count = ?, merged_from = ?, status = ?, updated_at = ? WHERE id = ?",
         );
         mergeMemoryStatsStatements.set(db, stmt);
     }
@@ -611,19 +702,23 @@ function assertTsMemoryIdWriteAllowed(db: Database, id: number): Memory | null {
 }
 
 export function insertMemory(db: Database, input: MemoryInput): Memory {
-    assertTsMemoryWriteAllowed(db, input.projectPath);
-    const now = Date.now();
-    const normalizedHash = computeNormalizedHash(input.content);
-    const insertValues = buildInsertMemoryValues(
-        input,
-        normalizedHash,
-        now,
-        hasMemoryImportanceColumn(db),
-    );
-    const result = getInsertMemoryStatement(db).run(...insertValues);
-
-    const insertedResult = result as { lastInsertRowid?: number | bigint };
-    const inserted = loadInsertedMemory(db, insertedResult.lastInsertRowid);
+    const inserted = db.transaction(() => {
+        assertTsMemoryWriteAllowed(db, input.projectPath);
+        const now = Date.now();
+        const normalizedHash = computeNormalizedHash(input.content);
+        const insertValues = buildInsertMemoryValues(
+            input,
+            normalizedHash,
+            now,
+            hasMemoryImportanceColumn(db),
+        );
+        const result = getInsertMemoryStatement(db).run(...insertValues) as {
+            lastInsertRowid?: number | bigint;
+        };
+        const memory = loadInsertedMemory(db, result.lastInsertRowid);
+        recordMemoryEvidence(db, memory.id, input);
+        return getMemoryById(db, memory.id) ?? memory;
+    })();
 
     invalidateProject(input.projectPath);
     return inserted;
@@ -636,23 +731,75 @@ export function insertMemory(db: Database, input: MemoryInput): Memory {
  * surfacing a transient write failure.
  */
 export function insertMemoryIdempotent(db: Database, input: MemoryInput): InsertMemoryResult {
-    try {
-        return { memory: insertMemory(db, input), inserted: true };
-    } catch (error) {
-        if (!isUniqueConstraintError(error)) {
-            throw error;
+    assertTsMemoryWriteAllowed(db, input.projectPath);
+    const existing = getMemoryByHash(
+        db,
+        input.projectPath,
+        input.category,
+        computeNormalizedHash(input.content),
+    );
+    if (existing) {
+        if (input.sourceSessionId && hasMemoryEvidenceTable(db)) {
+            recordMemoryEvidence(db, existing.id, input);
+        } else {
+            updateMemorySeenCount(db, existing.id);
         }
-        const normalizedHash = computeNormalizedHash(input.content);
-        const existing = getMemoryByHash(db, input.projectPath, input.category, normalizedHash);
-        if (!existing) {
-            throw error;
-        }
-        updateMemorySeenCount(db, existing.id);
-        return {
-            memory: getMemoryById(db, existing.id) ?? existing,
-            inserted: false,
-        };
+        return { memory: getMemoryById(db, existing.id) ?? existing, inserted: false };
     }
+    try {
+        const memory = insertMemory(db, input);
+        return { memory: getMemoryById(db, memory.id) ?? memory, inserted: true };
+    } catch (error) {
+        if (!isUniqueConstraintError(error)) throw error;
+        const normalizedHash = computeNormalizedHash(input.content);
+        const raced = getMemoryByHash(db, input.projectPath, input.category, normalizedHash);
+        if (!raced) throw error;
+        if (input.sourceSessionId && hasMemoryEvidenceTable(db)) {
+            recordMemoryEvidence(db, raced.id, input);
+        } else {
+            updateMemorySeenCount(db, raced.id);
+        }
+        return { memory: getMemoryById(db, raced.id) ?? raced, inserted: false };
+    }
+}
+
+export function mergeMemoryEpisodeEvidence(
+    db: Database,
+    targetId: number,
+    sourceIds: readonly number[],
+): number | null {
+    if (!hasMemoryEvidenceTable(db)) return null;
+    const ids = [targetId, ...sourceIds];
+    const placeholders = ids.map(() => "?").join(", ");
+    const rows = db
+        .prepare(
+            `SELECT memories.id, memories.seen_count,
+                    COUNT(DISTINCT memory_evidence.source_session_id) AS evidence_count
+               FROM memories
+               LEFT JOIN memory_evidence ON memory_evidence.memory_id = memories.id
+              WHERE memories.id IN (${placeholders})
+              GROUP BY memories.id, memories.seen_count`,
+        )
+        .all(...ids) as Array<{ seen_count?: number; evidence_count?: number }>;
+    const legacyBaseline = rows.reduce(
+        (sum, row) => sum + Math.max((row.seen_count ?? 1) - (row.evidence_count ?? 0), 0),
+        0,
+    );
+    for (const sourceId of sourceIds) {
+        db.prepare(
+            `INSERT OR IGNORE INTO memory_evidence (
+                memory_id, content_hash, source_session_id, source_message_id, source_type, observed_at
+            )
+            SELECT ?, content_hash, source_session_id, source_message_id, source_type, observed_at
+              FROM memory_evidence WHERE memory_id = ?`,
+        ).run(targetId, sourceId);
+    }
+    const union = db
+        .prepare(
+            "SELECT COUNT(DISTINCT source_session_id) AS count FROM memory_evidence WHERE memory_id = ?",
+        )
+        .get(targetId) as { count?: number } | undefined;
+    return legacyBaseline + (union?.count ?? 0);
 }
 
 export function getMemoryByHash(
@@ -1142,8 +1289,16 @@ export function mergeMemoryStats(
     status: MemoryStatus,
 ): void {
     assertTsMemoryIdWriteAllowed(db, id);
+    const mergedIds = db
+        .prepare("SELECT value AS id FROM json_each(?) WHERE type = 'integer' AND value <> ?")
+        .all(mergedFrom, id) as Array<{ id: number }>;
+    const mergedEpisodeCount = mergeMemoryEpisodeEvidence(
+        db,
+        id,
+        mergedIds.map((row) => row.id),
+    );
     getMergeMemoryStatsStatement(db).run(
-        seenCount,
+        mergedEpisodeCount ?? seenCount,
         retrievalCount,
         mergedFrom,
         status,

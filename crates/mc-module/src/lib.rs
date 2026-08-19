@@ -66,7 +66,8 @@ use mc_store::TagNumberRow;
 use mc_store::{
     canonical_root, validate_state_import_compartments, AuthoritySeedRow, DeferredExecuteState,
     FacadeMutationOutcome, HistorianPhase, InsertMemoryInput, MappingUpdate, McStore, McStoreError,
-    ModuleDropSeedRow, ModuleMemoryMutationRow, ModuleMemoryRow, ModuleStateSyncError,
+    ModuleDropSeedRow, ModuleMemoryEvidenceRow, ModuleMemoryMutationRow, ModuleMemoryRow,
+    ModuleStateSyncError,
     ModuleStateSyncRequest, ModuleStripSeedRow, ModuleWorkspaceMemberRow, ModuleWorkspaceRow,
     NoteCasOutcome, NoteEvaluationInput, NoteInput, NoteNudgeAnchorSeed, NoteWriteInput,
     PendingAgentDrop, PendingAgentDropSeedRow, PendingCompactionMarkerState,
@@ -1697,6 +1698,18 @@ struct ModuleMemoryWire {
     mural_cue_at: Option<i64>,
     #[serde(default)]
     mural_cue_rejection_count: i64,
+    #[serde(default)]
+    evidence: Option<Vec<ModuleMemoryEvidenceWire>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ModuleMemoryEvidenceWire {
+    content_hash: String,
+    source_session_id: String,
+    #[serde(default)]
+    source_message_id: Option<String>,
+    source_type: String,
+    observed_at: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1804,6 +1817,18 @@ impl ModuleMemoryWire {
             mural_cue_hash: self.mural_cue_hash,
             mural_cue_at: self.mural_cue_at,
             mural_cue_rejection_count: self.mural_cue_rejection_count,
+            evidence: self.evidence.map(|evidence| {
+                evidence
+                    .into_iter()
+                    .map(|row| ModuleMemoryEvidenceRow {
+                        content_hash: row.content_hash,
+                        source_session_id: row.source_session_id,
+                        source_message_id: row.source_message_id,
+                        source_type: row.source_type,
+                        observed_at: row.observed_at,
+                    })
+                    .collect()
+            }),
         }
     }
 }
@@ -10423,6 +10448,7 @@ impl McHandler {
                                     category,
                                     content,
                                     source_session_id: Some(conversation_key),
+                                    source_message_id: None,
                                     source_type: Some("agent"),
                                     importance: Some(50),
                                     expires_at: None,
@@ -10464,6 +10490,24 @@ impl McHandler {
                                 .update_memory_content(memory_project, id, content, now_ms())
                                 .map_err(|error| error.to_string())?
                                 .ok_or_else(|| format!("memory {id} was not found"))?;
+                            tx.record_memory_evidence(
+                                memory.id,
+                                InsertMemoryInput {
+                                    project_path: memory_project,
+                                    route_project_root: Some(
+                                        facade_scope.route_project_root.as_str(),
+                                    ),
+                                    category: &memory.category,
+                                    content,
+                                    source_session_id: Some(conversation_key),
+                                    source_message_id: None,
+                                    source_type: Some("agent"),
+                                    importance: memory.importance,
+                                    expires_at: memory.expires_at,
+                                    metadata_json: memory.metadata_json.as_deref(),
+                                    now_ms: now_ms(),
+                                },
+                            )?;
                             facade_text_response(
                                 format!(
                                     "Updated memory [ID: {}] in {}.",
@@ -10545,6 +10589,24 @@ impl McHandler {
                                 )
                                 .map_err(|error| error.to_string())?
                                 .ok_or_else(|| format!("memory {target_id} was not found"))?;
+                            tx.record_memory_evidence(
+                                memory.id,
+                                InsertMemoryInput {
+                                    project_path: memory_project,
+                                    route_project_root: Some(
+                                        facade_scope.route_project_root.as_str(),
+                                    ),
+                                    category: &memory.category,
+                                    content,
+                                    source_session_id: Some(conversation_key),
+                                    source_message_id: None,
+                                    source_type: Some("agent"),
+                                    importance: memory.importance,
+                                    expires_at: memory.expires_at,
+                                    metadata_json: memory.metadata_json.as_deref(),
+                                    now_ms: now_ms(),
+                                },
+                            )?;
                             facade_text_response(
                                 format!(
                                     "Merged memories into [ID: {}] in {}; superseded [{}].",
@@ -16700,6 +16762,7 @@ mod tests {
                 category,
                 content,
                 source_session_id: Some(project),
+                source_message_id: None,
                 source_type: Some("test"),
                 importance: Some(50),
                 expires_at: None,
@@ -22330,6 +22393,7 @@ mod tests {
             .any(|memory| memory.content == "second shared fact"));
         let first = store.get_memory_full(project_rows[0].id).unwrap().unwrap();
         assert_eq!(first.source_session_id.as_deref(), Some(key_a));
+        assert_eq!(first.source_type.as_deref(), Some("agent"));
         assert!(store
             .load_active_memories(key_a, now_ms())
             .unwrap()

@@ -364,6 +364,7 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
         case 76:
         case 77:
         case 78:
+        case 79:
             if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
             populateModuleOwnedRows(db, version, state);
             return;

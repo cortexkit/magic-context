@@ -902,12 +902,28 @@ function authoritySeedRows(
     return memoryRows.map((snapshot) => {
         const id = Number(snapshot.id);
         const mapping = mappings.get(id);
+        const evidence =
+            domain === "memories"
+                ? db
+                      .prepare(
+                          `SELECT content_hash, source_session_id, source_message_id, source_type, observed_at
+                             FROM memory_evidence WHERE memory_id = ?
+                             ORDER BY content_hash, source_session_id`,
+                      )
+                      .all(id)
+                : undefined;
         const seededSnapshot =
             domain === "memories" && mapping
-                ? { ...snapshot, mapping: mapping.hasSentinel ? null : mapping.files }
-                : domain === "notes" && snapshot.project_path == null
-                  ? { ...snapshot, project_path: projectPath }
-                  : snapshot;
+                ? {
+                      ...snapshot,
+                      evidence,
+                      mapping: mapping.hasSentinel ? null : mapping.files,
+                  }
+                : domain === "memories"
+                  ? { ...snapshot, evidence }
+                  : domain === "notes" && snapshot.project_path == null
+                    ? { ...snapshot, project_path: projectPath }
+                    : snapshot;
         return { source_row_id: snapshot.id, snapshot: seededSnapshot };
     });
 }

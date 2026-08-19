@@ -93,7 +93,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastMigrationOnOpenRefusal = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 78;
+export const LATEST_SUPPORTED_VERSION = 79;
 
 // chmod is meaningless on Windows (POSIX modes are not honored), so all
 // permission tightening is skipped there. mkdir's `mode` is likewise ignored.
@@ -1066,6 +1066,18 @@ export function initializeDatabase(db: Database): void {
       mural_cue_rejection_count INTEGER NOT NULL DEFAULT 0,
       UNIQUE(project_path, category, normalized_hash)
     );
+
+    CREATE TABLE IF NOT EXISTS memory_evidence (
+      memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+      content_hash TEXT NOT NULL,
+      source_session_id TEXT NOT NULL,
+      source_message_id TEXT,
+      source_type TEXT NOT NULL,
+      observed_at INTEGER NOT NULL,
+      PRIMARY KEY(memory_id, content_hash, source_session_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_memory_evidence_session
+      ON memory_evidence(source_session_id, memory_id);
 
     CREATE TABLE IF NOT EXISTS memory_embeddings (
       -- FK-cascade audit (v12): memory_embeddings.memory_id -> memories.id

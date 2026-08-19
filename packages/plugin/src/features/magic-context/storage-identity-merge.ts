@@ -1,4 +1,5 @@
 import type { Database } from "../../shared/sqlite";
+import { mergeMemoryEpisodeEvidence } from "./memory/storage-memory";
 
 const IDENTITY_COLUMNS = new Set(["project_path", "project_identity"]);
 const DERIVED_TABLE_SUFFIXES = [
@@ -201,7 +202,9 @@ function mergeMemoryRow(
         .get(toIdentity, row.category, row.normalized_hash, sourceId) as SqliteRow | undefined;
     if (collision && typeof collision.id === "number") {
         const targetId = collision.id;
-        const mergedSeen = Math.max(Number(collision.seen_count ?? 1), Number(row.seen_count ?? 1));
+        const mergedSeen =
+            mergeMemoryEpisodeEvidence(db, targetId, [sourceId]) ??
+            Math.max(Number(collision.seen_count ?? 1), Number(row.seen_count ?? 1));
         const sourceClassifiedAt = Number(row.classified_at ?? 0);
         const targetClassifiedAt = Number(collision.classified_at ?? 0);
         if (sourceClassifiedAt > targetClassifiedAt) {

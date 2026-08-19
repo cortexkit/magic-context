@@ -2818,6 +2818,46 @@ export const MIGRATIONS: Migration[] = [
             `);
         },
     },
+    {
+        version: 79,
+        description: "preserve content-bound per-session memory evidence provenance",
+        up(db: Database): void {
+            if (!tableExists(db, "memories")) return;
+            const memoryColumns = new Set(
+                (db.prepare("PRAGMA table_info(memories)").all() as Array<{ name: string }>).map(
+                    (row) => row.name,
+                ),
+            );
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS memory_evidence (
+                    memory_id INTEGER NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+                    content_hash TEXT NOT NULL,
+                    source_session_id TEXT NOT NULL,
+                    source_message_id TEXT,
+                    source_type TEXT NOT NULL,
+                    observed_at INTEGER NOT NULL,
+                    PRIMARY KEY(memory_id, content_hash, source_session_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_memory_evidence_session
+                    ON memory_evidence(source_session_id, memory_id);
+            `);
+            if (
+                ["id", "normalized_hash", "source_session_id", "source_type", "first_seen_at"].some(
+                    (column) => !memoryColumns.has(column),
+                )
+            ) {
+                return;
+            }
+            db.exec(`
+                INSERT OR IGNORE INTO memory_evidence (
+                    memory_id, content_hash, source_session_id, source_message_id, source_type, observed_at
+                )
+                SELECT id, normalized_hash, source_session_id, NULL, COALESCE(source_type, 'historian'), first_seen_at
+                  FROM memories
+                 WHERE source_session_id IS NOT NULL;
+            `);
+        },
+    },
 ];
 
 /**

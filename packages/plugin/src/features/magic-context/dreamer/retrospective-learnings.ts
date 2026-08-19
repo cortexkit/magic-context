@@ -1,6 +1,5 @@
 import type { Database } from "../../../shared/sqlite";
-import { computeNormalizedHash } from "../memory/normalize-hash";
-import { getMemoryByHash, insertMemory } from "../memory/storage-memory";
+import { insertMemoryIdempotent } from "../memory/storage-memory";
 import type { MemoryCategory } from "../memory/types";
 import { insertUserMemoryCandidates } from "../user-memory/storage-user-memory";
 
@@ -173,16 +172,7 @@ export function applyRetrospectiveLearnings(args: {
 
         if (learning.route === "memory") {
             if (!learning.category) continue;
-            // Skip an already-stored identical memory rather than throwing on the
-            // UNIQUE(project_path, category, normalized_hash) constraint.
-            const existing = getMemoryByHash(
-                args.db,
-                args.projectIdentity,
-                learning.category,
-                computeNormalizedHash(learning.content),
-            );
-            if (existing) continue;
-            insertMemory(args.db, {
+            const inserted = insertMemoryIdempotent(args.db, {
                 projectPath: args.projectIdentity,
                 category: learning.category,
                 content: learning.content,
@@ -190,7 +180,7 @@ export function applyRetrospectiveLearnings(args: {
                 sourceType: "dreamer",
                 metadataJson: JSON.stringify({ source: "retrospective" }),
             });
-            result.memoryWritten += 1;
+            if (inserted.inserted) result.memoryWritten += 1;
             continue;
         }
 

@@ -150,6 +150,14 @@ describe("runDeferredV22Backfill", () => {
         const database = makeDb();
         const firstId = insertMemory(database, "/proj/canonical", "dup-hash");
         const secondId = insertMemory(database, "/proj/symlinked", "dup-hash");
+        database
+            .prepare(
+                `INSERT INTO memory_evidence
+                    (memory_id, content_hash, source_session_id, source_message_id, source_type, observed_at)
+                 VALUES (?, 'dup-hash', 'session-a', NULL, 'historian', 1),
+                        (?, 'dup-hash', 'session-b', NULL, 'historian', 2)`,
+            )
+            .run(firstId, secondId);
         // Give the second (later) row a higher seen_count to verify merge keeps max.
         database.prepare("UPDATE memories SET seen_count = 9 WHERE id = ?").run(secondId);
 
@@ -170,6 +178,13 @@ describe("runDeferredV22Backfill", () => {
         // The earlier row survives (UPDATE'd first); seen_count merged to the max (9).
         expect(survivors[0].id).toBe(firstId);
         expect(survivors[0].seen_count).toBe(9);
+        expect(
+            database
+                .prepare(
+                    "SELECT source_session_id FROM memory_evidence WHERE memory_id = ? ORDER BY source_session_id",
+                )
+                .all(firstId),
+        ).toEqual([{ source_session_id: "session-a" }, { source_session_id: "session-b" }]);
         // No legacy rows remain.
         const unresolved = database
             .prepare(

@@ -1064,6 +1064,8 @@ interface MirrorPageStatements {
     upsertPendingReference: Statement;
     deleteMemoryVerifications: Statement;
     insertMemoryVerification: Statement;
+    deleteMemoryEvidence: Statement;
+    insertMemoryEvidence: Statement;
     noteById: Statement;
     noteIdByStoreId: Statement;
     insertNote: Statement;
@@ -1183,6 +1185,12 @@ function prepareMirrorPageStatements(db: Database): MirrorPageStatements {
         ),
         insertMemoryVerification: db.prepare(
             "INSERT INTO memory_verifications(memory_id, file_path, verified_at, mapped_at) VALUES (?, ?, ?, ?)",
+        ),
+        deleteMemoryEvidence: db.prepare("DELETE FROM memory_evidence WHERE memory_id = ?"),
+        insertMemoryEvidence: db.prepare(
+            `INSERT INTO memory_evidence (
+                memory_id, content_hash, source_session_id, source_message_id, source_type, observed_at
+             ) VALUES (?, ?, ?, ?, ?, ?)`,
         ),
         noteById: db.prepare("SELECT * FROM notes WHERE id = ?"),
         noteIdByStoreId: db.prepare(
@@ -1646,6 +1654,33 @@ function applyMemoryRow(db: Database, feed: ChangefeedRow, statements: MirrorPag
             for (const file of files.length > 0 ? files : [""]) {
                 statements.insertMemoryVerification.run(contextId, file, verifiedAt, mappedAt);
             }
+        }
+    }
+    if (has("evidence")) {
+        if (!Array.isArray(row.evidence)) {
+            throw new Error("memory feed evidence must be an array");
+        }
+        statements.deleteMemoryEvidence.run(contextId);
+        for (const item of row.evidence) {
+            if (!item || typeof item !== "object" || Array.isArray(item)) {
+                throw new Error("memory feed evidence row must be an object");
+            }
+            const evidence = item as Record<string, unknown>;
+            const contentHash = rowString(evidence, "content_hash");
+            const sourceSessionId = rowString(evidence, "source_session_id");
+            const sourceType = rowString(evidence, "source_type");
+            const observedAt = rowNumber(evidence, "observed_at", -1);
+            if (!contentHash || !sourceSessionId || !sourceType || observedAt < 0) {
+                throw new Error("memory feed evidence row is incomplete");
+            }
+            statements.insertMemoryEvidence.run(
+                contextId,
+                contentHash,
+                sourceSessionId,
+                rowNullableString(evidence, "source_message_id"),
+                sourceType,
+                observedAt,
+            );
         }
     }
 }

@@ -22,6 +22,7 @@ export type MemoryCategory =
 export type MemoryStatus = "active" | "permanent" | "archived";
 export type MemoryScope = "project" | "ecosystem" | "universe";
 export type VerificationStatus = "unverified" | "verified" | "stale" | "flagged";
+/** `user` requires a host-verified user-message link. Tool calls default to `agent`. */
 export type MemorySourceType = "historian" | "agent" | "dreamer" | "user";
 
 export interface Memory {
@@ -58,6 +59,9 @@ export interface MemoryInput {
     content: string;
     importance?: number | null;
     sourceSessionId?: string;
+    /** Host-native message that owns the observation. OpenCode tool calls expose
+     * the assistant tool-owner message; runtimes without that link leave this absent. */
+    sourceMessageId?: string;
     sourceType?: MemorySourceType;
     expiresAt?: number | null;
     metadataJson?: string | null;

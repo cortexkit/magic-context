@@ -2,13 +2,7 @@ import { sessionLog } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
 import { CATEGORY_DEFAULT_TTL, PROMOTABLE_CATEGORIES } from "./constants";
 import { embedTextForProject } from "./embedding";
-import { computeNormalizedHash } from "./normalize-hash";
-import {
-    getMemoryByHash,
-    getMemoryById,
-    insertMemory,
-    updateMemorySeenCount,
-} from "./storage-memory";
+import { getMemoryById, insertMemoryIdempotent } from "./storage-memory";
 import { saveEmbeddingIfHashMatches } from "./storage-memory-embeddings";
 import type { MemoryCategory, MemoryInput } from "./types";
 
@@ -59,14 +53,6 @@ export function promoteSessionFactsDurable(
             continue;
         }
 
-        const normalizedHash = computeNormalizedHash(fact.content);
-        const existingMemory = getMemoryByHash(db, projectPath, fact.category, normalizedHash);
-
-        if (existingMemory) {
-            updateMemorySeenCount(db, existingMemory.id);
-            continue;
-        }
-
         const memoryInput: MemoryInput = {
             projectPath,
             category: fact.category,
@@ -76,8 +62,10 @@ export function promoteSessionFactsDurable(
             expiresAt: resolveExpiresAt(fact.category),
         };
 
-        const memory = insertMemory(db, memoryInput);
-        refs.push({ memoryId: memory.id, content: memory.content });
+        const result = insertMemoryIdempotent(db, memoryInput);
+        if (result.inserted) {
+            refs.push({ memoryId: result.memory.id, content: result.memory.content });
+        }
     }
 
     return refs;

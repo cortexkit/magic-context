@@ -61,6 +61,14 @@ describe("project identity merge", () => {
         const sourceId = insertMemory(database, "dir:old", "legacy", "same-hash");
         const targetId = insertMemory(database, "git:new", "canonical", "same-hash");
         database
+            .prepare(
+                `INSERT INTO memory_evidence
+                    (memory_id, content_hash, source_session_id, source_message_id, source_type, observed_at)
+                 VALUES (?, 'same-hash', 'session-source', 'assistant-source', 'agent', 1),
+                        (?, 'same-hash', 'session-target', 'assistant-target', 'agent', 2)`,
+            )
+            .run(sourceId, targetId);
+        database
             .prepare("INSERT INTO project_state(project_path, project_memory_epoch) VALUES (?, 4)")
             .run("git:new");
         database
@@ -119,6 +127,16 @@ describe("project identity merge", () => {
         expect(database.prepare("SELECT COUNT(*) AS count FROM identity_merge_log").get()).toEqual({
             count: report.changedRows,
         });
+        expect(
+            database
+                .prepare(
+                    "SELECT source_session_id FROM memory_evidence WHERE memory_id = ? ORDER BY source_session_id",
+                )
+                .all(targetId),
+        ).toEqual([
+            { source_session_id: "session-source" },
+            { source_session_id: "session-target" },
+        ]);
     });
 
     test("preserves the oldest open broad cycle when task schedule rows collide", async () => {

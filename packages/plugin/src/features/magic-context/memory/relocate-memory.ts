@@ -1,4 +1,5 @@
 import type { Database } from "../../../shared/sqlite";
+import { mergeMemoryEpisodeEvidence } from "./storage-memory";
 import type { MemoryStatus } from "./types";
 
 /**
@@ -77,12 +78,20 @@ export function rekeyMemoryRowWithCollisionMerge(
         | undefined;
 
     if (collision && collision.id !== rowId) {
-        const mergedSeen = Math.max(collision.seen_count ?? 1, row.seen_count ?? 1);
-        if (mergedSeen !== (collision.seen_count ?? 1)) {
-            db.prepare("UPDATE memories SET seen_count = ? WHERE id = ?").run(
-                mergedSeen,
-                collision.id,
-            );
+        const hasEvidence = db
+            .prepare(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_evidence'",
+            )
+            .get();
+        if (hasEvidence) {
+            const mergedSeenCount = mergeMemoryEpisodeEvidence(db, collision.id, [rowId]);
+            db.prepare(
+                "UPDATE memories SET seen_count = MAX(COALESCE(seen_count, 1), ?) WHERE id = ?",
+            ).run(mergedSeenCount ?? row.seen_count ?? 1, collision.id);
+        } else {
+            db.prepare(
+                "UPDATE memories SET seen_count = MAX(COALESCE(seen_count, 1), ?) WHERE id = ?",
+            ).run(row.seen_count ?? 1, collision.id);
         }
         // Preserve an embedding on the surviving target BEFORE the source row's
         // embedding FK-cascades away on DELETE (memory_embeddings.memory_id
@@ -182,9 +191,50 @@ export function copyMemoriesToProject(
         `INSERT OR IGNORE INTO memory_embeddings (memory_id, embedding, model_id)
          SELECT ?, embedding, model_id FROM memory_embeddings WHERE memory_id = ?`,
     );
+    const hasEvidence = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_evidence'")
+        .get();
+    const copyEvidenceStmt = hasEvidence
+        ? db.prepare(
+              `INSERT OR IGNORE INTO memory_evidence (
+                  memory_id, content_hash, source_session_id, source_message_id, source_type, observed_at
+              )
+              SELECT ?, content_hash, source_session_id, source_message_id, source_type, observed_at
+                FROM memory_evidence WHERE memory_id = ?`,
+          )
+        : null;
     let relocated = 0;
     let skipped = 0;
     for (const id of ids) {
+        const source = db
+            .prepare("SELECT category, normalized_hash, seen_count FROM memories WHERE id = ?")
+            .get(id) as
+            | { category?: string; normalized_hash?: string; seen_count?: number }
+            | undefined;
+        const collision =
+            source?.category && source.normalized_hash
+                ? (db
+                      .prepare(
+                          "SELECT id FROM memories WHERE project_path = ? AND category = ? AND normalized_hash = ? LIMIT 1",
+                      )
+                      .get(toIdentity, source.category, source.normalized_hash) as
+                      | { id?: number }
+                      | undefined)
+                : undefined;
+        if (collision?.id !== undefined) {
+            copyEvidenceStmt?.run(collision.id, id);
+            if (copyEvidenceStmt) {
+                db.prepare(
+                    `UPDATE memories SET seen_count = MAX(
+                        COALESCE(seen_count, 1),
+                        ?,
+                        (SELECT COUNT(DISTINCT source_session_id) FROM memory_evidence WHERE memory_id = ?)
+                    ) WHERE id = ?`,
+                ).run(source?.seen_count ?? 1, collision.id, collision.id);
+            }
+            skipped += 1;
+            continue;
+        }
         const result = insertStmt.run(toIdentity, id) as {
             changes?: number;
             lastInsertRowid?: number | bigint;
@@ -192,6 +242,7 @@ export function copyMemoriesToProject(
         if ((result.changes ?? 0) > 0) {
             relocated += 1;
             copyEmbeddingStmt.run(Number(result.lastInsertRowid), id);
+            copyEvidenceStmt?.run(Number(result.lastInsertRowid), id);
         } else {
             skipped += 1;
         }

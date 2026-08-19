@@ -42,13 +42,14 @@ import {
 	hasMemoryClassifiedAtColumn,
 	hasMemoryShareableColumn,
 	insertMemory,
+	insertMemoryIdempotent,
 	type Memory,
 	type MemoryCategory,
 	mergeMemoryStats,
+	recordMemoryEvidence,
 	saveEmbedding,
 	supersededMemory,
 	updateMemoryContent,
-	updateMemorySeenCount,
 	V2_MEMORY_CATEGORIES,
 } from "@magic-context/core/features/magic-context/memory";
 import {
@@ -471,26 +472,19 @@ export function createCtxMemoryTool(
 					return err("Error: 'category' is required when action is 'write'.");
 				}
 
-				const existing = getMemoryByHash(
-					deps.db,
-					projectIdentity,
-					rawCategory,
-					computeNormalizedHash(content),
-				);
-				if (existing) {
-					updateMemorySeenCount(deps.db, existing.id);
-					return ok(
-						`Memory already exists [ID: ${existing.id}] in ${rawCategory} (seen count incremented).`,
-					);
-				}
-
-				const memory = insertMemory(deps.db, {
+				const insertResult = insertMemoryIdempotent(deps.db, {
 					projectPath: projectIdentity,
 					category: rawCategory,
 					content,
 					sourceSessionId: sessionId,
 					sourceType: dreamerAllowed ? "dreamer" : "agent",
 				});
+				if (!insertResult.inserted) {
+					return ok(
+						`Memory already exists [ID: ${insertResult.memory.id}] in ${rawCategory}.`,
+					);
+				}
+				const memory = insertResult.memory;
 
 				queueEmbedding({ deps, projectIdentity, memoryId: memory.id, content });
 				// Do NOT invalidate the m[0]/m[1] cache here. An additive write is a
@@ -596,6 +590,13 @@ export function createCtxMemoryTool(
 						targetMemoryId: memory.id,
 						category: memory.category,
 						newContent: content,
+					});
+					recordMemoryEvidence(deps.db, memory.id, {
+						projectPath: targetIdentity,
+						category: memory.category,
+						content,
+						sourceSessionId: sessionId,
+						sourceType: dreamerAllowed ? "dreamer" : "agent",
 					});
 				});
 				queueEmbedding({
@@ -784,6 +785,13 @@ export function createCtxMemoryTool(
 						mergedFrom,
 						mergedStatus,
 					);
+					recordMemoryEvidence(deps.db, canonicalMemory.id, {
+						projectPath: projectIdentity,
+						category,
+						content,
+						sourceSessionId: sessionId,
+						sourceType: dreamerAllowed ? "dreamer" : "agent",
+					});
 
 					for (const memory of sourceMemories) {
 						if (memory.id === canonicalMemory.id) {

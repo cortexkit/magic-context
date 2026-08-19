@@ -652,6 +652,7 @@ mod tests {
                 category: "CONSTRAINTS",
                 content: "must stay hidden",
                 source_session_id: None,
+                source_message_id: None,
                 source_type: Some("agent"),
                 importance: Some(50),
                 expires_at: None,

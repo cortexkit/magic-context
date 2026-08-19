@@ -6,6 +6,7 @@ import {
     getMaxMemoryIdForProjects,
     getMemoriesByProject,
     getMemoriesByProjects,
+    getMemoryEvidence,
     readNewMemoriesForM1Union,
 } from "../../features/magic-context/memory/storage-memory";
 import type { ContextDatabase } from "../../features/magic-context/storage";
@@ -1485,6 +1486,7 @@ export async function buildModuleStateSyncPayload(args: {
         superseded_by_memory_id: memory.supersededByMemoryId,
         merged_from: memory.mergedFrom,
         metadata_json: memory.metadataJson,
+        evidence: getMemoryEvidence(args.pass.db, memory.id),
     }));
     const renderedMemoryIds = memoryMutationsChanged
         ? args.force
