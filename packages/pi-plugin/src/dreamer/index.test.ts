@@ -3,7 +3,12 @@ import {
 	type DreamerConfig,
 	DreamerConfigSchema,
 } from "@magic-context/core/config/schema/magic-context";
+import {
+	acquireLease,
+	releaseLease,
+} from "@magic-context/core/features/magic-context/dreamer/lease";
 import { getTaskScheduleState } from "@magic-context/core/features/magic-context/dreamer/storage-task-schedule";
+import { leaseKeyFor } from "@magic-context/core/features/magic-context/dreamer/task-registry";
 import { insertMemory } from "@magic-context/core/features/magic-context/memory";
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
 import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
@@ -419,6 +424,51 @@ describe("Pi dreamer wiring", () => {
 		]);
 	});
 
+	test("old timer client cannot prompt after its owner switches worktrees", async () => {
+		db = createDb();
+		const clients: CapturedDreamClient[] = [];
+		const run = mock(async () => ({
+			ok: true as const,
+			assistantText: "done",
+		}));
+		__test.setPiSubagentRunnerFactory(() => ({ run }) as never);
+		__test.setStartDreamScheduleTimerFactory(async (registration) => {
+			clients.push(registration.client as unknown as CapturedDreamClient);
+			return mock(() => {});
+		});
+		const projectIdentity = "git:pi-stale-worktree-client";
+		const owner = {};
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectDir: "/tmp/worktree-A",
+				projectIdentity,
+				registrationOwner: owner,
+			}),
+		);
+		await flushMicrotasks();
+		const oldClient = clients[0];
+		expect(oldClient).toBeDefined();
+		if (!oldClient) throw new Error("first dreamer client was not captured");
+		const created = (await oldClient.session.create({})) as { id: string };
+
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectDir: "/tmp/worktree-B",
+				projectIdentity,
+				registrationOwner: owner,
+			}),
+		);
+		await expect(
+			oldClient.session.prompt({
+				path: { id: created.id },
+				body: { system: "system", parts: [{ text: "run dreamer" }] },
+			}),
+		).rejects.toThrow("registration is no longer active");
+		expect(run).not.toHaveBeenCalled();
+	});
+
 	test("active-owner handoff starts one timer when remaining worktree dirs repeat", async () => {
 		db = createDb();
 		const dirs: string[] = [];
@@ -533,6 +583,86 @@ describe("Pi dreamer wiring", () => {
 			"/tmp/worktree-C",
 			"/tmp/worktree-A",
 		]);
+	});
+
+	test("rejects a manual run after its explicit owner unregisters", async () => {
+		db = createDb();
+		__test.setStartDreamScheduleTimerFactory(async () => mock(() => {}));
+		const projectIdentity = "git:pi-stale-manual-owner";
+		const ownerA = dreamerOptions({
+			database: db,
+			projectDir: "/tmp/worktree-A",
+			projectIdentity,
+		});
+		const ownerB = dreamerOptions({
+			database: db,
+			projectDir: "/tmp/worktree-B",
+			projectIdentity,
+		});
+		registerPiDreamerProject(ownerA);
+		await flushMicrotasks();
+		registerPiDreamerProject(ownerB);
+		await flushMicrotasks();
+		unregisterPiDreamerProject({
+			projectIdentity,
+			registrationOwner: ownerA.registrationOwner,
+		});
+		__test.setPiSubagentRunnerFactory(() => {
+			throw new Error("manual client should not be created");
+		});
+
+		await expect(
+			runPiDreamForProject(
+				projectIdentity,
+				undefined,
+				ownerA.registrationOwner,
+			),
+		).rejects.toThrow(
+			`Pi dreamer registration owner is no longer active for project ${projectIdentity}`,
+		);
+	});
+
+	test("owner drain covers a lease wait and stale owner cannot start a prompt", async () => {
+		db = createDb();
+		__test.setStartDreamScheduleTimerFactory(async () => mock(() => {}));
+		const run = mock(async () => ({
+			ok: true as const,
+			assistantText: "<curate></curate>",
+		}));
+		__test.setPiSubagentRunnerFactory(() => ({ run }) as never);
+		const projectIdentity = "git:pi-manual-lease-wait";
+		const owner = {};
+		const leaseKey = leaseKeyFor("curate", projectIdentity);
+		const blocker = "manual-lease-blocker";
+		expect(acquireLease(db, blocker, leaseKey)).toBe(true);
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectIdentity,
+				registrationOwner: owner,
+				config: DreamerConfigSchema.parse({
+					model: "test/model",
+					tasks: { curate: { schedule: "0 4 * * *" } },
+				}),
+			}),
+		);
+
+		const manualRun = runPiDreamForProject(projectIdentity, "curate", owner);
+		await flushMicrotasks();
+		let drained = false;
+		const drain = awaitInFlightDreamers(owner).then(() => {
+			drained = true;
+		});
+		await flushMicrotasks();
+		expect(drained).toBe(false);
+
+		unregisterPiDreamerProject({ projectIdentity, registrationOwner: owner });
+		releaseLease(db, blocker, leaseKey);
+		const result = await manualRun;
+		await drain;
+		expect(drained).toBe(true);
+		expect(run).not.toHaveBeenCalled();
+		expect(result.failed).toEqual(["curate"]);
 	});
 
 	test("unregister removes the project", () => {
@@ -653,6 +783,50 @@ describe("Pi dreamer wiring", () => {
 
 		expect(onAdjunctsRefreshNeeded).toHaveBeenCalledTimes(1);
 		expect(onAdjunctsRefreshNeeded).toHaveBeenCalledWith("git:pi-g5-success");
+	});
+
+	test("notifies every registered worktree after a successful dreamer prompt", async () => {
+		db = createDb();
+		let capturedClient: CapturedDreamClient | null = null;
+		__test.setStartDreamScheduleTimerFactory(async (registration) => {
+			capturedClient = registration.client as unknown as CapturedDreamClient;
+			return mock(() => {});
+		});
+		__test.setPiSubagentRunnerFactory(
+			() =>
+				({
+					run: mock(async () => ({ ok: true, assistantText: "done" })),
+				}) as never,
+		);
+		const projectIdentity = "git:pi-g5-worktrees";
+		const refreshA = mock(() => {});
+		const refreshB = mock(() => {});
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectDir: "/tmp/worktree-A",
+				projectIdentity,
+				onAdjunctsRefreshNeeded: refreshA,
+			}),
+		);
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectDir: "/tmp/worktree-B",
+				projectIdentity,
+				onAdjunctsRefreshNeeded: refreshB,
+			}),
+		);
+
+		const client = requireCapturedClient(capturedClient);
+		const created = (await client.session.create({})) as { id: string };
+		await client.session.prompt({
+			path: { id: created.id },
+			body: { system: "system", parts: [{ text: "run dreamer" }] },
+		});
+
+		expect(refreshA).toHaveBeenCalledWith(projectIdentity);
+		expect(refreshB).toHaveBeenCalledWith(projectIdentity);
 	});
 
 	test("undefined onAdjunctsRefreshNeeded is a no-op after successful dreamer prompt", async () => {

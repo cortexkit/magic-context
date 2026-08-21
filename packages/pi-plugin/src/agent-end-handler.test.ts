@@ -125,6 +125,20 @@ describe("session_shutdown handler (drain location)", () => {
 		);
 	});
 
+	test("stops Dreamer registration before draining its work", () => {
+		const shutdownAt = body.indexOf("sessionShuttingDown = true");
+		const unregisterAt = body.indexOf("unregisterPiDreamerProject");
+		const drainAt = body.indexOf("awaitInFlightDreamers");
+		expect(shutdownAt).toBeGreaterThanOrEqual(0);
+		expect(unregisterAt).toBeGreaterThanOrEqual(0);
+		expect(drainAt).toBeGreaterThanOrEqual(0);
+		expect(shutdownAt).toBeLessThan(unregisterAt);
+		expect(unregisterAt).toBeLessThan(drainAt);
+		expect(INDEX_SRC).toMatch(
+			/function syncDreamerProjectRegistration[\s\S]*?if \(sessionShuttingDown\) return;/,
+		);
+	});
+
 	test("drain timeout uses unref/clear helper", () => {
 		// The bounded wait goes through withTimeout(), whose implementation
 		// calls unref() and clearTimeout() so an early drain cannot pin exit.

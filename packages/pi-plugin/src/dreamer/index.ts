@@ -157,6 +157,14 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 	const owners = existing?.owners ?? new Map<object, PiDreamerOptions>();
 	owners.delete(opts.registrationOwner);
 	owners.set(opts.registrationOwner, opts);
+	const notifyOwnersOfAdjunctRefresh = (projectIdentity: string): void => {
+		const callbacks = new Set(
+			[...owners.values()]
+				.map((owner) => owner.onAdjunctsRefreshNeeded)
+				.filter((callback) => callback !== undefined),
+		);
+		for (const callback of callbacks) callback(projectIdentity);
+	};
 	if (existing) {
 		// Same identity, same directory → genuinely already registered, no-op.
 		// Keep this extension instance as an owner so another session cannot
@@ -178,7 +186,11 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 	// Build the scheduled client once. Manual runs build owner-bound clients
 	// below; both paths share the same `inFlightDreams` accounting and the
 	// same module-private `sessionsById` table.
-	const client = createPiDreamerClient(opts);
+	const client = createPiDreamerClient(
+		opts,
+		notifyOwnersOfAdjunctRefresh,
+		() => owners.get(opts.registrationOwner)?.projectDir === opts.projectDir,
+	);
 
 	let cleanup: (() => void) | undefined;
 	let cancelled = false;
@@ -222,11 +234,23 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 	// to their owner lets session_shutdown wait only for that instance's work.
 	const runManual = async (
 		task?: DreamTaskName,
-		registrationOwner = opts.registrationOwner,
+		registrationOwner?: object,
 	): Promise<ManualRunResult> => {
-		const manualOpts = owners.get(registrationOwner) ?? opts;
-		const manualClient = createPiDreamerClient(manualOpts);
-		return runManualDream({
+		const manualOpts =
+			registrationOwner === undefined ? opts : owners.get(registrationOwner);
+		if (!manualOpts) {
+			throw new Error(
+				`Pi dreamer registration owner is no longer active for project ${opts.projectIdentity}`,
+			);
+		}
+		const manualClient = createPiDreamerClient(
+			manualOpts,
+			notifyOwnersOfAdjunctRefresh,
+			() =>
+				owners.get(manualOpts.registrationOwner)?.projectDir ===
+				manualOpts.projectDir,
+		);
+		const manualRun = runManualDream({
 			db: manualOpts.db,
 			projectIdentity: manualOpts.projectIdentity,
 			tasks: buildDreamTaskRuntimeConfigs(
@@ -253,6 +277,14 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 			}),
 			task,
 		});
+		// Track the whole manual run, including lease waits before its first
+		// subagent prompt, so owner-scoped shutdown cannot miss it.
+		inFlightDreams.set(manualRun, manualOpts.registrationOwner);
+		try {
+			return await manualRun;
+		} finally {
+			inFlightDreams.delete(manualRun);
+		}
 	};
 
 	registeredProjects.set(opts.projectIdentity, {
@@ -349,7 +381,11 @@ export async function awaitInFlightDreamers(
 	await Promise.allSettled(runs);
 }
 
-function createPiDreamerClient(opts: PiDreamerOptions): DreamTimerClient {
+function createPiDreamerClient(
+	opts: PiDreamerOptions,
+	onAdjunctsRefreshNeeded = opts.onAdjunctsRefreshNeeded,
+	isRegistrationOwnerActive: () => boolean = () => true,
+): DreamTimerClient {
 	const runner = piSubagentRunnerFactory();
 
 	const session = {
@@ -369,6 +405,12 @@ function createPiDreamerClient(opts: PiDreamerOptions): DreamTimerClient {
 			const dreamSession = sessionsById.get(sessionId);
 			if (!dreamSession) {
 				throw new Error(`Pi dreamer session not found: ${sessionId}`);
+			}
+
+			if (!isRegistrationOwnerActive()) {
+				throw new Error(
+					`Pi dreamer registration is no longer active for project ${opts.projectIdentity}`,
+				);
 			}
 
 			const userMessage = extractUserMessage(args);
@@ -427,7 +469,7 @@ function createPiDreamerClient(opts: PiDreamerOptions): DreamTimerClient {
 				// can update <project-docs>, <user-profile>, or <key-files>. The cost
 				// of one extra disk read per session next turn is tiny compared to
 				// stale adjuncts surviving until restart.
-				opts.onAdjunctsRefreshNeeded?.(opts.projectIdentity);
+				onAdjunctsRefreshNeeded?.(opts.projectIdentity);
 			} finally {
 				inFlightDreams.delete(runPromise);
 			}

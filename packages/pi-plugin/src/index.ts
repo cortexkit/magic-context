@@ -955,6 +955,7 @@ async function startPiMagicContextRuntime(
 	const projectDir = process.cwd();
 	const seenDreamerProjectIdentities = new Set<string>();
 	const dreamerRegistrationOwner = {};
+	let sessionShuttingDown = false;
 	// Step 5b: load the user's full magic-context.jsonc config. The loader
 	// reads the shared CortexKit project/user paths, validates them through the
 	// shared Zod schema, falls back to Pi-owned legacy files only while migration
@@ -1193,6 +1194,7 @@ async function startPiMagicContextRuntime(
 	function syncDreamerProjectRegistration(
 		current: ResolvedPiProjectDeps,
 	): void {
+		if (sessionShuttingDown) return;
 		seenDreamerProjectIdentities.add(current.projectIdentity);
 		if (!current.dreamerConfig) {
 			unregisterPiDreamerProject({
@@ -2319,6 +2321,7 @@ async function startPiMagicContextRuntime(
 	// re-runs the extension code but keeps the host process alive, so
 	// the cached handle is still valid across reload boundaries.
 	pi.on("session_shutdown", async (_event, ctx) => {
+		sessionShuttingDown = true;
 		// Bounded drain of in-flight historian / dreamer runs that were
 		// kicked off by recent turns. We moved the drain here from
 		// `agent_end` because Pi awaits agent_end handlers and was
@@ -2335,6 +2338,19 @@ async function startPiMagicContextRuntime(
 		// the comment block on the agent_end handler above).
 		const SHUTDOWN_DRAIN_MS = 5_000;
 		const sessionId = resolveSessionId(ctx);
+		// Stop this owner from admitting new Dreamer runs before snapshotting its
+		// in-flight work. A command that already started remains owner-tracked and
+		// is drained below; a later command fails instead of outliving shutdown.
+		try {
+			for (const identity of seenDreamerProjectIdentities) {
+				unregisterPiDreamerProject({
+					projectIdentity: identity,
+					registrationOwner: dreamerRegistrationOwner,
+				});
+			}
+		} catch (err) {
+			warn("shutdown: unregisterPiDreamerProject threw:", err);
+		}
 		if (sessionId) {
 			try {
 				await withTimeout(
@@ -2357,16 +2373,6 @@ async function startPiMagicContextRuntime(
 			);
 		} catch (err) {
 			warn("shutdown: dreamer drain threw:", err);
-		}
-		try {
-			for (const identity of seenDreamerProjectIdentities) {
-				unregisterPiDreamerProject({
-					projectIdentity: identity,
-					registrationOwner: dreamerRegistrationOwner,
-				});
-			}
-		} catch (err) {
-			warn("shutdown: unregisterPiDreamerProject threw:", err);
 		}
 		// Clear per-session system-prompt adjunct caches (sticky date,
 		// project docs, user profile, key files). Pi's
