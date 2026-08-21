@@ -24,6 +24,7 @@ export function registerCtxDreamCommand(
 		dreamerEnabled?: boolean;
 		resolveDreamerEnabled?: (ctx: { cwd: string }) => boolean | undefined;
 		onProjectSeen?: (projectIdentity: string) => void;
+		ensureRegistered?: (ctx: { cwd: string }) => void | Promise<void>;
 	},
 ): void {
 	pi.registerCommand("ctx-dream", {
@@ -108,6 +109,7 @@ export function registerCtxDreamCommand(
 
 			// Dreamer v2: run due/forced tasks now via the per-task scheduler.
 			try {
+				await deps.ensureRegistered?.(ctx);
 				const result = await runPiDreamForProject(
 					project.projectIdentity,
 					task,
@@ -146,6 +148,7 @@ export function registerCtxDreamCommand(
 						title: "/ctx-dream",
 						text: ["## /ctx-dream", "", ...lines].join("\n"),
 						level: result.ran.length > 0 ? "success" : "info",
+						rpcDisplay: "dialog",
 					},
 					{
 						projectDir: project.projectDir,

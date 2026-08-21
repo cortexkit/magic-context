@@ -154,6 +154,7 @@ export function registerCtxStatusCommand(
 						title: "/ctx-status",
 						text: `${statusText}\n\nActive profile: ${profileStatus}`,
 						level: "info",
+						rpcDisplay: "dialog",
 					},
 					details,
 				);

@@ -198,6 +198,7 @@ export function registerCtxSessionUpgradeCommand(
 								: "This session's compartments are already in the current format.",
 						].join("\n"),
 						level: "info",
+						rpcDisplay: "dialog",
 					});
 					return;
 				}
@@ -225,6 +226,7 @@ export function registerCtxSessionUpgradeCommand(
 							title: "/ctx-session-upgrade",
 							text: ["## Session Upgrade — Complete", "", summary].join("\n"),
 							level: "info",
+							rpcDisplay: "dialog",
 						});
 					},
 				});
@@ -375,6 +377,7 @@ export function registerCtxSessionUpgradeCommand(
 							recompResult.message,
 						].join("\n"),
 						level: "info",
+						rpcDisplay: "dialog",
 					});
 				},
 			});

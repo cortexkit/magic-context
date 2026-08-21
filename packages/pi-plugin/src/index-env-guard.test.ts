@@ -32,6 +32,7 @@ function createCountingPi() {
 	const commands: string[] = [];
 	const entryRenderers: string[] = [];
 	const pi = {
+		events: { on: mock(() => () => undefined) },
 		on: mock((event: string) => {
 			events.push(event);
 		}),
@@ -56,9 +57,9 @@ function createCountingPi() {
 
 afterEach(() => {
 	restoreEnv();
-	// Clear the process-global init latch so one test's full init does not
-	// leak into the next (the latch lives on globalThis, not module state).
-	__test.clearPiMagicContextActive();
+	// Clear the process-global marker context so one test's full init does not
+	// leak into the next (the holder lives on globalThis, not module state).
+	__test.clearPiInProcessSubagentInitContext();
 });
 
 describe("Pi full extension subagent env guard", () => {

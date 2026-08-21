@@ -24,6 +24,8 @@ export interface PiDreamerOptions {
 	db: ContextDatabase;
 	projectDir: string;
 	projectIdentity: string;
+	/** One stable token per full Pi extension instance. */
+	registrationOwner: object;
 	/** Resolved runnable DreamerConfig from loadPiConfig(). When disable=true, the caller does not register. */
 	config: DreamerConfig;
 	/**
@@ -83,6 +85,8 @@ type SessionDeleteArgs = SessionMessagesArgs;
 
 interface ProjectRegistration {
 	cleanup: () => void;
+	activeOwner: object;
+	owners: Map<object, PiDreamerOptions>;
 	/** Run dream tasks for this project IMMEDIATELY (Dreamer v2 manual path).
 	 *  `task` forces one task ignoring its gate; omitted runs all enabled. The
 	 *  registered dreamer timer also runs due tasks on its own schedule. */
@@ -122,8 +126,12 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 	}
 
 	const existing = registeredProjects.get(opts.projectIdentity);
+	const owners = existing?.owners ?? new Map<object, PiDreamerOptions>();
+	owners.set(opts.registrationOwner, opts);
 	if (existing) {
 		// Same identity, same directory → genuinely already registered, no-op.
+		// Keep this extension instance as an owner so another session cannot
+		// deregister the shared timer while it is still active.
 		if (existing.projectDir === opts.projectDir) {
 			return;
 		}
@@ -209,6 +217,8 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		});
 
 	registeredProjects.set(opts.projectIdentity, {
+		activeOwner: opts.registrationOwner,
+		owners,
 		cleanup: () => {
 			cancelled = true;
 			cleanup?.();
@@ -244,12 +254,26 @@ export async function runPiDreamForProject(
 	return registration.runManual(task);
 }
 
-/** Cleanup hook — call from session_shutdown to deregister this project. */
+/** Cleanup hook — call from session_shutdown to release this session's ownership. */
 export function unregisterPiDreamerProject(opts: {
 	projectIdentity: string;
+	registrationOwner: object;
 }): void {
 	const registration = registeredProjects.get(opts.projectIdentity);
-	if (!registration) {
+	if (!registration?.owners.delete(opts.registrationOwner)) {
+		return;
+	}
+
+	if (registration.owners.size > 0) {
+		if (registration.activeOwner !== opts.registrationOwner) return;
+		// The active worktree owner left while sibling sessions still use this
+		// project. Rebuild from the remaining owners so the shared timer follows
+		// a live session instead of retaining the departed session's directory.
+		const remaining = [...registration.owners.values()];
+		registration.cleanup();
+		registeredProjects.delete(opts.projectIdentity);
+		for (const remainingOptions of remaining)
+			registerPiDreamerProject(remainingOptions);
 		return;
 	}
 

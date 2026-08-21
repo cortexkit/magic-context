@@ -245,6 +245,7 @@ export function registerCtxEmbedCommand(
 				title: "/ctx-embed",
 				text: `## Embedding Status\n\n${statusText}`,
 				level: "info",
+				rpcDisplay: "dialog",
 			});
 		},
 	});

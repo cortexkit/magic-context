@@ -6,11 +6,15 @@ import {
 	type PiMessageSender,
 	registerCtxStatusEntryRenderer,
 	sendCtxStatusMessage,
+	setCtxStatusPresenter,
+	shouldShowCtxStatusDialog,
+	showCtxStatusDialog,
 } from "./pi-command-utils";
 
 describe("ctx-status entries", () => {
 	it("appends model-invisible entry data instead of sending a message", () => {
 		const appended: Array<{ customType: string; data: unknown }> = [];
+		const presented: CtxStatusEntryData[] = [];
 		let sent = 0;
 		const pi = {
 			registerEntryRenderer() {},
@@ -23,6 +27,7 @@ describe("ctx-status entries", () => {
 		} as unknown as PiMessageSender;
 
 		registerCtxStatusEntryRenderer(pi);
+		setCtxStatusPresenter(pi, (content) => presented.push(content));
 		sendCtxStatusMessage(
 			pi,
 			{ title: "Magic Embed", text: "Embedding history…", level: "info" },
@@ -41,6 +46,7 @@ describe("ctx-status entries", () => {
 			},
 		]);
 		expect(sent).toBe(0);
+		expect(presented).toEqual([appended[0]?.data]);
 	});
 
 	it("registers one ctx-status entry renderer and ignores malformed data", () => {
@@ -90,5 +96,73 @@ describe("ctx-status entries", () => {
 			},
 		]);
 		expect(sent).toBe(0);
+	});
+
+	it("keeps progress notifications short and routes detailed results to a dialog", () => {
+		expect(
+			shouldShowCtxStatusDialog({
+				title: "/ctx-dream",
+				text: "Starting…",
+				level: "info",
+			}),
+		).toBe(false);
+		expect(
+			shouldShowCtxStatusDialog({
+				title: "/ctx-flush",
+				text: "Complete",
+				level: "success",
+			}),
+		).toBe(true);
+		expect(
+			shouldShowCtxStatusDialog({
+				title: "/ctx-status",
+				text: "Detailed status",
+				level: "info",
+				rpcDisplay: "dialog",
+			}),
+		).toBe(true);
+	});
+
+	it("renders RPC detail output through Pi custom UI", async () => {
+		let rendered: string[] = [];
+		let closed = false;
+		let options: unknown;
+		const ctx = {
+			ui: {
+				async custom(factory: unknown, customOptions: unknown) {
+					options = customOptions;
+					const create = factory as (...args: unknown[]) => {
+						render: (width: number) => string[];
+						handleInput: (data: string) => void;
+					};
+					const component = create(
+						{},
+						{
+							fg: (_name: string, text: string) => text,
+							bold: (text: string) => text,
+						},
+						{},
+						() => {
+							closed = true;
+						},
+					);
+					rendered = component.render(92);
+					component.handleInput("\r");
+				},
+			},
+		};
+
+		await showCtxStatusDialog(ctx as never, {
+			title: "/ctx-flush",
+			text: "## /ctx-flush\n\nDetailed result",
+			level: "success",
+		});
+
+		expect(rendered.join("\n")).toContain("Detailed result");
+		expect(closed).toBe(true);
+		expect(options).toEqual({
+			overlay: true,
+			overlayOptions: { anchor: "center", width: 92 },
+		});
 	});
 });

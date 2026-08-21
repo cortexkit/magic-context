@@ -202,6 +202,7 @@ function nextTick() {
 	return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
 describe("subagent-runner pure helpers", () => {
@@ -234,6 +235,15 @@ describe("subagent-runner pure helpers", () => {
 		).toEqual({ text: null, stopReason: null, errorMessage: null });
 	});
 
+	it("distinguishes Pi from embedded Node hosts", () => {
+		expect(__test.isGenericRuntimeExecutable("/usr/bin/node24")).toBe(true);
+		expect(__test.isPiCliScript("/app/node_modules/.bin/next")).toBe(false);
+		expect(
+			__test.isPiCliScript(
+				"/app/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+			),
+		).toBe(true);
+	});
 	it("builds argv with system prompt, primary model, and prompt last", () => {
 		expect(
 			buildArgsForTest({
@@ -1057,10 +1067,8 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		});
 	});
 
-	it("with no piBinary override, spawns the host runtime + cli.js (Windows-safe, #177)", async () => {
-		// Default resolution must NOT spawn a bare "pi" (which ENOENTs on Windows
-		// because npm installs a pi.cmd shim, not a literal pi). It re-invokes the
-		// exact host CLI: process.execPath + process.argv[1], with no shell.
+	it("with no piBinary override, does not re-run an embedded host", async () => {
+		// The Bun test file stands in for pi-web's Next.js argv[1].
 		const child = createMockChild();
 		const spawnImpl = mock(() => child as never);
 		const { PiSubagentRunner } = await import("./subagent-runner");
@@ -1084,17 +1092,12 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		const [command, spawnArgs, opts] = (
 			spawnImpl.mock.calls as unknown[][]
 		)[0] as [string, string[], { shell?: boolean }];
-		// In this test runner argv[1] is a real on-disk script (bun/node test
-		// file), so the host-CLI branch fires: command is the runtime, the first
-		// arg is the running script, and the child is spawned without a shell.
-		expect(command).toBe(process.execPath);
-		expect(spawnArgs[0]).toBe(process.argv[1]);
+		expect(spawnArgs[0]).not.toBe(process.argv[1]);
 		expect(spawnArgs).toContain("--no-session");
+		expect(command.length).toBeGreaterThan(0);
 		// Never spawned through a shell (no cmd.exe in the path = no arg-escaping
 		// or injection on the untrusted prompt/task text).
 		expect(opts.shell).toBeFalsy();
-		// Crucially, never a bare "pi".
-		expect(command).not.toBe("pi");
 	});
 
 	it("returns model_failed promptly for live terminal error stopReason", async () => {
@@ -2479,6 +2482,7 @@ describe("Pi subagent schema-fence probe", () => {
 	it("does not spawn a Pi child when the shared database is newer than this build", async () => {
 		const dataHome = mkdtempSync(join(tmpdir(), "mc-pi-fence-probe-"));
 		try {
+			process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dataHome;
 			process.env.XDG_DATA_HOME = dataHome;
 			closeDatabase();
 			__resetSchemaFenceStateForTests();
@@ -2505,6 +2509,9 @@ describe("Pi subagent schema-fence probe", () => {
 		} finally {
 			closeDatabase();
 			__resetSchemaFenceStateForTests();
+			if (originalTestDataDir === undefined)
+				delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+			else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = originalTestDataDir;
 			if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
 			else process.env.XDG_DATA_HOME = originalXdgDataHome;
 			rmSync(dataHome, { recursive: true, force: true });

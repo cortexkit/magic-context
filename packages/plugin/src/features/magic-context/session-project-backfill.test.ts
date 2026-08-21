@@ -150,7 +150,7 @@ describe("runSessionProjectBackfill", () => {
         const db = createDb();
         const directory = makeTempDir("session-project-backfill-live-");
         let resolverCalls = 0;
-
+        let sourceCalls = 0;
         const first = await runSessionProjectBackfill(db, [{ sessionId: "ses-first", directory }], {
             resolveIdentity: () => {
                 resolverCalls += 1;
@@ -160,7 +160,10 @@ describe("runSessionProjectBackfill", () => {
         });
         const second = await runSessionProjectBackfill(
             db,
-            [{ sessionId: "ses-second", directory }],
+            async () => {
+                sourceCalls += 1;
+                return [{ sessionId: "ses-second", directory }];
+            },
             {
                 resolveIdentity: () => {
                     resolverCalls += 1;
@@ -175,6 +178,7 @@ describe("runSessionProjectBackfill", () => {
         expect(second.status).toBe("already_completed");
         expect(second.backfilledSessions).toBe(0);
         expect(resolverCalls).toBe(1);
+        expect(sourceCalls).toBe(0);
         expect(getStoredProjectPath(db, "ses-first")).toBe("git:first");
         expect(getStoredProjectPath(db, "ses-second")).toBeNull();
         expect(_getSessionProjectBackfillState(db)?.status).toBe("completed");

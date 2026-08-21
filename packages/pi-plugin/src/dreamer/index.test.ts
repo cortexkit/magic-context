@@ -56,6 +56,7 @@ function dreamerOptions(args: {
 	database: Database;
 	projectIdentity: string;
 	projectDir?: string;
+	registrationOwner?: object;
 	config?: DreamerConfig;
 	language?: string;
 	onAdjunctsRefreshNeeded?: (projectIdentity: string) => void;
@@ -66,6 +67,7 @@ function dreamerOptions(args: {
 			args.projectDir ??
 			`/tmp/${args.projectIdentity.replace(/[^a-z0-9-]/gi, "-")}`,
 		projectIdentity: args.projectIdentity,
+		registrationOwner: args.registrationOwner ?? {},
 		config: args.config ?? enabledConfig(),
 		embeddingConfig: { provider: "off" as const },
 		memoryEnabled: true,
@@ -295,6 +297,45 @@ describe("Pi dreamer wiring", () => {
 		expect(timerCleanup).not.toHaveBeenCalled();
 	});
 
+	test("one session shutdown keeps a same-project sibling registered", async () => {
+		db = createDb();
+		const firstCleanup = mock(() => {});
+		const secondCleanup = mock(() => {});
+		const cleanups = [firstCleanup, secondCleanup];
+		__test.setStartDreamScheduleTimerFactory(
+			async () => cleanups.shift() ?? mock(() => {}),
+		);
+
+		const firstOpts = dreamerOptions({
+			database: db,
+			projectDir: "/tmp/pi-shared-project",
+			projectIdentity: "git:pi-shared-project",
+		});
+		const secondOpts = dreamerOptions({
+			database: db,
+			projectDir: "/tmp/pi-shared-project",
+			projectIdentity: "git:pi-shared-project",
+		});
+		registerPiDreamerProject(firstOpts);
+		await flushMicrotasks();
+		registerPiDreamerProject(secondOpts);
+
+		unregisterPiDreamerProject({
+			projectIdentity: "git:pi-shared-project",
+			registrationOwner: firstOpts.registrationOwner,
+		});
+		await flushMicrotasks();
+		expect(__test.registeredProjectCount()).toBe(1);
+		expect(firstCleanup).toHaveBeenCalledTimes(1);
+
+		unregisterPiDreamerProject({
+			projectIdentity: "git:pi-shared-project",
+			registrationOwner: secondOpts.registrationOwner,
+		});
+		expect(__test.registeredProjectCount()).toBe(0);
+		expect(secondCleanup).toHaveBeenCalledTimes(1);
+	});
+
 	test("re-registering the same identity with a DIFFERENT dir rebuilds (worktree switch)", async () => {
 		db = createDb();
 		const firstCleanup = mock(() => {});
@@ -307,22 +348,20 @@ describe("Pi dreamer wiring", () => {
 		});
 
 		// Worktree A of the same repo → identity X.
-		registerPiDreamerProject(
-			dreamerOptions({
-				database: db,
-				projectDir: "/tmp/worktree-A",
-				projectIdentity: "git:pi-worktree",
-			}),
-		);
+		const firstOpts = dreamerOptions({
+			database: db,
+			projectDir: "/tmp/worktree-A",
+			projectIdentity: "git:pi-worktree",
+		});
+		registerPiDreamerProject(firstOpts);
 		await flushMicrotasks();
 		// Worktree B of the SAME repo (same identity, different dir).
-		registerPiDreamerProject(
-			dreamerOptions({
-				database: db,
-				projectDir: "/tmp/worktree-B",
-				projectIdentity: "git:pi-worktree",
-			}),
-		);
+		const secondOpts = dreamerOptions({
+			database: db,
+			projectDir: "/tmp/worktree-B",
+			projectIdentity: "git:pi-worktree",
+		});
+		registerPiDreamerProject(secondOpts);
 		await flushMicrotasks();
 
 		// Still one registration, but rebuilt: first timer torn down, second
@@ -330,19 +369,36 @@ describe("Pi dreamer wiring", () => {
 		expect(__test.registeredProjectCount()).toBe(1);
 		expect(firstCleanup).toHaveBeenCalledTimes(1);
 		expect(dirs).toEqual(["/tmp/worktree-A", "/tmp/worktree-B"]);
+
+		// When the active worktree owner leaves, keep the sibling owner alive
+		// and restore its registration instead of deleting the project timer.
+		unregisterPiDreamerProject({
+			projectIdentity: "git:pi-worktree",
+			registrationOwner: secondOpts.registrationOwner,
+		});
+		await flushMicrotasks();
+		expect(__test.registeredProjectCount()).toBe(1);
+		expect(secondCleanup).toHaveBeenCalledTimes(1);
+		expect(dirs).toEqual([
+			"/tmp/worktree-A",
+			"/tmp/worktree-B",
+			"/tmp/worktree-A",
+		]);
 	});
 
 	test("unregister removes the project", () => {
 		db = createDb();
-		registerPiDreamerProject(
-			dreamerOptions({
-				database: db,
-				projectDir: "/tmp/pi-project-unregister",
-				projectIdentity: "git:pi-unregister",
-			}),
-		);
+		const opts = dreamerOptions({
+			database: db,
+			projectDir: "/tmp/pi-project-unregister",
+			projectIdentity: "git:pi-unregister",
+		});
+		registerPiDreamerProject(opts);
 
-		unregisterPiDreamerProject({ projectIdentity: "git:pi-unregister" });
+		unregisterPiDreamerProject({
+			projectIdentity: "git:pi-unregister",
+			registrationOwner: opts.registrationOwner,
+		});
 
 		expect(__test.registeredProjectCount()).toBe(0);
 	});
@@ -498,10 +554,15 @@ describe("Pi dreamer wiring", () => {
 		const timer = deferred<() => void>();
 		__test.setStartDreamScheduleTimerFactory(() => timer.promise);
 
-		registerPiDreamerProject(
-			dreamerOptions({ database: db, projectIdentity: "git:pi-g12-race" }),
-		);
-		unregisterPiDreamerProject({ projectIdentity: "git:pi-g12-race" });
+		const opts = dreamerOptions({
+			database: db,
+			projectIdentity: "git:pi-g12-race",
+		});
+		registerPiDreamerProject(opts);
+		unregisterPiDreamerProject({
+			projectIdentity: "git:pi-g12-race",
+			registrationOwner: opts.registrationOwner,
+		});
 		expect(timerCleanup).not.toHaveBeenCalled();
 
 		timer.resolve(timerCleanup);
@@ -516,14 +577,22 @@ describe("Pi dreamer wiring", () => {
 		const timer = deferred<() => void>();
 		__test.setStartDreamScheduleTimerFactory(() => timer.promise);
 
-		registerPiDreamerProject(
-			dreamerOptions({ database: db, projectIdentity: "git:pi-g12-normal" }),
-		);
+		const opts = dreamerOptions({
+			database: db,
+			projectIdentity: "git:pi-g12-normal",
+		});
+		registerPiDreamerProject(opts);
 		timer.resolve(timerCleanup);
 		await flushMicrotasks();
 
-		unregisterPiDreamerProject({ projectIdentity: "git:pi-g12-normal" });
-		unregisterPiDreamerProject({ projectIdentity: "git:pi-g12-normal" });
+		unregisterPiDreamerProject({
+			projectIdentity: "git:pi-g12-normal",
+			registrationOwner: opts.registrationOwner,
+		});
+		unregisterPiDreamerProject({
+			projectIdentity: "git:pi-g12-normal",
+			registrationOwner: opts.registrationOwner,
+		});
 
 		expect(timerCleanup).toHaveBeenCalledTimes(1);
 	});

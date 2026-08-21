@@ -88,17 +88,20 @@ interface PiInvocation {
  * a literal `pi`), and Node's `spawn("pi")` without a shell looks for a file
  * named exactly `pi`, so it ENOENTs; and Windows ignores the `#!/usr/bin/env
  * node` shebang entirely, so spawning `dist/cli.js` "directly" only works on
- * POSIX. The reliable, cross-platform approach is to re-invoke the EXACT host
- * CLI the user is already running: `process.execPath` (the node/bun binary) plus
- * `process.argv[1]` (the absolute path to the running `cli.js`). That sidesteps
- * shim resolution completely and pins the child to the same Pi version/runtime.
+ * POSIX. When the host itself is Pi, the reliable, cross-platform approach is
+ * to re-invoke the EXACT host CLI the user is already running:
+ * `process.execPath` (the node/bun binary) plus `process.argv[1]` (the absolute
+ * path to the running `cli.js`). That sidesteps shim resolution completely and
+ * pins the child to the same Pi version/runtime. Embedded hosts such as pi-web
+ * must not reuse their unrelated `argv[1]`.
  *
- * Mirrors Pi's own `getPiInvocation` reference. MUST be evaluated in the host Pi
- * process (extensions load in-process, so `argv[1]` is the host `cli.js`).
+ * Mirrors Pi's own `getPiInvocation` reference. MUST be evaluated in the host
+ * process: a Pi host has its `cli.js` in `argv[1]`; embedded hosts fall through
+ * to bundled-Pi or PATH resolution.
  *
  * Resolution order:
- *   1. argv[1] is a real on-disk script (not a bun-compiled `/$bunfs/root/`
- *      virtual path) -> `execPath cli.js ...` (node + absolute cli.js).
+ *   1. argv[1] belongs to an on-disk Pi package (and is not a bun-compiled
+ *      `/$bunfs/root/` virtual path) -> `execPath cli.js ...`.
  *   2. execPath is a packaged binary (basename not node/bun) -> `execPath ...`
  *      (the compiled binary IS pi; no script arg).
  *   3. A bundled `@earendil-works/pi-coding-agent/dist/cli.js` resolves ->
@@ -106,25 +109,41 @@ interface PiInvocation {
  *   4. Last resort: bare `pi` on PATH.
  *
  * Everything is spawned WITHOUT a shell. The primary path (execPath + argv[1])
- * covers every real runtime because the extension loads in-process, so argv[1]
- * is the host cli.js; the bare-`pi` step is a near-unreachable backstop. We do
+ * covers every real Pi CLI runtime; embedded hosts fall through rather than
+ * accidentally re-running themselves. We do
  * NOT fall back to a shell for it (which on Windows would resolve the .cmd shim
  * but pass the prompt/task text through cmd.exe, exposing arg-escaping and
  * injection), and we don't pull in cross-spawn just for a dead path.
  */
+function isPiCliScript(scriptPath: string): boolean {
+	const normalized = scriptPath.replaceAll("\\", "/");
+	return /\/@(?:earendil-works|oh-my-pi)\/pi-coding-agent\/dist\/cli\.js$/.test(
+		normalized,
+	);
+}
+
+function isGenericRuntimeExecutable(execPath: string): boolean {
+	return /^(node(?:js)?\d*|bun)(\.exe)?$/.test(
+		basename(execPath).toLowerCase(),
+	);
+}
+
 function resolvePiInvocation(): PiInvocation {
 	const execPath = process.execPath;
 	const currentScript = process.argv[1];
 	const isBunVirtualScript =
 		currentScript?.startsWith("/$bunfs/root/") ?? false;
 
-	if (currentScript && !isBunVirtualScript && existsSync(currentScript)) {
+	if (
+		currentScript &&
+		!isBunVirtualScript &&
+		existsSync(currentScript) &&
+		isPiCliScript(currentScript)
+	) {
 		return { command: execPath, prefixArgs: [currentScript] };
 	}
 
-	const execName = basename(execPath).toLowerCase();
-	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
-	if (!isGenericRuntime) {
+	if (!isGenericRuntimeExecutable(execPath)) {
 		// A packaged single-file binary: execPath itself is pi.
 		return { command: execPath, prefixArgs: [] };
 	}
@@ -1920,6 +1939,8 @@ function terminateChild(child: ReturnType<typeof childProcess.spawn>) {
 export const __test = {
 	buildArgs,
 	extractFinalAssistant,
+	isGenericRuntimeExecutable,
+	isPiCliScript,
 	parsePiEventLine,
 	terminateChild,
 	DREAMER_ACTION_AGENTS,

@@ -104,6 +104,7 @@ export function registerCtxRecompCommand(
 					title: "/ctx-recomp",
 					text: executeRecompUpgradeStub(currentDeps.db, sessionId),
 					level: "info",
+					rpcDisplay: "dialog",
 				});
 				return;
 			}

@@ -4,7 +4,7 @@ import type {
 	ExtensionCommandContext,
 	Theme,
 } from "@earendil-works/pi-coding-agent";
-import { Box, type Component, Text } from "@earendil-works/pi-tui";
+import { Box, type Component, matchesKey, Text } from "@earendil-works/pi-tui";
 import { sessionLog } from "@magic-context/core/shared/logger";
 
 export const CTX_STATUS_CUSTOM_TYPE = "ctx-status";
@@ -15,6 +15,7 @@ export interface CtxStatusEntryData {
 	title: string;
 	text: string;
 	level?: CtxStatusLevel;
+	rpcDisplay?: "notification" | "dialog";
 	details?: unknown;
 }
 
@@ -40,6 +41,28 @@ type PiEntryRendererRegistration = {
 export type PiMessageSender = Pick<ExtensionAPI, "appendEntry"> &
 	PiEntryRendererRegistration;
 
+type CtxStatusPresenter = (content: CtxStatusMessageContent) => void;
+
+const ctxStatusPresenters = new WeakMap<PiMessageSender, CtxStatusPresenter>();
+
+export function setCtxStatusPresenter(
+	pi: PiMessageSender,
+	present: CtxStatusPresenter,
+): void {
+	ctxStatusPresenters.set(pi, present);
+}
+
+export function shouldShowCtxStatusDialog(
+	content: CtxStatusMessageContent,
+): boolean {
+	return (
+		content.rpcDisplay === "dialog" ||
+		(content.rpcDisplay !== "notification" &&
+			content.level !== undefined &&
+			content.level !== "info")
+	);
+}
+
 export function resolveSessionId(
 	ctx: ExtensionCommandContext,
 ): string | undefined {
@@ -52,6 +75,52 @@ export function resolveSessionId(
 		return typeof id === "string" && id.length > 0 ? id : undefined;
 	} catch {
 		return undefined;
+	}
+}
+
+export async function showCtxStatusDialog(
+	ctx: Pick<ExtensionCommandContext, "ui">,
+	content: CtxStatusMessageContent,
+): Promise<void> {
+	await ctx.ui.custom<undefined>(
+		(_tui, theme, _keybindings, done) =>
+			new CtxStatusDialog(content, theme, done),
+		{ overlay: true, overlayOptions: { anchor: "center", width: 92 } },
+	);
+}
+
+class CtxStatusDialog implements Component {
+	constructor(
+		private readonly content: CtxStatusMessageContent,
+		private readonly theme: Theme,
+		private readonly done: (value: undefined) => void,
+	) {}
+
+	handleInput(data: string): void {
+		if (
+			matchesKey(data, "escape") ||
+			matchesKey(data, "ctrl+c") ||
+			matchesKey(data, "return")
+		) {
+			this.done(undefined);
+		}
+	}
+
+	invalidate(): void {}
+
+	render(_width: number): string[] {
+		return [
+			this.theme.bold(
+				this.theme.fg(
+					statusTitleColor(this.content.level),
+					`[${this.content.title}]`,
+				),
+			),
+			"",
+			...this.content.text.split("\n"),
+			"",
+			this.theme.fg("dim", "Press Enter or Escape to close"),
+		];
 	}
 }
 
@@ -125,6 +194,8 @@ export function sendCtxStatusMessage(
 	if (typeof pi.appendEntry === "function") {
 		pi.appendEntry<CtxStatusEntryData>(CTX_STATUS_CUSTOM_TYPE, data);
 	}
+	ctxStatusPresenters.get(pi)?.(data);
+
 	// Minimal non-interactive API shims may omit appendEntry; logging remains the
 	// safe fallback and status text must never be routed through sendMessage.
 	sessionLog("pi-status", `${content.title}: ${content.text}`);

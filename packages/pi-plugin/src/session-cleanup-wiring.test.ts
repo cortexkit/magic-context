@@ -85,7 +85,7 @@ describe("session_before_switch handler wiring", () => {
 
 describe("session_shutdown handler also drains per-session maps", () => {
 	const handler = INDEX_SRC.match(
-		/pi\.on\("session_shutdown"[\s\S]*?\n\s*\}\);/,
+		/pi\.on\("session_shutdown"[\s\S]*?\n\t\}\);(?=\n\n\t\/\/ Pi has no `session_deleted` event)/,
 	);
 
 	test("session_shutdown handler exists", () => {

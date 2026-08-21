@@ -274,17 +274,21 @@ describe("Pi Magic Context commands", () => {
 	it("registers /ctx-dream and starts a run (Dreamer v2 manual path)", async () => {
 		const db = createDb();
 		const { pi, handlers, sent } = createMockPi();
+		const registrationCwds: string[] = [];
 
 		registerCtxDreamCommand(pi as never, {
 			db,
 			projectDir: "/tmp/project",
 			projectIdentity: "/tmp/project",
+			ensureRegistered: (ctx) => {
+				registrationCwds.push(ctx.cwd);
+			},
 		});
-		// Not registered with the dreamer timer in this unit test, so runManual
-		// throws "not registered" → the handler reports the failure. We only
-		// assert the command is wired and emits a /ctx-dream status message.
+		// This unit test isolates the command from the real dreamer registry. The
+		// injected registration sync runs immediately before the manual dream call.
 		await handlers.get("ctx-dream")?.("", createCtx());
 
+		expect(registrationCwds).toEqual(["/tmp/project"]);
 		expect(sent[0]?.customType).toBe("ctx-status");
 		expect(sent[0]?.data.text).toContain("/ctx-dream");
 	});

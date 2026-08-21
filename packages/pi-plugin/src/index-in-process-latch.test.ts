@@ -22,15 +22,15 @@ function restoreEnv() {
 function isolateXdgEnv() {
 	const root = mkdtempSync(join(tmpdir(), "magic-context-pi-latch-test-"));
 	process.env.XDG_CONFIG_HOME = join(root, "config");
-	process.env.XDG_DATA_HOME = join(root, "data");
+	// Use the preload's migration-safe test database; isolate only configuration.
+	delete process.env.XDG_DATA_HOME;
 }
 
 /**
- * Counting ExtensionAPI seam. Every registration method pushes the name onto
- * a list, so a test can assert that a second init registered NOTHING (no
- * duplicate tools, events, commands, timers, or watchers). The `on` mock is
- * the key seam for the latch: a second init that no-ops must not register any
- * event handlers, because those handlers would wire timers / background scans.
+ * Counting ExtensionAPI seam. Every ordinary registration method pushes the name onto
+ * a list, so a test can assert that a child init registered NOTHING (no
+ * duplicate tools, events, commands, timers, or watchers). The custom event
+ * bus drives the in-process child lifecycle signal.
  */
 function createCountingPi() {
 	const events: string[] = [];
@@ -38,10 +38,28 @@ function createCountingPi() {
 	const flags: string[] = [];
 	const commands: string[] = [];
 	const entryRenderers: string[] = [];
+	const eventBusHandlers = new Map<string, Set<(data: unknown) => void>>();
+	const piEventHandlers = new Map<
+		string,
+		Set<(event: unknown, ctx: unknown) => unknown>
+	>();
 	const pi = {
-		on: mock((event: string) => {
-			events.push(event);
-		}),
+		events: {
+			on(channel: string, handler: (data: unknown) => void) {
+				const handlers = eventBusHandlers.get(channel) ?? new Set();
+				handlers.add(handler);
+				eventBusHandlers.set(channel, handlers);
+				return () => handlers.delete(handler);
+			},
+		},
+		on: mock(
+			(event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
+				events.push(event);
+				const handlers = piEventHandlers.get(event) ?? new Set();
+				handlers.add(handler);
+				piEventHandlers.set(event, handlers);
+			},
+		),
 		registerTool: mock((tool: { name?: string }) => {
 			tools.push(tool.name ?? "<unnamed>");
 		}),
@@ -58,73 +76,122 @@ function createCountingPi() {
 		sendMessage: mock(() => undefined),
 		sendUserMessage: mock(() => undefined),
 	} as unknown as ExtensionAPI;
-	return { pi, events, tools, flags, commands, entryRenderers };
+	return {
+		pi,
+		events,
+		tools,
+		flags,
+		commands,
+		entryRenderers,
+		eventBusHandlerCount(channel: string) {
+			return eventBusHandlers.get(channel)?.size ?? 0;
+		},
+		emitEvent(channel: string, data: unknown = {}) {
+			for (const handler of eventBusHandlers.get(channel) ?? []) handler(data);
+		},
+		async emitPiEvent(event: string, data: unknown = {}, ctx: unknown = {}) {
+			for (const handler of piEventHandlers.get(event) ?? []) {
+				await handler(data, ctx);
+			}
+		},
+	};
 }
 
 afterEach(() => {
 	restoreEnv();
-	// The latch lives on globalThis (process-global by design), so clear it
-	// between tests or one test's init would suppress the next.
-	__test.clearPiMagicContextActive();
+	// The marker context lives on globalThis (process-global by design), so clear it
+	// between tests or one test's child state could suppress the next.
+	__test.clearPiInProcessSubagentInitContext();
+	__test.clearPiStartupMaintenanceClaim();
 });
 
-describe("Pi in-process re-init latch (#247)", () => {
-	it("second init in the same process is a no-op (no duplicate registrations)", async () => {
+describe("Pi in-process child guard (#247)", () => {
+	it("claims process-wide startup maintenance from the full runtime", async () => {
 		isolateXdgEnv();
 		delete process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV];
-		__test.clearPiMagicContextActive();
 
 		const first = createCountingPi();
 		await magicContextPiExtension(first.pi);
+		expect(__test.claimPiStartupMaintenance()).toBe(false);
 
+		const second = createCountingPi();
+		await magicContextPiExtension(second.pi);
+		expect(__test.claimPiStartupMaintenance()).toBe(false);
+	}, 15_000);
+	it("registers independent sessions in the same process", async () => {
+		isolateXdgEnv();
+		delete process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV];
+
+		const first = createCountingPi();
+		await magicContextPiExtension(first.pi);
 		// Sanity: the first init registered the full runtime.
 		expect(first.events.length).toBeGreaterThan(0);
-		expect(first.tools.length).toBeGreaterThan(0);
-		expect(first.commands.length).toBeGreaterThan(0);
+		expect(first.tools).toContain("ctx_search");
+		expect(first.commands).toContain("ctx-status");
 		expect(first.entryRenderers).toEqual(["ctx-status"]);
 
-		// The latch is now set in this process.
-		expect(__test.isPiMagicContextActiveInProcess()).toBe(true);
-
-		// Second init in the SAME process (the in-process child case).
-		// It must register nothing — same contract as a spawned subagent.
 		const second = createCountingPi();
 		await magicContextPiExtension(second.pi);
-
-		expect(second.events).toEqual([]);
-		expect(second.tools).toEqual([]);
-		expect(second.flags).toEqual([]);
-		expect(second.commands).toEqual([]);
-		expect(second.entryRenderers).toEqual([]);
-	}, 15_000);
-
-	it("clearing the latch (dispose) allows a full re-init", async () => {
-		isolateXdgEnv();
-		delete process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV];
-		__test.clearPiMagicContextActive();
-
-		const first = createCountingPi();
-		await magicContextPiExtension(first.pi);
-		expect(first.tools.length).toBeGreaterThan(0);
-
-		// Simulate the session_shutdown dispose path clearing the latch.
-		__test.clearPiMagicContextActive();
-		expect(__test.isPiMagicContextActiveInProcess()).toBe(false);
-
-		// A subsequent init re-registers the full runtime.
-		const second = createCountingPi();
-		await magicContextPiExtension(second.pi);
-
 		expect(second.events.length).toBeGreaterThan(0);
-		expect(second.tools.length).toBeGreaterThan(0);
-		expect(second.commands.length).toBeGreaterThan(0);
+		expect(second.tools).toContain("ctx_search");
+		expect(second.commands).toContain("ctx-status");
 		expect(second.entryRenderers).toEqual(["ctx-status"]);
 	}, 15_000);
 
-	it("spawned-child env guard still no-ops even when the latch is clear", async () => {
+	it("unsubscribes child lifecycle listeners on session shutdown", async () => {
+		isolateXdgEnv();
+		delete process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV];
+
+		const runtime = createCountingPi();
+		await magicContextPiExtension(runtime.pi);
+		expect(
+			runtime.eventBusHandlerCount("subagents:child:session-created"),
+		).toBe(1);
+		expect(runtime.eventBusHandlerCount("subagents:child:disposed")).toBe(1);
+
+		await runtime.emitPiEvent(
+			"session_shutdown",
+			{},
+			{
+				sessionManager: { getSessionId: () => undefined },
+				ui: { setStatus: () => undefined },
+			},
+		);
+		expect(
+			runtime.eventBusHandlerCount("subagents:child:session-created"),
+		).toBe(0);
+		expect(runtime.eventBusHandlerCount("subagents:child:disposed")).toBe(0);
+	}, 15_000);
+
+	it("skips only the marked in-process child", async () => {
+		isolateXdgEnv();
+		delete process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV];
+
+		const parent = createCountingPi();
+		await magicContextPiExtension(parent.pi);
+		parent.emitEvent("subagents:child:spawning");
+		parent.emitEvent("subagents:child:session-created");
+
+		// Second init in the SAME process (the in-process child case).
+		// It must register nothing — same contract as a spawned subagent.
+		const child = createCountingPi();
+		await magicContextPiExtension(child.pi);
+		expect(child.events).toEqual([]);
+		expect(child.tools).toEqual([]);
+		expect(child.commands).toEqual([]);
+
+		// Simulate the child dispose path clearing its lifecycle marker.
+		parent.emitEvent("subagents:child:disposed");
+		// A subsequent independent init re-registers the full runtime.
+		const sibling = createCountingPi();
+		await magicContextPiExtension(sibling.pi);
+		expect(sibling.tools).toContain("ctx_search");
+		expect(sibling.commands).toContain("ctx-status");
+	}, 15_000);
+
+	it("keeps the spawned-child environment guard", async () => {
 		isolateXdgEnv();
 		process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV] = "1";
-		__test.clearPiMagicContextActive();
 
 		const registrations = createCountingPi();
 		await magicContextPiExtension(registrations.pi);
@@ -134,35 +201,35 @@ describe("Pi in-process re-init latch (#247)", () => {
 		expect(registrations.flags).toEqual([]);
 		expect(registrations.commands).toEqual([]);
 		expect(registrations.entryRenderers).toEqual([]);
-		// The env guard returns BEFORE setting the latch, so a later in-process
-		// init in the same process would still initialize fully. This pins the
-		// spawned-child contract: the env guard is a separate, earlier gate.
-		expect(__test.isPiMagicContextActiveInProcess()).toBe(false);
+		// The env guard returns BEFORE registering lifecycle markers, so a later
+		// independent init in the same process would still initialize fully.
+		delete process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV];
+		const later = createCountingPi();
+		await magicContextPiExtension(later.pi);
+		expect(later.tools).toContain("ctx_search");
 	});
 
-	it("mutation direction: removing the latch makes the double-init test fail", async () => {
-		// This test documents the regression guard: if the latch check is
-		// removed from the entry, a second init would re-register everything.
-		// We simulate the "latch removed" state by clearing it between the two
-		// inits and asserting the second init then registers the full runtime
-		// — proving the latch is what suppresses it.
+	it("mutation direction: clearing the marker makes the child-init test fail", async () => {
+		// This test documents the regression guard: if the marker check is
+		// removed from the entry, a child init would register everything.
+		// We simulate the marker being absent before the child init and assert
+		// that it then registers the full runtime — proving the marker suppresses it.
 		isolateXdgEnv();
 		delete process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV];
-		__test.clearPiMagicContextActive();
 
-		const first = createCountingPi();
-		await magicContextPiExtension(first.pi);
-		expect(first.tools.length).toBeGreaterThan(0);
+		const parent = createCountingPi();
+		await magicContextPiExtension(parent.pi);
+		parent.emitEvent("subagents:child:session-created");
 
-		// Simulate the latch being absent: clear it before the second init.
-		__test.clearPiMagicContextActive();
+		// Simulate the marker being absent: clear it before the child init.
+		__test.clearPiInProcessSubagentInitContext();
 
-		const second = createCountingPi();
-		await magicContextPiExtension(second.pi);
+		const child = createCountingPi();
+		await magicContextPiExtension(child.pi);
 
-		// Without the latch suppressing it, the second init re-registers.
-		expect(second.events.length).toBeGreaterThan(0);
-		expect(second.tools.length).toBeGreaterThan(0);
-		expect(second.commands.length).toBeGreaterThan(0);
+		// Without the marker suppressing it, the child init registers.
+		expect(child.events.length).toBeGreaterThan(0);
+		expect(child.tools.length).toBeGreaterThan(0);
+		expect(child.commands.length).toBeGreaterThan(0);
 	}, 15_000);
 });

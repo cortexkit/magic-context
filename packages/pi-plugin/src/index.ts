@@ -20,6 +20,7 @@
  *   Falls back to schema defaults when neither file exists.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -120,6 +121,9 @@ import { registerCtxWrapupCommand } from "./commands/ctx-wrapup";
 import {
 	registerCtxStatusEntryRenderer,
 	sendCtxStatusMessage,
+	setCtxStatusPresenter,
+	shouldShowCtxStatusDialog,
+	showCtxStatusDialog,
 } from "./commands/pi-command-utils";
 import { loadPiConfig } from "./config";
 import {
@@ -184,7 +188,7 @@ import {
 const PREFIX = "[magic-context][pi]";
 
 // ---------------------------------------------------------------------------
-// Process-global init latch (issue #247)
+// In-process child guard (issue #247)
 //
 // `@gotgenes/pi-subagents` runs child agent sessions IN-PROCESS inside the
 // parent Pi process. Each child inherits the parent's user packages, so Pi
@@ -197,41 +201,70 @@ const PREFIX = "[magic-context][pi]";
 // parallel children fanned out concurrent `SessionManager.listAll` scans over
 // ~392 JSONL sessions and crashed the parent with heap OOM.
 //
-// The latch below is a `Symbol.for` key on `globalThis` so it survives the
+// The marker below is a `Symbol.for` key on `globalThis` so it survives the
 // duplicate module instances Pi's jiti loader creates per session
 // (`moduleCache: false` resets module-level state on every re-import, but a
-// Symbol.for key is process-global). The first init in this process sets it;
-// every later init in the same process (in-process child, or a second factory
-// call from any source) sees it set and no-ops with the SAME contract as a
-// spawned subagent child — no watchers, no timers, no background scans. The
-// parent's already-registered extension instance keeps serving its session.
+// Symbol.for key is process-global). The `session-created` lifecycle event sets
+// it only in the child's async context; that child factory sees it and no-ops
+// with the SAME contract as a spawned subagent child — no watchers, no timers,
+// no background scans. The parent's already-registered extension instance keeps
+// serving its session, while independent same-process sessions initialize normally.
 //
-// Dispose / re-arm: Pi fires `session_shutdown` (reason "reload") before a
-// `/reload` re-imports extensions, and (reason "shutdown") when the user
-// leaves the session. Each AgentSession owns its own ExtensionRunner, so a
-// child session's `session_shutdown` only fires handlers the CHILD registered
-// (none, because the child no-op'd) — it cannot clear the parent's latch.
-// We clear the latch in the parent's `session_shutdown` handler so a `/reload`
-// legitimately re-initializes, while ephemeral in-process children never touch
-// it.
+// Dispose / re-arm: `subagents:child:disposed` clears the child's marker after
+// its run. Since the marker is scoped with AsyncLocalStorage, a child cannot
+// suppress unrelated sessions hosted by pi-web.
 // ---------------------------------------------------------------------------
-const PI_ACTIVE_LATCH = Symbol.for("magic-context.pi.active");
+const PI_CHILD_INIT_CONTEXT = Symbol.for("magic-context.pi.child-init-context");
+const SUBAGENT_CHILD_SESSION_CREATED = "subagents:child:session-created";
+const SUBAGENT_CHILD_DISPOSED = "subagents:child:disposed";
+const PI_STARTUP_MAINTENANCE_SCHEDULED = Symbol.for(
+	"magic-context.pi.startup-maintenance-scheduled",
+);
 
-function isPiMagicContextActiveInProcess(): boolean {
-	return (globalThis as Record<symbol, unknown>)[PI_ACTIVE_LATCH] === true;
+function getPiChildInitContext(): AsyncLocalStorage<boolean> {
+	const globals = globalThis as Record<symbol, unknown>;
+	const existing = globals[PI_CHILD_INIT_CONTEXT];
+	if (existing instanceof AsyncLocalStorage) return existing;
+	const context = new AsyncLocalStorage<boolean>();
+	globals[PI_CHILD_INIT_CONTEXT] = context;
+	return context;
 }
 
-function markPiMagicContextActive(): void {
-	(globalThis as Record<symbol, unknown>)[PI_ACTIVE_LATCH] = true;
+function isPiInProcessSubagentInit(): boolean {
+	return getPiChildInitContext().getStore() === true;
 }
 
-function clearPiMagicContextActive(): void {
-	try {
-		delete (globalThis as Record<symbol, unknown>)[PI_ACTIVE_LATCH];
-	} catch {
-		// Some runtimes disallow delete on globalThis; fall back to overwrite.
-		(globalThis as Record<symbol, unknown>)[PI_ACTIVE_LATCH] = undefined;
-	}
+function clearPiInProcessSubagentInitContext(): void {
+	getPiChildInitContext().enterWith(false);
+}
+
+function registerPiSubagentInitContext(pi: ExtensionAPI): () => void {
+	const context = getPiChildInitContext();
+	// session-created fires after child creation has its own async branch but before
+	// bindExtensions(); marking on spawning would leak into the parent's call chain.
+	const unsubscribeCreated = pi.events.on(SUBAGENT_CHILD_SESSION_CREATED, () =>
+		context.enterWith(true),
+	);
+	const unsubscribeDisposed = pi.events.on(SUBAGENT_CHILD_DISPOSED, () =>
+		context.enterWith(false),
+	);
+	return () => {
+		unsubscribeCreated();
+		unsubscribeDisposed();
+	};
+}
+
+function claimPiStartupMaintenance(): boolean {
+	const globals = globalThis as Record<symbol, unknown>;
+	if (globals[PI_STARTUP_MAINTENANCE_SCHEDULED] === true) return false;
+	globals[PI_STARTUP_MAINTENANCE_SCHEDULED] = true;
+	return true;
+}
+
+function clearPiStartupMaintenanceClaim(): void {
+	delete (globalThis as Record<symbol, unknown>)[
+		PI_STARTUP_MAINTENANCE_SCHEDULED
+	];
 }
 
 function resolveCurrentProject(
@@ -465,9 +498,9 @@ export const __test = {
 	resetLoggedPiConfigDirs(): void {
 		loggedPiConfigDirs.clear();
 	},
-	isPiMagicContextActiveInProcess,
-	markPiMagicContextActive,
-	clearPiMagicContextActive,
+	clearPiInProcessSubagentInitContext,
+	claimPiStartupMaintenance,
+	clearPiStartupMaintenanceClaim,
 };
 
 function formatTokens(value: number): string {
@@ -732,18 +765,17 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	// In-process child guard (issue #247): `@gotgenes/pi-subagents` runs child
 	// agent sessions in the SAME process as the parent. They share the parent's
 	// env (so the spawned-child env guard above never fires) and re-trigger this
-	// factory for every child session. The process-global latch marks that the
-	// full Magic Context runtime is already active in this process; a second
-	// init no-ops with the same contract as a spawned subagent (no watchers, no
-	// timers, no background scans). The parent's registered instance keeps
-	// serving. See the latch block above for the dispose / `/reload` re-arm path.
-	if (isPiMagicContextActiveInProcess()) {
+	// factory for every child session. The lifecycle marker scopes the no-op to
+	// that child: no database, watchers, timers, or background scans. Independent
+	// same-process sessions remain unmarked and initialize normally.
+	if (isPiInProcessSubagentInit()) {
 		log(
-			`${PREFIX} in-process re-init detected (Magic Context already active in this process); skipping full extension registration`,
+			`${PREFIX} in-process subagent child detected; skipping full extension registration`,
 		);
 		return;
 	}
-	markPiMagicContextActive();
+	const unregisterPiSubagentInitContext = registerPiSubagentInitContext(pi);
+	registerPiSubagentInitContextCleanup(pi, unregisterPiSubagentInitContext);
 	beginBootQuietPeriod();
 
 	// Resolve the user-tier storage policy before opening the shared database.
@@ -862,39 +894,69 @@ async function startPiMagicContextRuntime(
 
 	// v22 deferred legacy-memory identity backfill. openDatabase() has already
 	// run migrations; the runner is fire-and-forget and logs failures without
-	// blocking Pi startup.
-	scheduleAfterBootQuiet(() => {
-		runDeferredV22Backfill(db).catch((err) => {
-			warn(`[v22-backfill] background runner failed: ${err}`);
+	// blocking Pi startup. Multiple independent AgentSessions share one process, so
+	// only the first full runtime schedules process-wide startup maintenance.
+	if (claimPiStartupMaintenance()) {
+		scheduleAfterBootQuiet(() => {
+			runDeferredV22Backfill(db).catch((err) => {
+				warn(`[v22-backfill] background runner failed: ${err}`);
+			});
 		});
-	});
 
-	scheduleAfterBootQuiet(() => {
-		void (async () => {
-			try {
-				const api = await loadDefaultPiSessionApi();
-				const sessions = (await api.listSessions()) as Array<{
-					id?: unknown;
-					cwd?: unknown;
-				}>;
-				await runSessionProjectBackfill(
-					database,
-					sessions.map((session) => ({
-						sessionId: typeof session?.id === "string" ? session.id : "",
-						directory: typeof session?.cwd === "string" ? session.cwd : "",
-					})),
-				);
-			} catch (err) {
-				warn(`[session-projects] background runner failed: ${err}`);
-			}
-		})();
-	}, 0);
+		scheduleAfterBootQuiet(() => {
+			void (async () => {
+				try {
+					let sessions:
+						| Array<{ sessionId: string; directory: string }>
+						| undefined;
+					await runSessionProjectBackfill(
+						database,
+						async (afterSessionId, limit) => {
+							if (!sessions) {
+								const api = await loadDefaultPiSessionApi();
+								const sessionsById = new Map<
+									string,
+									{ sessionId: string; directory: string }
+								>();
+								for (const session of (await api.listSessions()) as Array<{
+									id?: unknown;
+									cwd?: unknown;
+								}>) {
+									const sessionId =
+										typeof session?.id === "string" ? session.id : "";
+									const directory =
+										typeof session?.cwd === "string" ? session.cwd : "";
+									if (
+										sessionId &&
+										(!sessionsById.has(sessionId) || directory)
+									) {
+										sessionsById.set(sessionId, { sessionId, directory });
+									}
+								}
+								sessions = [...sessionsById.values()];
+							}
+							const offset =
+								afterSessionId === null
+									? 0
+									: sessions.findIndex(
+											(session) => session.sessionId === afterSessionId,
+										) + 1;
+							return sessions.slice(offset, offset + limit);
+						},
+					);
+				} catch (err) {
+					warn(`[session-projects] background runner failed: ${err}`);
+				}
+			})();
+		}, 0);
+	}
 
 	// Capture boot project for initial config load and logging only. Runtime
 	// identity/path resolution uses ctx.cwd per hook/command so session cwd
 	// switches follow the active project without reloading config.
 	const projectDir = process.cwd();
 	const seenDreamerProjectIdentities = new Set<string>();
+	const dreamerRegistrationOwner = {};
 	// Step 5b: load the user's full magic-context.jsonc config. The loader
 	// reads the shared CortexKit project/user paths, validates them through the
 	// shared Zod schema, falls back to Pi-owned legacy files only while migration
@@ -1129,6 +1191,37 @@ async function startPiMagicContextRuntime(
 
 	const bootProjectDeps = buildProjectDeps(projectDir, projectIdentity, config);
 	projectDepsByDir.set(projectDir, bootProjectDeps);
+
+	function syncDreamerProjectRegistration(
+		current: ResolvedPiProjectDeps,
+	): void {
+		seenDreamerProjectIdentities.add(current.projectIdentity);
+		if (!current.dreamerConfig) {
+			unregisterPiDreamerProject({
+				projectIdentity: current.projectIdentity,
+				registrationOwner: dreamerRegistrationOwner,
+			});
+			return;
+		}
+		registerPiDreamerProject({
+			db,
+			projectDir: current.projectDir,
+			projectIdentity: current.projectIdentity,
+			registrationOwner: dreamerRegistrationOwner,
+			config: current.dreamerConfig,
+			// Council finding #7: thread real embedding + memory config so
+			// dreamer can do semantic dedup AND can write memory updates.
+			// Previously hardcoded to off/false, making most dreamer tasks
+			// useless on Pi.
+			embeddingConfig: current.config.embedding,
+			memoryEnabled: current.config.memory.enabled,
+			retinaHandoff: current.config.smart_notes.retina_handoff,
+			mural: current.config.mural,
+			language: current.config.language,
+			gitCommitIndexing: current.config.memory.git_commit_indexing,
+			onAdjunctsRefreshNeeded: signalPiSystemPromptRefreshForProject,
+		});
+	}
 	const todowriteEnabled = bootProjectDeps.config.todowrite.enabled !== false;
 	const todowriteOverlayEnabled =
 		todowriteEnabled && bootProjectDeps.config.todowrite.overlay !== false;
@@ -1188,6 +1281,23 @@ async function startPiMagicContextRuntime(
 	);
 
 	pi.on("session_start", async (event, ctx) => {
+		if (ctx.mode === "rpc") {
+			setCtxStatusPresenter(pi, (content) => {
+				const type =
+					content.level === "error" || content.level === "warning"
+						? content.level
+						: "info";
+				const useDialog = shouldShowCtxStatusDialog(content);
+				if (!useDialog) {
+					ctx.ui.notify(content.text, type);
+					return;
+				}
+				void showCtxStatusDialog(ctx, content).catch((err) => {
+					warn("ctx status dialog failed:", err);
+					ctx.ui.notify(content.text, type);
+				});
+			});
+		}
 		await handlePiCloneSessionStart(event, ctx, {
 			db,
 			signalPendingMarker: signalPiDeferredCompactionMarkerDrain,
@@ -1440,6 +1550,8 @@ async function startPiMagicContextRuntime(
 		resolveDreamerEnabled: (ctx) =>
 			resolveCurrentProjectDeps(ctx).dreamerEnabled,
 		onProjectSeen: (identity) => seenDreamerProjectIdentities.add(identity),
+		ensureRegistered: (ctx) =>
+			syncDreamerProjectRegistration(resolveCurrentProjectDeps(ctx)),
 	});
 	info("registered /ctx-dream");
 
@@ -1466,23 +1578,7 @@ async function startPiMagicContextRuntime(
 	// PiSubagentRunner to spawn child sessions for each task.
 	const dreamerConfig = bootProjectDeps.dreamerConfig;
 	if (dreamerConfig) {
-		registerPiDreamerProject({
-			db,
-			projectDir,
-			projectIdentity,
-			config: dreamerConfig,
-			// Council finding #7: thread real embedding + memory config so
-			// dreamer can do semantic dedup AND can write memory updates.
-			// Previously hardcoded to off/false, making most dreamer tasks
-			// useless on Pi.
-			embeddingConfig: bootProjectDeps.config.embedding,
-			memoryEnabled: bootProjectDeps.config.memory.enabled,
-			retinaHandoff: bootProjectDeps.config.smart_notes.retina_handoff,
-			mural: bootProjectDeps.config.mural,
-			language: bootProjectDeps.config.language,
-			gitCommitIndexing: bootProjectDeps.config.memory.git_commit_indexing,
-			onAdjunctsRefreshNeeded: signalPiSystemPromptRefreshForProject,
-		});
+		syncDreamerProjectRegistration(bootProjectDeps);
 		info(`registered dreamer (${summarizeDreamSchedule(dreamerConfig)})`);
 	} else {
 		info(
@@ -1557,7 +1653,6 @@ async function startPiMagicContextRuntime(
 				projectIdentity: effectiveProjectDeps.projectIdentity,
 			};
 			const effectiveConfig = effectiveProjectDeps.config;
-			seenDreamerProjectIdentities.add(currentProject.projectIdentity);
 
 			// Re-register the dreamer for the CURRENT project. The boot-time
 			// registration above used process.cwd(), but Pi can switch projects
@@ -1572,35 +1667,13 @@ async function startPiMagicContextRuntime(
 			// pipeline. A switched-into project may carry its own config (different
 			// model/schedule, or its own `dreamer.disable`), so boot config must not
 			// leak into this registration.
-			const effectiveDreamerConfig = effectiveProjectDeps.dreamerConfig;
-			if (effectiveDreamerConfig) {
-				try {
-					registerPiDreamerProject({
-						db,
-						projectDir: currentProject.projectDir,
-						projectIdentity: currentProject.projectIdentity,
-						config: effectiveDreamerConfig,
-						embeddingConfig: effectiveConfig.embedding,
-						memoryEnabled: effectiveConfig.memory.enabled,
-						retinaHandoff: effectiveConfig.smart_notes.retina_handoff,
-						language: effectiveConfig.language,
-						gitCommitIndexing: effectiveConfig.memory.git_commit_indexing,
-						onAdjunctsRefreshNeeded: signalPiSystemPromptRefreshForProject,
-					});
-				} catch (err) {
-					warn("before_agent_start: registerPiDreamerProject threw:", err);
-				}
-			} else {
-				// The current checkout disables the dreamer. Any existing registration
-				// for this identity may have been created while another checkout's
-				// config was active, so tear it down explicitly here.
-				try {
-					unregisterPiDreamerProject({
-						projectIdentity: currentProject.projectIdentity,
-					});
-				} catch (err) {
-					warn("before_agent_start: unregisterPiDreamerProject threw:", err);
-				}
+			// The current checkout may also disable the dreamer. This instance may own a
+			// registration created while another checkout's config was active, so the
+			// shared helper releases that ownership explicitly.
+			try {
+				syncDreamerProjectRegistration(effectiveProjectDeps);
+			} catch (err) {
+				warn("before_agent_start: dreamer registration sync threw:", err);
 			}
 			// Pi exposes `sessionManager.getSessionId()` once a session is
 			// active. We resolve it here defensively because before_agent_start
@@ -2296,7 +2369,10 @@ async function startPiMagicContextRuntime(
 		}
 		try {
 			for (const identity of seenDreamerProjectIdentities) {
-				unregisterPiDreamerProject({ projectIdentity: identity });
+				unregisterPiDreamerProject({
+					projectIdentity: identity,
+					registrationOwner: dreamerRegistrationOwner,
+				});
 			}
 		} catch (err) {
 			warn("shutdown: unregisterPiDreamerProject threw:", err);
@@ -2327,16 +2403,6 @@ async function startPiMagicContextRuntime(
 		} catch {
 			// best-effort cleanup
 		}
-		// Re-arm the process-global init latch (issue #247). Pi fires
-		// `session_shutdown` (reason "reload") before a `/reload` re-imports
-		// extensions, and (reason "shutdown") when the user leaves the
-		// session. Each AgentSession owns its own ExtensionRunner, so an
-		// in-process child's `session_shutdown` only fires handlers the
-		// CHILD registered — and a child that no-op'd via the latch
-		// registered none, so it cannot clear the parent's latch. Clearing
-		// here lets a `/reload` legitimately re-initialize the full runtime,
-		// while ephemeral in-process children never touch it.
-		clearPiMagicContextActive();
 	});
 
 	// Pi has no `session_deleted` event, but `session_before_switch`
@@ -2375,6 +2441,13 @@ async function startPiMagicContextRuntime(
 			// best-effort — Pi proceeds with the switch regardless
 		}
 	});
+}
+
+function registerPiSubagentInitContextCleanup(
+	pi: ExtensionAPI,
+	unsubscribe: () => void,
+): void {
+	pi.on("session_shutdown", unsubscribe);
 }
 
 /**
