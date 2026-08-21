@@ -196,7 +196,7 @@ describe("Pi dreamer wiring", () => {
 		expect(language).toBe("es");
 	});
 
-	test("manual dreamer passes a directive-bearing system prompt when language is set", async () => {
+	test("manual dreamer uses refreshed options for its explicit owner", async () => {
 		db = createDb();
 		let capturedSystem = "";
 		__test.setStartDreamScheduleTimerFactory(async () => mock(() => {}));
@@ -215,22 +215,23 @@ describe("Pi dreamer wiring", () => {
 			content: "The Pi harness runs dreamer prompts through a subprocess.",
 		});
 
-		registerPiDreamerProject(
-			dreamerOptions({
-				database: db,
-				projectDir: process.cwd(),
-				projectIdentity: "git:pi-manual-language",
-				config: DreamerConfigSchema.parse({
-					model: "test/model",
-					tasks: { curate: { schedule: "0 4 * * *" } },
-				}),
-				language: "es",
+		const opts = dreamerOptions({
+			database: db,
+			projectDir: process.cwd(),
+			projectIdentity: "git:pi-manual-language",
+			config: DreamerConfigSchema.parse({
+				model: "test/model",
+				tasks: { curate: { schedule: "0 4 * * *" } },
 			}),
-		);
+			language: "en",
+		});
+		registerPiDreamerProject(opts);
+		registerPiDreamerProject({ ...opts, language: "es" });
 
 		const result = await runPiDreamForProject(
 			"git:pi-manual-language",
 			"curate",
+			opts.registrationOwner,
 		);
 		expect(
 			getTaskScheduleState(db, "git:pi-manual-language", "curate")?.lastError,
@@ -279,34 +280,34 @@ describe("Pi dreamer wiring", () => {
 			content: "Use the shared release checklist before publishing.",
 		});
 
-		registerPiDreamerProject(
-			dreamerOptions({
-				database: db,
-				projectDir: process.cwd(),
-				projectIdentity: "git:pi-curate-pseudo-tool-call",
-				// Model resolution is harness-scoped: scheduling remains at
-				// dreamer.tasks, while Pi's attempts live under dreamer.pi.
-				config: {
-					...DreamerConfigSchema.parse({
-						tasks: { curate: { schedule: "0 4 * * *" } },
-					}),
-					pi: {
-						model: { model: "primary/curator", thinking_level: "high" },
-						tasks: {
-							curate: {
-								fallback_models: [
-									{ model: "fallback/curator", thinking_level: "low" },
-								],
-							},
+		const opts = dreamerOptions({
+			database: db,
+			projectDir: process.cwd(),
+			projectIdentity: "git:pi-curate-pseudo-tool-call",
+			// Model resolution is harness-scoped: scheduling remains at
+			// dreamer.tasks, while Pi's attempts live under dreamer.pi.
+			config: {
+				...DreamerConfigSchema.parse({
+					tasks: { curate: { schedule: "0 4 * * *" } },
+				}),
+				pi: {
+					model: { model: "primary/curator", thinking_level: "high" },
+					tasks: {
+						curate: {
+							fallback_models: [
+								{ model: "fallback/curator", thinking_level: "low" },
+							],
 						},
 					},
-				} as never,
-			}),
-		);
+				},
+			} as never,
+		});
+		registerPiDreamerProject(opts);
 
 		const result = await runPiDreamForProject(
 			"git:pi-curate-pseudo-tool-call",
 			"curate",
+			opts.registrationOwner,
 		);
 
 		expect(attemptedModels).toEqual(["primary/curator", "fallback/curator"]);
@@ -585,7 +586,7 @@ describe("Pi dreamer wiring", () => {
 		]);
 	});
 
-	test("rejects a manual run after its explicit owner unregisters", async () => {
+	test("rejects ownerless and unregistered-owner manual runs", async () => {
 		db = createDb();
 		__test.setStartDreamScheduleTimerFactory(async () => mock(() => {}));
 		const projectIdentity = "git:pi-stale-manual-owner";
@@ -603,14 +604,20 @@ describe("Pi dreamer wiring", () => {
 		await flushMicrotasks();
 		registerPiDreamerProject(ownerB);
 		await flushMicrotasks();
-		unregisterPiDreamerProject({
-			projectIdentity,
-			registrationOwner: ownerA.registrationOwner,
-		});
 		__test.setPiSubagentRunnerFactory(() => {
 			throw new Error("manual client should not be created");
 		});
 
+		await expect(
+			runPiDreamForProject(projectIdentity, undefined, undefined as never),
+		).rejects.toThrow(
+			`Pi dreamer registration owner is no longer active for project ${projectIdentity}`,
+		);
+
+		unregisterPiDreamerProject({
+			projectIdentity,
+			registrationOwner: ownerA.registrationOwner,
+		});
 		await expect(
 			runPiDreamForProject(
 				projectIdentity,

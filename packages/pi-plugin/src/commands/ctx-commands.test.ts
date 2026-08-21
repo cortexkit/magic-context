@@ -310,6 +310,7 @@ describe("Pi Magic Context commands", () => {
 			db,
 			projectDir: "/tmp/project",
 			projectIdentity: "/tmp/project",
+			registrationOwner: {},
 			ensureRegistered: (ctx) => {
 				registrationCwds.push(ctx.cwd);
 			},
@@ -333,6 +334,7 @@ describe("Pi Magic Context commands", () => {
 			db,
 			projectDir: "/tmp/project",
 			projectIdentity: "/tmp/project",
+			registrationOwner: {},
 		});
 
 		await handlers.get("ctx-dream")?.("verify", createCtx());
@@ -362,6 +364,7 @@ describe("Pi Magic Context commands", () => {
 			db,
 			projectDir: "/tmp/project",
 			projectIdentity: "/tmp/project",
+			registrationOwner: {},
 			dreamerEnabled: false,
 		});
 		await handlers.get("ctx-dream")?.("", createCtx());
@@ -377,6 +380,7 @@ describe("Pi Magic Context commands", () => {
 			db,
 			projectDir: "/tmp/project-a",
 			projectIdentity: "/tmp/project-a",
+			registrationOwner: {},
 			resolveProject: (ctx) => ({
 				projectDir: ctx.cwd,
 				projectIdentity: ctx.cwd,

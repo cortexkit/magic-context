@@ -88,11 +88,12 @@ interface ProjectRegistration {
 	activeOwner: object;
 	owners: Map<object, PiDreamerOptions>;
 	/** Run dream tasks for this project IMMEDIATELY (Dreamer v2 manual path).
-	 *  `task` forces one task ignoring its gate; omitted runs all enabled. The
-	 *  registered dreamer timer also runs due tasks on its own schedule. */
+	 *  `task` forces one task ignoring its gate; `undefined` runs all enabled. The
+	 *  registered dreamer timer also runs due tasks on its own schedule.
+	 *  Keep this parameter order stable: registrations are shared across reloads. */
 	runManual: (
-		task?: DreamTaskName,
-		registrationOwner?: object,
+		task: DreamTaskName | undefined,
+		registrationOwner: object,
 	) => Promise<ManualRunResult>;
 	/** The directory this registration was built for. `resolveProjectIdentity`
 	 *  is intentionally identical across worktrees/clones of one repo, so a
@@ -233,11 +234,10 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 	// Scheduled runs keep using the timer's client above; binding manual runs
 	// to their owner lets session_shutdown wait only for that instance's work.
 	const runManual = async (
-		task?: DreamTaskName,
-		registrationOwner?: object,
+		task: DreamTaskName | undefined,
+		registrationOwner: object,
 	): Promise<ManualRunResult> => {
-		const manualOpts =
-			registrationOwner === undefined ? opts : owners.get(registrationOwner);
+		const manualOpts = owners.get(registrationOwner);
 		if (!manualOpts) {
 			throw new Error(
 				`Pi dreamer registration owner is no longer active for project ${opts.projectIdentity}`,
@@ -303,19 +303,20 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
  * Run one dream cycle IMMEDIATELY for the given project, mirroring
  * OpenCode's `/ctx-dream` behavior. Returns the run result, or `null`
  * if there's nothing to dequeue (queue empty or another worker holds
- * the lease — see `processDreamQueue` semantics). Throws if the project
- * isn't registered (call `registerPiDreamerProject` first).
+ * the lease — see `processDreamQueue` semantics). Throws if the project or
+ * owner isn't registered (call `registerPiDreamerProject` first).
  *
  * The user-visible reason this exists: without it, the user types
  * `/ctx-dream` and gets "queued, the timer will run it eventually" —
  * which makes the command feel broken even though the queue entry is
  * really there. Mirroring OpenCode's behavior lets us actually drain
- * it on the same turn.
+ * it on the same turn. The owner is required so same-directory
+ * re-registration always resolves the current owner options.
  */
 export async function runPiDreamForProject(
 	projectIdentity: string,
-	task?: DreamTaskName,
-	registrationOwner?: object,
+	task: DreamTaskName | undefined,
+	registrationOwner: object,
 ): Promise<ManualRunResult> {
 	const registration = registeredProjects.get(projectIdentity);
 	if (!registration) {

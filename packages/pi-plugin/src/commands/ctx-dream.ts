@@ -25,7 +25,7 @@ export function registerCtxDreamCommand(
 		resolveDreamerEnabled?: (ctx: { cwd: string }) => boolean | undefined;
 		onProjectSeen?: (projectIdentity: string) => void;
 		ensureRegistered?: (ctx: { cwd: string }) => void | Promise<void>;
-		registrationOwner?: object;
+		registrationOwner: object;
 	},
 ): void {
 	pi.registerCommand("ctx-dream", {
