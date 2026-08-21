@@ -267,13 +267,24 @@ export function unregisterPiDreamerProject(opts: {
 	if (registration.owners.size > 0) {
 		if (registration.activeOwner !== opts.registrationOwner) return;
 		// The active worktree owner left while sibling sessions still use this
-		// project. Rebuild from the remaining owners so the shared timer follows
-		// a live session instead of retaining the departed session's directory.
+		// project. Rebuild once from the most recently registered remaining owner
+		// so the shared timer follows a live session, then retain every sibling
+		// owner without repeatedly replacing the timer.
 		const remaining = [...registration.owners.values()];
+		const replacementOptions = remaining[remaining.length - 1];
+		if (!replacementOptions) return;
 		registration.cleanup();
 		registeredProjects.delete(opts.projectIdentity);
-		for (const remainingOptions of remaining)
-			registerPiDreamerProject(remainingOptions);
+		registerPiDreamerProject(replacementOptions);
+		const replacement = registeredProjects.get(opts.projectIdentity);
+		if (replacement) {
+			for (const remainingOptions of remaining) {
+				replacement.owners.set(
+					remainingOptions.registrationOwner,
+					remainingOptions,
+				);
+			}
+		}
 		return;
 	}
 

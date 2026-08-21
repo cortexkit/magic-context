@@ -386,6 +386,71 @@ describe("Pi dreamer wiring", () => {
 		]);
 	});
 
+	test("active-owner handoff starts one timer when remaining worktree dirs repeat", async () => {
+		db = createDb();
+		const dirs: string[] = [];
+		__test.setStartDreamScheduleTimerFactory(async (registration) => {
+			dirs.push((registration as { directory: string }).directory);
+			return mock(() => {});
+		});
+
+		const firstA = dreamerOptions({
+			database: db,
+			projectDir: "/tmp/worktree-A",
+			projectIdentity: "git:pi-handoff",
+		});
+		const ownerB = dreamerOptions({
+			database: db,
+			projectDir: "/tmp/worktree-B",
+			projectIdentity: "git:pi-handoff",
+		});
+		const secondA = dreamerOptions({
+			database: db,
+			projectDir: "/tmp/worktree-A",
+			projectIdentity: "git:pi-handoff",
+		});
+		const activeC = dreamerOptions({
+			database: db,
+			projectDir: "/tmp/worktree-C",
+			projectIdentity: "git:pi-handoff",
+		});
+		for (const owner of [firstA, ownerB, secondA, activeC]) {
+			registerPiDreamerProject(owner);
+			await flushMicrotasks();
+		}
+
+		unregisterPiDreamerProject({
+			projectIdentity: "git:pi-handoff",
+			registrationOwner: activeC.registrationOwner,
+		});
+		await flushMicrotasks();
+		expect(dirs).toEqual([
+			"/tmp/worktree-A",
+			"/tmp/worktree-B",
+			"/tmp/worktree-A",
+			"/tmp/worktree-C",
+			"/tmp/worktree-A",
+		]);
+
+		unregisterPiDreamerProject({
+			projectIdentity: "git:pi-handoff",
+			registrationOwner: secondA.registrationOwner,
+		});
+		await flushMicrotasks();
+		unregisterPiDreamerProject({
+			projectIdentity: "git:pi-handoff",
+			registrationOwner: ownerB.registrationOwner,
+		});
+		await flushMicrotasks();
+		expect(dirs.slice(-2)).toEqual(["/tmp/worktree-B", "/tmp/worktree-A"]);
+
+		unregisterPiDreamerProject({
+			projectIdentity: "git:pi-handoff",
+			registrationOwner: firstA.registrationOwner,
+		});
+		expect(__test.registeredProjectCount()).toBe(0);
+	});
+
 	test("unregister removes the project", () => {
 		db = createDb();
 		const opts = dreamerOptions({
