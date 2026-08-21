@@ -28,7 +28,7 @@ import { stagePiRecompMarker } from "../pi-recomp-marker";
 import { isPiRecompInFlight, spawnPiRecompRun } from "../pi-recomp-runner";
 import { readPiSessionMessages } from "../read-session-pi";
 import { updateStatusLine } from "../status-line";
-import { resolveSessionId, sendCtxStatusMessage } from "./pi-command-utils";
+import { createCtxStatusSender, resolveSessionId } from "./pi-command-utils";
 
 interface RecompConfirmation {
 	timestamp: number;
@@ -70,9 +70,10 @@ export function registerCtxRecompCommand(
 		description:
 			"Rebuild Magic Context compartments from raw Pi session history",
 		handler: async (args, ctx) => {
+			const sendStatus = createCtxStatusSender(pi, ctx);
 			const sessionId = resolveSessionId(ctx);
 			if (!sessionId) {
-				sendCtxStatusMessage(pi, {
+				sendStatus({
 					title: "/ctx-recomp",
 					text: "## Magic Recomp\n\nNo active Pi session is available.",
 					level: "error",
@@ -81,7 +82,7 @@ export function registerCtxRecompCommand(
 			}
 			const currentDeps = deps.resolveRuntimeDeps?.(ctx) ?? deps;
 			if (currentDeps.compactionOff) {
-				sendCtxStatusMessage(pi, {
+				sendStatus({
 					title: "/ctx-recomp",
 					text: COMPACTION_OFF_COMMAND_UNAVAILABLE,
 					level: "warning",
@@ -91,7 +92,7 @@ export function registerCtxRecompCommand(
 
 			const parsed = parseRecompArgs(args);
 			if (parsed.kind === "error") {
-				sendCtxStatusMessage(pi, {
+				sendStatus({
 					title: "/ctx-recomp",
 					text: `## Magic Recomp — Invalid Arguments\n\n${parsed.message}`,
 					level: "error",
@@ -100,7 +101,7 @@ export function registerCtxRecompCommand(
 			}
 
 			if (parsed.kind === "upgrade") {
-				sendCtxStatusMessage(pi, {
+				sendStatus({
 					title: "/ctx-recomp",
 					text: executeRecompUpgradeStub(currentDeps.db, sessionId),
 					level: "info",
@@ -110,7 +111,7 @@ export function registerCtxRecompCommand(
 			}
 
 			if (!currentDeps.historianModel) {
-				sendCtxStatusMessage(pi, {
+				sendStatus({
 					title: "/ctx-recomp",
 					text: "## Magic Recomp\n\n/ctx-recomp is unavailable because `historian.model` is not configured.",
 					level: "error",
@@ -137,7 +138,7 @@ export function registerCtxRecompCommand(
 				);
 				if (!warning.confirmable) confirmationBySession.delete(sessionId);
 				else confirmationBySession.set(sessionId, { timestamp: now, argsKey });
-				sendCtxStatusMessage(pi, {
+				sendStatus({
 					title: "/ctx-recomp",
 					text: warning.text,
 					level: warning.confirmable ? "warning" : "error",
@@ -146,7 +147,7 @@ export function registerCtxRecompCommand(
 			}
 
 			if (isWrapupInProgress(currentDeps.db, sessionId)) {
-				sendCtxStatusMessage(pi, {
+				sendStatus({
 					title: "/ctx-recomp",
 					text: "## Magic Recomp\n\n/ctx-wrapup is already compacting this session. Wait for it to finish, then try `/ctx-recomp` again.",
 					level: "warning",
@@ -155,7 +156,7 @@ export function registerCtxRecompCommand(
 			}
 
 			if (isPiRecompInFlight(sessionId)) {
-				sendCtxStatusMessage(pi, {
+				sendStatus({
 					title: "/ctx-recomp",
 					text: "## Magic Recomp\n\nA recomp or upgrade is already running for this session in the background. Wait for it to finish, then try again.",
 					level: "warning",
@@ -164,7 +165,7 @@ export function registerCtxRecompCommand(
 			}
 
 			confirmationBySession.delete(sessionId);
-			sendCtxStatusMessage(pi, {
+			sendStatus({
 				title: "/ctx-recomp",
 				text:
 					parsed.kind === "partial"
@@ -207,7 +208,7 @@ export function registerCtxRecompCommand(
 								directory: ctx.cwd,
 								accountingSessionId: sessionId,
 								notify: (text) => {
-									sendCtxStatusMessage(pi, {
+									sendStatus({
 										title: "/ctx-recomp",
 										text,
 										level: inferLevel(text),
@@ -269,7 +270,7 @@ export function registerCtxRecompCommand(
 						signalPiDeferredHistoryRefresh(sessionId);
 						signalPiDeferredMaterialization(sessionId);
 					}
-					sendCtxStatusMessage(pi, {
+					sendStatus({
 						title: "/ctx-recomp",
 						text: result.message,
 						level: inferLevel(result.message),

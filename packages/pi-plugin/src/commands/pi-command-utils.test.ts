@@ -6,7 +6,6 @@ import {
 	type PiMessageSender,
 	registerCtxStatusEntryRenderer,
 	sendCtxStatusMessage,
-	setCtxStatusPresenter,
 	shouldShowCtxStatusDialog,
 	showCtxStatusDialog,
 } from "./pi-command-utils";
@@ -14,7 +13,6 @@ import {
 describe("ctx-status entries", () => {
 	it("appends model-invisible entry data instead of sending a message", () => {
 		const appended: Array<{ customType: string; data: unknown }> = [];
-		const presented: CtxStatusEntryData[] = [];
 		let sent = 0;
 		const pi = {
 			registerEntryRenderer() {},
@@ -27,7 +25,6 @@ describe("ctx-status entries", () => {
 		} as unknown as PiMessageSender;
 
 		registerCtxStatusEntryRenderer(pi);
-		setCtxStatusPresenter(pi, (content) => presented.push(content));
 		sendCtxStatusMessage(
 			pi,
 			{ title: "Magic Embed", text: "Embedding history…", level: "info" },
@@ -46,7 +43,6 @@ describe("ctx-status entries", () => {
 			},
 		]);
 		expect(sent).toBe(0);
-		expect(presented).toEqual([appended[0]?.data]);
 	});
 
 	it("registers one ctx-status entry renderer and ignores malformed data", () => {

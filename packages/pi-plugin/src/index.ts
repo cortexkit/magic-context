@@ -120,10 +120,8 @@ import { registerCtxStatusCommand } from "./commands/ctx-status";
 import { registerCtxWrapupCommand } from "./commands/ctx-wrapup";
 import {
 	registerCtxStatusEntryRenderer,
+	resolveSessionId,
 	sendCtxStatusMessage,
-	setCtxStatusPresenter,
-	shouldShowCtxStatusDialog,
-	showCtxStatusDialog,
 } from "./commands/pi-command-utils";
 import { loadPiConfig } from "./config";
 import {
@@ -1281,23 +1279,6 @@ async function startPiMagicContextRuntime(
 	);
 
 	pi.on("session_start", async (event, ctx) => {
-		if (ctx.mode === "rpc") {
-			setCtxStatusPresenter(pi, (content) => {
-				const type =
-					content.level === "error" || content.level === "warning"
-						? content.level
-						: "info";
-				const useDialog = shouldShowCtxStatusDialog(content);
-				if (!useDialog) {
-					ctx.ui.notify(content.text, type);
-					return;
-				}
-				void showCtxStatusDialog(ctx, content).catch((err) => {
-					warn("ctx status dialog failed:", err);
-					ctx.ui.notify(content.text, type);
-				});
-			});
-		}
 		await handlePiCloneSessionStart(event, ctx, {
 			db,
 			signalPendingMarker: signalPiDeferredCompactionMarkerDrain,
@@ -1552,6 +1533,7 @@ async function startPiMagicContextRuntime(
 		onProjectSeen: (identity) => seenDreamerProjectIdentities.add(identity),
 		ensureRegistered: (ctx) =>
 			syncDreamerProjectRegistration(resolveCurrentProjectDeps(ctx)),
+		registrationOwner: dreamerRegistrationOwner,
 	});
 	info("registered /ctx-dream");
 
@@ -2323,9 +2305,9 @@ async function startPiMagicContextRuntime(
 		}
 	});
 
-	// Unregister project from dreamer timer on session shutdown. Pi's
-	// `/reload` command tears down extensions and re-runs this default
-	// export — without unregistering, the dreamer timer would hold a
+	// Release this extension instance's dreamer registrations on session shutdown.
+	// Pi's `/reload` command tears down extensions and re-runs this default
+	// export — without releasing them, the dreamer timer would hold a
 	// stale reference to the previous extension instance.
 	//
 	// IMPORTANT: We do NOT close the SQLite handle here. `openDatabase()`
@@ -2344,26 +2326,35 @@ async function startPiMagicContextRuntime(
 		// session_shutdown only fires when the user is actually leaving
 		// the session, so a brief wait is acceptable — and lets the
 		// JSONL session state reach a consistent compartment boundary
-		// before the process exits.
+		// before that session's cleanup completes.
 		//
-		// 5-second cap protects interactive shutdown from a hung
+		// 5-second cap per drain protects interactive shutdown from a hung
 		// subagent. In `pi --print` mode the process exits after
 		// agent_end before this handler fires anyway, so the cap
 		// doesn't help that mode (and we don't pretend it does — see
 		// the comment block on the agent_end handler above).
 		const SHUTDOWN_DRAIN_MS = 5_000;
-		try {
-			await withTimeout(awaitInFlightHistorians(), SHUTDOWN_DRAIN_MS);
-		} catch (err) {
-			warn("shutdown: historian drain threw:", err);
+		const sessionId = resolveSessionId(ctx);
+		if (sessionId) {
+			try {
+				await withTimeout(
+					awaitInFlightHistorians(sessionId),
+					SHUTDOWN_DRAIN_MS,
+				);
+			} catch (err) {
+				warn("shutdown: historian drain threw:", err);
+			}
+			try {
+				await withTimeout(awaitInFlightRecomps(sessionId), SHUTDOWN_DRAIN_MS);
+			} catch (err) {
+				warn("shutdown: recomp drain threw:", err);
+			}
 		}
 		try {
-			await withTimeout(awaitInFlightRecomps(), SHUTDOWN_DRAIN_MS);
-		} catch (err) {
-			warn("shutdown: recomp drain threw:", err);
-		}
-		try {
-			await withTimeout(awaitInFlightDreamers(), SHUTDOWN_DRAIN_MS);
+			await withTimeout(
+				awaitInFlightDreamers(dreamerRegistrationOwner),
+				SHUTDOWN_DRAIN_MS,
+			);
 		} catch (err) {
 			warn("shutdown: dreamer drain threw:", err);
 		}

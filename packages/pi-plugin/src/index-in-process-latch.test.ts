@@ -189,6 +189,44 @@ describe("Pi in-process child guard (#247)", () => {
 		expect(sibling.commands).toContain("ctx-status");
 	}, 15_000);
 
+	it("does not suppress an independent session while a child marker is active", async () => {
+		isolateXdgEnv();
+		delete process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV];
+
+		const parent = createCountingPi();
+		await magicContextPiExtension(parent.pi);
+
+		let childMarked!: () => void;
+		const marked = new Promise<void>((resolve) => {
+			childMarked = resolve;
+		});
+		let releaseChild!: () => void;
+		const release = new Promise<void>((resolve) => {
+			releaseChild = resolve;
+		});
+		const child = createCountingPi();
+		const childBranch = Promise.resolve().then(async () => {
+			parent.emitEvent("subagents:child:session-created");
+			await magicContextPiExtension(child.pi);
+			childMarked();
+			await release;
+			parent.emitEvent("subagents:child:disposed");
+		});
+
+		await marked;
+		try {
+			expect(child.tools).toEqual([]);
+
+			const independent = createCountingPi();
+			await magicContextPiExtension(independent.pi);
+			expect(independent.tools).toContain("ctx_search");
+			expect(independent.commands).toContain("ctx-status");
+		} finally {
+			releaseChild();
+			await childBranch;
+		}
+	}, 15_000);
+
 	it("keeps the spawned-child environment guard", async () => {
 		isolateXdgEnv();
 		process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV] = "1";

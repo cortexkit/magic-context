@@ -138,6 +138,39 @@ describe("Pi dreamer wiring", () => {
 		expect(__test.registeredProjectCount()).toBe(1);
 	});
 
+	test("shares registrations across jiti-style module instances", async () => {
+		db = createDb();
+		let timerStarts = 0;
+		__test.setStartDreamScheduleTimerFactory(async () => {
+			timerStarts += 1;
+			return mock(() => {});
+		});
+		const opts = dreamerOptions({
+			database: db,
+			projectDir: "/tmp/pi-shared-module",
+			projectIdentity: "git:pi-shared-module",
+		});
+		registerPiDreamerProject(opts);
+		await flushMicrotasks();
+
+		const secondInstance = await import(
+			`./index.ts?registry-instance=${Date.now()}`
+		);
+		secondInstance.__test.setStartDreamScheduleTimerFactory(async () => {
+			timerStarts += 1;
+			return mock(() => {});
+		});
+		secondInstance.registerPiDreamerProject({
+			...opts,
+			registrationOwner: {},
+		});
+		await flushMicrotasks();
+
+		expect(timerStarts).toBe(1);
+		expect(secondInstance.__test.registeredProjectCount()).toBe(1);
+		secondInstance.__test.reset();
+	});
+
 	test("threads language into scheduled dreamer registration", async () => {
 		db = createDb();
 		let language: string | undefined;
@@ -451,6 +484,57 @@ describe("Pi dreamer wiring", () => {
 		expect(__test.registeredProjectCount()).toBe(0);
 	});
 
+	test("re-registration refreshes owner recency before active-owner handoff", async () => {
+		db = createDb();
+		const dirs: string[] = [];
+		__test.setStartDreamScheduleTimerFactory(async (registration) => {
+			dirs.push((registration as { directory: string }).directory);
+			return mock(() => {});
+		});
+
+		const ownerA = {};
+		const firstA = dreamerOptions({
+			database: db,
+			projectDir: "/tmp/worktree-A",
+			projectIdentity: "git:pi-owner-recency",
+			registrationOwner: ownerA,
+		});
+		const ownerB = dreamerOptions({
+			database: db,
+			projectDir: "/tmp/worktree-B",
+			projectIdentity: "git:pi-owner-recency",
+		});
+		const refreshedA = dreamerOptions({
+			database: db,
+			projectDir: "/tmp/worktree-A",
+			projectIdentity: "git:pi-owner-recency",
+			registrationOwner: ownerA,
+		});
+		const activeC = dreamerOptions({
+			database: db,
+			projectDir: "/tmp/worktree-C",
+			projectIdentity: "git:pi-owner-recency",
+		});
+		for (const owner of [firstA, ownerB, refreshedA, activeC]) {
+			registerPiDreamerProject(owner);
+			await flushMicrotasks();
+		}
+
+		unregisterPiDreamerProject({
+			projectIdentity: "git:pi-owner-recency",
+			registrationOwner: activeC.registrationOwner,
+		});
+		await flushMicrotasks();
+
+		expect(dirs).toEqual([
+			"/tmp/worktree-A",
+			"/tmp/worktree-B",
+			"/tmp/worktree-A",
+			"/tmp/worktree-C",
+			"/tmp/worktree-A",
+		]);
+	});
+
 	test("unregister removes the project", () => {
 		db = createDb();
 		const opts = dreamerOptions({
@@ -470,6 +554,69 @@ describe("Pi dreamer wiring", () => {
 
 	test("awaitInFlightDreamers resolves immediately when nothing is running", async () => {
 		await expect(awaitInFlightDreamers()).resolves.toBeUndefined();
+	});
+
+	test("awaitInFlightDreamers waits only for the requested owner", async () => {
+		db = createDb();
+		const ownerA = {};
+		const ownerB = {};
+		const gates = [
+			deferred<{ ok: true; assistantText: string }>(),
+			deferred<{ ok: true; assistantText: string }>(),
+		];
+		let nextRunner = 0;
+		const clients: CapturedDreamClient[] = [];
+		__test.setPiSubagentRunnerFactory(() => {
+			const gate = gates[nextRunner++];
+			return { run: mock(() => gate.promise) } as never;
+		});
+		__test.setStartDreamScheduleTimerFactory(async (registration) => {
+			clients.push(registration.client as unknown as CapturedDreamClient);
+			return mock(() => {});
+		});
+
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectIdentity: "git:pi-owner-a",
+				registrationOwner: ownerA,
+			}),
+		);
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectIdentity: "git:pi-owner-b",
+				registrationOwner: ownerB,
+			}),
+		);
+		await flushMicrotasks();
+
+		const sessions = await Promise.all(
+			clients.map(
+				(client) => client.session.create({}) as Promise<{ id: string }>,
+			),
+		);
+		const prompts = clients.map((client, index) =>
+			client.session.prompt({
+				path: { id: sessions[index]?.id },
+				body: { system: "system", parts: [{ text: "run dreamer" }] },
+			}),
+		);
+		await flushMicrotasks();
+
+		let ownerADrained = false;
+		const ownerADrain = awaitInFlightDreamers(ownerA).then(() => {
+			ownerADrained = true;
+		});
+		gates[1]?.resolve({ ok: true, assistantText: "owner B done" });
+		await prompts[1];
+		await flushMicrotasks();
+		expect(ownerADrained).toBe(false);
+
+		gates[0]?.resolve({ ok: true, assistantText: "owner A done" });
+		await ownerADrain;
+		await prompts[0];
+		expect(ownerADrained).toBe(true);
 	});
 
 	test("fires onAdjunctsRefreshNeeded after successful dreamer prompt", async () => {

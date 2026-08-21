@@ -16,7 +16,7 @@ import { resolveTailHygieneStatus } from "@magic-context/core/shared/tail-hygien
 import { getPiChannel1Baseline } from "../ctx-reduce-nudge-pi";
 import { showStatusDialog } from "../dialogs/status-dialog";
 import { resolvePiWindowGeometry } from "../pi-context-limit";
-import { resolveSessionId, sendCtxStatusMessage } from "./pi-command-utils";
+import { createCtxStatusSender, resolveSessionId } from "./pi-command-utils";
 
 export interface RegisterCtxStatusDeps {
 	db: ContextDatabase;
@@ -82,6 +82,7 @@ export function registerCtxStatusCommand(
 	pi.registerCommand("ctx-status", {
 		description: "Show Magic Context status for the current Pi session",
 		handler: async (_args, ctx) => {
+			const sendStatus = createCtxStatusSender(pi, ctx);
 			const runtimeDeps = deps.resolveStatusDeps?.(ctx) ?? deps;
 			const projectIdentity =
 				runtimeDeps.resolveProject?.(ctx).projectIdentity ??
@@ -89,7 +90,7 @@ export function registerCtxStatusCommand(
 			const currentDeps = { ...runtimeDeps, projectIdentity };
 			const sessionId = resolveSessionId(ctx);
 			if (!sessionId) {
-				sendCtxStatusMessage(pi, {
+				sendStatus({
 					title: "/ctx-status",
 					text: "## Magic Status\n\nNo active Pi session is available.",
 					level: "error",
@@ -148,8 +149,7 @@ export function registerCtxStatusCommand(
 				);
 				const details = buildStatusDetails(currentDeps, sessionId);
 				const profileStatus = currentDeps.activeProfile ?? "none";
-				sendCtxStatusMessage(
-					pi,
+				sendStatus(
 					{
 						title: "/ctx-status",
 						text: `${statusText}\n\nActive profile: ${profileStatus}`,
@@ -159,7 +159,7 @@ export function registerCtxStatusCommand(
 					details,
 				);
 			} catch (error) {
-				sendCtxStatusMessage(pi, {
+				sendStatus({
 					title: "/ctx-status",
 					text: `## Magic Status — Failed\n\n${describeError(error).brief}`,
 					level: "error",

@@ -42,7 +42,7 @@ import { runPiHistorian } from "../pi-historian-runner";
 import { isPiRecompInFlight } from "../pi-recomp-runner";
 import { readPiSessionMessages } from "../read-session-pi";
 import { updateStatusLine } from "../status-line";
-import { resolveSessionId, sendCtxStatusMessage } from "./pi-command-utils";
+import { createCtxStatusSender, resolveSessionId } from "./pi-command-utils";
 
 export interface RegisterCtxWrapupDeps {
 	db: ContextDatabase;
@@ -120,9 +120,10 @@ export function registerCtxWrapupCommand(
 		description:
 			"Compact older Magic Context history while keeping the newest messages raw",
 		handler: async (args, ctx) => {
+			const sendStatus = createCtxStatusSender(pi, ctx);
 			const sessionId = resolveSessionId(ctx);
 			if (!sessionId) {
-				sendCtxStatusMessage(pi, {
+				sendStatus({
 					title: "/ctx-wrapup",
 					text: "## Magic Wrapup\n\nNo active Pi session is available.",
 					level: "error",
@@ -131,7 +132,7 @@ export function registerCtxWrapupCommand(
 			}
 			const currentDeps = deps.resolveRuntimeDeps?.(ctx) ?? deps;
 			if (currentDeps.compactionOff) {
-				sendCtxStatusMessage(pi, {
+				sendStatus({
 					title: "/ctx-wrapup",
 					text: COMPACTION_OFF_COMMAND_UNAVAILABLE,
 					level: "warning",
@@ -141,7 +142,7 @@ export function registerCtxWrapupCommand(
 
 			const sessionMeta = getOrCreateSessionMeta(currentDeps.db, sessionId);
 			if (sessionMeta.isSubagent) {
-				sendCtxStatusMessage(pi, {
+				sendStatus({
 					title: "/ctx-wrapup",
 					text: "## Magic Wrapup — Skipped\n\n/ctx-wrapup is only available in primary sessions.",
 					level: "warning",
@@ -150,7 +151,7 @@ export function registerCtxWrapupCommand(
 			}
 
 			if (!currentDeps.historianModel) {
-				sendCtxStatusMessage(pi, {
+				sendStatus({
 					title: "/ctx-wrapup",
 					text: "## Magic Wrapup\n\n/ctx-wrapup is unavailable because `historian.model` is not configured.",
 					level: "error",
@@ -160,7 +161,7 @@ export function registerCtxWrapupCommand(
 
 			const parsed = parseWrapupArgs(args);
 			if (!parsed.ok) {
-				sendCtxStatusMessage(pi, {
+				sendStatus({
 					title: "/ctx-wrapup",
 					text: `## Magic Wrapup — Invalid Arguments\n\n${parsed.message}`,
 					level: "error",
@@ -175,7 +176,7 @@ export function registerCtxWrapupCommand(
 				sessionId,
 				parsed.messagesToKeep,
 			);
-			sendCtxStatusMessage(pi, {
+			sendStatus({
 				title: "/ctx-wrapup",
 				text: result,
 				level:
@@ -194,6 +195,7 @@ export async function runPiWrapup(
 	sessionId: string,
 	messagesToKeep: number,
 ): Promise<string> {
+	const sendStatus = createCtxStatusSender(pi, ctx);
 	if (getOrCreateSessionMeta(deps.db, sessionId).isSubagent) {
 		return "## Magic Wrapup — Skipped\n\n/ctx-wrapup is only available in primary sessions.";
 	}
@@ -292,7 +294,7 @@ export async function runPiWrapup(
 			}
 		}, 60_000);
 		try {
-			sendCtxStatusMessage(pi, {
+			sendStatus({
 				title: "/ctx-wrapup",
 				text: `## Magic Wrapup\n\nEligible history is about ${initialPlan.snapshot.trueRawEligibleTokens.toLocaleString()} tokens across approximately ${estimateChunks(initialPlan.snapshot.trueRawEligibleTokens, deps.historianChunkTokens)} historian chunk(s).`,
 				level: "info",
@@ -365,7 +367,7 @@ export async function runPiWrapup(
 					failure = `${ownershipLostReason}; wrapped up through message ${lastEnd}. Run /ctx-wrapup again to continue.`;
 					break;
 				}
-				sendCtxStatusMessage(pi, {
+				sendStatus({
 					title: "/ctx-wrapup",
 					text: `## Magic Wrapup\n\nChunk ${chunkIndex}: wrapping messages ${plan.snapshot.offset}-${plan.snapshot.eligibleEndOrdinal - 1} (~${plan.snapshot.trueRawEligibleTokens.toLocaleString()} eligible tokens remain).`,
 					level: "info",
@@ -433,7 +435,7 @@ export async function runPiWrapup(
 						compartmentLeaseHolderId: leaseHolder,
 						readBranchEntries: () => readBranchEntries(ctx),
 						notifyIssue: (text) =>
-							sendCtxStatusMessage(pi, {
+							sendStatus({
 								title: "/ctx-wrapup",
 								text,
 								level: "warning",

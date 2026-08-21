@@ -8,7 +8,7 @@ import {
 	signalPiPendingMaterialization,
 	signalPiSystemPromptRefresh,
 } from "../context-handler";
-import { resolveSessionId, sendCtxStatusMessage } from "./pi-command-utils";
+import { createCtxStatusSender, resolveSessionId } from "./pi-command-utils";
 
 export function registerCtxFlushCommand(
 	pi: ExtensionAPI,
@@ -18,9 +18,10 @@ export function registerCtxFlushCommand(
 		description:
 			"Force pending Magic Context drops to materialize on the next provider call",
 		handler: async (_args, ctx) => {
+			const sendStatus = createCtxStatusSender(pi, ctx);
 			const sessionId = resolveSessionId(ctx);
 			if (!sessionId) {
-				sendCtxStatusMessage(pi, {
+				sendStatus({
 					title: "/ctx-flush",
 					text: "## /ctx-flush\n\nNo active Pi session is available.",
 					level: "error",
@@ -28,7 +29,7 @@ export function registerCtxFlushCommand(
 				return;
 			}
 			if (deps.compactionOff) {
-				sendCtxStatusMessage(pi, {
+				sendStatus({
 					title: "/ctx-flush",
 					text: COMPACTION_OFF_COMMAND_UNAVAILABLE,
 					level: "warning",
@@ -66,8 +67,7 @@ export function registerCtxFlushCommand(
 				pendingBefore > 0
 					? `## /ctx-flush\n\nFlushed ${pendingBefore} pending ops; next provider call will materialize.\n\n${result}`
 					: `## /ctx-flush\n\n${result}`;
-			sendCtxStatusMessage(
-				pi,
+			sendStatus(
 				{
 					title: "/ctx-flush",
 					text,

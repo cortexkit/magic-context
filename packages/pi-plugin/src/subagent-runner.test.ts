@@ -10,6 +10,7 @@ import {
 import { EventEmitter } from "node:events";
 import {
 	existsSync,
+	mkdirSync,
 	mkdtempSync,
 	readFileSync,
 	rmSync,
@@ -1065,6 +1066,57 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 			durationMs: expect.any(Number),
 			meta: { stderr: "warning from pi" },
 		});
+	});
+
+	it("with no piBinary override, spawns the host runtime + cli.js (Windows-safe, #177)", async () => {
+		// Default resolution must NOT spawn a bare "pi" (which ENOENTs on Windows
+		// because npm installs a pi.cmd shim, not a literal pi). It re-invokes the
+		// exact host CLI: process.execPath + process.argv[1], with no shell.
+		const root = mkdtempSync(join(tmpdir(), "mc-pi-cli-"));
+		const distDir = join(
+			root,
+			"node_modules",
+			"@earendil-works",
+			"pi-coding-agent",
+			"dist",
+		);
+		const cliPath = join(distDir, "cli.js");
+		mkdirSync(distDir, { recursive: true });
+		writeFileSync(cliPath, "");
+		const previousScript = process.argv[1];
+		process.argv[1] = cliPath;
+		try {
+			const child = createMockChild();
+			const spawnImpl = mock(() => child as never);
+			const runner = new PiSubagentRunner({ spawnImpl: spawnImpl as never });
+
+			const resultPromise = runner.run(baseOptions);
+			child.writeStdoutLine({ type: "session", id: "s1" });
+			child.writeStdoutLine(
+				agentEnd([
+					{
+						role: "assistant",
+						content: [{ type: "text", text: "ok" }],
+						stopReason: "stop",
+					},
+				]),
+			);
+			child.emitClose(0);
+			await resultPromise;
+
+			const [command, spawnArgs, opts] = (
+				spawnImpl.mock.calls as unknown[][]
+			)[0] as [string, string[], { shell?: boolean }];
+			expect(command).toBe(process.execPath);
+			expect(spawnArgs[0]).toBe(cliPath);
+			// Crucially, never a bare "pi".
+			expect(command).not.toBe("pi");
+			expect(opts.shell).toBeFalsy();
+		} finally {
+			if (previousScript === undefined) delete process.argv[1];
+			else process.argv[1] = previousScript;
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	it("with no piBinary override, does not re-run an embedded host", async () => {

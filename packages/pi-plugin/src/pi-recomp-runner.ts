@@ -7,7 +7,7 @@ import { setMagicContextRecompActive } from "./status-line";
 
 /**
  * In-flight detached recomp / upgrade runs, keyed by session, so the
- * `session_shutdown` handler can await them before Pi exits — mirrors
+ * `session_shutdown` handler can await only that session's work — mirrors
  * `inFlightHistorian` in context-handler.ts.
  *
  * Why detached: Pi's command handler IS the REPL turn (single process). Awaiting
@@ -26,13 +26,19 @@ export function isPiRecompInFlight(sessionId: string): boolean {
 }
 
 /**
- * Await all in-flight recomp/upgrade runs. Called from `session_shutdown`
- * (bounded by a timeout there) so a background recomp can finish publishing
- * before Pi tears the session down.
+ * Await one session's in-flight recomp/upgrade run. Called from
+ * `session_shutdown` (bounded by a timeout there) so a background recomp can
+ * finish publishing before Pi tears that session down. Omitting the session id
+ * waits for all runs and remains available for process-exit callers and tests.
  */
-export async function awaitInFlightRecomps(): Promise<void> {
-	if (inFlightRecomp.size === 0) return;
-	await Promise.allSettled(Array.from(inFlightRecomp.values()));
+export async function awaitInFlightRecomps(sessionId?: string): Promise<void> {
+	const runs = sessionId
+		? [inFlightRecomp.get(sessionId)].filter(
+				(run): run is Promise<unknown> => run !== undefined,
+			)
+		: [...inFlightRecomp.values()];
+	if (runs.length === 0) return;
+	await Promise.allSettled(runs);
 }
 
 /**

@@ -3364,14 +3364,22 @@ export function registerPiContextHandler(
 const inFlightHistorian = new Map<string, Promise<unknown>>();
 
 /**
- * Wait for all in-flight historian runs to complete. Called from the
- * Pi `session_shutdown` event handler so historian can finish writing
- * compartments before the process exits. Returns immediately if no
- * runs are in-flight.
+ * Wait for one session's in-flight historian run to complete. Called from the
+ * Pi `session_shutdown` event handler so its historian can finish writing
+ * compartments before that session shuts down. Omitting the session id waits
+ * for all runs and remains available for process-exit callers and tests. Returns
+ * immediately if no matching runs are in-flight.
  */
-export async function awaitInFlightHistorians(): Promise<void> {
-	if (inFlightHistorian.size === 0) return;
-	await Promise.allSettled(Array.from(inFlightHistorian.values()));
+export async function awaitInFlightHistorians(
+	sessionId?: string,
+): Promise<void> {
+	const runs = sessionId
+		? [inFlightHistorian.get(sessionId)].filter(
+				(run): run is Promise<unknown> => run !== undefined,
+			)
+		: [...inFlightHistorian.values()];
+	if (runs.length === 0) return;
+	await Promise.allSettled(runs);
 }
 
 export function resolvePiHistorianTriggerInputs(args: {

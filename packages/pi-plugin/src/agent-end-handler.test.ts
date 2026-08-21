@@ -107,15 +107,22 @@ describe("session_shutdown handler (drain location)", () => {
 	const body = extractSessionShutdownHandlerBody(INDEX_SRC);
 
 	test("drains in-flight historians through withTimeout", () => {
-		expect(body).toContain("awaitInFlightHistorians");
-		expect(body).toContain(
-			"withTimeout(awaitInFlightHistorians(), SHUTDOWN_DRAIN_MS)",
+		expect(body).toMatch(
+			/withTimeout\(\s*awaitInFlightHistorians\(sessionId\),\s*SHUTDOWN_DRAIN_MS,?\s*\)/,
 		);
 		expect(body).not.toContain("Promise.race");
 	});
 
-	test("drains in-flight dreamers (Promise.race with timeout)", () => {
-		expect(body).toContain("awaitInFlightDreamers");
+	test("drains the shutting-down session's recomp through withTimeout", () => {
+		expect(body).toMatch(
+			/withTimeout\(\s*awaitInFlightRecomps\(sessionId\),\s*SHUTDOWN_DRAIN_MS,?\s*\)/,
+		);
+	});
+
+	test("drains the current extension owner's dreamers through withTimeout", () => {
+		expect(body).toMatch(
+			/withTimeout\(\s*awaitInFlightDreamers\(dreamerRegistrationOwner\),\s*SHUTDOWN_DRAIN_MS,?\s*\)/,
+		);
 	});
 
 	test("drain timeout uses unref/clear helper", () => {

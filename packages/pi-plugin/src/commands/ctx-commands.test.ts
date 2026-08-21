@@ -29,8 +29,10 @@ interface AppendedEntry {
 interface MockCommandContext {
 	cwd: string;
 	hasUI?: boolean;
+	mode?: "rpc";
 	ui: {
 		custom: (factory: unknown, options?: unknown) => Promise<unknown>;
+		notify?: (text: string, type?: string) => void;
 		setStatus?: (key: string, text: string) => void;
 	};
 	model?: {
@@ -167,6 +169,34 @@ describe("Pi Magic Context commands", () => {
 		expect(sent[0]?.data.details).toMatchObject({ activeProfile: "work" });
 	});
 
+	it("presents /ctx-status through the live RPC command context", async () => {
+		const db = createDb();
+		const { pi, handlers } = createMockPi();
+		const shownA: unknown[] = [];
+		const shownB: unknown[] = [];
+		const rpcCtx = (sessionId: string, shown: unknown[]) => ({
+			...createCtx(sessionId),
+			mode: "rpc" as const,
+			ui: {
+				async custom(factory: unknown) {
+					shown.push(factory);
+					return undefined;
+				},
+				notify() {},
+			},
+		});
+		registerCtxStatusCommand(pi as never, {
+			db,
+			projectIdentity: "/tmp/project",
+		});
+
+		await handlers.get("ctx-status")?.("", rpcCtx("ses-a", shownA));
+		await handlers.get("ctx-status")?.("", rpcCtx("ses-b", shownB));
+
+		expect(shownA).toHaveLength(1);
+		expect(shownB).toHaveLength(1);
+	});
+
 	it("/ctx-status keeps the persisted usable limit when command context omits maxTokens", async () => {
 		const db = createDb();
 		const sessionId = "ses-status-persisted-reserve";
@@ -284,8 +314,10 @@ describe("Pi Magic Context commands", () => {
 				registrationCwds.push(ctx.cwd);
 			},
 		});
-		// This unit test isolates the command from the real dreamer registry. The
-		// injected registration sync runs immediately before the manual dream call.
+		// Not registered with the dreamer timer in this unit test, so runManual
+		// throws "not registered" → the handler reports the failure. We only
+		// assert the command is wired and emits a /ctx-dream status message.
+		// The injected registration sync runs immediately before runManual.
 		await handlers.get("ctx-dream")?.("", createCtx());
 
 		expect(registrationCwds).toEqual(["/tmp/project"]);

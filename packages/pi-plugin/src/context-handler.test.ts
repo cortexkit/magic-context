@@ -1074,6 +1074,44 @@ describe("registerPiContextHandler", () => {
 		clearAutoSearchForPiSession("ses-sticky-context");
 	});
 
+	it("awaits only the requested session's in-flight historian", async () => {
+		let resolveA!: () => void;
+		let resolveB!: () => void;
+		const historianA = new Promise<void>((resolve) => {
+			resolveA = resolve;
+		});
+		const historianB = new Promise<void>((resolve) => {
+			resolveB = resolve;
+		});
+		const restoreA = contextHandlerInternals.setInFlightHistorianForTests(
+			"ses-drain-a",
+			historianA,
+		);
+		const restoreB = contextHandlerInternals.setInFlightHistorianForTests(
+			"ses-drain-b",
+			historianB,
+		);
+		let sessionADrained = false;
+		const drainA = awaitInFlightHistorians("ses-drain-a").then(() => {
+			sessionADrained = true;
+		});
+
+		try {
+			resolveB();
+			await awaitInFlightHistorians("ses-drain-b");
+			expect(sessionADrained).toBe(false);
+
+			resolveA();
+			await drainA;
+			expect(sessionADrained).toBe(true);
+		} finally {
+			resolveA();
+			resolveB();
+			restoreA();
+			restoreB();
+		}
+	});
+
 	it("does not reset Pi model-specific state when canonical and native alias spellings flip", async () => {
 		const db = createTestDb();
 		const sessionId = "ses-pi-model-alias-switch";

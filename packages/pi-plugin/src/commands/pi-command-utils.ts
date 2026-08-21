@@ -41,17 +41,6 @@ type PiEntryRendererRegistration = {
 export type PiMessageSender = Pick<ExtensionAPI, "appendEntry"> &
 	PiEntryRendererRegistration;
 
-type CtxStatusPresenter = (content: CtxStatusMessageContent) => void;
-
-const ctxStatusPresenters = new WeakMap<PiMessageSender, CtxStatusPresenter>();
-
-export function setCtxStatusPresenter(
-	pi: PiMessageSender,
-	present: CtxStatusPresenter,
-): void {
-	ctxStatusPresenters.set(pi, present);
-}
-
 export function shouldShowCtxStatusDialog(
 	content: CtxStatusMessageContent,
 ): boolean {
@@ -64,7 +53,7 @@ export function shouldShowCtxStatusDialog(
 }
 
 export function resolveSessionId(
-	ctx: ExtensionCommandContext,
+	ctx: Pick<ExtensionCommandContext, "sessionManager">,
 ): string | undefined {
 	const sm = ctx.sessionManager;
 	const getSessionId = (sm as { getSessionId?: () => string | undefined })
@@ -179,10 +168,40 @@ export function registerCtxStatusEntryRenderer(pi: PiMessageSender): boolean {
 	}
 }
 
+function presentCtxStatusMessage(
+	ctx: Pick<ExtensionCommandContext, "mode" | "ui">,
+	content: CtxStatusMessageContent,
+): void {
+	if (ctx.mode !== "rpc") return;
+	const type =
+		content.level === "error" || content.level === "warning"
+			? content.level
+			: "info";
+	if (!shouldShowCtxStatusDialog(content)) {
+		ctx.ui.notify(content.text, type);
+		return;
+	}
+	void showCtxStatusDialog(ctx, content).catch((err) => {
+		sessionLog(
+			"pi-status",
+			`ctx status dialog failed: ${err instanceof Error ? err.message : String(err)}`,
+		);
+		ctx.ui.notify(content.text, type);
+	});
+}
+
+export function createCtxStatusSender(
+	pi: PiMessageSender,
+	ctx: ExtensionCommandContext,
+): (content: CtxStatusMessageContent, details?: unknown) => void {
+	return (content, details) => sendCtxStatusMessage(pi, content, details, ctx);
+}
+
 export function sendCtxStatusMessage(
 	pi: PiMessageSender,
 	content: CtxStatusMessageContent,
 	details?: unknown,
+	ctx?: ExtensionCommandContext,
 ): void {
 	const data: CtxStatusEntryData = {
 		...content,
@@ -194,7 +213,7 @@ export function sendCtxStatusMessage(
 	if (typeof pi.appendEntry === "function") {
 		pi.appendEntry<CtxStatusEntryData>(CTX_STATUS_CUSTOM_TYPE, data);
 	}
-	ctxStatusPresenters.get(pi)?.(data);
+	if (ctx) presentCtxStatusMessage(ctx, data);
 
 	// Minimal non-interactive API shims may omit appendEntry; logging remains the
 	// safe fallback and status text must never be routed through sendMessage.

@@ -9,7 +9,7 @@ import {
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import { runPiDreamForProject } from "../dreamer";
-import { sendCtxStatusMessage } from "./pi-command-utils";
+import { createCtxStatusSender } from "./pi-command-utils";
 
 export function registerCtxDreamCommand(
 	pi: ExtensionAPI,
@@ -25,11 +25,13 @@ export function registerCtxDreamCommand(
 		resolveDreamerEnabled?: (ctx: { cwd: string }) => boolean | undefined;
 		onProjectSeen?: (projectIdentity: string) => void;
 		ensureRegistered?: (ctx: { cwd: string }) => void | Promise<void>;
+		registrationOwner?: object;
 	},
 ): void {
 	pi.registerCommand("ctx-dream", {
 		description: "Run Magic Context dreamer tasks for this project now",
 		handler: async (args, ctx) => {
+			const sendStatus = createCtxStatusSender(pi, ctx);
 			const project = deps.resolveProject?.(ctx) ?? {
 				projectDir: deps.projectDir,
 				projectIdentity: deps.projectIdentity,
@@ -44,8 +46,7 @@ export function registerCtxDreamCommand(
 			let task: DreamTaskName | undefined;
 			if (requested) {
 				if (!isCanonicalDreamTask(requested)) {
-					sendCtxStatusMessage(
-						pi,
+					sendStatus(
 						{
 							title: "/ctx-dream",
 							text: `## /ctx-dream\n\nUnknown task "${requested}".`,
@@ -61,8 +62,7 @@ export function registerCtxDreamCommand(
 				task = requested;
 			}
 			if (dreamerEnabled === false) {
-				sendCtxStatusMessage(
-					pi,
+				sendStatus(
 					{
 						title: "/ctx-dream",
 						text: "## /ctx-dream\n\nDreamer is disabled for this project (`dreamer.disable=true`).",
@@ -84,8 +84,7 @@ export function registerCtxDreamCommand(
 
 			// Tell the user we're starting a real run, including the read-only count
 			// captured before the task acquires its lease.
-			sendCtxStatusMessage(
-				pi,
+			sendStatus(
 				{
 					title: "/ctx-dream",
 					text: [
@@ -113,6 +112,7 @@ export function registerCtxDreamCommand(
 				const result = await runPiDreamForProject(
 					project.projectIdentity,
 					task,
+					deps.registrationOwner,
 				);
 				const lines: string[] = [];
 				if (result.ran.length > 0) lines.push(`Ran: ${result.ran.join(", ")}`);
@@ -142,8 +142,7 @@ export function registerCtxDreamCommand(
 				}
 				if (lines.length === 0) lines.push("No enabled dream tasks to run.");
 
-				sendCtxStatusMessage(
-					pi,
+				sendStatus(
 					{
 						title: "/ctx-dream",
 						text: ["## /ctx-dream", "", ...lines].join("\n"),
@@ -158,8 +157,7 @@ export function registerCtxDreamCommand(
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				sessionLog(project.projectIdentity, `/ctx-dream failed: ${message}`);
-				sendCtxStatusMessage(
-					pi,
+				sendStatus(
 					{
 						title: "/ctx-dream",
 						text: [

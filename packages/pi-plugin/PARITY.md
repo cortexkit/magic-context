@@ -23,14 +23,20 @@ plugin process and reach `experimental.chat.messages.transform`. OpenCode gates
 historian / m[0]m[1] injection / nudges / auto-search behind `fullFeatureMode`
 (i.e. `!isSubagent`), and detects subagents via OpenCode's `session.parent_id`.
 
-**Pi:** Pi has **no native subagent concept**. The *only* subagents that exist
-are the ones Magic Context itself spawns (historian, dreamer, sidekick), and each
-runs as a **separate `pi --print` process** loading only the lean
-`subagent-entry.js`, whose recursion guard **never wires `pi.on("context")`**
-(see `subagent-entry.ts` header). A Pi subagent therefore *cannot* reach the
-context-handler pipeline at all.
+**Pi:** Pi has **no native subagent concept**. The subagents Magic Context itself
+spawns (historian, dreamer, sidekick) each run as a **separate `pi --print` process**
+loading only the lean `subagent-entry.js`, whose recursion guard **never wires
+`pi.on("context")`** (see `subagent-entry.ts` header). A Magic Context subagent
+therefore *cannot* reach the context-handler pipeline at all.
+`@gotgenes/pi-subagents`, however, can initialize a child session inside the same
+process. The full extension uses Pi's public child-session lifecycle events plus
+process-shared `AsyncLocalStorage` to suppress only the child while allowing
+unrelated same-process sessions to initialize normally.
 
-**Consequence:** `is_subagent` is **never written `true`** for any Pi session.
+**Consequence:** `is_subagent` is **never written `true`** for any Pi session
+that reaches the context-handler pipeline. Separate child processes load the lean
+entry, while in-process child initialization is suppressed before the normal
+context pipeline is registered.
 There is nothing to gate, so Pi does NOT need OpenCode's `fullFeatureMode`
 reduced-mode enforcement in `context-handler.ts`. The vestigial `!isSubagent`
 checks that exist in the Pi context handler are harmless (always take the
@@ -115,7 +121,7 @@ the source array for dirty indices only.
 
 ---
 
-## 6. Transient UI: Pi uses `ctx.ui.notify` toasts, not persistent dialogs
+## 6. Transient UI: Pi uses `ctx.ui.notify` toasts and RPC dialogs
 
 **OpenCode:** TUI dialogs (upgrade prompt, `/ctx-status`, `/ctx-recomp`, `/ctx-embed`, `/ctx-flush`) via RPC,
 with an ignored-message fallback for Desktop/Web. Notification drain is
@@ -123,7 +129,12 @@ with an ignored-message fallback for Desktop/Web. Notification drain is
 another) because one process can serve multiple sessions and TUI port discovery
 is newest-pid-wins.
 
-**Pi:** transient terminal notifications. The upgrade reminder passes
+**Pi:** command status is appended as a model-invisible custom entry. Interactive
+terminals render that entry through the registered entry renderer. In Pi RPC
+mode, each command uses its live `ctx`: `ctx.ui.notify` presents short progress
+as toasts and `ctx.ui.custom` presents detailed results as dialogs. A context
+captured by `session_start` cannot be reused because pi-web can host multiple
+sessions in one process. The upgrade reminder passes
 `deliveryPersists=false` on Pi, so a missed toast does not honor the old explicit-
 dismissal stamp. Both harnesses persist the 24-hour reminder cooldown and three-
 delivery cap, preventing repeated startup toasts while `/ctx-status` still reports
@@ -155,6 +166,13 @@ shared resolver's log-only dubious-ownership warning while still using the same
   **stdin** (Pi concatenates stdin + positional) to avoid Linux `MAX_ARG_STRLEN`
   / E2BIG; the positional is omitted when piping.
 - `--no-session` keeps subagent JSONL out of the user's session picker.
+- In pi-web, multiple sessions can share one process. Startup maintenance runs
+  once per process, while each session wires its own hooks. Dreamer registration
+  is process-shared and tracks sibling ownership, so one session's shutdown cannot
+  deregister another session's project timer.
+- `session_shutdown` drains only that session's in-flight historian and recomp work
+  and only the shutting-down extension instance's Dreamer work. Child-session
+  lifecycle listeners are detached only for that extension instance.
 
 ---
 
@@ -384,7 +402,8 @@ mechanism differs because the process models differ:
   inline `await` froze all input. Pi instead spawns the recomp via
   `spawnPiRecompRun` (mirroring `spawnPiHistorianRun`): the handler returns
   immediately after the ack message, the run is tracked in an in-flight map for
-  `session_shutdown` drain, and progress surfaces through `[ctx-status]`
+  `session_shutdown` drain (keyed by session id so one session does not drain
+  another), and progress surfaces through `[ctx-status]`
   messages + the `recomp` status-line flag.
 
 Because Pi's recomp runs in the background (not inside the user's turn), its
