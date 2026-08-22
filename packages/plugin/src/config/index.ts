@@ -71,6 +71,11 @@ function loadModelOverlay(): Record<string, unknown> | null {
 
     const overlay: Record<string, unknown> = {};
     const ignored: string[] = [];
+    for (const key of Object.keys(loaded.config)) {
+        if (!(MODEL_OVERLAY_AGENTS as readonly string[]).includes(key)) {
+            ignored.push(key);
+        }
+    }
     for (const agent of MODEL_OVERLAY_AGENTS) {
         const source = loaded.config[agent];
         if (!source || typeof source !== "object" || Array.isArray(source)) {
@@ -78,6 +83,9 @@ function loadModelOverlay(): Record<string, unknown> | null {
             continue;
         }
         const harness = (source as Record<string, unknown>).opencode;
+        for (const key of Object.keys(source as Record<string, unknown>)) {
+            if (key !== "opencode") ignored.push(`${agent}.${key}`);
+        }
         if (!harness || typeof harness !== "object" || Array.isArray(harness)) {
             if (harness !== undefined) ignored.push(`${agent}.opencode`);
             continue;

@@ -158,6 +158,7 @@ describe("loadPluginConfig — per-run model overlay", () => {
                     opencode: { model: "overlay/dreamer", fallback_models: ["overlay/fallback"] },
                 },
                 embedding: { provider: "off" },
+                memory: { enabled: false },
             }),
             "utf-8",
         );
@@ -179,9 +180,12 @@ describe("loadPluginConfig — per-run model overlay", () => {
                 fallback_models: ["overlay/fallback"],
             });
             expect(result.embedding.provider).toBe("local");
+            expect(result.memory.enabled).toBe(true);
             expect(result.configWarnings?.join("\n")).toContain(
-                "Ignoring unsupported keys: historian.opencode.prompt",
+                "historian.opencode.prompt",
             );
+            expect(result.configWarnings?.join("\n")).toContain("embedding");
+            expect(result.configWarnings?.join("\n")).toContain("memory");
         } finally {
             rmSync(overlay, { force: true });
         }
