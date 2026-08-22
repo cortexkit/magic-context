@@ -28,6 +28,7 @@ type CapturedDreamClient = {
 	session: {
 		create: (args: unknown) => Promise<unknown>;
 		prompt: (args: unknown) => Promise<unknown>;
+		messages: (args: unknown) => Promise<unknown>;
 	};
 };
 
@@ -173,6 +174,68 @@ describe("Pi dreamer wiring", () => {
 
 		expect(timerStarts).toBe(1);
 		expect(secondInstance.__test.registeredProjectCount()).toBe(1);
+		secondInstance.__test.reset();
+	});
+
+	test("shares manual-run draining across jiti-style module instances", async () => {
+		db = createDb();
+		const gate = deferred<{ ok: true; assistantText: string }>();
+		const runStarted = deferred<void>();
+		__test.setStartDreamScheduleTimerFactory(async () => mock(() => {}));
+		__test.setPiSubagentRunnerFactory(
+			() =>
+				({
+					run: mock(() => {
+						runStarted.resolve();
+						return gate.promise;
+					}),
+				}) as never,
+		);
+		const projectIdentity = "git:pi-shared-manual-drain";
+		const ownerA = {};
+		const ownerB = {};
+		const config = DreamerConfigSchema.parse({
+			model: "test/model",
+			tasks: { curate: { schedule: "0 4 * * *" } },
+		});
+		insertMemory(db, {
+			projectPath: projectIdentity,
+			category: "PROJECT_RULES",
+			content: "Keep reload-safe Dreamer lifecycle accounting process-shared.",
+		});
+		const opts = dreamerOptions({
+			database: db,
+			projectDir: process.cwd(),
+			projectIdentity,
+			registrationOwner: ownerA,
+			config,
+		});
+		registerPiDreamerProject(opts);
+
+		const secondInstance = await import(
+			`./index.ts?manual-drain-instance=${Date.now()}`
+		);
+		secondInstance.registerPiDreamerProject({
+			...opts,
+			registrationOwner: ownerB,
+		});
+		const manualRun = secondInstance.runPiDreamForProject(
+			projectIdentity,
+			"curate",
+			ownerB,
+		);
+		await runStarted.promise;
+		let drained = false;
+		const drain = secondInstance.awaitInFlightDreamers(ownerB).then(() => {
+			drained = true;
+		});
+		await flushMicrotasks();
+		expect(drained).toBe(false);
+
+		gate.resolve({ ok: true, assistantText: "curation complete" });
+		await manualRun;
+		await drain;
+		expect(drained).toBe(true);
 		secondInstance.__test.reset();
 	});
 
@@ -336,6 +399,36 @@ describe("Pi dreamer wiring", () => {
 		expect(timerCleanup).not.toHaveBeenCalled();
 	});
 
+	test("legacy same-dir registration rebuilds once", async () => {
+		db = createDb();
+		const firstCleanup = mock(() => {});
+		const secondCleanup = mock(() => {});
+		const cleanups = [firstCleanup, secondCleanup];
+		let timerStarts = 0;
+		__test.setStartDreamScheduleTimerFactory(async () => {
+			timerStarts += 1;
+			return cleanups.shift() ?? mock(() => {});
+		});
+		const projectIdentity = "git:pi-legacy-registration";
+		const opts = dreamerOptions({
+			database: db,
+			projectDir: "/tmp/pi-legacy",
+			projectIdentity,
+		});
+
+		registerPiDreamerProject(opts);
+		await flushMicrotasks();
+		__test.clearRegistrationGeneration(projectIdentity);
+		registerPiDreamerProject(opts);
+		await flushMicrotasks();
+		registerPiDreamerProject(opts);
+		await flushMicrotasks();
+
+		expect(timerStarts).toBe(2);
+		expect(firstCleanup).toHaveBeenCalledTimes(1);
+		expect(secondCleanup).not.toHaveBeenCalled();
+	});
+
 	test("one session shutdown keeps a same-project sibling registered", async () => {
 		db = createDb();
 		const firstCleanup = mock(() => {});
@@ -425,7 +518,89 @@ describe("Pi dreamer wiring", () => {
 		]);
 	});
 
-	test("old timer client cannot prompt after its owner switches worktrees", async () => {
+	test("keeps only the final timer when A-B-A registrations start concurrently", async () => {
+		db = createDb();
+		const gates = [
+			deferred<() => void>(),
+			deferred<() => void>(),
+			deferred<() => void>(),
+		];
+		const cleanups = [mock(() => {}), mock(() => {}), mock(() => {})];
+		const clients: CapturedDreamClient[] = [];
+		const timerRegistrations = new Map<string, number>();
+		let timerIndex = 0;
+		__test.setPiSubagentRunnerFactory(
+			() =>
+				({
+					run: mock(async () => ({ ok: true, assistantText: "done" })),
+				}) as never,
+		);
+		__test.setStartDreamScheduleTimerFactory(async (registration) => {
+			const index = timerIndex++;
+			clients.push(registration.client as unknown as CapturedDreamClient);
+			timerRegistrations.set(registration.directory, index);
+			const cleanup = await (gates[index]?.promise ??
+				Promise.resolve(mock(() => {})));
+			return () => {
+				cleanup();
+				timerRegistrations.delete(registration.directory);
+			};
+		});
+		const projectIdentity = "git:pi-overlapping-handoff";
+		const ownerA = {};
+		const ownerB = {};
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectDir: "/tmp/worktree-A",
+				projectIdentity,
+				registrationOwner: ownerA,
+			}),
+		);
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectDir: "/tmp/worktree-B",
+				projectIdentity,
+				registrationOwner: ownerB,
+			}),
+		);
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectDir: "/tmp/worktree-A",
+				projectIdentity,
+				registrationOwner: ownerA,
+			}),
+		);
+		expect(timerIndex).toBe(3);
+
+		gates[1]?.resolve(cleanups[1] as () => void);
+		await flushMicrotasks();
+		gates[0]?.resolve(cleanups[0] as () => void);
+		await flushMicrotasks();
+		gates[2]?.resolve(cleanups[2] as () => void);
+		await flushMicrotasks();
+
+		expect(cleanups[0]).not.toHaveBeenCalled();
+		expect(cleanups[1]).toHaveBeenCalledTimes(1);
+		expect(cleanups[2]).not.toHaveBeenCalled();
+		expect(timerRegistrations).toEqual(new Map([["/tmp/worktree-A", 2]]));
+		await expect(clients[0]?.session.create({})).rejects.toThrow(
+			"registration is no longer active",
+		);
+		await expect(clients[1]?.session.create({})).rejects.toThrow(
+			"registration is no longer active",
+		);
+		const activeClient = requireCapturedClient(clients[2] ?? null);
+		const session = (await activeClient.session.create({})) as { id: string };
+		await activeClient.session.prompt({
+			path: { id: session.id },
+			body: { system: "system", parts: [{ text: "run dreamer" }] },
+		});
+	});
+
+	test("stale sibling timer clients stay invalid across a worktree handoff", async () => {
 		db = createDb();
 		const clients: CapturedDreamClient[] = [];
 		const run = mock(async () => ({
@@ -438,19 +613,18 @@ describe("Pi dreamer wiring", () => {
 			return mock(() => {});
 		});
 		const projectIdentity = "git:pi-stale-worktree-client";
-		const owner = {};
+		const ownerA = {};
+		const ownerB = {};
 		registerPiDreamerProject(
 			dreamerOptions({
 				database: db,
 				projectDir: "/tmp/worktree-A",
 				projectIdentity,
-				registrationOwner: owner,
+				registrationOwner: ownerA,
 			}),
 		);
 		await flushMicrotasks();
-		const oldClient = clients[0];
-		expect(oldClient).toBeDefined();
-		if (!oldClient) throw new Error("first dreamer client was not captured");
+		const oldClient = requireCapturedClient(clients[0] ?? null);
 		const created = (await oldClient.session.create({})) as { id: string };
 
 		registerPiDreamerProject(
@@ -458,8 +632,12 @@ describe("Pi dreamer wiring", () => {
 				database: db,
 				projectDir: "/tmp/worktree-B",
 				projectIdentity,
-				registrationOwner: owner,
+				registrationOwner: ownerB,
 			}),
+		);
+		await flushMicrotasks();
+		await expect(oldClient.session.create({})).rejects.toThrow(
+			"registration is no longer active",
 		);
 		await expect(
 			oldClient.session.prompt({
@@ -467,7 +645,73 @@ describe("Pi dreamer wiring", () => {
 				body: { system: "system", parts: [{ text: "run dreamer" }] },
 			}),
 		).rejects.toThrow("registration is no longer active");
-		expect(run).not.toHaveBeenCalled();
+
+		unregisterPiDreamerProject({
+			projectIdentity,
+			registrationOwner: ownerB,
+		});
+		await flushMicrotasks();
+		const replacementClient = requireCapturedClient(clients[2] ?? null);
+		await expect(oldClient.session.create({})).rejects.toThrow(
+			"registration is no longer active",
+		);
+		const replacementSession = (await replacementClient.session.create({})) as {
+			id: string;
+		};
+		await replacementClient.session.prompt({
+			path: { id: replacementSession.id },
+			body: { system: "system", parts: [{ text: "run dreamer" }] },
+		});
+		expect(run).toHaveBeenCalledTimes(1);
+	});
+
+	test("discards a stale timer result that settles after a worktree handoff", async () => {
+		db = createDb();
+		const gate = deferred<{ ok: true; assistantText: string }>();
+		const clients: CapturedDreamClient[] = [];
+		const refresh = mock(() => {});
+		__test.setPiSubagentRunnerFactory(
+			() => ({ run: mock(() => gate.promise) }) as never,
+		);
+		__test.setStartDreamScheduleTimerFactory(async (registration) => {
+			clients.push(registration.client as unknown as CapturedDreamClient);
+			return mock(() => {});
+		});
+		const projectIdentity = "git:pi-late-stale-result";
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectDir: "/tmp/worktree-A",
+				projectIdentity,
+				registrationOwner: {},
+				onAdjunctsRefreshNeeded: refresh,
+			}),
+		);
+		await flushMicrotasks();
+		const oldClient = requireCapturedClient(clients[0] ?? null);
+		const created = (await oldClient.session.create({})) as { id: string };
+		const prompt = oldClient.session.prompt({
+			path: { id: created.id },
+			body: { system: "system", parts: [{ text: "run dreamer" }] },
+		});
+		await flushMicrotasks();
+
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectDir: "/tmp/worktree-B",
+				projectIdentity,
+				registrationOwner: {},
+			}),
+		);
+		await flushMicrotasks();
+		gate.resolve({ ok: true, assistantText: "stale result" });
+
+		await expect(prompt).rejects.toThrow("registration is no longer active");
+		await expect(
+			oldClient.session.messages({ path: { id: created.id } }),
+		).rejects.toThrow("registration is no longer active");
+		expect(refresh).not.toHaveBeenCalled();
 	});
 
 	test("active-owner handoff starts one timer when remaining worktree dirs repeat", async () => {
@@ -670,6 +914,63 @@ describe("Pi dreamer wiring", () => {
 		expect(drained).toBe(true);
 		expect(run).not.toHaveBeenCalled();
 		expect(result.failed).toEqual(["curate"]);
+	});
+
+	test("drains a manual run whose successful result arrives after unregister", async () => {
+		db = createDb();
+		const gate = deferred<{ ok: true; assistantText: string }>();
+		const runStarted = deferred<void>();
+		const refresh = mock(() => {});
+		__test.setStartDreamScheduleTimerFactory(async () => mock(() => {}));
+		__test.setPiSubagentRunnerFactory(
+			() =>
+				({
+					run: mock(() => {
+						runStarted.resolve();
+						return gate.promise;
+					}),
+				}) as never,
+		);
+		const projectIdentity = "git:pi-manual-late-unregister";
+		const owner = {};
+		insertMemory(db, {
+			projectPath: projectIdentity,
+			category: "PROJECT_RULES",
+			content: "Ignore Dreamer results after their registration owner exits.",
+		});
+		registerPiDreamerProject(
+			dreamerOptions({
+				database: db,
+				projectDir: process.cwd(),
+				projectIdentity,
+				registrationOwner: owner,
+				config: DreamerConfigSchema.parse({
+					model: "test/model",
+					tasks: { curate: { schedule: "0 4 * * *" } },
+				}),
+				onAdjunctsRefreshNeeded: refresh,
+			}),
+		);
+
+		const manualRun = runPiDreamForProject(projectIdentity, "curate", owner);
+		await runStarted.promise;
+		unregisterPiDreamerProject({
+			projectIdentity,
+			registrationOwner: owner,
+		});
+		let drained = false;
+		const drain = awaitInFlightDreamers(owner).then(() => {
+			drained = true;
+		});
+		await flushMicrotasks();
+		expect(drained).toBe(false);
+
+		gate.resolve({ ok: true, assistantText: "curation complete" });
+		const result = await manualRun;
+		await drain;
+		expect(drained).toBe(true);
+		expect(result.failed).toEqual(["curate"]);
+		expect(refresh).not.toHaveBeenCalled();
 	});
 
 	test("unregister removes the project", () => {

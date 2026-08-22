@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import magicContextPiExtension, { __test } from "./index";
+import { awaitInFlightRecomps, spawnPiRecompRun } from "./pi-recomp-runner";
 import { MAGIC_CONTEXT_PI_SUBAGENT_ENV } from "./subagent-runner";
 
 const originalEnv = {
@@ -37,6 +38,10 @@ function createCountingPi() {
 	const tools: string[] = [];
 	const flags: string[] = [];
 	const commands: string[] = [];
+	const commandHandlers = new Map<
+		string,
+		(args: string, ctx: unknown) => unknown
+	>();
 	const entryRenderers: string[] = [];
 	const eventBusHandlers = new Map<string, Set<(data: unknown) => void>>();
 	const piEventHandlers = new Map<
@@ -66,9 +71,15 @@ function createCountingPi() {
 		registerFlag: mock((name: string) => {
 			flags.push(name);
 		}),
-		registerCommand: mock((name: string) => {
-			commands.push(name);
-		}),
+		registerCommand: mock(
+			(
+				name: string,
+				command: { handler: (args: string, ctx: unknown) => unknown },
+			) => {
+				commands.push(name);
+				commandHandlers.set(name, command.handler);
+			},
+		),
 		registerEntryRenderer: mock((customType: string) => {
 			entryRenderers.push(customType);
 		}),
@@ -83,6 +94,11 @@ function createCountingPi() {
 		flags,
 		commands,
 		entryRenderers,
+		runCommand(name: string, args: string, ctx: unknown) {
+			const handler = commandHandlers.get(name);
+			if (!handler) throw new Error(`Command not registered: ${name}`);
+			return handler(args, ctx);
+		},
 		eventBusHandlerCount(channel: string) {
 			return eventBusHandlers.get(channel)?.size ?? 0;
 		},
@@ -163,6 +179,117 @@ describe("Pi in-process child guard (#247)", () => {
 		expect(runtime.eventBusHandlerCount("subagents:child:disposed")).toBe(0);
 	}, 15_000);
 
+	it("fences a registered command's late RPC fallback on shutdown", async () => {
+		isolateXdgEnv();
+		delete process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV];
+		const runtime = createCountingPi();
+		await magicContextPiExtension(runtime.pi);
+
+		let resolveCustom!: (value: undefined) => void;
+		let notifications = 0;
+		const ctx = {
+			mode: "rpc",
+			hasUI: false,
+			cwd: process.cwd(),
+			model: undefined,
+			sessionManager: { getSessionId: () => undefined },
+			ui: {
+				custom: () =>
+					new Promise<undefined>((resolve) => {
+						resolveCustom = resolve;
+					}),
+				notify: () => {
+					notifications += 1;
+				},
+				setStatus: () => undefined,
+			},
+		};
+		await runtime.runCommand("ctx-status", "", ctx);
+		expect(resolveCustom).toBeDefined();
+
+		await runtime.emitPiEvent("session_shutdown", {}, ctx);
+		resolveCustom(undefined);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(notifications).toBe(0);
+	});
+
+	it("aborts a recomp only after the five-second shutdown drain expires", async () => {
+		isolateXdgEnv();
+		delete process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV];
+		const runtime = createCountingPi();
+		await magicContextPiExtension(runtime.pi);
+
+		let observedSignal: AbortSignal | undefined;
+		let releaseRun!: () => void;
+		const runGate = new Promise<void>((resolve) => {
+			releaseRun = resolve;
+		});
+		spawnPiRecompRun({
+			sessionId: "ses-shutdown-timeout",
+			provider: { readMessages: () => [] },
+			onStatusChange() {},
+			work: async (signal) => {
+				observedSignal = signal;
+				await runGate;
+			},
+		});
+		await Promise.resolve();
+
+		const timers: Array<{
+			active: boolean;
+			callback: () => void;
+			delay: number;
+			handle: ReturnType<typeof setTimeout>;
+		}> = [];
+		const setTimeoutSpy = spyOn(globalThis, "setTimeout").mockImplementation(((
+			callback: (...args: unknown[]) => void,
+			delay?: number,
+		) => {
+			const timer = {
+				active: true,
+				callback: () => callback(),
+				delay: delay ?? 0,
+				handle: { unref() {} } as ReturnType<typeof setTimeout>,
+			};
+			timers.push(timer);
+			return timer.handle;
+		}) as typeof setTimeout);
+		const clearTimeoutSpy = spyOn(
+			globalThis,
+			"clearTimeout",
+		).mockImplementation(((handle: ReturnType<typeof setTimeout>) => {
+			const timer = timers.find((candidate) => candidate.handle === handle);
+			if (timer) timer.active = false;
+		}) as typeof clearTimeout);
+
+		try {
+			const shutdown = runtime.emitPiEvent(
+				"session_shutdown",
+				{},
+				{
+					sessionManager: { getSessionId: () => "ses-shutdown-timeout" },
+					ui: { setStatus: () => undefined },
+				},
+			);
+			for (let attempt = 0; attempt < 20 && timers.length < 2; attempt += 1) {
+				await Promise.resolve();
+			}
+			const timeout = timers.findLast((timer) => timer.active);
+			expect(timeout?.delay).toBe(5_000);
+			expect(observedSignal?.aborted).toBe(false);
+
+			timeout?.callback();
+			await shutdown;
+			expect(observedSignal?.aborted).toBe(true);
+		} finally {
+			setTimeoutSpy.mockRestore();
+			clearTimeoutSpy.mockRestore();
+			releaseRun();
+			await awaitInFlightRecomps("ses-shutdown-timeout");
+		}
+	}, 15_000);
+
 	it("skips only the marked in-process child", async () => {
 		isolateXdgEnv();
 		delete process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV];
@@ -226,6 +353,99 @@ describe("Pi in-process child guard (#247)", () => {
 			await childBranch;
 		}
 	}, 15_000);
+
+	it("suppresses four overlapping child initializations without leaking ALS state", async () => {
+		isolateXdgEnv();
+		delete process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV];
+
+		const parent = createCountingPi();
+		await magicContextPiExtension(parent.pi);
+		__test.clearPiStartupMaintenanceClaim();
+
+		const children = Array.from({ length: 4 }, () => createCountingPi());
+		let markedCount = 0;
+		let releaseBarrier!: () => void;
+		const allMarked = new Promise<void>((resolve) => {
+			releaseBarrier = resolve;
+		});
+		const branches = children.map((child) =>
+			Promise.resolve().then(async () => {
+				parent.emitEvent("subagents:child:session-created");
+				markedCount += 1;
+				if (markedCount === children.length) releaseBarrier();
+				await allMarked;
+				await magicContextPiExtension(child.pi);
+				parent.emitEvent("subagents:child:disposed");
+			}),
+		);
+		await allMarked;
+		await Promise.all(branches);
+
+		for (const child of children) {
+			expect(child.events).toEqual([]);
+			expect(child.tools).toEqual([]);
+			expect(child.flags).toEqual([]);
+			expect(child.commands).toEqual([]);
+			expect(child.entryRenderers).toEqual([]);
+			expect(
+				child.eventBusHandlerCount("subagents:child:session-created"),
+			).toBe(0);
+			expect(child.eventBusHandlerCount("subagents:child:disposed")).toBe(0);
+		}
+		// Child entry must return before claiming process-wide startup maintenance.
+		expect(__test.claimPiStartupMaintenance()).toBe(true);
+		__test.clearPiStartupMaintenanceClaim();
+
+		const independent = createCountingPi();
+		await magicContextPiExtension(independent.pi);
+		expect(independent.tools).toContain("ctx_search");
+		expect(independent.commands).toContain("ctx-status");
+		expect(independent.entryRenderers).toEqual(["ctx-status"]);
+		expect(__test.claimPiStartupMaintenance()).toBe(false);
+	}, 20_000);
+
+	it("keeps sibling child markers isolated after one child disposes early", async () => {
+		isolateXdgEnv();
+		delete process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV];
+
+		const parent = createCountingPi();
+		await magicContextPiExtension(parent.pi);
+		__test.clearPiStartupMaintenanceClaim();
+		const children = Array.from({ length: 4 }, () => createCountingPi());
+		let markedCount = 0;
+		let releaseBarrier!: () => void;
+		const allMarked = new Promise<void>((resolve) => {
+			releaseBarrier = resolve;
+		});
+		let firstDisposed!: () => void;
+		const firstChildDisposed = new Promise<void>((resolve) => {
+			firstDisposed = resolve;
+		});
+
+		const branches = children.map((child, index) =>
+			Promise.resolve().then(async () => {
+				parent.emitEvent("subagents:child:session-created");
+				markedCount += 1;
+				if (markedCount === children.length) releaseBarrier();
+				await allMarked;
+				if (index !== 0) await firstChildDisposed;
+				await magicContextPiExtension(child.pi);
+				parent.emitEvent("subagents:child:disposed");
+				if (index === 0) firstDisposed();
+			}),
+		);
+		await Promise.all(branches);
+
+		for (const child of children) {
+			expect(child.events).toEqual([]);
+			expect(child.tools).toEqual([]);
+			expect(child.flags).toEqual([]);
+			expect(child.commands).toEqual([]);
+			expect(child.entryRenderers).toEqual([]);
+		}
+		expect(__test.claimPiStartupMaintenance()).toBe(true);
+		__test.clearPiStartupMaintenanceClaim();
+	}, 20_000);
 
 	it("keeps the spawned-child environment guard", async () => {
 		isolateXdgEnv();

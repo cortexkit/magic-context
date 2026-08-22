@@ -246,22 +246,37 @@ function getToolCallIds(content: unknown): Set<string> {
  * repeated calls inside a single trigger evaluation don't re-walk the
  * branch.
  */
-export function readPiSessionMessages(ctx: ExtensionContext): RawMessage[] {
+export interface PiSessionSnapshot {
+	branchEntries: readonly unknown[];
+	rawMessages: RawMessage[];
+}
+
+export function readPiSessionSnapshot(
+	ctx: ExtensionContext,
+): PiSessionSnapshot {
 	const sm = ctx.sessionManager;
-	if (sm === undefined) return [];
+	if (sm === undefined) return { branchEntries: [], rawMessages: [] };
 	const getBranch = (sm as { getBranch?: (fromId?: string) => unknown[] })
 		.getBranch;
-	if (typeof getBranch !== "function") return [];
+	if (typeof getBranch !== "function")
+		return { branchEntries: [], rawMessages: [] };
 
 	let entries: unknown[];
 	try {
 		entries = getBranch.call(sm);
 	} catch {
-		return [];
+		return { branchEntries: [], rawMessages: [] };
 	}
-	if (!Array.isArray(entries)) return [];
+	if (!Array.isArray(entries)) return { branchEntries: [], rawMessages: [] };
 
-	return convertEntriesToRawMessages(entries);
+	return {
+		branchEntries: entries,
+		rawMessages: convertEntriesToRawMessages(entries),
+	};
+}
+
+export function readPiSessionMessages(ctx: ExtensionContext): RawMessage[] {
+	return readPiSessionSnapshot(ctx).rawMessages;
 }
 
 /**
@@ -340,7 +355,9 @@ function attachPiPartVersion(
  * Pure conversion exposed for unit testing — call sites in production
  * always go through `readPiSessionMessages`.
  */
-export function convertEntriesToRawMessages(entries: unknown[]): RawMessage[] {
+export function convertEntriesToRawMessages(
+	entries: readonly unknown[],
+): RawMessage[] {
 	const result: RawMessage[] = [];
 	let nextOrdinal = 1;
 

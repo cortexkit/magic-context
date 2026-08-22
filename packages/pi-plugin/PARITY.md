@@ -132,9 +132,11 @@ is newest-pid-wins.
 **Pi:** command status is appended as a model-invisible custom entry. Interactive
 terminals render that entry through the registered entry renderer. In Pi RPC
 mode, each command uses its live `ctx`: `ctx.ui.notify` presents short progress
-as toasts and `ctx.ui.custom` presents detailed results as dialogs. A context
-captured by `session_start` cannot be reused because pi-web can host multiple
-sessions in one process. The upgrade reminder passes
+as toasts. RPC hosts that execute the `ctx.ui.custom` component factory (such as
+pi-web) present detailed results as dialogs; hosts where `custom` resolves without
+executing the factory receive the same details through a notification fallback.
+A context captured by `session_start` cannot be reused because pi-web can host
+multiple sessions in one process. The upgrade reminder passes
 `deliveryPersists=false` on Pi, so a missed toast does not honor the old explicit-
 dismissal stamp. Both harnesses persist the 24-hour reminder cooldown and three-
 delivery cap, preventing repeated startup toasts while `/ctx-status` still reports

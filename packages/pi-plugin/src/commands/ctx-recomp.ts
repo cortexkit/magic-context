@@ -26,7 +26,7 @@ import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
 import { createPiHistorianClient } from "../pi-recomp-client-shared";
 import { stagePiRecompMarker } from "../pi-recomp-marker";
 import { isPiRecompInFlight, spawnPiRecompRun } from "../pi-recomp-runner";
-import { readPiSessionMessages } from "../read-session-pi";
+import { readPiSessionSnapshot } from "../read-session-pi";
 import { updateStatusLine } from "../status-line";
 import { createCtxStatusSender, resolveSessionId } from "./pi-command-utils";
 
@@ -174,8 +174,13 @@ export function registerCtxRecompCommand(
 				level: "info",
 			});
 
+			const cwd = ctx.cwd;
+			const fallbackModelId = ctx.model
+				? `${ctx.model.provider}/${ctx.model.id}`
+				: undefined;
+			const snapshot = readPiSessionSnapshot(ctx);
 			const provider = {
-				readMessages: () => readPiSessionMessages(ctx),
+				readMessages: () => snapshot.rawMessages,
 			} satisfies RawMessageProvider;
 
 			// Detached: the recomp runs in the background so the Pi REPL stays
@@ -189,9 +194,10 @@ export function registerCtxRecompCommand(
 				onStatusChange: () =>
 					updateStatusLine(ctx, {
 						db: currentDeps.db,
-						projectIdentity: ctx.cwd,
+						projectIdentity: cwd,
 					}),
-				work: async () => {
+				work: async (signal) => {
+					const detachedSendStatus = createCtxStatusSender(pi, ctx, signal);
 					const result = await executeContextRecompWithResult(
 						{
 							client: createPiHistorianClient({
@@ -205,10 +211,11 @@ export function registerCtxRecompCommand(
 								fallbackModels: currentDeps.historianFallbacks,
 								timeoutMs: currentDeps.historianTimeoutMs,
 								thinkingLevel: currentDeps.historianThinkingLevel,
-								directory: ctx.cwd,
+								directory: cwd,
 								accountingSessionId: sessionId,
+								signal,
 								notify: (text) => {
-									sendStatus({
+									detachedSendStatus({
 										title: "/ctx-recomp",
 										text,
 										level: inferLevel(text),
@@ -218,7 +225,7 @@ export function registerCtxRecompCommand(
 							db: currentDeps.db,
 							sessionId,
 							historianChunkTokens: currentDeps.historianChunkTokens,
-							directory: ctx.cwd,
+							directory: cwd,
 							historianTimeoutMs: currentDeps.historianTimeoutMs,
 							memoryEnabled: currentDeps.memoryEnabled,
 							autoPromote: currentDeps.autoPromote,
@@ -230,12 +237,11 @@ export function registerCtxRecompCommand(
 							// fallbacks + the session's own model as last-ditch retry.
 							fallbackModels: currentDeps.historianFallbacks,
 							language: currentDeps.language,
-							fallbackModelId: ctx.model
-								? `${ctx.model.provider}/${ctx.model.id}`
-								: undefined,
+							fallbackModelId,
 						},
 						parsed.kind === "partial" ? { range: parsed.range } : {},
 					);
+					if (signal.aborted) return;
 					if (result.published) {
 						// A successful recomp resolves the overflow that may have armed
 						// needs_emergency_recovery — clear it so the flag stops force-
@@ -260,7 +266,11 @@ export function registerCtxRecompCommand(
 						// mid-turn, busting the cache. Mirrors the background
 						// historian's onPublished (signalPiDeferred*).
 						try {
-							stagePiRecompMarker({ db: currentDeps.db, sessionId, ctx });
+							stagePiRecompMarker({
+								db: currentDeps.db,
+								sessionId,
+								branchEntries: snapshot.branchEntries,
+							});
 						} catch (markerError) {
 							sessionLog(
 								sessionId,
@@ -270,7 +280,7 @@ export function registerCtxRecompCommand(
 						signalPiDeferredHistoryRefresh(sessionId);
 						signalPiDeferredMaterialization(sessionId);
 					}
-					sendStatus({
+					detachedSendStatus({
 						title: "/ctx-recomp",
 						text: result.message,
 						level: inferLevel(result.message),

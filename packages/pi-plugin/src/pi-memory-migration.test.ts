@@ -253,4 +253,39 @@ describe("Pi memory migration (E6c)", () => {
 		// `primaryModelId ?? undefined` falling through to the agent default).
 		expect(models[0]).toBe("historian/model");
 	});
+
+	it("cancellation stops the fallback chain before applying memory changes", async () => {
+		const db = openDatabase();
+		const projectPath = resolveProjectIdentity(process.cwd());
+		insertMemory(db, {
+			projectPath,
+			category: "ARCHITECTURE_DECISIONS",
+			content: "keep me",
+		});
+		const controller = new AbortController();
+		let calls = 0;
+		let observedSignal: AbortSignal | undefined;
+		const outcome = await runPiMemoryMigration({
+			db,
+			runner: {
+				run: async (options: { signal?: AbortSignal }) => {
+					calls += 1;
+					observedSignal = options.signal;
+					controller.abort();
+					return { ok: true, assistantText: "no migrated block" };
+				},
+			} as never,
+			model: "historian/model",
+			fallbackModels: ["fallback/model"],
+			directory: process.cwd(),
+			sessionId: "ses-pi-mig-cancel",
+			signal: controller.signal,
+		});
+
+		expect(outcome.summary).toContain("cancelled");
+		expect(observedSignal).toBe(controller.signal);
+		expect(calls).toBe(1);
+		expect(getMemoriesByProject(db, projectPath)).toHaveLength(1);
+		expect(isMemoryMigrationDone(db, projectPath)).toBe(false);
+	});
 });

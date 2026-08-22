@@ -55,6 +55,7 @@ export interface PiMemoryMigrationDeps {
 	/** Route user_observations to the user-memory candidate pool when enabled. */
 	userMemoriesEnabled?: boolean;
 	language?: string;
+	signal?: AbortSignal;
 }
 
 export interface PiMemoryMigrationOutcome {
@@ -62,9 +63,15 @@ export interface PiMemoryMigrationOutcome {
 	summary: string;
 }
 
+const CANCELLED_OUTCOME: PiMemoryMigrationOutcome = {
+	ran: false,
+	summary: "Memory migration cancelled during session shutdown.",
+};
+
 export async function runPiMemoryMigration(
 	deps: PiMemoryMigrationDeps,
 ): Promise<PiMemoryMigrationOutcome> {
+	if (deps.signal?.aborted) return CANCELLED_OUTCOME;
 	const projectPath = resolveProjectIdentityForSession(
 		deps.directory,
 		deps.allowHomeProject,
@@ -139,6 +146,7 @@ export async function runPiMemoryMigration(
 	let parsed: ReturnType<typeof parseMemoryMigrationOutput> | null = null;
 	let lastFailReason = "no output";
 	for (let i = 0; i < modelChain.length; i += 1) {
+		if (deps.signal?.aborted) return CANCELLED_OUTCOME;
 		const model = modelChain[i];
 		if (i > 0) {
 			sessionLog(
@@ -164,7 +172,9 @@ export async function runPiMemoryMigration(
 			// Reuse the "recomp" accounting bucket — memory migration is part of the
 			// session-upgrade flow and there is no dedicated subagent tag for it.
 			accountingSubagent: "recomp",
+			signal: deps.signal,
 		});
+		if (deps.signal?.aborted) return CANCELLED_OUTCOME;
 
 		if (!result.ok) {
 			lastFailReason = `historian ${result.reason}`;
@@ -210,6 +220,7 @@ export async function runPiMemoryMigration(
 		};
 	}
 
+	if (deps.signal?.aborted) return CANCELLED_OUTCOME;
 	// Persist observations BEFORE the destructive apply.
 	let routed = 0;
 	if (deps.userMemoriesEnabled && parsed.userObservations.length > 0) {

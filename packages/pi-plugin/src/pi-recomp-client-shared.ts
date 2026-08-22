@@ -22,11 +22,14 @@ export function createPiHistorianClient(args: {
 	thinkingLevel?: string;
 	directory: string;
 	accountingSessionId: string;
+	signal?: AbortSignal;
 	notify: (text: string) => void;
 }) {
 	const sessions = new Map<string, unknown[]>();
 	let counter = 0;
 	async function prompt(input: unknown): Promise<Record<string, never>> {
+		if (args.signal?.aborted)
+			throw new Error("prompt aborted by external signal");
 		const body = readBody(input);
 		const sessionId = readPathId(input);
 		if (body.noReply) {
@@ -60,7 +63,10 @@ export function createPiHistorianClient(args: {
 				: args.thinkingLevel,
 			accountingSessionId: args.accountingSessionId,
 			accountingSubagent: "recomp",
+			signal: args.signal,
 		});
+		if (args.signal?.aborted)
+			throw new Error("prompt aborted by external signal");
 		if (!result.ok) {
 			throw new Error(
 				`Pi recomp historian failed (${result.reason}): ${result.error}`,
@@ -73,6 +79,8 @@ export function createPiHistorianClient(args: {
 		session: {
 			get: async () => ({ directory: args.directory }),
 			create: async () => {
+				if (args.signal?.aborted)
+					throw new Error("prompt aborted by external signal");
 				const id = `magic-context-pi-recomp-${++counter}`;
 				sessions.set(id, []);
 				return { id };

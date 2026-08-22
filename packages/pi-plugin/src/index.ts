@@ -120,6 +120,7 @@ import { registerCtxStatusCommand } from "./commands/ctx-status";
 import { registerCtxWrapupCommand } from "./commands/ctx-wrapup";
 import {
 	registerCtxStatusEntryRenderer,
+	registerCtxStatusLifecycleSignal,
 	resolveSessionId,
 	sendCtxStatusMessage,
 } from "./commands/pi-command-utils";
@@ -158,7 +159,7 @@ import { ensureProjectRegisteredFromPiDirectory } from "./embedding-bootstrap";
 import { registerPiFailClosedSurface } from "./fail-closed-pi";
 import { resolvePiUsableContextLimit } from "./pi-context-limit";
 import { computePiPressure, extractAssistantUsage } from "./pi-pressure";
-import { awaitInFlightRecomps } from "./pi-recomp-runner";
+import { abortInFlightRecomps, awaitInFlightRecomps } from "./pi-recomp-runner";
 import { readPiSessionMessages } from "./read-session-pi";
 import { registerStatusLine, updateStatusLine } from "./status-line";
 import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
@@ -955,6 +956,8 @@ async function startPiMagicContextRuntime(
 	const projectDir = process.cwd();
 	const seenDreamerProjectIdentities = new Set<string>();
 	const dreamerRegistrationOwner = {};
+	const commandLifecycleController = new AbortController();
+	registerCtxStatusLifecycleSignal(pi, commandLifecycleController.signal);
 	let sessionShuttingDown = false;
 	// Step 5b: load the user's full magic-context.jsonc config. The loader
 	// reads the shared CortexKit project/user paths, validates them through the
@@ -2322,6 +2325,7 @@ async function startPiMagicContextRuntime(
 	// the cached handle is still valid across reload boundaries.
 	pi.on("session_shutdown", async (_event, ctx) => {
 		sessionShuttingDown = true;
+		commandLifecycleController.abort();
 		// Bounded drain of in-flight historian / dreamer runs that were
 		// kicked off by recent turns. We moved the drain here from
 		// `agent_end` because Pi awaits agent_end handlers and was
@@ -2365,6 +2369,9 @@ async function startPiMagicContextRuntime(
 			} catch (err) {
 				warn("shutdown: recomp drain threw:", err);
 			}
+			// Timeout only stops waiting. Fence and cancel any run still alive before
+			// this handler returns and Pi disposes its command context.
+			abortInFlightRecomps(sessionId);
 		}
 		try {
 			await withTimeout(

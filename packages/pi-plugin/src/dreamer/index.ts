@@ -84,6 +84,8 @@ interface SessionPromptArgs extends SessionMessagesArgs {
 type SessionDeleteArgs = SessionMessagesArgs;
 
 interface ProjectRegistration {
+	/** Unique per timer build. Optional only for registrations retained across reload from older code. */
+	generation?: object;
 	cleanup: () => void;
 	activeOwner: object;
 	owners: Map<object, PiDreamerOptions>;
@@ -167,30 +169,32 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		for (const callback of callbacks) callback(projectIdentity);
 	};
 	if (existing) {
-		// Same identity, same directory → genuinely already registered, no-op.
-		// Keep this extension instance as an owner so another session cannot
-		// deregister the shared timer while it is still active.
-		if (existing.projectDir === opts.projectDir) {
+		// Same identity and directory genuinely reuses the timer. Registrations
+		// retained by an older module have no generation and must rebuild once.
+		if (existing.generation && existing.projectDir === opts.projectDir) {
 			return;
 		}
-		// Same identity, DIFFERENT directory: a worktree/clone switch in the same
-		// process. The existing registration's timer + client closure are pinned
-		// to the OLD checkout and its boot-time dreamerConfig. Tear it down and
-		// rebuild against the new directory + freshly-resolved config below, so
-		// the dreamer runs in the right checkout (and honors a `dreamer.disable`
-		// that may differ between checkouts — handled by the disable early-return
-		// above, which fires before this).
+		// A different checkout or legacy registration has a timer + client closure
+		// pinned to stale options. Tear it down before rebuilding below.
 		existing.cleanup();
 		registeredProjects.delete(opts.projectIdentity);
 	}
 
+	const generation = {};
 	// Build the scheduled client once. Manual runs build owner-bound clients
 	// below; both paths share the same `inFlightDreams` accounting and the
 	// same module-private `sessionsById` table.
 	const client = createPiDreamerClient(
 		opts,
 		notifyOwnersOfAdjunctRefresh,
-		() => owners.get(opts.registrationOwner)?.projectDir === opts.projectDir,
+		() => {
+			const current = registeredProjects.get(opts.projectIdentity);
+			return (
+				current?.generation === generation &&
+				current.owners.get(opts.registrationOwner)?.projectDir ===
+					opts.projectDir
+			);
+		},
 	);
 
 	let cleanup: (() => void) | undefined;
@@ -218,9 +222,15 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		primerRawProviderFactory: createPiPrimerRawProviderFactory(),
 	}).then((timerCleanup) => {
 		if (cancelled) {
-			// Registration was cancelled before timer setup completed —
-			// immediately invoke cleanup to prevent leaked timer registration.
-			timerCleanup?.();
+			// The shared timer registry is keyed by directory. A newer A registration
+			// may already have replaced this stale A entry during an async A→B→A handoff,
+			// so its directory must not be deleted by the stale cleanup.
+			if (
+				registeredProjects.get(opts.projectIdentity)?.projectDir !==
+				opts.projectDir
+			) {
+				timerCleanup?.();
+			}
 			return;
 		}
 		cleanup = timerCleanup;
@@ -288,6 +298,7 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 	};
 
 	registeredProjects.set(opts.projectIdentity, {
+		generation,
 		activeOwner: opts.registrationOwner,
 		owners,
 		cleanup: () => {
@@ -388,9 +399,17 @@ function createPiDreamerClient(
 	isRegistrationOwnerActive: () => boolean = () => true,
 ): DreamTimerClient {
 	const runner = piSubagentRunnerFactory();
+	const assertRegistrationOwnerActive = (): void => {
+		if (!isRegistrationOwnerActive()) {
+			throw new Error(
+				`Pi dreamer registration is no longer active for project ${opts.projectIdentity}`,
+			);
+		}
+	};
 
 	const session = {
 		create: async (args: SessionCreateArgs) => {
+			assertRegistrationOwnerActive();
 			const sessionId = `magic-context-pi-dream-${++sessionCounter}`;
 			sessionsById.set(sessionId, {
 				id: sessionId,
@@ -408,11 +427,7 @@ function createPiDreamerClient(
 				throw new Error(`Pi dreamer session not found: ${sessionId}`);
 			}
 
-			if (!isRegistrationOwnerActive()) {
-				throw new Error(
-					`Pi dreamer registration is no longer active for project ${opts.projectIdentity}`,
-				);
-			}
+			assertRegistrationOwnerActive();
 
 			const userMessage = extractUserMessage(args);
 			const systemPrompt = extractSystemPrompt(args);
@@ -445,6 +460,7 @@ function createPiDreamerClient(
 			inFlightDreams.set(runPromise, opts.registrationOwner);
 			try {
 				const result = await runPromise;
+				assertRegistrationOwnerActive();
 				if (!result.ok) {
 					const error = new Error(
 						`Pi dreamer subagent failed (${result.reason}): ${result.error}`,
@@ -476,6 +492,7 @@ function createPiDreamerClient(
 			}
 		},
 		messages: async (args: SessionMessagesArgs) => {
+			assertRegistrationOwnerActive();
 			const dreamSession = sessionsById.get(args.path.id);
 			return { data: dreamSession?.messages ?? [] };
 		},
@@ -609,6 +626,10 @@ function makeMessage(
 
 export const __test = {
 	registeredProjectCount: () => registeredProjects.size,
+	clearRegistrationGeneration: (projectIdentity: string) => {
+		const registration = registeredProjects.get(projectIdentity);
+		if (registration) delete registration.generation;
+	},
 	setPiSubagentRunnerFactory: (factory: PiSubagentRunnerFactory) => {
 		piSubagentRunnerFactory = factory;
 	},

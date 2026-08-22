@@ -73,4 +73,13 @@ describe("/ctx-recomp post-completion signal contract", () => {
 		);
 		expect(clearCall).toBeGreaterThan(publishedGate);
 	});
+
+	test("captures session data before detached work and threads its abort signal", () => {
+		expect(codeOnly).toContain("const snapshot = readPiSessionSnapshot(ctx)");
+		expect(codeOnly).toContain("readMessages: () => snapshot.rawMessages");
+		expect(codeOnly).toContain("branchEntries: snapshot.branchEntries");
+		expect(codeOnly).toContain("work: async (signal)");
+		expect(codeOnly).toContain("signal,");
+		expect(codeOnly).not.toContain("readPiSessionMessages(ctx)");
+	});
 });

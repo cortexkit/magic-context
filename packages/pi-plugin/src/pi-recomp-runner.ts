@@ -18,7 +18,12 @@ import { setMagicContextRecompActive } from "./status-line";
  * equivalent fire-and-forget so the REPL stays responsive while the historian
  * passes run in the background — the same pattern as `spawnPiHistorianRun`.
  */
-const inFlightRecomp = new Map<string, Promise<unknown>>();
+interface InFlightRecompRun {
+	promise: Promise<unknown>;
+	controller: AbortController;
+}
+
+const inFlightRecomp = new Map<string, InFlightRecompRun>();
 
 /** True when a detached recomp/upgrade is already running for this session. */
 export function isPiRecompInFlight(sessionId: string): boolean {
@@ -33,12 +38,17 @@ export function isPiRecompInFlight(sessionId: string): boolean {
  */
 export async function awaitInFlightRecomps(sessionId?: string): Promise<void> {
 	const runs = sessionId
-		? [inFlightRecomp.get(sessionId)].filter(
+		? [inFlightRecomp.get(sessionId)?.promise].filter(
 				(run): run is Promise<unknown> => run !== undefined,
 			)
-		: [...inFlightRecomp.values()];
+		: [...inFlightRecomp.values()].map((run) => run.promise);
 	if (runs.length === 0) return;
 	await Promise.allSettled(runs);
+}
+
+/** Fence and cancel one session's detached recomp/upgrade, if still running. */
+export function abortInFlightRecomps(sessionId: string): void {
+	inFlightRecomp.get(sessionId)?.controller.abort();
 }
 
 /**
@@ -60,26 +70,36 @@ export function spawnPiRecompRun(args: {
 	sessionId: string;
 	provider: RawMessageProvider;
 	onStatusChange: () => void;
-	work: () => Promise<void>;
+	work: (signal: AbortSignal) => Promise<void>;
 }): void {
 	const { sessionId, provider, onStatusChange, work } = args;
+	const controller = new AbortController();
 	const unregister = setRawMessageProvider(sessionId, provider);
 	setMagicContextRecompActive(sessionId, true);
+
+	let run: InFlightRecompRun;
+	const runPromise = Promise.resolve()
+		.then(async () => {
+			try {
+				await work(controller.signal);
+			} catch (err) {
+				if (!controller.signal.aborted) {
+					sessionLog(
+						sessionId,
+						`pi recomp run failed (detached): ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
+			}
+		})
+		.finally(() => {
+			if (inFlightRecomp.get(sessionId) === run) {
+				inFlightRecomp.delete(sessionId);
+			}
+			setMagicContextRecompActive(sessionId, false);
+			unregister();
+			if (!controller.signal.aborted) onStatusChange();
+		});
+	run = { promise: runPromise, controller };
+	inFlightRecomp.set(sessionId, run);
 	onStatusChange();
-	const runPromise = (async () => {
-		try {
-			await work();
-		} catch (err) {
-			sessionLog(
-				sessionId,
-				`pi recomp run failed (detached): ${err instanceof Error ? err.message : String(err)}`,
-			);
-		}
-	})().finally(() => {
-		inFlightRecomp.delete(sessionId);
-		setMagicContextRecompActive(sessionId, false);
-		unregister();
-		onStatusChange();
-	});
-	inFlightRecomp.set(sessionId, runPromise);
 }

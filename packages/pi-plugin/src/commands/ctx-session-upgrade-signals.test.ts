@@ -52,4 +52,13 @@ describe("/ctx-session-upgrade detached execution contract", () => {
 		expect(codeOnly).toContain("isRecompComplete(recompResult.message)");
 		expect(codeOnly).toContain("!recompResult.published");
 	});
+
+	test("captures snapshots and threads cancellation through recomp and migration", () => {
+		expect(codeOnly).toContain("readPiSessionSnapshot(ctx)");
+		expect(codeOnly).toContain("readMessages: () => snapshot.rawMessages");
+		expect(codeOnly).toContain("branchEntries: snapshot.branchEntries");
+		expect(codeOnly).toContain("runMigration(signal)");
+		expect(codeOnly).toContain("work: async (signal)");
+		expect(codeOnly).not.toContain("readPiSessionMessages(ctx)");
+	});
 });

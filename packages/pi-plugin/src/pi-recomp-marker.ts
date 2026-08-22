@@ -46,11 +46,8 @@ import {
 export function stagePiRecompMarker(args: {
 	db: ContextDatabase;
 	sessionId: string;
-	ctx: unknown;
+	branchEntries: readonly unknown[];
 }): void {
-	const readBranchEntries = resolvePiReadBranchEntries(args.ctx);
-	if (!readBranchEntries) return;
-
 	const compartments = getCompartments(args.db, args.sessionId);
 	const last = compartments[compartments.length - 1];
 	if (!last) return;
@@ -58,7 +55,7 @@ export function stagePiRecompMarker(args: {
 	let firstKeptEntryId: string | null = null;
 	try {
 		firstKeptEntryId = findFirstKeptEntryId(
-			readBranchEntries(),
+			args.branchEntries,
 			last.endMessage,
 		);
 	} catch {
