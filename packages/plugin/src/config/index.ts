@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 
 import { detectConfigFile, isPrototypePollutionKey, parseJsonc } from "../shared/jsonc-parser";
 import { setOutputReserveConfig } from "../shared/models-dev-cache";
@@ -53,6 +54,58 @@ function getUserConfigBasePath(): string {
 
 function getProjectConfigBasePath(directory: string): string {
     return cortexKitProjectConfigBasePath(directory);
+}
+
+const MODEL_OVERLAY_AGENTS = ["historian", "dreamer", "sidekick"] as const;
+const MODEL_OVERLAY_FIELDS = ["model", "fallback_models", "variant"] as const;
+
+function loadModelOverlay(): Record<string, unknown> | null {
+    const configuredPath = process.env.MAGIC_CONTEXT_CONFIG?.trim();
+    if (!configuredPath) return null;
+
+    const loaded = loadConfigFileDetailed(
+        resolvePath(configuredPath),
+        "user",
+    );
+    if (!loaded) return null;
+
+    const overlay: Record<string, unknown> = {};
+    const ignored: string[] = [];
+    for (const agent of MODEL_OVERLAY_AGENTS) {
+        const source = loaded.config[agent];
+        if (!source || typeof source !== "object" || Array.isArray(source)) {
+            if (source !== undefined) ignored.push(agent);
+            continue;
+        }
+        const harness = (source as Record<string, unknown>).opencode;
+        if (!harness || typeof harness !== "object" || Array.isArray(harness)) {
+            if (harness !== undefined) ignored.push(`${agent}.opencode`);
+            continue;
+        }
+        const selected: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(harness)) {
+            if ((MODEL_OVERLAY_FIELDS as readonly string[]).includes(key)) {
+                selected[key] = value;
+            } else {
+                ignored.push(`${agent}.opencode.${key}`);
+            }
+        }
+        if (Object.keys(selected).length > 0) {
+            overlay[agent] = { opencode: selected };
+        }
+    }
+
+    if (loaded.warnings.length > 0 || ignored.length > 0) {
+        overlay.configWarnings = [
+            ...loaded.warnings.map((warning) => `[model overlay] ${warning}`),
+            ...(ignored.length > 0
+                ? [
+                      `[model overlay] Ignoring unsupported keys: ${ignored.join(", ")}. Only OpenCode model, fallback_models, and variant fields are supported.`,
+                  ]
+                : []),
+        ];
+    }
+    return overlay;
 }
 
 interface LegacyReadFallback {
@@ -600,6 +653,14 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
         })) {
             allWarnings.push(`[project config] ${warning}`);
         }
+    }
+
+    const modelOverlay = loadModelOverlay();
+    if (modelOverlay) {
+        const overlayWarnings = modelOverlay.configWarnings;
+        delete modelOverlay.configWarnings;
+        mergedRaw = deepMergeRawConfig(mergedRaw, modelOverlay);
+        if (overlayWarnings) allWarnings.push(...overlayWarnings);
     }
 
     const recoveredTopLevelKeys: string[] = [];

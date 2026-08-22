@@ -141,6 +141,53 @@ describe("loadPluginConfig — graduated mural config", () => {
     });
 });
 
+describe("loadPluginConfig — per-run model overlay", () => {
+    it("applies only OpenCode model fields from MAGIC_CONTEXT_CONFIG", () => {
+        const overlay = join(tmpdir(), `mc-model-overlay-${Date.now()}.jsonc`);
+        writeFileSync(
+            overlay,
+            JSON.stringify({
+                historian: {
+                    opencode: {
+                        model: "overlay/historian",
+                        variant: "fast",
+                        prompt: "must be ignored",
+                    },
+                },
+                dreamer: {
+                    opencode: { model: "overlay/dreamer", fallback_models: ["overlay/fallback"] },
+                },
+                embedding: { provider: "off" },
+            }),
+            "utf-8",
+        );
+        try {
+            const result = loadWithUserConfig(
+                JSON.stringify({
+                    historian: { opencode: { model: "user/historian" } },
+                    embedding: { provider: "local" },
+                }),
+                { MAGIC_CONTEXT_CONFIG: overlay },
+            );
+
+            expect(result.historian.opencode).toMatchObject({
+                model: "overlay/historian",
+                variant: "fast",
+            });
+            expect(result.dreamer?.opencode).toMatchObject({
+                model: "overlay/dreamer",
+                fallback_models: ["overlay/fallback"],
+            });
+            expect(result.embedding.provider).toBe("local");
+            expect(result.configWarnings?.join("\n")).toContain(
+                "Ignoring unsupported keys: historian.opencode.prompt",
+            );
+        } finally {
+            rmSync(overlay, { force: true });
+        }
+    });
+});
+
 describe("loadPluginConfig — transform mode resolution", () => {
     it("downgrades rust when compaction is off and emits one boot warning", () => {
         const result = loadWithUserConfig(
