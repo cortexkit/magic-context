@@ -157,6 +157,7 @@ describe("loadPluginConfig — per-run model overlay", () => {
                 dreamer: {
                     opencode: { model: "overlay/dreamer", fallback_models: ["overlay/fallback"] },
                 },
+                sidekick: { model: "overlay/sidekick", variant: "balanced" },
                 embedding: { provider: "off" },
                 memory: { enabled: false },
             }),
@@ -178,6 +179,10 @@ describe("loadPluginConfig — per-run model overlay", () => {
             expect(result.dreamer?.opencode).toMatchObject({
                 model: "overlay/dreamer",
                 fallback_models: ["overlay/fallback"],
+            });
+            expect(result.sidekick).toMatchObject({
+                model: "overlay/sidekick",
+                variant: "balanced",
             });
             expect(result.embedding.provider).toBe("local");
             expect(result.memory.enabled).toBe(true);

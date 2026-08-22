@@ -82,12 +82,16 @@ function loadModelOverlay(): Record<string, unknown> | null {
             if (source !== undefined) ignored.push(agent);
             continue;
         }
-        const harness = (source as Record<string, unknown>).opencode;
-        for (const key of Object.keys(source as Record<string, unknown>)) {
-            if (key !== "opencode") ignored.push(`${agent}.${key}`);
+        const sourceRecord = source as Record<string, unknown>;
+        const isFlatSidekick = agent === "sidekick";
+        const harness = isFlatSidekick ? sourceRecord : sourceRecord.opencode;
+        for (const key of Object.keys(sourceRecord)) {
+            if (isFlatSidekick ? !(MODEL_OVERLAY_FIELDS as readonly string[]).includes(key) : key !== "opencode") {
+                ignored.push(`${agent}.${key}`);
+            }
         }
         if (!harness || typeof harness !== "object" || Array.isArray(harness)) {
-            if (harness !== undefined) ignored.push(`${agent}.opencode`);
+            if (harness !== undefined) ignored.push(`${agent}${isFlatSidekick ? "" : ".opencode"}`);
             continue;
         }
         const selected: Record<string, unknown> = {};
@@ -99,7 +103,7 @@ function loadModelOverlay(): Record<string, unknown> | null {
             }
         }
         if (Object.keys(selected).length > 0) {
-            overlay[agent] = { opencode: selected };
+            overlay[agent] = isFlatSidekick ? selected : { opencode: selected };
         }
     }
 
