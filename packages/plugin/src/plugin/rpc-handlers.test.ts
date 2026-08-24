@@ -50,6 +50,24 @@ describe("sidebar snapshot RPC failures", () => {
     });
 });
 
+describe("buildStatusDetail — active profile", () => {
+    test("includes the resolved profile name in the RPC status payload", () => {
+        const db = createTestDb();
+        try {
+            expect(
+                buildStatusDetail(db, "ses-profile-status", process.cwd(), undefined, {
+                    profile: "work",
+                }).activeProfile,
+            ).toBe("work");
+            expect(
+                buildStatusDetail(db, "ses-base-status", process.cwd()).activeProfile,
+            ).toBeNull();
+        } finally {
+            closeQuietly(db);
+        }
+    });
+});
+
 describe("buildStatusDetail — storage version probe", () => {
     test("reports the upstream lane when fork rows share context.db", () => {
         const db = createTestDb();

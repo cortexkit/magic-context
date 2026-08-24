@@ -30,6 +30,7 @@ import {
     renewGitSweepLease,
 } from "./git-commits/sweep-coordinator";
 import { invalidateProject } from "./memory/embedding-cache";
+import { dominantEmbeddingFailure, type EmbeddingFailure } from "./memory/embedding-failure";
 import { getEmbeddingProviderIdentity } from "./memory/embedding-identity";
 import { LocalEmbeddingProvider } from "./memory/embedding-local";
 import { OpenAICompatibleEmbeddingProvider } from "./memory/embedding-openai";
@@ -2154,6 +2155,11 @@ async function embedCompartmentChunkBatch(
     return embedded;
 }
 
+function getLastEmbeddingFailureForProject(projectIdentity: string): EmbeddingFailure | null {
+    const registration = projectRegistrations.get(projectIdentity);
+    return registration?.provider?.getLastFailureReason?.() ?? null;
+}
+
 interface CandidateChunkBatchResult {
     /** Compartments fully embedded + persisted this call. */
     embedded: number;
@@ -2165,6 +2171,8 @@ interface CandidateChunkBatchResult {
      *  (returned no/partial vectors). NOT permanent: excluded for the rest of
      *  THIS run so the cursor advances, but re-attempted on a future run. */
     failed: number[];
+    /** Classified reasons from failed provider attempts in this batch. */
+    failureReasons: EmbeddingFailure[];
 }
 
 /** Embed + persist chunk vectors for an already-selected candidate batch.
@@ -2182,7 +2190,8 @@ async function embedCandidateChunkBatch(
 ): Promise<CandidateChunkBatchResult> {
     const noWork: number[] = [];
     const failed: number[] = [];
-    if (candidates.length === 0) return { embedded: 0, noWork, failed };
+    const failureReasons: EmbeddingFailure[] = [];
+    if (candidates.length === 0) return { embedded: 0, noWork, failed, failureReasons };
     const maxInputTokens = getProjectEmbeddingMaxInputTokens(projectIdentity);
 
     type Prepared = {
@@ -2222,7 +2231,7 @@ async function embedCandidateChunkBatch(
         prepared.push({ candidate, windows });
     }
 
-    if (prepared.length === 0) return { embedded: 0, noWork, failed };
+    if (prepared.length === 0) return { embedded: 0, noWork, failed, failureReasons };
 
     // Embed the prepared compartments in sub-batches bounded by window count so
     // the per-call payload (and the provider's padded tensor / JSON body) stays
@@ -2254,9 +2263,10 @@ async function embedCandidateChunkBatch(
         );
 
         // Retry the provider call a few times with backoff. The provider returns
-        // null / all-null on failure (never throws), so we can't read the failure
-        // reason — but we CAN time it: a fast failure (refused connection, 400,
-        // brief blip) is worth a quick retry; a SLOW failure means the request hit
+        // null / all-null on failure (never throws), while its optional classified
+        // reason is retained separately for the final command summary. We can also
+        // time it: a fast failure (refused connection, 400, brief blip) is worth a
+        // quick retry; a SLOW failure means the request hit
         // the provider's HTTP timeout, and re-sending the identical (too-big/too-
         // slow) payload would just burn another full timeout. So retry only when
         // the prior attempt failed FAST. With MAX_WINDOWS_PER_EMBED_CALL=2 a
@@ -2289,6 +2299,10 @@ async function embedCandidateChunkBatch(
                 log("[magic-context] failed to proactively embed compartment chunks:", error);
             }
             if (signal?.aborted) break;
+            if (!result || result.vectors.size === 0) {
+                const failure = getLastEmbeddingFailureForProject(projectIdentity);
+                if (failure) failureReasons.push(failure);
+            }
             if (result) {
                 for (const item of slice) {
                     if (persistedIds.has(item.candidate.id)) continue;
@@ -2340,7 +2354,7 @@ async function embedCandidateChunkBatch(
             }
         }
     }
-    return { embedded, noWork, failed };
+    return { embedded, noWork, failed, failureReasons };
 }
 
 async function drainCompartmentChunkBacklogForProject(
@@ -2414,7 +2428,14 @@ export type SessionChunkBackfillOutcome =
     // vectors for them after retries) and were not skippable no-work rows —
     // surfaced so the command can tell the user it stopped early (with how many
     // failed) instead of falsely "done". `remaining` is still-embeddable count.
-    | { status: "stalled"; embedded: number; total: number; remaining: number; failed: number };
+    | {
+          status: "stalled";
+          embedded: number;
+          total: number;
+          remaining: number;
+          failed: number;
+          failure?: EmbeddingFailure;
+      };
 
 /**
  * Backfill ALL un-embedded compartment chunks for ONE session in a single run
@@ -2490,6 +2511,7 @@ export async function embedSessionCompartmentChunks(
     let aborted = false;
     let providerDown = false;
     let consecutiveFailedBatches = 0;
+    const failureReasons: EmbeddingFailure[] = [];
     try {
         options?.onProgress?.({ embedded, total });
         // Re-query each iteration (rather than pre-loading all candidates) so
@@ -2515,6 +2537,7 @@ export async function embedSessionCompartmentChunks(
                 embedded: n,
                 noWork,
                 failed,
+                failureReasons: batchFailureReasons,
             } = await embedCandidateChunkBatch(
                 db,
                 projectIdentity,
@@ -2528,6 +2551,10 @@ export async function embedSessionCompartmentChunks(
                 aborted = true;
                 break;
             }
+            // Keep the provider's classified failure evidence for the final command
+            // summary. Each failed slice can retry, so the dominant reason is chosen
+            // only after the drain has observed every attempted batch.
+            failureReasons.push(...batchFailureReasons);
             // Record no-work candidates so the next query advances past them.
             for (const id of noWork) skipIds.push(id);
             // Record this-run failures so the cursor advances; retried next run.
@@ -2580,7 +2607,14 @@ export async function embedSessionCompartmentChunks(
             ) - skipIds.length,
         );
         if (remaining > 0) {
-            return { status: "stalled", embedded, total, remaining, failed: failedIds.length };
+            return {
+                status: "stalled",
+                embedded,
+                total,
+                remaining,
+                failed: failedIds.length,
+                failure: dominantEmbeddingFailure(failureReasons),
+            };
         }
     }
     return { status: "done", embedded, total, failed: failedIds.length };

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import type { EmbeddingConfig } from "@magic-context/core/config/schema/magic-context";
 import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
+import type { EmbeddingFailure } from "@magic-context/core/features/magic-context/memory/embedding-failure";
 import type {
 	EmbeddingProvider,
 	EmbeddingPurpose,
@@ -20,6 +21,34 @@ import {
 	maybeAutoEmbedPiSession,
 	runEmbedDrain,
 } from "./ctx-embed";
+
+class FailingEmbeddingProvider implements EmbeddingProvider {
+	readonly modelId = "fake-embedding-model";
+
+	constructor(private readonly failure: EmbeddingFailure) {}
+
+	async initialize(): Promise<boolean> {
+		return true;
+	}
+
+	async embed(): Promise<null> {
+		return null;
+	}
+
+	async embedBatch(texts: string[]): Promise<null[]> {
+		return texts.map(() => null);
+	}
+
+	async dispose(): Promise<void> {}
+
+	isLoaded(): boolean {
+		return true;
+	}
+
+	getLastFailureReason(): EmbeddingFailure {
+		return this.failure;
+	}
+}
 
 class FakeEmbeddingProvider implements EmbeddingProvider {
 	readonly modelId = "fake-embedding-model";
@@ -98,6 +127,67 @@ describe("Pi /ctx-embed progress", () => {
 		autoEmbedAttemptedBySession.clear();
 		_resetProjectEmbeddingRegistryForTests();
 		_setTestProviderFactoryForProject(null);
+	});
+
+	it.each([
+		{
+			failure: {
+				class: "substitution_rejected",
+				reason:
+					"served model 'bge-m3' does not match requested 'baai/bge-m3-embedding' (substitution guard)",
+				retryable: false,
+			} satisfies EmbeddingFailure,
+		},
+		{
+			failure: {
+				class: "http_error",
+				reason: "HTTP 402 from endpoint: quota exhausted",
+				retryable: false,
+			} satisfies EmbeddingFailure,
+		},
+		{
+			failure: {
+				class: "empty_result",
+				reason: "response data[] was empty",
+				retryable: true,
+			} satisfies EmbeddingFailure,
+		},
+		{
+			failure: {
+				class: "invalid_envelope",
+				reason: "response had keys [object, results] but data[] was absent",
+				retryable: false,
+			} satisfies EmbeddingFailure,
+		},
+	])("surfaces $failure.class in the /ctx-embed summary", async ({
+		failure,
+	}) => {
+		_setTestProviderFactoryForProject(
+			() => new FailingEmbeddingProvider(failure),
+		);
+		const db = createTestDb();
+		try {
+			const project = `pi-embed-failure-${failure.class}`;
+			const sessionId = `pi-embed-failure-${failure.class}`;
+			registerEmbedding(db, project);
+			seedCompartments(db, sessionId, 1);
+
+			const terminal = await runEmbedDrain(db, project, sessionId, {
+				batchSize: 1,
+			});
+			expect(terminal.text).toContain(failure.reason);
+			if (failure.retryable) {
+				expect(terminal.text).toContain(
+					"Run /ctx-embed start again to retry them.",
+				);
+			} else {
+				expect(terminal.text).not.toContain(
+					"Run /ctx-embed start again to retry them.",
+				);
+			}
+		} finally {
+			closeQuietly(db);
+		}
 	});
 
 	it("re-arms after a zero-work pass and latches only after the later drain succeeds", async () => {

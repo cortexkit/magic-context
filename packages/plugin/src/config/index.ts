@@ -15,6 +15,7 @@ import {
 } from "./migrate-config-location";
 import { migrateDreamerV2 } from "./migrate-dreamer-v2";
 import { migrateLegacyExperimental } from "./migrate-experimental";
+import { resolveConfigProfile } from "./profiles";
 import {
     constrainProjectThresholdOverrides,
     dropInheritedEmbeddingKeyOnRedirect,
@@ -613,11 +614,6 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
               : null;
 
     const allWarnings: string[] = [];
-    let mergedRaw: Record<string, unknown> = {};
-    // Threshold trust boundary is relative to the USER/default effective config:
-    // a cloned repo may delay compaction, but it may not lower thresholds in a
-    // way that forces extra historian work on the user's account.
-    const trustedBaseConfig = parsePluginConfig(userLoaded?.config ?? {});
 
     if (userLegacyFallback.source) {
         allWarnings.push(
@@ -641,26 +637,48 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
 
     if (userLoaded) {
         allWarnings.push(...userLoaded.warnings.map((w) => `[user config] ${w}`));
-        mergedRaw = deepMergeRawConfig(mergedRaw, userLoaded.config);
     }
 
+    let projectRaw: Record<string, unknown> = {};
     if (projectLoaded) {
         allWarnings.push(...projectLoaded.warnings.map((w) => `[project config] ${w}`));
-        const projectRaw = { ...projectLoaded.config };
+        projectRaw = { ...projectLoaded.config };
         for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
             allWarnings.push(`[project config] ${warning}`);
         }
-        mergedRaw = deepMergeRawConfig(mergedRaw, projectRaw);
+    }
+
+    // Resolve profiles at the single user→project merge choke point. The profile
+    // definition is parsed from the trusted user tier, then its validated model
+    // overlay is merged before the untrusted project config. The raw selector is
+    // consumed here; only the resolved name remains as status metadata.
+    const profileResolution = resolveConfigProfile({
+        userRaw: userLoaded?.config ?? {},
+        projectRaw,
+    });
+    allWarnings.push(...profileResolution.warnings.map((warning) => `[config] ${warning}`));
+    const trustedProfiledRaw = deepMergeRawConfig(
+        profileResolution.userBase,
+        profileResolution.overlay,
+    );
+    let mergedRaw = trustedProfiledRaw;
+    // Threshold trust boundary is relative to the USER/default effective config:
+    // a cloned repo may delay compaction, but it may not lower thresholds in a
+    // way that forces extra historian work on the user's account.
+    const trustedBaseConfig = parsePluginConfig(trustedProfiledRaw);
+
+    if (projectLoaded) {
+        mergedRaw = deepMergeRawConfig(mergedRaw, profileResolution.projectBase);
         for (const warning of dropInheritedEmbeddingKeyOnRedirect(
             projectRaw,
             mergedRaw,
-            userLoaded?.config,
+            profileResolution.userBase,
         )) {
             allWarnings.push(`[project config] ${warning}`);
         }
         for (const warning of constrainProjectThresholdOverrides({
             mergedRaw,
-            projectRaw,
+            projectRaw: profileResolution.projectBase,
             trustedBaseConfig,
         })) {
             allWarnings.push(`[project config] ${warning}`);
@@ -677,6 +695,7 @@ export function loadPluginConfigDetailed(directory: string): LoadResultDetailed 
 
     const recoveredTopLevelKeys: string[] = [];
     const config = parsePluginConfig(mergedRaw, recoveredTopLevelKeys);
+    if (profileResolution.activeProfile) config.profile = profileResolution.activeProfile;
     setOutputReserveConfig(config.output_reserve);
     setWindowOverlayPath(config.models?.window_overlay_path);
     if (config.configWarnings?.length) {

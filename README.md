@@ -333,6 +333,26 @@ Settings live in `magic-context.jsonc`. Most settings have sensible defaults, bu
 
 Upgrading from an earlier version? Your existing config is moved here automatically on first run (a `.MOVED_READPLEASE` breadcrumb is left at the old path).
 
+### Work and personal repository model profiles
+
+If your personal repositories use one hidden-agent model set and work repositories use another, define the profiles in user config and let each work repository select its name:
+
+```jsonc
+// ~/.config/cortexkit/magic-context.jsonc
+{
+  "profile": "personal",
+  "profiles": {
+    "personal": { "historian": { "opencode": { "model": "anthropic/claude-sonnet-4-6" } } },
+    "work": { "historian": { "opencode": { "model": "openai/gpt-5.2-codex" } } }
+  }
+}
+
+// <work-repo>/.cortexkit/magic-context.jsonc
+{ "profile": "work" }
+```
+
+This is the work-repositories-versus-personal-repositories setup requested by kagbodji. Profiles overlay only hidden-agent model selection, preserve base settings that they do not mention, and are defined only in user config. A project can select a known user profile but cannot supply its contents. See [CONFIGURATION.md](./CONFIGURATION.md#per-repository-model-profiles) for the full OpenCode/Pi example, fallback behavior, and trust boundary.
+
 ---
 
 ## Storage

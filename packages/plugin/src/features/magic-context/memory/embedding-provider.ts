@@ -1,3 +1,5 @@
+import type { EmbeddingFailure } from "./embedding-failure";
+
 export type EmbeddingPurpose = "query" | "passage";
 
 export interface EmbeddingProvider {
@@ -31,4 +33,6 @@ export interface EmbeddingProvider {
     ): Promise<Map<string, Float32Array>>;
     dispose(): Promise<void>;
     isLoaded(): boolean;
+    /** Most recent classified provider failure, if this provider exposes one. */
+    getLastFailureReason?(): EmbeddingFailure | null;
 }

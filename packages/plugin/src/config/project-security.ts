@@ -256,6 +256,9 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
  * over the user config. Returns warnings describing what was ignored.
  *
  * Closes:
+ *  - `profiles` — profile definitions choose hidden-agent models and must stay
+ *    in trusted user config; a repository may select a named profile but cannot
+ *    supply its contents.
  *  - `auto_update` — a repo must not suppress plugin self-updates (which can
  *    carry security fixes).
  *  - `fail_closed_blocking` — a repo must not un-block (or force-block) the
@@ -299,6 +302,13 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
  */
 export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknown>): string[] {
     const warnings: string[] = [];
+
+    if ("profiles" in projectRaw) {
+        delete projectRaw.profiles;
+        warnings.push(
+            "Ignoring profiles from project config (security: profile definitions are user-level only; a repository may select a named user profile with profile).",
+        );
+    }
 
     if ("auto_update" in projectRaw) {
         delete projectRaw.auto_update;

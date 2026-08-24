@@ -513,6 +513,46 @@ describe("loadPiConfig", () => {
 		expect(warnings).toContain("historian.pi.model");
 	});
 
+	it("resolves user-owned model profiles with project selection precedence", () => {
+		const cwd = makeTempRoot("mc-pi-profile-cwd-");
+		const home = makeTempRoot("mc-pi-profile-home-");
+		withHome(home);
+		writeUserConfig(
+			home,
+			JSON.stringify({
+				profile: "personal",
+				historian: { pi: { model: "github-copilot/base" } },
+				profiles: {
+					personal: { historian: { pi: { model: "github-copilot/personal" } } },
+					work: {
+						historian: {
+							pi: {
+								model: {
+									model: "github-copilot/work",
+									thinking_level: "high",
+								},
+								fallback_models: [
+									{ model: "openai/work-fallback", thinking_level: "minimal" },
+								],
+							},
+						},
+					},
+				},
+			}),
+		);
+		writeProjectConfig(cwd, JSON.stringify({ profile: "work" }));
+
+		const result = loadPiConfig({ cwd });
+
+		expect(result.config.profile).toBe("work");
+		expect(result.config.historian?.pi).toEqual({
+			model: { model: "github-copilot/work", thinking_level: "high" },
+			fallback_models: [
+				{ model: "openai/work-fallback", thinking_level: "minimal" },
+			],
+		});
+	});
+
 	it("migrates legacy agent enabled keys before schema parsing", () => {
 		const cwd = makeTempRoot("mc-pi-cwd-");
 		const home = makeTempRoot("mc-pi-home-");

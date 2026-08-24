@@ -152,6 +152,21 @@ describe("Pi Magic Context commands", () => {
 		expect(sent[0]?.data.text).toContain("## Magic Status");
 	});
 
+	it("surfaces the active profile in /ctx-status text and dialog data", async () => {
+		const db = createDb();
+		const { pi, handlers, sent } = createMockPi();
+		registerCtxStatusCommand(pi as never, {
+			db,
+			projectIdentity: "/tmp/project",
+			activeProfile: "work",
+		});
+
+		await handlers.get("ctx-status")?.("", createCtx());
+
+		expect(sent[0]?.data.text).toContain("Active profile: work");
+		expect(sent[0]?.data.details).toMatchObject({ activeProfile: "work" });
+	});
+
 	it("/ctx-status keeps the persisted usable limit when command context omits maxTokens", async () => {
 		const db = createDb();
 		const sessionId = "ses-status-persisted-reserve";

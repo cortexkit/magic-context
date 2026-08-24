@@ -1268,6 +1268,7 @@ async function startPiMagicContextRuntime(
 			runnable: bootProjectDeps.dreamerEnabled,
 			scheduleSummary: summarizeDreamSchedule(bootProjectDeps.config.dreamer),
 		},
+		activeProfile: bootProjectDeps.config.profile,
 		resolveStatusDeps: (ctx) => {
 			const current = resolveCurrentProjectDeps(ctx);
 			return {
@@ -1283,6 +1284,7 @@ async function startPiMagicContextRuntime(
 					runnable: current.dreamerEnabled,
 					scheduleSummary: summarizeDreamSchedule(current.config.dreamer),
 				},
+				activeProfile: current.config.profile,
 			};
 		},
 	});

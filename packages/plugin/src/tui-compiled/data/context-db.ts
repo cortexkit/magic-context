@@ -181,6 +181,7 @@ export async function loadStatusDetail(
     const emptyDetail: StatusDetail = {
         ...EMPTY_SNAPSHOT,
         sessionId,
+        activeProfile: null,
         tagCounter: 0,
         activeTags: 0,
         droppedTags: 0,

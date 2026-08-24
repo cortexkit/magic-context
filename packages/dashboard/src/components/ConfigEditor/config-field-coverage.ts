@@ -78,6 +78,10 @@ export const RENDERED_PREFIXES: readonly string[] = [
  */
 export const OMITTED_BY_DESIGN: Readonly<Record<string, string>> = {
   ...agentOverrideTailOmissions(),
+  profile:
+    "per-repository model-profile selector; deferred until the Alfonso Desktop profile editor is available",
+  profiles:
+    "user-owned model-profile definitions; deferred until the Alfonso Desktop profile editor is available",
   "sidekick.system_prompt": "free-form prompt override; raw JSONC",
   "system_prompt_injection.skip_signatures":
     "free-form substring array; raw JSONC (no array widget in the form yet)",

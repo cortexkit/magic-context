@@ -4,6 +4,7 @@ import { formatStatusDetailMarkdown } from "./status-detail-text";
 
 const STATUS_FIXTURE: StatusDetail = {
     sessionId: "ses_status",
+    activeProfile: "work",
     usagePercentage: 75,
     inputTokens: 96_000,
     contextLimit: 128_000,
@@ -70,6 +71,7 @@ describe("formatStatusDetailMarkdown", () => {
         expect(formatStatusDetailMarkdown(STATUS_FIXTURE)).toBe(`## Magic Context Status
 
 - **Mode:** Magic Context compaction
+- **Active profile:** work
 - **Usage:** 75.0% (96,000 / 128,000 usable tokens)
 - **Cache lane:** live (42s remaining); TTL 5m
 - **Historian:** running; boundary present; coverage 12

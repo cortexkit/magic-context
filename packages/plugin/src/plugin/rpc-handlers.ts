@@ -617,6 +617,7 @@ export function buildStatusDetail(
     );
     const detail: StatusDetail = {
         ...base,
+        activeProfile: typeof config?.profile === "string" ? config.profile : null,
         tagCounter: 0,
         activeTags: 0,
         droppedTags: 0,

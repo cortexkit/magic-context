@@ -23,7 +23,7 @@ Add the schema line for editor validation and autocomplete:
 ```
 
 :::note
-Project-level configs cannot use `{env:VAR}` / `{file:path}` expansion. A cloned repository also cannot set `output_reserve`, `sqlite.*`, `storage.enforce_private_permissions`, hidden-agent prompts/permissions, `historian.model`, or `historian.fallback_models`. Project `execute_threshold_percentage` / `execute_threshold_tokens` may only RAISE thresholds relative to the user's effective settings (a repo may delay compaction, not make it happen earlier). Dreamer model/schedule/task tuning and `memory.enabled` remain allowed project overrides.
+Project-level configs cannot use `{env:VAR}` / `{file:path}` expansion. A cloned repository also cannot set `output_reserve`, `sqlite.*`, `storage.enforce_private_permissions`, hidden-agent prompts/permissions, `historian.model`, or `historian.fallback_models`. Profile definitions in `profiles` are user-level only; a project may set only `profile` to choose a named user profile. Project `execute_threshold_percentage` / `execute_threshold_tokens` may only RAISE thresholds relative to the user's effective settings (a repo may delay compaction, not make it happen earlier). Dreamer model/schedule/task tuning and `memory.enabled` remain allowed project overrides.
 :::
 
 ## Top-level switches
@@ -70,6 +70,15 @@ When and how aggressively Magic Context manages the session's context window. Pe
 | `protected_tags` | number (1–100) | — | Number of recent tags to protect from dropping (min: 1, max: 100, default: 20) |
 | `clear_reasoning_age` | number (10–) | `50` | Clear reasoning/thinking blocks older than N tags (default: 50) |
 | `history_budget_percentage` | number (0.05–0.5) | `0.15` | Fraction of usable context (context_limit × execute_threshold) reserved for the session history block (default: 0.15) |
+
+## Model profiles
+
+Named user-owned model-selection overlays. A project may select a profile name but cannot define or alter profile contents.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `profile` | string | — | Select a named user-owned model profile. Project config may select a profile name, which overrides this user default; unknown names warn and use the base configuration. |
+| `profiles` | map<string, object> | — | User-level named model profiles. A profile may contain only historian/dreamer harness model blocks and sidekick model-selection fields; project configs may select a name but cannot define profiles. |
 
 ## Historian
 

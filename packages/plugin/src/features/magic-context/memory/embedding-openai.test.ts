@@ -530,3 +530,66 @@ describe("OpenAICompatibleEmbeddingProvider model-substitution guard", () => {
         expect(provider._getFailureCount()).toBe(0);
     });
 });
+
+describe("OpenAICompatibleEmbeddingProvider classified failures", () => {
+    let fetchSpy: ReturnType<typeof spyOn<typeof globalThis, "fetch">>;
+
+    beforeEach(() => {
+        fetchSpy = spyOn(globalThis, "fetch");
+    });
+    afterEach(() => {
+        fetchSpy.mockRestore();
+    });
+
+    test.each([
+        {
+            name: "router namespace rewrite is a substitution rejection",
+            model: "baai/bge-m3-embedding",
+            response: new Response(
+                JSON.stringify({ model: "bge-m3", data: [{ embedding: [0.1, 0.2] }] }),
+                { status: 200 },
+            ),
+            failureClass: "substitution_rejected",
+            reason: "served model 'bge-m3' does not match requested 'baai/bge-m3-embedding' (substitution guard)",
+        },
+        {
+            name: "HTTP failure includes a redacted body excerpt",
+            model: "test-model",
+            response: new Response(
+                '{"error":"quota exhausted","api_key":"sk-abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"}',
+                { status: 402 },
+            ),
+            failureClass: "http_error",
+            reason: 'HTTP 402 from endpoint: {"error":"quota exhausted","api_key":"<REDACTED:api_key>"}',
+        },
+        {
+            name: "empty data is a genuine empty result",
+            model: "test-model",
+            response: new Response(JSON.stringify({ object: "list", data: [] }), { status: 200 }),
+            failureClass: "empty_result",
+            reason: "response data[] was empty",
+        },
+        {
+            name: "wrong envelope reports the available keys",
+            model: "test-model",
+            response: new Response(JSON.stringify({ object: "list", results: [] }), {
+                status: 200,
+            }),
+            failureClass: "invalid_envelope",
+            reason: "response had keys [object, results] but data[] was absent",
+        },
+    ])("$name", async ({ model, response, failureClass, reason }) => {
+        fetchSpy.mockImplementation((async () => response) as FetchLike);
+        const provider = new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model,
+        });
+
+        expect(await provider.embed("text")).toBeNull();
+        expect(provider.getLastFailureReason()).toEqual({
+            class: failureClass,
+            reason,
+            retryable: failureClass === "empty_result",
+        });
+    });
+});

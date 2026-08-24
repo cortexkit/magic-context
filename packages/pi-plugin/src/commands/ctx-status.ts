@@ -38,6 +38,8 @@ export interface RegisterCtxStatusDeps {
 		[modelKey: string]: number | undefined;
 	};
 	dreamer?: { runnable?: boolean; scheduleSummary?: string };
+	/** User-owned profile selected for the project, after config resolution. */
+	activeProfile?: string;
 }
 
 export type CtxStatusRuntimeDeps = Omit<
@@ -57,6 +59,7 @@ export interface CtxStatusDetails {
 	lastCompartmentRange: string | null;
 	memoryCount: number;
 	noteCount: number;
+	activeProfile: string | null;
 	dreamer: {
 		enabled: boolean;
 		scheduleSummary: string | null;
@@ -144,9 +147,14 @@ export function registerCtxStatusCommand(
 					resolveTailHygieneStatus(getPiChannel1Baseline(sessionId)),
 				);
 				const details = buildStatusDetails(currentDeps, sessionId);
+				const profileStatus = currentDeps.activeProfile ?? "none";
 				sendCtxStatusMessage(
 					pi,
-					{ title: "/ctx-status", text: statusText, level: "info" },
+					{
+						title: "/ctx-status",
+						text: `${statusText}\n\nActive profile: ${profileStatus}`,
+						level: "info",
+					},
 					details,
 				);
 			} catch (error) {
@@ -175,6 +183,7 @@ function buildStatusDetails(
 	return {
 		sessionId,
 		projectIdentity: deps.projectIdentity,
+		activeProfile: deps.activeProfile ?? null,
 		activeTags: activeTags.length,
 		droppedTags: droppedTags.length,
 		totalBytes,

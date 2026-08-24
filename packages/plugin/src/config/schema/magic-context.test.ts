@@ -285,6 +285,66 @@ describe("MagicContextConfigSchema", () => {
         });
     });
 
+    describe("config profiles", () => {
+        it("admits only user-owned model-selection overlays and preserves harness qualifiers", () => {
+            const result = MagicContextConfigSchema.parse({
+                profile: "work",
+                profiles: {
+                    work: {
+                        historian: {
+                            opencode: {
+                                model: { model: "anthropic/work-historian", variant: "high" },
+                                fallback_models: [
+                                    { model: "openai/work-fallback", variant: "low" },
+                                ],
+                            },
+                            pi: {
+                                model: {
+                                    model: "github-copilot/work-historian",
+                                    thinking_level: "high",
+                                },
+                            },
+                        },
+                        dreamer: {
+                            opencode: {
+                                tasks: {
+                                    verify: {
+                                        fallback_models: [
+                                            { model: "openai/work-verify", variant: "medium" },
+                                        ],
+                                    },
+                                },
+                            },
+                        },
+                        sidekick: {
+                            model: "anthropic/work-sidekick",
+                            fallback_models: ["openai/work-sidekick-fallback"],
+                        },
+                    },
+                },
+            });
+
+            expect(result.profiles?.work?.historian?.opencode?.fallback_models).toEqual([
+                { model: "openai/work-fallback", variant: "low" },
+            ]);
+            expect(
+                result.profiles?.work?.dreamer?.opencode?.tasks?.verify?.fallback_models,
+            ).toEqual([{ model: "openai/work-verify", variant: "medium" }]);
+            expect(result.profiles?.work?.sidekick?.model).toBe("anthropic/work-sidekick");
+        });
+
+        it("rejects durable state and agent metadata in a profile", () => {
+            for (const profiles of [
+                { work: { embedding: { provider: "off" } } },
+                { work: { historian: { two_pass: true } } },
+                { work: { dreamer: { tasks: { verify: { schedule: "0 3 * * *" } } } } },
+                { work: { sidekick: { timeout_ms: 60_000 } } },
+            ]) {
+                expect(MagicContextConfigSchema.safeParse({ profiles }).success).toBe(false);
+            }
+        });
+    });
+
     describe("per-harness model configuration", () => {
         it("keeps the migration inventory exhaustive and field-specific", () => {
             expect(PER_HARNESS_MIGRATION_INVENTORY).toEqual({

@@ -50,6 +50,25 @@ describe("Pi status dialog", () => {
 		}
 	});
 
+	it("includes the active profile in status-dialog data", () => {
+		const db = createTestDb();
+		try {
+			const detail = buildPiStatusDetail(
+				{ getAllTools: () => [] } as never,
+				fakeContext("ses-status-profile") as never,
+				{
+					db,
+					projectIdentity: resolveProjectIdentity(process.cwd()),
+					activeProfile: "work",
+				},
+				"ses-status-profile",
+			);
+			expect(detail.activeProfile).toBe("work");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("matches the persisted scheduler percentage when command context omits maxTokens", async () => {
 		const db = createTestDb();
 		try {

@@ -10,6 +10,7 @@ import {
 	embedPauseBySession,
 	embedRunStateBySession,
 } from "@magic-context/core/hooks/magic-context/embed-session-state";
+import { formatEmbedFailureSummary } from "@magic-context/core/hooks/magic-context/format-embed-failure";
 import { formatEmbedStatusText } from "@magic-context/core/hooks/magic-context/format-embed-status";
 import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
 import { resolveSessionId, sendCtxStatusMessage } from "./pi-command-utils";
@@ -130,7 +131,11 @@ export async function runEmbedDrain(
 		}
 		case "stalled":
 			return {
-				text: `## /ctx-embed\n\nEmbedded ${outcome.embedded} compartment${outcome.embedded === 1 ? "" : "s"}; ${outcome.remaining} could not be embedded (the provider returned no result). Run /ctx-embed start again to retry them.`,
+				text: `## /ctx-embed\n\n${formatEmbedFailureSummary(
+					outcome.embedded,
+					outcome.remaining,
+					outcome.failure,
+				)}`,
 				level: "info",
 			};
 		default:

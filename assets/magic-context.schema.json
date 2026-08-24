@@ -50,6 +50,566 @@
       "description": "Output language for Magic Context's generated content and guidance, as a 2-letter ISO 639-1 code (e.g. \"tr\", \"es\", \"de\", \"ja\", \"pt\"). When set, the historian, dreamer, sidekick, and the agent-guidance block instruct the model to write its PROSE in this language while keeping all structural tokens (XML tags, the five memory category names, code identifiers, file paths) in English. USER-LEVEL ONLY (ignored in project config for security). Unset = today's behavior (model mirrors the conversation; English scaffolding). Changing it triggers one cache re-materialization; existing compartments/memories keep their original language until naturally rewritten.",
       "type": "string"
     },
+    "profile": {
+      "description": "Select a named user-owned model profile. Project config may select a profile name, which overrides this user default; unknown names warn and use the base configuration.",
+      "type": "string",
+      "minLength": 1
+    },
+    "profiles": {
+      "description": "User-level named model profiles. A profile may contain only historian/dreamer harness model blocks and sidekick model-selection fields; project configs may select a name but cannot define profiles.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "historian": {
+            "type": "object",
+            "properties": {
+              "opencode": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "description": "Primary OpenCode model entry.",
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "model": {
+                            "type": "string",
+                            "description": "OpenCode model ID (for example, provider/model)."
+                          },
+                          "variant": {
+                            "description": "OpenCode reasoning variant for this entry.",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "model"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "fallback_models": {
+                    "description": "Ordered fallback OpenCode entries. New-shape configuration requires an array; legacy singleton values migrate to a one-element array.",
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "model": {
+                              "type": "string",
+                              "description": "OpenCode model ID (for example, provider/model)."
+                            },
+                            "variant": {
+                              "description": "OpenCode reasoning variant for this entry.",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "model"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  },
+                  "variant": {
+                    "description": "OpenCode reasoning variant for the primary entry when it declares none. Fallback entries declare variants per-entry.",
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "description": "Strict OpenCode model-resolution block. It accepts no Pi vocabulary."
+              },
+              "pi": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "description": "Primary Pi model entry.",
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "model": {
+                            "type": "string",
+                            "description": "Pi model ID (for example, provider/model)."
+                          },
+                          "thinking_level": {
+                            "description": "Pi thinking level for this entry.",
+                            "type": "string",
+                            "enum": [
+                              "off",
+                              "minimal",
+                              "low",
+                              "medium",
+                              "high",
+                              "xhigh",
+                              "max"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "model"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "fallback_models": {
+                    "description": "Ordered fallback Pi entries. New-shape configuration requires an array; legacy singleton values migrate to a one-element array.",
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "model": {
+                              "type": "string",
+                              "description": "Pi model ID (for example, provider/model)."
+                            },
+                            "thinking_level": {
+                              "description": "Pi thinking level for this entry.",
+                              "type": "string",
+                              "enum": [
+                                "off",
+                                "minimal",
+                                "low",
+                                "medium",
+                                "high",
+                                "xhigh",
+                                "max"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "model"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  },
+                  "thinking_level": {
+                    "description": "Pi thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry.",
+                    "type": "string",
+                    "enum": [
+                      "off",
+                      "minimal",
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh",
+                      "max"
+                    ]
+                  }
+                },
+                "additionalProperties": false,
+                "description": "Strict Pi model-resolution block. It accepts no OpenCode vocabulary."
+              }
+            },
+            "additionalProperties": false
+          },
+          "dreamer": {
+            "type": "object",
+            "properties": {
+              "opencode": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "description": "Primary OpenCode model entry.",
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "model": {
+                            "type": "string",
+                            "description": "OpenCode model ID (for example, provider/model)."
+                          },
+                          "variant": {
+                            "description": "OpenCode reasoning variant for this entry.",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "model"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "fallback_models": {
+                    "description": "Ordered fallback OpenCode entries. New-shape configuration requires an array; legacy singleton values migrate to a one-element array.",
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "model": {
+                              "type": "string",
+                              "description": "OpenCode model ID (for example, provider/model)."
+                            },
+                            "variant": {
+                              "description": "OpenCode reasoning variant for this entry.",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "model"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  },
+                  "variant": {
+                    "description": "OpenCode reasoning variant for the primary entry when it declares none. Fallback entries declare variants per-entry.",
+                    "type": "string"
+                  },
+                  "tasks": {
+                    "description": "OpenCode task execution overrides. Each named task accepts only model, fallback_models, variant, and timeout_minutes.",
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {
+                      "type": "object",
+                      "properties": {
+                        "model": {
+                          "description": "OpenCode model entry for this task.",
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "model": {
+                                  "type": "string",
+                                  "description": "OpenCode model ID (for example, provider/model)."
+                                },
+                                "variant": {
+                                  "description": "OpenCode reasoning variant for this entry.",
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "model"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ]
+                        },
+                        "fallback_models": {
+                          "description": "Ordered OpenCode fallback entries for this task.",
+                          "type": "array",
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "model": {
+                                    "type": "string",
+                                    "description": "OpenCode model ID (for example, provider/model)."
+                                  },
+                                  "variant": {
+                                    "description": "OpenCode reasoning variant for this entry.",
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "model"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          }
+                        },
+                        "variant": {
+                          "description": "OpenCode reasoning variant for this task's primary entry when it declares none. Fallback entries declare variants per-entry.",
+                          "type": "string"
+                        },
+                        "timeout_minutes": {
+                          "description": "Minutes allowed for this task before it is aborted.",
+                          "type": "number",
+                          "minimum": 5
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "additionalProperties": false,
+                "description": "Strict OpenCode dreamer model-resolution block. It accepts no Pi vocabulary."
+              },
+              "pi": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "description": "Primary Pi model entry.",
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "model": {
+                            "type": "string",
+                            "description": "Pi model ID (for example, provider/model)."
+                          },
+                          "thinking_level": {
+                            "description": "Pi thinking level for this entry.",
+                            "type": "string",
+                            "enum": [
+                              "off",
+                              "minimal",
+                              "low",
+                              "medium",
+                              "high",
+                              "xhigh",
+                              "max"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "model"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "fallback_models": {
+                    "description": "Ordered fallback Pi entries. New-shape configuration requires an array; legacy singleton values migrate to a one-element array.",
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "model": {
+                              "type": "string",
+                              "description": "Pi model ID (for example, provider/model)."
+                            },
+                            "thinking_level": {
+                              "description": "Pi thinking level for this entry.",
+                              "type": "string",
+                              "enum": [
+                                "off",
+                                "minimal",
+                                "low",
+                                "medium",
+                                "high",
+                                "xhigh",
+                                "max"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "model"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  },
+                  "thinking_level": {
+                    "description": "Pi thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry.",
+                    "type": "string",
+                    "enum": [
+                      "off",
+                      "minimal",
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh",
+                      "max"
+                    ]
+                  },
+                  "tasks": {
+                    "description": "Pi task execution overrides. Each named task accepts only model, fallback_models, thinking_level, and timeout_minutes.",
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {
+                      "type": "object",
+                      "properties": {
+                        "model": {
+                          "description": "Pi model entry for this task.",
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "model": {
+                                  "type": "string",
+                                  "description": "Pi model ID (for example, provider/model)."
+                                },
+                                "thinking_level": {
+                                  "description": "Pi thinking level for this entry.",
+                                  "type": "string",
+                                  "enum": [
+                                    "off",
+                                    "minimal",
+                                    "low",
+                                    "medium",
+                                    "high",
+                                    "xhigh",
+                                    "max"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "model"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ]
+                        },
+                        "fallback_models": {
+                          "description": "Ordered Pi fallback entries for this task.",
+                          "type": "array",
+                          "items": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "model": {
+                                    "type": "string",
+                                    "description": "Pi model ID (for example, provider/model)."
+                                  },
+                                  "thinking_level": {
+                                    "description": "Pi thinking level for this entry.",
+                                    "type": "string",
+                                    "enum": [
+                                      "off",
+                                      "minimal",
+                                      "low",
+                                      "medium",
+                                      "high",
+                                      "xhigh",
+                                      "max"
+                                    ]
+                                  }
+                                },
+                                "required": [
+                                  "model"
+                                ],
+                                "additionalProperties": false
+                              }
+                            ]
+                          }
+                        },
+                        "thinking_level": {
+                          "description": "Pi thinking level for this task's primary entry when it declares none. Fallback entries declare thinking levels per-entry.",
+                          "type": "string",
+                          "enum": [
+                            "off",
+                            "minimal",
+                            "low",
+                            "medium",
+                            "high",
+                            "xhigh",
+                            "max"
+                          ]
+                        },
+                        "timeout_minutes": {
+                          "description": "Minutes allowed for this task before it is aborted.",
+                          "type": "number",
+                          "minimum": 5
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "additionalProperties": false,
+                "description": "Strict Pi dreamer model-resolution block. It accepts no OpenCode vocabulary."
+              }
+            },
+            "additionalProperties": false
+          },
+          "sidekick": {
+            "type": "object",
+            "properties": {
+              "model": {
+                "description": "Primary model ID (e.g. 'claude-sonnet-4-6')",
+                "type": "string"
+              },
+              "fallback_models": {
+                "description": "Fallback model IDs if primary is unavailable",
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                ]
+              },
+              "variant": {
+                "description": "OpenCode reasoning variant (e.g. for extended thinking)",
+                "type": "string"
+              },
+              "thinking_level": {
+                "description": "Pi thinking level for the sidekick model selection.",
+                "type": "string",
+                "enum": [
+                  "off",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false,
+        "description": "User-owned model-selection overlay. Only historian/dreamer harness model blocks and sidekick model-selection fields are allowed."
+      }
+    },
     "historian": {
       "description": "Historian metadata plus independent strict OpenCode and Pi execution blocks. Retained metadata stays at historian; model, fallback_models, variant, and thinking_level belong only in historian.opencode or historian.pi.",
       "type": "object",

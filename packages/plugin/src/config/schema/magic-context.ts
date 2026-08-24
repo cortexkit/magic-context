@@ -310,6 +310,53 @@ export const DreamerPiHarnessBlockSchema = z
     .describe("Strict Pi dreamer model-resolution block. It accepts no OpenCode vocabulary.");
 export type DreamerPiHarnessBlock = z.infer<typeof DreamerPiHarnessBlockSchema>;
 
+/**
+ * User-owned model-selection overlay for one named profile. Profiles deliberately
+ * mirror only the existing per-harness execution blocks: durable state, prompts,
+ * schedules, and resource gates remain outside the profile trust boundary.
+ */
+const ProfileHistorianSchema = z
+    .object({
+        opencode: OpenCodeHarnessBlockSchema.optional(),
+        pi: PiHarnessBlockSchema.optional(),
+    })
+    .strict();
+const ProfileDreamerSchema = z
+    .object({
+        opencode: DreamerOpenCodeHarnessBlockSchema.optional(),
+        pi: DreamerPiHarnessBlockSchema.optional(),
+    })
+    .strict();
+const ProfileSidekickSchema = AgentOverrideConfigSchema.pick({
+    model: true,
+    fallback_models: true,
+    variant: true,
+})
+    .extend({
+        thinking_level: PiThinkingLevelSchema.describe(
+            "Pi thinking level for the sidekick model selection.",
+        ),
+    })
+    .strict();
+
+export const ConfigProfileSchema = z
+    .object({
+        historian: ProfileHistorianSchema.optional(),
+        dreamer: ProfileDreamerSchema.optional(),
+        sidekick: ProfileSidekickSchema.optional(),
+    })
+    .strict()
+    .describe(
+        "User-owned model-selection overlay. Only historian/dreamer harness model blocks and sidekick model-selection fields are allowed.",
+    );
+export type ConfigProfile = z.infer<typeof ConfigProfileSchema>;
+
+export const ConfigProfilesSchema = z.record(
+    z.string().trim().min(1, "Profile names must not be empty or whitespace-only."),
+    ConfigProfileSchema,
+);
+export type ConfigProfiles = z.infer<typeof ConfigProfilesSchema>;
+
 /** A 5-field cron expression, or "" to disable the task. */
 const CronScheduleSchema = z
     .string()
@@ -672,6 +719,10 @@ export interface MagicContextConfig {
     auto_update?: boolean;
     /** Output language for generated Magic Context prose. USER config only. */
     language?: string;
+    /** Active user-owned model profile after user/project resolution. */
+    profile?: string;
+    /** Named user-owned model profiles. Declarations are consumed during resolution. */
+    profiles?: ConfigProfiles;
     historian?: HistorianConfig;
     dreamer?: DreamerConfig;
     smart_notes: {
@@ -892,6 +943,17 @@ export const MagicContextConfigSchema = z
                     "triggers one cache re-materialization; existing compartments/memories keep their " +
                     "original language until naturally rewritten.",
             ),
+        profile: z
+            .string()
+            .trim()
+            .min(1)
+            .optional()
+            .describe(
+                "Select a named user-owned model profile. Project config may select a profile name, which overrides this user default; unknown names warn and use the base configuration.",
+            ),
+        profiles: ConfigProfilesSchema.optional().describe(
+            "User-level named model profiles. A profile may contain only historian/dreamer harness model blocks and sidekick model-selection fields; project configs may select a name but cannot define profiles.",
+        ),
         historian: HistorianConfigSchema.describe(
             "Historian metadata plus independent strict OpenCode and Pi execution blocks. Retained metadata stays at historian; model, fallback_models, variant, and thinking_level belong only in historian.opencode or historian.pi.",
         ),

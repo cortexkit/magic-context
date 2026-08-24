@@ -10,6 +10,7 @@ import { existsSync } from "node:fs";
 import { migrateLegacyAgentEnabledInMemory } from "@magic-context/core/config/agent-disable";
 import { migrateDreamerV2 } from "@magic-context/core/config/migrate-dreamer-v2";
 import { migrateLegacyExperimental } from "@magic-context/core/config/migrate-experimental";
+import { resolveConfigProfile } from "@magic-context/core/config/profiles";
 import {
 	constrainProjectThresholdOverrides,
 	dropInheritedEmbeddingKeyOnRedirect,
@@ -392,52 +393,57 @@ export function loadPiConfig(
 		);
 	}
 
-	let rawConfig: Record<string, unknown> = {};
 	const mergeFiles = [...loadedFiles].sort((a, b) => {
 		if (a.scope === b.scope) return 0;
 		return a.scope === "user" ? -1 : 1;
 	});
-	// The trusted user config (sorted first) — passed to the embedding-redirect
-	// guard so a project repeating the user's own endpoint is not a redirect.
-	const userRaw = mergeFiles.find((f) => f.scope === "user")?.config;
-	// Threshold trust boundary is relative to the USER/default effective config:
-	// a cloned repo may delay compaction, but it may not lower thresholds in a
-	// way that forces extra historian work on the user's account.
-	const trustedBaseConfig = parsePiConfig(userRaw ?? {}).config;
+	const userRaw = mergeFiles.find((f) => f.scope === "user")?.config ?? {};
+	const projectLoaded = mergeFiles.find((f) => f.scope === "project");
+	let projectRaw: Record<string, unknown> = {};
 
 	for (const loaded of mergeFiles) {
 		const prefix =
 			loaded.scope === "user" ? "[user config]" : "[project config]";
 		warnings.push(...loaded.warnings.map((warning) => `${prefix} ${warning}`));
+		if (loaded.scope !== "project") continue;
+		projectRaw = { ...loaded.config };
+		for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
+			warnings.push(`${prefix} ${warning}`);
+		}
+	}
 
-		if (loaded.scope === "project") {
-			// Harden the repo-supplied (untrusted) project config before merging
-			// it over the trusted user config (parity with OpenCode).
-			const projectRaw = { ...loaded.config };
-			for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
-				warnings.push(`${prefix} ${warning}`);
-			}
-			rawConfig = mergeRawConfigs(rawConfig, projectRaw);
-			for (const warning of dropInheritedEmbeddingKeyOnRedirect(
-				projectRaw,
-				rawConfig,
-				userRaw,
-			)) {
-				warnings.push(`${prefix} ${warning}`);
-			}
-			for (const warning of constrainProjectThresholdOverrides({
-				mergedRaw: rawConfig,
-				projectRaw,
-				trustedBaseConfig,
-			})) {
-				warnings.push(`${prefix} ${warning}`);
-			}
-		} else {
-			rawConfig = mergeRawConfigs(rawConfig, loaded.config);
+	const profileResolution = resolveConfigProfile({ userRaw, projectRaw });
+	warnings.push(
+		...profileResolution.warnings.map((warning) => `[config] ${warning}`),
+	);
+	const trustedProfiledRaw = mergeRawConfigs(
+		profileResolution.userBase,
+		profileResolution.overlay,
+	);
+	let rawConfig = trustedProfiledRaw;
+	// Threshold trust boundary is relative to the user/profile effective config.
+	const trustedBaseConfig = parsePiConfig(trustedProfiledRaw).config;
+	if (projectLoaded) {
+		rawConfig = mergeRawConfigs(rawConfig, profileResolution.projectBase);
+		for (const warning of dropInheritedEmbeddingKeyOnRedirect(
+			projectRaw,
+			rawConfig,
+			profileResolution.userBase,
+		)) {
+			warnings.push(`[project config] ${warning}`);
+		}
+		for (const warning of constrainProjectThresholdOverrides({
+			mergedRaw: rawConfig,
+			projectRaw: profileResolution.projectBase,
+			trustedBaseConfig,
+		})) {
+			warnings.push(`[project config] ${warning}`);
 		}
 	}
 
 	const parsed = parsePiConfig(rawConfig);
+	if (profileResolution.activeProfile)
+		parsed.config.profile = profileResolution.activeProfile;
 	setOutputReserveConfig(parsed.config.output_reserve);
 	setWindowOverlayPath(parsed.config.models?.window_overlay_path);
 	warnings.push(
@@ -568,49 +574,57 @@ export function loadPiConfigDetailed(
 		);
 	}
 
-	let rawConfig: Record<string, unknown> = {};
 	const mergeFiles = [...loadedFiles].sort((a, b) => {
 		if (a.scope === b.scope) return 0;
 		return a.scope === "user" ? -1 : 1;
 	});
-	const userRaw = mergeFiles.find((f) => f.scope === "user")?.config;
-	// Threshold trust boundary is relative to the USER/default effective config:
-	// a cloned repo may delay compaction, but it may not lower thresholds in a
-	// way that forces extra historian work on the user's account.
-	const trustedBaseConfig = parsePiConfig(userRaw ?? {}).config;
+	const userRaw = mergeFiles.find((f) => f.scope === "user")?.config ?? {};
+	const projectLayer = mergeFiles.find((f) => f.scope === "project");
+	let projectRaw: Record<string, unknown> = {};
 
 	for (const loaded of mergeFiles) {
 		const prefix =
 			loaded.scope === "user" ? "[user config]" : "[project config]";
 		warnings.push(...loaded.warnings.map((warning) => `${prefix} ${warning}`));
+		if (loaded.scope !== "project") continue;
+		projectRaw = { ...loaded.config };
+		for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
+			warnings.push(`${prefix} ${warning}`);
+		}
+	}
 
-		if (loaded.scope === "project") {
-			const projectRaw = { ...loaded.config };
-			for (const warning of stripUnsafeProjectConfigFields(projectRaw)) {
-				warnings.push(`${prefix} ${warning}`);
-			}
-			rawConfig = mergeRawConfigs(rawConfig, projectRaw);
-			for (const warning of dropInheritedEmbeddingKeyOnRedirect(
-				projectRaw,
-				rawConfig,
-				userRaw,
-			)) {
-				warnings.push(`${prefix} ${warning}`);
-			}
-			for (const warning of constrainProjectThresholdOverrides({
-				mergedRaw: rawConfig,
-				projectRaw,
-				trustedBaseConfig,
-			})) {
-				warnings.push(`${prefix} ${warning}`);
-			}
-		} else {
-			rawConfig = mergeRawConfigs(rawConfig, loaded.config);
+	const profileResolution = resolveConfigProfile({ userRaw, projectRaw });
+	warnings.push(
+		...profileResolution.warnings.map((warning) => `[config] ${warning}`),
+	);
+	const trustedProfiledRaw = mergeRawConfigs(
+		profileResolution.userBase,
+		profileResolution.overlay,
+	);
+	let rawConfig = trustedProfiledRaw;
+	const trustedBaseConfig = parsePiConfig(trustedProfiledRaw).config;
+	if (projectLayer) {
+		rawConfig = mergeRawConfigs(rawConfig, profileResolution.projectBase);
+		for (const warning of dropInheritedEmbeddingKeyOnRedirect(
+			projectRaw,
+			rawConfig,
+			profileResolution.userBase,
+		)) {
+			warnings.push(`[project config] ${warning}`);
+		}
+		for (const warning of constrainProjectThresholdOverrides({
+			mergedRaw: rawConfig,
+			projectRaw: profileResolution.projectBase,
+			trustedBaseConfig,
+		})) {
+			warnings.push(`[project config] ${warning}`);
 		}
 	}
 
 	const recoveredTopLevelKeys: string[] = [];
 	const parsed = parsePiConfig(rawConfig, recoveredTopLevelKeys);
+	if (profileResolution.activeProfile)
+		parsed.config.profile = profileResolution.activeProfile;
 	setOutputReserveConfig(parsed.config.output_reserve);
 	setWindowOverlayPath(parsed.config.models?.window_overlay_path);
 	warnings.push(

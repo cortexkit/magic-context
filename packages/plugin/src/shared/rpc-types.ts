@@ -141,6 +141,8 @@ export interface SidebarSnapshot {
 }
 
 export interface StatusDetail extends SidebarSnapshot {
+    /** User-owned model profile selected for this project, or null for the base config. */
+    activeProfile: string | null;
     tagCounter: number;
     activeTags: number;
     droppedTags: number;

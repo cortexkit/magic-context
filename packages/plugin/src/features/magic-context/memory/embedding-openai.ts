@@ -1,4 +1,6 @@
 import { log } from "../../../shared/logger";
+import { sanitizeDiagnosticText } from "../../../shared/redaction";
+import type { EmbeddingFailure, EmbeddingFailureClass } from "./embedding-failure";
 import { getEmbeddingProviderIdentity } from "./embedding-identity";
 import type { EmbeddingProvider, EmbeddingPurpose } from "./embedding-provider";
 import { blockedEmbeddingEndpointReason } from "./embedding-ssrf";
@@ -151,6 +153,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
      *  with one line per batch. Resets with the provider instance (i.e. on any
      *  config change), so a corrected config logs again if it regresses. */
     private modelMismatchLogged = false;
+    private lastFailureReason: EmbeddingFailure | null = null;
     /** True while a half-open probe is in flight. Only the caller who set this
      *  to true is allowed to make a real HTTP call; everyone else short-
      *  circuits as if the circuit were still OPEN. */
@@ -308,10 +311,16 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
             });
 
             if (!response.ok) {
-                log(
-                    `[magic-context] openai-compatible embedding request failed: ${response.status} ${response.statusText}`,
+                const excerpt = await response.text().catch(() => "");
+                const failure = this.failure(
+                    "http_error",
+                    `HTTP ${response.status} from endpoint${this.bodyExcerpt(excerpt)}`,
+                    response.status >= 500 || response.status === 408 || response.status === 429,
                 );
-                this.recordFailure(isProbe);
+                log(
+                    `[magic-context] openai-compatible embedding request failed: ${failure.reason}`,
+                );
+                this.recordFailure(isProbe, failure);
                 return Array.from({ length: texts.length }, () => null);
             }
 
@@ -321,22 +330,26 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
             // is overloaded or the upstream connection dropped mid-response).
             const rawBody = await response.text();
             if (rawBody.trim().length === 0) {
+                const failure = this.failure("invalid_envelope", "response body was empty", false);
                 log(
-                    `[magic-context] openai-compatible embedding request returned empty body (status=${response.status}, content-type=${response.headers.get("content-type") ?? "none"})`,
+                    `[magic-context] openai-compatible embedding request failed: ${failure.reason}`,
                 );
-                this.recordFailure(isProbe);
+                this.recordFailure(isProbe, failure);
                 return Array.from({ length: texts.length }, () => null);
             }
             let body: EmbeddingResponseBody;
             try {
                 body = JSON.parse(rawBody) as EmbeddingResponseBody;
-            } catch (parseError) {
-                const snippet = rawBody.slice(0, 200).replace(/\s+/g, " ");
-                log(
-                    `[magic-context] openai-compatible embedding response was not JSON (status=${response.status}, ${rawBody.length}B body, snippet="${snippet}"):`,
-                    parseError instanceof Error ? parseError.message : parseError,
+            } catch {
+                const failure = this.failure(
+                    "invalid_envelope",
+                    `response body was not valid JSON${this.bodyExcerpt(rawBody)}`,
+                    false,
                 );
-                this.recordFailure(isProbe);
+                log(
+                    `[magic-context] openai-compatible embedding request failed: ${failure.reason}`,
+                );
+                this.recordFailure(isProbe, failure);
                 return Array.from({ length: texts.length }, () => null);
             }
             // Model-substitution guard. A local server (LMStudio/Ollama) can
@@ -351,16 +364,44 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
             if (this.model && servedModel && !embeddingModelsMatch(servedModel, this.model)) {
                 if (!this.modelMismatchLogged) {
                     log(
-                        `[magic-context] embedding endpoint served a DIFFERENT model than requested — refusing the substituted vectors (they have the wrong dimensions/space). requested="${this.model}" served="${servedModel}". Check that the endpoint serves the requested model; variant suffixes and vendor prefixes are matched automatically.`,
+                        `[magic-context] embedding endpoint served a DIFFERENT model than requested — refusing the substituted vectors (they have the wrong dimensions/space). requested="${sanitizeDiagnosticText(this.model)}" served="${sanitizeDiagnosticText(servedModel)}". Check that the endpoint serves the requested model; variant suffixes and vendor prefixes are matched automatically.`,
                     );
                     this.modelMismatchLogged = true;
                 }
-                this.recordFailure(isProbe);
+                this.recordFailure(
+                    isProbe,
+                    this.failure(
+                        "substitution_rejected",
+                        `served model '${sanitizeDiagnosticText(servedModel)}' does not match requested '${sanitizeDiagnosticText(this.model)}' (substitution guard)`,
+                        false,
+                    ),
+                );
                 return Array.from({ length: texts.length }, () => null);
             }
 
-            const items = Array.isArray(body.data) ? body.data : [];
+            const responseKeys = Object.keys(body).sort();
+            if (!Array.isArray(body.data)) {
+                const failure = this.failure(
+                    "invalid_envelope",
+                    `response had keys [${responseKeys.join(", ")}] but data[] was absent`,
+                    false,
+                );
+                log(
+                    `[magic-context] openai-compatible embedding request failed: ${failure.reason}`,
+                );
+                this.recordFailure(isProbe, failure);
+                return Array.from({ length: texts.length }, () => null);
+            }
+            if (body.data.length === 0) {
+                const failure = this.failure("empty_result", "response data[] was empty", true);
+                log(
+                    `[magic-context] openai-compatible embedding request failed: ${failure.reason}`,
+                );
+                this.recordFailure(isProbe, failure);
+                return Array.from({ length: texts.length }, () => null);
+            }
 
+            const items = body.data;
             const results = Array.from({ length: texts.length }, (_, index) => {
                 const embedding = items[index]?.embedding;
                 return Array.isArray(embedding) ? Float32Array.from(embedding) : null;
@@ -369,7 +410,15 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
             // A response with no usable vectors is still a failure — the
             // endpoint is up but not actually embedding.
             if (results.every((r) => r === null)) {
-                this.recordFailure(isProbe);
+                const failure = this.failure(
+                    "invalid_envelope",
+                    `response had keys [${responseKeys.join(", ")}] but data[].embedding was absent`,
+                    false,
+                );
+                log(
+                    `[magic-context] openai-compatible embedding request failed: ${failure.reason}`,
+                );
+                this.recordFailure(isProbe, failure);
             } else {
                 this.recordSuccess();
             }
@@ -391,11 +440,24 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                     log(
                         `[magic-context] openai-compatible embedding request timed out after ${FETCH_TIMEOUT_MS}ms`,
                     );
-                    this.recordFailure(isProbe);
+                    const failure = this.failure(
+                        "transport_error",
+                        `request timed out after ${FETCH_TIMEOUT_MS}ms`,
+                        true,
+                    );
+                    this.recordFailure(isProbe, failure);
                 }
             } else {
-                log("[magic-context] openai-compatible embedding request failed:", error);
-                this.recordFailure(isProbe);
+                const detail = error instanceof Error ? error.message : String(error);
+                const failure = this.failure(
+                    "transport_error",
+                    `transport error: ${sanitizeDiagnosticText(detail)}`,
+                    true,
+                );
+                log(
+                    `[magic-context] openai-compatible embedding request failed: ${failure.reason}`,
+                );
+                this.recordFailure(isProbe, failure);
             }
             return Array.from({ length: texts.length }, () => null);
         } finally {
@@ -446,17 +508,33 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
         // happens on probe success via recordSuccess(). If the probe fails,
         // recordFailure() will push circuitOpenUntil forward.
         this.halfOpenProbeInFlight = true;
-        log("[magic-context] openai-compatible embedding: circuit half-open, probing endpoint");
+        log(
+            `[magic-context] openai-compatible embedding: circuit half-open, probing endpoint after ${this.lastFailureReason?.reason ?? "unknown failure"}`,
+        );
         return "probe";
     }
 
-    private recordFailure(isProbe: boolean): void {
+    private failure(
+        failureClass: EmbeddingFailureClass,
+        reason: string,
+        retryable: boolean,
+    ): EmbeddingFailure {
+        return { class: failureClass, reason, retryable };
+    }
+
+    private bodyExcerpt(body: string): string {
+        const excerpt = sanitizeDiagnosticText(body).replace(/\s+/g, " ").trim().slice(0, 200);
+        return excerpt ? `: ${excerpt}` : "";
+    }
+
+    private recordFailure(isProbe: boolean, failure?: EmbeddingFailure): void {
+        if (failure) this.lastFailureReason = failure;
         if (isProbe) {
             // Canonical half-open: single probe failure re-opens the circuit.
             this.circuitOpenUntil = Date.now() + OPEN_DURATION_MS;
             if (!this.openLogged) {
                 log(
-                    `[magic-context] openai-compatible embedding: probe failed, re-opening circuit for ${OPEN_DURATION_MS / 60_000}min`,
+                    `[magic-context] openai-compatible embedding: probe failed (${failure?.reason ?? this.lastFailureReason?.reason ?? "unknown failure"}), re-opening circuit for ${OPEN_DURATION_MS / 60_000}min`,
                 );
                 this.openLogged = true;
             }
@@ -473,7 +551,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
             this.circuitOpenUntil = now + OPEN_DURATION_MS;
             if (!this.openLogged) {
                 log(
-                    `[magic-context] openai-compatible embedding: opening circuit for ${OPEN_DURATION_MS / 60_000}min after ${this.failureTimes.length} failures in ${FAILURE_WINDOW_MS / 1_000}s`,
+                    `[magic-context] openai-compatible embedding: opening circuit for ${OPEN_DURATION_MS / 60_000}min after ${this.failureTimes.length} failures in ${FAILURE_WINDOW_MS / 1_000}s (${failure?.reason ?? this.lastFailureReason?.reason ?? "unknown failure"})`,
                 );
                 this.openLogged = true;
             }
@@ -490,6 +568,11 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
         this.failureTimes = [];
         this.circuitOpenUntil = 0;
         this.openLogged = false;
+        this.lastFailureReason = null;
+    }
+
+    getLastFailureReason(): EmbeddingFailure | null {
+        return this.lastFailureReason;
     }
 
     // Test-only hooks.
@@ -509,5 +592,6 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
         this.circuitOpenUntil = 0;
         this.openLogged = false;
         this.halfOpenProbeInFlight = false;
+        this.lastFailureReason = null;
     }
 }

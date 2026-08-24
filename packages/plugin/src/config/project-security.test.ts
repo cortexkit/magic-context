@@ -7,6 +7,23 @@ import {
 } from "./project-security";
 
 describe("stripUnsafeProjectConfigFields", () => {
+    it("strips profile definitions from project config but leaves profile selection", () => {
+        const raw: Record<string, unknown> = {
+            profile: "work",
+            profiles: {
+                work: {
+                    historian: { opencode: { model: "attacker/model" } },
+                },
+            },
+        };
+
+        const warnings = stripUnsafeProjectConfigFields(raw);
+
+        expect(raw.profile).toBe("work");
+        expect(raw.profiles).toBeUndefined();
+        expect(warnings.join("\n")).toContain("Ignoring profiles from project config");
+    });
+
     it("strips auto_update from project config", () => {
         const raw: Record<string, unknown> = { auto_update: false, dreamer: { model: "x" } };
         const warnings = stripUnsafeProjectConfigFields(raw);

@@ -29,6 +29,45 @@ Only model-resolution fields move. The migration inventory is explicit:
 
 There is no catch-all migration rule: fields not listed in this table are not moved by the per-harness migration.
 
+### Per-repository model profiles
+
+Use user-owned `profiles` when your work repositories and personal repositories need different hidden-agent models without duplicating durable configuration. This is kagbodji's use case: keep the personal default in user config, then let each work repository select the work model set.
+
+```jsonc
+// ~/.config/cortexkit/magic-context.jsonc
+{
+  "profile": "personal",
+  "profiles": {
+    "personal": {
+      "historian": {
+        "opencode": { "model": "anthropic/claude-sonnet-4-6" },
+        "pi": { "model": "github-copilot/claude-sonnet-4-6" }
+      },
+      "sidekick": { "model": "anthropic/claude-haiku-4-5" }
+    },
+    "work": {
+      "historian": {
+        "opencode": { "model": "openai/gpt-5.2-codex" },
+        "pi": { "model": "github-copilot/gpt-5.2-codex" }
+      },
+      "dreamer": {
+        "opencode": { "model": "openai/gpt-5.2-codex" }
+      },
+      "sidekick": { "model": "openai/gpt-5.2-codex-mini" }
+    }
+  }
+}
+```
+
+A work repository then needs only a selection key:
+
+```jsonc
+// <work-repo>/.cortexkit/magic-context.jsonc
+{ "profile": "work" }
+```
+
+Resolution is `user base → selected user profile → project config`; a project selection wins over the user default. Profile overlays deep-merge, so a profile can override one harness model while base fallback chains and other settings stay intact. Profiles are defined only in user config: a project may select a known name, but project-supplied `profiles` content is ignored with a warning. An unknown selected name also warns and uses the base configuration with no profile rather than disabling Magic Context. Profiles admit only hidden-agent model selection (`historian.opencode` / `historian.pi`, `dreamer.opencode` / `dreamer.pi`, and sidekick model fields); embeddings, prompts, storage, compaction, memory gates, thresholds, and other durable behavior stay outside them.
+
 ### Cross-harness scoping
 
 Both plugins write to the same SQLite database at `~/.local/share/cortexkit/magic-context/context.db`. Tables are scoped by:

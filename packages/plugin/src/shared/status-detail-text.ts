@@ -35,6 +35,7 @@ export function formatStatusDetailMarkdown(detail: StatusDetail): string {
         "## Magic Context Status",
         "",
         `- **Mode:** ${mode}`,
+        `- **Active profile:** ${detail.activeProfile ?? "none"}`,
         `- **Usage:** ${detail.usagePercentage.toFixed(1)}% (${formatCount(detail.inputTokens)} / ${usableLimit})`,
         `- **Cache lane:** ${formatCacheLane(detail)}`,
         `- **Historian:** ${[historianState, ...historianDetails].join("; ")}`,

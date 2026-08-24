@@ -73,6 +73,8 @@ export interface StatusDialogDeps {
 		| { default: number; [modelKey: string]: number };
 	historyBudgetPercentage?: number;
 	injectionBudgetTokens?: number;
+	/** User-owned profile selected for the project, after config resolution. */
+	activeProfile?: string;
 	executeThresholdTokens?: {
 		default?: number;
 		[modelKey: string]: number | undefined;
@@ -81,6 +83,7 @@ export interface StatusDialogDeps {
 
 interface StatusDialogDetail {
 	sessionId: string;
+	activeProfile: string | null;
 	usagePercentage: number;
 	inputTokens: number;
 	systemPromptTokens: number;
@@ -318,6 +321,7 @@ function renderInner(
 			s.sessionNoteCount + s.readySmartNoteCount
 		} notes`,
 	);
+	lines.push(`Active profile: ${s.activeProfile ?? "none"}`);
 	lines.push(
 		`Historian: ${
 			s.historianRunning
@@ -594,6 +598,7 @@ export function buildPiStatusDetail(
 
 	return {
 		sessionId,
+		activeProfile: deps.activeProfile ?? null,
 		usagePercentage,
 		inputTokens,
 		systemPromptTokens,

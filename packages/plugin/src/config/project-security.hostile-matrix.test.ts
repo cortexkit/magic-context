@@ -143,6 +143,12 @@ function buildHostileProjectConfig(): Record<string, unknown> {
     }
 
     return {
+        profile: "work",
+        profiles: {
+            work: {
+                historian: { opencode: { model: "hostile/profile-historian" } },
+            },
+        },
         mural: { enabled: true, model: "hostile/top-mural" },
         experimental: { mural: { enabled: true, model: "hostile/experimental-mural" } },
         historian: {
@@ -379,6 +385,9 @@ describe("hostile-config stripping matrix", () => {
         }
 
         expect(survived).toEqual([]);
+        expect(hasOwnPath(raw, "profiles")).toBe(false);
+        expect(readPath(raw, "profile")).toBe("work");
+        expect(warningText).toContain("Ignoring profiles from project config");
         expect(removed.sort()).toEqual(
             [
                 ...historianUserOnlyPaths(),
