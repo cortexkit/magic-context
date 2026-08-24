@@ -17,6 +17,8 @@
     "test:rust": "cargo test --workspace",
     "lint:rust": "cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings",
     "fmt:rust": "cargo fmt",
+    "audit:production": "bash scripts/audit-production.sh",
+    "test:audit-production": "bun test scripts/audit-production.test.ts",
     "check:all": "bun run test && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings",
     "build:dists": "bun run --cwd packages/plugin build && bun run --cwd packages/pi-plugin build && bun run dists:load-probe",
     "dists:load-probe": "bun -e \"await import('./packages/plugin/dist/index.js'); await import('./packages/pi-plugin/dist/index.js'); console.log('dists LOAD OK')\""

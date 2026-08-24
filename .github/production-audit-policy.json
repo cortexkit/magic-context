@@ -1,0 +1,43 @@
+{
+  "auditLevel": "high",
+  "scope": "Production dependencies declared by each published package, resolved in isolated consumer manifests without monorepo overrides",
+  "acceptedAdvisories": [
+    {
+      "id": "GHSA-xcpc-8h2w-3j85",
+      "package": "adm-zip",
+      "severity": "high",
+      "affectedArtifacts": [
+        "@cortexkit/opencode-magic-context",
+        "@cortexkit/pi-magic-context"
+      ],
+      "dependencyPath": "@huggingface/transformers@4.2.0 > onnxruntime-node@1.24.3 > adm-zip@0.5.18",
+      "reachability": "onnxruntime-node uses adm-zip only during native-provider installation; runtime inference does not parse ZIP input",
+      "owner": "cortexkit/magic-context maintainers",
+      "rationale": "No released onnxruntime-node version permits patched adm-zip@0.6.x; acceptance is temporary pending the upstream range change and coordinated Transformers release",
+      "expires": "2026-11-17",
+      "upstream": [
+        "https://github.com/huggingface/transformers.js/issues/1727",
+        "https://github.com/microsoft/onnxruntime/pull/29772",
+        "https://github.com/huggingface/transformers.js/pull/1731"
+      ]
+    },
+    {
+      "id": "GHSA-f88m-g3jw-g9cj",
+      "package": "sharp",
+      "severity": "high",
+      "affectedArtifacts": [
+        "@cortexkit/opencode-magic-context",
+        "@cortexkit/pi-magic-context"
+      ],
+      "dependencyPath": "@huggingface/transformers@4.2.0 > sharp@0.34.5",
+      "reachability": "Magic Context uses the Transformers text-embedding pipeline and does not pass image input to sharp",
+      "owner": "cortexkit/magic-context maintainers",
+      "rationale": "Transformers' released ^0.34.5 range cannot select patched sharp@0.35.x; acceptance is temporary pending the upstream range change and release",
+      "expires": "2026-11-17",
+      "upstream": [
+        "https://github.com/huggingface/transformers.js/issues/1729",
+        "https://github.com/huggingface/transformers.js/pull/1731"
+      ]
+    }
+  ]
+}

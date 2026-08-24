@@ -28,6 +28,22 @@ env:
 # every PR and master push exercises the full unit → Docker → host gauntlet.
 
 jobs:
+  audit-production:
+    name: Audit (published production dependencies)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.10"
+
+      - name: Test production audit policy
+        run: bun run test:audit-production
+
+      - name: Reject unaccepted HIGH production advisories
+        run: bun run audit:production
+
   check-plugin:
     name: Check (plugin)
     runs-on: ubuntu-latest
