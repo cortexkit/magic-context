@@ -87,6 +87,7 @@ import { modelAcceptsEmptyContent, replaySentinelByMessageIds } from "./sentinel
 import {
     applyFrozenTrailingBlankDecisions,
     clearOldReasoning,
+    findLatestAssistantReasoningMutationExemptMessage,
     findMergedReasoningStripCandidateIds,
     findTrailingBlankDecisionCandidates,
     stripClearedReasoning,
@@ -775,6 +776,7 @@ export function finalizeMessageRepresentation(
         prependedMessageCount?: number;
         reasoningMutatedMessages?: Iterable<MessageLike>;
         reasoningMutationExemptMessage?: MessageLike;
+        trailingBlankNewestAssistant?: MessageLike;
         mergedReasoningStrippedIds?: ReadonlySet<string>;
         trailingBlankDecisions?: ReadonlyMap<string, TrailingBlankDecision>;
         skipMergedReasoningStrip?: boolean;
@@ -801,7 +803,7 @@ export function finalizeMessageRepresentation(
             clearedParts = stripClearedReasoning(targetedMessages);
         }
     }
-    let newestAssistant = options?.reasoningMutationExemptMessage;
+    let newestAssistant = options?.trailingBlankNewestAssistant;
     if (!newestAssistant) {
         for (let index = messages.length - 1; index >= 0; index -= 1) {
             const message = messages[index];
@@ -830,16 +832,19 @@ export async function runPostTransformPhase(
     args: RunPostTransformPhaseArgs,
 ): Promise<PostTransformPhaseResult> {
     const compactionOff = args.compactionOff === true;
-    // Capture before todo/history synthesis can add assistant messages. Anthropic
-    // requires the signed reasoning blocks from the newest assistant to be replayed
-    // unchanged, and OpenCode serializes these same in-memory message objects.
-    let reasoningMutationExemptMessage: MessageLike | undefined;
+    // Capture before todo/history synthesis can add assistant messages. Reasoning replay skips a
+    // metadata-only OpenCode request shell, while trailing-blank freezing still tracks that newest
+    // host message because its shape can change before the next pass.
+    let trailingBlankNewestAssistant: MessageLike | undefined;
     for (let index = args.messages.length - 1; index >= 0; index -= 1) {
         const message = args.messages[index];
         if (message.info.role !== "assistant") continue;
-        reasoningMutationExemptMessage = message;
+        trailingBlankNewestAssistant = message;
         break;
     }
+    const reasoningMutationExemptMessage = findLatestAssistantReasoningMutationExemptMessage(
+        args.messages,
+    );
     // `isExplicitFlush` reads pendingMaterializationSessions — the persistent
     // "user wants pending ops + heuristics to run" signal. Survives across
     // blocked defer passes (compartmentRunning) so /ctx-flush intent is not
@@ -2117,8 +2122,8 @@ export async function runPostTransformPhase(
     }
 
     const newestAssistantId =
-        typeof reasoningMutationExemptMessage?.info.id === "string"
-            ? reasoningMutationExemptMessage.info.id
+        typeof trailingBlankNewestAssistant?.info.id === "string"
+            ? trailingBlankNewestAssistant.info.id
             : undefined;
     const tFinalRepresentation = performance.now();
     const finalRepresentation = finalizeMessageRepresentation(
@@ -2128,6 +2133,7 @@ export async function runPostTransformPhase(
             prependedMessageCount,
             reasoningMutatedMessages,
             reasoningMutationExemptMessage,
+            trailingBlankNewestAssistant,
             mergedReasoningStrippedIds,
             trailingBlankDecisions,
             skipMergedReasoningStrip: compactionOff,

@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 import {
     clearOldReasoning,
+    findLatestAssistantReasoningMutationExemptMessage,
     findMergedReasoningStripCandidateIds,
     replayStrippedInlineThinking,
     stripClearedReasoning,
@@ -661,6 +662,26 @@ describe("strip-content", () => {
     });
 
     describe("stripReasoningFromMergedAssistants (sentinel-based groupIntoBlocks workaround)", () => {
+        it("keeps a completed tool step exempt behind a metadata-only request shell", () => {
+            const completed = message("completed-step", "assistant", [
+                { type: "step-start" },
+                { type: "reasoning", text: "signed thinking", signature: "sig" },
+                { type: "text", text: "status before tool" },
+                {
+                    type: "tool",
+                    callID: "call-live",
+                    tool: "bash",
+                    state: { status: "completed", input: {}, output: "done" },
+                },
+                { type: "step-finish" },
+            ]);
+            const requestShell = message("request-shell", "assistant", [{ type: "step-start" }]);
+
+            expect(
+                findLatestAssistantReasoningMutationExemptMessage([completed, requestShell]),
+            ).toBe(completed);
+        });
+
         describe("#given a leading whitespace-only text block before the reasoning", () => {
             it("#then keeps the reasoning — whitespace text is sentinel-invisible to the keep-rule", () => {
                 // Regression shape after OpenCode's Anthropic adapter normalizes

@@ -5612,7 +5612,7 @@ fn enforce_block_identity(
         // Accept it only when the stored strip/keep decision reconstructs the full
         // message identity that was previously served.
         if trailing_blank_identity_replays_stored(req, core, mid, stored) {
-            if latest_assistant_reasoning_mutation_exempt_mid(&req.messages) == Some(mid.as_str())
+            if latest_assistant_mid(&req.messages) == Some(mid.as_str())
                 && frozen_trailing_blank_decision(core, mid)
                     == Some(FrozenTrailingBlankDecision::Strip)
             {
@@ -11699,7 +11699,7 @@ fn refresh_trailing_blank_decisions(
         return (0, false);
     }
 
-    let newest_assistant_mid = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
+    let newest_assistant_mid = latest_assistant_mid(&req.messages);
     let mut updates = Vec::new();
     for rendered in rendered_messages {
         let Some(mid) = rendered.meta.harness_id.as_deref() else {
@@ -12447,14 +12447,36 @@ fn is_mutable_merged_reasoning_block(block: &CkWireBlock) -> bool {
             .is_some_and(|extras| extras.contains_key("cache_control"))
 }
 
-/// Anthropic verifies the newest assistant's signed reasoning against the original response.
-/// Keep that assistant out of every reasoning-mutation lane, regardless of profile or whether
-/// the response is still in flight.
-fn latest_assistant_reasoning_mutation_exempt_mid(messages: &[CkIngressMessage]) -> Option<&str> {
+fn latest_assistant_mid(messages: &[CkIngressMessage]) -> Option<&str> {
     messages
         .iter()
         .rev()
         .find(|message| !message.ck.meta.synthetic && message.ck.role == "assistant")
+        .map(|message| message.mid.as_str())
+}
+
+fn has_reasoning_replay_content(message: &CkIngressMessage) -> bool {
+    message
+        .ck
+        .content
+        .iter()
+        .any(|block| !is_reasoning_ignored_block(block))
+}
+
+/// Anthropic verifies the newest provider-visible assistant's signed reasoning against the
+/// original response. OpenCode can append a metadata-only assistant shell before dispatch; that
+/// shell never reaches the provider and therefore must not steal the completed step's exemption.
+pub(crate) fn latest_assistant_reasoning_mutation_exempt_mid(
+    messages: &[CkIngressMessage],
+) -> Option<&str> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| {
+            !message.ck.meta.synthetic
+                && message.ck.role == "assistant"
+                && has_reasoning_replay_content(message)
+        })
         .map(|message| message.mid.as_str())
 }
 
@@ -12478,14 +12500,15 @@ fn latest_assistant_message_mutation_exempt_mid(
     messages
         .iter()
         .rev()
-        .find(|message| !message.ck.meta.synthetic && message.ck.role == "assistant")
-        .filter(|message| {
-            message
-                .ck
-                .content
-                .iter()
-                .find(|block| !is_reasoning_ignored_block(block))
-                .is_some_and(is_reasoning_block)
+        .find(|message| {
+            !message.ck.meta.synthetic
+                && message.ck.role == "assistant"
+                && message
+                    .ck
+                    .content
+                    .iter()
+                    .find(|block| !is_reasoning_ignored_block(block))
+                    .is_some_and(is_reasoning_block)
         })
         .map(|message| message.mid.as_str())
 }
@@ -12644,7 +12667,10 @@ fn clear_served_native_reasoning_from_iter<'a>(
         .filter(|message| !message.ck.meta.synthetic)
     {
         ordinal_by_mid.insert(message.mid.as_str(), message.ordinal);
-        if message.ck.role == "assistant" && message.ordinal >= newest_assistant_ordinal {
+        if message.ck.role == "assistant"
+            && has_reasoning_replay_content(message)
+            && message.ordinal >= newest_assistant_ordinal
+        {
             newest_assistant_ordinal = message.ordinal;
             newest_assistant_mid = Some(message.mid.as_str());
         }
@@ -17816,6 +17842,8 @@ pub(crate) mod tests {
             name: String,
             target_mid: String,
             expect_strip: bool,
+            reasoning_exempt_mid: Option<String>,
+            target_reasoning_index: usize,
             encoded_input: Vec<CkIngressMessage>,
         }
 
@@ -17823,7 +17851,7 @@ pub(crate) mod tests {
             "../testdata/merged-reasoning-adapter-golden.json"
         ))
         .unwrap();
-        assert_eq!(golden.generator_version, 1);
+        assert_eq!(golden.generator_version, 2);
         assert_eq!(
             golden
                 .cases
@@ -17835,6 +17863,7 @@ pub(crate) mod tests {
                 "thinking",
                 "redacted_thinking",
                 "reasoning_cache_control",
+                "live_tool_continuation_request_shell",
             ]
         );
 
@@ -17847,6 +17876,12 @@ pub(crate) mod tests {
                 fixture.encoded_input,
             );
             request.provider_id = Some("anthropic".to_string());
+            assert_eq!(
+                latest_assistant_reasoning_mutation_exempt_mid(&request.messages),
+                fixture.reasoning_exempt_mid.as_deref(),
+                "adapter case {} disagreed with the TypeScript exemption target",
+                fixture.name
+            );
 
             let response = run(&store, &request, &spine());
             assert_eq!(response.action, "HARD");
@@ -17858,7 +17893,7 @@ pub(crate) mod tests {
                 })
                 .unwrap_or_else(|| panic!("missing adapter target for {}", fixture.name));
             let stripped = matches!(
-                &target.content[0].kind,
+                &target.content[fixture.target_reasoning_index].kind,
                 ck_wire::CkKind::Text { text } if text.is_empty()
             );
             assert_eq!(
@@ -18067,7 +18102,10 @@ pub(crate) mod tests {
             )
             .expect("mid-turn continuation tails serve untouched");
             assert_eq!(
-                response.messages().last().map(|message| message.role.as_str()),
+                response
+                    .messages()
+                    .last()
+                    .map(|message| message.role.as_str()),
                 Some("assistant")
             );
         }
@@ -19034,6 +19072,106 @@ pub(crate) mod tests {
             0
         );
         assert_eq!(served, vec![assistant]);
+    }
+
+    #[test]
+    fn metadata_only_assistant_shell_does_not_steal_live_step_reasoning_exemption() {
+        let live = CkIngressMessage {
+            mid: "live-step".to_string(),
+            ordinal: 1,
+            ck: CkWireMessage::from_parts(
+                "assistant",
+                vec![
+                    ck_wire::CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                        text: "signed live thinking".to_string(),
+                        signature: Some("live-signature".to_string()),
+                    }),
+                    ck_wire::CkWireBlock::bare(ck_wire::CkKind::Text {
+                        text: "status before tool".to_string(),
+                    }),
+                    ck_wire::CkWireBlock::bare(ck_wire::CkKind::ToolCall {
+                        id: "call-live".to_string(),
+                        name: "bash".to_string(),
+                        input: json!({ "command": "true" }),
+                        provider_executed: false,
+                    }),
+                    ck_wire::CkWireBlock::bare(ck_wire::CkKind::ToolResult {
+                        id: "call-live".to_string(),
+                        tool_name: "bash".to_string(),
+                        output: ck_wire::CkToolOutput::bare(ck_wire::CkOutputKind::Text {
+                            text: "done".to_string(),
+                        }),
+                        provider_executed: false,
+                    }),
+                ],
+                None,
+                ck_wire::ProviderExtras::new(),
+                ck_wire::HarnessMeta {
+                    harness_id: Some("live-step".to_string()),
+                    ..Default::default()
+                },
+            ),
+        };
+        let shell = CkIngressMessage {
+            mid: "request-shell".to_string(),
+            ordinal: 2,
+            ck: CkWireMessage::from_parts(
+                "assistant",
+                vec![ck_wire::CkWireBlock::bare(ck_wire::CkKind::Opaque(
+                    ck_wire::OpaqueBlock {
+                        source: json!({ "harness": "opencode" }),
+                        kind: "step-start".to_string(),
+                        raw: json!({ "type": "step-start" }),
+                        arc: None,
+                    },
+                ))],
+                None,
+                ck_wire::ProviderExtras::new(),
+                ck_wire::HarnessMeta {
+                    harness_id: Some("request-shell".to_string()),
+                    ..Default::default()
+                },
+            ),
+        };
+        let ingress = vec![live.clone(), shell];
+
+        assert_eq!(
+            latest_assistant_reasoning_mutation_exempt_mid(&ingress),
+            Some("live-step")
+        );
+        assert_eq!(
+            latest_assistant_message_mutation_exempt_mid(
+                &ingress,
+                Some(SerializerProfile::OpencodeAiSdk),
+                true,
+            ),
+            Some("live-step")
+        );
+
+        // OpenCode expands the completed native tool part downstream into an Anthropic
+        // assistant(tool_use) + user(tool_result) continuation. The request shell itself is
+        // wire-invisible, so the signed reasoning on the completed step remains the live block.
+        let mut native = vec![json!({
+            "info": { "id": "live-step", "role": "assistant" },
+            "parts": [{
+                "type": "reasoning",
+                "text": "signed live thinking",
+                "metadata": { "anthropic": { "signature": "live-signature" } }
+            }]
+        })];
+        assert_eq!(
+            clear_served_native_reasoning(
+                SerializerProfile::OpencodeAiSdk,
+                true,
+                &mut native,
+                std::slice::from_ref(&live.ck),
+                &ingress,
+                u64::MAX,
+                false,
+            ),
+            0
+        );
+        assert_eq!(native[0]["parts"][0]["text"], "signed live thinking");
     }
 
     #[test]

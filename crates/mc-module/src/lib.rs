@@ -11733,7 +11733,7 @@ fn native_reasoning_should_clear(
         && reasoning_watermark > 0
         && transform::request_accepts_empty_content(request)
         && tag_number <= reasoning_watermark
-        && !(request.mid_turn && newest_assistant_mid == Some(mid));
+        && newest_assistant_mid != Some(mid);
     (tag_number, should_clear)
 }
 
@@ -11894,12 +11894,8 @@ fn attach_native_messages_incremental(
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
-    let newest_assistant_mid = request
-        .messages
-        .iter()
-        .filter(|message| !message.ck.meta.synthetic && message.ck.role == "assistant")
-        .max_by_key(|message| message.ordinal)
-        .map(|message| message.mid.as_str());
+    let newest_assistant_mid =
+        transform::latest_assistant_reasoning_mutation_exempt_mid(&request.messages);
 
     let mut sidecar_hashes = cached
         .as_mut()

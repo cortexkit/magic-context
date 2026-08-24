@@ -453,6 +453,30 @@ const REASONING_IGNORED_PART_TYPES = new Set([
 // Anthropic block ends with thinking at position 0 and at most one present.
 const REASONING_PART_TYPES = new Set(["reasoning", "thinking", "redacted_thinking"]);
 
+function hasReasoningReplayContent(message: MessageLike): boolean {
+    return message.parts.some((part) => {
+        if (!isRecord(part) || part.ignored === true) return false;
+        const type = typeof part.type === "string" ? part.type : "";
+        if (REASONING_IGNORED_PART_TYPES.has(type)) return false;
+        return type !== "text" || typeof part.text !== "string" || part.text.trim().length > 0;
+    });
+}
+
+/**
+ * Return the newest assistant that is visible in the provider replay. OpenCode may append a
+ * metadata-only request shell; the adapter drops that shell, so it cannot own the exemption for
+ * the completed assistant whose signed reasoning is actually replayed last.
+ */
+export function findLatestAssistantReasoningMutationExemptMessage(
+    messages: MessageLike[],
+): MessageLike | undefined {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        if (message.info.role === "assistant" && hasReasoningReplayContent(message)) return message;
+    }
+    return undefined;
+}
+
 interface MergedReasoningStripPlan {
     message: MessageLike;
     stripIndices: number[];

@@ -20,5 +20,8 @@
     "check:all": "bun run test && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings",
     "build:dists": "bun run --cwd packages/plugin build && bun run --cwd packages/pi-plugin build && bun run dists:load-probe",
     "dists:load-probe": "bun -e \"await import('./packages/plugin/dist/index.js'); await import('./packages/pi-plugin/dist/index.js'); console.log('dists LOAD OK')\""
+  },
+  "overrides": {
+    "adm-zip": "0.6.0"
   }
 }

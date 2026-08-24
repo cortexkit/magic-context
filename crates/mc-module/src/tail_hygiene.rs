@@ -479,6 +479,10 @@ fn block_is_protected(
             .is_some_and(|arc_id| protected_arc_ids.contains(arc_id))
 }
 
+// Production measures through measure_tail_hygiene_with_pending_drops (queued
+// agent drops leave U); this unqueued form remains as the tests' baseline
+// reference for delta/parity assertions.
+#[cfg(test)]
 pub(crate) fn measure_tail_hygiene(
     projection: &FlatProjection,
     core: &CoreState,

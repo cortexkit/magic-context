@@ -1,5 +1,5 @@
 {
-  "generator_version": 1,
+  "generator_version": 2,
   "cases": [
     {
       "name": "reasoning",
@@ -48,6 +48,8 @@
           ]
         }
       ],
+      "reasoning_exempt_mid": "reasoning-newest",
+      "target_reasoning_index": 0,
       "encoded_input": [
         {
           "mid": "reasoning-first",
@@ -171,6 +173,8 @@
           ]
         }
       ],
+      "reasoning_exempt_mid": "thinking-newest",
+      "target_reasoning_index": 0,
       "encoded_input": [
         {
           "mid": "thinking-first",
@@ -293,6 +297,8 @@
           ]
         }
       ],
+      "reasoning_exempt_mid": "redacted_thinking-newest",
+      "target_reasoning_index": 0,
       "encoded_input": [
         {
           "mid": "redacted_thinking-first",
@@ -418,6 +424,8 @@
           ]
         }
       ],
+      "reasoning_exempt_mid": "reasoning_cache_control-newest",
+      "target_reasoning_index": 0,
       "encoded_input": [
         {
           "mid": "reasoning_cache_control-first",
@@ -492,6 +500,203 @@
             ],
             "meta": {
               "harness_id": "reasoning_cache_control-newest",
+              "ordinal": 3,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "live_tool_continuation_request_shell",
+      "target_mid": "live-continuation-target",
+      "expect_strip": false,
+      "raw_messages": [
+        {
+          "info": {
+            "id": "live-continuation-first",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "reasoning",
+              "text": "older thinking",
+              "metadata": {
+                "anthropic": {
+                  "signature": "sig-older"
+                }
+              }
+            },
+            {
+              "type": "text",
+              "text": "older status"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "live-continuation-target",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "step-start"
+            },
+            {
+              "type": "reasoning",
+              "text": "signed live thinking",
+              "metadata": {
+                "anthropic": {
+                  "signature": "sig-live"
+                }
+              }
+            },
+            {
+              "type": "text",
+              "text": "status before tool"
+            },
+            {
+              "type": "tool",
+              "callID": "call-live",
+              "tool": "bash",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "command": "true"
+                },
+                "output": "done"
+              }
+            },
+            {
+              "type": "step-finish"
+            }
+          ]
+        },
+        {
+          "info": {
+            "id": "live-continuation-request-shell",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "step-start"
+            }
+          ]
+        }
+      ],
+      "reasoning_exempt_mid": "live-continuation-target",
+      "target_reasoning_index": 1,
+      "encoded_input": [
+        {
+          "mid": "live-continuation-first",
+          "ordinal": 1,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "reasoning",
+                  "text": "older thinking"
+                }
+              },
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "older status"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "live-continuation-first",
+              "ordinal": 1,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        },
+        {
+          "mid": "live-continuation-target",
+          "ordinal": 2,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "opaque",
+                  "source": "opencode",
+                  "kind": "step-start",
+                  "raw": {
+                    "type": "step-start"
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "type": "reasoning",
+                  "text": "signed live thinking"
+                }
+              },
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "status before tool"
+                }
+              },
+              {
+                "kind": {
+                  "type": "tool_call",
+                  "id": "call-live",
+                  "name": "bash",
+                  "input": {
+                    "command": "true"
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "type": "tool_result",
+                  "id": "call-live",
+                  "tool_name": "bash",
+                  "output": {
+                    "kind": {
+                      "type": "text",
+                      "text": "done"
+                    }
+                  }
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "live-continuation-target",
+              "ordinal": 2,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        },
+        {
+          "mid": "live-continuation-request-shell",
+          "ordinal": 3,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "opaque",
+                  "source": "opencode",
+                  "kind": "step-start",
+                  "raw": {
+                    "type": "step-start"
+                  }
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "live-continuation-request-shell",
               "ordinal": 3,
               "synthetic": false,
               "summary": false,
