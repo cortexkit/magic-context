@@ -543,7 +543,9 @@ describe("Pi dreamer wiring", () => {
 				Promise.resolve(mock(() => {})));
 			return () => {
 				cleanup();
-				timerRegistrations.delete(registration.directory);
+				if (timerRegistrations.get(registration.directory) === index) {
+					timerRegistrations.delete(registration.directory);
+				}
 			};
 		});
 		const projectIdentity = "git:pi-overlapping-handoff";
@@ -582,7 +584,7 @@ describe("Pi dreamer wiring", () => {
 		gates[2]?.resolve(cleanups[2] as () => void);
 		await flushMicrotasks();
 
-		expect(cleanups[0]).not.toHaveBeenCalled();
+		expect(cleanups[0]).toHaveBeenCalledTimes(1);
 		expect(cleanups[1]).toHaveBeenCalledTimes(1);
 		expect(cleanups[2]).not.toHaveBeenCalled();
 		expect(timerRegistrations).toEqual(new Map([["/tmp/worktree-A", 2]]));

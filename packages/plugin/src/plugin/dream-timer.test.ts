@@ -1,8 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDatabase } from "../features/magic-context/storage";
+import { startDreamScheduleTimer } from "./dream-timer";
 
 /**
  * Regression coverage for the schema-fence / null-DB crash:
@@ -39,6 +40,111 @@ describe("schema-fence null-DB contract", () => {
             expect(supported).toBeTruthy();
         } finally {
             rmSync(dir, { recursive: true, force: true });
+        }
+    });
+});
+
+describe("dream-timer registration cleanup", () => {
+    test("stale same-directory cleanup preserves the replacement registration", async () => {
+        const directory = mkdtempSync(join(tmpdir(), "mc-dream-timer-cleanup-"));
+        const timerHandle = {
+            unref: mock(() => {}),
+        } as unknown as ReturnType<typeof setInterval>;
+        const setIntervalSpy = spyOn(globalThis, "setInterval").mockImplementation(
+            (() => timerHandle) as typeof setInterval,
+        );
+        const clearIntervalSpy = spyOn(globalThis, "clearInterval").mockImplementation(
+            (() => undefined) as typeof clearInterval,
+        );
+        const base = {
+            directory,
+            projectIdentity: "git:dream-timer-cleanup",
+            harness: "pi" as const,
+            client: {} as never,
+            ensureRegistered: async () => undefined,
+        };
+        let cleanupReplacement: (() => void) | undefined;
+
+        try {
+            const cleanupStale = await startDreamScheduleTimer({ ...base });
+            cleanupReplacement = await startDreamScheduleTimer({ ...base });
+            expect(cleanupStale).toBeFunction();
+            expect(cleanupReplacement).toBeFunction();
+
+            cleanupStale?.();
+            expect(clearIntervalSpy).not.toHaveBeenCalled();
+
+            cleanupReplacement?.();
+            expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
+        } finally {
+            cleanupReplacement?.();
+            setIntervalSpy.mockRestore();
+            clearIntervalSpy.mockRestore();
+            rmSync(directory, { recursive: true, force: true });
+        }
+    });
+
+    test("stops the singleton when a tick removes the last dead directory", async () => {
+        const directory = mkdtempSync(join(tmpdir(), "mc-dream-timer-dead-dir-"));
+        const timerHandle = {
+            unref: mock(() => {}),
+        } as unknown as ReturnType<typeof setInterval>;
+        const singletonStartupHandle = {
+            unref: mock(() => {}),
+        } as unknown as ReturnType<typeof setTimeout>;
+        const projectStartupHandle = {
+            unref: mock(() => {}),
+        } as unknown as ReturnType<typeof setTimeout>;
+        const startupHandles = [singletonStartupHandle, projectStartupHandle];
+        let startupIndex = 0;
+        const setTimeoutSpy = spyOn(globalThis, "setTimeout").mockImplementation(
+            (() => startupHandles[startupIndex++] ?? projectStartupHandle) as typeof setTimeout,
+        );
+        const clearTimeoutSpy = spyOn(globalThis, "clearTimeout").mockImplementation(
+            (() => undefined) as typeof clearTimeout,
+        );
+        let intervalCallback: (() => void) | undefined;
+        const setIntervalSpy = spyOn(globalThis, "setInterval").mockImplementation(((
+            callback: () => void,
+        ) => {
+            intervalCallback = callback;
+            return timerHandle;
+        }) as typeof setInterval);
+        const clearIntervalSpy = spyOn(globalThis, "clearInterval").mockImplementation(
+            (() => undefined) as typeof clearInterval,
+        );
+        let cleanupStale: (() => void) | undefined;
+        let cleanup: (() => void) | undefined;
+
+        try {
+            const registration = {
+                directory,
+                projectIdentity: "git:dream-timer-dead-dir",
+                harness: "pi" as const,
+                client: {} as never,
+                dreamerConfig: { disable: false } as never,
+                ensureRegistered: async () => undefined,
+            };
+            cleanupStale = await startDreamScheduleTimer({ ...registration });
+            cleanup = await startDreamScheduleTimer({ ...registration });
+            rmSync(directory, { recursive: true, force: true });
+            intervalCallback?.();
+            for (let attempt = 0; attempt < 20; attempt += 1) {
+                if (clearIntervalSpy.mock.calls.length > 0) break;
+                await Promise.resolve();
+            }
+
+            expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
+            expect(clearTimeoutSpy).toHaveBeenCalledWith(projectStartupHandle);
+            expect(clearTimeoutSpy).toHaveBeenCalledWith(singletonStartupHandle);
+        } finally {
+            cleanupStale?.();
+            cleanup?.();
+            setTimeoutSpy.mockRestore();
+            clearTimeoutSpy.mockRestore();
+            setIntervalSpy.mockRestore();
+            clearIntervalSpy.mockRestore();
+            rmSync(directory, { recursive: true, force: true });
         }
     });
 });

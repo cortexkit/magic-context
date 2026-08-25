@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { awaitInFlightHistorians } from "./context-handler";
+import { __test as dreamerTest } from "./dreamer";
 import magicContextPiExtension, { __test } from "./index";
 import { awaitInFlightRecomps, spawnPiRecompRun } from "./pi-recomp-runner";
-import { MAGIC_CONTEXT_PI_SUBAGENT_ENV } from "./subagent-runner";
+import {
+	MAGIC_CONTEXT_PI_SUBAGENT_ENV,
+	PiSubagentRunner,
+} from "./subagent-runner";
 
 const originalEnv = {
 	MAGIC_CONTEXT_PI_SUBAGENT: process.env.MAGIC_CONTEXT_PI_SUBAGENT,
@@ -20,11 +25,13 @@ function restoreEnv() {
 	}
 }
 
-function isolateXdgEnv() {
+function isolateXdgEnv(): string {
 	const root = mkdtempSync(join(tmpdir(), "magic-context-pi-latch-test-"));
-	process.env.XDG_CONFIG_HOME = join(root, "config");
+	const configHome = join(root, "config");
+	process.env.XDG_CONFIG_HOME = configHome;
 	// Use the preload's migration-safe test database; isolate only configuration.
 	delete process.env.XDG_DATA_HOME;
+	return configHome;
 }
 
 /**
@@ -119,6 +126,7 @@ afterEach(() => {
 	// between tests or one test's child state could suppress the next.
 	__test.clearPiInProcessSubagentInitContext();
 	__test.clearPiStartupMaintenanceClaim();
+	dreamerTest.reset();
 });
 
 describe("Pi in-process child guard (#247)", () => {
@@ -153,6 +161,159 @@ describe("Pi in-process child guard (#247)", () => {
 		expect(second.commands).toContain("ctx-status");
 		expect(second.entryRenderers).toEqual(["ctx-status"]);
 	}, 15_000);
+
+	it("keeps session B historian and Dreamer live when session A shuts down", async () => {
+		const configHome = isolateXdgEnv();
+		delete process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV];
+		const configDir = join(configHome, "cortexkit");
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(
+			join(configDir, "magic-context.jsonc"),
+			JSON.stringify({
+				dreamer: { pi: { model: "test/dreamer" } },
+				historian: { pi: { model: "test/historian" } },
+				protected_tags: 1,
+			}),
+		);
+
+		const scheduledClients: Array<{
+			session: {
+				create(args: unknown): Promise<unknown>;
+				prompt(args: unknown): Promise<unknown>;
+			};
+		}> = [];
+		const dreamerRun = mock(async () => ({
+			ok: true as const,
+			assistantText: "done",
+			cost: 0,
+			durationMs: 1,
+		}));
+		const historianRun = spyOn(
+			PiSubagentRunner.prototype,
+			"run",
+		).mockImplementation(async (options) => {
+			const prompt = (options as { userMessage?: string }).userMessage ?? "";
+			const ordinals = [...prompt.matchAll(/^\[(\d+)\] [UAT]:/gm)].map(
+				(match) => Number(match[1]),
+			);
+			const start = ordinals[0] ?? 1;
+			const end = ordinals.at(-1) ?? start;
+			return {
+				ok: true,
+				assistantText: `<compartment start="${start}" end="${end}" title="Live B"><p1>Session B remains live.</p1></compartment>`,
+				cost: 0,
+				durationMs: 1,
+			} as never;
+		});
+		dreamerTest.setPiSubagentRunnerFactory(
+			() => ({ run: dreamerRun }) as never,
+		);
+		dreamerTest.setStartDreamScheduleTimerFactory(async (registration) => {
+			scheduledClients.push(registration.client as never);
+			return mock(() => {});
+		});
+
+		const runtimeA = createCountingPi();
+		const runtimeB = createCountingPi();
+		await magicContextPiExtension(runtimeA.pi);
+		await magicContextPiExtension(runtimeB.pi);
+		await Promise.resolve();
+		expect(scheduledClients).toHaveLength(1);
+
+		const shutdownCtx = (sessionId: string) => ({
+			sessionManager: { getSessionId: () => sessionId },
+			ui: { setStatus: () => undefined },
+		});
+		const makeMessages = (count: number) =>
+			Array.from({ length: count }, (_, index) => {
+				const role = index % 2 === 0 ? "user" : "assistant";
+				return {
+					role,
+					content: [
+						{
+							type: "text",
+							text: `${role} message ${index + 1} ${"history detail ".repeat(200)}`,
+						},
+					],
+					timestamp: Date.now() + index,
+				};
+			});
+		const historianCtx = (
+			messages: ReturnType<typeof makeMessages>,
+			percent: number,
+		) => ({
+			cwd: process.cwd(),
+			hasUI: false,
+			model: {
+				provider: "test",
+				id: "model",
+				contextWindow: 100_000,
+				maxTokens: 4_096,
+			},
+			sessionManager: {
+				getSessionId: () => "ses-live-b",
+				getBranch: () =>
+					messages.map((message, index) => ({
+						type: "message",
+						id: `entry-${index + 1}`,
+						message,
+					})),
+			},
+			getContextUsage: () => ({
+				tokens: Math.round(percent * 1_000),
+				percent,
+				contextWindow: 100_000,
+			}),
+			ui: { setStatus: () => undefined, notify: () => undefined },
+		});
+
+		try {
+			expect(historianRun).not.toHaveBeenCalled();
+			await runtimeA.emitPiEvent(
+				"session_shutdown",
+				{},
+				shutdownCtx("ses-retired-a"),
+			);
+			await Promise.resolve();
+			expect(scheduledClients).toHaveLength(2);
+
+			const activeClient = scheduledClients[1];
+			if (!activeClient) throw new Error("expected session B Dreamer client");
+			const session = (await activeClient.session.create({})) as { id: string };
+			await activeClient.session.prompt({
+				path: { id: session.id },
+				body: { system: "system", parts: [{ text: "continue dreamer" }] },
+			});
+			expect(dreamerRun).toHaveBeenCalledTimes(1);
+
+			const primeMessages = makeMessages(1);
+			await runtimeB.emitPiEvent(
+				"context",
+				{ messages: primeMessages },
+				historianCtx(primeMessages, 1),
+			);
+			const liveMessages = makeMessages(50);
+			await runtimeB.emitPiEvent(
+				"context",
+				{ messages: liveMessages },
+				historianCtx(liveMessages, 90),
+			);
+			await awaitInFlightHistorians("ses-live-b");
+			expect(
+				historianRun.mock.calls.some(
+					([options]) =>
+						(options as { model?: unknown }).model === "test/historian",
+				),
+			).toBe(true);
+		} finally {
+			historianRun.mockRestore();
+			await runtimeB.emitPiEvent(
+				"session_shutdown",
+				{},
+				shutdownCtx("ses-live-b"),
+			);
+		}
+	}, 20_000);
 
 	it("unsubscribes child lifecycle listeners on session shutdown", async () => {
 		isolateXdgEnv();

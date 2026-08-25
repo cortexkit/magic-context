@@ -222,12 +222,11 @@ export function registerPiDreamerProject(opts: PiDreamerOptions): void {
 		primerRawProviderFactory: createPiPrimerRawProviderFactory(),
 	}).then((timerCleanup) => {
 		if (cancelled) {
-			// The shared timer registry is keyed by directory. A newer A registration
-			// may already have replaced this stale A entry during an async A→B→A handoff,
-			// so its directory must not be deleted by the stale cleanup.
+			// A stale registration must release its timer resource even when a newer
+			// A→B→A registration uses the same directory. The shared timer cleanup
+			// is registration-identity-aware, so this cannot remove the replacement.
 			if (
-				registeredProjects.get(opts.projectIdentity)?.projectDir !==
-				opts.projectDir
+				registeredProjects.get(opts.projectIdentity)?.generation !== generation
 			) {
 				timerCleanup?.();
 			}

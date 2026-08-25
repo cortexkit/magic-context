@@ -133,6 +133,7 @@ interface ProjectRegistration {
 
 /** Singleton timer state. */
 let activeTimer: ReturnType<typeof setInterval> | null = null;
+let startupTickTimer: ReturnType<typeof setTimeout> | null = null;
 const startupTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const startupJitters = new Map<string, number>();
 let nextStartupJitterSlot = 0;
@@ -178,6 +179,22 @@ function openTimerDatabaseOrNull(context: string): Database | null {
 /** All projects that have called startDreamScheduleTimer in this process,
  *  keyed by directory so re-registration of the same directory is idempotent. */
 const registeredProjects = new Map<string, ProjectRegistration>();
+
+function stopDreamScheduleTimerIfIdle(): void {
+    if (registeredProjects.size !== 0) return;
+    const stopped = activeTimer !== null || startupTickTimer !== null;
+    if (activeTimer) {
+        clearInterval(activeTimer);
+        activeTimer = null;
+    }
+    if (startupTickTimer) {
+        clearTimeout(startupTickTimer);
+        startupTickTimer = null;
+    }
+    startupJitters.clear();
+    nextStartupJitterSlot = 0;
+    if (stopped) log("[dreamer] stopped dream schedule timer (no projects left)");
+}
 
 /**
  * Register the calling project with the process-wide dream + maintenance
@@ -231,7 +248,10 @@ export async function startDreamScheduleTimer(
             `[dreamer] started independent schedule timer (every ${DREAM_TIMER_INTERVAL_MS / 60_000}m)`,
         );
 
-        scheduleAfterBootQuiet(() => runTick("startup"));
+        startupTickTimer = scheduleAfterBootQuiet(() => {
+            startupTickTimer = null;
+            runTick("startup");
+        });
 
         const timer = setInterval(() => runTick("interval"), DREAM_TIMER_INTERVAL_MS);
         if (typeof timer === "object" && "unref" in timer) {
@@ -243,6 +263,13 @@ export async function startDreamScheduleTimer(
     }
 
     return () => {
+        // A newer registration may have replaced this directory before an async
+        // caller receives and invokes its cleanup. Never let stale cleanup remove
+        // the replacement's registry entry, startup work, or singleton timer.
+        if (registeredProjects.get(args.directory) !== args) {
+            stopDreamScheduleTimerIfIdle();
+            return;
+        }
         registeredProjects.delete(args.directory);
         const startupTimer = startupTimers.get(args.directory);
         if (startupTimer) {
@@ -252,13 +279,7 @@ export async function startDreamScheduleTimer(
         log(
             `[dreamer] unregistered project ${args.projectIdentity} (remaining=${registeredProjects.size})`,
         );
-        if (registeredProjects.size === 0 && activeTimer) {
-            clearInterval(activeTimer);
-            activeTimer = null;
-            startupJitters.clear();
-            nextStartupJitterSlot = 0;
-            log("[dreamer] stopped dream schedule timer (no projects left)");
-        }
+        stopDreamScheduleTimerIfIdle();
     };
 }
 
@@ -399,7 +420,15 @@ async function sweepProject(
                 log(`[dreamer] orphan schedule GC failed for ${reg.projectIdentity}:`, error);
             }
         }
-        registeredProjects.delete(reg.directory);
+        if (registeredProjects.get(reg.directory) === reg) {
+            registeredProjects.delete(reg.directory);
+            const startupTimer = startupTimers.get(reg.directory);
+            if (startupTimer) {
+                clearTimeout(startupTimer);
+                startupTimers.delete(reg.directory);
+            }
+        }
+        stopDreamScheduleTimerIfIdle();
         return;
     }
 
