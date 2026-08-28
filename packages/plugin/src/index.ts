@@ -203,7 +203,9 @@ const server: Plugin = async (ctx) => {
 
     const liveSessionState = createLiveSessionState();
     const rustModeModuleClient: RustModeModuleClient | undefined =
-        pluginConfig.transform_mode === "rust" ? new SubcModuleTransport() : undefined;
+        pluginConfig.transform_mode === "rust"
+            ? new SubcModuleTransport(pluginConfig.subc?.connection_file)
+            : undefined;
 
     const hooks = await createSessionHooksAsync({
         ctx,

@@ -178,6 +178,10 @@ export interface MagicContextDeps {
             min_chars: number;
         };
         transform_mode?: ResolvedTransformMode;
+        /** Path to the subc daemon's connection file. Threaded to the module
+         *  transport so a host that publishes it outside the default data-dir
+         *  location (e.g. a systemd RuntimeDirectory) is actually reachable. */
+        subc?: { connection_file: string };
         /** Compaction-off mode gate (issue #266). Resolved ONCE here at the
          *  session-hook construction boundary via isCompactionEnabled; the
          *  resolved boolean is threaded to the transform phases. */
@@ -774,7 +778,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     const authorityRecoveryModuleClient =
         deps.rustModeModuleClient ??
         (() => {
-            const transport = new SubcModuleTransport();
+            const transport = new SubcModuleTransport(deps.config.subc?.connection_file);
             const client: RustModeModuleClient = {
                 call: (args) => transport.call(args),
                 stateSyncCapabilities: (args) => transport.stateSyncCapabilities(args),
