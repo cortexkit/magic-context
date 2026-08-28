@@ -123,6 +123,7 @@ describe("output-token reservation", () => {
 describe("models-dev-cache (SDK-only)", () => {
     let tempDir: string;
     let originalXdgData: string | undefined;
+    let originalTestDataDir: string | undefined;
 
     function makeClient(providers: Array<unknown>) {
         return { config: { providers: async () => ({ data: { providers } }) } };
@@ -133,7 +134,9 @@ describe("models-dev-cache (SDK-only)", () => {
         // Isolate the persisted-cache file under a temp data dir so tests never
         // touch the real ~/.local/share/cortexkit/magic-context cache.
         originalXdgData = process.env.XDG_DATA_HOME;
+        originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
         process.env.XDG_DATA_HOME = tempDir;
+        process.env.MAGIC_CONTEXT_TEST_DATA_DIR = tempDir;
         setOutputReserveConfig(undefined);
         clearModelsDevCache();
     });
@@ -141,6 +144,8 @@ describe("models-dev-cache (SDK-only)", () => {
     afterEach(() => {
         if (originalXdgData === undefined) delete process.env.XDG_DATA_HOME;
         else process.env.XDG_DATA_HOME = originalXdgData;
+        if (originalTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+        else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = originalTestDataDir;
         try {
             rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
         } catch {

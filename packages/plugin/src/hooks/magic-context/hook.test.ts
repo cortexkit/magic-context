@@ -80,6 +80,7 @@ class HookFakeEmbeddingProvider implements EmbeddingProvider {
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
+const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 
 function makeTempDir(prefix: string): string {
     const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -96,6 +97,8 @@ afterEach(() => {
     closeReadOnlySessionDb();
     closeDatabase();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
+    if (originalTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = originalTestDataDir;
 
     for (const dir of tempDirs) {
         try {
@@ -246,7 +249,9 @@ function countIndexedHookMessage(sessionId: string, messageId: string): number {
 
 describe("magic-context hook", () => {
     it("constructs with directory fallback when load-time identity resolution throws", () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-identity-fallback-data-");
+        const dataHome = makeTempDir("hook-identity-fallback-data-");
+        process.env.XDG_DATA_HOME = dataHome;
+        process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dataHome;
         const projectDir = makeTempDir("hook-identity-fallback-project-");
         mkdirSync(join(projectDir, ".git"));
         __setProjectIdentityTestHooks({
@@ -263,7 +268,9 @@ describe("magic-context hook", () => {
     });
 
     it("constructs and resolves a project when sandbox policy denies realpath for the home directory", () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-realpath-sandbox-data-");
+        const dataHome = makeTempDir("hook-realpath-sandbox-data-");
+        process.env.XDG_DATA_HOME = dataHome;
+        process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dataHome;
         const projectDir = makeTempDir("hook-realpath-sandbox-project-");
         const deniedHome = makeTempDir("hook-realpath-sandbox-home-");
         const originalNative = realpathSync.native;
@@ -291,7 +298,9 @@ describe("magic-context hook", () => {
     });
 
     it("rehydrates pending marker sessions into both deferred signal sets", () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-marker-rehydrate-");
+        const dataHome = makeTempDir("hook-marker-rehydrate-");
+        process.env.XDG_DATA_HOME = dataHome;
+        process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dataHome;
         const db = openDatabase();
         const sessionId = "ses-marker-rehydrate";
         setPendingCompactionMarkerState(db, sessionId, {
@@ -310,7 +319,9 @@ describe("magic-context hook", () => {
     });
 
     it("indexes terminal message.updated events asynchronously", async () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-message-index-");
+        const dataHome = makeTempDir("hook-message-index-");
+        process.env.XDG_DATA_HOME = dataHome;
+        process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dataHome;
         createOpenCodeDbForHook("ses-index", [
             { id: "u-1", role: "user", text: "index user text" },
             { id: "a-1", role: "assistant", text: "index assistant text" },
@@ -450,7 +461,9 @@ describe("magic-context hook", () => {
     });
 
     it("initializes the dream queue table during setup", () => {
-        process.env.XDG_DATA_HOME = makeTempDir("hook-dream-queue-init-");
+        const dataHome = makeTempDir("hook-dream-queue-init-");
+        process.env.XDG_DATA_HOME = dataHome;
+        process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dataHome;
         requireHook(createMagicContextHook(createMockDeps()));
         const db = openDatabase();
 
@@ -466,6 +479,7 @@ describe("magic-context hook", () => {
     it("disables magic-context and warns when persistent storage is unavailable", () => {
         const dataHome = makeTempDir("hook-storage-disabled-");
         process.env.XDG_DATA_HOME = dataHome;
+        process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dataHome;
         // Block mkdirSync at the cortexkit segment of the new shared path so
         // openDatabase() falls into its in-memory fallback. (Plugin v0.16+
         // moved DB to <XDG_DATA_HOME>/cortexkit/magic-context/.)

@@ -46,6 +46,7 @@ const SESSION_ID = "ses_degraded_reanchor";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
+const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 const originalXdgCacheHome = process.env.XDG_CACHE_HOME;
 
 let db: Database;
@@ -55,6 +56,7 @@ function useTempDataHome(prefix: string): string {
     const dir = mkdtempSync(join(tmpdir(), prefix));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
+    process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dir;
     process.env.XDG_CACHE_HOME = dir;
     mkdirSync(join(dir, "opencode"), { recursive: true });
     return dir;
@@ -165,6 +167,8 @@ afterEach(() => {
     }
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalXdgDataHome;
+    if (originalTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = originalTestDataDir;
     if (originalXdgCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = originalXdgCacheHome;
 });

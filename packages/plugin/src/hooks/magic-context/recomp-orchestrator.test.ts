@@ -24,16 +24,20 @@ import {
 
 const tempDirs: string[] = [];
 const originalXdg = process.env.XDG_DATA_HOME;
+const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 
 function useTempDataHome(prefix: string): void {
     const dir = join(tmpdir(), `${prefix}${Math.random().toString(36).slice(2)}`);
     process.env.XDG_DATA_HOME = dir;
+    process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dir;
     tempDirs.push(dir);
 }
 
 afterEach(() => {
     closeDatabase();
     process.env.XDG_DATA_HOME = originalXdg;
+    if (originalTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = originalTestDataDir;
     for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
     tempDirs.length = 0;
 });

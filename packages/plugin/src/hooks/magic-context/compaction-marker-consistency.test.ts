@@ -12,11 +12,13 @@ import { checkCompactionMarkerConsistency } from "./compaction-marker-manager";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
+const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 
 function useTempDataHome(prefix: string): string {
     const dir = mkdtempSync(join(tmpdir(), prefix));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
+    process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dir;
     // Match the getDataDir() layout the plugin expects. opencode.db lives
     // under opencode/, while magic-context's own DB now lives at the shared
     // cortexkit path. Create both parent directories so the OpenCode-side DB
@@ -59,6 +61,8 @@ function insertPart(db: Database, id: string): void {
 afterEach(() => {
     closeDatabase();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
+    if (originalTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = originalTestDataDir;
     for (const dir of tempDirs) {
         try {
             rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

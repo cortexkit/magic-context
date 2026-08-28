@@ -7,11 +7,13 @@ import { runMigrations } from "./migrations";
 import { closeDatabase, initializeDatabase, openDatabase } from "./storage-db";
 
 const tempDirs: string[] = [];
+const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 
 function useTempDataHome(prefix: string): string {
     const dir = mkdtempSync(join(tmpdir(), prefix));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
+    process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dir;
     return dir;
 }
 
@@ -30,6 +32,8 @@ afterEach(() => {
     }
     tempDirs.length = 0;
     process.env.XDG_DATA_HOME = undefined;
+    if (originalTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = originalTestDataDir;
 });
 
 describe("migration v12 — FK cascades and orphan cleanup", () => {

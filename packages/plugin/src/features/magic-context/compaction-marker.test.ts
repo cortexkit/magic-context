@@ -15,11 +15,13 @@ import {
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
+const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 
 function useTempDataHome(prefix: string): string {
     const dir = mkdtempSync(join(tmpdir(), prefix));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
+    process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dir;
     mkdirSync(join(dir, "opencode"), { recursive: true });
     return dir;
 }
@@ -51,6 +53,8 @@ function insertMessage(
 afterEach(() => {
     closeCompactionMarkerDb();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
+    if (originalTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = originalTestDataDir;
     for (const dir of tempDirs) {
         rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }

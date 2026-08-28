@@ -15,6 +15,7 @@ import {
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
+const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 
 function makeTempDir(prefix: string): string {
     const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -23,12 +24,16 @@ function makeTempDir(prefix: string): string {
 }
 
 function useTempDataHome(prefix: string): void {
-    process.env.XDG_DATA_HOME = makeTempDir(prefix);
+    const dir = makeTempDir(prefix);
+    process.env.XDG_DATA_HOME = dir;
+    process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dir;
 }
 
 afterEach(() => {
     closeDatabase();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
+    if (originalTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = originalTestDataDir;
 
     for (const dir of tempDirs) {
         try {

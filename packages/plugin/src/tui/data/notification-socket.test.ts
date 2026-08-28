@@ -18,6 +18,7 @@ import {
 } from "./notification-socket";
 
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
+const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 const tempDirs: string[] = [];
 const servers: MagicContextRpcServer[] = [];
 const legacyServers: Array<ReturnType<typeof Bun.serve>> = [];
@@ -38,12 +39,15 @@ afterEach(() => {
     } else {
         process.env.XDG_DATA_HOME = originalXdgDataHome;
     }
+    if (originalTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = originalTestDataDir;
 });
 
 function makeDataHome(): string {
     const dir = mkdtempSync(join(tmpdir(), "mc-notification-socket-"));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
+    process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dir;
     return dir;
 }
 

@@ -21,11 +21,14 @@ import * as path from "node:path";
 
 let tmpRoot = "";
 let originalXdg: string | undefined;
+let originalTestDataDir: string | undefined;
 
 beforeEach(() => {
     tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mc-announcement-test-"));
     originalXdg = process.env.XDG_DATA_HOME;
+    originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
     process.env.XDG_DATA_HOME = tmpRoot;
+    process.env.MAGIC_CONTEXT_TEST_DATA_DIR = tmpRoot;
 });
 
 afterEach(() => {
@@ -34,6 +37,8 @@ afterEach(() => {
     } else {
         process.env.XDG_DATA_HOME = originalXdg;
     }
+    if (originalTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = originalTestDataDir;
     try {
         // maxRetries/retryDelay ride out transient EBUSY/EPERM on Windows.
         fs.rmSync(tmpRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

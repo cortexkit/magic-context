@@ -49,10 +49,13 @@ import { ensureColumn, initializeDatabase } from "./storage-db";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
+const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 
 afterEach(() => {
     closeDatabase();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
+    if (originalTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = originalTestDataDir;
 
     for (const dir of tempDirs) {
         try {
@@ -73,6 +76,7 @@ function makeTempDir(prefix: string): string {
 function useTempDataHome(prefix: string): string {
     const dataHome = makeTempDir(prefix);
     process.env.XDG_DATA_HOME = dataHome;
+    process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dataHome;
     return dataHome;
 }
 

@@ -16,12 +16,15 @@ import {
 } from "./upgrade-reminder";
 
 let prevDataHome: string | undefined;
+let prevTestDataDir: string | undefined;
 let tempHome: string;
 
 beforeEach(() => {
     prevDataHome = process.env.XDG_DATA_HOME;
+    prevTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
     tempHome = mkdtempSync(join(tmpdir(), "mc-upgrade-rem-"));
     process.env.XDG_DATA_HOME = tempHome;
+    process.env.MAGIC_CONTEXT_TEST_DATA_DIR = tempHome;
     mkdirSync(join(tempHome, "cortexkit", "magic-context"), { recursive: true });
     closeDatabase();
     __resetUpgradeReminderProcessGuard();
@@ -31,6 +34,8 @@ afterEach(() => {
     closeDatabase();
     if (prevDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = prevDataHome;
+    if (prevTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = prevTestDataDir;
     rmSync(tempHome, { recursive: true, force: true });
 });
 

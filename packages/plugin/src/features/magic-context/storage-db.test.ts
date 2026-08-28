@@ -49,6 +49,7 @@ import { SESSION_SCOPED_TABLES } from "./storage-session-tables";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
+const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 const originalStorageDir = process.env.MAGIC_CONTEXT_STORAGE_DIR;
 const originalNodeEnv = process.env.NODE_ENV;
 
@@ -111,6 +112,8 @@ afterEach(() => {
     __resetRpcIdentityTestHooks();
     __resetStoragePrivatePermissionEnforcementForTests();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
+    if (originalTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = originalTestDataDir;
     if (originalStorageDir === undefined) delete process.env.MAGIC_CONTEXT_STORAGE_DIR;
     else process.env.MAGIC_CONTEXT_STORAGE_DIR = originalStorageDir;
     if (originalNodeEnv === undefined) delete process.env.NODE_ENV;

@@ -25,11 +25,14 @@ import {
 
 const temporaryPaths: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
+const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 
 afterEach(() => {
     closeDatabase();
     __resetWindowReportLedgerDiagnosticsForTests();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
+    if (originalTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = originalTestDataDir;
     for (const temporaryPath of temporaryPaths.splice(0)) {
         rmSync(temporaryPath, { recursive: true, force: true });
     }
@@ -39,6 +42,7 @@ function useTemporaryDataHome(): void {
     const directory = mkdtempSync(join(tmpdir(), "mc-window-report-"));
     temporaryPaths.push(directory);
     process.env.XDG_DATA_HOME = directory;
+    process.env.MAGIC_CONTEXT_TEST_DATA_DIR = directory;
 }
 
 describe("window report ledger", () => {

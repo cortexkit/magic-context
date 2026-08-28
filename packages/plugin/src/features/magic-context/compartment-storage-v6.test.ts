@@ -6,11 +6,13 @@ import { appendCompartments, getCompartmentsByEndMessageId } from "./compartment
 import { closeDatabase, openDatabase } from "./storage";
 
 const tempDirs: string[] = [];
+const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 
 function useTempDataHome(prefix: string): string {
     const dir = mkdtempSync(join(tmpdir(), prefix));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
+    process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dir;
     return dir;
 }
 
@@ -25,6 +27,8 @@ afterEach(() => {
     }
     tempDirs.length = 0;
     process.env.XDG_DATA_HOME = undefined;
+    if (originalTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = originalTestDataDir;
 });
 
 describe("getCompartmentsByEndMessageId (plan v6 §5)", () => {

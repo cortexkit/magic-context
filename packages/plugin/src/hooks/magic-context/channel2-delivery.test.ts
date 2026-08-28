@@ -19,11 +19,14 @@ import { maybeDeliverChannel2 } from "./channel2-delivery";
 import { closeReadOnlySessionDb } from "./read-session-db";
 
 const openCodeDbs: Database[] = [];
+const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 
 function useTempDataHome(prefix: string): void {
     const { mkdtempSync } = require("node:fs");
     const { tmpdir } = require("node:os");
-    process.env.XDG_DATA_HOME = mkdtempSync(join(tmpdir(), prefix));
+    const dir = mkdtempSync(join(tmpdir(), prefix));
+    process.env.XDG_DATA_HOME = dir;
+    process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dir;
 }
 
 function createOpenCodeAssistantTail(sessionId: string, finish: string): Database {
@@ -50,6 +53,8 @@ afterEach(() => {
     closeReadOnlySessionDb();
     closeDatabase();
     mock.restore();
+    if (originalTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = originalTestDataDir;
 });
 
 /**
