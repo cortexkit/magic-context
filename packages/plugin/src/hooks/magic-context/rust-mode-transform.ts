@@ -927,6 +927,15 @@ function authoritySeedRows(
                   )
                   .all(projectPath, projectPath);
     const memoryRows = snapshots.filter(isRecord);
+    // A `superseded_by_memory_id` pointing outside this seed set can never resolve
+    // module-side: the store records it as a pending memory reference, and the
+    // resolution sweep only clears pendings whose target later appears in
+    // mc_memories. A target that is absent here is absent for good (its row was
+    // hard-deleted after an archive), so the pending would survive to
+    // authority_finish_prepare and permanently reject the memories-domain handoff.
+    // Dropping the dead link here keeps the gate meaningful for the case it exists
+    // to catch: a target the host DID send that the module failed to ingest.
+    const seededIds = new Set(memoryRows.map((row) => Number(row.id)));
     const mappings =
         domain === "memories"
             ? getMemoryVerifications(
@@ -937,16 +946,22 @@ function authoritySeedRows(
     return memoryRows.map((snapshot) => {
         const id = Number(snapshot.id);
         const mapping = mappings.get(id);
+        const resolvedSnapshot =
+            domain === "memories" &&
+            snapshot.superseded_by_memory_id != null &&
+            !seededIds.has(Number(snapshot.superseded_by_memory_id))
+                ? { ...snapshot, superseded_by_memory_id: null }
+                : snapshot;
         const seededSnapshot =
             domain === "memories" && mapping
                 ? {
-                      ...snapshot,
+                      ...resolvedSnapshot,
                       mapping: mapping.hasSentinel ? null : mapping.files,
                       mapping_origin: mapping.mappingOrigin,
                   }
                 : domain === "notes" && snapshot.project_path == null
-                  ? { ...snapshot, project_path: projectPath }
-                  : snapshot;
+                  ? { ...resolvedSnapshot, project_path: projectPath }
+                  : resolvedSnapshot;
         return { source_row_id: snapshot.id, snapshot: seededSnapshot };
     });
 }
@@ -3006,6 +3021,7 @@ export async function runRustModeTransform(
 
 export const __rustModeTransformTest = {
     applyNativeMessagesVerbatim,
+    authoritySeedRows,
     contentSnapshotsFor,
     snapshotTags: {
         array: LKG_SNAPSHOT_ARRAY,

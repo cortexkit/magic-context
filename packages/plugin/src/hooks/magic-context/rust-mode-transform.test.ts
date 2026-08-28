@@ -4220,3 +4220,98 @@ describe("raw fallback refusal copy and early abort", () => {
         expect(parkedMessages).toEqual([ENGINE_RECONNECTING_USER_MESSAGE]);
     });
 });
+
+describe("authoritySeedRows — supersede pointer resolution (issue #377)", () => {
+    // The store records a pending memory reference for any seeded row whose
+    // superseded_by_memory_id it cannot resolve, and authority_finish_prepare
+    // rejects the memories-domain handoff while any pending references exist.
+    // A target outside the seed set can never resolve, so the pending survives
+    // the resolution sweep and blocks rust mode permanently.
+    function seedDb(): ContextDatabase {
+        const db = new Database(":memory:") as ContextDatabase;
+        initializeDatabase(db);
+        return db;
+    }
+
+    function insert(
+        db: ContextDatabase,
+        project: string,
+        content: string,
+        status: string,
+    ): number {
+        const now = Date.now();
+        db.prepare(
+            `INSERT INTO memories
+               (project_path, category, content, normalized_hash, source_type,
+                seen_count, retrieval_count, first_seen_at, created_at, updated_at,
+                last_seen_at, status)
+             VALUES (?, 'ARCHITECTURE', ?, ?, 'agent', 1, 0, ?, ?, ?, ?, ?)`,
+        ).run(project, content, `hash-${content}`, now, now, now, now, status);
+        return Number(
+            (db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id,
+        );
+    }
+
+    it("drops a supersede pointer whose target is absent from the seed set", () => {
+        const db = seedDb();
+        try {
+            const project = "git:seed-test";
+            const survivor = insert(db, project, "survivor", "active");
+            const superseded = insert(db, project, "superseded", "archived");
+            const orphaned = insert(db, project, "orphaned", "archived");
+
+            // Resolvable: target is in the same seed set.
+            db.prepare("UPDATE memories SET superseded_by_memory_id = ? WHERE id = ?").run(
+                survivor,
+                superseded,
+            );
+            // Unresolvable: target id never existed in this project.
+            db.prepare("UPDATE memories SET superseded_by_memory_id = ? WHERE id = ?").run(
+                999_999,
+                orphaned,
+            );
+
+            const rows = __rustModeTransformTest.authoritySeedRows(db, project, "memories");
+            const byId = new Map(
+                rows.map((row) => [
+                    Number((row as { source_row_id: unknown }).source_row_id),
+                    (row as { snapshot: Record<string, unknown> }).snapshot,
+                ]),
+            );
+
+            // The dead link is dropped so the module never records a pending reference.
+            expect(byId.get(orphaned)?.superseded_by_memory_id).toBeNull();
+            // The resolvable pointer is preserved verbatim — this must stay surgical,
+            // not a blanket null of the column.
+            expect(byId.get(superseded)?.superseded_by_memory_id).toBe(survivor);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    it("drops a supersede pointer whose target belongs to another project", () => {
+        const db = seedDb();
+        try {
+            const project = "git:seed-a";
+            const foreign = insert(db, "git:seed-b", "foreign-target", "active");
+            const local = insert(db, project, "local", "archived");
+            db.prepare("UPDATE memories SET superseded_by_memory_id = ? WHERE id = ?").run(
+                foreign,
+                local,
+            );
+
+            const rows = __rustModeTransformTest.authoritySeedRows(db, project, "memories");
+            const snapshot = (
+                rows.find(
+                    (row) => Number((row as { source_row_id: unknown }).source_row_id) === local,
+                ) as { snapshot: Record<string, unknown> }
+            ).snapshot;
+
+            // The seed set is project-scoped, so a cross-project target is
+            // equally unresolvable module-side.
+            expect(snapshot.superseded_by_memory_id).toBeNull();
+        } finally {
+            closeQuietly(db);
+        }
+    });
+});
