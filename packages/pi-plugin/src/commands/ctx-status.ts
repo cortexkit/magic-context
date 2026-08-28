@@ -12,6 +12,7 @@ import { getNotes } from "@magic-context/core/features/magic-context/storage-not
 import { getTagsBySession } from "@magic-context/core/features/magic-context/storage-tags";
 import { executeStatus } from "@magic-context/core/hooks/magic-context/execute-status";
 import { describeError } from "@magic-context/core/shared/error-message";
+import { getMagicContextStorageResolution } from "@magic-context/core/shared/data-path";
 import { resolveTailHygieneStatus } from "@magic-context/core/shared/tail-hygiene-status";
 import { getPiChannel1Baseline } from "../ctx-reduce-nudge-pi";
 import { showStatusDialog } from "../dialogs/status-dialog";
@@ -148,11 +149,12 @@ export function registerCtxStatusCommand(
 				);
 				const details = buildStatusDetails(currentDeps, sessionId);
 				const profileStatus = currentDeps.activeProfile ?? "none";
+				const storage = getMagicContextStorageResolution();
 				sendCtxStatusMessage(
 					pi,
 					{
 						title: "/ctx-status",
-						text: `${statusText}\n\nActive profile: ${profileStatus}`,
+						text: `${statusText}\n\nActive profile: ${profileStatus}\n\nStorage: ${storage.path} (${storage.source})`,
 						level: "info",
 					},
 					details,

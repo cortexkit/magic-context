@@ -34,6 +34,7 @@ import {
     formatInconclusiveOpenCodeMigrationWarning,
     formatLiveProcessMigrationRefusal,
     getLiveMigrationBlockingProcesses,
+    getDatabasePath,
     getMigrationOnOpenRefusal,
     getPersistedSchemaVersion,
     getSchemaFenceRejection,
@@ -48,6 +49,8 @@ import { SESSION_SCOPED_TABLES } from "./storage-session-tables";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
+const originalStorageDir = process.env.MAGIC_CONTEXT_STORAGE_DIR;
+const originalNodeEnv = process.env.NODE_ENV;
 
 function makeTempDir(prefix: string): string {
     const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -58,6 +61,7 @@ function makeTempDir(prefix: string): string {
 function useTempDataHome(prefix: string): string {
     const dataHome = makeTempDir(prefix);
     process.env.XDG_DATA_HOME = dataHome;
+    process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dataHome;
     return dataHome;
 }
 
@@ -107,6 +111,10 @@ afterEach(() => {
     __resetRpcIdentityTestHooks();
     __resetStoragePrivatePermissionEnforcementForTests();
     process.env.XDG_DATA_HOME = originalXdgDataHome;
+    if (originalStorageDir === undefined) delete process.env.MAGIC_CONTEXT_STORAGE_DIR;
+    else process.env.MAGIC_CONTEXT_STORAGE_DIR = originalStorageDir;
+    if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = originalNodeEnv;
 
     for (const dir of tempDirs) {
         try {
@@ -206,6 +214,43 @@ describe("upstream migration version lane", () => {
             closeQuietly(future);
             closeQuietly(forkOnly);
         }
+    });
+});
+
+describe("explicit shared storage resolution", () => {
+    it("keeps both path resolution and database opening inside test isolation", () => {
+        const testDataDir = makeTempDir("storage-db-test-guard-");
+        process.env.MAGIC_CONTEXT_TEST_DATA_DIR = testDataDir;
+        process.env.XDG_DATA_HOME = makeTempDir("storage-db-preload-xdg-");
+        process.env.MAGIC_CONTEXT_STORAGE_DIR = makeTempDir("storage-db-production-");
+
+        const resolved = resolveDatabasePath();
+        expect(resolved.dbPath).toBe(resolveDbPath(testDataDir));
+        const db = openDatabase();
+        expect(db).not.toBeNull();
+        expect(getDatabasePath(db!)).toBe(resolved.dbPath);
+        closeDatabase();
+    });
+
+    it("opens a fresh absolute override and applies private storage permissions", () => {
+        if (process.platform === "win32") return;
+        const override = makeTempDir("storage-db-explicit-");
+        process.env.MAGIC_CONTEXT_TEST_DATA_DIR = "";
+        process.env.NODE_ENV = "development";
+        process.env.MAGIC_CONTEXT_STORAGE_DIR = join(override, "shared");
+        __setRpcDiscoveryFsForTests({
+            readdirSync: (_path, options) => (options?.withFileTypes ? [] : []),
+        });
+        __setRpcIdentityTestHooks({
+            processListExecFileSync: (() => "") as typeof execFileSync,
+        });
+        const db = openDatabase();
+        expect(db).not.toBeNull();
+        const dbPath = join(override, "shared", "context.db");
+        expect(existsSync(dbPath)).toBe(true);
+        expect(statSync(join(override, "shared")).mode & 0o777).toBe(0o700);
+        expect(statSync(dbPath).mode & 0o777).toBe(0o600);
+        closeDatabase();
     });
 });
 

@@ -13,6 +13,7 @@ import collections
 import datetime as dt
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -3431,12 +3432,14 @@ def invoke_live_probe(
     args: argparse.Namespace, after_ms: int, engine_after_ms: int
 ) -> dict[str, Any]:
     home = Path.home()
-    context_db = args.context_db or home / ".local/share/cortexkit/magic-context/context.db"
-    store_db = args.store_db or home / ".local/share/cortexkit/magic-context/store.db"
-    store_root = args.store_root or home / ".local/share/cortexkit"
+    storage_dir = os.environ.get("MAGIC_CONTEXT_STORAGE_DIR", "").strip()
+    storage_root = Path(storage_dir) if storage_dir else home / ".local/share/cortexkit/magic-context"
+    context_db = args.context_db or storage_root / "context.db"
+    store_db = args.store_db or storage_root / "store.db"
+    store_root = args.store_root or storage_root
     opencode_db = args.opencode_db or home / ".local/share/opencode/opencode.db"
     pi_session_dir = args.pi_session_dir or home / ".pi/agent/sessions"
-    rpc_root = args.rpc_root or home / ".local/share/cortexkit/magic-context/rpc"
+    rpc_root = args.rpc_root or storage_root / "rpc"
     command = [
         "bun",
         str(Path(__file__).with_name("audit-transform-wire-parity-live.ts")),

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { resolveCortexKitProjectConfigPath } from "@magic-context/core/config/migrate-config-location";
 import { parseCompartmentOutput } from "@magic-context/core/hooks/magic-context/compartment-parser";
 import {
-    getMagicContextStorageDir,
+    getMagicContextStorageResolution,
     getProjectMagicContextHistorianDir,
 } from "@magic-context/core/shared/data-path";
 import { loadPiConfig } from "@magic-context/pi-core/config";
@@ -60,6 +60,7 @@ export interface PiDiagnosticReport {
     loadWarnings: string[];
     storageDir: {
         path: string;
+        source?: string;
         exists: boolean;
         contextDbSizeBytes: number;
     };
@@ -391,7 +392,8 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
     const userConfigPath = getPiUserConfigPath();
     const projectConfigPath = getProjectConfigPath(cwd);
     const loaded = loadPiConfig({ cwd });
-    const storageDirPath = getMagicContextStorageDir();
+    const storageResolution = getMagicContextStorageResolution();
+    const storageDirPath = storageResolution.path;
     const dbPath = join(storageDirPath, "context.db");
     const logPath = getMagicContextLogPath("pi");
     const logFileSize = existsSync(logPath) ? statSync(logPath).size : 0;
@@ -428,6 +430,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
         loadWarnings: loaded.warnings.map(sanitizeString),
         storageDir: {
             path: storageDirPath,
+            source: storageResolution.source,
             exists: existsSync(storageDirPath),
             contextDbSizeBytes: fileSize(dbPath),
         },
@@ -457,6 +460,7 @@ export function renderDiagnosticsMarkdown(report: PiDiagnosticReport): string {
     const settings = sanitizeValue(report.settings);
     const storage = {
         path: sanitizeString(report.storageDir.path),
+        source: report.storageDir.source ?? "unknown",
         exists: report.storageDir.exists,
         context_db_size: formatBytes(report.storageDir.contextDbSizeBytes),
     };

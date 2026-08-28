@@ -6,8 +6,9 @@
  * Usage: bun packages/plugin/scripts/bench-synapse-vs-local.ts [--n 100]
  */
 
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { homedir } from "node:os";
+import { getMagicContextStorageDir } from "../src/shared/data-path";
 import { SynapseEmbeddingProvider } from "../src/features/magic-context/memory/embedding-synapse";
 import { LocalEmbeddingProvider } from "../src/features/magic-context/memory/embedding-local";
 
@@ -17,7 +18,7 @@ const N = nIdx >= 0 ? Number(process.argv[nIdx + 1]) : 100;
 // Real corpus: compartment P1 paraphrases (the same content class the chunk
 // embedder feeds), read-only.
 const { Database } = await import("bun:sqlite");
-const db = new Database(join(homedir(), ".local/share/cortexkit/magic-context/context.db"), {
+const db = new Database(join(getMagicContextStorageDir(), "context.db"), {
     readonly: true,
 });
 const rows = db

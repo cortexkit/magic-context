@@ -12,12 +12,9 @@
 
 import { Database } from "bun:sqlite";
 import { join } from "node:path";
+import { getDataDir, getMagicContextStorageDir } from "../src/shared/data-path";
 
 // --- DB paths ---
-
-function getDataDir(): string {
-	return join(process.env.HOME ?? "~", ".local", "share");
-}
 
 function openOpenCodeDb(): Database {
 	return new Database(join(getDataDir(), "opencode", "opencode.db"), { readonly: true });
@@ -25,7 +22,7 @@ function openOpenCodeDb(): Database {
 
 function openPluginDb(): Database {
 	return new Database(
-		join(getDataDir(), "opencode", "storage", "plugin", "magic-context", "context.db"),
+		join(getMagicContextStorageDir(), "context.db"),
 		{ readonly: true },
 	);
 }

@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, statSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
-import { getDataDir, getOpenCodeStorageDir } from "../../src/shared/data-path"
+import { getDataDir, getMagicContextStorageDir, getOpenCodeStorageDir } from "../../src/shared/data-path"
 
 function listDatabaseFiles(dirPath: string, filePrefix: string): string[] {
 	if (!existsSync(dirPath)) {
@@ -44,7 +44,7 @@ export function resolveOpenCodeDatabasePath(): string {
 }
 
 export function resolveContextDatabasePath(): string {
-	const contextDbPath = join(getOpenCodeStorageDir(), "plugin", "magic-context", "context.db")
+	const contextDbPath = join(getMagicContextStorageDir(), "context.db")
 	if (!existsSync(contextDbPath)) {
 		throw new Error(`Context DB not found: ${contextDbPath}`)
 	}

@@ -11,8 +11,9 @@ import {
 } from "../src/features/magic-context/memory/embedding";
 import { loadAllEmbeddings } from "../src/features/magic-context/memory/storage-memory-embeddings";
 import { cosineSimilarity } from "../src/features/magic-context/memory/embedding";
+import { getMagicContextStorageDir } from "../src/shared/data-path";
 
-const DB_PATH = `${process.env.HOME}/.local/share/opencode/storage/plugin/magic-context/context.db`;
+const DB_PATH = `${getMagicContextStorageDir()}/context.db`;
 const query = process.argv[2] ?? "how does the historian work";
 
 async function main() {

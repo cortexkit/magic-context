@@ -10,6 +10,7 @@ import { getPendingOps } from "../../features/magic-context/storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta";
 import { getTagsBySession } from "../../features/magic-context/storage-tags";
 import { getErrorMessage } from "../../shared/error-message";
+import { getMagicContextStorageResolution } from "../../shared/data-path";
 import { formatThresholdClampNote } from "../../shared/format-threshold";
 import { sessionLog } from "../../shared/logger";
 import type { TailHygieneStatus } from "../../shared/rpc-types";
@@ -151,6 +152,12 @@ export function executeStatus(
             `**Protected tags:** ${protectedTags}`,
             `**Subagent session:** ${meta.isSubagent}`,
         ];
+
+        const storage = getMagicContextStorageResolution();
+        lines.push(
+            "",
+            `**Storage:** ${storage.path} (${storage.source})`,
+        );
 
         if (tailHygiene !== undefined) {
             lines.push(

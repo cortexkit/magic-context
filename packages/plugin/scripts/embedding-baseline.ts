@@ -27,6 +27,7 @@ import { Database } from "../src/shared/sqlite";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { getMagicContextStorageDir } from "../src/shared/data-path";
 
 import { EmbeddingConfigSchema } from "../src/config/schema/magic-context";
 import { cosineSimilarity } from "../src/features/magic-context/memory/cosine-similarity";
@@ -279,7 +280,7 @@ async function run() {
 
     // 2. Open the plugin's live context DB (read-only) and load memories + embeddings
     //    for the current project.
-    const dbPath = join(homedir(), ".local/share/opencode/storage/plugin/magic-context/context.db");
+    const dbPath = join(getMagicContextStorageDir(), "context.db");
     if (!existsSync(dbPath)) {
         console.error(`[baseline] plugin DB not found at ${dbPath}`);
         process.exit(1);

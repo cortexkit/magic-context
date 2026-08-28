@@ -13,6 +13,8 @@ import {
 } from "./context-db";
 
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
+const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+const originalStorageDir = process.env.MAGIC_CONTEXT_STORAGE_DIR;
 const tempDirs: string[] = [];
 const servers: MagicContextRpcServer[] = [];
 
@@ -24,12 +26,19 @@ afterEach(() => {
     }
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalXdgDataHome;
+    if (originalTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = originalTestDataDir;
+    if (originalStorageDir === undefined) delete process.env.MAGIC_CONTEXT_STORAGE_DIR;
+    else process.env.MAGIC_CONTEXT_STORAGE_DIR = originalStorageDir;
 });
 
 function makeDataHome(): string {
     const dir = mkdtempSync(join(tmpdir(), "mc-context-db-"));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
+    // The shared resolver gives test isolation priority. Keep both values
+    // aligned so the RPC client and fixture server exercise one directory.
+    process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dir;
     return dir;
 }
 

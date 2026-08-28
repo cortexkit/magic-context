@@ -70,6 +70,13 @@ packages/dashboard/
 
 The dashboard reads from the same SQLite database the plugin writes to:
 - **Database**: `~/.local/share/cortexkit/magic-context/context.db`
+
+When a host isolates `XDG_DATA_HOME` per harness process, set
+`MAGIC_CONTEXT_STORAGE_DIR` to the same absolute storage directory for every
+process that shares the harness-side database. The dashboard follows this
+override but does not relocate the per-user `subc` daemon module state; use one
+override value per machine to avoid split-brain stores. Mixed-version harnesses
+still block database migrations until they are restarted on a compatible build.
 - **Config**: `~/.config/cortexkit/magic-context.jsonc` (user) · `<project>/.cortexkit/magic-context.jsonc` (project)
 - **Logs**: `$MAGIC_CONTEXT_LOG_PATH` (default: `${TMPDIR}/opencode/magic-context/magic-context.log`, `pi/` for Pi)
 

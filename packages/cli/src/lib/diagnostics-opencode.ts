@@ -15,7 +15,10 @@ import { loadPluginConfig } from "@magic-context/core/config";
 import { isCompactionEnabled } from "@magic-context/core/config/agent-disable";
 import { parseCompartmentOutput } from "@magic-context/core/hooks/magic-context/compartment-parser";
 import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
-import { getProjectMagicContextHistorianDir } from "@magic-context/core/shared/data-path";
+import {
+    getMagicContextStorageResolution,
+    getProjectMagicContextHistorianDir,
+} from "@magic-context/core/shared/data-path";
 import { parse as parseJsonc } from "comment-json";
 import { detectOpenCodeInstallations } from "./opencode-detect";
 import { describeOpenCodeInstallations, type OpenCodeInstallationReport } from "./opencode-helpers";
@@ -59,6 +62,7 @@ export interface DiagnosticReport {
     };
     storageDir: {
         path: string;
+        source?: string;
         exists: boolean;
         contextDbSizeBytes: number;
     };
@@ -249,14 +253,8 @@ function getPluginCacheInfo(): { path: string; cached?: string; latest?: string 
     return { path, cached, latest: getSelfVersion() };
 }
 
-function getStorageDir(): string {
-    const dataHome = process.env.XDG_DATA_HOME || join(homedir(), ".local", "share");
-    // Plugin v0.16+ uses the shared cortexkit/magic-context path so OpenCode and
-    // Pi can share memory/embedding/dreamer state. doctor --issue diagnostics
-    // should report on the live storage location, not the legacy OpenCode-only
-    // path. (See packages/plugin/src/shared/data-path.ts for the canonical
-    // resolver.)
-    return join(dataHome, "cortexkit", "magic-context");
+function getStorageResolution(): ReturnType<typeof getMagicContextStorageResolution> {
+    return getMagicContextStorageResolution();
 }
 
 function fileSize(path: string): number {
@@ -786,7 +784,8 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
     const opencodeConfig = readConfig(configPaths.opencodeConfig);
     const tuiConfig = readConfig(configPaths.tuiConfig);
     const magicContextConfig = readConfig(configPaths.magicContextConfig);
-    const storageDirPath = getStorageDir();
+    const storageResolution = getStorageResolution();
+    const storageDirPath = storageResolution.path;
     const contextDbPath = join(storageDirPath, "context.db");
 
     const logPath = getMagicContextLogPath("opencode");
@@ -837,6 +836,7 @@ export async function collectDiagnostics(): Promise<DiagnosticReport> {
         pluginCache: getPluginCacheInfo(),
         storageDir: {
             path: storageDirPath,
+            source: storageResolution.source,
             exists: existsSync(storageDirPath),
             contextDbSizeBytes: fileSize(contextDbPath),
         },
@@ -886,6 +886,7 @@ export function renderDiagnosticsMarkdown(report: DiagnosticReport): string {
 
     const storage = {
         path: sanitizeString(report.storageDir.path),
+        source: report.storageDir.source ?? "unknown",
         exists: report.storageDir.exists,
         context_db_size: formatBytes(report.storageDir.contextDbSizeBytes),
     };

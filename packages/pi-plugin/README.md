@@ -132,9 +132,13 @@ Magic Context stores everything in a single shared SQLite database at:
 ```
 
 When a host isolates `XDG_DATA_HOME` per process, set
-`MC_SHARE_STORAGE_DIR` to the complete shared Magic Context storage directory.
-The explicit path takes precedence over the XDG-derived path and does not
-change Pi's own configuration or session directories.
+`MAGIC_CONTEXT_STORAGE_DIR` to the absolute, complete shared Magic Context
+storage directory. The explicit path takes precedence over the XDG-derived path
+and does not change Pi's own configuration or session directories. The host must
+propagate one identical value to every process that shares the database; Magic
+Context never originates this variable from its default. This affects the
+harness-side database only, not `subc` daemon state. Mixed-version processes on
+one directory still block migrations until all processes use a compatible build.
 
 This is the **same database** the OpenCode plugin and OMP extension use. Tables are scoped by:
 - `harness` column (`'pi'` or `'opencode'`) for session-scoped data; OMP intentionally uses `'pi'`

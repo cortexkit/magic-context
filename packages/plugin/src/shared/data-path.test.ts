@@ -18,7 +18,7 @@ import {
 const savedEnv = {
     XDG_CACHE_HOME: process.env.XDG_CACHE_HOME,
     XDG_DATA_HOME: process.env.XDG_DATA_HOME,
-    MC_SHARE_STORAGE_DIR: process.env.MC_SHARE_STORAGE_DIR,
+    MAGIC_CONTEXT_STORAGE_DIR: process.env.MAGIC_CONTEXT_STORAGE_DIR,
     LOCALAPPDATA: process.env.LOCALAPPDATA,
     MAGIC_CONTEXT_LOG_PATH: process.env.MAGIC_CONTEXT_LOG_PATH,
     MAGIC_CONTEXT_TEST_DATA_DIR: process.env.MAGIC_CONTEXT_TEST_DATA_DIR,
@@ -29,12 +29,14 @@ describe("data-path", () => {
     beforeEach(() => {
         process.env.XDG_CACHE_HOME = undefined;
         process.env.XDG_DATA_HOME = undefined;
+        delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+        delete process.env.NODE_ENV;
         process.env.LOCALAPPDATA = undefined;
         process.env.MAGIC_CONTEXT_LOG_PATH = undefined;
         // Bun's env handling: explicit delete for unset
         delete process.env.XDG_CACHE_HOME;
         delete process.env.XDG_DATA_HOME;
-        delete process.env.MC_SHARE_STORAGE_DIR;
+        delete process.env.MAGIC_CONTEXT_STORAGE_DIR;
         delete process.env.LOCALAPPDATA;
         delete process.env.MAGIC_CONTEXT_LOG_PATH;
     });
@@ -142,21 +144,19 @@ describe("data-path", () => {
         );
     });
 
-    test("test storage isolation takes precedence over MC_SHARE_STORAGE_DIR", () => {
+    test("test storage isolation takes precedence over MAGIC_CONTEXT_STORAGE_DIR", () => {
         process.env.MAGIC_CONTEXT_TEST_DATA_DIR = "/tmp/mc-test-isolation";
-        process.env.MC_SHARE_STORAGE_DIR = "/tmp/production-shared-data";
+        process.env.MAGIC_CONTEXT_STORAGE_DIR = "/tmp/production-shared-data";
         expect(getMagicContextStorageDir()).toBe(
             path.join("/tmp/mc-test-isolation", "cortexkit", "magic-context"),
         );
     });
 
-    test("getMagicContextStorageDir prefers XDG_DATA_HOME over MAGIC_CONTEXT_TEST_DATA_DIR", () => {
-        // A test managing its own per-test data home is already controlled, and
-        // several suites depend on that dir being honored.
+    test("test storage isolation takes precedence over XDG_DATA_HOME", () => {
         process.env.MAGIC_CONTEXT_TEST_DATA_DIR = "/tmp/mc-test-isolation";
         process.env.XDG_DATA_HOME = "/tmp/custom-data";
         expect(getMagicContextStorageDir()).toBe(
-            path.join("/tmp/custom-data", "cortexkit", "magic-context"),
+            path.join("/tmp/mc-test-isolation", "cortexkit", "magic-context"),
         );
     });
 
@@ -167,20 +167,27 @@ describe("data-path", () => {
         );
     });
 
-    test("getMagicContextStorageDir honors MC_SHARE_STORAGE_DIR", () => {
+    test("getMagicContextStorageDir honors MAGIC_CONTEXT_STORAGE_DIR", () => {
         process.env.XDG_DATA_HOME = "/tmp/private-agent-data";
-        process.env.MC_SHARE_STORAGE_DIR = "/tmp/shared-magic-context";
+        process.env.MAGIC_CONTEXT_STORAGE_DIR = "/tmp/shared-magic-context";
         expect(getMagicContextStorageDir()).toBe("/tmp/shared-magic-context");
     });
 
-    test("MC_SHARE_STORAGE_DIR takes precedence over XDG_DATA_HOME", () => {
+    test("MAGIC_CONTEXT_STORAGE_DIR takes precedence over XDG_DATA_HOME", () => {
         process.env.XDG_DATA_HOME = "/tmp/private-agent-data";
-        process.env.MC_SHARE_STORAGE_DIR = "./shared-magic-context";
-        expect(getMagicContextStorageDir()).toBe(path.resolve("./shared-magic-context"));
+        process.env.MAGIC_CONTEXT_STORAGE_DIR = "/tmp/shared-magic-context";
+        expect(getMagicContextStorageDir()).toBe("/tmp/shared-magic-context");
     });
 
-    test("blank MC_SHARE_STORAGE_DIR falls back to XDG_DATA_HOME", () => {
-        process.env.MC_SHARE_STORAGE_DIR = "   ";
+    test("relative MAGIC_CONTEXT_STORAGE_DIR is rejected", () => {
+        process.env.MAGIC_CONTEXT_STORAGE_DIR = "./shared-magic-context";
+        expect(() => getMagicContextStorageDir()).toThrow(
+            "MAGIC_CONTEXT_STORAGE_DIR must be an absolute path",
+        );
+    });
+
+    test("blank MAGIC_CONTEXT_STORAGE_DIR falls back to XDG_DATA_HOME", () => {
+        process.env.MAGIC_CONTEXT_STORAGE_DIR = "   ";
         process.env.XDG_DATA_HOME = "/tmp/custom-data";
         expect(getMagicContextStorageDir()).toBe(
             path.join("/tmp/custom-data", "cortexkit", "magic-context"),
