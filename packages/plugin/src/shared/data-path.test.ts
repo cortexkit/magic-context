@@ -18,6 +18,7 @@ import {
 const savedEnv = {
     XDG_CACHE_HOME: process.env.XDG_CACHE_HOME,
     XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+    MC_SHARE_STORAGE_DIR: process.env.MC_SHARE_STORAGE_DIR,
     LOCALAPPDATA: process.env.LOCALAPPDATA,
     MAGIC_CONTEXT_LOG_PATH: process.env.MAGIC_CONTEXT_LOG_PATH,
     MAGIC_CONTEXT_TEST_DATA_DIR: process.env.MAGIC_CONTEXT_TEST_DATA_DIR,
@@ -33,6 +34,7 @@ describe("data-path", () => {
         // Bun's env handling: explicit delete for unset
         delete process.env.XDG_CACHE_HOME;
         delete process.env.XDG_DATA_HOME;
+        delete process.env.MC_SHARE_STORAGE_DIR;
         delete process.env.LOCALAPPDATA;
         delete process.env.MAGIC_CONTEXT_LOG_PATH;
     });
@@ -140,6 +142,14 @@ describe("data-path", () => {
         );
     });
 
+    test("test storage isolation takes precedence over MC_SHARE_STORAGE_DIR", () => {
+        process.env.MAGIC_CONTEXT_TEST_DATA_DIR = "/tmp/mc-test-isolation";
+        process.env.MC_SHARE_STORAGE_DIR = "/tmp/production-shared-data";
+        expect(getMagicContextStorageDir()).toBe(
+            path.join("/tmp/mc-test-isolation", "cortexkit", "magic-context"),
+        );
+    });
+
     test("getMagicContextStorageDir prefers XDG_DATA_HOME over MAGIC_CONTEXT_TEST_DATA_DIR", () => {
         // A test managing its own per-test data home is already controlled, and
         // several suites depend on that dir being honored.
@@ -151,6 +161,26 @@ describe("data-path", () => {
     });
 
     test("getMagicContextStorageDir honors XDG_DATA_HOME", () => {
+        process.env.XDG_DATA_HOME = "/tmp/custom-data";
+        expect(getMagicContextStorageDir()).toBe(
+            path.join("/tmp/custom-data", "cortexkit", "magic-context"),
+        );
+    });
+
+    test("getMagicContextStorageDir honors MC_SHARE_STORAGE_DIR", () => {
+        process.env.XDG_DATA_HOME = "/tmp/private-agent-data";
+        process.env.MC_SHARE_STORAGE_DIR = "/tmp/shared-magic-context";
+        expect(getMagicContextStorageDir()).toBe("/tmp/shared-magic-context");
+    });
+
+    test("MC_SHARE_STORAGE_DIR takes precedence over XDG_DATA_HOME", () => {
+        process.env.XDG_DATA_HOME = "/tmp/private-agent-data";
+        process.env.MC_SHARE_STORAGE_DIR = "./shared-magic-context";
+        expect(getMagicContextStorageDir()).toBe(path.resolve("./shared-magic-context"));
+    });
+
+    test("blank MC_SHARE_STORAGE_DIR falls back to XDG_DATA_HOME", () => {
+        process.env.MC_SHARE_STORAGE_DIR = "   ";
         process.env.XDG_DATA_HOME = "/tmp/custom-data";
         expect(getMagicContextStorageDir()).toBe(
             path.join("/tmp/custom-data", "cortexkit", "magic-context"),

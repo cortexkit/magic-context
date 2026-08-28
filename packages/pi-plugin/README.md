@@ -131,6 +131,11 @@ Magic Context stores everything in a single shared SQLite database at:
 ~/.local/share/cortexkit/magic-context/context.db
 ```
 
+When a host isolates `XDG_DATA_HOME` per process, set
+`MC_SHARE_STORAGE_DIR` to the complete shared Magic Context storage directory.
+The explicit path takes precedence over the XDG-derived path and does not
+change Pi's own configuration or session directories.
+
 This is the **same database** the OpenCode plugin and OMP extension use. Tables are scoped by:
 - `harness` column (`'pi'` or `'opencode'`) for session-scoped data; OMP intentionally uses `'pi'`
 - `project_path` (resolved git root) for project-scoped data (memories, embeddings, dreamer runs)

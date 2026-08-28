@@ -357,7 +357,7 @@ This is the work-repositories-versus-personal-repositories setup requested by ka
 
 ## Storage
 
-All durable state lives in a local SQLite database under the shared CortexKit store (`~/.local/share/cortexkit/magic-context/context.db`, XDG-equivalent on Windows; legacy OpenCode-folder databases are migrated forward on first boot). If the database can't be opened, Magic Context disables itself and notifies you. Memories are keyed to a **stable project identity** derived from the repo, so they follow a project across worktrees, clones, and forks rather than being tied to a directory path.
+All durable state lives in a local SQLite database under the shared CortexKit store (`~/.local/share/cortexkit/magic-context/context.db`, XDG-equivalent on Windows; legacy OpenCode-folder databases are migrated forward on first boot). Set `MC_SHARE_STORAGE_DIR` to override the complete Magic Context storage directory when a host isolates `XDG_DATA_HOME`; the explicit path takes precedence over the XDG-derived path. If the database can't be opened, Magic Context disables itself and notifies you. Memories are keyed to a **stable project identity** derived from the repo, so they follow a project across worktrees, clones, and forks rather than being tied to a directory path.
 
 Magic Context also writes to a few other locations:
 

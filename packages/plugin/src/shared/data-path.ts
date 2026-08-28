@@ -166,7 +166,8 @@ export function getOpenCodeStorageDir(): string {
  *   - Shared Dreamer runs (one per project per machine)
  *   - Future cross-harness session migration
  *
- * Layout: <XDG_DATA_HOME>/cortexkit/magic-context/
+ * Layout: <MC_SHARE_STORAGE_DIR>/ when explicitly configured, otherwise
+ * <XDG_DATA_HOME>/cortexkit/magic-context/.
  *
  * TEST-ISOLATION GUARD. `openDatabase()` has been guarded in
  * `resolveDatabasePath()` since the 2026-06-01 (v26) and 2026-06-19 (v41)
@@ -192,8 +193,9 @@ export function getOpenCodeStorageDir(): string {
  * `PRAGMA integrity_check`, announcements, the models.dev cache) are covered
  * too — they never go through the DB resolver.
  *
- * XDG_DATA_HOME still wins over both: a test that manages its own data home is
- * already controlled, and production has no test dir set at all.
+ * In production, MC_SHARE_STORAGE_DIR takes precedence over XDG_DATA_HOME.
+ * Test isolation remains authoritative so an ambient override cannot redirect
+ * a test into a user's real shared database.
  */
 export function getMagicContextStorageDir(): string {
     if (!process.env.XDG_DATA_HOME) {
@@ -204,6 +206,10 @@ export function getMagicContextStorageDir(): string {
         if (process.env.NODE_ENV === "test") {
             return getTestBackstopStorageDir();
         }
+    }
+    const explicitStorageDir = process.env.MC_SHARE_STORAGE_DIR?.trim();
+    if (explicitStorageDir) {
+        return path.resolve(explicitStorageDir);
     }
     return path.join(getDataDir(), "cortexkit", "magic-context");
 }
