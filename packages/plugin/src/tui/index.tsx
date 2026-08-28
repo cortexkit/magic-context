@@ -16,7 +16,7 @@ import { formatWindowDerivationLine } from "../shared/window-geometry"
 import { compactionOffSidebarRows, nativeCompactionContextLabel } from "./compaction-off"
 import { isCompactionEnabled } from "../config/agent-disable"
 import { loadPluginConfig } from "../config"
-import { detectConflicts } from "../shared/conflict-detector"
+import { detectConflicts, isDcpCoexistenceActive } from "../shared/conflict-detector"
 import { fixConflicts } from "../shared/conflict-fixer"
 
 const DEFAULT_TOAST_DURATION_MS = 5000
@@ -1045,8 +1045,19 @@ const tui: TuiPlugin = async (api, _options, meta) => {
         compactionEnabled: isCompactionEnabled(pluginConfig ?? {}),
     })
     if (conflictResult.hasConflict) {
-        showConflictDialog(api, directory, conflictResult.reasons, conflictResult.conflicts)
-        return
+        // Mirror the server-side DCP-coexistence escape hatch (index.ts): if
+        // DCP is the ONLY conflict and conflicts.allow_dcp is true, the server
+        // stays enabled in compaction-off mode — the TUI must not show the
+        // "disabled, remove DCP" dialog in that case, or offer to strip the
+        // DCP plugin the user explicitly opted to keep.
+        const dcpCoexistenceActive = isDcpCoexistenceActive(
+            conflictResult,
+            (pluginConfig as { conflicts?: { allow_dcp?: boolean } } | undefined)?.conflicts?.allow_dcp,
+        )
+        if (!dcpCoexistenceActive) {
+            showConflictDialog(api, directory, conflictResult.reasons, conflictResult.conflicts)
+            return
+        }
     }
 
     initRpcClient(directory)

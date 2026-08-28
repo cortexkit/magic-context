@@ -817,6 +817,19 @@ const SidebarContent = (props: {
                 Status (Q=queued ops, N=session notes). */}
             {collapsed() && (
                 <box width="100%" flexDirection="column">
+                    {/* Historian keeps running in the background even in
+                        compaction-off/DCP-coexistence mode (it only summarizes
+                        the raw tail into compartments/memories; it never
+                        touches the live message array), so its status row is
+                        shown unconditionally rather than gated by compactionOff. */}
+                    <box width="100%" flexDirection="row" justifyContent="space-between">
+                        <text fg={props.theme.textMuted}>Historian</text>
+                        {s()?.historianRunning ? (
+                            <text fg={props.theme.warning}>comparting ⟳</text>
+                        ) : (
+                            <text fg={props.theme.textMuted}>idle</text>
+                        )}
+                    </box>
                     {compactionOff() ? (
                         compactionOffSidebarRows(s()!).map((row) => (
                             <StatRow
@@ -829,14 +842,6 @@ const SidebarContent = (props: {
                         ))
                     ) : (
                         <>
-                            <box width="100%" flexDirection="row" justifyContent="space-between">
-                                <text fg={props.theme.textMuted}>Historian</text>
-                                {s()?.historianRunning ? (
-                                    <text fg={props.theme.warning}>comparting ⟳</text>
-                                ) : (
-                                    <text fg={props.theme.textMuted}>idle</text>
-                                )}
-                            </box>
                             <Show when={s()?.dreamerProgress}>
                                 {(progress) => (
                                     <box width="100%" flexDirection="row" justifyContent="space-between">
@@ -874,8 +879,9 @@ const SidebarContent = (props: {
             {/* Expanded view — full section grid. */}
             {!collapsed() && (
                 <>
-            {/* Historian section */}
-            {!compactionOff() && sections().historian && (
+            {/* Historian section — unconditional on compactionOff, see the
+                collapsed-view comment above for why it keeps running. */}
+            {sections().historian && (
                 <>
             <box width="100%" marginTop={1} flexDirection="row" justifyContent="space-between">
                 <text fg={props.theme.text}>

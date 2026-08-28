@@ -557,6 +557,36 @@ function readOmoDisabledHooks(directory: string): Set<string> {
 }
 
 /**
+ * Single source of truth for the DCP-coexistence escape hatch: DCP is the
+ * ONLY conflict AND the user opted in via `conflicts.allow_dcp: true`.
+ *
+ * Every call site that decides whether to disable/warn/dialog on a DCP
+ * conflict (plugin boot, TUI startup dialog, doctor, setup) MUST call this
+ * instead of re-deriving `onlyDcpConflict` inline — three copies of the same
+ * boolean expression is how one of them silently drifted from the others
+ * (a TUI-only false negative fired the "fix conflicts" dialog even though
+ * the server was correctly running in coexistence mode). Logs the negative
+ * case so a future divergence is diagnosable from the log file instead of
+ * only visible as a user-reported dialog.
+ */
+export function isDcpCoexistenceActive(result: ConflictResult, allowDcp: boolean | undefined): boolean {
+    if (!result.conflicts.dcpPlugin) return false;
+    const onlyDcpConflict =
+        !result.conflicts.compactionAuto &&
+        !result.conflicts.compactionPrune &&
+        !result.conflicts.omoPreemptiveCompaction &&
+        !result.conflicts.omoContextWindowMonitor &&
+        !result.conflicts.omoAnthropicRecovery;
+    const active = onlyDcpConflict && allowDcp === true;
+    if (!active) {
+        log(
+            `[magic-context] DCP conflict present but coexistence NOT active (onlyDcpConflict=${onlyDcpConflict}, allow_dcp=${allowDcp})`,
+        );
+    }
+    return active;
+}
+
+/**
  * Generate a short conflict summary for ignored message display.
  */
 export function formatConflictShort(result: ConflictResult): string {

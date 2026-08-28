@@ -344,6 +344,18 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         );
     }
 
+    // conflicts.allow_dcp is USER-tier only: a cloned repo must never grant
+    // itself DCP coexistence (it changes conflict handling and disables the
+    // historian). Field-scoped stripping preserves future project-tier conflict
+    // knobs in the same block.
+    const conflicts = projectRaw.conflicts;
+    if (isPlainObject(conflicts) && "allow_dcp" in conflicts) {
+        delete conflicts.allow_dcp;
+        warnings.push(
+            "Ignoring conflicts.allow_dcp from project config (security: only user-level config may opt into DCP coexistence; a cloned repo cannot change conflict handling).",
+        );
+    }
+
     if ("output_reserve" in projectRaw) {
         delete projectRaw.output_reserve;
         warnings.push(

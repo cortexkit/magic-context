@@ -56,6 +56,7 @@ import { createToolRegistry } from "./plugin/tool-registry";
 import {
     type ConflictResult,
     detectConflicts,
+    isDcpCoexistenceActive,
     resolveCompactionForBoot,
 } from "./shared/conflict-detector";
 import { getMagicContextStorageDir } from "./shared/data-path";
@@ -178,6 +179,7 @@ const server: Plugin = async (ctx) => {
     // we cannot see). If the resolved fetch fails or times out, we fall back to
     // the file-based check unchanged and log one line naming the fallback.
     let conflictResult: ConflictResult | null = null;
+    let dcpCoexistenceActive = false;
     if (pluginConfig.enabled) {
         const resolvedCompaction = await resolveCompactionForBoot(ctx.client);
         if (resolvedCompaction === null) {
@@ -190,8 +192,19 @@ const server: Plugin = async (ctx) => {
             resolvedCompaction: resolvedCompaction ?? undefined,
         });
         if (conflictResult.hasConflict) {
-            pluginConfig.enabled = false;
-            log(`[magic-context] disabled due to conflicts: ${conflictResult.reasons.join("; ")}`);
+            // DCP-coexistence escape hatch: if DCP is the ONLY conflict and
+            // conflicts.allow_dcp is true, stay enabled but force compaction off.
+            if (isDcpCoexistenceActive(conflictResult, pluginConfig.conflicts?.allow_dcp)) {
+                // Run in DCP-coexistence mode: compaction off, memory/docs/tools on.
+                pluginConfig.compaction = { ...pluginConfig.compaction, enabled: false };
+                dcpCoexistenceActive = true;
+                log(
+                    "[magic-context] opencode-dcp detected but conflicts.allow_dcp=true — running in DCP-coexistence (compaction-off) mode",
+                );
+            } else {
+                pluginConfig.enabled = false;
+                log(`[magic-context] disabled due to conflicts: ${conflictResult.reasons.join("; ")}`);
+            }
         } else {
             log("[magic-context] no conflicts detected, plugin enabled");
         }
@@ -481,7 +494,13 @@ const server: Plugin = async (ctx) => {
 
     // Conflict warning / cleanup for Desktop mode.
     // TUI handles this via a startup dialog; this covers Desktop where we can't show dialogs.
-    if (conflictResult?.hasConflict) {
+    if (dcpCoexistenceActive) {
+        // Plugin is actually enabled (compaction-off) — surface the coexistence
+        // notice instead of the "disabled" warning below.
+        void import("./plugin/conflict-warning-hook").then(({ sendDcpCoexistenceNotice }) =>
+            sendDcpCoexistenceNotice(ctx.client as unknown as Record<string, unknown>, ctx.directory),
+        );
+    } else if (conflictResult?.hasConflict) {
         // Fire-and-forget: send warning to the last active session for this project
         void sendConflictWarning(
             ctx.client as unknown as Record<string, unknown>,

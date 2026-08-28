@@ -63,6 +63,18 @@ function resolveCompactionEnabledForWriter(): boolean {
     }
 }
 
+// Mirrors the server/TUI coexistence check in packages/plugin/src/index.ts
+// and tui/index.tsx: a user who set conflicts.allow_dcp=true has explicitly
+// opted into running DCP alongside Magic Context (compaction-off mode), so
+// setup must not silently offer to strip it back out.
+function isDcpCoexistenceAllowed(): boolean {
+    try {
+        return loadPluginConfig(process.cwd()).conflicts?.allow_dcp === true;
+    } catch {
+        return false;
+    }
+}
+
 // ─── Helpers ──────────────────────────────────────────────
 
 function ensureDir(dir: string): void {
@@ -257,6 +269,13 @@ async function resolveDcpConflictBeforeSetup(
     const plugins = Array.isArray(ocConfig.plugin) ? ocConfig.plugin : [];
     const dcpIndexes = findDcpPluginIndexes(plugins);
     if (dcpIndexes.length === 0) return false;
+
+    if (isDcpCoexistenceAllowed()) {
+        log.info(
+            "opencode-dcp detected but conflicts.allow_dcp=true — keeping it (DCP-coexistence mode)",
+        );
+        return false;
+    }
 
     log.warn(`Found conflicting plugin: ${pluginEntryName(plugins[dcpIndexes[0]])}`);
     log.message(

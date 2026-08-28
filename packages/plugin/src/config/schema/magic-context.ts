@@ -910,6 +910,14 @@ export interface MagicContextConfig {
             max_commits: number;
         };
     };
+    /**
+     * Plugin conflict resolution options. USER-LEVEL ONLY — project configs
+     * cannot override conflict handling.
+     */
+    conflicts?: {
+        /** When true and DCP is the sole conflict, run in compaction-off mode instead of disabling. */
+        allow_dcp?: boolean;
+    };
     sidekick?: SidekickConfig;
 }
 
@@ -1357,6 +1365,19 @@ export const MagicContextConfigSchema = z
                 git_commit_indexing: { enabled: false, since_days: 365, max_commits: 2000 },
             })
             .describe("Cross-session memory configuration"),
+        conflicts: z
+            .object({
+                allow_dcp: z
+                    .boolean()
+                    .default(false)
+                    .describe(
+                        "When true and opencode-dcp is the ONLY detected conflict, Magic Context stays enabled but runs in compaction-off mode (historian/compartments disabled, memory/docs/ctx_search/ctx_expand/ctx_memory stay on). Default false. USER-LEVEL ONLY — project config cannot grant DCP coexistence. Requires a restart.",
+                    ),
+            })
+            .optional()
+            .describe(
+                "Plugin conflict resolution options. USER-LEVEL ONLY — project configs cannot override conflict handling.",
+            ),
         sidekick: SidekickConfigSchema.describe(
             "Optional sidekick agent configuration for session-start memory retrieval",
         ),

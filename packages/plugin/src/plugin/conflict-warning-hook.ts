@@ -17,6 +17,7 @@ import { waitForSafeNotificationTarget } from "../shared/safe-notification-targe
 
 const CONFLICT_WARNING_MARKER = "⚠️ Magic Context is disabled due to conflicting configuration:";
 const SCHEMA_FENCE_MARKER = "⚠️ Magic Context is disabled — database is newer than this version";
+const DCP_COEXISTENCE_MARKER = "✨ Magic Context is running in DCP-coexistence mode";
 const ENABLED_MARKER = "✨ Magic Context is now enabled";
 const ANNOUNCEMENT_MARKER = "✨ Magic Context — what's new in";
 
@@ -251,6 +252,45 @@ export async function sendConflictWarning(
             `[magic-context] conflict-warning: failed to send: ${error instanceof Error ? error.message : String(error)}`,
         );
     }
+}
+
+/**
+ * Send a DCP-coexistence notice to the active session when running in
+ * compaction-off mode due to DCP conflict resolution.
+ *
+ * Routes through the shared `sendIgnoredMessage` helper instead of posting
+ * directly: that helper already shows a TUI toast when a TUI is connected to
+ * this session, and only falls back to a persisted (but LLM-`ignored`, so
+ * context-free) chat message for Desktop. Posting via raw `session.prompt`
+ * here previously always persisted the message, which is why TUI users saw
+ * it land in scrollback instead of as a toast.
+ */
+export async function sendDcpCoexistenceNotice(
+    client: unknown,
+    directory: string,
+): Promise<void> {
+    const { sessionId } = getDesktopState(directory);
+    if (!sessionId) {
+        log("[magic-context] dcp-coexistence-notice: could not find active session for notice");
+        return;
+    }
+
+    const noticeText = [
+        `${DCP_COEXISTENCE_MARKER} (compaction-off).`,
+        "",
+        "Memory, docs, and ctx_search remain available. The historian and compartments are disabled.",
+    ].join("\n");
+
+    log(`[magic-context] sending DCP-coexistence notice to session ${sessionId}`);
+
+    const { sendIgnoredMessage } = await import(
+        "../hooks/magic-context/send-session-notification"
+    );
+    await sendIgnoredMessage(client, sessionId, noticeText, {}).catch((error: unknown) => {
+        log(
+            `[magic-context] dcp-coexistence-notice: failed to send: ${error instanceof Error ? error.message : String(error)}`,
+        );
+    });
 }
 
 /**

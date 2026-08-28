@@ -179,7 +179,7 @@ Magic Context owns context management end to end, so it **disables itself** if a
 - **OpenCode built-in compaction** (`compaction.auto` / `compaction.prune`) — Magic Context replaces it. Setup turns it off.
 - **OMP native compaction** (`compaction.enabled`) — Magic Context replaces it. OMP setup turns it off transactionally.
 - **OMP automatic memory** (`memory.backend`) — a second memory injector duplicates recall and retention. OMP setup sets it to `off`; existing data is not deleted.
-- **DCP** (`opencode-dcp`) — a separate context-pruning plugin. The two cannot run together; remove it from your `plugin` list.
+- **DCP** (`opencode-dcp`) — a separate context-pruning plugin. The two cannot run together; remove it from your `plugin` list. Advanced users can set `conflicts.allow_dcp: true` in their user-level config to run Magic Context in compaction-off mode (memories and docs injection stay on, historian and compartments turn off) when DCP is the only detected conflict.
 - **oh-my-opencode (OMO)** — setup offers to disable the three hooks that overlap:
   - `preemptive-compaction` — triggers compaction that conflicts with the historian.
   - `context-window-monitor` — injects usage warnings that overlap with Magic Context's nudges.

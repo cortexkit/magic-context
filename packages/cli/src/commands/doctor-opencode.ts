@@ -12,7 +12,7 @@ import {
     probeEmbeddingEndpoint,
 } from "@magic-context/core/features/magic-context/memory/embedding-probe";
 import { getLiveMigrationBlockingProcesses } from "@magic-context/core/features/magic-context/storage-db";
-import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
+import { detectConflicts, isDcpCoexistenceActive } from "@magic-context/core/shared/conflict-detector";
 import { fixConflicts } from "@magic-context/core/shared/conflict-fixer";
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { ensureTuiPluginEntry } from "@magic-context/core/shared/tui-config";
@@ -92,6 +92,18 @@ function resolveCompactionEnabledForDoctor(): boolean {
                 `preserving existing native compaction fields. ` +
                 `(${error instanceof Error ? error.message : String(error)})`,
         );
+        return false;
+    }
+}
+
+// Mirrors the server/TUI coexistence check in packages/plugin/src/index.ts
+// and tui/index.tsx: a user who set conflicts.allow_dcp=true has explicitly
+// opted into running DCP alongside Magic Context (compaction-off mode), so
+// doctor must not auto-fix (remove) it back out.
+function isDcpCoexistenceAllowed(): boolean {
+    try {
+        return loadPluginConfig(process.cwd()).conflicts?.allow_dcp === true;
+    } catch {
         return false;
     }
 }
@@ -1121,20 +1133,26 @@ export async function runDoctor(
     );
 
     if (conflictResult.hasConflict) {
-        for (const reason of conflictResult.reasons) {
-            fail(`Conflict: ${reason}`);
-        }
-        // Auto-fix conflicts. In compaction-off mode the fixer skips native
-        // compaction fields (compaction.auto/prune) — it may report, never
-        // repair, native compaction fields in that mode. DCP and OMO hook
-        // fixes keep their existing policy in BOTH modes.
-        const actions = fixConflicts(cwd, conflictResult.conflicts, { compactionEnabled });
-        for (const action of actions) {
-            pass(`Fixed: ${action}`);
-            fixed++;
-        }
-        if (actions.length > 0) {
-            warn("Restart OpenCode for conflict fixes to take effect");
+        if (isDcpCoexistenceActive(conflictResult, isDcpCoexistenceAllowed())) {
+            pass(
+                "opencode-dcp detected but conflicts.allow_dcp=true — running in DCP-coexistence mode, no fix needed",
+            );
+        } else {
+            for (const reason of conflictResult.reasons) {
+                fail(`Conflict: ${reason}`);
+            }
+            // Auto-fix conflicts. In compaction-off mode the fixer skips native
+            // compaction fields (compaction.auto/prune) — it may report, never
+            // repair, native compaction fields in that mode. DCP and OMO hook
+            // fixes keep their existing policy in BOTH modes.
+            const actions = fixConflicts(cwd, conflictResult.conflicts, { compactionEnabled });
+            for (const action of actions) {
+                pass(`Fixed: ${action}`);
+                fixed++;
+            }
+            if (actions.length > 0) {
+                warn("Restart OpenCode for conflict fixes to take effect");
+            }
         }
     } else {
         // Honest compaction state label in both modes. When MC compaction is
