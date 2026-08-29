@@ -265,6 +265,14 @@ function lineComponent(renderLines: (width: number) => string[]): Component {
 	};
 }
 
+function hasAnimatedRow(
+	rows: ReadonlyArray<{ todo: TodoItem; key: string }>,
+): boolean {
+	return capTodoRows(rows).visible.some(
+		({ todo }) => todo.status === "in_progress",
+	);
+}
+
 function capTodoRows<T>(rows: readonly T[]): {
 	visible: T[];
 	hiddenCount: number;
@@ -467,9 +475,9 @@ export class TodoOverlay {
 				{ placement: "aboveEditor" },
 			);
 			this.widgetRegistered = true;
-			this.syncSpinTimer(visible.some((todo) => todo.status === "in_progress"));
+			this.syncSpinTimer(hasAnimatedRow(visible));
 		} else {
-			this.syncSpinTimer(visible.some((todo) => todo.status === "in_progress"));
+			this.syncSpinTimer(hasAnimatedRow(visible));
 			this.tui?.requestRender();
 		}
 	}
