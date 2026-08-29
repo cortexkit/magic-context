@@ -49,8 +49,10 @@ import { resolvePromptContext } from "../../shared/prompt-context";
 import type { Database } from "../../shared/sqlite";
 import {
     buildChannel2Reminder,
+    type Channel1State,
     type Channel2PredicateBaseline,
     evaluateChannel2,
+    reclaimableToolOutputCount,
     type ToolReclaimHint,
 } from "./ctx-reduce-nudge";
 import { isMidTurn } from "./read-session-db";
@@ -64,7 +66,7 @@ export interface Channel2DeliveryDeps {
      */
     client?: unknown;
     /** Persisted reclaimable/total tail tokens, typed deltas, and generation validity. */
-    baseline?: Channel2PredicateBaseline & { usableWindow?: number };
+    baseline?: Channel2PredicateBaseline & Partial<Pick<Channel1State, "baselineParts">>;
     oldestReclaimableToolTags?: readonly ToolReclaimHint[];
     /** Module-owned directives are already predicate-validated; preserve their text verbatim. */
     directiveText?: string;
@@ -203,7 +205,7 @@ export async function maybeDeliverChannel2(
             deps.directiveText ??
             buildChannel2Reminder(
                 effectiveU,
-                deps.baseline?.usableWindow ?? 0,
+                reclaimableToolOutputCount(deps.baseline?.baselineParts ?? []),
                 deps.oldestReclaimableToolTags,
             );
 

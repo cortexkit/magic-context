@@ -143,6 +143,35 @@ describe("stripStructuralNoise", () => {
         expect(replayTarget.parts.at(-1)).toEqual({ type: "text", text: "" });
     });
 
+    it("does not manufacture a missing blank for a frozen keep decision", () => {
+        const providerShaped = message("target", "assistant", [
+            { type: "reasoning", text: "signed thinking" },
+            { type: "tool", callID: "call-1", state: { status: "completed" } },
+        ]);
+        const before = JSON.stringify(providerShaped.parts);
+        const servedMessages = [providerShaped];
+
+        const mutations = applyFrozenTrailingBlankDecisions(
+            servedMessages,
+            "newest-other",
+            new Map([["target", "keep"]]),
+        );
+
+        expect(JSON.stringify(servedMessages[0].parts)).toBe(before);
+        expect(mutations).toBe(0);
+
+        const emptyAssistant = message("empty", "assistant", []);
+        const emptyMessages = [emptyAssistant];
+        expect(
+            applyFrozenTrailingBlankDecisions(
+                emptyMessages,
+                "newest-other",
+                new Map([["empty", "keep"]]),
+            ),
+        ).toBe(0);
+        expect(emptyMessages[0].parts).toEqual([]);
+    });
+
     it("matches Rust's newest-only trailing-strip exemption", () => {
         const decisions = new Map([["target", "strip"]] as const);
         const newestMessages = [

@@ -40,6 +40,58 @@ describe("encodeOpenCodeMessagesToCk", () => {
         });
     });
 
+    it("carries completed-tool titles only in the non-decision-bearing recovery sidecar", () => {
+        const [encoded] = encodeOpenCodeMessagesToCk([
+            {
+                info: { id: "msg_titled_tool", role: "assistant" },
+                parts: [
+                    {
+                        type: "tool",
+                        tool: "read",
+                        callID: "read:titled",
+                        state: {
+                            status: "completed",
+                            input: { filePath: "src/title.ts" },
+                            output: "contents",
+                            metadata: { title: "Read title-bearing fixture" },
+                        },
+                    },
+                ],
+            },
+        ]);
+
+        expect(encoded.ck.provider_extras).toEqual({
+            opencode: {
+                ctx_expand_tool_titles: {
+                    "read:titled": "Read title-bearing fixture",
+                },
+            },
+        });
+        expect(encoded.ck.content[0]).toEqual({
+            kind: {
+                type: "tool_call",
+                id: "read:titled",
+                name: "read",
+                input: { filePath: "src/title.ts" },
+            },
+        });
+
+        const [pending] = encodeOpenCodeMessagesToCk([
+            {
+                info: { id: "msg_pending_tool", role: "assistant" },
+                parts: [
+                    {
+                        type: "tool",
+                        tool: "read",
+                        callID: "read:pending",
+                        state: { status: "pending", title: "Not recoverable yet" },
+                    },
+                ],
+            },
+        ]);
+        expect(pending.ck.provider_extras).toBeUndefined();
+    });
+
     it("carries nested OpenCode timestamps from the generated temporal parity fixture", () => {
         const golden = JSON.parse(
             readFileSync(

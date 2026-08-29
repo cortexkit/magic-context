@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getMagicContextLogPath } from "./data-path";
+import { sanitizeConfigValue, sanitizeDiagnosticText } from "./redaction";
 
 const isTestEnv = process.env.NODE_ENV === "test";
 
@@ -22,7 +23,9 @@ let lastErrorTime: string | null = null;
 function recordSwallowedWrite(error: unknown): void {
     try {
         swallowedWriteCount++;
-        lastErrorMessage = error instanceof Error ? error.message : String(error);
+        lastErrorMessage = sanitizeDiagnosticText(
+            error instanceof Error ? error.message : String(error),
+        );
         lastErrorTime = new Date().toISOString();
     } catch {
         // Diagnostics must not make the logger throw either.
@@ -66,9 +69,11 @@ export function log(message: string, data?: unknown): void {
             data === undefined
                 ? ""
                 : data instanceof Error
-                  ? ` ${data.message}${data.stack ? `\n${data.stack}` : ""}`
-                  : ` ${JSON.stringify(data)}`;
-        buffer.push(`[${timestamp}] ${message}${serialized}\n`);
+                  ? ` ${sanitizeDiagnosticText(
+                        `${data.message}${data.stack ? `\n${data.stack}` : ""}`,
+                    )}`
+                  : ` ${JSON.stringify(sanitizeConfigValue(data))}`;
+        buffer.push(`[${timestamp}] ${sanitizeDiagnosticText(message)}${serialized}\n`);
         if (buffer.length >= BUFFER_SIZE_LIMIT) {
             flush();
         } else {

@@ -2,8 +2,8 @@
   "schema": 1,
   "provenance": {
     "generator": "crates/mc-module/gen/gen-differential-golden.ts",
-    "generator_version": "dg-reference-v3",
-    "input_sha256": "9c09629eb0119da36a2c1177fde810507a35f268c89e288d992ba77a2232f6e0"
+    "generator_version": "dg-reference-v4",
+    "input_sha256": "c4dd5cfcbf788decc3ae0c758fdf6a3870c3c8f8e2a41a1efcf6c933e817c0fc"
   },
   "cases": [
     {
@@ -315,6 +315,163 @@
             "meta": {
               "harness_id": "notice",
               "synthetic": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "DG-6-trailing-blank-keep-zero-source",
+      "family": "trailing-blank-keep-zero-source",
+      "input": {
+        "session_id": "dg-trailing-blank-incident",
+        "markers": [
+          "merged-composite",
+          "frozen-keep",
+          "zero-source-trailing"
+        ],
+        "frozen_decision": {
+          "message_id": "assistant-target",
+          "decision": "keep"
+        },
+        "messages": [
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "leading sibling text"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "assistant-sibling"
+            }
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "opaque",
+                  "source": {
+                    "source": "opencode"
+                  },
+                  "kind": "step-start",
+                  "raw": {
+                    "type": "step-start",
+                    "snapshot": "raw-store-step"
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "type": "reasoning",
+                  "text": "merged reasoning",
+                  "signature": "sig"
+                }
+              },
+              {
+                "kind": {
+                  "type": "tool_call",
+                  "id": "call-incident",
+                  "name": "TERMINAL",
+                  "input": {
+                    "command": "pwd"
+                  },
+                  "provider_executed": false
+                }
+              },
+              {
+                "kind": {
+                  "type": "opaque",
+                  "source": {
+                    "source": "opencode"
+                  },
+                  "kind": "step-finish",
+                  "raw": {
+                    "type": "step-finish",
+                    "reason": "tool-calls"
+                  }
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "assistant-target"
+            }
+          }
+        ]
+      },
+      "expected": {
+        "status": "ok",
+        "action": "passthrough",
+        "decision": "keep-no-manufacture",
+        "wire": [
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "leading sibling text"
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "assistant-sibling"
+            }
+          },
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "opaque",
+                  "source": {
+                    "source": "opencode"
+                  },
+                  "kind": "step-start",
+                  "raw": {
+                    "type": "step-start",
+                    "snapshot": "raw-store-step"
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "type": "reasoning",
+                  "text": "merged reasoning",
+                  "signature": "sig"
+                }
+              },
+              {
+                "kind": {
+                  "type": "tool_call",
+                  "id": "call-incident",
+                  "name": "TERMINAL",
+                  "input": {
+                    "command": "pwd"
+                  },
+                  "provider_executed": false
+                }
+              },
+              {
+                "kind": {
+                  "type": "opaque",
+                  "source": {
+                    "source": "opencode"
+                  },
+                  "kind": "step-finish",
+                  "raw": {
+                    "type": "step-finish",
+                    "reason": "tool-calls"
+                  }
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "assistant-target"
             }
           }
         ]

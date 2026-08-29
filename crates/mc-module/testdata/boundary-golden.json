@@ -25,6 +25,7 @@
     "BLOCK_UNTIL_DONE_PERCENTAGE": 95,
     "MAX_COMMITS_PER_BLOCK": 5
   },
+  "default_context_limit": 200000,
   "chunk_cases": [
     {
       "label": "text-only mixed roles",
@@ -2325,6 +2326,34 @@
         "reason": null,
         "consume_through_ordinal": null
       }
+    }
+  ],
+  "completed_arc_fence_cases": [
+    {
+      "label": "completed arc inv=2 result=4 fences head end=3 backward",
+      "candidate": 3,
+      "publication_floor_ordinal": 2,
+      "arcs": [
+        {
+          "callId": "exact-381",
+          "invOrdinal": 2,
+          "resOrdinal": 4
+        }
+      ],
+      "expected": 2
+    },
+    {
+      "label": "completed arc below publication floor closes forward",
+      "candidate": 3,
+      "publication_floor_ordinal": 3,
+      "arcs": [
+        {
+          "callId": "published-call",
+          "invOrdinal": 2,
+          "resOrdinal": 4
+        }
+      ],
+      "expected": 5
     }
   ]
 }

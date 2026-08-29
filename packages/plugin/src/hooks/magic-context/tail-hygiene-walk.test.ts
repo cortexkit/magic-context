@@ -399,7 +399,7 @@ describe("tail hygiene baseline and defer-window deltas", () => {
             "tool output ".repeat(500),
         );
         const tags = [tag(1, "call-replay", "tool", { toolOwnerMessageId: "owner" })];
-        const reminder = buildChannel1Reminder("firm", 42_000, 128_000);
+        const reminder = buildChannel1Reminder("firm", 42_000, 16);
         const served = structuredClone(original) as MessageLike;
         (served.parts[0] as { state: { output: string } }).state.output += reminder;
         const baseline = refreshTailHygieneBaseline({
@@ -506,7 +506,7 @@ describe("tail hygiene baseline and defer-window deltas", () => {
         });
         const mutated = structuredClone(original) as MessageLike;
         const toolPart = mutated.parts[0] as { state: { output: string } };
-        toolPart.state.output += buildChannel1Reminder("gentle", 25_000, 128_000);
+        toolPart.state.output += buildChannel1Reminder("gentle", 25_000, 16);
         const defer = refreshTailHygieneBaseline({
             messages: [mutated],
             tags,

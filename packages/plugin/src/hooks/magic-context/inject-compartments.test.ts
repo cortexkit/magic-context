@@ -23,6 +23,7 @@ import {
     setProjectState,
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { insertUserMemory } from "../../features/magic-context/user-memory/storage-user-memory";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
@@ -69,6 +70,21 @@ function makeProjectDir(): string {
     const dir = mkdtempSync(join(tmpdir(), "mc-renderer-test-"));
     tempDirs.push(dir);
     return dir;
+}
+
+function createUserMemoryTable(): void {
+    db.exec(`
+        CREATE TABLE user_memories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            promoted_at INTEGER NOT NULL,
+            source_candidate_ids TEXT DEFAULT '[]',
+            source_candidate_provenance TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+    `);
 }
 
 function createOpenCodeMessageTimes(rows: Array<{ id: string; timestamp: number }>): void {
@@ -1988,21 +2004,20 @@ describe("m[0]/m[1] materialization", () => {
         ).toBe(false);
     });
 
-    it("injectM0M1 does NOT render <project-memory> when projectPath is undefined (memory.enabled=false config bypass guard)", () => {
-        // Regression: when memory.enabled=false the caller passes projectPath
-        // undefined (projectIdentity is deliberately undefined). materializeM0
-        // renders <project-memory> purely on projectPath presence, so the old
-        // `projectIdentity ?? deps.projectPath` fallback re-supplied the launch
-        // path and injected project memories despite the config being OFF. With
-        // the fallback removed, projectPath stays undefined and no memory renders.
+    it("suppresses every memory-derived surface when memory.enabled=false", () => {
+        // Regression: the caller deliberately omits projectPath when memory is
+        // disabled, but user-profile and mural rendering used separate ungated
+        // reads. Cover the baseline, delta, and multipart mural together.
         db = makeDb();
         const projectDirectory = makeProjectDir();
-        // Seed memories that WOULD render if the path leaked through.
+        createUserMemoryTable();
         insertMemory(db, {
             projectPath: PROJECT_PATH,
             category: "ARCHITECTURE",
-            content: "Should NOT appear when memory disabled",
+            content: "project memory must not leak when disabled",
         });
+        insertUserMemory(db, "profile baseline must not leak", []);
+        setProjectState(db, "__global__", { projectUserProfileVersion: 1 });
         const state = readStateFromMeta();
         const messages = [userMessage("m1", "hello")];
 
@@ -2013,12 +2028,137 @@ describe("m[0]/m[1] materialization", () => {
             state,
             projectPath: undefined,
             projectDirectory,
+            memoryEnabled: false,
+            mural: {
+                enabled: true,
+                supportsVision: true,
+                dataUrl: "data:image/png;base64,cHJvZmlsZS1tdXJhbA==",
+            },
         });
 
         expect(result.injected).toBe(true);
         const m0 = renderedText(messages[0]);
         expect(m0).not.toContain("<project-memory>");
-        expect(m0).not.toContain("Should NOT appear when memory disabled");
+        expect(m0).not.toContain("project memory must not leak when disabled");
+        expect(m0).not.toContain("<user-profile>");
+        expect(m0).not.toContain("profile baseline must not leak");
+        expect(m0).not.toContain("<memory-mural>");
+        expect(messages[0].parts).toHaveLength(1);
+
+        // A cache-busting m[1] refresh sees a newer profile version but must not
+        // turn it into a <new-user-profile> delta while memory remains disabled.
+        insertUserMemory(db, "profile delta must not leak", []);
+        setProjectState(db, "__global__", { projectUserProfileVersion: 2 });
+        const refreshed = [userMessage("m2", "again")];
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: refreshed,
+            state,
+            projectPath: undefined,
+            projectDirectory,
+            memoryEnabled: false,
+            isCacheBustingPass: true,
+        });
+        const m1 = renderedText(refreshed[1]);
+        expect(m1).not.toContain("<new-user-profile>");
+        expect(m1).not.toContain("profile delta must not leak");
+    });
+
+    it("uses an immediate render-config HARD path for a memory-on to memory-off transition", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        createUserMemoryTable();
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "ARCHITECTURE",
+            content: "transition project fact",
+        });
+        insertUserMemory(db, "transition profile fact", []);
+        setProjectState(db, "__global__", { projectUserProfileVersion: 1 });
+        const state = readStateFromMeta();
+
+        const on = [userMessage("m1", "before")];
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: on,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            memoryEnabled: true,
+            hardSignals: { systemHash: "memory-guidance-on", modelKey: "test/model" },
+        });
+        expect(renderedText(on[0])).toContain("transition profile fact");
+
+        const off = [userMessage("m2", "after")];
+        const transition = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: off,
+            state,
+            projectPath: undefined,
+            projectDirectory,
+            memoryEnabled: false,
+            // The system hook publishes its changed hash after message transform.
+            // Keep the old hash here to prove the memory gate itself prevents a
+            // one-request replay of the memory-bearing cache.
+            hardSignals: { systemHash: "memory-guidance-on", modelKey: "test/model" },
+        });
+        expect(transition.decision.reason).toBe("render_config");
+        expect(transition.m0RematerializedThisPass).toBe(true);
+        expect(renderedText(off[0])).not.toContain("transition profile fact");
+        const suppressedBytes = transition.m0Bytes?.toString("utf8");
+
+        // When injection is deferred, replay the frozen suppressed m[0] unchanged instead of rendering it again.
+        const defer = [userMessage("m3", "still off")];
+        const replay = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: defer,
+            state,
+            projectPath: undefined,
+            projectDirectory,
+            memoryEnabled: false,
+            hardSignals: { systemHash: "memory-guidance-on", modelKey: "test/model" },
+        });
+        expect(replay.m0RematerializedThisPass).toBe(false);
+        expect(replay.m0Bytes?.toString("utf8")).toBe(suppressedBytes);
+        expect(renderedText(defer[0])).not.toContain("transition profile fact");
+    });
+
+    it("keeps the memory-on m[0]/m[1] shape byte-identical", () => {
+        db = makeDb();
+        const projectDirectory = makeProjectDir();
+        createUserMemoryTable();
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "ARCHITECTURE",
+            content: "memory-on project fact",
+        });
+        insertUserMemory(db, "memory-on profile fact", []);
+        setProjectState(db, "__global__", { projectUserProfileVersion: 1 });
+
+        const defaultRender = materializeM0({
+            db,
+            sessionId: SESSION_ID,
+            state: readStateFromMeta(),
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+        });
+        const explicitlyEnabledRender = materializeM0({
+            db,
+            sessionId: SESSION_ID,
+            state: readStateFromMeta(),
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            memoryEnabled: true,
+        });
+
+        expect(explicitlyEnabledRender.m0Text).toBe(defaultRender.m0Text);
+        expect(explicitlyEnabledRender.m1Text).toBe(defaultRender.m1Text);
+        expect(defaultRender.m0Text).toContain("memory-on profile fact");
+        expect(defaultRender.m0Text).toContain("memory-on project fact");
     });
 
     it("injectM0M1 still injects history when materialization contention exhausts with NO cached baseline (no throw, no empty history)", () => {

@@ -201,15 +201,16 @@ function mergeMemoryRow(
         .get(toIdentity, row.category, row.normalized_hash, sourceId) as SqliteRow | undefined;
     if (collision && typeof collision.id === "number") {
         const targetId = collision.id;
-        const mergedSeen = Math.max(Number(collision.seen_count ?? 1), Number(row.seen_count ?? 1));
+        const targetSeen = Number(collision.seen_count ?? 1);
+        const mergedSeen = Math.max(targetSeen, Number(row.seen_count ?? 1));
         const sourceClassifiedAt = Number(row.classified_at ?? 0);
         const targetClassifiedAt = Number(collision.classified_at ?? 0);
         if (sourceClassifiedAt > targetClassifiedAt) {
             db.prepare(
                 `UPDATE memories
-                    SET importance = ?, scope = ?, shareable = ?, classified_at = ?
-                  WHERE id = ?`,
-            ).run(row.importance, row.scope, row.shareable, row.classified_at, targetId);
+                     SET importance = ?, scope = ?, shareable = ?, classified_at = ?, updated_at = ?
+                   WHERE id = ?`,
+            ).run(row.importance, row.scope, row.shareable, row.classified_at, mergedAt, targetId);
         }
         const sourceHasCue = typeof row.mural_cue === "string" && row.mural_cue.length > 0;
         const targetHasCue =
@@ -219,30 +220,43 @@ function mergeMemoryRow(
         if (sourceHasCue && (!targetHasCue || sourceCueAt > targetCueAt)) {
             db.prepare(
                 `UPDATE memories
-                    SET mural_cue = ?, mural_cue_hash = ?, mural_cue_at = ?,
-                        mural_cue_rejection_count = ?
-                  WHERE id = ?`,
+                     SET mural_cue = ?, mural_cue_hash = ?, mural_cue_at = ?,
+                         mural_cue_rejection_count = ?, updated_at = ?
+                   WHERE id = ?`,
             ).run(
                 row.mural_cue,
                 row.mural_cue_hash,
                 row.mural_cue_at,
                 row.mural_cue_rejection_count,
+                mergedAt,
                 targetId,
             );
         }
         db.prepare(
-            `INSERT INTO memory_verifications (memory_id, file_path, verified_at, mapped_at)
-             SELECT ?, file_path, verified_at, mapped_at
-               FROM memory_verifications
-              WHERE memory_id = ?
-             ON CONFLICT(memory_id, file_path) DO UPDATE SET
-                verified_at = MAX(memory_verifications.verified_at, excluded.verified_at),
-                mapped_at = MAX(memory_verifications.mapped_at, excluded.mapped_at)`,
+            `INSERT INTO memory_verifications
+                 (memory_id, file_path, verified_at, mapped_at, mapping_origin)
+              SELECT ?, file_path, verified_at, mapped_at, mapping_origin
+                FROM memory_verifications
+               WHERE memory_id = ?
+              ON CONFLICT(memory_id, file_path) DO UPDATE SET
+                 verified_at = MAX(memory_verifications.verified_at, excluded.verified_at),
+                 mapped_at = MAX(memory_verifications.mapped_at, excluded.mapped_at),
+                 mapping_origin = CASE
+                     WHEN excluded.mapped_at >= memory_verifications.mapped_at
+                         THEN excluded.mapping_origin
+                     ELSE memory_verifications.mapping_origin
+                 END`,
         ).run(targetId, sourceId);
         db.prepare("DELETE FROM memory_verifications WHERE memory_id = ?").run(sourceId);
-        db.prepare(
-            "UPDATE memories SET seen_count = ?, status = COALESCE(status, 'active') WHERE id = ?",
-        ).run(mergedSeen, targetId);
+        if (
+            mergedSeen !== targetSeen ||
+            collision.status === null ||
+            collision.status === undefined
+        ) {
+            db.prepare(
+                "UPDATE memories SET seen_count = ?, status = COALESCE(status, 'active'), updated_at = ? WHERE id = ?",
+            ).run(mergedSeen, mergedAt, targetId);
+        }
         db.prepare(
             `UPDATE memories
                 SET status = 'archived',
@@ -273,8 +287,10 @@ function mergeMemoryRow(
     }
 
     const result = db
-        .prepare("UPDATE memories SET project_path = ? WHERE id = ? AND project_path = ?")
-        .run(toIdentity, sourceId, fromIdentity) as { changes?: number };
+        .prepare(
+            "UPDATE memories SET project_path = ?, updated_at = ? WHERE id = ? AND project_path = ?",
+        )
+        .run(toIdentity, mergedAt, sourceId, fromIdentity) as { changes?: number };
     if ((result.changes ?? 0) === 0) return false;
     logRow(db, fromIdentity, toIdentity, "memories", String(sourceId), "rekeyed", null, mergedAt);
     return true;

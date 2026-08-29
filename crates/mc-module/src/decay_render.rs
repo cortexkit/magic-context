@@ -179,15 +179,17 @@ fn tier_body(c: &DecayRenderCompartment, tier: u8) -> String {
     c.content.trim().to_string()
 }
 
-/// Truncate to at most `max` characters (Unicode scalar values), trimming trailing
-/// whitespace and appending `…`. Char-boundary safe (vs the TS UTF-16 slice; they
-/// agree on the BMP-without-surrogate-pairs content the golden covers).
+/// Truncate to at most `max` UTF-16 code units, exactly matching JavaScript's
+/// `String.prototype.slice`. A cut through an astral scalar retains the leading
+/// surrogate as an internal marker; the response encoder converts that marker to
+/// the `\udxxx` JSON escape JavaScript emits for the lone unit.
 fn truncate_with_ellipsis(content: &str, max: usize) -> String {
-    if content.chars().count() <= max {
+    let units = content.encode_utf16().collect::<Vec<_>>();
+    if units.len() <= max {
         return content.to_string();
     }
-    let cut: String = content.chars().take(max).collect();
-    format!("{}…", cut.trim_end())
+    let prefix = crate::transform::string_from_js_utf16_prefix(&units, max);
+    format!("{}…", prefix.trim_end())
 }
 
 /// Legacy flat-content tier rendering (no paraphrase columns): P1 = full, P2 = ≤1200
@@ -618,7 +620,9 @@ mod tests {
     struct RenderCase {
         compartments: Vec<RawComp>,
         budget: f64,
-        body: String,
+        body: Option<String>,
+        body_utf16_hex: Option<String>,
+        forced_tier: Option<u8>,
     }
     #[derive(Deserialize)]
     struct RenderGolden {
@@ -654,8 +658,26 @@ mod tests {
                     legacy: r.legacy,
                 })
                 .collect();
-            let got = render_decayed_compartments(&comps, case.budget, no_guard);
-            assert_eq!(got, case.body, "render mismatch in case {n}");
+            let got = case.forced_tier.map_or_else(
+                || render_decayed_compartments(&comps, case.budget, no_guard),
+                |tier| render_compartment_at_tier(&comps[0], tier),
+            );
+            if let Some(expected_hex) = &case.body_utf16_hex {
+                let actual_hex = crate::transform::js_utf16_units_from_internal(&got)
+                    .into_iter()
+                    .map(|unit| format!("{unit:04x}"))
+                    .collect::<String>();
+                assert_eq!(
+                    actual_hex, *expected_hex,
+                    "UTF-16 render mismatch in case {n}"
+                );
+            } else {
+                assert_eq!(
+                    Some(&got),
+                    case.body.as_ref(),
+                    "render mismatch in case {n}"
+                );
+            }
         }
     }
 
@@ -822,7 +844,8 @@ mod tests {
             let got =
                 render_decayed_compartments(&comps, case.budget, mc_tokenizer::estimate_tokens);
             assert_eq!(
-                got, case.body,
+                Some(&got),
+                case.body.as_ref(),
                 "tight render mismatch in case {n} (budget {})",
                 case.budget
             );

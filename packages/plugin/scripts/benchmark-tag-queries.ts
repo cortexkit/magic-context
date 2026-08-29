@@ -40,20 +40,12 @@ import { Database, type Statement } from "bun:sqlite";
 import { copyFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getMagicContextStorageDir } from "../src/shared/data-path";
 
 type DB = Database;
 type Stmt = Statement;
 
-const LIVE_DB_PATH =
-    process.env.MAGIC_CONTEXT_DB ??
-    join(
-        process.env.HOME ?? "",
-        ".local",
-        "share",
-        "cortexkit",
-        "magic-context",
-        "context.db",
-    );
+const LIVE_DB_PATH = process.env.MAGIC_CONTEXT_DB ?? join(getMagicContextStorageDir(), "context.db");
 
 // AFT session — 48,949 tags total, 399 active (0.8%). Worst-case for the
 // current scan-everything approach, best-case for partial indexes.

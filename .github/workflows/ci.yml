@@ -3,12 +3,15 @@ name: CI
 on:
   push:
     branches: [master, main]
-  pull_request:
+  # This private-source drift leg runs only on the default branch's scheduled
+  # workflow revision, never against untrusted branch code.
+  schedule:
+    - cron: "17 3 * * *"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
-# Pipeline shape on every push to master and on every PR:
+# Pipeline shape on every push to master/main:
 #
 #   check-plugin, check-pi-plugin                          (unit tests + lint + typecheck, parallel)
 #                  ↓
@@ -25,7 +28,9 @@ env:
 #     Catches cache-stability + correctness regressions that the smoke layer cannot see.
 #
 # Docker e2e was previously in a separate workflow (e2e-docker.yml). Folding it here means
-# every PR and master push exercises the full unit → Docker → host gauntlet.
+# every master/main push exercises the full unit → Docker → host gauntlet. The
+# scheduled Rust hermetic drift leg additionally checks the current private sibling
+# sources; it never runs on untrusted branch code.
 
 jobs:
   check-plugin:
@@ -308,13 +313,15 @@ jobs:
           MC_E2E_MODE: ts
         run: |
           # The mode validator independently checks tests/**/*.test.ts and
-          # derives this OpenCode list. Rust is intentionally absent from public
-          # CI because its private ../commons and ../subconscious path-deps are
-          # not provisioned here; the local release gate runs that host group.
+          # derives this OpenCode list. Rust is intentionally absent from PR and
+          # ordinary master CI because it requires private ../commons and
+          # ../subconscious source. The scheduled hosted drift job below covers
+          # that private-source lane; never add it to pull_request.
           cd packages/e2e-tests
           files=$(bun scripts/validate-mode-manifest.ts --mode ts --harness opencode | tr '\n' ' ')
-          echo "Running OpenCode host tests from mode manifest: $files"
-          bun test --timeout 600000 $files
+           echo "Running OpenCode host tests from mode manifest: $files"
+           # shellcheck disable=SC2086 # The repository-controlled file list must expand into Bun arguments.
+           bun test --timeout 600000 $files
           # This oracle is outside the manifest's tests/**/*.test.ts inventory.
           bun test --timeout 600000 src/cache-analysis.test.ts
 
@@ -368,5 +375,128 @@ jobs:
         run: |
           cd packages/e2e-tests
           files=$(bun scripts/validate-mode-manifest.ts --mode ts --harness pi | tr '\n' ' ')
-          echo "Running Pi host tests from mode manifest: $files"
-          bun test --timeout 600000 $files
+           echo "Running Pi host tests from mode manifest: $files"
+           # shellcheck disable=SC2086 # The repository-controlled file list must expand into Bun arguments.
+           bun test --timeout 600000 $files
+
+  rust-e2e-preflight:
+    name: Rust hermetic E2E drift credential preflight
+    # Scheduled workflows use the default branch. This prevents the private-source
+    # App token from being exposed to untrusted branch code.
+    if: ${{ github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      enabled: ${{ steps.credentials.outputs.enabled }}
+    steps:
+      - id: credentials
+        name: Report private-source credential state
+        env:
+          CK_CI_APP_ID: ${{ secrets.CK_CI_APP_ID }}
+          CK_CI_APP_PRIVATE_KEY: ${{ secrets.CK_CI_APP_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing_secrets=()
+          [[ -n "$CK_CI_APP_ID" ]] || missing_secrets+=("CK_CI_APP_ID")
+          [[ -n "$CK_CI_APP_PRIVATE_KEY" ]] || missing_secrets+=("CK_CI_APP_PRIVATE_KEY")
+
+          if (( ${#missing_secrets[@]} > 0 )); then
+            missing_prerequisite="$(IFS=','; echo "${missing_secrets[*]}")"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Rust hermetic E2E skipped::Missing prerequisite: Actions secret(s) ${missing_prerequisite}. Configure the cortexkit-ci GitHub App secrets documented in .github/RUST_E2E_CI.md."
+            {
+              echo "## Rust hermetic E2E drift"
+              echo "SKIPPED: Missing prerequisite: Actions secret(s) ${missing_prerequisite}."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "Rust hermetic E2E drift is SKIPPED: cortexkit-ci GitHub App secrets are absent. This scheduled run does not claim the Rust suite passed."
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Rust hermetic E2E credentials are available for the hosted drift runner."
+          fi
+
+  e2e-rust-hermetic:
+    name: E2E (Rust hermetic drift)
+    # This job uses private sibling source with a scoped cortexkit-ci GitHub App
+    # token. It must remain scheduled-only and never run on untrusted branch code.
+    if: ${{ needs.rust-e2e-preflight.outputs.enabled == 'true' }}
+    runs-on: ubuntu-latest
+    needs: [e2e-host-opencode, e2e-host-pi, rust-e2e-preflight]
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Create scoped cortexkit-ci GitHub App token
+        id: cortexkit-ci-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.CK_CI_APP_ID }}
+          private-key: ${{ secrets.CK_CI_APP_PRIVATE_KEY }}
+          owner: cortexkit
+          repositories: subconscious,commons
+
+      - name: Check out commons
+        uses: actions/checkout@v5
+        with:
+          repository: cortexkit/commons
+          token: ${{ steps.cortexkit-ci-token.outputs.token }}
+          path: ../commons
+          persist-credentials: false
+
+      - name: Check out subconscious
+        uses: actions/checkout@v5
+        with:
+          repository: cortexkit/subconscious
+          token: ${{ steps.cortexkit-ci-token.outputs.token }}
+          path: ../subconscious
+          persist-credentials: false
+
+      - name: Record private sibling revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          commons_sha="$(git -C "$GITHUB_WORKSPACE/../commons" rev-parse HEAD)"
+          subconscious_sha="$(git -C "$GITHUB_WORKSPACE/../subconscious" rev-parse HEAD)"
+          summary="Rust hermetic sibling checkouts: commons=${commons_sha}; subconscious=${subconscious_sha}"
+          echo "$summary"
+          echo "$summary" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Derive hermetic Cargo cache key
+        id: cargo-cache-key
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="$(sha256sum Cargo.lock ../commons/Cargo.lock ../subconscious/Cargo.lock | sha256sum | awk '{print $1}')"
+          echo "key=rust-hermetic-${RUNNER_OS}-${RUNNER_ARCH}-${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore ck-subc and ckdev-mc-e2e Cargo target cache
+        uses: actions/cache@v4
+        with:
+          path: packages/e2e-tests/.cache/rust-e2e-cargo-target
+          key: ${{ steps.cargo-cache-key.outputs.key }}
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install OpenCode
+        run: |
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      - name: Verify OpenCode on PATH
+        run: opencode --version
+
+      - name: Build OpenCode plugin
+        run: bun run --cwd packages/plugin build
+
+      - name: Build ck-subc and ckdev-mc-e2e, then run Rust hermetic e2e
+        run: scripts/run-rust-hermetic-e2e.sh

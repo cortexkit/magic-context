@@ -1649,7 +1649,19 @@ mod tests {
             .unwrap();
         let output = client.await_output("run-1").await.unwrap();
         client.close().await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Route release is asynchronous after close(); poll for both goodbyes
+        // instead of budgeting a fixed sleep, which raced the second release on
+        // slower hardware (issue #373: ~40-60ms observed against a 20ms budget).
+        let release_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if server.log.lock().await.goodbyes.len() >= 2 {
+                break;
+            }
+            if tokio::time::Instant::now() >= release_deadline {
+                break; // fall through to the assertions for a full diagnostic
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
 
         assert_eq!(output.text, terminal_text);
         let log = server.log.lock().await;

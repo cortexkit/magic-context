@@ -59,6 +59,11 @@ const STATUS_COLOR: Record<TodoStatus, Parameters<Theme["fg"]>[0]> = {
 	cancelled: "error",
 };
 
+const SPIN_FRAMES = ["◐", "◓", "◑", "◒"];
+function spinGlyph(): string {
+	return SPIN_FRAMES[Math.floor(Date.now() / 160) % SPIN_FRAMES.length]!;
+}
+
 const snapshotsBySession = new Map<string, TodoSnapshot>();
 const MAX_TODOWRITE_RENDER_CACHE_ENTRIES = 50;
 
@@ -236,7 +241,7 @@ function formatTodoLine(
 	theme: Theme,
 	options: { showId?: boolean } = {},
 ): string {
-	const glyph = theme.fg(STATUS_COLOR[todo.status], STATUS_GLYPH[todo.status]);
+	const glyph = theme.fg(STATUS_COLOR[todo.status], todo.status === "in_progress" ? spinGlyph() : STATUS_GLYPH[todo.status]);
 	const id =
 		options.showId && todo.id ? `${theme.fg("accent", `#${todo.id}`)} ` : "";
 	const color =
@@ -258,6 +263,14 @@ function lineComponent(renderLines: (width: number) => string[]): Component {
 		render: renderLines,
 		invalidate() {},
 	};
+}
+
+function hasAnimatedRow(
+	rows: ReadonlyArray<{ todo: TodoItem; key: string }>,
+): boolean {
+	return capTodoRows(rows).visible.some(
+		({ todo }) => todo.status === "in_progress",
+	);
 }
 
 function capTodoRows<T>(rows: readonly T[]): {
@@ -388,6 +401,22 @@ function isOverlayLive(todo: TodoItem): boolean {
 }
 
 export class TodoOverlay {
+	private spinTimer: ReturnType<typeof setInterval> | undefined;
+	private syncSpinTimer(hasInProgress: boolean): void {
+		if (hasInProgress && this.widgetRegistered) {
+			if (this.spinTimer) return;
+			// Wall-clock repaint so the in_progress glyph animates between
+			// todowrite events; keyed on the presence of an in_progress todo so
+			// an overlay of pending/completed rows costs nothing.
+			this.spinTimer = setInterval(() => {
+				this.tui?.requestRender();
+			}, 160);
+			this.spinTimer.unref?.();
+		} else if (this.spinTimer) {
+			clearInterval(this.spinTimer);
+			this.spinTimer = undefined;
+		}
+	}
 	private uiCtx: ExtensionUIContext | undefined;
 	private sessionId: string | undefined;
 	private widgetRegistered = false;
@@ -420,6 +449,7 @@ export class TodoOverlay {
 				this.uiCtx.setWidget(WIDGET_KEY, undefined);
 				this.widgetRegistered = false;
 				this.tui = undefined;
+				if (this.spinTimer) { clearInterval(this.spinTimer); this.spinTimer = undefined; }
 			}
 			return;
 		}
@@ -438,13 +468,16 @@ export class TodoOverlay {
 						invalidate: () => {
 							this.widgetRegistered = false;
 							this.tui = undefined;
+							if (this.spinTimer) { clearInterval(this.spinTimer); this.spinTimer = undefined; }
 						},
 					};
 				},
 				{ placement: "aboveEditor" },
 			);
 			this.widgetRegistered = true;
+			this.syncSpinTimer(hasAnimatedRow(visible));
 		} else {
+			this.syncSpinTimer(hasAnimatedRow(visible));
 			this.tui?.requestRender();
 		}
 	}
@@ -470,6 +503,7 @@ export class TodoOverlay {
 	}
 
 	dispose(): void {
+		if (this.spinTimer) { clearInterval(this.spinTimer); this.spinTimer = undefined; }
 		if (this.uiCtx) this.uiCtx.setWidget(WIDGET_KEY, undefined);
 		this.widgetRegistered = false;
 		this.tui = undefined;

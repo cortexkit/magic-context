@@ -1,6 +1,6 @@
 {
     "schema": 1,
-    "header": "CI intentionally runs only the manifest-derived TS invocation; the Rust invocation requires private sibling path-deps (../commons and ../subconscious) and remains a mandatory local release-gate leg.",
+    "header": "Pull-request and ordinary master CI intentionally run only the manifest-derived TS invocation. The tag release workflow runs the Rust invocation through scripts/run-rust-hermetic-e2e.sh on an explicitly enabled private-source runner; it requires sibling path-deps (../commons and ../subconscious).",
     "entries": [
         {
             "path": "tests/cache-invariants.test.ts",
@@ -475,6 +475,19 @@
                 "RUST-E2E",
                 "FOLD-UNDER-PRESSURE",
                 "HISTORIAN-PRODUCER"
+            ]
+        },
+        {
+            "path": "tests/rust-memory-off-parity.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "one hermetic persistent-data fixture runs memory-on/off transitions through both TS and Rust served-wire lanes",
+            "contract_refs": [
+                "RUST-E2E",
+                "MEMORY-OFF-TRANSFORM-PARITY"
             ]
         },
         {

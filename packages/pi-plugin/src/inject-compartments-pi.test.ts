@@ -370,18 +370,43 @@ describe("injectM0M1Pi memory feature gate", () => {
 			insertMemory(db, {
 				projectPath: base.projectIdentity,
 				category: "ARCHITECTURE",
-				content: "SECRET project memory must not leak when disabled",
+				content: "project memory must not leak when disabled",
 				sourceType: "historian",
 			});
+			insertUserMemory(db, "profile baseline must not leak", []);
+			setProjectState(db, "__global__", { projectUserProfileVersion: 1 });
 
-			// memoryEnabled=false → memory suppressed, compartments retained.
-			const disabledState = { ...base, memoryEnabled: false };
+			// memoryEnabled=false suppresses every memory-derived surface while
+			// retaining compartment history.
+			const disabledState = {
+				...base,
+				memoryEnabled: false,
+				mural: {
+					enabled: true,
+					supportsVision: true,
+					dataUrl: "data:image/png;base64,cHJvZmlsZS1tdXJhbA==",
+				},
+			};
 			const off = [userMessage("hello", 10)];
 			injectM0M1Pi(disabledState, db, off as never, undefined, true);
 			const offM0 = textOf(off[0] as never);
-			expect(offM0).not.toContain("SECRET project memory");
+			expect(offM0).not.toContain("project memory must not leak when disabled");
 			expect(offM0).not.toContain("<project-memory");
+			expect(offM0).not.toContain("<user-profile>");
+			expect(offM0).not.toContain("profile baseline must not leak");
+			expect(offM0).not.toContain("<memory-mural>");
+			expect((off[0] as { content: unknown[] }).content).toHaveLength(1);
 			expect(offM0).toContain("compartment body present");
+
+			// A fresh global profile version can request m[1] work, but its delta
+			// must remain absent while the memory surface is disabled.
+			insertUserMemory(db, "profile delta must not leak", []);
+			setProjectState(db, "__global__", { projectUserProfileVersion: 2 });
+			const refreshed = [userMessage("again", 11)];
+			injectM0M1Pi(disabledState, db, refreshed as never, undefined, true);
+			const offM1 = textOf(refreshed[1] as never);
+			expect(offM1).not.toContain("<new-user-profile>");
+			expect(offM1).not.toContain("profile delta must not leak");
 
 			// Control: a fresh session with memoryEnabled left on DOES render it,
 			// proving the gate (not some other filter) is responsible.
@@ -399,8 +424,99 @@ describe("injectM0M1Pi memory feature gate", () => {
 			]);
 			const on = [userMessage("hello", 10)];
 			injectM0M1Pi(onState, db, on as never, undefined, true);
-			expect(textOf(on[0] as never)).toContain("SECRET project memory");
+			expect(textOf(on[0] as never)).toContain(
+				"project memory must not leak when disabled",
+			);
 		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("uses the system-hash HARD path for a memory-on to memory-off transition", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-memory-off-transition-"));
+		try {
+			const state = piState("ses-pi-memgate-transition", cwd);
+			insertMemory(db, {
+				projectPath: state.projectIdentity,
+				category: "ARCHITECTURE",
+				content: "transition project fact",
+			});
+			insertUserMemory(db, "transition profile fact", []);
+			setProjectState(db, "__global__", { projectUserProfileVersion: 1 });
+
+			const on = [userMessage("before", 10)];
+			injectM0M1Pi(
+				{
+					...state,
+					memoryEnabled: true,
+					hardSignals: {
+						systemHash: "memory-guidance-on",
+						modelKey: "test/model",
+					},
+				},
+				db,
+				on as never,
+				undefined,
+				true,
+			);
+			expect(textOf(on[0] as never)).toContain("transition profile fact");
+
+			const offState = {
+				...state,
+				memoryEnabled: false,
+				hardSignals: {
+					systemHash: "memory-guidance-off",
+					modelKey: "test/model",
+				},
+			};
+			const off = [userMessage("after", 11)];
+			const transition = injectM0M1Pi(
+				offState,
+				db,
+				off as never,
+				undefined,
+				true,
+			);
+			expect(transition.m0Materialized).toBe(true);
+			expect(textOf(off[0] as never)).not.toContain("transition profile fact");
+
+			const defer = [userMessage("still off", 12)];
+			const replay = injectM0M1Pi(offState, db, defer as never);
+			expect(replay.m0Materialized).toBe(false);
+			expect(textOf(defer[0] as never)).not.toContain(
+				"transition profile fact",
+			);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+			closeQuietly(db);
+		}
+	});
+
+	it("keeps the memory-on m[0]/m[1] shape byte-identical", () => {
+		const db = createTestDb();
+		const cwd = mkdtempSync(join(tmpdir(), "pi-m0m1-memory-on-shape-"));
+		try {
+			const state = piState("ses-pi-memgate-shape", cwd);
+			insertMemory(db, {
+				projectPath: state.projectIdentity,
+				category: "ARCHITECTURE",
+				content: "memory-on project fact",
+			});
+			insertUserMemory(db, "memory-on profile fact", []);
+			setProjectState(db, "__global__", { projectUserProfileVersion: 1 });
+
+			const defaultRender = materializeM0Pi(state, db);
+			const explicitlyEnabledRender = materializeM0Pi(
+				{ ...state, memoryEnabled: true },
+				db,
+			);
+			expect(explicitlyEnabledRender.m0).toBe(defaultRender.m0);
+			expect(explicitlyEnabledRender.m1).toBe(defaultRender.m1);
+			expect(defaultRender.m0).toContain("memory-on profile fact");
+			expect(defaultRender.m0).toContain("memory-on project fact");
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
 			closeQuietly(db);
 		}
 	});

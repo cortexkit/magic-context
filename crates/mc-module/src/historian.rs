@@ -5,6 +5,7 @@
 //! watermark on the next materializing pass (a publish never mutates cached
 //! render state directly).
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
@@ -900,7 +901,10 @@ pub struct HistorianFireRequest<'a> {
     pub project_slug: &'a str,
     /// The role-scoped historian SYSTEM prompt (HISTORIAN_SYSTEM_PROMPT). Sent via the
     /// producer's `system` field, never concatenated into `prompt`. Empty means absent.
-    pub system: &'a str,
+    pub system: Cow<'a, str>,
+    /// Trusted language setting for retry-only repair guidance. It never reaches transform
+    /// composition or the primary prompt surface.
+    pub content_language: Option<&'a str>,
     pub prompt: &'a str,
     pub model_chain: &'a [String],
     pub from_ordinal: u64,
@@ -1212,6 +1216,7 @@ where
 
     let mut auth_blocked_providers = Vec::new();
     let mut all_failures_permanent = true;
+    let mut prompt = request.prompt.to_string();
 
     for (index, model) in request.model_chain.iter().enumerate() {
         if provider_is_auth_blocked(&auth_blocked_providers, model) {
@@ -1243,7 +1248,12 @@ where
             fired.firing_seq,
         );
         let handle = match producer
-            .start(&producer_session_id, request.system, request.prompt, model)
+            .start(
+                &producer_session_id,
+                request.system.as_ref(),
+                &prompt,
+                model,
+            )
             .await
         {
             Ok(handle) => handle,
@@ -1357,7 +1367,7 @@ where
             session_id: request.session_id,
             project_path: request.project_path,
             awaiting,
-            output,
+            output: output.clone(),
             observed_chunk_fingerprint: request.observed_chunk_fingerprint,
             validation_chunk: request.validation_chunk,
             chunk_transcript: request.chunk_transcript,
@@ -1378,6 +1388,12 @@ where
                 // Validation rejection is model-local output failure. Exhaust the
                 // configured fallback chain before returning the final rejection.
                 if has_eligible_model(&request.model_chain[index + 1..], &auth_blocked_providers) {
+                    prompt = crate::historian_prompt::build_historian_repair_prompt(
+                        request.prompt,
+                        &output.text,
+                        &err.to_string(),
+                        request.content_language,
+                    );
                     continue;
                 }
                 return Err(HistorianDriveError::Validation(err));
@@ -1801,6 +1817,7 @@ mod tests {
             clear_reasoning_age: 50,
             caveman_enabled: false,
             caveman_min_chars: 500,
+            tool_input_key_orders: Default::default(),
             tool_present: false,
             todo_tool_present: None,
             prompt_surface_preset: crate::prompt_surface::PromptSurfacePreset::Full,
@@ -1827,6 +1844,7 @@ mod tests {
             detected_context_limit: 0,
             detected_context_limit_model_key: None,
             history_budget_tokens: None,
+            historian_model_chain: None,
             declared_trim: None,
             lineage_switched: false,
             descent_edge_id: 0,
@@ -2054,6 +2072,7 @@ mod tests {
         observed_starts: Vec<(String, String)>,
         observed_sessions: Vec<String>,
         observed_systems: Vec<String>,
+        observed_prompts: Vec<String>,
         await_run_ids: Vec<String>,
         cancels: Vec<String>,
         closes: usize,
@@ -2093,11 +2112,12 @@ mod tests {
             &mut self,
             session_id: &str,
             system: &str,
-            _prompt: &str,
+            prompt: &str,
             model: &str,
         ) -> Result<RunHandle, HistorianProducerError> {
             self.observed_sessions.push(session_id.to_string());
             self.observed_systems.push(system.to_string());
+            self.observed_prompts.push(prompt.to_string());
             self.observed_starts
                 .push((session_id.to_string(), model.to_string()));
             self.starts
@@ -2202,7 +2222,8 @@ mod tests {
             session_id: "ses",
             project_path: "git:proj",
             project_slug: "proj",
-            system: "role guidance",
+            system: Cow::Borrowed("role guidance"),
+            content_language: None,
             prompt,
             model_chain: models,
             from_ordinal: 2,
@@ -3549,18 +3570,28 @@ mod tests {
             .with_start(Ok(run_handle("run-valid")))
             .with_output(Ok(producer_output(historian_xml("fallback summary"))));
 
-        let outcome = run_historian_firing(
-            &mut producer,
-            fire_request(&store, "placeholder prompt", &models, &chunk, &prior),
-        )
-        .await
-        .expect("a valid fallback must publish after primary validation rejection");
+        let mut request = fire_request(&store, "placeholder prompt", &models, &chunk, &prior);
+        request.content_language = Some("tr");
+        let outcome = run_historian_firing(&mut producer, request)
+            .await
+            .expect("a valid fallback must publish after primary validation rejection");
 
         let HistorianDriveOutcome::Completed(success) = outcome else {
             panic!("expected completed fallback run");
         };
         assert_eq!(success.model, "other/model-b");
         assert_eq!(producer.observed_starts.len(), 2);
+        assert_eq!(producer.observed_prompts[0], "placeholder prompt");
+        assert!(
+            producer.observed_prompts[1].ends_with(
+                "Preserve U: lines and directly quoted user text in their original source language; write the surrounding summary prose in Turkish (Türkçe)."
+            ),
+            "the validation retry must append quote-preserving language guidance after invalid XML"
+        );
+        assert!(
+            producer.observed_prompts[1].contains("Previous invalid XML:\n<output>"),
+            "the repair prompt must retain the rejected output as data"
+        );
         assert_eq!(
             store
                 .load_historian_assembly_snapshot("ses")

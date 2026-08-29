@@ -5,6 +5,10 @@
       "name": "reasoning",
       "target_mid": "reasoning-target",
       "expect_strip": true,
+      "expected_sentinel": {
+        "type": "text",
+        "text": ""
+      },
       "raw_messages": [
         {
           "info": {
@@ -130,6 +134,10 @@
       "name": "thinking",
       "target_mid": "thinking-target",
       "expect_strip": true,
+      "expected_sentinel": {
+        "type": "text",
+        "text": ""
+      },
       "raw_messages": [
         {
           "info": {
@@ -255,6 +263,10 @@
       "name": "redacted_thinking",
       "target_mid": "redacted_thinking-target",
       "expect_strip": true,
+      "expected_sentinel": {
+        "type": "text",
+        "text": ""
+      },
       "raw_messages": [
         {
           "info": {
@@ -378,6 +390,13 @@
       "name": "reasoning_cache_control",
       "target_mid": "reasoning_cache_control-target",
       "expect_strip": false,
+      "expected_sentinel": {
+        "type": "text",
+        "text": "",
+        "cache_control": {
+          "type": "ephemeral"
+        }
+      },
       "raw_messages": [
         {
           "info": {

@@ -40,6 +40,7 @@ import { log, sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { Database as SqliteDb } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 
 /** Static placeholder. The real session-history comes from transform injection. */
 export const MARKER_SUMMARY_TEXT =
@@ -56,12 +57,14 @@ function persistMarkerStateAndDropReplacedTag(
     state: PersistedCompactionMarkerState | null,
     replacedSummaryMessageId: string | null,
 ): void {
+    const transactionStartedAt = performance.now();
     db.transaction(() => {
         setPersistedCompactionMarkerState(db, sessionId, state);
         if (replacedSummaryMessageId !== null) {
             dropMarkerSummaryTag(db, sessionId, replacedSummaryMessageId);
         }
     })();
+    logSlowWriteTransaction("marker-drain", transactionStartedAt);
 }
 
 /**

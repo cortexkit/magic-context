@@ -807,7 +807,10 @@ mod tests {
             .insert_memory(insert_input(foreign, "CONSTRAINTS", "new shared rule", 4))
             .unwrap();
 
-        let meta = meta_after_hard(0, None, folded_max, folded_cursor, vec![baseline]);
+        seed_user_profile(store, &["profile delta must stay hidden".to_string()]);
+        let mut meta = meta_after_hard(0, None, folded_max, folded_cursor, vec![baseline]);
+        meta.user_profile_version = 2;
+        meta.m1_user_profile_version = 1;
         let m1 = compose_m1_from_store(
             &store,
             project,
@@ -827,6 +830,8 @@ mod tests {
         assert_eq!(m1.memory_update_count, 0);
         assert!(!m1.body.contains("private rule"));
         assert!(!m1.body.contains("shared rule"));
+        assert!(!m1.body.contains("<new-user-profile>"));
+        assert!(!m1.body.contains("profile delta must stay hidden"));
     }
 
     #[test]

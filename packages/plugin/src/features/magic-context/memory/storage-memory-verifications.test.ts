@@ -106,8 +106,32 @@ describe("memory verification side-table helpers", () => {
             expect(getUnmappedMemoryIds(db, [a.id, b.id]).sort()).toEqual([a.id, b.id].sort());
             // Mapping a (real file) and b (sentinel) both count as mapped.
             recordMemoryMapping(db, a.id, ["src/a.ts"], 1);
-            recordMemoryMapping(db, b.id, [], 1);
+            recordMemoryMapping(db, b.id, [], 1, "host_rejected_fallback");
+            expect(getMemoryVerifications(db, [b.id]).get(b.id)?.mappingOrigin).toBe(
+                "host_rejected_fallback",
+            );
             expect(getUnmappedMemoryIds(db, [a.id, b.id])).toEqual([]);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("content updates clear a host fallback so mapping re-enters scope", () => {
+        const db = freshDb();
+        try {
+            const m = insertMemory(db, {
+                projectPath: "git:test",
+                category: "ARCHITECTURE",
+                content: "X references an unavailable file.",
+                sourceSessionId: "ses",
+            });
+            recordMemoryMapping(db, m.id, [], 1_000, "host_rejected_fallback");
+            expect(getUnmappedMemoryIds(db, [m.id])).toEqual([]);
+
+            updateMemoryContent(db, m.id, "X now lives in src/x.ts.", "newhash");
+
+            expect(getMemoryVerifications(db, [m.id]).has(m.id)).toBe(false);
+            expect(getUnmappedMemoryIds(db, [m.id])).toEqual([m.id]);
         } finally {
             closeQuietly(db);
         }
@@ -148,6 +172,7 @@ describe("memory verification side-table helpers", () => {
             const state = getMemoryVerifications(db, [memory.id]).get(memory.id);
             expect(state?.files).toEqual([]);
             expect(state?.hasSentinel).toBe(true);
+            expect(state?.mappingOrigin).toBe("mapper");
             expect(state?.verifiedAt).toBe(2000);
 
             updateMemoryVerification(db, memory.id, "verified", 3000);

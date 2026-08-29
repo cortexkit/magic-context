@@ -21,6 +21,7 @@ import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { getMagicContextStorageDir } from "../src/shared/data-path";
 
 const canonicalHome = realpathSync.native(homedir());
 const homeIdentity = `dir:${createHash("md5").update(canonicalHome, "utf8").digest("hex").slice(0, 12)}`;
@@ -33,9 +34,7 @@ function isCanonicalHomeRoot(root: string): boolean {
     }
 }
 
-const dbPath =
-    process.env.MAGIC_CONTEXT_DB ??
-    join(homedir(), ".local", "share", "cortexkit", "magic-context", "context.db");
+const dbPath = process.env.MAGIC_CONTEXT_DB ?? join(getMagicContextStorageDir(), "context.db");
 // Plain path + options object, not a file: URI — bun:sqlite on Linux rejects
 // file: URIs (the CLI database-access fix established this pattern).
 const db = new Database(dbPath, { readonly: true });

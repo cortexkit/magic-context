@@ -14,7 +14,10 @@ import {
 import { getLiveMigrationBlockingProcesses } from "@magic-context/core/features/magic-context/storage-db";
 import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
 import { fixConflicts } from "@magic-context/core/shared/conflict-fixer";
-import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
+import {
+    getMagicContextStorageDir,
+    getMagicContextStorageResolution,
+} from "@magic-context/core/shared/data-path";
 import { ensureTuiPluginEntry } from "@magic-context/core/shared/tui-config";
 import { parse, stringify } from "comment-json";
 
@@ -1263,7 +1266,9 @@ export async function runDoctor(
 
     // 7c. Shared context DB exists, opens, integrity_check, row counts.
     // This catches corrupted DB files and misaligned storage paths early.
-    const dbPath = join(getMagicContextStorageDir(), "context.db");
+    const storage = getMagicContextStorageResolution();
+    const dbPath = join(storage.path, "context.db");
+    log.info(`Shared storage: ${storage.path} (source: ${storage.source})`);
     if (!existsSync(dbPath)) {
         log.info(`Shared context DB not yet created at ${dbPath} (will be created on first run)`);
     } else {

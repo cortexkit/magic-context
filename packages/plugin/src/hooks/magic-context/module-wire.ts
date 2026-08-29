@@ -644,6 +644,7 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                         (part as Record<string, unknown>).syntheticTodoMarker === true),
             );
         const content: Record<string, unknown>[] = [];
+        const recoveryToolTitles: Record<string, string> = {};
         for (const partValue of parts) {
             if (partValue === null || typeof partValue !== "object") continue;
             const part = partValue as Record<string, unknown>;
@@ -706,6 +707,15 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                 const input = state.input ?? part.input ?? part.args ?? {};
                 content.push({ kind: { type: "tool_call", id: callId, name: toolName, input } });
                 if (state.status === "completed" || state.status === "error") {
+                    const metadata =
+                        state.metadata !== null && typeof state.metadata === "object"
+                            ? (state.metadata as Record<string, unknown>)
+                            : {};
+                    const title =
+                        (typeof state.title === "string" && state.title.trim()) ||
+                        (typeof metadata.title === "string" && metadata.title.trim()) ||
+                        "";
+                    if (title) recoveryToolTitles[callId] = title;
                     const output =
                         typeof state.output === "string"
                             ? state.output
@@ -745,6 +755,13 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
             ck: {
                 role,
                 content,
+                ...(Object.keys(recoveryToolTitles).length > 0
+                    ? {
+                          provider_extras: {
+                              opencode: { ctx_expand_tool_titles: recoveryToolTitles },
+                          },
+                      }
+                    : {}),
                 meta: {
                     harness_id: id,
                     ordinal,

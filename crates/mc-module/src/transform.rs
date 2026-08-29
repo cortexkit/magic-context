@@ -55,8 +55,9 @@ use mc_store::{
     LineageDescentDisposition, LineageDescentRequest, McStore, McStoreError, McTagRow,
     MemoryRevision, ModuleMeta, ModuleUsage, NoteDelivery, PassSchedulerObservation,
     PendingAgentDrop, PendingChannel2Directive, PendingRewriteState, ServedBlockFingerprint,
-    StoredCompartment, TagCacheSummary, TagMintInput, TailHygieneBaseline, TemporalMarkInput,
-    TemporalMarkRow, TransformCommit, TransformOverlayBatch, UserHintDecisionInput, UserHintRow,
+    StoredCompartment, TagCacheSummary, TagMintInput, TailHygieneBaseline, TailHygienePartKind,
+    TemporalMarkInput, TemporalMarkRow, TransformCommit, TransformOverlayBatch,
+    UserHintDecisionInput, UserHintRow,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -714,6 +715,10 @@ pub struct TransformRequest {
     /// Minimum source byte length for an eligible caveman text block.
     #[serde(default = "default_caveman_min_chars")]
     pub caveman_min_chars: usize,
+    /// Top-level tool-input key order captured by the TypeScript wire adapter. The
+    /// map is used only for edit-marker payload bytes and never reaches provider input.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_input_key_orders: BTreeMap<String, Vec<String>>,
     /// Whether this request advertises the canonical reduction tool. Missing input is
     /// deliberately false so older callers stay on the dormant byte path.
     #[serde(default)]
@@ -816,6 +821,12 @@ pub struct TransformRequest {
     /// route can outlive a config reload; absent values use the bind-time fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_budget_tokens: Option<f64>,
+    /// When set, this is the host-approved model order for OpenCode historian requests. Before
+    /// building the request, the host applies the user's profile and removes model choices from
+    /// repository config. An absent value lets Claude Code choose models from module config;
+    /// a present but empty list disables historian dispatch for this OpenCode route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub historian_model_chain: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declared_trim: Option<DeclaredTrim>,
     /// Composed fake-compaction edge delivered by the lineage owner. Missing fields retain
@@ -915,6 +926,8 @@ struct TransformRequestWire {
     #[serde(default = "default_caveman_min_chars")]
     caveman_min_chars: usize,
     #[serde(default)]
+    tool_input_key_orders: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
     tool_present: bool,
     #[serde(default)]
     todo_tool_present: Option<bool>,
@@ -969,6 +982,8 @@ struct TransformRequestWire {
     #[serde(default)]
     history_budget_tokens: Option<f64>,
     #[serde(default)]
+    historian_model_chain: Option<Vec<String>>,
+    #[serde(default)]
     declared_trim: Option<DeclaredTrim>,
     #[serde(default)]
     lineage_switched: bool,
@@ -1017,6 +1032,7 @@ impl<'de> Deserialize<'de> for TransformRequest {
             auto_search_min_prompt_chars: wire.auto_search_min_prompt_chars,
             caveman_enabled: wire.caveman_enabled,
             caveman_min_chars: wire.caveman_min_chars,
+            tool_input_key_orders: wire.tool_input_key_orders,
             tool_present: wire.tool_present,
             todo_tool_present: wire.todo_tool_present,
             prompt_surface_preset: wire.prompt_surface_preset,
@@ -1043,6 +1059,7 @@ impl<'de> Deserialize<'de> for TransformRequest {
             detected_context_limit: wire.detected_context_limit,
             detected_context_limit_model_key: wire.detected_context_limit_model_key,
             history_budget_tokens: wire.history_budget_tokens,
+            historian_model_chain: wire.historian_model_chain,
             declared_trim: wire.declared_trim,
             lineage_switched: wire.lineage_switched,
             descent_edge_id: wire.descent_edge_id,
@@ -2514,7 +2531,10 @@ fn compose_additive_m0(
     } else {
         crate::project_docs::ProjectDocs::default()
     };
-    let mural = crate::m0_compose::resolved_mural(m0_mural_input(req, serializer_profile));
+    let mural = ctx
+        .memory_enabled
+        .then(|| crate::m0_compose::resolved_mural(m0_mural_input(req, serializer_profile)))
+        .flatten();
     let mut m0_bytes = render_m0(
         &M0Inputs {
             project_docs: &docs.rendered_block,
@@ -3175,6 +3195,9 @@ fn apply_once(
         }
     }
     let req = rebased_req.as_ref().unwrap_or(ingress_req);
+    // Snapshot the store-derived request before any renderer mutation can add sentinels,
+    // canonical blanks, or synthetic composition artifacts.
+    let trailing_blank_source_decisions = snapshot_trailing_blank_source_decisions(req);
 
     // --- ingress: CK messages -> flat blocks, then strip synthetic before cache logic ---
     let projection = if rebased_req.is_some() {
@@ -3995,8 +4018,9 @@ fn apply_once(
                 .map(|tokens| (row.block_id.as_str(), tokens))
         })
         .collect();
-    let tail_for_selection =
+    let mut tail_for_selection =
         tail_sel_items(&live, loaded.meta.coverage_ordinal, &tag_tokens_by_block);
+    attach_edit_input_key_orders(&mut tail_for_selection, &req.tool_input_key_orders);
     // Todo state is deferred work just like an m1 or reduction delta: it may ride an
     // independently scheduled bust, but it never authorizes provider-visible bytes by itself.
     // Compute only the call-id transition here; the complete pair is built after classification.
@@ -5200,7 +5224,10 @@ fn apply_once(
         if let Some(row) = maybe_append_channel1_nudge(
             Channel1NudgeInputs {
                 ctx,
-                usable_window_tokens: context_limit_tokens.round() as i64,
+                usable_window_tokens: effective_nudge_window_tokens(
+                    req.geometry.as_ref(),
+                    context_limit_tokens,
+                ),
                 core: &core,
                 projection: &projection,
                 tag_rows: &hygiene_tag_rows,
@@ -5287,13 +5314,40 @@ fn apply_once(
             true,
         )?;
     }
-    // Recheck trailing blanks on every pass, including deferred passes. The build
-    // above already applied stored decisions, so removing a provider-added blank
-    // from an older message restores its previously served bytes. On a deferred
+    // A stored keep is stale when the original assistant has no trailing blank. Demote it only
+    // while that assistant is also in the current output and this pass is already invalidating the
+    // provider cache, so the first strip cannot be delayed until a later deferred pass.
+    let healed_trailing_blank_ids = heal_poisoned_trailing_blank_decisions(
+        &mut core,
+        req,
+        &trailing_blank_source_decisions,
+        &built_output.messages,
+        is_provider_prefix_mutation_pass,
+    );
+    if !healed_trailing_blank_ids.is_empty() {
+        built_output = build_output_with_tags(
+            &core,
+            output_meta,
+            &projection,
+            req,
+            (tagging_active || auto_search_active).then_some(&tag_overlay),
+            tail_reclaim_enabled && !req.is_subagent,
+            mutation_exempt_mid,
+            &tag_numbers,
+            meta.reasoning_cleared_through_tag
+                .max(meta.reasoning_cleared_through_ordinal),
+            transition_committed,
+            output_cache_snapshot.as_ref(),
+            true,
+        )?;
+    }
+    // Recheck trailing blanks on every pass, including deferred passes. Decisions come only from
+    // the immutable ingress snapshot and are intersected with the served projection. On a deferred
     // pass, record only the newest assistant because no cached message follows it.
     let (trailing_blank_decisions_updated, newest_keep_updated) = refresh_trailing_blank_decisions(
         &mut core,
         req,
+        &trailing_blank_source_decisions,
         &built_output.messages,
         is_provider_prefix_mutation_pass,
     );
@@ -5397,7 +5451,10 @@ fn apply_once(
         &req.channel2_nudge_state,
         ctx.now_ms,
         Channel2DirectiveInput {
-            usable_window_tokens: context_limit_tokens.round() as i64,
+            usable_window_tokens: effective_nudge_window_tokens(
+                req.geometry.as_ref(),
+                context_limit_tokens,
+            ),
             core: &core,
             projection: &projection,
             tag_rows: &hygiene_tag_rows,
@@ -5514,6 +5571,12 @@ fn apply_once(
             req.session_id,
             transition_shapes.poisoned_reasoning_arc_ids.join(","),
             row_version,
+        );
+    }
+    for mid in &healed_trailing_blank_ids {
+        eprintln!(
+            "mc-module: trailing-blank-heal session={} mid={} reason=source_without_trailing_blank pass_row={}",
+            req.session_id, mid, row_version,
         );
     }
     timings.store_memories = m1_revision_read_timings.memories_ms;
@@ -5797,6 +5860,20 @@ fn effective_context_limit_tokens(
         }
     }
     200_000.0
+}
+
+fn effective_nudge_window_tokens(
+    geometry: Option<&TransformGeometry>,
+    scheduler_context_limit_tokens: f64,
+) -> i64 {
+    // Keep the usage-reported context limit for scheduler calculations. Reminder text describes
+    // context available after host reserves, so prefer the host's `usable_soft` geometry.
+    geometry
+        .filter(|geometry| geometry.usable_soft >= crate::scheduler::MIN_PLAUSIBLE_CONTEXT_LIMIT)
+        .map_or(scheduler_context_limit_tokens, |geometry| {
+            geometry.usable_soft as f64
+        })
+        .round() as i64
 }
 
 fn effective_hard_context_limit_tokens(
@@ -6953,6 +7030,27 @@ fn sel_item_from_flat(block: &FlatBlock, tag_tokens_by_block: &HashMap<&str, usi
         byte_size: block.bytes.len(),
         token_count: tag_tokens_by_block.get(block.id.as_str()).copied(),
         arc_id: block.arc_id.clone(),
+    }
+}
+
+fn attach_edit_input_key_orders(items: &mut [SelItem], key_orders: &BTreeMap<String, Vec<String>>) {
+    for item in items {
+        let Some(key_order) = key_orders.get(&item.id) else {
+            continue;
+        };
+        let SelKind::ToolCall { name, input } = &mut item.kind else {
+            continue;
+        };
+        if !crate::selection::is_edit_tool(name) {
+            continue;
+        }
+        let Some(object) = input.as_object_mut() else {
+            continue;
+        };
+        object.insert(
+            crate::selection::EDIT_INPUT_KEY_ORDER_MARKER.to_string(),
+            serde_json::to_value(key_order).unwrap_or(Value::Null),
+        );
     }
 }
 
@@ -8884,6 +8982,13 @@ fn run_user_hint_lexical_search(
                     title: None,
                     note_status: None,
                     surface_condition: None,
+                    score_hundredths: 100,
+                    start_ordinal: None,
+                    end_ordinal: None,
+                    note_created_at_ms: None,
+                    note_anchor_ordinal: None,
+                    note_session_id: None,
+                    source_project_path: None,
                 },
             });
         }
@@ -8914,6 +9019,13 @@ fn run_user_hint_lexical_search(
                 title: Some(compartment.title),
                 note_status: None,
                 surface_condition: None,
+                score_hundredths: 100,
+                start_ordinal: None,
+                end_ordinal: None,
+                note_created_at_ms: None,
+                note_anchor_ordinal: None,
+                note_session_id: None,
+                source_project_path: None,
             },
         });
     }
@@ -9093,6 +9205,86 @@ pub(crate) fn utf16_len(text: &str) -> usize {
     text.encode_utf16().count()
 }
 
+// Rust strings cannot contain JavaScript's lone UTF-16 surrogates. These Unicode
+// noncharacters reserve an internal representation until the JSON response is encoded.
+const JS_SURROGATE_MARKER_OPEN: char = '\u{FDD0}';
+const JS_SURROGATE_MARKER_CLOSE: char = '\u{FDD1}';
+
+pub(crate) fn string_from_js_utf16_prefix(units: &[u16], requested: usize) -> String {
+    let end = requested.min(units.len());
+    if end > 0 && (0xD800..=0xDBFF).contains(&units[end - 1]) {
+        let mut prefix = String::from_utf16(&units[..end - 1])
+            .expect("a prefix before a leading surrogate remains valid UTF-16");
+        let _ = write!(
+            prefix,
+            "{JS_SURROGATE_MARKER_OPEN}{:04x}{JS_SURROGATE_MARKER_CLOSE}",
+            units[end - 1]
+        );
+        prefix
+    } else {
+        String::from_utf16(&units[..end]).expect("a complete JavaScript prefix is valid UTF-16")
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn js_utf16_units_from_internal(text: &str) -> Vec<u16> {
+    let mut units = Vec::new();
+    let mut rest = text;
+    while let Some(marker_start) = rest.find(JS_SURROGATE_MARKER_OPEN) {
+        units.extend(rest[..marker_start].encode_utf16());
+        let marker = &rest[marker_start + JS_SURROGATE_MARKER_OPEN.len_utf8()..];
+        let bytes = marker.as_bytes();
+        let encoded_marker = bytes.len() >= 4
+            && bytes[..4].iter().all(u8::is_ascii_hexdigit)
+            && marker[4..].starts_with(JS_SURROGATE_MARKER_CLOSE);
+        if encoded_marker {
+            if let Ok(unit) = u16::from_str_radix(&marker[..4], 16) {
+                if (0xD800..=0xDBFF).contains(&unit) {
+                    units.push(unit);
+                    rest = &marker[4 + JS_SURROGATE_MARKER_CLOSE.len_utf8()..];
+                    continue;
+                }
+            }
+        }
+        units.extend(JS_SURROGATE_MARKER_OPEN.to_string().encode_utf16());
+        rest = marker;
+    }
+    units.extend(rest.encode_utf16());
+    units
+}
+
+pub(crate) fn encode_js_surrogate_markers(encoded: Vec<u8>) -> Vec<u8> {
+    let Ok(text) = String::from_utf8(encoded) else {
+        unreachable!("serde_json always emits UTF-8")
+    };
+    if !text.contains(JS_SURROGATE_MARKER_OPEN) {
+        return text.into_bytes();
+    }
+
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(marker_start) = rest.find(JS_SURROGATE_MARKER_OPEN) {
+        output.push_str(&rest[..marker_start]);
+        let marker = &rest[marker_start + JS_SURROGATE_MARKER_OPEN.len_utf8()..];
+        let bytes = marker.as_bytes();
+        let encoded_marker = bytes.len() >= 4
+            && bytes[..4].iter().all(u8::is_ascii_hexdigit)
+            && marker[4..].starts_with(JS_SURROGATE_MARKER_CLOSE)
+            && u16::from_str_radix(&marker[..4], 16)
+                .is_ok_and(|unit| (0xD800..=0xDBFF).contains(&unit));
+        if encoded_marker {
+            output.push_str("\\u");
+            output.push_str(&marker[..4]);
+            rest = &marker[4 + JS_SURROGATE_MARKER_CLOSE.len_utf8()..];
+        } else {
+            output.push(JS_SURROGATE_MARKER_OPEN);
+            rest = marker;
+        }
+    }
+    output.push_str(rest);
+    output.into_bytes()
+}
+
 /// Keep whole Unicode scalars while measuring the prefix in UTF-16 code units, matching the
 /// TypeScript wire renderer without producing an invalid half-surrogate in Rust output.
 pub(crate) fn utf16_prefix(text: &str, limit: usize) -> &str {
@@ -9226,7 +9418,7 @@ fn maybe_append_channel1_nudge(
     let reminder = build_channel1_reminder(
         decision.level,
         decision.reclaimable_tokens,
-        input.usable_window_tokens,
+        reclaimable_tool_output_count(input.baseline),
         &hint,
         sticky,
     );
@@ -9395,6 +9587,7 @@ struct Channel2DirectiveInput<'a> {
 struct Channel2Pressure {
     due: bool,
     reclaimable_tokens: i64,
+    reclaimable_tool_outputs: usize,
     hint: Vec<(i64, String)>,
 }
 
@@ -9425,7 +9618,7 @@ fn channel2_directives(
                     channel2_nudge: Some(Channel2NudgeDirective {
                         text: build_channel2_host_reminder(
                             pressure.reclaimable_tokens,
-                            input.usable_window_tokens,
+                            pressure.reclaimable_tool_outputs,
                             &pressure.hint,
                         ),
                     }),
@@ -9473,6 +9666,7 @@ fn channel2_pressure(
     Some(Channel2Pressure {
         due,
         reclaimable_tokens,
+        reclaimable_tool_outputs: reclaimable_tool_output_count(input.baseline),
         hint,
     })
 }
@@ -9562,7 +9756,7 @@ fn claude_code_channel2_directive(
     let pending = PendingChannel2Directive {
         text: build_channel2_reminder_text(
             pressure.reclaimable_tokens,
-            input.usable_window_tokens,
+            pressure.reclaimable_tool_outputs,
             &pressure.hint,
         ),
         directive_id: channel2_directive_id(session_id, arming_watermark),
@@ -9627,23 +9821,22 @@ fn oldest_channel2_hint(
 
 fn build_channel2_reminder_text(
     reclaimable_tokens: i64,
-    usable_window_tokens: i64,
+    reclaimable_tool_outputs: usize,
     hint: &[(i64, String)],
 ) -> String {
-    let amount = approx_thousands(reclaimable_tokens);
-    let usable_window = approx_thousands(usable_window_tokens);
+    let summary = format_reclaimable_output_summary(reclaimable_tool_outputs, reclaimable_tokens);
     let hint_text = format_reclaimable_hint(hint);
     format!(
-        "Routine housekeeping: an older span of this session folds into compact history automatically — nothing is lost and nothing pauses. Drop spent tool outputs with ctx_reduce first so the archive keeps only what matters (~{amount} of ~{usable_window} reclaimable).{hint_text}"
+        "Routine housekeeping: {summary} are reclaimable — make a ctx_reduce pass at a natural stopping point.{hint_text}"
     )
 }
 
 fn build_channel2_host_reminder(
     reclaimable_tokens: i64,
-    usable_window_tokens: i64,
+    reclaimable_tool_outputs: usize,
     hint: &[(i64, String)],
 ) -> String {
-    let text = build_channel2_reminder_text(reclaimable_tokens, usable_window_tokens, hint);
+    let text = build_channel2_reminder_text(reclaimable_tokens, reclaimable_tool_outputs, hint);
     format!("<system-reminder>\n{text}\n</system-reminder>")
 }
 
@@ -9716,6 +9909,7 @@ fn channel1_refire_tokens(tail_tokens: i64) -> i64 {
 #[cfg(test)]
 mod nudge_formula_tests {
     use super::*;
+    use serde::Deserialize;
 
     fn baseline(u: i64, t: i64) -> TailHygieneBaseline {
         TailHygieneBaseline {
@@ -9854,19 +10048,94 @@ mod nudge_formula_tests {
         assert!(format_reclaimable_hint(&hint).is_empty());
     }
 
+    #[derive(Debug, Deserialize)]
+    struct ReminderCopyGolden {
+        schema: u32,
+        cases: Vec<ReminderCopyGoldenCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ReminderCopyGoldenCase {
+        id: String,
+        channel: String,
+        level: Option<String>,
+        reclaimable_tool_outputs: usize,
+        reclaimable_tokens: i64,
+        #[serde(default)]
+        sticky: bool,
+        hint: Vec<ReminderCopyGoldenHint>,
+        expected: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ReminderCopyGoldenHint {
+        tag_number: i64,
+        tool_name: String,
+    }
+
     #[test]
-    fn reminder_wording_uses_the_usable_window_and_keeps_gentle_number_free() {
-        let gentle = build_channel1_reminder(Channel1Level::Gentle, 42_000, 128_000, &[], false);
-        assert!(gentle.contains("Housekeeping: some earlier tool outputs are spent and can be dropped with ctx_reduce when you are done with them. Context is managed automatically — this is tidiness, never a reason to rush or narrow scope."));
-        assert!(!gentle.chars().any(|character| character.is_ascii_digit()));
+    fn reminder_copy_matches_the_typescript_golden_without_capacity_gauges() {
+        let golden: ReminderCopyGolden = serde_json::from_str(include_str!(
+            "../testdata/ctx-reduce-nudge-copy-golden.json"
+        ))
+        .expect("parse ctx_reduce nudge copy golden");
+        assert_eq!(golden.schema, 1);
 
-        let firm = build_channel1_reminder(Channel1Level::Firm, 42_000, 128_000, &[], false);
-        assert!(firm.contains("Housekeeping: ~42k of this session's ~128k window is spent tool output. Drop what you have already processed with ctx_reduce at a natural stopping point. Not a limit — nothing is lost either way."));
-        let urgent = build_channel1_reminder(Channel1Level::Urgent, 61_000, 128_000, &[], false);
-        assert!(urgent.contains("Housekeeping backlog: ~61k of this session's ~128k window is spent tool output — worth a ctx_reduce pass now. This is routine and lossless; it is never a reason to change scope."));
-
-        let channel2 = build_channel2_reminder_text(55_000, 128_000, &[]);
-        assert_eq!(channel2, "Routine housekeeping: an older span of this session folds into compact history automatically — nothing is lost and nothing pauses. Drop spent tool outputs with ctx_reduce first so the archive keeps only what matters (~55k of ~128k reclaimable).");
+        for reminder in golden.cases {
+            let hint = reminder
+                .hint
+                .iter()
+                .map(|hint| (hint.tag_number, hint.tool_name.clone()))
+                .collect::<Vec<_>>();
+            let rendered = match reminder.channel.as_str() {
+                "channel1" => build_channel1_reminder(
+                    Channel1Level::parse(reminder.level.as_deref().unwrap_or_default())
+                        .expect("channel1 golden must name a known level"),
+                    reminder.reclaimable_tokens,
+                    reminder.reclaimable_tool_outputs,
+                    &hint,
+                    reminder.sticky,
+                ),
+                "channel2" => build_channel2_host_reminder(
+                    reminder.reclaimable_tokens,
+                    reminder.reclaimable_tool_outputs,
+                    &hint,
+                ),
+                unknown => panic!("unknown reminder golden channel: {unknown}"),
+            };
+            assert_eq!(rendered, reminder.expected, "{} copy drifted", reminder.id);
+            assert!(
+                !rendered.contains("of ~"),
+                "{} exposed a denominator",
+                reminder.id
+            );
+            assert!(
+                !rendered.contains("of this session"),
+                "{} exposed session capacity",
+                reminder.id
+            );
+            assert_eq!(
+                Regex::new(r"~\d+(?:\.\d+)?k\b")
+                    .unwrap()
+                    .find_iter(&rendered)
+                    .count(),
+                1,
+                "{} exposed more than the reclaimable token mass",
+                reminder.id
+            );
+            assert!(
+                !Regex::new(r"\b\d+(?:\.\d+)?\s*%")
+                    .unwrap()
+                    .is_match(&rendered),
+                "{} exposed a percentage",
+                reminder.id
+            );
+            assert!(
+                !Regex::new(r"(?i)\bwindow\b").unwrap().is_match(&rendered),
+                "{} exposed context capacity",
+                reminder.id
+            );
+        }
     }
 
     #[test]
@@ -9904,11 +10173,11 @@ mod nudge_formula_tests {
             Channel1Level::Urgent,
             1,
         ));
-        let sticky = build_channel1_reminder(Channel1Level::Firm, 70_000, 128_000, &[], true);
-        assert!(sticky.contains("Reminder: ctx_reduce housekeeping still pending —"));
-        assert!(!sticky.contains("Not a limit"));
-        let escalation =
-            build_channel1_reminder(Channel1Level::Urgent, 80_000, 128_000, &[], false);
+        let sticky = build_channel1_reminder(Channel1Level::Firm, 70_000, 16, &[], true);
+        assert!(
+            sticky.contains("Reminder: 16 spent tool outputs (~70k tokens) are still reclaimable")
+        );
+        let escalation = build_channel1_reminder(Channel1Level::Urgent, 80_000, 16, &[], false);
         assert!(escalation.contains("Housekeeping backlog:"));
     }
 
@@ -10095,33 +10364,50 @@ fn should_use_sticky_channel1_reminder(
         && current_real_user_turn_count - last_ordinal < CHANNEL1_STICKY_REAL_USER_TURN_GAP
 }
 
+fn reclaimable_tool_output_count(baseline: Option<&TailHygieneBaseline>) -> usize {
+    baseline
+        .into_iter()
+        .flat_map(|baseline| baseline.baseline_parts.iter())
+        .filter(|part| part.kind == TailHygienePartKind::ToolOutput && part.u_tokens > 0)
+        .count()
+}
+
 fn build_channel1_reminder(
     level: Channel1Level,
     reclaimable_tokens: i64,
-    usable_window_tokens: i64,
+    reclaimable_tool_outputs: usize,
     hint: &[(i64, String)],
     sticky: bool,
 ) -> String {
+    let summary = format_reclaimable_output_summary(reclaimable_tool_outputs, reclaimable_tokens);
     let hint_text = format_reclaimable_hint(hint);
     if sticky {
         return format!(
-            "\n\n<system-reminder>\nReminder: ctx_reduce housekeeping still pending —{hint_text}\n</system-reminder>"
+            "\n\n<system-reminder>\nReminder: {summary} are still reclaimable — ctx_reduce them at a natural stopping point.{hint_text}\n</system-reminder>"
         );
     }
 
-    let amount = approx_thousands(reclaimable_tokens);
-    let usable_window = approx_thousands(usable_window_tokens);
     let body = match level {
-        Channel1Level::Gentle =>
-            "Housekeeping: some earlier tool outputs are spent and can be dropped with ctx_reduce when you are done with them. Context is managed automatically — this is tidiness, never a reason to rush or narrow scope.".to_string(),
+        Channel1Level::Gentle => format!(
+            "Housekeeping: {summary} are reclaimable — drop the ones you have already processed with ctx_reduce at a natural stopping point."
+        ),
         Channel1Level::Firm => format!(
-            "Housekeeping: ~{amount} of this session's ~{usable_window} window is spent tool output. Drop what you have already processed with ctx_reduce at a natural stopping point. Not a limit — nothing is lost either way."
+            "Housekeeping: {summary} are reclaimable — make a ctx_reduce pass at a natural stopping point."
         ),
         Channel1Level::Urgent => format!(
-            "Housekeeping backlog: ~{amount} of this session's ~{usable_window} window is spent tool output — worth a ctx_reduce pass now. This is routine and lossless; it is never a reason to change scope."
+            "Housekeeping backlog: {summary} are reclaimable — a ctx_reduce pass is due."
         ),
     };
     format!("\n\n<system-reminder>\n{body}{hint_text}\n</system-reminder>")
+}
+
+fn format_reclaimable_output_summary(reclaimable_tool_outputs: usize, tokens: i64) -> String {
+    let outputs = match reclaimable_tool_outputs {
+        0 => "spent tool outputs".to_string(),
+        1 => "1 spent tool output".to_string(),
+        count => format!("{count} spent tool outputs"),
+    };
+    format!("{outputs} (~{} tokens)", approx_thousands(tokens))
 }
 
 fn approx_thousands(tokens: i64) -> String {
@@ -11664,6 +11950,43 @@ enum FrozenTrailingBlankDecision {
     Strip,
 }
 
+type TrailingBlankSourceDecisions = HashMap<String, (FrozenTrailingBlankDecision, usize)>;
+
+fn trailing_blank_source_decision(
+    message: &CkIngressMessage,
+) -> Option<(FrozenTrailingBlankDecision, usize)> {
+    if message.ck.role != "assistant" {
+        return None;
+    }
+    let trailing_count = message
+        .ck
+        .content
+        .iter()
+        .rev()
+        .take_while(|block| is_sentinel_invisible_text_block(block))
+        .count();
+    if message.ck.content.is_empty() || trailing_count == message.ck.content.len() {
+        Some((FrozenTrailingBlankDecision::Keep, 1))
+    } else if trailing_count == 0 {
+        Some((FrozenTrailingBlankDecision::Strip, 0))
+    } else if trailing_count <= 10_000 {
+        Some((FrozenTrailingBlankDecision::Keep, trailing_count))
+    } else {
+        None
+    }
+}
+
+fn snapshot_trailing_blank_source_decisions(
+    req: &TransformRequest,
+) -> TrailingBlankSourceDecisions {
+    req.messages
+        .iter()
+        .filter_map(|message| {
+            trailing_blank_source_decision(message).map(|decision| (message.mid.clone(), decision))
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum UserTerminatedTailDecision {
     Unchanged,
@@ -11790,7 +12113,7 @@ fn canonical_blank_block() -> CkWireBlock {
     })
 }
 
-fn apply_frozen_trailing_blank_decision(
+pub(crate) fn apply_frozen_trailing_blank_decision(
     core: &CoreState,
     profile: SerializerProfile,
     provider_id: Option<&str>,
@@ -11814,10 +12137,12 @@ fn apply_frozen_trailing_blank_decision(
         .iter()
         .rposition(|block| !is_sentinel_invisible_text_block(block))
     else {
-        if message.content.len() == 1 && message.content.first() == Some(&canonical_blank) {
+        if message.content.is_empty()
+            || (message.content.len() == 1 && message.content.first() == Some(&canonical_blank))
+        {
             return 0;
         }
-        let mutations = message.content.len().max(1);
+        let mutations = message.content.len();
         message.content = vec![canonical_blank];
         message.mark_modified();
         return mutations;
@@ -11835,6 +12160,11 @@ fn apply_frozen_trailing_blank_decision(
         0
     };
     if keep_count > 0 {
+        // A keep may canonicalize a suffix supplied by the harness, but cannot recreate a suffix
+        // that is absent from the current source shape.
+        if trailing_count == 0 {
+            return 0;
+        }
         let blank_index = last_meaningful_index + 1;
         let suffix_is_canonical = trailing_count == keep_count
             && message.content[blank_index..]
@@ -11860,9 +12190,66 @@ fn apply_frozen_trailing_blank_decision(
     trailing_count
 }
 
+fn heal_poisoned_trailing_blank_decisions(
+    core: &mut CoreState,
+    req: &TransformRequest,
+    source_decisions: &TrailingBlankSourceDecisions,
+    rendered_messages: &[ServedMessage],
+    can_mutate_provider_prefix: bool,
+) -> Vec<String> {
+    if !can_mutate_provider_prefix
+        || SerializerProfile::parse(&req.serializer_profile)
+            != Some(SerializerProfile::OpencodeAiSdk)
+        || req.provider_id.as_deref() != Some("anthropic")
+    {
+        return Vec::new();
+    }
+
+    let newest_assistant_mid = latest_assistant_mid(&req.messages);
+    let visible_assistant_ids = rendered_messages
+        .iter()
+        .filter(|message| message.role == "assistant")
+        .filter_map(|message| message.meta.harness_id.as_deref())
+        .collect::<HashSet<_>>();
+    let mut healed_ids = source_decisions
+        .iter()
+        .filter_map(|(mid, (decision, _))| {
+            (*decision == FrozenTrailingBlankDecision::Strip
+                && newest_assistant_mid != Some(mid.as_str())
+                && visible_assistant_ids.contains(mid.as_str())
+                && frozen_trailing_blank_decision(core, mid)
+                    == Some(FrozenTrailingBlankDecision::Keep))
+            .then(|| mid.clone())
+        })
+        .collect::<Vec<_>>();
+    healed_ids.sort();
+    if healed_ids.is_empty() {
+        return healed_ids;
+    }
+
+    let replaced_keys = healed_ids
+        .iter()
+        .flat_map(|mid| {
+            [
+                format!("strip:trailing_blank_keep:{mid}"),
+                format!("strip:trailing_blank_strip:{mid}"),
+            ]
+        })
+        .collect::<HashSet<_>>();
+    core.frozen_units
+        .retain(|unit| !replaced_keys.contains(&unit.key));
+    core.frozen_units.extend(
+        healed_ids
+            .iter()
+            .map(|mid| strip_unit("trailing_blank_strip", mid, "")),
+    );
+    healed_ids
+}
+
 fn refresh_trailing_blank_decisions(
     core: &mut CoreState,
     req: &TransformRequest,
+    source_decisions: &TrailingBlankSourceDecisions,
     rendered_messages: &[ServedMessage],
     record_historical: bool,
 ) -> (usize, bool) {
@@ -11881,22 +12268,9 @@ fn refresh_trailing_blank_decisions(
         if rendered.role != "assistant" {
             continue;
         }
-        let trailing_count = rendered
-            .content
-            .iter()
-            .rev()
-            .take_while(|block| is_sentinel_invisible_text_block(block))
-            .count();
-        let (decision, keep_count) =
-            if rendered.content.is_empty() || trailing_count == rendered.content.len() {
-                (FrozenTrailingBlankDecision::Keep, 1)
-            } else if trailing_count == 0 {
-                (FrozenTrailingBlankDecision::Strip, 0)
-            } else if trailing_count <= 10_000 {
-                (FrozenTrailingBlankDecision::Keep, trailing_count)
-            } else {
-                continue;
-            };
+        let Some(&(decision, keep_count)) = source_decisions.get(mid) else {
+            continue;
+        };
         let frozen = frozen_trailing_blank_decision(core, mid);
         let frozen_matches = frozen == Some(decision)
             && (decision == FrozenTrailingBlankDecision::Strip
@@ -12898,15 +13272,12 @@ fn empty_reasoning_sentinel(part: &Value) -> Value {
     let Some(object) = part.as_object() else {
         return Value::Object(sentinel);
     };
-    let part_type = object
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("reasoning");
-    sentinel.insert("type".to_string(), Value::String(part_type.to_string()));
-    if object.contains_key("thinking") && !object.contains_key("text") {
-        sentinel.insert("thinking".to_string(), Value::String(String::new()));
-    } else {
-        sentinel.insert("text".to_string(), Value::String(String::new()));
+    sentinel.insert("type".to_string(), Value::String("text".to_string()));
+    sentinel.insert("text".to_string(), Value::String(String::new()));
+    for key in ["cache_control", "cacheControl"] {
+        if let Some(value) = object.get(key) {
+            sentinel.insert(key.to_string(), value.clone());
+        }
     }
     Value::Object(sentinel)
 }
@@ -12915,13 +13286,14 @@ fn is_empty_reasoning_sentinel(part: &Value) -> bool {
     let Some(object) = part.as_object() else {
         return false;
     };
-    if object.len() != 2 || !object.contains_key("type") {
-        return false;
-    }
-    object
-        .get("text")
-        .or_else(|| object.get("thinking"))
-        .is_some_and(|value| value.as_str() == Some(""))
+    object.get("type").and_then(Value::as_str) == Some("text")
+        && object.get("text").and_then(Value::as_str) == Some("")
+        && object.keys().all(|key| {
+            matches!(
+                key.as_str(),
+                "type" | "text" | "cache_control" | "cacheControl"
+            )
+        })
 }
 
 fn is_sentinel_invisible_text_block(block: &CkWireBlock) -> bool {
@@ -13427,6 +13799,30 @@ pub(crate) mod tests {
             effective_context_limit_tokens(&ModuleUsage::default(), Some(&implausible)),
             200_000.0
         );
+    }
+
+    #[test]
+    fn nudge_display_denominator_prefers_geometry_usable_soft() {
+        let geometry = TransformGeometry {
+            usable_soft: 872_000,
+            usable_hard: 1_000_000,
+            derivation: "models.dev/1000000; usableSoft=872000".to_string(),
+        };
+        let scheduler_denominator = effective_context_limit_tokens(
+            &ModuleUsage {
+                current_total_input_tokens: 600_000,
+                context_limit_tokens: 1_000_000,
+                ..ModuleUsage::default()
+            },
+            Some(&geometry),
+        );
+
+        assert_eq!(scheduler_denominator, 1_000_000.0);
+        assert_eq!(
+            effective_nudge_window_tokens(Some(&geometry), scheduler_denominator),
+            872_000
+        );
+        assert_eq!(effective_nudge_window_tokens(None, 128_000.0), 128_000);
     }
 
     #[test]
@@ -14317,6 +14713,7 @@ pub(crate) mod tests {
             clear_reasoning_age: DEFAULT_CLEAR_REASONING_AGE,
             caveman_enabled: false,
             caveman_min_chars: DEFAULT_CAVEMAN_MIN_CHARS,
+            tool_input_key_orders: BTreeMap::new(),
             tool_present: false,
             todo_tool_present: Some(true),
             prompt_surface_preset: PromptSurfacePreset::Full,
@@ -14343,6 +14740,7 @@ pub(crate) mod tests {
             detected_context_limit: 0,
             detected_context_limit_model_key: None,
             history_budget_tokens: None,
+            historian_model_chain: None,
             declared_trim: None,
             lineage_switched: false,
             descent_edge_id: 0,
@@ -18466,6 +18864,38 @@ pub(crate) mod tests {
         keep_core
             .frozen_units
             .push(strip_unit("trailing_blank_keep", "target", ""));
+        let mut missing_trailing = assistant(stable_content(false));
+        let missing_trailing_bytes = serde_json::to_vec(&missing_trailing).unwrap();
+        assert_eq!(
+            apply_frozen_trailing_blank_decision(
+                &keep_core,
+                SerializerProfile::OpencodeAiSdk,
+                Some("anthropic"),
+                false,
+                "target",
+                &mut missing_trailing,
+            ),
+            0
+        );
+        assert_eq!(
+            serde_json::to_vec(&missing_trailing).unwrap(),
+            missing_trailing_bytes,
+            "a frozen keep must not manufacture an absent suffix"
+        );
+        let mut empty = assistant(Vec::new());
+        assert_eq!(
+            apply_frozen_trailing_blank_decision(
+                &keep_core,
+                SerializerProfile::OpencodeAiSdk,
+                Some("anthropic"),
+                false,
+                "target",
+                &mut empty,
+            ),
+            0
+        );
+        assert!(empty.content.is_empty());
+
         let mut newest_with_trailing = assistant(stable_content(true));
         apply_frozen_trailing_blank_decision(
             &keep_core,
@@ -18599,6 +19029,119 @@ pub(crate) mod tests {
                 &mut non_anthropic,
             ),
             0
+        );
+    }
+
+    #[test]
+    fn trailing_blank_decisions_mint_from_ingress_instead_of_rendered_sentinels() {
+        let target = CkIngressMessage {
+            mid: "target".to_string(),
+            ordinal: 1,
+            ck: CkWireMessage::from_parts(
+                "assistant",
+                vec![CkWireBlock::bare(ck_wire::CkKind::Text {
+                    text: "store-derived answer".to_string(),
+                })],
+                None,
+                ck_wire::ProviderExtras::new(),
+                ck_wire::HarnessMeta {
+                    harness_id: Some("target".to_string()),
+                    ..Default::default()
+                },
+            ),
+        };
+        let mut request = profile_req(
+            SerializerProfile::OpencodeAiSdk,
+            "trailing-source-only",
+            "cfg",
+            vec![target.clone()],
+        );
+        request.provider_id = Some("anthropic".to_string());
+        let source_decisions = snapshot_trailing_blank_source_decisions(&request);
+        let mut composed = target.ck;
+        composed.content.push(canonical_blank_block());
+        let rendered = vec![ServedMessage::from_message(composed)];
+        let mut core = CoreState::default();
+
+        assert_eq!(
+            refresh_trailing_blank_decisions(
+                &mut core,
+                &request,
+                &source_decisions,
+                &rendered,
+                true,
+            ),
+            (1, false)
+        );
+        assert_eq!(
+            frozen_trailing_blank_decision(&core, "target"),
+            Some(FrozenTrailingBlankDecision::Strip),
+            "the rendered sentinel must not mint a keep"
+        );
+    }
+
+    #[test]
+    fn trailing_blank_poison_heal_excludes_newest_and_legitimate_keeps() {
+        fn source_assistant(mid: &str, ordinal: u64, trailing: bool) -> CkIngressMessage {
+            let mut content = vec![CkWireBlock::bare(ck_wire::CkKind::Text {
+                text: format!("answer-{mid}"),
+            })];
+            if trailing {
+                content.push(CkWireBlock::bare(ck_wire::CkKind::Text {
+                    text: " ".to_string(),
+                }));
+            }
+            CkIngressMessage {
+                mid: mid.to_string(),
+                ordinal,
+                ck: CkWireMessage::from_parts(
+                    "assistant",
+                    content,
+                    None,
+                    ck_wire::ProviderExtras::new(),
+                    ck_wire::HarnessMeta {
+                        harness_id: Some(mid.to_string()),
+                        ..Default::default()
+                    },
+                ),
+            }
+        }
+
+        let historical = source_assistant("legitimate", 1, true);
+        let newest = source_assistant("newest", 2, false);
+        let mut request = profile_req(
+            SerializerProfile::OpencodeAiSdk,
+            "trailing-heal-exclusions",
+            "cfg",
+            vec![historical.clone(), newest.clone()],
+        );
+        request.provider_id = Some("anthropic".to_string());
+        let source_decisions = snapshot_trailing_blank_source_decisions(&request);
+        let rendered = vec![
+            ServedMessage::from_message(historical.ck),
+            ServedMessage::from_message(newest.ck),
+        ];
+        let mut core = CoreState::default();
+        core.frozen_units
+            .push(strip_unit("trailing_blank_keep", "legitimate", ""));
+        core.frozen_units
+            .push(strip_unit("trailing_blank_keep", "newest", ""));
+
+        assert!(heal_poisoned_trailing_blank_decisions(
+            &mut core,
+            &request,
+            &source_decisions,
+            &rendered,
+            true,
+        )
+        .is_empty());
+        assert_eq!(
+            frozen_trailing_blank_decision(&core, "legitimate"),
+            Some(FrozenTrailingBlankDecision::Keep)
+        );
+        assert_eq!(
+            frozen_trailing_blank_decision(&core, "newest"),
+            Some(FrozenTrailingBlankDecision::Keep)
         );
     }
 
@@ -18970,6 +19513,195 @@ pub(crate) mod tests {
         assert_eq!(
             message_bytes(&structural_replay, "structural"),
             structural_bytes
+        );
+    }
+
+    fn trailing_regression_assistant(
+        mid: &str,
+        ordinal: u64,
+        trailing_text: Option<&str>,
+        structural_finish: bool,
+    ) -> CkIngressMessage {
+        let mut content = vec![CkWireBlock::bare(ck_wire::CkKind::Text {
+            text: format!("answer-{mid}"),
+        })];
+        if structural_finish {
+            content.push(CkWireBlock::bare(ck_wire::CkKind::Opaque(
+                ck_wire::OpaqueBlock {
+                    source: json!({ "source": "opencode" }),
+                    kind: "step-finish".to_string(),
+                    raw: json!({ "type": "step-finish", "reason": "tool-calls" }),
+                    arc: None,
+                },
+            )));
+        }
+        if let Some(text) = trailing_text {
+            content.push(CkWireBlock::bare(ck_wire::CkKind::Text {
+                text: text.to_string(),
+            }));
+        }
+        CkIngressMessage {
+            mid: mid.to_string(),
+            ordinal,
+            ck: CkWireMessage::from_parts(
+                "assistant",
+                content,
+                None,
+                ck_wire::ProviderExtras::new(),
+                ck_wire::HarnessMeta {
+                    harness_id: Some(mid.to_string()),
+                    ..Default::default()
+                },
+            ),
+        }
+    }
+
+    fn trailing_regression_request(
+        session: &str,
+        messages: Vec<CkIngressMessage>,
+    ) -> TransformRequest {
+        let mut request = profile_req(SerializerProfile::OpencodeAiSdk, session, "cfg", messages);
+        request.provider_id = Some("anthropic".to_string());
+        request
+    }
+
+    fn trailing_regression_message_bytes(response: &TransformResponse, mid: &str) -> Vec<u8> {
+        response
+            .messages()
+            .iter()
+            .find(|message| message.meta.harness_id.as_deref() == Some(mid))
+            .expect("trailing-blank regression target must be served")
+            .canonical_bytes()
+            .to_vec()
+    }
+
+    #[test]
+    fn poisoned_trailing_blank_keep_heals_only_on_a_visible_bust_and_replays_stably() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let session = "trailing-blank-poison-heal";
+        let bootstrap = run(
+            &store,
+            &trailing_regression_request(session, vec![item("user-0", 1, "start")]),
+            &spine(),
+        );
+        assert_eq!(bootstrap.action, "HARD");
+
+        let mut loaded = store.load(session).unwrap();
+        loaded
+            .core
+            .frozen_units
+            .push(strip_unit("trailing_blank_keep", "poisoned", ""));
+        store
+            .commit(session, loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+
+        let messages = || {
+            vec![
+                item("user-0", 1, "start"),
+                trailing_regression_assistant("poisoned", 2, None, true),
+                trailing_regression_assistant("newest", 3, None, false),
+            ]
+        };
+        let defer = run(
+            &store,
+            &trailing_regression_request(session, messages()),
+            &spine(),
+        );
+        assert_eq!(defer.action, "SOFT+");
+        let defer_target = defer
+            .messages()
+            .iter()
+            .find(|message| message.meta.harness_id.as_deref() == Some("poisoned"))
+            .unwrap();
+        assert_eq!(defer_target.content.last(), Some(&canonical_blank_block()));
+        assert_eq!(
+            frozen_trailing_blank_decision(&store.load(session).unwrap().core, "poisoned"),
+            Some(FrozenTrailingBlankDecision::Keep)
+        );
+
+        let mut bust_request = trailing_regression_request(session, messages());
+        bust_request.render_config = "cfg-bust".to_string();
+        let bust = run(&store, &bust_request, &spine());
+        assert_eq!(bust.action, "HARD");
+        let bust_bytes = trailing_regression_message_bytes(&bust, "poisoned");
+        let bust_target = bust
+            .messages()
+            .iter()
+            .find(|message| message.meta.harness_id.as_deref() == Some("poisoned"))
+            .unwrap();
+        assert!(matches!(
+            &bust_target.content.last().unwrap().kind,
+            ck_wire::CkKind::Text { text } if text == "answer-poisoned"
+        ));
+        assert_eq!(
+            frozen_trailing_blank_decision(&store.load(session).unwrap().core, "poisoned"),
+            Some(FrozenTrailingBlankDecision::Strip)
+        );
+
+        for _ in 0..2 {
+            let mut replay_request = trailing_regression_request(session, messages());
+            replay_request.render_config = "cfg-bust".to_string();
+            let replay = run(&store, &replay_request, &spine());
+            assert_eq!(replay.action, "SOFT+");
+            assert_eq!(
+                trailing_regression_message_bytes(&replay, "poisoned"),
+                bust_bytes
+            );
+        }
+    }
+
+    #[test]
+    fn decisionless_historical_late_blank_is_bounded_by_the_next_bust() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let session = "trailing-blank-decisionless-late";
+        run(
+            &store,
+            &trailing_regression_request(session, vec![item("user-0", 1, "start")]),
+            &spine(),
+        );
+
+        let messages = || {
+            vec![
+                item("user-0", 1, "start"),
+                trailing_regression_assistant("late", 2, Some(" \t"), false),
+                trailing_regression_assistant("newest", 3, None, false),
+            ]
+        };
+        let defer = run(
+            &store,
+            &trailing_regression_request(session, messages()),
+            &spine(),
+        );
+        assert_eq!(defer.action, "SOFT+");
+        assert_eq!(
+            frozen_trailing_blank_decision(&store.load(session).unwrap().core, "late"),
+            None
+        );
+        let defer_bytes = trailing_regression_message_bytes(&defer, "late");
+
+        let mut bust_request = trailing_regression_request(session, messages());
+        bust_request.render_config = "cfg-bust".to_string();
+        let bust = run(&store, &bust_request, &spine());
+        assert_eq!(bust.action, "HARD");
+        assert_eq!(
+            frozen_trailing_blank_decision(&store.load(session).unwrap().core, "late"),
+            Some(FrozenTrailingBlankDecision::Keep)
+        );
+        let bust_bytes = trailing_regression_message_bytes(&bust, "late");
+        assert_ne!(
+            bust_bytes, defer_bytes,
+            "the already-priced bust canonicalizes the late store blank once"
+        );
+
+        let mut replay_request = trailing_regression_request(session, messages());
+        replay_request.render_config = "cfg-bust".to_string();
+        let replay = run(&store, &replay_request, &spine());
+        assert_eq!(replay.action, "SOFT+");
+        assert_eq!(
+            trailing_regression_message_bytes(&replay, "late"),
+            bust_bytes
         );
     }
 
@@ -20373,10 +21105,7 @@ pub(crate) mod tests {
             1,
             "the newest assistant is exempt even after completion"
         );
-        assert_eq!(
-            native[0]["parts"][0],
-            json!({ "type": "reasoning", "text": "" })
-        );
+        assert_eq!(native[0]["parts"][0], json!({ "type": "text", "text": "" }));
         assert_eq!(native[1]["parts"][0]["text"], "thinking-latest");
         let first_pass = native.clone();
         assert_eq!(
@@ -24663,6 +25392,13 @@ pub(crate) mod tests {
             title: None,
             note_status: None,
             surface_condition: None,
+            score_hundredths: 100,
+            start_ordinal: None,
+            end_ordinal: None,
+            note_created_at_ms: None,
+            note_anchor_ordinal: None,
+            note_session_id: None,
+            source_project_path: None,
         }];
         let singular = render_user_hint(&single).unwrap();
         assert!(singular.contains("Your memory may contain 1 related fragment:"));
@@ -24677,6 +25413,13 @@ pub(crate) mod tests {
                 title: None,
                 note_status: None,
                 surface_condition: None,
+                score_hundredths: 100,
+                start_ordinal: None,
+                end_ordinal: None,
+                note_created_at_ms: None,
+                note_anchor_ordinal: None,
+                note_session_id: None,
+                source_project_path: None,
             })
             .collect::<Vec<_>>();
         let hint = render_user_hint(&results).unwrap();
@@ -24700,6 +25443,13 @@ pub(crate) mod tests {
                 title: None,
                 note_status: None,
                 surface_condition: None,
+                score_hundredths: 100,
+                start_ordinal: None,
+                end_ordinal: None,
+                note_created_at_ms: None,
+                note_anchor_ordinal: None,
+                note_session_id: None,
+                source_project_path: None,
             },
             crate::memory_tool::MemorySearchResult {
                 source_kind: crate::memory_tool::MemorySearchSourceKind::Memory,
@@ -24710,6 +25460,13 @@ pub(crate) mod tests {
                 title: None,
                 note_status: None,
                 surface_condition: None,
+                score_hundredths: 100,
+                start_ordinal: None,
+                end_ordinal: None,
+                note_created_at_ms: None,
+                note_anchor_ordinal: None,
+                note_session_id: None,
+                source_project_path: None,
             },
             crate::memory_tool::MemorySearchResult {
                 source_kind: crate::memory_tool::MemorySearchSourceKind::Memory,
@@ -24720,6 +25477,13 @@ pub(crate) mod tests {
                 title: None,
                 note_status: None,
                 surface_condition: None,
+                score_hundredths: 100,
+                start_ordinal: None,
+                end_ordinal: None,
+                note_created_at_ms: None,
+                note_anchor_ordinal: None,
+                note_session_id: None,
+                source_project_path: None,
             },
         ])
         .unwrap();
@@ -24747,6 +25511,37 @@ pub(crate) mod tests {
         );
         let astral_capped = truncate_hint_to_total_cap(&astral_wrapped, USER_HINT_TOTAL_CHAR_CAP);
         assert!(astral_capped.encode_utf16().count() <= USER_HINT_TOTAL_CHAR_CAP);
+    }
+
+    #[test]
+    fn reasoning_sentinel_matches_typescript_cache_metadata_golden() {
+        let golden: Value = serde_json::from_str(include_str!(
+            "../testdata/merged-reasoning-adapter-golden.json"
+        ))
+        .unwrap();
+        let fixture = golden["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["name"] == "reasoning_cache_control")
+            .unwrap();
+        let original = &fixture["raw_messages"][1]["parts"][0];
+        assert_eq!(
+            empty_reasoning_sentinel(original),
+            fixture["expected_sentinel"]
+        );
+    }
+
+    #[test]
+    fn response_encoder_emits_javascript_lone_surrogate_escape() {
+        let units = "a😀b".encode_utf16().collect::<Vec<_>>();
+        let internal = string_from_js_utf16_prefix(&units, 2);
+        assert_eq!(js_utf16_units_from_internal(&internal), units[..2]);
+        let encoded = serde_json::to_vec(&internal).unwrap();
+        assert_eq!(
+            encode_js_surrogate_markers(encoded),
+            br#""a\ud83d""#.to_vec()
+        );
     }
 
     #[test]
@@ -26171,8 +26966,13 @@ pub(crate) mod tests {
             let refire_request = with_usage(refire_request, 900, 1024);
             let sticky = run(&s, &refire_request, &spine());
             let sticky_result = tail_bytes(&sticky, "result3").to_string();
+            assert_eq!(
+                tail_bytes(&sticky, "result2"),
+                first_result,
+                "the first reminder span is frozen while the new cache-busting tail appends its own span"
+            );
             assert!(
-                sticky_result.contains("Reminder: ctx_reduce housekeeping still pending —"),
+                sticky_result.contains("Reminder: "),
                 "expected sticky refire, got {sticky_result}"
             );
             assert_eq!(s.load_channel1_appends("nudge").unwrap().len(), 2);
@@ -26252,7 +27052,7 @@ pub(crate) mod tests {
             let resumed_result = tail_bytes(&resumed, "result5");
             assert!(resumed_result.contains("<system-reminder>"));
             assert!(resumed_result.contains("Housekeeping"));
-            assert!(!resumed_result.contains("Reminder: ctx_reduce housekeeping still pending"));
+            assert!(!resumed_result.contains("Reminder: "));
             assert_eq!(s.load_channel1_appends("drop-grace").unwrap().len(), 2);
         });
     }
@@ -27766,6 +28566,10 @@ pub(crate) mod tests {
                 session_id: Some("writer"),
                 content: "ready note survives pressure refold",
                 surface_condition: Some("condition true"),
+                compiled_provider: None,
+                compiled_config: None,
+                compiled_at: None,
+                compile_status: None,
                 anchor_block_id: None,
                 anchor_ordinal: None,
                 now_ms: 1,
@@ -28589,6 +29393,16 @@ pub(crate) mod tests {
         request.caveman_enabled = true;
         request.caveman_min_chars = 1;
         request.protected_tags = 0;
+        request.messages[0].ck.role = "assistant".to_string();
+        request.messages[0]
+            .ck
+            .content
+            .push(ck_wire::CkWireBlock::bare(ck_wire::CkKind::ToolCall {
+                id: "mixed-call".to_string(),
+                name: "read".to_string(),
+                input: json!({ "filePath": "src/lib.rs" }),
+                provider_executed: false,
+            }));
         let projection = project_messages(&request.messages).unwrap();
         let live = projection
             .blocks

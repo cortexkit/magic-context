@@ -225,3 +225,11 @@ export function resolveOpenCodeAgentOverrides(agent: unknown): Record<string, un
         ...(primary?.qualifier ? { variant: primary.qualifier } : {}),
     };
 }
+
+export function resolveHistorianAgentOverrides(agent: unknown): Record<string, unknown> {
+    return {
+        temperature: 0.1,
+        maxTokens: 32_000,
+        ...resolveOpenCodeAgentOverrides(agent),
+    };
+}

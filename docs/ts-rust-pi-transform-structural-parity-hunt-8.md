@@ -1,0 +1,57 @@
+# TS ↔ Rust ↔ Pi transform structural parity hunt #8
+
+## Method and denominators
+
+TypeScript remains the OpenCode behavioral specification. Each provider leg is compared in its own serialized value space: Anthropic Messages, OpenAI-compatible chat, and Gemini `contents` are not normalized into one fictional envelope. Counts from unlike sessions remain inventory only. Rust lane admission still comes only from live config, with ASTROCYTE and ENGRAM as the built-in expected Rust sessions; Pi render captures remain pre-provider transform evidence and are not mislabeled as provider requests.
+
+`scripts/audit-transform-wire-parity.py` retains every hunt 1–7 axis. Hunt 8 adds provider-wire family detection, provider labels from capture metadata/model hints, system-root extraction for OpenAI-compatible and Gemini requests, empty/drop sentinel shapes, system-message counts, tool-call/result adjacency, reasoning/signature shapes, per-provider TS/Rust value-space comparisons, and explicit invalid-wire invariants (`scripts/audit-transform-wire-parity.py:657-1022`). The hermetic differ now walks seven matched provider fixtures per OpenCode lane: canonical Anthropic, Bedrock, GitHub Copilot, Qwen, OpenAI, Gemini, and Moonshot/Kimi (`scripts/audit-transform-wire-parity.test.py:20-248,249-422`). Its negative fixture inserts the issue-#135 separator shape and proves the adjacency bucket becomes non-empty rather than passing vacuously.
+
+No user database or provider credential is copied into the repository. The worktree contains no `opencode.db`, so genuinely old live-session counts are not claimed below.
+
+## Axis verdicts
+
+### A. Provider-matrix serialization — matched source/value spaces; no provider-specific Rust wire found
+
+**Empty-content strategy: pass.** TypeScript permits empty sentinels only for exact provider id `anthropic`; Bedrock, Copilot, Vertex Anthropic, proxies, and unknown providers retain native parts or use non-empty `[dropped]` placeholders (`packages/plugin/src/hooks/magic-context/sentinel.ts:20-37,85-140`). Rust receives the same current provider id in `TransformRequest`, uses the same exact equality gate, and emits `[dropped]` otherwise (`crates/mc-module/src/transform.rs:10296-10302,12829-12835`). The provider matrix reports matched sentinel value spaces and rejects any non-Anthropic empty content.
+
+**Single system message: pass by shared host ownership.** The system hook runs before the TS/Rust transform split and appends Magic Context guidance inside the host's first entry. Strict OpenAI-compatible templates therefore receive one system message; Anthropic sees one top-level system field whose content may contain provider-native blocks (`packages/plugin/src/hooks/magic-context/system-prompt-hash.ts:349-375`; regression at `system-prompt-hash.test.ts:387-504`). Rust never owns a second system-message insertion path.
+
+**Tool-pairing skeletons: pass in matched fixtures and codec invariants.** The shared reducer freezes complete invocation/result arcs. Rust's OpenCode codec coalesces fresh adjacent call/result CK messages into one native completed tool part and preserves native completed parts on replay (`crates/mc-module/src/codec/opencode.rs:411-487,826-1025,1113-1130`). The new differ validates immediate result adjacency in Anthropic, OpenAI-compatible, and Gemini value spaces. The deliberate GitHub-Copilot/Qwen separator mutation is classified as `tool_result_adjacency_violation`; the valid seven-family matrix is empty. This closes the audit blind spot without weakening the pinned issue-#135 failure fixture.
+
+**Non-Anthropic reasoning/signatures: pass.** The Anthropic-only consecutive-assistant workaround is gated identically in TS and Rust. OpenAI-compatible Kimi/Moonshot/Qwen reasoning is not replaced with an empty reasoning shell (`packages/plugin/src/hooks/magic-context/strip-content.test.ts:1141-1185`; `crates/mc-module/src/transform.rs:12081-12118,18156-18205`). Native codec replay preserves matched reasoning/signature carriers and exempts the newest live reasoning boundary (`crates/mc-module/src/codec/opencode.rs:826-1025`). The provider differ now inventories OpenAI `reasoning_content`, Gemini thought signatures, and Anthropic signed/redacted blocks separately.
+
+**Scope note:** Rust returns OpenCode-native MessageV2; OpenCode's selected adapter performs final provider serialization for both TS and Rust authority. A future adapter family can still introduce a shared TS/Rust 400, but it is not a Rust parity defect unless the native MessageV2 differs. The new matrix reports both parity divergence and provider-invalid shapes so shared failures are not hidden by equal lanes.
+
+### B. Rust lifecycle edges — fork/revert/migrate pass; compaction-off transition remains operationally explicit
+
+**OpenCode fork versus Pi clone: intentional divergence remains correct.** OpenCode `/fork` creates a new session identity and neither TS nor Rust copies session-local transform state. Rust `mc_cache_state` is keyed by the new session id, so the child bootstraps independently. Pi's JSONL clone header identifies a stable copied prefix and its transactionally filtered inheritance remains the explicit exception documented in `packages/pi-plugin/PARITY.md §25` and covered by `packages/pi-plugin/src/clone-inheritance.test.ts`.
+
+**Message removal/revert: pass.** `message.removed` invalidates the Rust wire cache before host cleanup (`packages/plugin/src/hooks/magic-context/event-handler.ts:714-779`). `invalidateWireState` clears every ordinal memo and forces the next request to a full wire (`packages/plugin/src/hooks/magic-context/rust-mode-transform.ts:1409-1422`). The adapter also detects a stored-count shrink without relying on event delivery and re-primes the canonical ordinal map (`rust-mode-transform.test.ts:1880-1939`). OpenCode revert is therefore covered whether it emits the expected removal event or the next pass first observes the shortened durable history.
+
+**`migrate-session`: pass by refusal, not by pretending state moved.** The CLI resolves source and target authority, requires the module to be reachable while markers exist, and refuses when `session.status.row_version` proves any module transform cache remains (`packages/cli/src/commands/migrate-session.ts:133-219`). Only a session with no module cache can be re-homed, so `mc_cache_state` can neither silently orphan nor travel under the wrong project identity.
+
+**Compaction-off flip: safe/fenced, but not seamless.** Config resolution downgrades configured Rust to TypeScript when compaction is disabled (`packages/plugin/src/config/transform-mode.ts:15-33`). Project memory/note authority is drained through the existing marker protocol when a module client is reachable; otherwise TypeScript writes remain fenced and the operator receives the drain command (`packages/plugin/src/hooks/magic-context/transform.ts:374-494`). Session-local module cache is deliberately dormant rather than rewritten by TypeScript. Structural brief: expose this as an explicit suspended-session-cache state in doctor/status and offer a read-only preflight before the flip. Acceptance: module memories/notes drain or remain fenced; context mirrors are labeled mirrors; dormant `mc_cache_state` is never reported as active TS authority; re-enabling Rust either resumes the same state or requires an explicit delete; and no config flip silently deletes module history.
+
+### C. Boot/cold-start races — four cells pass; boundary rewind remains fail-loud
+
+The new adapter/module sequence matrix exercises both fresh, fresh module plus warm adapter, fresh adapter plus old module, and mid-turn adapter restart. A matching sequence performs one bootstrap; a mismatch adopts the durable sequence once, discards sender watermarks, rebuilds a full seed, and then advances from the durable value (`packages/plugin/src/hooks/magic-context/module-state-sync.ts:1770-1868`; matrix at `module-state-sync.test.ts:303-369`). Every accepted cell ends at `durable_seq + 1`; none accepts a lower expected sequence.
+
+The module independently protects semantic state after sequence admission. A stale cold seed may add compatibility rows but cannot replace a newer materialized boundary (`crates/mc-module/src/lib.rs:30177-30245`), and stale full state sync cannot rewind a committed boundary-divergence recut (`crates/mc-module/src/transform.rs:22129-22196`). Verdict: each cell is bootstrap-only or adopt, never rewind.
+
+### D. Caveman on aged content — byte parity pinned; live-aged corpus remains an evidence gap
+
+TypeScript and Rust use the same 20/20/20/40 oldest-first depth boundaries (`packages/plugin/src/hooks/magic-context/caveman-cleanup.ts:68-79`; `crates/mc-module/src/transform.rs:6201-6215`), freeze the bust's maximum tag as the age basis, and always recompress from pristine source rather than an intermediate (`caveman-cleanup.ts:81-196`; `transform.rs:6217-6299`). Rust already consumes `crates/mc-module/testdata/caveman-golden.json`; Hunt 8 makes the TypeScript oracle consume that same 42-row corpus and assert exact lite/full/ultra bytes (`packages/plugin/src/hooks/magic-context/caveman.test.ts:255-279`).
+
+No checked-in live `opencode.db` exists, and the isolated worktree fence forbids reading an operator checkout or home database. Therefore the requested genuinely old live-session denominator is **not claimed**. Structural brief: add a read-only aged-session capture command that hashes source rows, records age-basis/tag/depth coordinates, and emits only compressed fixture bytes after explicit operator selection. Acceptance: at least one real old session per live TS/Rust lane; exact shared-source hashes before comparison; identical eligible ordering and depth boundaries; exact compressed bytes at all three depths; no database writes; and no raw unrelated messages in the artifact.
+
+### E. Differ unexplained-byte bucket — hermetic empty and non-vacuous
+
+All previous wire, TS↔Pi, facade, telemetry, engine-adjacent, and operator-read buckets remain. The new seven-family TS↔Rust provider matrix reports no divergent value space and no invalid wire invariant. The negative OpenAI-compatible separator fixture produces both a provider-axis divergence and `tool_result_adjacency_violation`, proving the bucket can go red. Live non-Anthropic captures remain a post-deploy evidence step, not a synthetic claim.
+
+## Landed changes and verification policy
+
+No clear-cut production transform defect survived source and fixture adjudication, so no speculative provider or lifecycle mutation was landed. The delivery extends the dump-first differ, adds the cold-start sequence matrix, and pins TypeScript to the shared caveman byte corpus. Verification includes the differ tests, focused caveman/state-sync tests, TypeScript diagnostics, and the full plugin, Pi, and Rust suite gates. Deliberate non-vacuity mutations must make the provider adjacency guard, cold-sequence adoption, and shared caveman golden fail before restoration.
+
+## Honest-empty declaration
+
+Hunt #8 is **not empty**. It closes the non-Anthropic differ blind spot with seven provider families, adds a non-vacuous issue-#135 invalid-wire bucket, proves the four-cell cold-start sequence matrix, pins both implementations to one caveman byte corpus, and records two precise operational briefs (compaction-off dormant module state and live aged-session evidence). The standing honest-empty counter remains **0/3**. No master push is part of this work.

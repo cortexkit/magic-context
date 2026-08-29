@@ -156,38 +156,24 @@ function resolvePiInvocation(): PiInvocation {
 	return { command: "pi", prefixArgs: [] };
 }
 
-/**
- * Resolve the path to the lean subagent extension entry that gets loaded
- * inside spawned Pi child processes. The bundle ships at
- * `dist/subagent-entry.js` next to `dist/index.js` (this module). We use
- * `import.meta.url` so the path resolves correctly regardless of where
- * the npm package is installed (or where it's symlinked from in dev).
- *
- * Falls back to undefined if the file isn't found at the expected
- * location — caller should treat that as a soft signal to skip the
- * `-x` flag (subagent will run without Magic Context tools, which is
- * acceptable for ctx_*-using agents in dev/test before the bundle exists).
- */
-function resolveSubagentEntryPath(): string | undefined {
+/** Resolve an optional child extension bundled beside the Pi plugin entry. */
+function resolveSiblingEntryPath(fileName: string): string | undefined {
 	try {
-		// Resolve from the current module's directory. In dev (running
-		// .ts via Bun) and in prod (running .js from dist/), this lands
-		// in the same directory as the runner itself.
+		// Source tests run before these sibling bundles exist. Production packaging
+		// emits both entries beside index.js, so missing files safely mean "skip" only
+		// in that pre-build environment.
 		const here = dirname(fileURLToPath(import.meta.url));
-		const candidate = resolvePath(here, "subagent-entry.js");
-		if (existsSync(candidate)) return candidate;
-
-		// Dev fallback: when running source from packages/pi-plugin/src/
-		// the .js bundle doesn't exist yet; skip the --extension flag so
-		// tests running pre-build don't fail. Production builds always
-		// have the bundle.
-		return undefined;
+		const candidate = resolvePath(here, fileName);
+		return existsSync(candidate) ? candidate : undefined;
 	} catch {
 		return undefined;
 	}
 }
 
-const SUBAGENT_ENTRY_PATH = resolveSubagentEntryPath();
+const SUBAGENT_ENTRY_PATH = resolveSiblingEntryPath("subagent-entry.js");
+const HISTORIAN_CALIBRATION_ENTRY_PATH = resolveSiblingEntryPath(
+	"historian-calibration-extension.js",
+);
 
 /**
  * Grace period (ms) after we detect the terminal assistant message_end
@@ -315,6 +301,12 @@ const PI_HISTORIAN_TOOLS = [...PI_READ_ONLY_BUILTINS, "aft_search"] as const;
 const DREAMER_ACTION_AGENTS: ReadonlySet<string> = new Set([
 	"dreamer",
 	"magic-context-dreamer",
+]);
+const HISTORIAN_AGENTS: ReadonlySet<string> = new Set([
+	"magic-context-historian",
+	"historian",
+	"historian-recomp",
+	"historian-editor",
 ]);
 const SEARCH_ONLY_SUBAGENT_TOOL_AGENTS: ReadonlySet<string> = new Set([
 	"sidekick",
@@ -996,6 +988,16 @@ export class PiSubagentRunner implements SubagentRunner {
 						env: {
 							...process.env,
 							[MAGIC_CONTEXT_PI_SUBAGENT_ENV]: "1",
+							...(options.temperature !== undefined
+								? { MAGIC_CONTEXT_HISTORIAN_TEMPERATURE: String(options.temperature) }
+								: {}),
+							...(options.maxOutputTokens !== undefined
+								? {
+									MAGIC_CONTEXT_HISTORIAN_MAX_OUTPUT_TOKENS: String(
+										options.maxOutputTokens,
+									),
+								}
+								: {}),
 						},
 						// stdout = JSON events; stderr = diagnostics. stdin is a pipe
 						// when we deliver the user message there (always on Windows, or
@@ -1653,6 +1655,7 @@ export function buildArgs(
 		subagentEntryPath?: string;
 		systemPromptPath?: string;
 		modelRef?: string;
+		historianCalibrationEntryPath?: string | null;
 	},
 ): string[] {
 	const ompHost = isOmpHostProcess();
@@ -1735,6 +1738,14 @@ export function buildArgs(
 		if (DREAMER_ACTION_AGENTS.has(options.agent)) {
 			args.push("--magic-context-dreamer-actions");
 		}
+	}
+
+	const historianCalibrationEntryPath =
+		opts?.historianCalibrationEntryPath === undefined
+			? HISTORIAN_CALIBRATION_ENTRY_PATH
+			: opts.historianCalibrationEntryPath;
+	if (HISTORIAN_AGENTS.has(options.agent) && historianCalibrationEntryPath) {
+		args.push("--extension", historianCalibrationEntryPath);
 	}
 
 	// Every child receives an explicit built-in tool gate. Pi applies this as

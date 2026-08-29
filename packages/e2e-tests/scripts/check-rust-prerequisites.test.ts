@@ -44,5 +44,13 @@ describe("Rust release prerequisite detector", () => {
         });
         expect(hidden.ok).toBe(false);
         expect(hidden.missing.join("\n")).toContain("ck-mc binary");
+
+        const hermetic = detectRustPrerequisites({
+            repoRoot: root,
+            requireCkMc: false,
+            env: { PATH: cargoOnly },
+        });
+        expect(hermetic.ok).toBe(false);
+        expect(hermetic.missing.join("\n")).not.toContain("ck-mc binary");
     });
 });

@@ -958,6 +958,48 @@ describe("createMagicContextCommandHandler", () => {
     });
 
     describe("Rust-mode command operations", () => {
+        it("omits context.db mirrors when canonical status is unavailable", async () => {
+            insertTag(db, "ses-rust-status-unavailable", 1, 1024);
+            const sendNotification = mock(async () => {});
+            const getStatusDetail = mock(() => {
+                throw new Error("host mirror must not be formatted");
+            });
+            const handler = createMagicContextCommandHandler({
+                db,
+                protectedTags: 3,
+                transformMode: "rust",
+                rustModeModuleClient: {
+                    call: async () => {
+                        throw new Error("module offline");
+                    },
+                },
+                getStatusDetail,
+                sendNotification,
+            });
+
+            await expectSentinel(
+                handler["command.execute.before"](
+                    {
+                        command: "ctx-status",
+                        sessionID: "ses-rust-status-unavailable",
+                        arguments: "",
+                    },
+                    makeOutput(""),
+                    {},
+                ),
+                "__CONTEXT_MANAGEMENT_CTX-STATUS_HANDLED__",
+            );
+
+            expect(getStatusDetail).not.toHaveBeenCalled();
+            expect(sendNotification).toHaveBeenCalledWith(
+                "ses-rust-status-unavailable",
+                expect.stringContaining("Rust module status could not be read"),
+                {},
+            );
+            const text = String(sendNotification.mock.calls[0]?.[1]);
+            expect(text).not.toContain("- Active: 1");
+        });
+
         it("routes flush to the module while retaining flush wording", async () => {
             const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
             const sendNotification = mock(async () => {});
@@ -1055,6 +1097,128 @@ describe("createMagicContextCommandHandler", () => {
                 expect.stringContaining("Wrapped up."),
                 {},
             );
+        });
+
+        it("refuses Rust partial recomp and session upgrade without touching either authority store", async () => {
+            const sendNotification = mock(async () => {});
+            const moduleCall = mock(async () => ({ disposition: "started" }));
+            const runUpgrade = mock(async () => "TS upgrade ran");
+            const handler = createMagicContextCommandHandler({
+                db,
+                protectedTags: 3,
+                transformMode: "rust",
+                rustModeModuleClient: { call: moduleCall },
+                runUpgrade,
+                sendNotification,
+            });
+
+            await expectSentinel(
+                handler["command.execute.before"](
+                    {
+                        command: "ctx-recomp",
+                        sessionID: "ses-rust-maintenance",
+                        arguments: "10-20",
+                    },
+                    makeOutput(""),
+                    {},
+                ),
+                "__CONTEXT_MANAGEMENT_CTX-RECOMP_HANDLED__",
+            );
+            await expectSentinel(
+                handler["command.execute.before"](
+                    {
+                        command: "ctx-session-upgrade",
+                        sessionID: "ses-rust-maintenance",
+                        arguments: "",
+                    },
+                    makeOutput(""),
+                    {},
+                ),
+                "__CONTEXT_MANAGEMENT_CTX-SESSION-UPGRADE_HANDLED__",
+            );
+
+            expect(moduleCall).not.toHaveBeenCalled();
+            expect(runUpgrade).not.toHaveBeenCalled();
+            const text = (sendNotification.mock.calls as unknown as Array<[string, string]>)
+                .map(([, notification]) => notification)
+                .join("\n");
+            expect(text).toContain("module supports only a full-session recomp");
+            expect(text).toContain("switch authority through the documented drain flow");
+        });
+
+        it("maps every shared wrapup state cell to the TypeScript outcome contract", async () => {
+            const matrix = [
+                {
+                    cell: "empty",
+                    disposition: "nothing_to_compact",
+                    expectedHeading: "## Magic Wrapup",
+                    forbiddenHeading: "— Partial",
+                },
+                {
+                    cell: "active",
+                    disposition: "already_in_progress",
+                    expectedHeading: "## Magic Wrapup — Skipped",
+                },
+                ...[
+                    "lease_timeout",
+                    "zero_progress",
+                    "partial_progress",
+                    "producer_failure",
+                    "ownership_loss",
+                ].map((cell) => ({
+                    cell,
+                    disposition: "retryable",
+                    expectedHeading: "## Magic Wrapup — Partial",
+                })),
+                {
+                    cell: "success",
+                    disposition: "completed",
+                    expectedHeading: "## Magic Wrapup",
+                    forbiddenHeading: "— Partial",
+                },
+            ];
+
+            for (const row of matrix) {
+                const sendNotification = mock(async () => {});
+                const moduleCall = mock(async () => ({
+                    ok: true,
+                    disposition: row.disposition,
+                    rounds: row.cell === "success" ? 2 : 0,
+                    summary: `matrix:${row.cell}`,
+                }));
+                const handler = createMagicContextCommandHandler({
+                    db,
+                    protectedTags: 3,
+                    transformMode: "rust",
+                    rustModeModuleClient: { call: moduleCall },
+                    sendNotification,
+                });
+                const sessionId = `ses-rust-wrapup-matrix-${row.cell}`;
+
+                await expectSentinel(
+                    handler["command.execute.before"](
+                        { command: "ctx-wrapup", sessionID: sessionId, arguments: "" },
+                        makeOutput(""),
+                        {},
+                    ),
+                    "__CONTEXT_MANAGEMENT_CTX-WRAPUP_HANDLED__",
+                );
+
+                const text = (sendNotification.mock.calls as unknown as Array<[string, string]>)
+                    .filter(([notifiedSession]) => notifiedSession === sessionId)
+                    .map(([, notification]) => notification)
+                    .join("\n");
+                expect(text, row.cell).toContain(row.expectedHeading);
+                if (row.disposition !== "already_in_progress") {
+                    expect(text, row.cell).toContain(`matrix:${row.cell}`);
+                }
+                if (row.forbiddenHeading)
+                    expect(text, row.cell).not.toContain(row.forbiddenHeading);
+                if (row.disposition === "retryable") {
+                    expect(text, row.cell).toContain("Run /ctx-wrapup again to continue.");
+                    expect(text, row.cell).not.toContain("— Failed");
+                }
+            }
         });
 
         it("presents a retryable Rust wrapup as Partial with a continuation, not Failed", async () => {

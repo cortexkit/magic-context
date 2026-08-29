@@ -113,6 +113,7 @@ import { modelAcceptsEmptyContent } from "./sentinel";
 import {
     replayClearedReasoning,
     replayStrippedInlineThinking,
+    snapshotTrailingBlankSourceDecisions,
     stripClearedReasoning,
 } from "./strip-content";
 import { injectTemporalMarkers } from "./temporal-awareness";
@@ -121,6 +122,7 @@ import { loadContextUsage, resolveSchedulerDecision } from "./transform-context-
 import { findLastUserMessageId, findSessionId } from "./transform-message-helpers";
 import {
     applyFlushedStatuses,
+    hasRecentAssistantCommit,
     type MessageLike,
     stripStructuralNoise,
     type TagTarget,
@@ -694,6 +696,21 @@ export function createTransform(deps: TransformDeps) {
     const deferredMaterializationSessions =
         deps.deferredMaterializationSessions ?? new Set<string>();
 
+    const observeCommitNudgeTransition = (
+        sessionId: string,
+        hasRecentCommit: boolean,
+        isSubagent: boolean,
+    ): void => {
+        const hadPriorCommitState = deps.commitSeenLastPass?.has(sessionId) ?? false;
+        const sawCommitLastPass = deps.commitSeenLastPass?.get(sessionId) ?? false;
+        // The first pass establishes a restart-safe baseline. Only a later
+        // absent→present edge is a new commit, and subagents never deliver note nudges.
+        if (!isSubagent && hadPriorCommitState && hasRecentCommit && !sawCommitLastPass) {
+            onNoteTrigger(deps.db, sessionId, "commit_detected");
+        }
+        deps.commitSeenLastPass?.set(sessionId, hasRecentCommit);
+    };
+
     const transform = async (
         _input: Record<string, never>,
         output: { messages: unknown[] },
@@ -833,13 +850,27 @@ export function createTransform(deps: TransformDeps) {
                 sessionLog(sessionId, "rust transform unavailable; using raw passthrough");
                 return;
             }
+            if (!compactionOff) {
+                observeCommitNudgeTransition(
+                    sessionId,
+                    hasRecentAssistantCommit(messages),
+                    sessionMeta.isSubagent,
+                );
+            }
             await rustModeTransform.run(sessionId, messages, output, sessionMeta);
+            // Rust returns before the TypeScript post-pass hook below. Run the
+            // host-owned embedding trigger after either implementation publishes.
+            deps.maybeAutoEmbedSession?.(sessionId);
             return;
         }
 
         // System prompt change detection is handled in experimental.chat.system.transform
         // (see system-prompt-hash.ts), not here. The messages transform only receives
         // user/assistant messages, not the system prompt.
+
+        // Freeze the harness-derived suffix shape before tagging, structural-noise
+        // sentinels, and synthetic injections can alter the live message graph.
+        const trailingBlankSourceDecisions = snapshotTrailingBlankSourceDecisions(messages);
 
         const reducedMode = sessionMeta.isSubagent;
         const fullFeatureMode = !reducedMode;
@@ -1828,21 +1859,7 @@ export function createTransform(deps: TransformDeps) {
                 messageTagNumbers = result.messageTagNumbers;
                 batch = result.batch;
                 hasRecentReduceCall = result.hasRecentReduceCall;
-                const hadPriorCommitState = deps.commitSeenLastPass?.has(sessionId) ?? false;
-                const sawCommitLastPass = deps.commitSeenLastPass?.get(sessionId) ?? false;
-                // Only trigger on NEW commits — not on first pass after restart where
-                // we have no baseline. First pass establishes the baseline silently.
-                // Subagents never deliver note nudges (gated in postprocess), so skip
-                // accumulating orphan trigger state.
-                if (
-                    fullFeatureMode &&
-                    hadPriorCommitState &&
-                    result.hasRecentCommit &&
-                    !sawCommitLastPass
-                ) {
-                    onNoteTrigger(db, sessionId, "commit_detected");
-                }
-                deps.commitSeenLastPass?.set(sessionId, result.hasRecentCommit);
+                observeCommitNudgeTransition(sessionId, result.hasRecentCommit, !fullFeatureMode);
                 logTransformTiming(sessionId, "tagMessages", t0);
                 taggingSucceeded = true;
             } catch (error) {
@@ -2217,6 +2234,7 @@ export function createTransform(deps: TransformDeps) {
             // empty-sentinel gate and whole-message placeholder choice agrees for
             // this transform pass, including cold DB-recovered passes.
             resolvedProviderID,
+            trailingBlankSourceDecisions,
             passOutcome,
             historyRefreshSessions: deps.historyRefreshSessions,
             m0M1: {
@@ -2230,6 +2248,7 @@ export function createTransform(deps: TransformDeps) {
                 projectPath: projectIdentity,
                 projectDirectory: sessionDirectory,
                 injectDocs: deps.injectDocs,
+                memoryEnabled: deps.memoryConfig?.enabled,
                 memoryInjectionBudgetTokens: deps.memoryConfig?.injectionBudgetTokens,
                 historyBudgetTokens,
                 temporalAwareness: deps.experimentalTemporalAwareness,

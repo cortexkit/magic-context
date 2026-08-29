@@ -1,4 +1,4 @@
-//! DG-1..5 differential goldens: TS emits fixtures, Rust consumes them in-process.
+//! DG-1..6 differential goldens: TS emits fixtures, Rust consumes them in-process.
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -6,10 +6,12 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use crate::ck_wire::{CkIngressMessage, CkWireMessage};
+use crate::healing::SerializerProfile;
 use crate::transform::{
-    is_newest_synthetic_user_prompt, user_terminated_tail_decision, TransformRequest,
-    TransformResponse, UserTerminatedTailDecision,
+    apply_frozen_trailing_blank_decision, is_newest_synthetic_user_prompt,
+    user_terminated_tail_decision, TransformRequest, TransformResponse, UserTerminatedTailDecision,
 };
+use mc_core::{CoreState, DurabilityClass, FrozenUnit};
 
 use super::{attach_native_messages_incremental, NativeAttachmentCache, NativeCacheKeyMode};
 
@@ -98,6 +100,35 @@ fn rust_wire_for_case(case: &GoldenCase, input_wire: &[Value]) -> Vec<Value> {
             });
         }
     }
+    if case.family == "trailing-blank-keep-zero-source" {
+        let frozen = &case.input["frozen_decision"];
+        let mid = frozen["message_id"]
+            .as_str()
+            .expect("DG trailing-blank target id");
+        assert_eq!(frozen["decision"], "keep");
+        let core = CoreState {
+            frozen_units: vec![FrozenUnit {
+                key: format!("strip:trailing_blank_keep:{mid}"),
+                kind: "strip_trailing_blank_keep".to_string(),
+                frozen_payload: String::new(),
+                durability_class: DurabilityClass::Lineage,
+                reset_rule: String::new(),
+            }],
+            ..Default::default()
+        };
+        let target = messages
+            .iter_mut()
+            .find(|message| message.meta.harness_id.as_deref() == Some(mid))
+            .expect("DG trailing-blank target must be present");
+        apply_frozen_trailing_blank_decision(
+            &core,
+            SerializerProfile::OpencodeAiSdk,
+            Some("anthropic"),
+            false,
+            mid,
+            target,
+        );
+    }
     messages
         .iter()
         .map(|message| serde_json::to_value(message).expect("serialize CK wire"))
@@ -109,9 +140,9 @@ fn dg_goldens_match_ts_wire_surface_and_gate_labels() {
     let golden: Golden = serde_json::from_str(include_str!("../testdata/differential-golden.json"))
         .expect("parse differential golden");
     assert_eq!(golden.schema, 1);
-    assert_eq!(golden.provenance.generator_version, "dg-reference-v3");
+    assert_eq!(golden.provenance.generator_version, "dg-reference-v4");
     assert_eq!(golden.provenance.input_sha256.len(), 64);
-    assert_eq!(golden.cases.len(), 5);
+    assert_eq!(golden.cases.len(), 6);
 
     for case in &golden.cases {
         let input_wire = case.input["messages"]
@@ -169,7 +200,7 @@ fn dg_golden_vacuity_guard_rejects_one_byte_fixture_perturbation_per_family() {
         );
         observed += 1;
     }
-    assert_eq!(observed, 5, "every DG family needs a vacuity mutation");
+    assert_eq!(observed, 6, "every DG family needs a vacuity mutation");
 }
 
 #[test]

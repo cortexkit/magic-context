@@ -937,8 +937,12 @@ export interface PiHistorianOptions {
 	fallbackModels?: readonly ModelInput[];
 	/** Historian context window — used to derive chunk token budget. */
 	historianChunkTokens: number;
-	/** Optional per-call timeout (default 120s). */
+	/** Optional per-call timeout (default 600s). */
 	timeoutMs?: number;
+	/** Provider sampling temperature; when omitted, uses the temperature configured for historian runs. */
+	temperature?: number;
+	/** Provider output budget; when omitted, uses the output-token budget configured for historian runs. */
+	maxOutputTokens?: number;
 	/** When true, run a second editor pass after a successful first pass to
 	 *  clean low-signal U: lines and cross-compartment duplicates. Mirrors
 	 *  OpenCode's `historian.two_pass` config. */
@@ -3651,6 +3655,8 @@ function spawnPiHistorianRun(args: {
 				refreshBoundarySnapshot,
 				currentContextLimit,
 				historianTimeoutMs: historian.timeoutMs,
+				temperature: historian.temperature,
+				maxOutputTokens: historian.maxOutputTokens,
 				twoPass: historian.twoPass,
 				thinkingLevel: historian.thinkingLevel,
 				memoryEnabled: historian.memoryEnabled,

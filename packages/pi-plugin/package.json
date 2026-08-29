@@ -1,6 +1,6 @@
 {
   "name": "@cortexkit/pi-magic-context",
-  "version": "0.40.0",
+  "version": "0.40.1",
   "type": "module",
   "description": "Pi and OMP coding agent extension for Magic Context — cross-session memory and context management",
   "main": "dist/index.js",
@@ -28,7 +28,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -p ../retina-local-fs/tsconfig.build.json && rm -f dist/index.js dist/subagent-entry.js dist/*-*.js && bun build src/index.ts src/subagent-entry.ts --outdir dist --target node --format esm --splitting --external @earendil-works/pi-coding-agent --external @earendil-works/pi-tui --external @huggingface/transformers --external node:sqlite",
+    "build": "tsc -p ../retina-local-fs/tsconfig.build.json && rm -f dist/index.js dist/subagent-entry.js dist/historian-calibration-extension.js dist/*-*.js && bun build src/index.ts src/subagent-entry.ts src/historian-calibration-extension.ts --outdir dist --target node --format esm --splitting --external @earendil-works/pi-coding-agent --external @earendil-works/pi-tui --external @huggingface/transformers --external node:sqlite",
     "build:e2e-argv": "bun build src/subagent-runner.ts --outfile ../../tests/docker/.generated/subagent-runner-e2e.mjs --target node --format esm --external node:sqlite",
     "typecheck": "tsc -p ../retina-local-fs/tsconfig.build.json && tsc --noEmit",
     "test": "bun install --frozen-lockfile && bun test",

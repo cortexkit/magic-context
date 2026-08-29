@@ -11,6 +11,9 @@ const tempRoots: string[] = [];
 const originalHome = process.env.HOME;
 const originalPiDir = process.env.PI_CODING_AGENT_DIR;
 const originalDataHome = process.env.XDG_DATA_HOME;
+const originalStorageDir = process.env.MAGIC_CONTEXT_STORAGE_DIR;
+const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+const originalNodeEnv = process.env.NODE_ENV;
 const originalCacheHome = process.env.XDG_CACHE_HOME;
 const originalConfigHome = process.env.XDG_CONFIG_HOME;
 
@@ -27,6 +30,12 @@ afterEach(() => {
     else process.env.PI_CODING_AGENT_DIR = originalPiDir;
     if (originalDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalDataHome;
+    if (originalStorageDir === undefined) delete process.env.MAGIC_CONTEXT_STORAGE_DIR;
+    else process.env.MAGIC_CONTEXT_STORAGE_DIR = originalStorageDir;
+    if (originalTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = originalTestDataDir;
+    if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = originalNodeEnv;
     if (originalCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = originalCacheHome;
     if (originalConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
@@ -46,12 +55,47 @@ describe("sanitizeValue Pi diagnostics redaction", () => {
             }),
         ).toEqual({
             execute_threshold_tokens: 200000,
-            api_key: "<REDACTED>",
+            api_key: "<REDACTED:api_key>",
+        });
+    });
+
+    it("uses the shared key classifier for token budgets and secret classes", () => {
+        expect(
+            sanitizeValue({
+                execute_threshold_tokens: { default: 200000 },
+                injection_budget_tokens: 4000,
+                access_token: "high-entropy-access-token",
+                hasUsageTokens: true,
+            }),
+        ).toEqual({
+            execute_threshold_tokens: { default: 200000 },
+            injection_budget_tokens: 4000,
+            access_token: "<REDACTED:access_token>",
+            hasUsageTokens: true,
         });
     });
 });
 
 describe("collectDiagnostics Pi path resolution", () => {
+    it("reports the explicit shared storage directory and its source", async () => {
+        const root = makeTempRoot();
+        const cwd = join(root, "workspace");
+        const storageDir = join(root, "shared-magic-context");
+        process.env.HOME = join(root, "home");
+        process.env.XDG_DATA_HOME = join(root, "private-data");
+        process.env.XDG_CACHE_HOME = join(root, "cache");
+        process.env.XDG_CONFIG_HOME = join(root, "config");
+        process.env.MAGIC_CONTEXT_STORAGE_DIR = storageDir;
+        delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+        process.env.NODE_ENV = "development";
+
+        mkdirSync(cwd, { recursive: true });
+        const report = await collectDiagnostics(cwd);
+
+        expect(report.storageDir.path).toBe(storageDir);
+        expect(report.storageDir.source).toBe("environment override");
+    });
+
     it("reads recent sessions from PI_CODING_AGENT_DIR instead of HOME/.pi/agent", async () => {
         const root = makeTempRoot();
         const home = join(root, "home");

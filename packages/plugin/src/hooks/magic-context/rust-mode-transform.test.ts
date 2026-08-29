@@ -10,6 +10,7 @@ import {
     getAuthorityManagedMarker,
 } from "../../features/magic-context/context-authority";
 import { insertMemory } from "../../features/magic-context/memory";
+import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
 import { runMigrations } from "../../features/magic-context/migrations";
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import { getChannel2NudgeState, setChannel2NudgeState } from "../../features/magic-context/storage";
@@ -353,6 +354,15 @@ describe("Rust mode authority adapter", () => {
 
         expect(authorityRoots.length).toBeGreaterThan(0);
         expect(authorityRoots.every((root) => root === "/session/root-b")).toBe(true);
+        expect(
+            db
+                .prepare(
+                    "SELECT project_path FROM session_projects WHERE session_id = ? AND harness = 'opencode'",
+                )
+                .get(sessionId),
+        ).toEqual({
+            project_path: resolveProjectIdentityForSession("/session/root-b", false),
+        });
     });
 
     it("transports the host-resolved output_reserve as Rust usable_soft", () => {
@@ -437,6 +447,31 @@ describe("Rust mode authority adapter", () => {
             midTurn: false,
         });
         expect(body.history_budget_tokens).toBe(42_000);
+    });
+
+    it("copies the profile-resolved historian chain onto the authority wire", () => {
+        const historianModelChain = __rustModeTransformTest.resolvedHistorianModelChain({
+            historianModel: { model: "anthropic/profile-historian", qualifier: "high" },
+            fallbackModels: [
+                { model: "openai/profile-fallback", qualifier: "low" },
+                "anthropic/profile-historian",
+            ],
+        });
+        const body = __rustModeTransformTest.buildTransformBody({
+            sessionId: "profile-model-wire",
+            input: [],
+            nativeMessages: [],
+            passInputs: { historian_model_chain: historianModelChain },
+            usage: {},
+            modelKey: null,
+            providerId: null,
+            midTurn: false,
+        });
+
+        expect(body.historian_model_chain).toEqual([
+            "anthropic/profile-historian",
+            "openai/profile-fallback",
+        ]);
     });
 
     it("gates and copies a mural payload onto the transform wire", () => {
@@ -2394,6 +2429,37 @@ describe("Rust mode authority adapter", () => {
         expect(getSlot(sessionId)?.jsonPrefix).toContain("recovered synchronously");
     });
 
+    it("keeps the raw array untouched when overflow-state storage is unreadable", async () => {
+        const sessionId = `rust-overflow-state-fault-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const moduleCall = mock(async () => {
+            throw new Error("module must not run after the preflight storage fault");
+        });
+        const moduleClient: RustModeModuleClient = { call: moduleCall };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const input = [
+            {
+                info: {
+                    id: "m1",
+                    role: "user",
+                    sessionID: sessionId,
+                    model: { providerID: "test-provider", modelID: "test-model" },
+                },
+                parts: [{ type: "text", text: "raw must survive" }],
+            },
+        ] as MessageLike[];
+        const meta = makeMeta(db, sessionId);
+        db.exec("DROP TABLE session_meta");
+        const output = { messages: [] as unknown[] };
+
+        await transform.run(sessionId, input, output, meta);
+
+        expect(output.messages).toEqual(input);
+        expect(moduleCall).not.toHaveBeenCalled();
+    });
+
     it("throws locally instead of serving raw above a known context limit", async () => {
         const sessionId = `rust-raw-limit-${Date.now()}`;
         sessions.push(sessionId);
@@ -3778,6 +3844,133 @@ describe("LKG durability across restarts", () => {
         }
     });
 
+    it("freezes a replayed representation across defers and converts it on a bust", async () => {
+        const sessionId = `rust-lkg-frozen-transition-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const input = makeRestartInput(sessionId);
+        const representationA = [
+            {
+                info: { id: "m1", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "representation A" }],
+            },
+        ];
+        const representationB = [
+            {
+                info: { id: "m1", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "representation B" }],
+            },
+        ];
+        const representationC = [
+            ...representationB,
+            {
+                info: { id: "m2", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "delta tail" }],
+            },
+        ];
+        let pass = 0;
+        const transformBodies: Record<string, unknown>[] = [];
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method, body }) => {
+                if (method !== "transform") return { ok: true };
+                transformBodies.push(body as Record<string, unknown>);
+                pass += 1;
+                if (pass === 2) throw new Error("daemon unavailable");
+                return {
+                    decision: pass === 4 ? "HARD" : pass === 1 ? "HARD" : "SOFT+",
+                    native_messages: structuredClone(
+                        pass === 1 ? representationA : pass >= 5 ? representationC : representationB,
+                    ),
+                };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+
+        const initial = { messages: [...input] as unknown[] };
+        await transform.run(sessionId, input, initial, makeMeta(db, sessionId));
+        expect(initial.messages).toEqual(representationA);
+
+        const fallback = { messages: [...input] as unknown[] };
+        await transform.run(sessionId, input, fallback, makeMeta(db, sessionId));
+        expect(fallback.messages).toEqual(representationA);
+
+        const deferred = { messages: [...input] as unknown[] };
+        await transform.run(sessionId, input, deferred, makeMeta(db, sessionId));
+        expect(deferred.messages).toEqual(representationA);
+
+        const busted = { messages: [...input] as unknown[] };
+        await transform.run(sessionId, input, busted, makeMeta(db, sessionId));
+        expect(busted.messages).toEqual(representationB);
+        expect(transformBodies[2]?.tail_delta).toBeUndefined();
+        expect(transformBodies[3]?.tail_delta).toBeUndefined();
+
+        const resumedInput = [
+            ...input,
+            {
+                info: {
+                    id: "m2",
+                    role: "user",
+                    sessionID: sessionId,
+                    model: { providerID: "test-provider", modelID: "test-model" },
+                },
+                parts: [{ type: "text", text: "delta tail" }],
+            },
+        ] as MessageLike[];
+        const resumed = { messages: [...resumedInput] as unknown[] };
+        await transform.run(sessionId, resumedInput, resumed, makeMeta(db, sessionId));
+        expect(resumed.messages).toEqual(representationC);
+        expect(transformBodies[4]?.tail_delta).toBeDefined();
+    });
+
+    it("drops a frozen LKG instead of replaying it after an in-process model flip", async () => {
+        const sessionId = `rust-lkg-frozen-model-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const input = makeRestartInput(sessionId);
+        const frozenRepresentation = [
+            {
+                info: { id: "m1", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "frozen representation" }],
+            },
+        ];
+        let calls = 0;
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) => {
+                if (method !== "transform") return { ok: true };
+                calls += 1;
+                if (calls > 1) throw new Error("daemon unavailable");
+                return {
+                    decision: "HARD",
+                    native_messages: structuredClone(frozenRepresentation),
+                };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        await transform.run(
+            sessionId,
+            input,
+            { messages: [...input] },
+            makeMeta(db, sessionId),
+        );
+        const fallback = { messages: [...input] as unknown[] };
+        await transform.run(sessionId, input, fallback, makeMeta(db, sessionId));
+        expect(fallback.messages).toEqual(frozenRepresentation);
+
+        const switchedInput = structuredClone(input);
+        switchedInput[0]!.info.model = {
+            providerID: "test-provider",
+            modelID: "other-model",
+        };
+        const switched = { messages: [...switchedInput] as unknown[] };
+        await transform.run(sessionId, switchedInput, switched, makeMeta(db, sessionId));
+
+        expect(switched.messages).toEqual(switchedInput);
+        expect(getSlot(sessionId)).toBeUndefined();
+        expect(transform.getState(sessionId).forceFullWire).toBe(true);
+    });
+
     it("still refuses a model change on a hydrated slot", async () => {
         const sessionId = `rust-lkg-restart-model-${Date.now()}`;
         sessions.push(sessionId);
@@ -4025,5 +4218,100 @@ describe("raw fallback refusal copy and early abort", () => {
             );
         }
         expect(parkedMessages).toEqual([ENGINE_RECONNECTING_USER_MESSAGE]);
+    });
+});
+
+describe("authoritySeedRows — supersede pointer resolution (issue #377)", () => {
+    // The store records a pending memory reference for any seeded row whose
+    // superseded_by_memory_id it cannot resolve, and authority_finish_prepare
+    // rejects the memories-domain handoff while any pending references exist.
+    // A target outside the seed set can never resolve, so the pending survives
+    // the resolution sweep and blocks rust mode permanently.
+    function seedDb(): ContextDatabase {
+        const db = new Database(":memory:") as ContextDatabase;
+        initializeDatabase(db);
+        return db;
+    }
+
+    function insert(
+        db: ContextDatabase,
+        project: string,
+        content: string,
+        status: string,
+    ): number {
+        const now = Date.now();
+        db.prepare(
+            `INSERT INTO memories
+               (project_path, category, content, normalized_hash, source_type,
+                seen_count, retrieval_count, first_seen_at, created_at, updated_at,
+                last_seen_at, status)
+             VALUES (?, 'ARCHITECTURE', ?, ?, 'agent', 1, 0, ?, ?, ?, ?, ?)`,
+        ).run(project, content, `hash-${content}`, now, now, now, now, status);
+        return Number(
+            (db.prepare("SELECT last_insert_rowid() AS id").get() as { id: number }).id,
+        );
+    }
+
+    it("drops a supersede pointer whose target is absent from the seed set", () => {
+        const db = seedDb();
+        try {
+            const project = "git:seed-test";
+            const survivor = insert(db, project, "survivor", "active");
+            const superseded = insert(db, project, "superseded", "archived");
+            const orphaned = insert(db, project, "orphaned", "archived");
+
+            // Resolvable: target is in the same seed set.
+            db.prepare("UPDATE memories SET superseded_by_memory_id = ? WHERE id = ?").run(
+                survivor,
+                superseded,
+            );
+            // Unresolvable: target id never existed in this project.
+            db.prepare("UPDATE memories SET superseded_by_memory_id = ? WHERE id = ?").run(
+                999_999,
+                orphaned,
+            );
+
+            const rows = __rustModeTransformTest.authoritySeedRows(db, project, "memories");
+            const byId = new Map(
+                rows.map((row) => [
+                    Number((row as { source_row_id: unknown }).source_row_id),
+                    (row as { snapshot: Record<string, unknown> }).snapshot,
+                ]),
+            );
+
+            // The dead link is dropped so the module never records a pending reference.
+            expect(byId.get(orphaned)?.superseded_by_memory_id).toBeNull();
+            // The resolvable pointer is preserved verbatim — this must stay surgical,
+            // not a blanket null of the column.
+            expect(byId.get(superseded)?.superseded_by_memory_id).toBe(survivor);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    it("drops a supersede pointer whose target belongs to another project", () => {
+        const db = seedDb();
+        try {
+            const project = "git:seed-a";
+            const foreign = insert(db, "git:seed-b", "foreign-target", "active");
+            const local = insert(db, project, "local", "archived");
+            db.prepare("UPDATE memories SET superseded_by_memory_id = ? WHERE id = ?").run(
+                foreign,
+                local,
+            );
+
+            const rows = __rustModeTransformTest.authoritySeedRows(db, project, "memories");
+            const snapshot = (
+                rows.find(
+                    (row) => Number((row as { source_row_id: unknown }).source_row_id) === local,
+                ) as { snapshot: Record<string, unknown> }
+            ).snapshot;
+
+            // The seed set is project-scoped, so a cross-project target is
+            // equally unresolvable module-side.
+            expect(snapshot.superseded_by_memory_id).toBeNull();
+        } finally {
+            closeQuietly(db);
+        }
     });
 });

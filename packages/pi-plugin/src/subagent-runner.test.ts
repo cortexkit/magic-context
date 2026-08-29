@@ -186,6 +186,7 @@ function buildArgsForTest(
 ) {
 	return __test.buildArgs(options, {
 		systemPromptPath: TEST_SYSTEM_PROMPT_PATH,
+		historianCalibrationEntryPath: null,
 		...opts,
 	});
 }
@@ -275,6 +276,24 @@ describe("subagent-runner pure helpers", () => {
 			// historian.thinking_level in their Pi magic-context.jsonc.
 			"summarize this session",
 		]);
+	});
+
+	it("loads the provider calibration extension only for historian requests", () => {
+		const historian = buildArgsForTest(
+			{ ...baseOptions, agent: "magic-context-historian" },
+			{ historianCalibrationEntryPath: "/tmp/historian-calibration.js" },
+		);
+		expect(historian).toEqual(
+			expect.arrayContaining([
+				"--extension",
+				"/tmp/historian-calibration.js",
+			]),
+		);
+		const sidekick = buildArgsForTest(
+			{ ...baseOptions, agent: "sidekick" },
+			{ historianCalibrationEntryPath: "/tmp/historian-calibration.js" },
+		);
+		expect(sidekick).not.toContain("/tmp/historian-calibration.js");
 	});
 
 	it("passes the active entry thinking level through Pi's --thinking flag", () => {
@@ -1031,6 +1050,8 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 			...baseOptions,
 			model: "anthropic/claude-sonnet",
 			cwd: "/tmp/project",
+			temperature: 0.1,
+			maxOutputTokens: 32_000,
 		});
 		child.writeStderr("warning from pi");
 		child.writeStdoutLine({ type: "session", id: "s1" });
@@ -1054,6 +1075,8 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 				cwd: "/tmp/project",
 				env: expect.objectContaining({
 					MAGIC_CONTEXT_PI_SUBAGENT: "1",
+					MAGIC_CONTEXT_HISTORIAN_TEMPERATURE: "0.1",
+					MAGIC_CONTEXT_HISTORIAN_MAX_OUTPUT_TOKENS: "32000",
 					PATH: process.env.PATH,
 				}),
 				stdio: ["ignore", "pipe", "pipe"],

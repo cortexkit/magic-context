@@ -1,0 +1,4 @@
+# m1bench is the dedicated private-source release runner.
+self-hosted-runner:
+  labels:
+    - m1bench

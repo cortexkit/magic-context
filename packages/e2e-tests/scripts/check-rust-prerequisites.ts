@@ -7,6 +7,8 @@ import { spawnSync } from "node:child_process";
 export interface RustPrerequisiteOptions {
     repoRoot?: string;
     allowBuild?: boolean;
+    /** Hermetic e2e builds ck-mc in its own Cargo target, so it needs source rather than a prebuilt binary. */
+    requireCkMc?: boolean;
     env?: NodeJS.ProcessEnv;
 }
 
@@ -60,6 +62,7 @@ function buildCkMc(cargo: string, repoRoot: string, env: NodeJS.ProcessEnv): boo
 export function detectRustPrerequisites(options: RustPrerequisiteOptions = {}): RustPrerequisiteResult {
     const repoRoot = resolve(options.repoRoot ?? resolve(import.meta.dir, "../../.."));
     const env = options.env ?? process.env;
+    const requireCkMc = options.requireCkMc ?? true;
     const missing: string[] = [];
     const cargo = pathCommand("cargo", env.PATH);
     const commonsRoot = resolve(repoRoot, "../commons");
@@ -81,22 +84,25 @@ export function detectRustPrerequisites(options: RustPrerequisiteOptions = {}): 
         );
     }
 
-    const configuredCkMc = env.MC_E2E_CK_MC_BIN;
-    let ckMcBin = configuredCkMc && isExecutable(configuredCkMc) ? configuredCkMc : undefined;
-    if (!ckMcBin) {
-        const workspaceCkMc = join(repoRoot, "target/release/ck-mc");
-        ckMcBin = isExecutable(workspaceCkMc) ? workspaceCkMc : pathCommand("ck-mc", env.PATH);
-    }
-    if (!ckMcBin && options.allowBuild && cargo && missing.length === 0) {
-        if (buildCkMc(cargo, repoRoot, env)) {
+    let ckMcBin: string | undefined;
+    if (requireCkMc) {
+        const configuredCkMc = env.MC_E2E_CK_MC_BIN;
+        ckMcBin = configuredCkMc && isExecutable(configuredCkMc) ? configuredCkMc : undefined;
+        if (!ckMcBin) {
             const workspaceCkMc = join(repoRoot, "target/release/ck-mc");
-            if (isExecutable(workspaceCkMc)) ckMcBin = workspaceCkMc;
+            ckMcBin = isExecutable(workspaceCkMc) ? workspaceCkMc : pathCommand("ck-mc", env.PATH);
         }
-    }
-    if (!ckMcBin) {
-        missing.push(
-            "ck-mc binary: target/release/ck-mc is absent and no ck-mc executable was found on PATH",
-        );
+        if (!ckMcBin && options.allowBuild && cargo && missing.length === 0) {
+            if (buildCkMc(cargo, repoRoot, env)) {
+                const workspaceCkMc = join(repoRoot, "target/release/ck-mc");
+                if (isExecutable(workspaceCkMc)) ckMcBin = workspaceCkMc;
+            }
+        }
+        if (!ckMcBin) {
+            missing.push(
+                "ck-mc binary: target/release/ck-mc is absent and no ck-mc executable was found on PATH",
+            );
+        }
     }
 
     return {
@@ -108,29 +114,35 @@ export function detectRustPrerequisites(options: RustPrerequisiteOptions = {}): 
     };
 }
 
-function parseArgs(args: string[]): { build: boolean; print: boolean } {
+function parseArgs(args: string[]): { build: boolean; print: boolean; hermetic: boolean } {
     let build = false;
     let print = false;
+    let hermetic = false;
     for (const arg of args) {
         if (arg === "--build") build = true;
         else if (arg === "--print") print = true;
+        else if (arg === "--hermetic") hermetic = true;
         else if (arg === "--help" || arg === "-h") {
-            console.log("Usage: check-rust-prerequisites.ts [--build] [--print]");
+            console.log("Usage: check-rust-prerequisites.ts [--build] [--print] [--hermetic]");
             process.exit(0);
         } else throw new Error(`unknown argument: ${arg}`);
     }
-    return { build, print };
+    if (hermetic && (build || print)) {
+        throw new Error("--hermetic cannot be combined with --build or --print");
+    }
+    return { build, print, hermetic };
 }
 
 if (import.meta.main) {
     try {
-        const { build, print } = parseArgs(Bun.argv.slice(2));
-        const result = detectRustPrerequisites({ allowBuild: build });
+        const { build, print, hermetic } = parseArgs(Bun.argv.slice(2));
+        const result = detectRustPrerequisites({ allowBuild: build, requireCkMc: !hermetic });
         if (!result.ok) {
             for (const reason of result.missing) console.error(`missing prerequisite: ${reason}`);
             process.exit(1);
         }
         if (print) console.log(result.ckMcBin);
+        else if (hermetic) console.log("Hermetic Rust e2e source prerequisites resolved");
         else console.log("Rust e2e prerequisites resolved");
     } catch (error) {
         console.error(`Rust prerequisite detector failed: ${String(error)}`);

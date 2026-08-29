@@ -344,8 +344,24 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                     <>
                         <box flexDirection="column" flexGrow={1} flexBasis={0}>
                             <text fg={t().text}><b>Tags</b></text>
-                            <R t={t()} l="Active" v={`${s().activeTags} (~${fmtBytes(s().activeBytes)})`} />
-                            <R t={t()} l="Dropped" v={String(s().droppedTags)} />
+                            <R
+                                t={t()}
+                                l="Active"
+                                v={
+                                    s().tagCountsAuthoritative === false
+                                        ? "n/a (module total only)"
+                                        : `${s().activeTags} (~${fmtBytes(s().activeBytes)})`
+                                }
+                            />
+                            <R
+                                t={t()}
+                                l="Dropped"
+                                v={
+                                    s().tagCountsAuthoritative === false
+                                        ? "n/a (module total only)"
+                                        : String(s().droppedTags)
+                                }
+                            />
                             <R t={t()} l="Total" v={String(s().totalTags)} fg={t().textMuted} />
                             <box marginTop={1}>
                                 <text fg={t().text}><b>Pending Queue</b></text>
@@ -459,7 +475,7 @@ async function showRecompDialog(api: TuiPluginApi, targetSessionId = getSessionI
         return false
     }
 
-    const countResult = await getCompartmentCount(sessionId)
+    const countResult = await getCompartmentCount(sessionId, api.state.path.directory ?? "")
     // Ack only after the dialog is actually shown for the same active session;
     // route switches while the RPC detail load is in flight must leave it pending.
     if (getSessionId(api) !== sessionId) return false
@@ -588,10 +604,17 @@ async function showStatusDialog(api: TuiPluginApi, targetSessionId = getSessionI
 
     const directory = api.state.path.directory ?? ""
     const modelKey = getModelKeyFromMessages(api, sessionId)
-    const detail = await loadStatusDetail(sessionId, directory, modelKey)
+    const result = await loadStatusDetail(sessionId, directory, modelKey)
     if (getSessionId(api) !== sessionId) return false
+    if (!result.ok) {
+        showToast(api, {
+            message: `Status unavailable: ${result.error}`,
+            variant: "warning",
+        })
+        return false
+    }
 
-    api.ui.dialog.replace(() => <StatusDialog api={api} s={detail} />)
+    api.ui.dialog.replace(() => <StatusDialog api={api} s={result.detail} />)
     return true
 }
 

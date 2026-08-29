@@ -17,8 +17,7 @@
  *   bun packages/plugin/scripts/benchmark-nearest-prior.ts <session_id>
  *
  * Requires:
- *   - `~/.local/share/cortexkit/magic-context/db.sqlite` (or
- *     XDG_DATA_HOME equivalent)
+ *   - `MAGIC_CONTEXT_STORAGE_DIR/db.sqlite` (or its XDG-derived default)
  *   - `~/.local/share/opencode/storage/sqlite/db.sqlite` (the OpenCode
  *     DB to ATTACH for the JOIN to `oc.message`)
  */
@@ -27,6 +26,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Database } from "../src/shared/sqlite";
+import { getMagicContextStorageDir } from "../src/shared/data-path";
 
 const sessionId = process.argv[2];
 if (!sessionId) {
@@ -36,8 +36,8 @@ if (!sessionId) {
     process.exit(1);
 }
 
+const mcDbPath = join(getMagicContextStorageDir(), "db.sqlite");
 const dataHome = process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share");
-const mcDbPath = join(dataHome, "cortexkit", "magic-context", "db.sqlite");
 const ocDbPath = join(dataHome, "opencode", "storage", "sqlite", "db.sqlite");
 
 if (!existsSync(mcDbPath)) {

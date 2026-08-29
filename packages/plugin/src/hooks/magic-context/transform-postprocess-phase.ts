@@ -28,6 +28,7 @@ import {
 import {
     addMergedReasoningStrippedIds,
     addTrailingBlankDecisions,
+    demoteTrailingBlankKeepDecisions,
     getMergedReasoningStrippedIds,
     getPersistedCompactionMarkerState,
     getTrailingBlankDecisions,
@@ -90,12 +91,14 @@ import {
     findLatestAssistantReasoningMutationExemptMessage,
     findMergedReasoningStripCandidateIds,
     findTrailingBlankDecisionCandidates,
+    snapshotTrailingBlankSourceDecisions,
     stripClearedReasoning,
     stripDroppedPlaceholderMessages,
     stripInlineThinking,
     stripReasoningFromMergedAssistants,
     stripSystemInjectedMessages,
     type TrailingBlankDecision,
+    type TrailingBlankSourceDecisions,
 } from "./strip-content";
 import { buildEditSupersessionReclaim, buildSupersessionReclaimOps } from "./supersession-reclaim";
 import { byteSize, prependTag } from "./tag-content-primitives";
@@ -654,12 +657,16 @@ interface RunPostTransformPhaseArgs {
      * cannot diverge from the main transform on cold DB-recovered passes.
      */
     resolvedProviderID?: string;
+    /** Raw harness observations captured before any Magic Context insertion or sentinelization. */
+    trailingBlankSourceDecisions?: TrailingBlankSourceDecisions;
     passOutcome?: PassOutcome;
     historyRefreshSessions?: Set<string>;
     m0M1?: {
         projectPath?: string;
         projectDirectory?: string;
         injectDocs?: boolean;
+        /** False suppresses every memory-derived m[0]/m[1] surface. */
+        memoryEnabled?: boolean;
         memoryInjectionBudgetTokens?: number;
         historyBudgetTokens?: number;
         temporalAwareness?: boolean;
@@ -832,6 +839,8 @@ export async function runPostTransformPhase(
     args: RunPostTransformPhaseArgs,
 ): Promise<PostTransformPhaseResult> {
     const compactionOff = args.compactionOff === true;
+    const trailingBlankSourceDecisions =
+        args.trailingBlankSourceDecisions ?? snapshotTrailingBlankSourceDecisions(args.messages);
     // Capture before todo/history synthesis can add assistant messages. Reasoning replay skips a
     // metadata-only OpenCode request shell, while trailing-blank freezing still tracks that newest
     // host message because its shape can change before the next pass.
@@ -906,6 +915,7 @@ export async function runPostTransformPhase(
                   projectPath: args.m0M1.projectPath,
                   projectDirectory: args.m0M1.projectDirectory,
                   injectDocs: args.m0M1.injectDocs,
+                  memoryEnabled: args.m0M1.memoryEnabled,
                   muralEnabled: args.m0M1.muralEnabled,
                   memoryInjectionBudgetTokens: args.m0M1.memoryInjectionBudgetTokens,
                   historyBudgetTokens: args.m0M1.historyBudgetTokens,
@@ -933,6 +943,7 @@ export async function runPostTransformPhase(
                 projectPath: args.m0M1.projectPath,
                 projectDirectory: args.m0M1.projectDirectory,
                 injectDocs: args.m0M1.injectDocs,
+                memoryEnabled: args.m0M1.memoryEnabled,
                 memoryInjectionBudgetTokens: args.m0M1.memoryInjectionBudgetTokens,
                 historyBudgetTokens: args.m0M1.historyBudgetTokens,
                 temporalAwareness: args.m0M1.temporalAwareness,
@@ -1540,6 +1551,7 @@ export async function runPostTransformPhase(
                 projectPath: args.m0M1.projectPath,
                 projectDirectory: args.m0M1.projectDirectory,
                 injectDocs: args.m0M1.injectDocs,
+                memoryEnabled: args.m0M1.memoryEnabled,
                 memoryInjectionBudgetTokens: args.m0M1.memoryInjectionBudgetTokens,
                 historyBudgetTokens: args.m0M1.historyBudgetTokens,
                 temporalAwareness: args.m0M1.temporalAwareness,
@@ -1668,7 +1680,7 @@ export async function runPostTransformPhase(
         // Step 1: Replay — re-apply sentinel to messages whose IDs were neutralized
         // on a prior bust pass. Preserves array length — no splice.
         if (persistedIds.size > 0) {
-            const { replayed, missingIds } = replaySentinelByMessageIds(
+            const { replayed } = replaySentinelByMessageIds(
                 args.messages,
                 persistedIds,
                 args.resolvedProviderID,
@@ -1679,15 +1691,12 @@ export async function runPostTransformPhase(
                     `sentinel replay: neutralized ${replayed} previously-stripped messages`,
                 );
             }
-            // Prune IDs that no longer appear in the live message set (e.g., after
-            // compaction trimmed them out entirely). Don't prune if they're present
-            // but already sentinel — those are working as intended.
-            if (missingIds.length > 0) {
-                for (const id of missingIds) persistedIds.delete(id);
-                // CAS delta (remove) so a sibling process discovering new IDs in
-                // parallel isn't clobbered by this prune's whole-set overwrite.
-                applyStrippedPlaceholderDelta(args.db, args.sessionId, { remove: missingIds });
-            }
+            // Absence from one transform array is not deletion. Advancing the
+            // compaction marker can temporarily hide source rows on the fold pass
+            // and project them again on the next pass. Their frozen sentinel IDs
+            // must survive that gap so the reappearing rows keep the bytes already
+            // served at the seam. The message.deleted handler removes IDs only
+            // after OpenCode confirms that the durable source row was deleted.
         }
 
         // Step 2: Detect — only on cache-busting passes, find NEW eligible messages
@@ -2125,6 +2134,62 @@ export async function runPostTransformPhase(
         typeof trailingBlankNewestAssistant?.info.id === "string"
             ? trailingBlankNewestAssistant.info.id
             : undefined;
+
+    if (isCacheBustingPass && trailingBlankDecisions.size > 0) {
+        // A source snapshot can outlive the message's projection when a marker trims history.
+        // Heal only IDs still present now so the first strip cannot land later on a defer serve.
+        const visibleMessageIds = new Set(
+            args.messages.flatMap((message) =>
+                typeof message.info.id === "string" ? [message.info.id] : [],
+            ),
+        );
+        const poisonedKeepIds: string[] = [];
+        for (const [id, decision] of trailingBlankDecisions) {
+            if (
+                id === newestAssistantId ||
+                !visibleMessageIds.has(id) ||
+                trailingBlankSourceDecisions.get(id) !== "strip"
+            ) {
+                continue;
+            }
+            if (decision === "keep" || decision.startsWith("keep:")) {
+                poisonedKeepIds.push(id);
+            }
+        }
+        if (poisonedKeepIds.length > 0) {
+            try {
+                const demotedIds = demoteTrailingBlankKeepDecisions(
+                    args.db,
+                    args.sessionId,
+                    poisonedKeepIds,
+                );
+                if (demotedIds === null) {
+                    args.passOutcome?.record("trailing-blank-heal-persistence-failure");
+                    sessionLog(
+                        args.sessionId,
+                        "trailing blank heal: persistence failed; retaining frozen keep decisions",
+                    );
+                } else {
+                    for (const id of demotedIds) {
+                        trailingBlankDecisions.set(id, "strip");
+                        bustedThisPass = true;
+                        sessionLog(
+                            args.sessionId,
+                            `trailing blank heal: demoted message ${id} from keep to strip because its source has no trailing blank`,
+                        );
+                    }
+                }
+            } catch (error) {
+                args.passOutcome?.record("trailing-blank-heal-exception");
+                sessionLog(
+                    args.sessionId,
+                    "transform failed healing trailing blank decisions:",
+                    error,
+                );
+            }
+        }
+    }
+
     const tFinalRepresentation = performance.now();
     const finalRepresentation = finalizeMessageRepresentation(
         args.messages,
@@ -2149,7 +2214,10 @@ export async function runPostTransformPhase(
         const detectedCandidates = findTrailingBlankDecisionCandidates(
             args.messages,
             trailingBlankDecisions,
-            { refreshMessageId: newestAssistantId },
+            {
+                refreshMessageId: newestAssistantId,
+                sourceDecisions: trailingBlankSourceDecisions,
+            },
         );
         // A defer pass can safely establish only the newest assistant's shape: it
         // has no cached continuation after it. Historical messages without a prior

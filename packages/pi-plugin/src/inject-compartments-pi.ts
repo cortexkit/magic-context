@@ -359,10 +359,10 @@ export interface PiM0M1State {
 	sessionId: string;
 	projectIdentity: string;
 	projectDirectory: string;
-	/** When false, project memories are NOT read or rendered into m[0]/m[1]
-	 *  (config `memory.enabled=false`). Mirrors OpenCode, which passes
-	 *  `projectPath: undefined` in that case so every memory read short-circuits.
-	 *  Docs are controlled independently by injectDocs. Unset/true keeps memory on. */
+	/** When false, every memory-derived surface is omitted from m[0]/m[1]
+	 *  (config `memory.enabled=false`): project memory, user profile, deltas, and
+	 *  the memory mural. Docs are controlled independently by injectDocs.
+	 *  Unset/true keeps memory on. */
 	memoryEnabled?: boolean;
 	/** Defaults true. When false, m[0] omits the <project-docs> block and docs hash. */
 	injectDocs?: boolean;
@@ -632,6 +632,7 @@ function resolveMuralForM0Pi(
 	modelKey: string,
 	budgetTokens: number,
 ): MuralWireOptions | undefined {
+	if (state.memoryEnabled === false) return undefined;
 	if (state.mural) return state.mural;
 	if (!state.muralEnabled) return undefined;
 	return resolveMuralWire(
@@ -1259,7 +1260,9 @@ export function renderM0Pi(
 	// bytes on the wire than OpenCode for the same state, and let m[0] grow
 	// without bound as the global user-profile accumulates.
 	const trimmedProfile = trimUserMemoriesToBudget(
-		userProfileOverride ?? safeGetActiveUserMemoriesPi(db),
+		state.memoryEnabled === false
+			? []
+			: (userProfileOverride ?? safeGetActiveUserMemoriesPi(db)),
 		state.userProfileBudgetTokens ?? DEFAULT_USER_PROFILE_BUDGET_TOKENS,
 	);
 	const userProfile = renderUserProfileBlock(
@@ -1377,7 +1380,8 @@ function readFrozenM0InputsPi(
 						memoryCutoff,
 					)
 			: [];
-		const userProfile = safeGetActiveUserMemoriesPi(db);
+		const userProfile =
+			state.memoryEnabled === false ? [] : safeGetActiveUserMemoriesPi(db);
 		const projectState = memPath ? getProjectState(db, memPath) : undefined;
 		const globalState = getProjectState(db, GLOBAL_USER_PROFILE_PROJECT_PATH);
 		const markers: PiM0SnapshotMarkers = {
@@ -1423,7 +1427,8 @@ function readFrozenM0InputsPi(
 				(state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).modelKey,
 			),
 			projectIdentity: state.projectIdentity,
-			muralEnabled: state.muralEnabled === true,
+			muralEnabled:
+				state.memoryEnabled !== false && state.muralEnabled === true,
 			renderBudgetIdentity: renderBudgetIdentityPi(state),
 		};
 		return { docs, markers, compartments, memories, userProfile, workspace };
@@ -1928,7 +1933,10 @@ function renderM1PiWithMetadata(
 	const currentUserProfileVersion =
 		getProjectState(db, GLOBAL_USER_PROFILE_PROJECT_PATH)
 			?.projectUserProfileVersion ?? 0;
-	if (currentUserProfileVersion !== markers.projectUserProfileVersion) {
+	if (
+		state.memoryEnabled !== false &&
+		currentUserProfileVersion !== markers.projectUserProfileVersion
+	) {
 		const profileBudget =
 			state.userProfileBudgetTokens ?? DEFAULT_USER_PROFILE_BUDGET_TOKENS;
 		const trimmedProfile = trimUserMemoriesToBudget(

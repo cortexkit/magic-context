@@ -1984,6 +1984,7 @@ mod tests {
         chunk_cases: Vec<ChunkCase>,
         boundary_cases: Vec<BoundaryCase>,
         trigger_cases: Vec<TriggerCase>,
+        completed_arc_fence_cases: Vec<CompletedArcFenceCase>,
     }
 
     #[derive(Deserialize)]
@@ -2022,6 +2023,23 @@ mod tests {
         fenced_by_open_arc: bool,
         true_raw_eligible_tokens: f64,
         oversize_atomic_unit: bool,
+    }
+
+    #[derive(Deserialize)]
+    struct CompletedArcFenceCase {
+        label: String,
+        candidate: u64,
+        publication_floor_ordinal: u64,
+        arcs: Vec<CompletedArcJson>,
+        expected: u64,
+    }
+
+    #[derive(Deserialize)]
+    struct CompletedArcJson {
+        #[serde(rename = "invOrdinal")]
+        inv_ordinal: u64,
+        #[serde(rename = "resOrdinal")]
+        res_ordinal: Option<u64>,
     }
 
     #[derive(Deserialize)]
@@ -2170,6 +2188,30 @@ mod tests {
             (got - value).abs() < f64::EPSILON,
             "constant {name} drifted: TS={got} Rust={value}"
         );
+    }
+
+    #[test]
+    fn completed_arc_fence_matches_typescript_golden() {
+        for case in golden().completed_arc_fence_cases {
+            let arcs = case
+                .arcs
+                .into_iter()
+                .map(|arc| ToolArc {
+                    inv_ordinal: arc.inv_ordinal,
+                    res_ordinal: arc.res_ordinal,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                fence_boundary_for_completed_tool_arcs(
+                    case.candidate,
+                    &arcs,
+                    case.publication_floor_ordinal,
+                ),
+                case.expected,
+                "{}",
+                case.label
+            );
+        }
     }
 
     #[test]

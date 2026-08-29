@@ -252,12 +252,13 @@ the harness I/O differs:
   as a user turn. The shared `channel2_nudge_state` lease
   (pending→claimed→delivered, TTL-scoped stale-claim heal, revert only on send
   failure) is used identically for the one-ceiling-per-lifetime cap; only the
-  delivery call differs. Both
-  deliver MID-TURN at step boundaries (the point
-  of the channel: warn while the pile grows): OpenCode from `message.updated`
-  (finish=tool-calls OR stop, queued message drains at the next run-loop step);
-  Pi primarily from `tool_result` with deliverAs "steer" (queued, pulled at the
-  next step), with `agent_end` + "followUp" as the idle fallback.
+  delivery call differs. Delivery timing follows each host's safe queue surface:
+  OpenCode emits from `message.updated` (finish=tool-calls OR stop), and its
+  synthetic queued message drains at the next run-loop step. Pi calls the same
+  token-bound delivery helper from `tool_result`, with clean-stop `agent_end` as
+  the fallback, but always uses `deliverAs: "nextTurn"`. That queue joins the next
+  real user turn instead of steering the active turn or starting an autonomous
+  follow-up that could race an external prompt.
 
 - **Removed in this redesign (both harnesses):** the rolling/iteration nudge
   (`nudger`/`injectPiNudge`/`nudge-injector.ts`) and the tool-heavy sticky reminder

@@ -1276,10 +1276,9 @@ mod tests {
                 ("U", measured.u, case.expected.u),
                 ("T", measured.t, case.expected.t),
             ] {
-                let tolerance = 12.max((ts.unsigned_abs() as f64 * 0.03).ceil() as i64);
-                assert!(
-                    (rust - ts).abs() <= tolerance,
-                    "{} {label} drifted outside tokenizer tolerance: Rust={rust}, TS={ts}, tolerance={tolerance}",
+                assert_eq!(
+                    rust, ts,
+                    "{} {label} must match the TypeScript instrument exactly",
                     case.id
                 );
             }

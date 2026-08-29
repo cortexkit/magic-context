@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { DREAMER_CLASSIFIER_AGENT } from "../../../agents/dreamer";
+import { withContentLanguageDirective } from '../../../agents/language-directive';
 import { createChildSessionWithFence } from "../../../hooks/magic-context/child-session-spawn";
 import { isRustAuthorityDrainingError } from "../../../plugin/rust-tool-backends";
 import type { PluginContext } from "../../../plugin/types";
@@ -14,7 +15,7 @@ import { shouldKeepSubagents } from "../../../shared/keep-subagents";
 import { log } from "../../../shared/logger";
 import type { ModelInput } from "../../../shared/model-resolution";
 import { hasShareabilitySensitiveText } from "../../../shared/redaction";
-import { modelBodyField } from "../../../shared/resolve-fallbacks";
+import { modelBodyField, toModelEntry } from "../../../shared/resolve-fallbacks";
 import type { Database } from "../../../shared/sqlite";
 import {
     getMemoriesByProject,
@@ -109,6 +110,7 @@ export interface ClassifyArgs {
     leaseAcquisition?: LeaseAcquisition;
     model?: ModelInput;
     fallbackModels?: readonly ModelInput[];
+    language?: string;
     /** Present only for rust-mode projects whose memories authority is MODULE. */
     moduleClient?: ClassifyModuleClient;
     moduleSessionId?: string;
@@ -367,7 +369,7 @@ async function classifyOneChunk(
                 query: { directory: args.sessionDirectory },
                 body: {
                     agent: DREAMER_CLASSIFIER_AGENT,
-                    system: CLASSIFY_SYSTEM_PROMPT,
+                    system: withContentLanguageDirective(CLASSIFY_SYSTEM_PROMPT, args.language),
                     ...modelBodyField(args.model),
                     parts: [{ type: "text", text: prompt, synthetic: true }],
                 },
@@ -461,6 +463,11 @@ async function runClassifyThroughModule(
         memories: chunk.map(toPromptMemory),
         anchors,
     });
+    const modelChain = [args.model, ...(args.fallbackModels ?? [])]
+        .map(toModelEntry)
+        .filter((entry) => entry !== undefined)
+        .map((entry) => entry.model);
+    const resolvedModelChain = [...new Set(modelChain)];
     const response = await args.moduleClient?.call({
         sessionId: args.moduleSessionId as string,
         projectRoot: args.moduleProjectRoot as string,
@@ -478,6 +485,7 @@ async function runClassifyThroughModule(
                 .digest("hex")
                 .slice(0, 24)}`,
             authority_generation: args.moduleAuthorityGeneration,
+            ...(resolvedModelChain.length > 0 ? { model_chain: resolvedModelChain } : {}),
             payload: {
                 prompt_body: prompt,
                 items: chunk.map((candidate) => ({

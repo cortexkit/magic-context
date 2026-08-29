@@ -82,8 +82,8 @@ function useTempDataHome(prefix: string): void {
 
 function resolveContextLimit(): number {
     // Tests don't specify providerID/modelID in most events, so the real
-    // resolveContextLimit falls through to DEFAULT_CONTEXT_LIMIT = 128_000.
-    return 128_000;
+    // resolveContextLimit falls through to DEFAULT_CONTEXT_LIMIT = 200_000.
+    return 200_000;
 }
 
 function countIndexedMessages(sessionId: string, messageId: string): number {

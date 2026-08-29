@@ -142,6 +142,36 @@ function toolOutput(message: TestMessage, index: number): string {
 }
 
 describe("createTransform", () => {
+    it("keeps the raw array untouched when session metadata is unreadable", async () => {
+        useTempDataHome("context-transform-meta-fault-");
+        const db = openDatabase();
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler: { shouldExecute: mock(() => "execute" as const) },
+            contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>(),
+            db,
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTags: 0,
+        });
+        const messages: TestMessage[] = [
+            {
+                info: { id: "meta-fault-user", role: "user", sessionID: "ses-meta-fault" },
+                parts: [{ type: "text", text: "raw must survive" }],
+            },
+        ];
+        const original = structuredClone(messages);
+        const output = { messages };
+        db.exec("DROP TABLE session_meta");
+
+        await transform({}, output);
+
+        expect(output.messages).toBe(messages);
+        expect(messages).toEqual(original);
+    });
+
     it("persists distinct TypeScript transform decision reasons from ordinary passes", async () => {
         useTempDataHome("context-transform-decision-fence-");
         const sessionId = "ses-transform-decision-fence";
@@ -1080,9 +1110,12 @@ describe("createTransform", () => {
         //#when
         await transform({}, { messages });
 
-        //#then — main transform stripped step-start with the recovered provider,
-        // and postprocess used that same provider for the whole-message sentinel.
-        expect(messages[1].parts[1]).toEqual({ type: "text", text: "" });
+        //#then — main transform strips the step-start with the recovered provider.
+        // The raw suffix decision is `strip`, so postprocess also removes that
+        // Magic Context sentinel instead of freezing it as a provider blank.
+        expect(messages[1].parts).toHaveLength(1);
+        expect(messages[1].parts[0]).toMatchObject({ type: "text" });
+        expect(messages[1].parts[0]?.text).toContain("visible");
         expect(messages[2].parts).toEqual([{ type: "text", text: "" }]);
     });
 

@@ -31,7 +31,7 @@ Tools (read-only): read, grep, glob, aft_search, aft_outline, aft_zoom. Each mem
 
 For each memory decide ONE of:
 - Backing files found → the COMPLETE set of repo-relative paths whose code the memory is about.
-- File-independent → the memory describes EXTERNAL behavior (a provider / API / platform / protocol limit, e.g. "Anthropic returns 400 on empty content"), or a pure process / workflow / philosophy rule, with NO specific local file that backs it.
+- File-independent → the memory describes EXTERNAL behavior (a provider / API / platform / protocol limit, e.g. "Anthropic returns 400 on empty content"), or a pure process / workflow / philosophy rule, with NO specific local file that backs it. A BEHAVIORAL claim (when to act, how to work, who decides, or tool-usage discipline) is file-independent even when it cites file paths or commands as examples: a named file is not the file backing the rule.
 
 Output ONE XML manifest at the very end and NOTHING else — no narration, no per-memory commentary, no reasoning:
 <mappings>
@@ -42,7 +42,7 @@ Output ONE XML manifest at the very end and NOTHING else — no narration, no pe
 Rules:
 - Every input memory id MUST appear exactly once.
 - files: repo-relative, comma-separated, no spaces inside a path. Only files that actually exist and genuinely back the memory.
-- A BACKING FILE is CODE that implements or handles the claim — not a file that merely mentions it. A markdown doc (.md), a PARITY/notes file, or a test that only DESCRIBES an external fact is NOT a backing file. If the only place a memory's fact appears is prose/docs/a test (no code implements or handles it), mark it independent="true".
+- A BACKING FILE is CODE that implements or handles the claim — not a file that merely mentions it. A path named inside a process directive is an action target or example, not evidence that the file backs the directive. A markdown doc (.md), a PARITY/notes file, or a test that only DESCRIBES an external fact is NOT a backing file. If the only place a memory's fact appears is prose/docs/a test (no code implements or handles it), mark it independent="true".
 - Many CONSTRAINTS are HYBRID: "external system does X, and OUR code handles it here." Map those to the HANDLING code (you can verify the handling, even though you can't verify the external behavior). Only mark independent when there is NO local code that implements or handles the fact.
 - Prefer the most specific file(s); do not pad with tangential files. Most memories map to one file; some to a few.
 - When you genuinely cannot find any local backing and it is not clearly external, still emit the memory with independent="true" (do not drop it).`;
@@ -102,7 +102,7 @@ export function buildMapMemoriesPrompt(projectPath: string, memories: MapMemoryI
 
 Project: ${projectPath}
 
-For each memory below, find the repo file(s) it makes a claim about, or mark it file-independent. When "Likely files" are listed, those paths are named in the memory and confirmed to exist — START there: confirm each actually backs the claim (a quick read/outline), drop any that don't, add others only if genuinely needed. Search from scratch only when no likely files are given. Then output ONE <mappings> manifest covering every id.
+For each memory below, find the repo file(s) it makes a claim about, or mark it file-independent. Behavioral process/workflow directives stay file-independent even when they name files. When "Likely files" are listed, those paths are named in the memory and confirmed to exist — START there only for code claims: confirm each actually backs the claim (a quick read/outline), drop any that don't, add others only if genuinely needed. Search from scratch only when no likely files are given. Then output ONE <mappings> manifest covering every id.
 
 <memories>
 ${list}

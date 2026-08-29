@@ -43,7 +43,7 @@ describe("migration v79: transform decision comparison telemetry", () => {
                     "m0_model_key_new",
                 ]),
             );
-            expect(LATEST_SUPPORTED_VERSION).toBe(81);
+            expect(LATEST_SUPPORTED_VERSION).toBe(82);
             expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
         } finally {
             closeQuietly(db);

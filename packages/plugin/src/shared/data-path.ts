@@ -166,7 +166,9 @@ export function getOpenCodeStorageDir(): string {
  *   - Shared Dreamer runs (one per project per machine)
  *   - Future cross-harness session migration
  *
- * Layout: <XDG_DATA_HOME>/cortexkit/magic-context/
+ * Resolution precedence: test isolation, MAGIC_CONTEXT_STORAGE_DIR, XDG data
+ * home, then the platform default. The explicit override is a complete storage
+ * directory and must be absolute so every process on a host selects one store.
  *
  * TEST-ISOLATION GUARD. `openDatabase()` has been guarded in
  * `resolveDatabasePath()` since the 2026-06-01 (v26) and 2026-06-19 (v41)
@@ -192,20 +194,61 @@ export function getOpenCodeStorageDir(): string {
  * `PRAGMA integrity_check`, announcements, the models.dev cache) are covered
  * too — they never go through the DB resolver.
  *
- * XDG_DATA_HOME still wins over both: a test that manages its own data home is
- * already controlled, and production has no test dir set at all.
+ * In production, MAGIC_CONTEXT_STORAGE_DIR takes precedence over XDG_DATA_HOME.
+ * Test isolation remains authoritative so an ambient override cannot redirect
+ * a test into a user's real shared database.
  */
-export function getMagicContextStorageDir(): string {
-    if (!process.env.XDG_DATA_HOME) {
-        const testDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
-        if (testDataDir) {
-            return path.join(testDataDir, "cortexkit", "magic-context");
+export type MagicContextStorageSource =
+    | "test isolation"
+    | "environment override"
+    | "XDG_DATA_HOME"
+    | "platform default";
+
+export interface MagicContextStorageResolution {
+    path: string;
+    source: MagicContextStorageSource;
+}
+
+export function getMagicContextStorageResolution(): MagicContextStorageResolution {
+    const testDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR?.trim();
+    if (testDataDir) {
+        const perTestDataHome = process.env.XDG_DATA_HOME?.trim();
+        if (perTestDataHome && path.resolve(perTestDataHome) !== path.resolve(testDataDir)) {
+            return {
+                path: path.join(perTestDataHome, "cortexkit", "magic-context"),
+                source: "test isolation",
+            };
         }
-        if (process.env.NODE_ENV === "test") {
-            return getTestBackstopStorageDir();
-        }
+        return {
+            path: path.join(testDataDir, "cortexkit", "magic-context"),
+            source: "test isolation",
+        };
     }
-    return path.join(getDataDir(), "cortexkit", "magic-context");
+    if (process.env.NODE_ENV === "test") {
+        return { path: getTestBackstopStorageDir(), source: "test isolation" };
+    }
+    const explicitStorageDir = process.env.MAGIC_CONTEXT_STORAGE_DIR?.trim();
+    if (explicitStorageDir) {
+        if (!path.isAbsolute(explicitStorageDir)) {
+            throw new Error("MAGIC_CONTEXT_STORAGE_DIR must be an absolute path");
+        }
+        return { path: explicitStorageDir, source: "environment override" };
+    }
+    const xdgDataHome = process.env.XDG_DATA_HOME?.trim();
+    if (xdgDataHome) {
+        return {
+            path: path.join(xdgDataHome, "cortexkit", "magic-context"),
+            source: "XDG_DATA_HOME",
+        };
+    }
+    return {
+        path: path.join(os.homedir(), ".local", "share", "cortexkit", "magic-context"),
+        source: "platform default",
+    };
+}
+
+export function getMagicContextStorageDir(): string {
+    return getMagicContextStorageResolution().path;
 }
 
 let testBackstopStorageDir: string | null = null;

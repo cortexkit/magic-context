@@ -204,18 +204,29 @@ function formatOldestReclaimableHint(hint?: readonly ToolReclaimHint[]): string 
     return rendered.length > 0 ? `\noldest reclaimable: ${rendered}.` : "";
 }
 
+export function reclaimableToolOutputCount(parts: readonly TailHygienePartMeasurement[]): number {
+    return parts.filter((part) => part.kind === "toolOutput" && part.uTokens > 0).length;
+}
+
+function formatReclaimableOutputSummary(count: number, tokens: number): string {
+    const outputCount = Math.max(0, Math.floor(count));
+    const outputs =
+        outputCount === 0
+            ? "spent tool outputs"
+            : `${outputCount} spent tool output${outputCount === 1 ? "" : "s"}`;
+    return `${outputs} (~${approxThousands(tokens)} tokens)`;
+}
+
 export function buildChannel2Reminder(
     undroppedTokens: number,
-    usableWindowTokens: number,
+    reclaimableToolOutputs: number,
     hint?: readonly ToolReclaimHint[],
 ): string {
-    const amount = approxThousands(undroppedTokens);
-    const usableWindow = approxThousands(usableWindowTokens);
+    const summary = formatReclaimableOutputSummary(reclaimableToolOutputs, undroppedTokens);
     const hintText = formatOldestReclaimableHint(hint);
     return (
         `<system-reminder>\n` +
-        `Routine housekeeping: an older span of this session folds into compact history automatically — nothing is lost and nothing pauses. ` +
-        `Drop spent tool outputs with ctx_reduce first so the archive keeps only what matters (~${amount} of ~${usableWindow} reclaimable).${hintText}\n` +
+        `Routine housekeeping: ${summary} are reclaimable — make a ctx_reduce pass at a natural stopping point.${hintText}\n` +
         `</system-reminder>`
     );
 }
@@ -243,34 +254,26 @@ export function shouldUseStickyChannel1Reminder(input: {
 export function buildChannel1Reminder(
     level: Channel1Level,
     undroppedTokens: number,
-    usableWindowTokens: number,
+    reclaimableToolOutputs: number,
     hint?: readonly ToolReclaimHint[],
     sticky = false,
 ): string {
+    const summary = formatReclaimableOutputSummary(reclaimableToolOutputs, undroppedTokens);
     const hintText = formatOldestReclaimableHint(hint);
     if (sticky) {
-        return `\n\n<system-reminder>\nReminder: ctx_reduce housekeeping still pending —${hintText}\n</system-reminder>`;
+        return `\n\n<system-reminder>\nReminder: ${summary} are still reclaimable — ctx_reduce them at a natural stopping point.${hintText}\n</system-reminder>`;
     }
 
-    const amount = approxThousands(undroppedTokens);
-    const usableWindow = approxThousands(usableWindowTokens);
     let body: string;
     switch (level) {
         case "gentle":
-            body =
-                `Housekeeping: some earlier tool outputs are spent and can be dropped with ctx_reduce when you are done with them. ` +
-                `Context is managed automatically — this is tidiness, never a reason to rush or narrow scope.`;
+            body = `Housekeeping: ${summary} are reclaimable — drop the ones you have already processed with ctx_reduce at a natural stopping point.`;
             break;
         case "firm":
-            body =
-                `Housekeeping: ~${amount} of this session's ~${usableWindow} window is spent tool output. ` +
-                `Drop what you have already processed with ctx_reduce at a natural stopping point. ` +
-                `Not a limit — nothing is lost either way.`;
+            body = `Housekeeping: ${summary} are reclaimable — make a ctx_reduce pass at a natural stopping point.`;
             break;
         case "urgent":
-            body =
-                `Housekeeping backlog: ~${amount} of this session's ~${usableWindow} window is spent tool output — worth a ctx_reduce pass now. ` +
-                `This is routine and lossless; it is never a reason to change scope.`;
+            body = `Housekeeping backlog: ${summary} are reclaimable — a ctx_reduce pass is due.`;
             break;
     }
     return `\n\n<system-reminder>\n${body}${hintText}\n</system-reminder>`;

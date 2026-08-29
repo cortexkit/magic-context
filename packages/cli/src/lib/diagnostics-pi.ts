@@ -1,13 +1,11 @@
-import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 
 import { resolveCortexKitProjectConfigPath } from "@magic-context/core/config/migrate-config-location";
 import { parseCompartmentOutput } from "@magic-context/core/hooks/magic-context/compartment-parser";
 import {
-    getMagicContextStorageDir,
+    getMagicContextStorageResolution,
     getProjectMagicContextHistorianDir,
 } from "@magic-context/core/shared/data-path";
 import { loadPiConfig } from "@magic-context/pi-core/config";
@@ -26,7 +24,7 @@ import {
     hasPiMagicContextPackage,
     isPiMagicContextPackageEntry,
 } from "./pi-package-entry";
-import { redactSecretText } from "./redaction";
+import { sanitizeConfigValue, sanitizeDiagnosticText } from "./redaction";
 
 export interface PiConfigDiagnostic {
     path: string;
@@ -62,6 +60,7 @@ export interface PiDiagnosticReport {
     loadWarnings: string[];
     storageDir: {
         path: string;
+        source?: string;
         exists: boolean;
         contextDbSizeBytes: number;
     };
@@ -155,70 +154,12 @@ function fileSize(path: string): number {
     }
 }
 
-function escapeRegex(value: string): string {
-    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function currentUserHash(): string {
-    const username = userInfo().username || "unknown";
-    return createHash("sha256").update(username).digest("hex").slice(0, 12);
-}
-
-function redactSecretString(value: string): string {
-    // Apply the shared comprehensive redactor (OpenCode parity: adds
-    // github_pat_/ghp_/hf_/AKIA/Slack/Google/JWT and generic key=value forms that
-    // the bespoke version leaked) AND then the original looser patterns as a
-    // SUPERSET — the shared `sk-` pattern requires 32+ chars (real key length),
-    // so keep the looser `sk-{12,}` here too so short/synthetic sk- tokens are
-    // still caught. Redaction is safer over-broad than under.
-    return redactSecretText(value)
-        .replace(/Bearer\s+[A-Za-z0-9._~+\-/=]+/g, "Bearer <REDACTED>")
-        .replace(/sk-[A-Za-z0-9_-]{12,}/g, "sk-<REDACTED>")
-        .replace(/api[_-]?key=([^\s&]+)/gi, "api_key=<REDACTED>")
-        .replace(/token=([^\s&]+)/gi, "token=<REDACTED>");
-}
-
-/**
- * Sanitize paths, usernames, and obvious secret material before writing issue
- * reports. The exact home path becomes <HOME>; the local username is replaced
- * with a stable short hash so reports can correlate repeated occurrences
- * without leaking the account name.
- */
 export function sanitizeString(value: string): string {
-    const home = process.env.HOME || homedir();
-    const username = userInfo().username;
-    const userHash = `<USER:${currentUserHash()}>`;
-    let sanitized = redactSecretString(value);
-    if (home) {
-        sanitized = sanitized.replace(new RegExp(escapeRegex(home), "g"), "<HOME>");
-    }
-    sanitized = sanitized.replace(/\/Users\/[^/]+\//g, `/Users/${userHash}/`);
-    sanitized = sanitized.replace(/\/home\/[^/]+\//g, `/home/${userHash}/`);
-    sanitized = sanitized.replace(/C:\\Users\\[^\\]+\\/g, `C:\\Users\\${userHash}\\`);
-    if (username) {
-        sanitized = sanitized.replace(new RegExp(escapeRegex(username), "g"), userHash);
-    }
-    return sanitized;
+    return sanitizeDiagnosticText(value);
 }
 
-function shouldRedactKey(key: string): boolean {
-    return /api[_-]?key|token|secret|password|authorization|cookie/i.test(key);
-}
-
-export function sanitizeValue(value: unknown, key = ""): unknown {
-    if (value === null || typeof value === "number" || typeof value === "boolean") return value;
-    if (shouldRedactKey(key)) return "<REDACTED>";
-    if (typeof value === "string") return sanitizeString(value);
-    if (Array.isArray(value)) return value.map((entry) => sanitizeValue(entry));
-    if (value && typeof value === "object") {
-        return Object.fromEntries(
-            Object.entries(value).map(([entryKey, entry]) => [
-                entryKey,
-                sanitizeValue(entry, entryKey),
-            ]),
-        );
-    }
-    return value;
+export function sanitizeValue(value: unknown): unknown {
+    return sanitizeConfigValue(value);
 }
 
 function readJsonc(path: string): {
@@ -451,7 +392,8 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
     const userConfigPath = getPiUserConfigPath();
     const projectConfigPath = getProjectConfigPath(cwd);
     const loaded = loadPiConfig({ cwd });
-    const storageDirPath = getMagicContextStorageDir();
+    const storageResolution = getMagicContextStorageResolution();
+    const storageDirPath = storageResolution.path;
     const dbPath = join(storageDirPath, "context.db");
     const logPath = getMagicContextLogPath("pi");
     const logFileSize = existsSync(logPath) ? statSync(logPath).size : 0;
@@ -488,6 +430,7 @@ export async function collectDiagnostics(cwd = process.cwd()): Promise<PiDiagnos
         loadWarnings: loaded.warnings.map(sanitizeString),
         storageDir: {
             path: storageDirPath,
+            source: storageResolution.source,
             exists: existsSync(storageDirPath),
             contextDbSizeBytes: fileSize(dbPath),
         },
@@ -517,6 +460,7 @@ export function renderDiagnosticsMarkdown(report: PiDiagnosticReport): string {
     const settings = sanitizeValue(report.settings);
     const storage = {
         path: sanitizeString(report.storageDir.path),
+        source: report.storageDir.source ?? "unknown",
         exists: report.storageDir.exists,
         context_db_size: formatBytes(report.storageDir.contextDbSizeBytes),
     };

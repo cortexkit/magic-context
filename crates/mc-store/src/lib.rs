@@ -2405,6 +2405,111 @@ const MIGRATIONS: &[Migration] = &[
         ALTER TABLE mc_chunk_transcripts ADD COLUMN raw_messages_deflate BLOB NULL;
         ",
     },
+    Migration {
+        version: 51,
+        // A null mapped-files array means file-independent, but it does not explain
+        // whether the mapper chose that outcome or the host rejected every supplied
+        // path. Keep the distinction with the authoritative module mapping.
+        statements: "
+        ALTER TABLE mc_memory_mappings
+            ADD COLUMN mapping_origin TEXT NOT NULL DEFAULT 'mapper';
+        ",
+    },
+    Migration {
+        version: 52,
+        // Smart-note authoring compilation is part of the authoritative note row. Without
+        // these fields a MODULE write becomes uncompiled when the host mirror is rebuilt.
+        statements: r#"
+        ALTER TABLE mc_notes ADD COLUMN compiled_provider TEXT;
+        ALTER TABLE mc_notes ADD COLUMN compiled_config TEXT;
+        ALTER TABLE mc_notes ADD COLUMN compiled_at INTEGER;
+        ALTER TABLE mc_notes ADD COLUMN compile_status TEXT;
+
+        DROP TRIGGER IF EXISTS mc_notes_feed_insert;
+        DROP TRIGGER IF EXISTS mc_notes_feed_update;
+        CREATE TRIGGER mc_notes_feed_insert AFTER INSERT ON mc_notes BEGIN
+            INSERT INTO mc_changefeed(domain, op, module_row_id, full_row_snapshot, content_hash)
+            VALUES ('notes', 'insert', NEW.id,
+                json_object(
+                    'id', NEW.id, 'type', NEW.type, 'project_path', NEW.project_path,
+                    'session_id', NEW.session_id, 'content', NEW.content, 'status', NEW.status,
+                    'surface_condition', NEW.surface_condition,
+                    'compiled_provider', NEW.compiled_provider, 'compiled_config', NEW.compiled_config,
+                    'compiled_at', NEW.compiled_at, 'compile_status', NEW.compile_status,
+                    'ready_at', NEW.ready_at, 'ready_reason', NEW.ready_reason,
+                    'manifest_json', NEW.manifest_json, 'compiled_check', NEW.compiled_check,
+                    'check_hash', NEW.check_hash, 'check_cron', NEW.check_cron,
+                    'check_failure_count', NEW.check_failure_count,
+                    'check_network_failure_count', NEW.check_network_failure_count,
+                    'check_quarantined_until', NEW.check_quarantined_until,
+                    'check_next_due_at', NEW.check_next_due_at, 'check_compiled_at', NEW.check_compiled_at,
+                    'check_false_since_at', NEW.check_false_since_at,
+                    'check_last_liveness_at', NEW.check_last_liveness_at,
+                    'last_checked_at', NEW.last_checked_at, 'check_status', NEW.check_status,
+                    'check_version', NEW.check_version, 'policy_version', NEW.policy_version,
+                    'harness', NEW.harness, 'anchor_block_id', NEW.anchor_block_id,
+                    'anchor_ordinal', NEW.anchor_ordinal, 'dismissed_at', NEW.dismissed_at,
+                    'dismissal_resolution', NEW.dismissal_resolution,
+                    'status_version', NEW.status_version, 'created_at_ms', NEW.created_at_ms,
+                    'updated_at_ms', NEW.updated_at_ms, 'context_store_uuid', NEW.context_store_uuid,
+                    'context_row_id', NEW.context_row_id), NULL);
+        END;
+        CREATE TRIGGER mc_notes_feed_update AFTER UPDATE ON mc_notes
+        WHEN NEW.id IS NOT OLD.id OR NEW.type IS NOT OLD.type
+          OR NEW.project_path IS NOT OLD.project_path OR NEW.session_id IS NOT OLD.session_id
+          OR NEW.content IS NOT OLD.content OR NEW.status IS NOT OLD.status
+          OR NEW.surface_condition IS NOT OLD.surface_condition
+          OR NEW.compiled_provider IS NOT OLD.compiled_provider
+          OR NEW.compiled_config IS NOT OLD.compiled_config OR NEW.compiled_at IS NOT OLD.compiled_at
+          OR NEW.compile_status IS NOT OLD.compile_status OR NEW.ready_at IS NOT OLD.ready_at
+          OR NEW.ready_reason IS NOT OLD.ready_reason OR NEW.manifest_json IS NOT OLD.manifest_json
+          OR NEW.compiled_check IS NOT OLD.compiled_check OR NEW.check_hash IS NOT OLD.check_hash
+          OR NEW.check_cron IS NOT OLD.check_cron
+          OR NEW.check_failure_count IS NOT OLD.check_failure_count
+          OR NEW.check_network_failure_count IS NOT OLD.check_network_failure_count
+          OR NEW.check_quarantined_until IS NOT OLD.check_quarantined_until
+          OR NEW.check_next_due_at IS NOT OLD.check_next_due_at
+          OR NEW.check_compiled_at IS NOT OLD.check_compiled_at
+          OR NEW.check_false_since_at IS NOT OLD.check_false_since_at
+          OR NEW.check_last_liveness_at IS NOT OLD.check_last_liveness_at
+          OR NEW.last_checked_at IS NOT OLD.last_checked_at OR NEW.check_status IS NOT OLD.check_status
+          OR NEW.check_version IS NOT OLD.check_version OR NEW.policy_version IS NOT OLD.policy_version
+          OR NEW.harness IS NOT OLD.harness OR NEW.anchor_block_id IS NOT OLD.anchor_block_id
+          OR NEW.anchor_ordinal IS NOT OLD.anchor_ordinal OR NEW.dismissed_at IS NOT OLD.dismissed_at
+          OR NEW.dismissal_resolution IS NOT OLD.dismissal_resolution
+          OR NEW.status_version IS NOT OLD.status_version
+          OR NEW.created_at_ms IS NOT OLD.created_at_ms OR NEW.updated_at_ms IS NOT OLD.updated_at_ms
+          OR NEW.context_store_uuid IS NOT OLD.context_store_uuid
+          OR NEW.context_row_id IS NOT OLD.context_row_id
+        BEGIN
+            INSERT INTO mc_changefeed(domain, op, module_row_id, full_row_snapshot, content_hash)
+            VALUES ('notes', 'update', NEW.id,
+                json_object(
+                    'id', NEW.id, 'type', NEW.type, 'project_path', NEW.project_path,
+                    'session_id', NEW.session_id, 'content', NEW.content, 'status', NEW.status,
+                    'surface_condition', NEW.surface_condition,
+                    'compiled_provider', NEW.compiled_provider, 'compiled_config', NEW.compiled_config,
+                    'compiled_at', NEW.compiled_at, 'compile_status', NEW.compile_status,
+                    'ready_at', NEW.ready_at, 'ready_reason', NEW.ready_reason,
+                    'manifest_json', NEW.manifest_json, 'compiled_check', NEW.compiled_check,
+                    'check_hash', NEW.check_hash, 'check_cron', NEW.check_cron,
+                    'check_failure_count', NEW.check_failure_count,
+                    'check_network_failure_count', NEW.check_network_failure_count,
+                    'check_quarantined_until', NEW.check_quarantined_until,
+                    'check_next_due_at', NEW.check_next_due_at, 'check_compiled_at', NEW.check_compiled_at,
+                    'check_false_since_at', NEW.check_false_since_at,
+                    'check_last_liveness_at', NEW.check_last_liveness_at,
+                    'last_checked_at', NEW.last_checked_at, 'check_status', NEW.check_status,
+                    'check_version', NEW.check_version, 'policy_version', NEW.policy_version,
+                    'harness', NEW.harness, 'anchor_block_id', NEW.anchor_block_id,
+                    'anchor_ordinal', NEW.anchor_ordinal, 'dismissed_at', NEW.dismissed_at,
+                    'dismissal_resolution', NEW.dismissal_resolution,
+                    'status_version', NEW.status_version, 'created_at_ms', NEW.created_at_ms,
+                    'updated_at_ms', NEW.updated_at_ms, 'context_store_uuid', NEW.context_store_uuid,
+                    'context_row_id', NEW.context_row_id), NULL);
+        END;
+        "#,
+    },
 ];
 
 /// The highest `mc_cache` schema migration this binary ships.
@@ -3922,6 +4027,7 @@ pub struct SessionStatusSnapshot {
     pub loaded: LoadedState,
     pub compartment_count: usize,
     pub pending_drop_count: usize,
+    /// Every durable `mc_tags` row for the session, regardless of coverage, compartment, or drop state.
     pub tag_count: usize,
     pub pass_trace: Option<PassTrace>,
     pub compartment_page: Option<CompartmentPage>,
@@ -4146,6 +4252,8 @@ pub struct StoredMemorySearchRow {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StoredCompartmentSearchRow {
     pub sequence: i64,
+    pub start_ordinal: i64,
+    pub end_ordinal: i64,
     pub title: String,
     pub content: String,
     pub p1: Option<String>,
@@ -4190,6 +4298,10 @@ pub struct NoteWriteInput<'a> {
     pub session_id: Option<&'a str>,
     pub content: &'a str,
     pub surface_condition: Option<&'a str>,
+    pub compiled_provider: Option<&'a str>,
+    pub compiled_config: Option<&'a str>,
+    pub compiled_at: Option<i64>,
+    pub compile_status: Option<&'a str>,
     pub anchor_block_id: Option<&'a str>,
     pub anchor_ordinal: Option<i64>,
     pub now_ms: i64,
@@ -4204,6 +4316,10 @@ pub struct StoredNote {
     pub content: String,
     pub status: String,
     pub surface_condition: Option<String>,
+    pub compiled_provider: Option<String>,
+    pub compiled_config: Option<String>,
+    pub compiled_at: Option<i64>,
+    pub compile_status: Option<String>,
     pub ready_at: Option<i64>,
     pub ready_reason: Option<String>,
     pub manifest_json: Option<String>,
@@ -4278,6 +4394,9 @@ pub struct StoredNoteSearchRow {
     pub content: String,
     pub status: String,
     pub surface_condition: Option<String>,
+    pub session_id: String,
+    pub anchor_ordinal: Option<i64>,
+    pub created_at_ms: i64,
     pub updated_at_ms: i64,
 }
 
@@ -4403,6 +4522,7 @@ pub struct MappingUpdate {
     pub memory_id: i64,
     pub content_hash_at_prompt: String,
     pub mapped_files: Option<Vec<String>>,
+    pub mapping_origin: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4971,13 +5091,6 @@ struct HistorianSideChannelOutboxRow {
     attempt_count: u32,
 }
 
-#[derive(Debug)]
-struct HistorianSideChannelPendingItem {
-    id: HistorianSideChannelOutboxId,
-    payload_json: String,
-    created_at_ms: i64,
-}
-
 #[derive(Debug, Clone)]
 struct HistorianSideChannelOutboxId {
     firing_seq: u64,
@@ -5434,7 +5547,11 @@ impl<'a> FacadeMutationTxn<'a> {
                         normalized_hash = ?2,
                         updated_at = ?3,
                         shareable = 0,
-                        classified_at = NULL
+                        classified_at = NULL,
+                        mural_cue = NULL,
+                        mural_cue_hash = NULL,
+                        mural_cue_at = NULL,
+                        mural_cue_rejection_count = 0
                   WHERE id = ?4",
                 params![content, normalized_hash, now_ms, id],
             )
@@ -5517,6 +5634,116 @@ impl<'a> FacadeMutationTxn<'a> {
             archived.push(memory.id);
         }
         Ok(Some(archived))
+    }
+
+    pub fn merge_memories_canonical(
+        &self,
+        project_path: &str,
+        ids: &[i64],
+        merged_content: &str,
+        source_session_id: Option<&str>,
+        now_ms: i64,
+    ) -> Result<Option<(StoredMemoryFull, Vec<i64>)>, String> {
+        if ids.len() < 2 {
+            return Ok(None);
+        }
+        let mut rows = Vec::with_capacity(ids.len());
+        for id in ids {
+            let Some(row) = load_memory_full_tx(self.tx, *id).map_err(|error| error.to_string())?
+            else {
+                return Ok(None);
+            };
+            if row.project_path != project_path
+                || row.superseded_by_memory_id.is_some()
+                || !matches!(row.status.as_str(), "active" | "permanent")
+                || rows
+                    .first()
+                    .is_some_and(|first: &StoredMemoryFull| first.category != row.category)
+            {
+                return Ok(None);
+            }
+            rows.push(row);
+        }
+
+        let category = rows[0].category.clone();
+        let normalized_hash = compute_normalized_memory_hash(merged_content);
+        let matching_id = self
+            .tx
+            .query_row(
+                "SELECT id FROM mc_memories
+                  WHERE project_path = ?1 AND category = ?2 AND normalized_hash = ?3
+                  LIMIT 1",
+                params![project_path, category, normalized_hash],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if let Some(id) = matching_id.filter(|id| !ids.contains(id)) {
+            return Err(format!("memory content already exists as ID {id}"));
+        }
+
+        let created_canonical = matching_id.is_none();
+        let target_id = if let Some(id) = matching_id {
+            id
+        } else {
+            self.insert_memory(InsertMemoryInput {
+                project_path,
+                route_project_root: None,
+                category: &category,
+                content: merged_content,
+                source_session_id,
+                source_type: Some("agent"),
+                importance: Some(50),
+                expires_at: None,
+                metadata_json: None,
+                now_ms,
+            })?
+        };
+        let source_ids = ids
+            .iter()
+            .copied()
+            .filter(|id| *id != target_id)
+            .collect::<Vec<_>>();
+        let Some(mut merged) =
+            self.merge_memories(project_path, target_id, &source_ids, merged_content, now_ms)?
+        else {
+            return Ok(None);
+        };
+
+        if created_canonical {
+            // The TypeScript-compatible merge path inserts the new canonical row with
+            // lineage and counters computed only from the source rows. Because this block
+            // writes those final aggregates, no separate target-update delta is required.
+            let merged_from = merged_from_json(&rows);
+            let seen_count = rows.iter().map(|row| row.seen_count.max(0)).sum::<i64>();
+            let retrieval_count = rows
+                .iter()
+                .map(|row| row.retrieval_count.max(0))
+                .sum::<i64>();
+            self.tx
+                .execute(
+                    "UPDATE mc_memories
+                        SET seen_count = ?1, retrieval_count = ?2, merged_from = ?3
+                      WHERE id = ?4",
+                    params![seen_count, retrieval_count, merged_from, target_id],
+                )
+                .map_err(|error| error.to_string())?;
+            self.tx
+                .execute(
+                    "DELETE FROM mc_memory_mutation_log
+                      WHERE id = (
+                          SELECT MAX(id) FROM mc_memory_mutation_log
+                           WHERE project_path = ?1 AND mutation_type = 'update'
+                             AND target_memory_id = ?2 AND queued_at = ?3
+                      )",
+                    params![project_path, target_id, now_ms],
+                )
+                .map_err(|error| error.to_string())?;
+            merged = load_memory_full_tx(self.tx, target_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "canonical memory disappeared during merge".to_string())?;
+        }
+        Ok(Some((merged, source_ids)))
     }
 
     pub fn merge_memories(
@@ -5794,8 +6021,9 @@ impl<'a> FacadeMutationTxn<'a> {
             .execute(
                 "INSERT INTO mc_notes
                  (type, project_path, session_id, content, status, surface_condition,
+                  compiled_provider, compiled_config, compiled_at, compile_status,
                   anchor_block_id, anchor_ordinal, harness, created_at_ms, updated_at_ms)
-                 VALUES ('smart', ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'module', ?8, ?8)",
+                  VALUES ('smart', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'module', ?12, ?12)",
                 params![
                     input.project_path,
                     input.session_id,
@@ -5805,6 +6033,10 @@ impl<'a> FacadeMutationTxn<'a> {
                         .surface_condition
                         .map(str::trim)
                         .filter(|value| !value.is_empty()),
+                    input.compiled_provider,
+                    input.compiled_config,
+                    input.compiled_at,
+                    input.compile_status,
                     input.anchor_block_id,
                     input.anchor_ordinal,
                     input.now_ms,
@@ -5839,17 +6071,13 @@ impl<'a> FacadeMutationTxn<'a> {
                 current: Some(current),
             });
         }
-        let next_content = content.map(str::trim).unwrap_or(&current.content);
-        if next_content.is_empty() {
-            return Ok(NoteCasOutcome::Conflict {
-                current: Some(current),
-            });
-        }
-        let condition_changed = surface_condition.is_some();
+        let next_content = content.unwrap_or(&current.content);
         let next_condition = surface_condition
             .flatten()
             .map(str::trim)
             .filter(|value| !value.is_empty());
+        let condition_changed =
+            surface_condition.is_some() && next_condition != current.surface_condition.as_deref();
         let next_status = if condition_changed && next_condition.is_some() {
             "pending"
         } else {
@@ -7115,6 +7343,13 @@ impl McStore {
                 )
                 .map(|value| value.max(0) as usize)
             };
+            let tag_count = transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM mc_tags WHERE session_id = ?1",
+                    params![session_id],
+                    |row| row.get::<_, i64>(0),
+                )?
+                .max(0) as usize;
             let compartment_page = compartment_page
                 .map(|(after_sequence, limit)| {
                     let max_sequence = transaction
@@ -7179,7 +7414,7 @@ impl McStore {
                 loaded,
                 compartment_count: count("mc_compartments")?,
                 pending_drop_count: count("pending_agent_drops")?,
-                tag_count: count("mc_tags")?,
+                tag_count,
                 pass_trace,
                 compartment_page,
             };
@@ -8476,6 +8711,8 @@ impl McStore {
                         0
                     }));
                 }
+                assignments.push("updated_at = ?".to_string());
+                values.push(rusqlite::types::Value::Integer(now_ms));
                 assignments.push("classified_at = ?".to_string());
                 values.push(rusqlite::types::Value::Integer(now_ms));
                 values.push(rusqlite::types::Value::Integer(update.memory_id));
@@ -11152,7 +11389,11 @@ impl McStore {
                         normalized_hash = ?2,
                         updated_at = ?3,
                         shareable = 0,
-                        classified_at = NULL
+                        classified_at = NULL,
+                        mural_cue = NULL,
+                        mural_cue_hash = NULL,
+                        mural_cue_at = NULL,
+                        mural_cue_rejection_count = 0
                   WHERE id = ?4",
                 params![content, normalized_hash, now_ms, id],
             )?;
@@ -11579,8 +11820,6 @@ impl McStore {
         let session_id = request.session_id;
         let expected_row_version = request.expected_row_version;
         let predicate = request.predicate;
-        let side_channel_items =
-            historian_side_channel_pending_items(&request).map_err(HistorianPublishError::Serde)?;
         let outcome = self.inner.with_conn_fenced(|tx| {
             let row = tx
                 .query_row(
@@ -11708,8 +11947,32 @@ impl McStore {
             } else {
                 Vec::new()
             };
-            enqueue_historian_side_channels_tx(tx, session_id, &side_channel_items)?;
-
+            // Side channels share the accepted publication transaction when their writes
+            // succeed, but are re-derivable and must not abort core historian progress.
+            // Failed writes are deliberately not enqueued for retry.
+            if !request.events.is_empty()
+                && !self.take_historian_side_channel_fault_for_test("event")
+            {
+                let _ = insert_historian_events_tx(tx, request.session_id, request.events);
+            }
+            if !request.primer_candidates.is_empty()
+                && !self.take_historian_side_channel_fault_for_test("primer")
+            {
+                for candidate in request.primer_candidates {
+                    if insert_historian_primer_tx(tx, candidate).is_err() {
+                        break;
+                    }
+                }
+            }
+            if !request.user_memory_candidates.is_empty()
+                && !self.take_historian_side_channel_fault_for_test("user_observation")
+            {
+                for candidate in request.user_memory_candidates {
+                    if insert_historian_user_observation_tx(tx, candidate).is_err() {
+                        break;
+                    }
+                }
+            }
             meta.publication_floor_ordinal = Some(
                 meta.publication_floor_ordinal
                     .unwrap_or(1)
@@ -11735,16 +11998,7 @@ impl McStore {
         })?;
 
         match outcome {
-            PublishTxnOutcome::Committed(result) => {
-                // The accepted payload is already durable beside the compartment commit. Drain
-                // each kind independently now; any failure remains queued for a later transform.
-                let _ = self.drain_historian_side_channels(
-                    session_id,
-                    current_time_ms(),
-                    HISTORIAN_SIDE_CHANNEL_DRAIN_PER_KIND,
-                );
-                Ok(result)
-            }
+            PublishTxnOutcome::Committed(result) => Ok(result),
             PublishTxnOutcome::CasConflict { found, reason } => {
                 Err(HistorianPublishError::CasConflict {
                     expected: expected_row_version,
@@ -11775,9 +12029,25 @@ impl McStore {
         }
     }
 
-    /// Drain due historian side-channel work without coupling any target table to another.
-    /// A successful target write marks the outbox row delivered in the same transaction; the
-    /// acknowledgement row is deleted only after that commit, so restart replay is idempotent.
+    fn take_historian_side_channel_fault_for_test(&self, kind: &str) -> bool {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            return self
+                .historian_side_channel_fail_once
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(kind);
+        }
+        #[cfg(not(any(test, feature = "test-support")))]
+        {
+            let _ = kind;
+            false
+        }
+    }
+
+    /// Drain legacy outbox rows accepted before side-channel publication adopted the
+    /// TypeScript best-effort contract. New publishes never enqueue rows, but draining old
+    /// durable work avoids stranding data during a rolling upgrade.
     pub fn drain_historian_side_channels(
         &self,
         session_id: &str,
@@ -11894,13 +12164,7 @@ impl McStore {
         row: &HistorianSideChannelOutboxRow,
         now_ms: i64,
     ) -> Result<(), McStoreError> {
-        #[cfg(any(test, feature = "test-support"))]
-        if self
-            .historian_side_channel_fail_once
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&row.id.kind)
-        {
+        if self.take_historian_side_channel_fault_for_test(&row.id.kind) {
             return Err(McStoreError::Serde(format!(
                 "injected historian {} side-channel failure",
                 row.id.kind
@@ -12543,7 +12807,7 @@ impl McStore {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let rows = self.inner.with_conn(|conn| {
             let mut statement = conn.prepare(
-                "SELECT sequence, title, content, p1, p2, p3, p4, created_at
+                "SELECT sequence, start_message, end_message, title, content, p1, p2, p3, p4, created_at
                    FROM mc_compartments
                   WHERE session_id = ?1
                   ORDER BY sequence DESC
@@ -12553,13 +12817,15 @@ impl McStore {
                 .query_map(params![session_id, limit], |row| {
                     Ok(StoredCompartmentSearchRow {
                         sequence: row.get(0)?,
-                        title: row.get(1)?,
-                        content: row.get(2)?,
-                        p1: row.get(3)?,
-                        p2: row.get(4)?,
-                        p3: row.get(5)?,
-                        p4: row.get(6)?,
-                        created_at: row.get(7)?,
+                        start_ordinal: row.get(1)?,
+                        end_ordinal: row.get(2)?,
+                        title: row.get(3)?,
+                        content: row.get(4)?,
+                        p1: row.get(5)?,
+                        p2: row.get(6)?,
+                        p3: row.get(7)?,
+                        p4: row.get(8)?,
+                        created_at: row.get(9)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -12630,7 +12896,7 @@ impl McStore {
         let pattern = sql_like_pattern(query);
         let rows = self.inner.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT sequence, title, content, p1, p2, p3, p4, created_at
+                "SELECT sequence, start_message, end_message, title, content, p1, p2, p3, p4, created_at
                    FROM mc_compartments
                   WHERE session_id = ?1
                     AND (LOWER(title) LIKE ?2 ESCAPE '\\'
@@ -12646,13 +12912,15 @@ impl McStore {
                 .query_map(params![session_id, pattern], |r| {
                     Ok(StoredCompartmentSearchRow {
                         sequence: r.get(0)?,
-                        title: r.get(1)?,
-                        content: r.get(2)?,
-                        p1: r.get(3)?,
-                        p2: r.get(4)?,
-                        p3: r.get(5)?,
-                        p4: r.get(6)?,
-                        created_at: r.get(7)?,
+                        start_ordinal: r.get(1)?,
+                        end_ordinal: r.get(2)?,
+                        title: r.get(3)?,
+                        content: r.get(4)?,
+                        p1: r.get(5)?,
+                        p2: r.get(6)?,
+                        p3: r.get(7)?,
+                        p4: r.get(8)?,
+                        created_at: r.get(9)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -13119,15 +13387,13 @@ impl McStore {
             if current.status != expected_status || current.status_version != expected_version {
                 return Ok(NoteCasOutcome::Conflict { current: Some(current) });
             }
-            let next_content = content.map(str::trim).unwrap_or(&current.content);
-            if next_content.is_empty() {
-                return Ok(NoteCasOutcome::Conflict { current: Some(current) });
-            }
-            let condition_changed = surface_condition.is_some();
+            let next_content = content.unwrap_or(&current.content);
             let next_condition = surface_condition
                 .flatten()
                 .map(str::trim)
                 .filter(|value| !value.is_empty());
+            let condition_changed = surface_condition.is_some()
+                && next_condition != current.surface_condition.as_deref();
             let next_status = if condition_changed && next_condition.is_some() {
                 "pending"
             } else {
@@ -13596,8 +13862,9 @@ impl McStore {
         let pattern = sql_like_pattern(query);
         let rows = self.inner.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, content, status, surface_condition, updated_at_ms
-                   FROM mc_notes
+                "SELECT id, content, status, surface_condition, session_id, anchor_ordinal,
+                        created_at_ms, updated_at_ms
+                    FROM mc_notes
                   WHERE project_path = ?1
                     AND (type = 'smart' OR session_id = ?3)
                     AND (LOWER(content) LIKE ?2 ESCAPE '\\'
@@ -13612,7 +13879,10 @@ impl McStore {
                         content: r.get(1)?,
                         status: r.get(2)?,
                         surface_condition: r.get(3)?,
-                        updated_at_ms: r.get(4)?,
+                        session_id: r.get(4)?,
+                        anchor_ordinal: r.get(5)?,
+                        created_at_ms: r.get(6)?,
+                        updated_at_ms: r.get(7)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -14530,6 +14800,7 @@ impl McStore {
             source_row_id: i64,
             snapshot_json: String,
             mapping_json: Option<String>,
+            mapping_origin: Option<String>,
             category: String,
             normalized_hash: String,
         }
@@ -14553,10 +14824,15 @@ impl McStore {
                     .map(serde_json::to_string)
                     .transpose()
                     .map_err(|error| McStoreError::Serde(error.to_string()))?;
+                let mapping_origin = object
+                    .get("mapping_origin")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
                 Ok(PreparedMemorySeed {
                     source_row_id: row.source_row_id,
                     snapshot_json,
                     mapping_json,
+                    mapping_origin,
                     category: object
                         .get("category")
                         .and_then(Value::as_str)
@@ -14739,12 +15015,14 @@ impl McStore {
                          AND source_context_row_id = ?3",
                 )?;
                 let mut mapping_upsert = tx.prepare(
-                    "INSERT INTO mc_memory_mappings(memory_id, project_path, mapped_files_json, updated_at)
-                     VALUES (?1, ?2, ?3, ?4)
+                    "INSERT INTO mc_memory_mappings
+                         (memory_id, project_path, mapped_files_json, updated_at, mapping_origin)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
                      ON CONFLICT(memory_id) DO UPDATE SET
                          project_path = excluded.project_path,
                          mapped_files_json = excluded.mapped_files_json,
-                         updated_at = excluded.updated_at",
+                         updated_at = excluded.updated_at,
+                         mapping_origin = excluded.mapping_origin",
                 )?;
                 let mut mapping_delete =
                     tx.prepare("DELETE FROM mc_memory_mappings WHERE memory_id = ?1")?;
@@ -14911,6 +15189,7 @@ impl McStore {
                             project,
                             mapped_files_json,
                             integer("updated_at").unwrap_or(0),
+                            prepared_row.mapping_origin.as_deref().unwrap_or("mapper"),
                         ])?;
                     } else {
                         mapping_delete.execute(params![module_row_id])?;
@@ -15223,13 +15502,14 @@ impl McStore {
                     .into_iter()
                     .map(|memory| {
                         let mapping = memory_mapping_feed_value(conn, memory.id)?;
+                        let mapping_origin = memory_mapping_origin_feed_value(conn, memory.id)?;
                         Ok(ChangefeedRow {
                             feed_seq: 0,
                             domain: "memories".to_string(),
                             op: "insert".to_string(),
                             module_row_id: memory.id,
                             content_hash: Some(memory.normalized_hash.clone()),
-                            full_row_snapshot: memory_feed_snapshot(&memory, mapping),
+                            full_row_snapshot: memory_feed_snapshot(&memory, mapping, mapping_origin),
                         })
                     })
                     .collect::<Result<Vec<_>, rusqlite::Error>>()?;
@@ -15667,110 +15947,6 @@ fn insert_historian_events_tx(
     Ok(())
 }
 
-fn historian_side_channel_pending_items(
-    request: &HistorianPublishRequest<'_>,
-) -> Result<Vec<HistorianSideChannelPendingItem>, String> {
-    let default_start = request
-        .compartments
-        .iter()
-        .map(|compartment| compartment.start_message.max(0) as u64)
-        .min()
-        .unwrap_or_else(|| request.publication_floor_ordinal.saturating_sub(1));
-    let default_end = request
-        .compartments
-        .iter()
-        .map(|compartment| compartment.end_message.max(0) as u64)
-        .max()
-        .unwrap_or(default_start);
-    let created_at_ms = current_time_ms();
-    let mut items = Vec::new();
-
-    for (item_index, event) in request.events.iter().enumerate() {
-        let source = event.compartment_id.and_then(|sequence| {
-            request
-                .compartments
-                .iter()
-                .find(|compartment| compartment.sequence.max(0) as u64 == sequence)
-        });
-        items.push(HistorianSideChannelPendingItem {
-            id: HistorianSideChannelOutboxId {
-                firing_seq: request.predicate.firing_seq,
-                kind: "event".to_string(),
-                source_start: source
-                    .map(|compartment| compartment.start_message.max(0) as u64)
-                    .unwrap_or(default_start),
-                source_end: source
-                    .map(|compartment| compartment.end_message.max(0) as u64)
-                    .unwrap_or(default_end),
-                item_index,
-            },
-            payload_json: serde_json::to_string(event).map_err(|error| error.to_string())?,
-            created_at_ms,
-        });
-    }
-    for (item_index, primer) in request.primer_candidates.iter().enumerate() {
-        if primer.question.trim().is_empty() {
-            continue;
-        }
-        items.push(HistorianSideChannelPendingItem {
-            id: HistorianSideChannelOutboxId {
-                firing_seq: request.predicate.firing_seq,
-                kind: "primer".to_string(),
-                source_start: primer.source_compartment_start.unwrap_or(default_start),
-                source_end: primer.source_compartment_end.unwrap_or(default_end),
-                item_index,
-            },
-            payload_json: serde_json::to_string(primer).map_err(|error| error.to_string())?,
-            created_at_ms,
-        });
-    }
-    for (item_index, observation) in request.user_memory_candidates.iter().enumerate() {
-        if observation.content.trim().is_empty() {
-            continue;
-        }
-        items.push(HistorianSideChannelPendingItem {
-            id: HistorianSideChannelOutboxId {
-                firing_seq: request.predicate.firing_seq,
-                kind: "user_observation".to_string(),
-                source_start: observation
-                    .source_compartment_start
-                    .unwrap_or(default_start),
-                source_end: observation.source_compartment_end.unwrap_or(default_end),
-                item_index,
-            },
-            payload_json: serde_json::to_string(observation).map_err(|error| error.to_string())?,
-            created_at_ms,
-        });
-    }
-    Ok(items)
-}
-
-fn enqueue_historian_side_channels_tx(
-    tx: &rusqlite::Transaction<'_>,
-    session_id: &str,
-    items: &[HistorianSideChannelPendingItem],
-) -> rusqlite::Result<()> {
-    for item in items {
-        tx.execute(
-            "INSERT INTO mc_historian_side_channel_outbox
-                 (session_id, firing_seq, kind, source_start, source_end, item_index,
-                  payload_json, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                session_id,
-                item.id.firing_seq as i64,
-                item.id.kind,
-                item.id.source_start as i64,
-                item.id.source_end as i64,
-                item.id.item_index as i64,
-                item.payload_json,
-                item.created_at_ms,
-            ],
-        )?;
-    }
-    Ok(())
-}
-
 fn mark_historian_side_channel_delivered_tx(
     tx: &rusqlite::Transaction<'_>,
     row: &HistorianSideChannelOutboxRow,
@@ -16094,7 +16270,7 @@ fn tag_row_from_sql(r: &rusqlite::Row<'_>) -> rusqlite::Result<McTagRow> {
     })
 }
 
-const NOTE_SELECT_COLUMNS: &str = "id, type, project_path, session_id, content, status, surface_condition, ready_at, ready_reason, manifest_json, compiled_check, check_hash, check_cron, check_failure_count, check_network_failure_count, check_quarantined_until, check_next_due_at, check_compiled_at, check_false_since_at, check_last_liveness_at, last_checked_at, check_status, check_version, policy_version, harness, anchor_block_id, anchor_ordinal, dismissed_at, dismissal_resolution, status_version, created_at_ms, updated_at_ms, context_store_uuid, context_row_id";
+const NOTE_SELECT_COLUMNS: &str = "id, type, project_path, session_id, content, status, surface_condition, compiled_provider, compiled_config, compiled_at, compile_status, ready_at, ready_reason, manifest_json, compiled_check, check_hash, check_cron, check_failure_count, check_network_failure_count, check_quarantined_until, check_next_due_at, check_compiled_at, check_false_since_at, check_last_liveness_at, last_checked_at, check_status, check_version, policy_version, harness, anchor_block_id, anchor_ordinal, dismissed_at, dismissal_resolution, status_version, created_at_ms, updated_at_ms, context_store_uuid, context_row_id";
 const NOTE_INSERT_COLUMNS: &str = "type, project_path, session_id, content, status, surface_condition, ready_at, ready_reason, manifest_json, compiled_check, check_hash, check_cron, check_failure_count, check_network_failure_count, check_quarantined_until, check_next_due_at, check_compiled_at, check_false_since_at, check_last_liveness_at, last_checked_at, check_status, check_version, policy_version, harness, anchor_block_id, anchor_ordinal, dismissed_at, dismissal_resolution, status_version, created_at_ms, updated_at_ms, context_store_uuid, context_row_id";
 
 fn stored_note_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredNote> {
@@ -16106,33 +16282,37 @@ fn stored_note_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredNote> {
         content: r.get(4)?,
         status: r.get(5)?,
         surface_condition: r.get(6)?,
-        ready_at: r.get(7)?,
-        ready_reason: r.get(8)?,
-        manifest_json: r.get(9)?,
-        compiled_check: r.get(10)?,
-        check_hash: r.get(11)?,
-        check_cron: r.get(12)?,
-        check_failure_count: r.get(13)?,
-        check_network_failure_count: r.get(14)?,
-        check_quarantined_until: r.get(15)?,
-        check_next_due_at: r.get(16)?,
-        check_compiled_at: r.get(17)?,
-        check_false_since_at: r.get(18)?,
-        check_last_liveness_at: r.get(19)?,
-        last_checked_at: r.get(20)?,
-        check_status: r.get(21)?,
-        check_version: r.get(22)?,
-        policy_version: r.get(23)?,
-        harness: r.get(24)?,
-        anchor_block_id: r.get(25)?,
-        anchor_ordinal: r.get(26)?,
-        dismissed_at: r.get(27)?,
-        dismissal_resolution: r.get(28)?,
-        status_version: r.get(29)?,
-        created_at_ms: r.get(30)?,
-        updated_at_ms: r.get(31)?,
-        context_store_uuid: r.get(32)?,
-        context_row_id: r.get(33)?,
+        compiled_provider: r.get(7)?,
+        compiled_config: r.get(8)?,
+        compiled_at: r.get(9)?,
+        compile_status: r.get(10)?,
+        ready_at: r.get(11)?,
+        ready_reason: r.get(12)?,
+        manifest_json: r.get(13)?,
+        compiled_check: r.get(14)?,
+        check_hash: r.get(15)?,
+        check_cron: r.get(16)?,
+        check_failure_count: r.get(17)?,
+        check_network_failure_count: r.get(18)?,
+        check_quarantined_until: r.get(19)?,
+        check_next_due_at: r.get(20)?,
+        check_compiled_at: r.get(21)?,
+        check_false_since_at: r.get(22)?,
+        check_last_liveness_at: r.get(23)?,
+        last_checked_at: r.get(24)?,
+        check_status: r.get(25)?,
+        check_version: r.get(26)?,
+        policy_version: r.get(27)?,
+        harness: r.get(28)?,
+        anchor_block_id: r.get(29)?,
+        anchor_ordinal: r.get(30)?,
+        dismissed_at: r.get(31)?,
+        dismissal_resolution: r.get(32)?,
+        status_version: r.get(33)?,
+        created_at_ms: r.get(34)?,
+        updated_at_ms: r.get(35)?,
+        context_store_uuid: r.get(36)?,
+        context_row_id: r.get(37)?,
     })
 }
 
@@ -16311,7 +16491,21 @@ fn memory_mapping_feed_value(
     }
 }
 
-fn memory_feed_snapshot(memory: &StoredMemoryFull, mapping: Value) -> Value {
+fn memory_mapping_origin_feed_value(
+    conn: &rusqlite::Connection,
+    memory_id: i64,
+) -> rusqlite::Result<Value> {
+    let origin = conn
+        .query_row(
+            "SELECT mapping_origin FROM mc_memory_mappings WHERE memory_id = ?1",
+            params![memory_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(origin.map(Value::String).unwrap_or(Value::Null))
+}
+
+fn memory_feed_snapshot(memory: &StoredMemoryFull, mapping: Value, mapping_origin: Value) -> Value {
     serde_json::json!({
         "id": memory.id,
         "project_path": memory.project_path,
@@ -16345,6 +16539,7 @@ fn memory_feed_snapshot(memory: &StoredMemoryFull, mapping: Value) -> Value {
         "mural_cue_at": memory.mural_cue_at,
         "mural_cue_rejection_count": memory.mural_cue_rejection_count,
         "mapping": mapping,
+        "mapping_origin": mapping_origin,
     })
 }
 
@@ -16354,7 +16549,8 @@ fn emit_verification_memory_snapshot_tx(
     feed_seq_before: i64,
 ) -> rusqlite::Result<()> {
     let mapping = memory_mapping_feed_value(tx, memory.id)?;
-    let snapshot = serde_json::to_string(&memory_feed_snapshot(memory, mapping))
+    let mapping_origin = memory_mapping_origin_feed_value(tx, memory.id)?;
+    let snapshot = serde_json::to_string(&memory_feed_snapshot(memory, mapping, mapping_origin))
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let enriched = tx.execute(
         "UPDATE mc_changefeed
@@ -16538,8 +16734,8 @@ fn set_memory_verification_tx(
             "verified" => {
                 tx.execute(
                     "UPDATE mc_memories
-                        SET verification_status = 'verified', verified_at = ?1
-                      WHERE id = ?2",
+                         SET verification_status = 'verified', verified_at = ?1, updated_at = ?1
+                       WHERE id = ?2",
                     params![now_ms, update.memory_id],
                 )?;
             }
@@ -16684,20 +16880,40 @@ fn set_memory_mapping_tx(
             });
             continue;
         }
+        if !matches!(
+            update.mapping_origin.as_str(),
+            "mapper" | "host_rejected_fallback"
+        ) {
+            rejected.push(MappingRejected {
+                memory_id: update.memory_id,
+                reason: "invalid_mapping_origin".to_string(),
+            });
+            continue;
+        }
         let files = serde_json::to_string(&update.mapped_files)
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         tx.execute(
-            "INSERT INTO mc_memory_mappings(memory_id, project_path, mapped_files_json, updated_at)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO mc_memory_mappings
+                 (memory_id, project_path, mapped_files_json, updated_at, mapping_origin)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(memory_id) DO UPDATE SET
-                project_path = excluded.project_path,
-                mapped_files_json = excluded.mapped_files_json,
-                updated_at = excluded.updated_at",
-            params![update.memory_id, project, files, now_ms],
+                 project_path = excluded.project_path,
+                 mapped_files_json = excluded.mapped_files_json,
+                 updated_at = excluded.updated_at,
+                 mapping_origin = excluded.mapping_origin",
+            params![
+                update.memory_id,
+                project,
+                files,
+                now_ms,
+                update.mapping_origin
+            ],
         )?;
         let mapping = memory_mapping_feed_value(tx, update.memory_id)?;
-        let snapshot = serde_json::to_string(&memory_feed_snapshot(&memory, mapping))
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let mapping_origin = memory_mapping_origin_feed_value(tx, update.memory_id)?;
+        let snapshot =
+            serde_json::to_string(&memory_feed_snapshot(&memory, mapping, mapping_origin))
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         tx.execute(
             "INSERT INTO mc_changefeed(domain, op, module_row_id, full_row_snapshot, content_hash)
              VALUES ('memories', 'update', ?1, ?2, ?3)",
@@ -17205,6 +17421,10 @@ mod tests {
                 session_id: Some("ses_delete"),
                 content: "smart note",
                 surface_condition: Some("later"),
+                compiled_provider: None,
+                compiled_config: None,
+                compiled_at: None,
+                compile_status: None,
                 anchor_block_id: None,
                 anchor_ordinal: None,
                 now_ms: 1,
@@ -18383,6 +18603,76 @@ mod tests {
                 ("cmd-zero".to_string(), Some("no_targets".to_string())),
                 ("cmd-normal".to_string(), None),
             ]
+        );
+    }
+
+    #[test]
+    fn session_status_tag_count_includes_all_operational_tag_states_and_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        let session_id = "status-tag-total";
+        let tags = (1..=6)
+            .map(|ordinal| TagMintInput {
+                block_id: format!("m{ordinal}#0"),
+                kind: "message".to_string(),
+                token_count: ordinal,
+                source_bytes: format!("message {ordinal}").into_bytes(),
+            })
+            .collect::<Vec<_>>();
+        store.mint_or_get_tags(session_id, &tags, 100).unwrap();
+        store
+            .mint_or_get_tags(
+                "another-session",
+                &[TagMintInput {
+                    block_id: "m1#0".to_string(),
+                    kind: "message".to_string(),
+                    token_count: 1,
+                    source_bytes: b"other".to_vec(),
+                }],
+                100,
+            )
+            .unwrap();
+        store
+            .replace_compartments(
+                session_id,
+                &[StoredCompartment {
+                    sequence: 1,
+                    start_message: 1,
+                    end_message: 2,
+                    end_message_id: "m2#0".to_string(),
+                    title: "frozen prefix".to_string(),
+                    content: "prefix".to_string(),
+                    importance: 50,
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+        store
+            .append_pending_agent_drops(session_id, &["m3#0".to_string(), "m4#0".to_string()], 200)
+            .unwrap();
+        let core = CoreState {
+            boundary_id: "m2#0".to_string(),
+            ..Default::default()
+        };
+        let meta = ModuleMeta {
+            coverage_ordinal: Some(4),
+            ..Default::default()
+        };
+        store.commit(session_id, None, &core, &meta).unwrap();
+
+        // The compartment covers m1-m2, queued drops cover m3-m4, and m5-m6 remain active.
+        // The status total must cross both the durable coverage boundary and the requested page.
+        let snapshot = store
+            .load_session_status_snapshot(session_id, Some((0, 1)))
+            .unwrap();
+        assert_eq!(snapshot.loaded.meta.coverage_ordinal, Some(4));
+        assert_eq!(snapshot.compartment_count, 1);
+        assert_eq!(snapshot.pending_drop_count, 2);
+        assert_eq!(snapshot.compartment_page.unwrap().compartments.len(), 1);
+        assert_eq!(snapshot.tag_count, 6);
+        assert_eq!(
+            snapshot.tag_count,
+            store.load_tags_for_session(session_id).unwrap().len()
         );
     }
 
@@ -20558,6 +20848,10 @@ mod tests {
                 session_id: Some("m1-session"),
                 content: "m1 note",
                 surface_condition: None,
+                compiled_provider: None,
+                compiled_config: None,
+                compiled_at: None,
+                compile_status: None,
                 anchor_block_id: None,
                 anchor_ordinal: None,
                 now_ms: 1,
@@ -21018,6 +21312,7 @@ mod tests {
                 100,
             )
             .unwrap();
+        assert_eq!(store.get_memory_full(1).unwrap().unwrap().updated_at, 100);
         let after = store
             .load_m1_revision_snapshot(own, own, "session", true, 100)
             .unwrap();
@@ -21972,10 +22267,11 @@ mod tests {
     }
 
     #[test]
-    fn historian_side_channel_faults_are_isolated_and_retryable_per_kind() {
+    fn historian_side_channel_fault_matrix_is_best_effort_and_lossy_after_restart() {
         for failed_kind in HISTORIAN_SIDE_CHANNEL_KINDS {
             let dir = tempfile::tempdir().unwrap();
-            let store = McStore::open(&descriptor(dir.path())).unwrap();
+            let descriptor = descriptor(dir.path());
+            let store = McStore::open(&descriptor).unwrap();
             store
                 .commit("ses", None, &CoreState::default(), &publishing_meta())
                 .unwrap();
@@ -22040,46 +22336,44 @@ mod tests {
                 store.load_user_memory_candidates("ses").unwrap().len(),
                 usize::from(failed_kind != "user_observation")
             );
-            if failed_kind == "primer" {
-                assert_eq!(
-                    store.load_user_memory_candidates("ses").unwrap().len(),
-                    1,
-                    "a failed Primer write must not suppress user observations"
-                );
-            }
-            let pending = store.historian_side_channel_status("ses").unwrap();
-            assert_eq!(pending.pending_count, 1);
-            assert!(pending
-                .last_failure
-                .as_deref()
-                .is_some_and(|error| error.contains(failed_kind)));
-
-            let retry = store
-                .drain_historian_side_channels("ses", i64::MAX, 32)
-                .unwrap();
-            assert_eq!(retry.succeeded, 1);
-            assert_eq!(store.load_compartment_events("ses").unwrap().len(), 1);
-            assert_eq!(store.load_primer_candidates("ses").unwrap().len(), 1);
-            assert_eq!(store.load_user_memory_candidates("ses").unwrap().len(), 1);
             assert_eq!(
                 store
                     .historian_side_channel_status("ses")
                     .unwrap()
                     .pending_count,
-                0
+                0,
+                "new side-channel failures must not become durable retry work"
+            );
+            drop(store);
+
+            let reopened = McStore::open(&descriptor).unwrap();
+            let retry = reopened
+                .drain_historian_side_channels("ses", i64::MAX, 32)
+                .unwrap();
+            assert_eq!(retry.attempted, 0);
+            assert_eq!(
+                reopened.load_compartment_events("ses").unwrap().len(),
+                usize::from(failed_kind != "event")
+            );
+            assert_eq!(
+                reopened.load_primer_candidates("ses").unwrap().len(),
+                usize::from(failed_kind != "primer")
+            );
+            assert_eq!(
+                reopened.load_user_memory_candidates("ses").unwrap().len(),
+                usize::from(failed_kind != "user_observation")
             );
         }
     }
 
     #[test]
-    fn historian_side_channel_outbox_recovers_after_restart() {
+    fn historian_new_publications_leave_the_legacy_outbox_empty() {
         let dir = tempfile::tempdir().unwrap();
         let descriptor = descriptor(dir.path());
         let store = McStore::open(&descriptor).unwrap();
         store
             .commit("ses", None, &CoreState::default(), &publishing_meta())
             .unwrap();
-        store.fail_next_historian_side_channel_for_test("event");
         let event = HistorianEventCandidate {
             kind: "causal_incident".into(),
             fields_json: "{}".into(),
@@ -22106,28 +22400,25 @@ mod tests {
                 raw_chunk_messages: None,
             })
             .unwrap();
+        assert_eq!(store.load_compartment_events("ses").unwrap().len(), 1);
         assert_eq!(
             store
                 .historian_side_channel_status("ses")
                 .unwrap()
                 .pending_count,
-            1
+            0
         );
         drop(store);
 
         let reopened = McStore::open(&descriptor).unwrap();
-        let recovery = reopened
-            .drain_historian_side_channels("ses", i64::MAX, 32)
-            .unwrap();
-        assert_eq!(recovery.succeeded, 1);
-        assert_eq!(reopened.load_compartment_events("ses").unwrap().len(), 1);
         assert_eq!(
             reopened
-                .historian_side_channel_status("ses")
+                .drain_historian_side_channels("ses", i64::MAX, 32)
                 .unwrap()
-                .pending_count,
+                .attempted,
             0
         );
+        assert_eq!(reopened.load_compartment_events("ses").unwrap().len(), 1);
     }
 
     #[test]
@@ -22395,6 +22686,10 @@ mod tests {
                 session_id: Some(session_a),
                 content: "shared project guidance",
                 surface_condition: Some("shared condition"),
+                compiled_provider: None,
+                compiled_config: None,
+                compiled_at: None,
+                compile_status: None,
                 anchor_block_id: None,
                 anchor_ordinal: None,
                 now_ms: 3,
@@ -22518,6 +22813,10 @@ mod tests {
                 session_id: Some("writer-session"),
                 content: "wait for the release",
                 surface_condition: Some("release exists"),
+                compiled_provider: None,
+                compiled_config: None,
+                compiled_at: None,
+                compile_status: None,
                 anchor_block_id: None,
                 anchor_ordinal: None,
                 now_ms: 10,
@@ -22631,6 +22930,10 @@ mod tests {
                 session_id: Some("writer"),
                 content: "evaluate me",
                 surface_condition: Some("condition"),
+                compiled_provider: None,
+                compiled_config: None,
+                compiled_at: None,
+                compile_status: None,
                 anchor_block_id: None,
                 anchor_ordinal: None,
                 now_ms: 1,
@@ -22690,6 +22993,10 @@ mod tests {
                     session_id: Some("writer"),
                     content: "scoped note",
                     surface_condition: Some("condition"),
+                    compiled_provider: None,
+                    compiled_config: None,
+                    compiled_at: None,
+                    compile_status: None,
                     anchor_block_id: None,
                     anchor_ordinal: None,
                     now_ms: 1,
@@ -22747,6 +23054,10 @@ mod tests {
                     session_id: Some("writer"),
                     content: &format!("note {index}"),
                     surface_condition: None,
+                    compiled_provider: None,
+                    compiled_config: None,
+                    compiled_at: None,
+                    compile_status: None,
                     anchor_block_id: None,
                     anchor_ordinal: None,
                     now_ms: 1,
@@ -25314,6 +25625,7 @@ mod shadow_tests {
                     memory_id: 1,
                     content_hash_at_prompt: hash(1),
                     mapped_files: Some(vec!["src/old.rs".to_string()]),
+                    mapping_origin: "mapper".to_string(),
                 }],
                 5,
             )
@@ -25357,6 +25669,7 @@ mod shadow_tests {
             )
             .unwrap();
         assert_eq!(result.accepted, vec![1]);
+        assert_eq!(store.get_memory_full(1).unwrap().unwrap().updated_at, 10);
         let verified_feed = store
             .pull_changefeed("memories", 0, 100)
             .unwrap()
@@ -25427,18 +25740,29 @@ mod shadow_tests {
                 &[MappingUpdate {
                     memory_id: 2,
                     content_hash_at_prompt: hash(2),
-                    mapped_files: Some(vec!["src/lib.rs".into()]),
+                    mapped_files: None,
+                    mapping_origin: "host_rejected_fallback".to_string(),
                 }],
                 4,
             )
             .unwrap();
         assert_eq!(mapping.accepted, vec![2]);
-        assert!(store
+        let fallback_feed = store
             .pull_changefeed("memories", 0, 100)
             .unwrap()
             .rows
-            .iter()
-            .any(|row| row.full_row_snapshot.get("mapping").is_some()));
+            .into_iter()
+            .rev()
+            .find(|row| row.module_row_id == 2)
+            .unwrap();
+        assert_eq!(
+            fallback_feed.full_row_snapshot["mapping"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            fallback_feed.full_row_snapshot["mapping_origin"],
+            serde_json::json!("host_rejected_fallback")
+        );
         assert_memory_feed_snapshots_complete(&store);
 
         // The live-snapshot arm feeds the mirror resnapshot healer, so its rows must
@@ -25492,6 +25816,7 @@ mod shadow_tests {
                     memory_id: 1,
                     content_hash_at_prompt: hash.clone(),
                     mapped_files: Some(vec!["src/lib.rs".to_string()]),
+                    mapping_origin: "mapper".to_string(),
                 }],
                 2,
             )
@@ -25636,6 +25961,264 @@ mod shadow_tests {
                 .unwrap()
                 .next_cursor,
             applied_feed_head
+        );
+    }
+
+    #[test]
+    fn memory_content_update_invalidates_all_derived_mural_cues() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let project = "git:mural-cue-update";
+        let memory_id = store
+            .insert_memory(InsertMemoryInput {
+                project_path: project,
+                route_project_root: None,
+                category: "CONSTRAINTS",
+                content: "old content",
+                source_session_id: None,
+                source_type: None,
+                importance: None,
+                expires_at: None,
+                metadata_json: None,
+                now_ms: 1,
+            })
+            .unwrap();
+        store
+            .inner
+            .with_conn_fenced(|tx| {
+                tx.execute(
+                    "UPDATE mc_memories
+                        SET mural_cue = 'cue', mural_cue_hash = 'hash',
+                            mural_cue_at = 9, mural_cue_rejection_count = 3
+                      WHERE id = ?1",
+                    params![memory_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        store
+            .update_memory_content(project, memory_id, "new content", 10)
+            .unwrap()
+            .unwrap();
+        let cues = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT mural_cue, mural_cue_hash, mural_cue_at,
+                            mural_cue_rejection_count
+                       FROM mc_memories WHERE id = ?1",
+                    params![memory_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+            })
+            .unwrap();
+        assert_eq!(cues, (None, None, None, 0));
+    }
+
+    #[test]
+    fn facade_note_write_persists_compilation_and_update_matches_ts_content_semantics() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let project = "git:compiled-note";
+        let session = "compiled-note-session";
+        let written = store
+            .with_facade_command(
+                "/route/compiled-note",
+                project,
+                "notes",
+                session,
+                "note",
+                "write",
+                Some("write-compiled-note"),
+                |tx| {
+                    let note = tx.insert_project_note(NoteWriteInput {
+                        project_path: project,
+                        route_project_root: Some("/route/compiled-note"),
+                        session_id: Some(session),
+                        content: "original",
+                        surface_condition: Some("same condition"),
+                        compiled_provider: Some("anthropic"),
+                        compiled_config: Some("{\"model\":\"claude\"}"),
+                        compiled_at: Some(123),
+                        compile_status: Some("compiled"),
+                        anchor_block_id: None,
+                        anchor_ordinal: None,
+                        now_ms: 1,
+                    })?;
+                    Ok(note.id.to_string().into_bytes())
+                },
+            )
+            .unwrap();
+        let note_id = match written {
+            FacadeMutationOutcome::Applied(bytes) => {
+                String::from_utf8(bytes).unwrap().parse::<i64>().unwrap()
+            }
+            FacadeMutationOutcome::Duplicate(_) => unreachable!(),
+        };
+        let initial = store
+            .get_note_by_id(project, session, note_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(initial.compiled_provider.as_deref(), Some("anthropic"));
+        assert_eq!(initial.compile_status.as_deref(), Some("compiled"));
+        assert_eq!(initial.compiled_at, Some(123));
+
+        store
+            .with_facade_command(
+                "/route/compiled-note",
+                project,
+                "notes",
+                session,
+                "note",
+                "update",
+                Some("update-note-verbatim"),
+                |tx| {
+                    tx.update_note_cas(
+                        project,
+                        note_id,
+                        &initial.status,
+                        initial.status_version,
+                        Some("  keep surrounding whitespace  "),
+                        Some(Some("same condition")),
+                        2,
+                    )?;
+                    Ok(Vec::new())
+                },
+            )
+            .unwrap();
+        let updated = store
+            .get_note_by_id(project, session, note_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.content, "  keep surrounding whitespace  ");
+        assert_eq!(updated.compiled_provider.as_deref(), Some("anthropic"));
+        assert_eq!(updated.compile_status.as_deref(), Some("compiled"));
+
+        store
+            .with_facade_command(
+                "/route/compiled-note",
+                project,
+                "notes",
+                session,
+                "note",
+                "update",
+                Some("update-note-empty"),
+                |tx| {
+                    tx.update_note_cas(
+                        project,
+                        note_id,
+                        &updated.status,
+                        updated.status_version,
+                        Some(""),
+                        None,
+                        3,
+                    )?;
+                    Ok(Vec::new())
+                },
+            )
+            .unwrap();
+        let emptied = store
+            .get_note_by_id(project, session, note_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(emptied.content, "");
+        let feed = store.pull_changefeed("notes", 0, 100).unwrap();
+        assert!(feed.rows.iter().any(|row| {
+            row.full_row_snapshot["compiled_provider"].as_str() == Some("anthropic")
+                && row.full_row_snapshot["compile_status"].as_str() == Some("compiled")
+        }));
+    }
+
+    #[test]
+    fn facade_merge_creates_content_hash_canonical_row_and_supersedes_all_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let project = "git:canonical-merge";
+        let first = store
+            .insert_memory(InsertMemoryInput {
+                project_path: project,
+                route_project_root: None,
+                category: "CONSTRAINTS",
+                content: "first source",
+                source_session_id: None,
+                source_type: None,
+                importance: None,
+                expires_at: None,
+                metadata_json: None,
+                now_ms: 1,
+            })
+            .unwrap();
+        let second = store
+            .insert_memory(InsertMemoryInput {
+                project_path: project,
+                route_project_root: None,
+                category: "CONSTRAINTS",
+                content: "second source",
+                source_session_id: None,
+                source_type: None,
+                importance: None,
+                expires_at: None,
+                metadata_json: None,
+                now_ms: 1,
+            })
+            .unwrap();
+
+        let merged = store
+            .with_facade_command(
+                "/route/canonical-merge",
+                project,
+                "memories",
+                "canonical-session",
+                "memory",
+                "merge",
+                Some("canonical-merge"),
+                |tx| {
+                    let (canonical, superseded) = tx
+                        .merge_memories_canonical(
+                            project,
+                            &[first, second],
+                            "new canonical content",
+                            Some("canonical-session"),
+                            2,
+                        )?
+                        .expect("valid same-category merge");
+                    Ok(serde_json::to_vec(&(canonical.id, superseded)).unwrap())
+                },
+            )
+            .unwrap();
+        let bytes = match merged {
+            FacadeMutationOutcome::Applied(bytes) => bytes,
+            FacadeMutationOutcome::Duplicate(_) => unreachable!(),
+        };
+        let (canonical_id, superseded): (i64, Vec<i64>) = serde_json::from_slice(&bytes).unwrap();
+        assert!(canonical_id > second);
+        assert_eq!(superseded, vec![first, second]);
+        let canonical = store.get_memory_full(canonical_id).unwrap().unwrap();
+        assert_eq!(canonical.content, "new canonical content");
+        assert_eq!(canonical.merged_from, Some(format!("[{first},{second}]")));
+        assert_eq!(
+            store
+                .get_memory_full(first)
+                .unwrap()
+                .unwrap()
+                .superseded_by_memory_id,
+            Some(canonical_id)
+        );
+        assert_eq!(
+            store
+                .get_memory_full(second)
+                .unwrap()
+                .unwrap()
+                .superseded_by_memory_id,
+            Some(canonical_id)
         );
     }
 }

@@ -12,7 +12,14 @@
       "oldString": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa...[truncated]",
       "newString": "new contents new contents new contents n...[truncated]",
       "occurrence": 2
-    }
+    },
+    "input_key_order": [
+      "filePath",
+      "oldString",
+      "newString",
+      "occurrence"
+    ],
+    "expected_json": "{\"filePath\":\"/workspace/packages/plugin/src/hooks/magic-context/edit-marker.ts\",\"oldString\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa...[truncated]\",\"newString\":\"new contents new contents new contents n...[truncated]\",\"occurrence\":2}"
   },
   {
     "label": "write-marker: path and small metadata survive",
@@ -25,6 +32,31 @@
       "path": "/workspace/crates/mc-module/src/selection.rs",
       "content": "written contents written contents writte...[truncated]",
       "mode": "overwrite"
-    }
+    },
+    "input_key_order": [
+      "path",
+      "content",
+      "mode"
+    ],
+    "expected_json": "{\"path\":\"/workspace/crates/mc-module/src/selection.rs\",\"content\":\"written contents written contents writte...[truncated]\",\"mode\":\"overwrite\"}"
+  },
+  {
+    "label": "edit-marker: original insertion order reaches provider serialization",
+    "input": {
+      "z": "metadata-first",
+      "filePath": "/workspace/z-first.ts",
+      "content": "replacement contents replacement contents replacement contents replacement contents replacement contents replacement contents replacement contents replacement contents "
+    },
+    "expected": {
+      "z": "metadata-first",
+      "filePath": "/workspace/z-first.ts",
+      "content": "replacement contents replacement content...[truncated]"
+    },
+    "input_key_order": [
+      "z",
+      "filePath",
+      "content"
+    ],
+    "expected_json": "{\"z\":\"metadata-first\",\"filePath\":\"/workspace/z-first.ts\",\"content\":\"replacement contents replacement content...[truncated]\"}"
   }
 ]

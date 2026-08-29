@@ -62,7 +62,11 @@ import { getMagicContextStorageDir } from "./shared/data-path";
 import { registerExitAbort, unregisterExitAbort } from "./shared/exit-abort-registry";
 import { setKeepSubagents } from "./shared/keep-subagents";
 import { log } from "./shared/logger";
-import { resolveHistorianModel, resolveOpenCodeAgentOverrides } from "./shared/model-resolution";
+import {
+    resolveHistorianAgentOverrides,
+    resolveHistorianModel,
+    resolveOpenCodeAgentOverrides,
+} from "./shared/model-resolution";
 import { refreshModelLimitsFromApi } from "./shared/models-dev-cache";
 import { createPromptSurfaceRuntime } from "./shared/prompt-surface-runtime";
 import { MagicContextRpcServer } from "./shared/rpc-server";
@@ -199,7 +203,9 @@ const server: Plugin = async (ctx) => {
 
     const liveSessionState = createLiveSessionState();
     const rustModeModuleClient: RustModeModuleClient | undefined =
-        pluginConfig.transform_mode === "rust" ? new SubcModuleTransport() : undefined;
+        pluginConfig.transform_mode === "rust"
+            ? new SubcModuleTransport(pluginConfig.subc?.connection_file)
+            : undefined;
 
     const hooks = await createSessionHooksAsync({
         ctx,
@@ -730,16 +736,14 @@ const server: Plugin = async (ctx) => {
                 // agent config field, so leaking them in would put unknown keys on the
                 // OpenCode agent config. Both historian and historian-editor agents use
                 // the remaining overrides (same model, fallbacks, etc.).
-                const historianAgentOverrides = pluginConfig.historian
-                    ? (() => {
-                          const {
-                              two_pass: _twoPass,
-                              disallowed_tools: _disallowedTools,
-                              ...agentOverrides
-                          } = resolveOpenCodeAgentOverrides(pluginConfig.historian);
-                          return agentOverrides;
-                      })()
-                    : undefined;
+                const historianAgentOverrides = (() => {
+                    const {
+                        two_pass: _twoPass,
+                        disallowed_tools: _disallowedTools,
+                        ...agentOverrides
+                    } = resolveHistorianAgentOverrides(pluginConfig.historian);
+                    return agentOverrides;
+                })();
                 // Build hidden-agent registrations from a helper in a NON-entry
                 // module (see hidden-agent-registrations.ts: exporting it from the
                 // entry would make OpenCode's legacy loader invoke it as a plugin
@@ -749,11 +753,10 @@ const server: Plugin = async (ctx) => {
                 const registrations = buildHiddenAgentRegistrations({
                     dreamerPrompt: DREAMER_SYSTEM_PROMPT,
                     smartNoteCompilerPrompt: SMART_NOTE_COMPILER_SYSTEM_PROMPT,
-                    // v2: the v8.7.3 historian prompt always describes the
-                    // <user_observations> output; observations are simply not
-                    // promoted to user-profile when user_memories is disabled
-                    // (gated in the runner). Keeping the system prompt constant
-                    // preserves prompt-cache byte stability.
+                    // The historian prompt always describes <user_observations>, even when
+                    // user memories are disabled. The runner only prevents those observations
+                    // from reaching the user profile. Keeping one system prompt preserves
+                    // prompt-cache byte stability.
                     historianPrompt: withContentLanguageDirective(
                         COMPARTMENT_AGENT_SYSTEM_PROMPT,
                         pluginConfig.language,

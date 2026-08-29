@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
     buildChannel1Reminder,
     buildChannel2Reminder,
@@ -6,6 +7,7 @@ import {
     CHANNEL1_MIN_TOKENS,
     CHANNEL2_FLOOR_TOKENS,
     CHANNEL2_SEVERITY_THRESHOLD,
+    type Channel1Level,
     channel1RefireTokens,
     decideChannel1,
     evaluateChannel2,
@@ -176,36 +178,78 @@ describe("decideChannel1 — agent-tail hygiene ratio", () => {
     });
 });
 
+type ReminderCopyGolden = {
+    schema: number;
+    cases: Array<{
+        id: string;
+        channel: "channel1" | "channel2";
+        level?: Channel1Level;
+        reclaimable_tool_outputs: number;
+        reclaimable_tokens: number;
+        sticky?: boolean;
+        hint: Array<{ tag_number: number; tool_name: string | null }>;
+        expected: string;
+    }>;
+};
+
+const reminderCopyGolden = JSON.parse(
+    readFileSync(
+        new URL(
+            "../../../../../crates/mc-module/testdata/ctx-reduce-nudge-copy-golden.json",
+            import.meta.url,
+        ),
+        "utf8",
+    ),
+) as ReminderCopyGolden;
+
+function renderReminderGoldenCase(reminder: ReminderCopyGolden["cases"][number]): string {
+    const hint = reminder.hint.map(({ tag_number, tool_name }) => ({
+        tagNumber: tag_number,
+        toolName: tool_name,
+    }));
+    if (reminder.channel === "channel2") {
+        return buildChannel2Reminder(
+            reminder.reclaimable_tokens,
+            reminder.reclaimable_tool_outputs,
+            hint,
+        );
+    }
+    if (!reminder.level) throw new Error(`${reminder.id} needs a Channel-1 level`);
+    return buildChannel1Reminder(
+        reminder.level,
+        reminder.reclaimable_tokens,
+        reminder.reclaimable_tool_outputs,
+        hint,
+        reminder.sticky,
+    );
+}
+
 describe("reminder rendering", () => {
-    it("renders the user-approved gentle body without numbers", () => {
-        const reminder = buildChannel1Reminder("gentle", 42_000, 128_000);
-        expect(reminder).toContain(
-            "Housekeeping: some earlier tool outputs are spent and can be dropped with ctx_reduce when you are done with them. Context is managed automatically — this is tidiness, never a reason to rush or narrow scope.",
-        );
-        expect(reminder).not.toMatch(/\d/);
+    it("matches the TypeScript copy golden for every rendered band", () => {
+        expect(reminderCopyGolden.schema).toBe(1);
+        for (const reminder of reminderCopyGolden.cases) {
+            expect(renderReminderGoldenCase(reminder), reminder.id).toBe(reminder.expected);
+        }
     });
 
-    it("renders firm and urgent denominators plus the unchanged hint line", () => {
-        const firm = buildChannel1Reminder("firm", 42_000, 128_000, [
-            { tagNumber: 123, toolName: "read" },
-            { tagNumber: 145, toolName: null },
-        ]);
-        expect(firm).toContain(
-            "Housekeeping: ~42k of this session's ~128k window is spent tool output. Drop what you have already processed with ctx_reduce at a natural stopping point. Not a limit — nothing is lost either way.",
-        );
-        expect(firm).toContain("oldest reclaimable: §123§ read · §145§ tool.");
-
-        const urgent = buildChannel1Reminder("urgent", 61_000, 128_000);
-        expect(urgent).toContain(
-            "Housekeeping backlog: ~61k of this session's ~128k window is spent tool output — worth a ctx_reduce pass now. This is routine and lossless; it is never a reason to change scope.",
-        );
-    });
-
-    it("renders the user-approved Channel-2 carrier with its denominator", () => {
-        const reminder = buildChannel2Reminder(55_000, 128_000);
-        expect(reminder).toContain(
-            "Routine housekeeping: an older span of this session folds into compact history automatically — nothing is lost and nothing pauses. Drop spent tool outputs with ctx_reduce first so the archive keeps only what matters (~55k of ~128k reclaimable).",
-        );
+    it("never exposes a context-capacity gauge in any rendered band", () => {
+        for (const reminder of reminderCopyGolden.cases) {
+            const rendered = renderReminderGoldenCase(reminder);
+            expect(rendered, `${reminder.id} must not expose a denominator`).not.toContain("of ~");
+            expect(rendered, `${reminder.id} must not expose session capacity`).not.toContain(
+                "of this session",
+            );
+            expect(
+                rendered.match(/~\d+(?:\.\d+)?k\b/g) ?? [],
+                `${reminder.id} must expose only the reclaimable token mass`,
+            ).toHaveLength(1);
+            expect(rendered, `${reminder.id} must not expose a percentage`).not.toMatch(
+                /\b\d+(?:\.\d+)?\s*%/,
+            );
+            expect(rendered, `${reminder.id} must not expose context capacity`).not.toMatch(
+                /\bwindow\b/i,
+            );
+        }
     });
 
     it("dampens re-fires in a window with zero real user turns (pure tool stream)", () => {
@@ -265,11 +309,12 @@ describe("reminder rendering", () => {
             }),
         ).toBe(false);
 
-        const sticky = buildChannel1Reminder("firm", 70_000, 128_000, undefined, true);
-        expect(sticky).toContain("Reminder: ctx_reduce housekeeping still pending —");
-        expect(sticky).not.toContain("Not a limit");
-        const escalation = buildChannel1Reminder("urgent", 80_000, 128_000, undefined, false);
-        expect(escalation).toContain("Housekeeping backlog:");
+        const sticky = buildChannel1Reminder("firm", 70_000, 16, undefined, true);
+        expect(sticky).toContain(
+            "Reminder: 16 spent tool outputs (~70k tokens) are still reclaimable",
+        );
+        const escalation = buildChannel1Reminder("urgent", 80_000, 16, undefined, false);
+        expect(escalation).toContain("Housekeeping backlog: 16 spent tool outputs (~80k tokens)");
     });
 });
 

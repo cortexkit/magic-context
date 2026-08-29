@@ -7,6 +7,7 @@ import { initializeDatabase } from "./storage-db";
 import {
     addMergedReasoningStrippedIds,
     addTrailingBlankDecisions,
+    demoteTrailingBlankKeepDecisions,
     getMergedReasoningStrippedIds,
     getTrailingBlankDecisions,
 } from "./storage-meta-persisted";
@@ -105,6 +106,30 @@ describe("trailing_blank_decisions", () => {
             new Map([
                 ["assistant-historical", "strip"],
                 ["assistant-newest", "keep"],
+            ]),
+        );
+    });
+
+    it("demotes only frozen keep decisions selected for healing", () => {
+        addTrailingBlankDecisions(db, sessionId, [
+            ["assistant-keep", "keep"],
+            ["assistant-keep-two", "keep:2"],
+            ["assistant-strip", "strip"],
+        ]);
+
+        expect(
+            demoteTrailingBlankKeepDecisions(db, sessionId, [
+                "assistant-keep",
+                "assistant-keep-two",
+                "assistant-strip",
+                "assistant-missing",
+            ]),
+        ).toEqual(["assistant-keep", "assistant-keep-two"]);
+        expect(getTrailingBlankDecisions(db, sessionId)).toEqual(
+            new Map([
+                ["assistant-keep", "strip"],
+                ["assistant-keep-two", "strip"],
+                ["assistant-strip", "strip"],
             ]),
         );
     });

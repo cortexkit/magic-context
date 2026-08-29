@@ -108,7 +108,7 @@ export function isSecretKey(key: string): boolean {
 }
 
 export function sanitizePathString(value: string): string {
-    const home = homedir();
+    const home = process.env.HOME || process.env.USERPROFILE || homedir();
     const username = userInfo().username;
     let sanitized = value;
     if (home) {
@@ -132,7 +132,7 @@ const SECRET_TEXT_PATTERNS: Array<{
         replacement: "<ANTHROPIC_API_KEY_REDACTED>",
     },
     {
-        pattern: /\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}/g,
+        pattern: /\bsk-(?:proj-)?[A-Za-z0-9_-]{12,}/g,
         replacement: "<OPENAI_API_KEY_REDACTED>",
     },
     {

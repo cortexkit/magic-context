@@ -87,7 +87,7 @@ afterEach(() => {
 });
 
 describe("partitionVerifyScope (per-memory verified_at gate)", () => {
-    test("excludes file-independent (sentinel) and unmapped memories", async () => {
+    test("excludes both no-file sentinel origins and unmapped memories", async () => {
         const db = freshDb();
         const dir = makeGitMetadataDirectory("mc-verify-gate-scope-");
         installGitScript(
@@ -101,9 +101,11 @@ describe("partitionVerifyScope (per-memory verified_at gate)", () => {
         try {
             const mapped = mem(db, PROJECT, "A in a.ts");
             const independent = mem(db, PROJECT, "Anthropic returns 400 on empty content");
+            const hostFallback = mem(db, PROJECT, "The host rejected every mapped path");
             mem(db, PROJECT, "unmapped fact");
             recordMemoryMapping(db, mapped, ["a.ts"], 1);
             recordMemoryMapping(db, independent, [], 1);
+            recordMemoryMapping(db, hostFallback, [], 1, "host_rejected_fallback");
 
             const gate = await partitionVerifyScope({
                 db,

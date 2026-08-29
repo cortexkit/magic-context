@@ -10,7 +10,28 @@ use crate::external_cache_sessions;
 use crate::pi_sessions;
 use crate::project_identity::{basename, normalize_stored_project_path};
 
+#[cfg(test)]
+use std::sync::Mutex;
+
+#[cfg(test)]
+static RESOLVE_DB_PATH_ENV_LOCK: Mutex<()> = Mutex::new(());
+
 pub fn resolve_db_path() -> Option<PathBuf> {
+    // Keep the dashboard on the same harness-side database as the plugin. An
+    // explicit override is a complete absolute storage directory; do not fall
+    // back to XDG/legacy paths when it is invalid or the DB is not created yet.
+    if let Ok(raw) = std::env::var("MAGIC_CONTEXT_STORAGE_DIR") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let explicit = PathBuf::from(trimmed);
+            if !explicit.is_absolute() {
+                return None;
+            }
+            let path = explicit.join("context.db");
+            return path.exists().then_some(path);
+        }
+    }
+
     // The magic-context plugin uses XDG_DATA_HOME or ~/.local/share on ALL platforms
     // (see packages/plugin/src/shared/data-path.ts). On Windows this means
     // C:\Users\<user>\.local\share — NOT %APPDATA%.
@@ -47,6 +68,47 @@ pub fn resolve_db_path() -> Option<PathBuf> {
         Some(legacy_path)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod storage_path_tests {
+    use super::resolve_db_path;
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn explicit_absolute_storage_override_beats_xdg_and_rejects_relative() {
+        let _guard = super::RESOLVE_DB_PATH_ENV_LOCK.lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let explicit = root.path().join("shared");
+        fs::create_dir_all(&explicit).unwrap();
+        let explicit_db = explicit.join("context.db");
+        fs::write(&explicit_db, b"sqlite-fixture").unwrap();
+        let xdg = root.path().join("xdg");
+        fs::create_dir_all(xdg.join("cortexkit/magic-context")).unwrap();
+        let xdg_db = xdg.join("cortexkit/magic-context/context.db");
+        fs::write(&xdg_db, b"xdg-fixture").unwrap();
+
+        let old_storage = std::env::var_os("MAGIC_CONTEXT_STORAGE_DIR");
+        let old_xdg = std::env::var_os("XDG_DATA_HOME");
+        std::env::set_var("MAGIC_CONTEXT_STORAGE_DIR", &explicit);
+        std::env::set_var("XDG_DATA_HOME", &xdg);
+        assert_eq!(resolve_db_path(), Some(PathBuf::from(&explicit_db)));
+
+        std::env::set_var("MAGIC_CONTEXT_STORAGE_DIR", "relative/shared");
+        assert_eq!(resolve_db_path(), None);
+
+        if let Some(value) = old_storage {
+            std::env::set_var("MAGIC_CONTEXT_STORAGE_DIR", value);
+        } else {
+            std::env::remove_var("MAGIC_CONTEXT_STORAGE_DIR");
+        }
+        if let Some(value) = old_xdg {
+            std::env::set_var("XDG_DATA_HOME", value);
+        } else {
+            std::env::remove_var("XDG_DATA_HOME");
+        }
     }
 }
 

@@ -1,0 +1,845 @@
+{
+  "language_names": [
+    {
+      "language": "aa",
+      "name": "Afar"
+    },
+    {
+      "language": "ab",
+      "name": "Abkhazian"
+    },
+    {
+      "language": "ae",
+      "name": "Avestan"
+    },
+    {
+      "language": "af",
+      "name": "Afrikaans"
+    },
+    {
+      "language": "ak",
+      "name": "Akan"
+    },
+    {
+      "language": "am",
+      "name": "Amharic (አማርኛ)"
+    },
+    {
+      "language": "an",
+      "name": "Aragonese"
+    },
+    {
+      "language": "ar",
+      "name": "Arabic (العربية)"
+    },
+    {
+      "language": "as",
+      "name": "Assamese (অসমীয়া)"
+    },
+    {
+      "language": "av",
+      "name": "Avaric"
+    },
+    {
+      "language": "ay",
+      "name": "Aymara"
+    },
+    {
+      "language": "az",
+      "name": "Azerbaijani (azərbaycan)"
+    },
+    {
+      "language": "ba",
+      "name": "Bashkir (башҡорт)"
+    },
+    {
+      "language": "be",
+      "name": "Belarusian (беларуская)"
+    },
+    {
+      "language": "bg",
+      "name": "Bulgarian (български)"
+    },
+    {
+      "language": "bh",
+      "name": "Bhojpuri"
+    },
+    {
+      "language": "bi",
+      "name": "Bislama"
+    },
+    {
+      "language": "bm",
+      "name": "Bambara (bamanakan)"
+    },
+    {
+      "language": "bn",
+      "name": "Bangla (বাংলা)"
+    },
+    {
+      "language": "bo",
+      "name": "Tibetan (བོད་སྐད་)"
+    },
+    {
+      "language": "br",
+      "name": "Breton (brezhoneg)"
+    },
+    {
+      "language": "bs",
+      "name": "Bosnian (bosanski)"
+    },
+    {
+      "language": "ca",
+      "name": "Catalan (català)"
+    },
+    {
+      "language": "ce",
+      "name": "Chechen (нохчийн)"
+    },
+    {
+      "language": "ch",
+      "name": "Chamorro"
+    },
+    {
+      "language": "co",
+      "name": "Corsican (corsu)"
+    },
+    {
+      "language": "cr",
+      "name": "Cree (ᓀᐦᐃᖬᐍᐏᐣ)"
+    },
+    {
+      "language": "cs",
+      "name": "Czech (Čeština)"
+    },
+    {
+      "language": "cu",
+      "name": "Church Slavic"
+    },
+    {
+      "language": "cv",
+      "name": "Chuvash (чӑваш чӗлхи)"
+    },
+    {
+      "language": "cy",
+      "name": "Welsh (Cymraeg)"
+    },
+    {
+      "language": "da",
+      "name": "Danish (dansk)"
+    },
+    {
+      "language": "de",
+      "name": "German (Deutsch)"
+    },
+    {
+      "language": "dv",
+      "name": "Dhivehi (ދިވެހިބަސް)"
+    },
+    {
+      "language": "dz",
+      "name": "Dzongkha (རྫོང་ཁ་)"
+    },
+    {
+      "language": "ee",
+      "name": "Ewe (eʋegbe)"
+    },
+    {
+      "language": "el",
+      "name": "Greek (Ελληνικά)"
+    },
+    {
+      "language": "en",
+      "name": "English"
+    },
+    {
+      "language": "eo",
+      "name": "Esperanto"
+    },
+    {
+      "language": "es",
+      "name": "Spanish (Español)"
+    },
+    {
+      "language": "et",
+      "name": "Estonian (eesti)"
+    },
+    {
+      "language": "eu",
+      "name": "Basque (euskara)"
+    },
+    {
+      "language": "fa",
+      "name": "Persian (فارسی)"
+    },
+    {
+      "language": "ff",
+      "name": "Fula (Pulaar)"
+    },
+    {
+      "language": "fi",
+      "name": "Finnish (suomi)"
+    },
+    {
+      "language": "fj",
+      "name": "Fijian"
+    },
+    {
+      "language": "fo",
+      "name": "Faroese (føroyskt)"
+    },
+    {
+      "language": "fr",
+      "name": "French (français)"
+    },
+    {
+      "language": "fy",
+      "name": "Western Frisian (Frysk)"
+    },
+    {
+      "language": "ga",
+      "name": "Irish (Gaeilge)"
+    },
+    {
+      "language": "gd",
+      "name": "Scottish Gaelic (Gàidhlig)"
+    },
+    {
+      "language": "gl",
+      "name": "Galician (galego)"
+    },
+    {
+      "language": "gn",
+      "name": "Guarani (avañe’ẽ)"
+    },
+    {
+      "language": "gu",
+      "name": "Gujarati (ગુજરાતી)"
+    },
+    {
+      "language": "gv",
+      "name": "Manx (Gaelg)"
+    },
+    {
+      "language": "ha",
+      "name": "Hausa"
+    },
+    {
+      "language": "he",
+      "name": "Hebrew (עברית)"
+    },
+    {
+      "language": "hi",
+      "name": "Hindi (हिन्दी)"
+    },
+    {
+      "language": "ho",
+      "name": "Hiri Motu"
+    },
+    {
+      "language": "hr",
+      "name": "Croatian (Hrvatski)"
+    },
+    {
+      "language": "ht",
+      "name": "Haitian Creole (Kreyòl Ayisyen)"
+    },
+    {
+      "language": "hu",
+      "name": "Hungarian (Magyar)"
+    },
+    {
+      "language": "hy",
+      "name": "Armenian (հայերեն)"
+    },
+    {
+      "language": "hz",
+      "name": "Herero"
+    },
+    {
+      "language": "ia",
+      "name": "Interlingua (interlingua)"
+    },
+    {
+      "language": "id",
+      "name": "Indonesian (Indonesia)"
+    },
+    {
+      "language": "ie",
+      "name": "Interlingue"
+    },
+    {
+      "language": "ig",
+      "name": "Igbo"
+    },
+    {
+      "language": "ii",
+      "name": "Liangshan Yi (ꆈꌠꉙ)"
+    },
+    {
+      "language": "ik",
+      "name": "Inupiaq"
+    },
+    {
+      "language": "in",
+      "name": "Indonesian (Indonesia)"
+    },
+    {
+      "language": "io",
+      "name": "Ido"
+    },
+    {
+      "language": "is",
+      "name": "Icelandic (íslenska)"
+    },
+    {
+      "language": "it",
+      "name": "Italian (Italiano)"
+    },
+    {
+      "language": "iu",
+      "name": "Inuktitut (ᐃᓄᒃᑎᑐᑦ)"
+    },
+    {
+      "language": "iw",
+      "name": "Hebrew (עברית)"
+    },
+    {
+      "language": "ja",
+      "name": "Japanese (日本語)"
+    },
+    {
+      "language": "ji",
+      "name": "Yiddish (ייִדיש)"
+    },
+    {
+      "language": "jv",
+      "name": "Javanese (Jawa)"
+    },
+    {
+      "language": "jw",
+      "name": "Javanese (Jawa)"
+    },
+    {
+      "language": "ka",
+      "name": "Georgian (ქართული)"
+    },
+    {
+      "language": "kg",
+      "name": "Kongo"
+    },
+    {
+      "language": "ki",
+      "name": "Kikuyu (Gikuyu)"
+    },
+    {
+      "language": "kj",
+      "name": "Kuanyama"
+    },
+    {
+      "language": "kk",
+      "name": "Kazakh (қазақ тілі)"
+    },
+    {
+      "language": "kl",
+      "name": "Kalaallisut (kalaallisut)"
+    },
+    {
+      "language": "km",
+      "name": "Khmer (ខ្មែរ)"
+    },
+    {
+      "language": "kn",
+      "name": "Kannada (ಕನ್ನಡ)"
+    },
+    {
+      "language": "ko",
+      "name": "Korean (한국어)"
+    },
+    {
+      "language": "kr",
+      "name": "Kanuri"
+    },
+    {
+      "language": "ks",
+      "name": "Kashmiri (کٲشُر)"
+    },
+    {
+      "language": "ku",
+      "name": "Kurdish (kurdî (kurmancî))"
+    },
+    {
+      "language": "kv",
+      "name": "Komi"
+    },
+    {
+      "language": "kw",
+      "name": "Cornish (kernewek)"
+    },
+    {
+      "language": "ky",
+      "name": "Kyrgyz (кыргызча)"
+    },
+    {
+      "language": "la",
+      "name": "Latin"
+    },
+    {
+      "language": "lb",
+      "name": "Luxembourgish (Lëtzebuergesch)"
+    },
+    {
+      "language": "lg",
+      "name": "Ganda (Luganda)"
+    },
+    {
+      "language": "li",
+      "name": "Limburgish"
+    },
+    {
+      "language": "ln",
+      "name": "Lingala (lingála)"
+    },
+    {
+      "language": "lo",
+      "name": "Lao (ລາວ)"
+    },
+    {
+      "language": "lt",
+      "name": "Lithuanian (lietuvių)"
+    },
+    {
+      "language": "lu",
+      "name": "Luba-Katanga (Tshiluba)"
+    },
+    {
+      "language": "lv",
+      "name": "Latvian (latviešu)"
+    },
+    {
+      "language": "mg",
+      "name": "Malagasy"
+    },
+    {
+      "language": "mh",
+      "name": "Marshallese"
+    },
+    {
+      "language": "mi",
+      "name": "Māori"
+    },
+    {
+      "language": "mk",
+      "name": "Macedonian (македонски)"
+    },
+    {
+      "language": "ml",
+      "name": "Malayalam (മലയാളം)"
+    },
+    {
+      "language": "mn",
+      "name": "Mongolian (монгол)"
+    },
+    {
+      "language": "mo",
+      "name": "Romanian (română)"
+    },
+    {
+      "language": "mr",
+      "name": "Marathi (मराठी)"
+    },
+    {
+      "language": "ms",
+      "name": "Malay (Bahasa Melayu)"
+    },
+    {
+      "language": "mt",
+      "name": "Maltese (Malti)"
+    },
+    {
+      "language": "my",
+      "name": "Burmese (မြန်မာ)"
+    },
+    {
+      "language": "na",
+      "name": "Nauru"
+    },
+    {
+      "language": "nb",
+      "name": "Norwegian Bokmål (norsk bokmål)"
+    },
+    {
+      "language": "nd",
+      "name": "North Ndebele (isiNdebele)"
+    },
+    {
+      "language": "ne",
+      "name": "Nepali (नेपाली)"
+    },
+    {
+      "language": "ng",
+      "name": "Ndonga"
+    },
+    {
+      "language": "nl",
+      "name": "Dutch (Nederlands)"
+    },
+    {
+      "language": "nn",
+      "name": "Norwegian Nynorsk (norsk nynorsk)"
+    },
+    {
+      "language": "no",
+      "name": "Norwegian (norsk)"
+    },
+    {
+      "language": "nr",
+      "name": "South Ndebele"
+    },
+    {
+      "language": "nv",
+      "name": "Navajo (Diné Bizaad)"
+    },
+    {
+      "language": "ny",
+      "name": "Nyanja"
+    },
+    {
+      "language": "oc",
+      "name": "Occitan (occitan)"
+    },
+    {
+      "language": "oj",
+      "name": "Ojibwa"
+    },
+    {
+      "language": "om",
+      "name": "Oromo (Oromoo)"
+    },
+    {
+      "language": "or",
+      "name": "Odia (ଓଡ଼ିଆ)"
+    },
+    {
+      "language": "os",
+      "name": "Ossetic (ирон)"
+    },
+    {
+      "language": "pa",
+      "name": "Punjabi (ਪੰਜਾਬੀ)"
+    },
+    {
+      "language": "pi",
+      "name": "Pali"
+    },
+    {
+      "language": "pl",
+      "name": "Polish (polski)"
+    },
+    {
+      "language": "ps",
+      "name": "Pashto (پښتو)"
+    },
+    {
+      "language": "pt",
+      "name": "Portuguese (Português)"
+    },
+    {
+      "language": "qu",
+      "name": "Quechua (Runasimi)"
+    },
+    {
+      "language": "rm",
+      "name": "Romansh (rumantsch)"
+    },
+    {
+      "language": "rn",
+      "name": "Rundi (Ikirundi)"
+    },
+    {
+      "language": "ro",
+      "name": "Romanian (română)"
+    },
+    {
+      "language": "ru",
+      "name": "Russian (Русский)"
+    },
+    {
+      "language": "rw",
+      "name": "Kinyarwanda (Ikinyarwanda)"
+    },
+    {
+      "language": "sa",
+      "name": "Sanskrit (संस्कृत भाषा)"
+    },
+    {
+      "language": "sc",
+      "name": "Sardinian (sardu)"
+    },
+    {
+      "language": "sd",
+      "name": "Sindhi (سنڌي)"
+    },
+    {
+      "language": "se",
+      "name": "North Sámi (davvisámegiella)"
+    },
+    {
+      "language": "sg",
+      "name": "Sango (Sängö)"
+    },
+    {
+      "language": "sh",
+      "name": "Serbo-Croatian"
+    },
+    {
+      "language": "si",
+      "name": "Sinhala (සිංහල)"
+    },
+    {
+      "language": "sk",
+      "name": "Slovak (Slovenčina)"
+    },
+    {
+      "language": "sl",
+      "name": "Slovenian (slovenščina)"
+    },
+    {
+      "language": "sm",
+      "name": "Samoan (Gagana faʻa Sāmoa)"
+    },
+    {
+      "language": "sn",
+      "name": "Shona (chiShona)"
+    },
+    {
+      "language": "so",
+      "name": "Somali (Soomaali)"
+    },
+    {
+      "language": "sq",
+      "name": "Albanian (shqip)"
+    },
+    {
+      "language": "sr",
+      "name": "Serbian (српски)"
+    },
+    {
+      "language": "ss",
+      "name": "Swati (siSwati)"
+    },
+    {
+      "language": "st",
+      "name": "Southern Sotho (Sesotho)"
+    },
+    {
+      "language": "su",
+      "name": "Sundanese (Basa Sunda)"
+    },
+    {
+      "language": "sv",
+      "name": "Swedish (Svenska)"
+    },
+    {
+      "language": "sw",
+      "name": "Swahili (Kiswahili)"
+    },
+    {
+      "language": "ta",
+      "name": "Tamil (தமிழ்)"
+    },
+    {
+      "language": "te",
+      "name": "Telugu (తెలుగు)"
+    },
+    {
+      "language": "tg",
+      "name": "Tajik (тоҷикӣ)"
+    },
+    {
+      "language": "th",
+      "name": "Thai (ไทย)"
+    },
+    {
+      "language": "ti",
+      "name": "Tigrinya (ትግርኛ)"
+    },
+    {
+      "language": "tk",
+      "name": "Turkmen (Türkmen dili)"
+    },
+    {
+      "language": "tl",
+      "name": "Tagalog"
+    },
+    {
+      "language": "tn",
+      "name": "Tswana (Setswana)"
+    },
+    {
+      "language": "to",
+      "name": "Tongan (lea fakatonga)"
+    },
+    {
+      "language": "tr",
+      "name": "Turkish (Türkçe)"
+    },
+    {
+      "language": "ts",
+      "name": "Tsonga (Xitsonga)"
+    },
+    {
+      "language": "tt",
+      "name": "Tatar (татар)"
+    },
+    {
+      "language": "tw",
+      "name": "Twi"
+    },
+    {
+      "language": "ty",
+      "name": "Tahitian"
+    },
+    {
+      "language": "ug",
+      "name": "Uyghur (ئۇيغۇرچە)"
+    },
+    {
+      "language": "uk",
+      "name": "Ukrainian (Українська)"
+    },
+    {
+      "language": "ur",
+      "name": "Urdu (اردو)"
+    },
+    {
+      "language": "uz",
+      "name": "Uzbek (o‘zbek)"
+    },
+    {
+      "language": "ve",
+      "name": "Venda (Tshivenḓa)"
+    },
+    {
+      "language": "vi",
+      "name": "Vietnamese (Tiếng Việt)"
+    },
+    {
+      "language": "vo",
+      "name": "Volapük"
+    },
+    {
+      "language": "wa",
+      "name": "Walloon (walon)"
+    },
+    {
+      "language": "wo",
+      "name": "Wolof"
+    },
+    {
+      "language": "xh",
+      "name": "Xhosa (IsiXhosa)"
+    },
+    {
+      "language": "yi",
+      "name": "Yiddish (ייִדיש)"
+    },
+    {
+      "language": "yo",
+      "name": "Yoruba (Èdè Yorùbá)"
+    },
+    {
+      "language": "za",
+      "name": "Zhuang (Vahcuengh)"
+    },
+    {
+      "language": "zh",
+      "name": "Chinese (中文)"
+    },
+    {
+      "language": "zu",
+      "name": "Zulu (isiZulu)"
+    }
+  ],
+  "directive_cases": [
+    {
+      "label": "unset",
+      "language": null,
+      "preserve_user_quotes": false,
+      "retrospective": false,
+      "directive": ""
+    },
+    {
+      "label": "unset preserves quotes",
+      "language": null,
+      "preserve_user_quotes": true,
+      "retrospective": false,
+      "directive": ""
+    },
+    {
+      "label": "Turkish",
+      "language": "tr",
+      "preserve_user_quotes": false,
+      "retrospective": false,
+      "directive": "## Output language\n\nWrite human-readable prose you author in: Turkish (Türkçe).\n\nDo not translate or rename structural tokens. Copy required output schemas exactly:\n- XML tag names, XML attribute names, JSON keys, tool names, tool-call argument keys, enum values, booleans/null, and required sentinel strings stay in English exactly as shown.\n- Keep code identifiers, file paths, commands, config keys, CLI flags, URLs, commit hashes, model/provider IDs, stack traces, diagnostics, and transcript role markers such as U:, A:, and TC: verbatim.\n- Localize only free-text prose values/content: summaries, memory text, explanations, titles, observations, and answers — unless the prompt says to preserve original wording.\n\nThese literal values must remain English when used:\nPROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING;\ncausal_incident, trajectory_correction;\nfeature, design, docs, release, investigation, bug, refactor, infra;\nmemory, observation; true, false; No relevant memories found.\n\nPreserve the required output shape. Do not add commentary outside the requested XML/JSON/tool output."
+    },
+    {
+      "label": "Turkish preserves quotes",
+      "language": "tr",
+      "preserve_user_quotes": true,
+      "retrospective": false,
+      "directive": "## Output language\n\nWrite human-readable prose you author in: Turkish (Türkçe).\n\nDo not translate or rename structural tokens. Copy required output schemas exactly:\n- XML tag names, XML attribute names, JSON keys, tool names, tool-call argument keys, enum values, booleans/null, and required sentinel strings stay in English exactly as shown.\n- Keep code identifiers, file paths, commands, config keys, CLI flags, URLs, commit hashes, model/provider IDs, stack traces, diagnostics, and transcript role markers such as U:, A:, and TC: verbatim.\n- Localize only free-text prose values/content: summaries, memory text, explanations, titles, observations, and answers — unless the prompt says to preserve original wording.\n\nThese literal values must remain English when used:\nPROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING;\ncausal_incident, trajectory_correction;\nfeature, design, docs, release, investigation, bug, refactor, infra;\nmemory, observation; true, false; No relevant memories found.\n\nPreserve the required output shape. Do not add commentary outside the requested XML/JSON/tool output.\n\nPreserve U: lines and directly quoted user text in their original source language; write the surrounding summary prose in Turkish (Türkçe)."
+    },
+    {
+      "label": "Norwegian Bokmal",
+      "language": "nb",
+      "preserve_user_quotes": false,
+      "retrospective": false,
+      "directive": "## Output language\n\nWrite human-readable prose you author in: Norwegian Bokmål (norsk bokmål).\n\nDo not translate or rename structural tokens. Copy required output schemas exactly:\n- XML tag names, XML attribute names, JSON keys, tool names, tool-call argument keys, enum values, booleans/null, and required sentinel strings stay in English exactly as shown.\n- Keep code identifiers, file paths, commands, config keys, CLI flags, URLs, commit hashes, model/provider IDs, stack traces, diagnostics, and transcript role markers such as U:, A:, and TC: verbatim.\n- Localize only free-text prose values/content: summaries, memory text, explanations, titles, observations, and answers — unless the prompt says to preserve original wording.\n\nThese literal values must remain English when used:\nPROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING;\ncausal_incident, trajectory_correction;\nfeature, design, docs, release, investigation, bug, refactor, infra;\nmemory, observation; true, false; No relevant memories found.\n\nPreserve the required output shape. Do not add commentary outside the requested XML/JSON/tool output."
+    },
+    {
+      "label": "Norwegian Bokmal preserves quotes",
+      "language": "nb",
+      "preserve_user_quotes": true,
+      "retrospective": false,
+      "directive": "## Output language\n\nWrite human-readable prose you author in: Norwegian Bokmål (norsk bokmål).\n\nDo not translate or rename structural tokens. Copy required output schemas exactly:\n- XML tag names, XML attribute names, JSON keys, tool names, tool-call argument keys, enum values, booleans/null, and required sentinel strings stay in English exactly as shown.\n- Keep code identifiers, file paths, commands, config keys, CLI flags, URLs, commit hashes, model/provider IDs, stack traces, diagnostics, and transcript role markers such as U:, A:, and TC: verbatim.\n- Localize only free-text prose values/content: summaries, memory text, explanations, titles, observations, and answers — unless the prompt says to preserve original wording.\n\nThese literal values must remain English when used:\nPROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING;\ncausal_incident, trajectory_correction;\nfeature, design, docs, release, investigation, bug, refactor, infra;\nmemory, observation; true, false; No relevant memories found.\n\nPreserve the required output shape. Do not add commentary outside the requested XML/JSON/tool output.\n\nPreserve U: lines and directly quoted user text in their original source language; write the surrounding summary prose in Norwegian Bokmål (norsk bokmål)."
+    },
+    {
+      "label": "Turkish retrospective",
+      "language": "tr",
+      "preserve_user_quotes": false,
+      "retrospective": true,
+      "directive": "## Output language\n\nWrite human-readable prose you author in: Turkish (Türkçe).\n\nDo not translate or rename structural tokens. Copy required output schemas exactly:\n- XML tag names, XML attribute names, JSON keys, tool names, tool-call argument keys, enum values, booleans/null, and required sentinel strings stay in English exactly as shown.\n- Keep code identifiers, file paths, commands, config keys, CLI flags, URLs, commit hashes, model/provider IDs, stack traces, diagnostics, and transcript role markers such as U:, A:, and TC: verbatim.\n- Localize only free-text prose values/content: summaries, memory text, explanations, titles, observations, and answers — unless the prompt says to preserve original wording.\n\nThese literal values must remain English when used:\nPROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING;\ncausal_incident, trajectory_correction;\nfeature, design, docs, release, investigation, bug, refactor, infra;\nmemory, observation; true, false; No relevant memories found.\n\nPreserve the required output shape. Do not add commentary outside the requested XML/JSON/tool output.\n\nWrite the lesson text in Turkish (Türkçe); paraphrase source text and never quote the user."
+    },
+    {
+      "label": "Turkish preserves quotes and retrospective",
+      "language": "tr",
+      "preserve_user_quotes": true,
+      "retrospective": true,
+      "directive": "## Output language\n\nWrite human-readable prose you author in: Turkish (Türkçe).\n\nDo not translate or rename structural tokens. Copy required output schemas exactly:\n- XML tag names, XML attribute names, JSON keys, tool names, tool-call argument keys, enum values, booleans/null, and required sentinel strings stay in English exactly as shown.\n- Keep code identifiers, file paths, commands, config keys, CLI flags, URLs, commit hashes, model/provider IDs, stack traces, diagnostics, and transcript role markers such as U:, A:, and TC: verbatim.\n- Localize only free-text prose values/content: summaries, memory text, explanations, titles, observations, and answers — unless the prompt says to preserve original wording.\n\nThese literal values must remain English when used:\nPROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING;\ncausal_incident, trajectory_correction;\nfeature, design, docs, release, investigation, bug, refactor, infra;\nmemory, observation; true, false; No relevant memories found.\n\nPreserve the required output shape. Do not add commentary outside the requested XML/JSON/tool output.\n\nPreserve U: lines and directly quoted user text in their original source language; write the surrounding summary prose in Turkish (Türkçe).\n\nWrite the lesson text in Turkish (Türkçe); paraphrase source text and never quote the user."
+    }
+  ],
+  "repair_cases": [
+    {
+      "language": null,
+      "original_prompt": "<new_messages>\n[1] U: Preserve this quotation\n</new_messages>\n\nTranscript guard.",
+      "previous_output": "<output><compartment>invalid</compartment></output>",
+      "validation_error": "missing required raw ordinal",
+      "prompt": "<new_messages>\n[1] U: Preserve this quotation\n</new_messages>\n\nTranscript guard.\n\nYour previous XML response was invalid and cannot be persisted.\nValidation error: missing required raw ordinal\nReturn a corrected full XML response for the same existing state and new messages.\nDo not skip any displayed raw ordinal or displayed raw range, even if the message looks trivial.\nEvery displayed message range must belong to exactly one compartment unless it is intentionally left in one trailing suffix marked by <unprocessed_from>.\n\nPrevious invalid XML:\n<output><compartment>invalid</compartment></output>"
+    },
+    {
+      "language": "tr",
+      "original_prompt": "<new_messages>\n[1] U: Preserve this quotation\n</new_messages>\n\nTranscript guard.",
+      "previous_output": "<output><compartment>invalid</compartment></output>",
+      "validation_error": "missing required raw ordinal",
+      "prompt": "<new_messages>\n[1] U: Preserve this quotation\n</new_messages>\n\nTranscript guard.\n\nYour previous XML response was invalid and cannot be persisted.\nValidation error: missing required raw ordinal\nReturn a corrected full XML response for the same existing state and new messages.\nDo not skip any displayed raw ordinal or displayed raw range, even if the message looks trivial.\nEvery displayed message range must belong to exactly one compartment unless it is intentionally left in one trailing suffix marked by <unprocessed_from>.\n\nPrevious invalid XML:\n<output><compartment>invalid</compartment></output>\n\n## Output language\n\nWrite human-readable prose you author in: Turkish (Türkçe).\n\nDo not translate or rename structural tokens. Copy required output schemas exactly:\n- XML tag names, XML attribute names, JSON keys, tool names, tool-call argument keys, enum values, booleans/null, and required sentinel strings stay in English exactly as shown.\n- Keep code identifiers, file paths, commands, config keys, CLI flags, URLs, commit hashes, model/provider IDs, stack traces, diagnostics, and transcript role markers such as U:, A:, and TC: verbatim.\n- Localize only free-text prose values/content: summaries, memory text, explanations, titles, observations, and answers — unless the prompt says to preserve original wording.\n\nThese literal values must remain English when used:\nPROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING;\ncausal_incident, trajectory_correction;\nfeature, design, docs, release, investigation, bug, refactor, infra;\nmemory, observation; true, false; No relevant memories found.\n\nPreserve the required output shape. Do not add commentary outside the requested XML/JSON/tool output.\n\nPreserve U: lines and directly quoted user text in their original source language; write the surrounding summary prose in Turkish (Türkçe)."
+    },
+    {
+      "language": "nb",
+      "original_prompt": "<new_messages>\n[1] U: Preserve this quotation\n</new_messages>\n\nTranscript guard.",
+      "previous_output": "<output><compartment>invalid</compartment></output>",
+      "validation_error": "missing required raw ordinal",
+      "prompt": "<new_messages>\n[1] U: Preserve this quotation\n</new_messages>\n\nTranscript guard.\n\nYour previous XML response was invalid and cannot be persisted.\nValidation error: missing required raw ordinal\nReturn a corrected full XML response for the same existing state and new messages.\nDo not skip any displayed raw ordinal or displayed raw range, even if the message looks trivial.\nEvery displayed message range must belong to exactly one compartment unless it is intentionally left in one trailing suffix marked by <unprocessed_from>.\n\nPrevious invalid XML:\n<output><compartment>invalid</compartment></output>\n\n## Output language\n\nWrite human-readable prose you author in: Norwegian Bokmål (norsk bokmål).\n\nDo not translate or rename structural tokens. Copy required output schemas exactly:\n- XML tag names, XML attribute names, JSON keys, tool names, tool-call argument keys, enum values, booleans/null, and required sentinel strings stay in English exactly as shown.\n- Keep code identifiers, file paths, commands, config keys, CLI flags, URLs, commit hashes, model/provider IDs, stack traces, diagnostics, and transcript role markers such as U:, A:, and TC: verbatim.\n- Localize only free-text prose values/content: summaries, memory text, explanations, titles, observations, and answers — unless the prompt says to preserve original wording.\n\nThese literal values must remain English when used:\nPROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING;\ncausal_incident, trajectory_correction;\nfeature, design, docs, release, investigation, bug, refactor, infra;\nmemory, observation; true, false; No relevant memories found.\n\nPreserve the required output shape. Do not add commentary outside the requested XML/JSON/tool output.\n\nPreserve U: lines and directly quoted user text in their original source language; write the surrounding summary prose in Norwegian Bokmål (norsk bokmål)."
+    }
+  ]
+}

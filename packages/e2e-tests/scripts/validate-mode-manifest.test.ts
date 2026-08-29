@@ -18,7 +18,7 @@ function manifestWith(entries: ModeManifest["entries"]): ModeManifest {
 
 describe("mode manifest validator", () => {
     it("covers every live e2e test exactly once", () => {
-        expect(validation.files.length).toBe(60);
+        expect(validation.files.length).toBe(61);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -30,7 +30,7 @@ describe("mode manifest validator", () => {
         const ts = filesForMode(validation, "ts");
         const rust = filesForMode(validation, "rust");
         expect(ts).toHaveLength(41);
-        expect(rust).toHaveLength(31);
+        expect(rust).toHaveLength(32);
         expect(ts.filter((path) => path.startsWith("tests/pi-")).length).toBe(22);
         expect(filesForMode(validation, "ts", "opencode")).toHaveLength(19);
         expect(filesForMode(validation, "ts", "pi")).toHaveLength(22);

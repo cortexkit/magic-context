@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { getHarness } from "../../shared/harness";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import type { Database } from "../../shared/sqlite";
+import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { resolveIsSubagentFromOpenCodeDb } from "./resolve-subagent-fallback";
 import {
     BOOLEAN_META_KEYS,
@@ -212,7 +213,9 @@ export function retryPendingSessionCleanups(
 }
 
 export function clearSession(db: Database, sessionId: string): void {
+    const transactionStartedAt = performance.now();
     db.transaction(() => {
         deleteSessionScopedRows(db, [sessionId]);
     })();
+    logSlowWriteTransaction("clear-session", transactionStartedAt);
 }

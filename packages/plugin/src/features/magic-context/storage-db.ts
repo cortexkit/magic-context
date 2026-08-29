@@ -96,7 +96,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastMigrationOnOpenRefusal = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 81;
+export const LATEST_SUPPORTED_VERSION = 82;
 
 // chmod is meaningless on Windows (POSIX modes are not honored), so all
 // permission tightening is skipped there. mkdir's `mode` is likewise ignored.
@@ -1185,8 +1185,10 @@ export function initializeDatabase(db: Database): void {
       -- verified_at=0 means "mapped (files known) but not yet content-verified".
       -- map-memories sets mapped_at + verified_at=0; verify sets verified_at=now.
       verified_at  INTEGER NOT NULL,
-      mapped_at    INTEGER NOT NULL DEFAULT 0,
-      PRIMARY KEY (memory_id, file_path)
+       mapped_at    INTEGER NOT NULL DEFAULT 0,
+       -- Distinguishes mapper-authored independence from a host rejection fallback.
+       mapping_origin TEXT NOT NULL DEFAULT 'mapper',
+       PRIMARY KEY (memory_id, file_path)
     );
     CREATE INDEX IF NOT EXISTS idx_memory_verifications_memory ON memory_verifications(memory_id);
 

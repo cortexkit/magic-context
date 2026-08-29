@@ -628,9 +628,10 @@ describe("Pi clone state inheritance", () => {
 		});
 	});
 
-	it("inherits processed-image frozen ids that remain on the clone path", () => {
+	it("inherits frozen ids that remain on the clone path", () => {
 		const database = db();
 		seedMeta(database, {
+			stripped_placeholder_ids: JSON.stringify(["a1", "a3"]),
 			processed_image_stripped_ids: JSON.stringify(["u1", "u3"]),
 		});
 
@@ -638,10 +639,13 @@ describe("Pi clone state inheritance", () => {
 
 		const row = database
 			.prepare(
-				"SELECT processed_image_stripped_ids AS ids FROM session_meta WHERE session_id = ?",
+				`SELECT stripped_placeholder_ids AS placeholders,
+				        processed_image_stripped_ids AS images
+				   FROM session_meta WHERE session_id = ?`,
 			)
-			.get("clone") as { ids: string };
-		expect(JSON.parse(row.ids)).toEqual(["u1"]);
+			.get("clone") as { placeholders: string; images: string };
+		expect(JSON.parse(row.placeholders)).toEqual(["a1"]);
+		expect(JSON.parse(row.images)).toEqual(["u1"]);
 	});
 
 	it("leaves every m0/m1 cache field fresh so the first pass hard-materializes", () => {

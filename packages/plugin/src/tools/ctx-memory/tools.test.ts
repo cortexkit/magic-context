@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+
 import { DREAMER_AGENT } from "../../agents/dreamer";
 import { SIDEKICK_AGENT } from "../../agents/sidekick";
 import {
@@ -9,11 +10,13 @@ import {
     getMemoriesByProject,
     getMemoryById,
     getMemoryMutationsForRender,
+    getMemoryVerifications,
     getProjectState,
     getUnclassifiedMemoryIds,
     insertMemory,
     insertMemoryIdempotent,
     normalizeStoredProjectPath,
+    recordMemoryMapping,
     setMemoryClassification,
 } from "../../features/magic-context";
 import {
@@ -116,6 +119,7 @@ function createTestDb(dbPath = ":memory:"): Database {
             file_path TEXT NOT NULL,
             verified_at INTEGER NOT NULL,
             mapped_at INTEGER NOT NULL DEFAULT 0,
+            mapping_origin TEXT NOT NULL DEFAULT 'mapper',
             PRIMARY KEY (memory_id, file_path)
         );
         CREATE INDEX IF NOT EXISTS idx_memory_verifications_memory ON memory_verifications(memory_id);
@@ -450,6 +454,67 @@ describe("createCtxMemoryTools", () => {
             expect(result).toContain("Write REFUSED and NOT saved");
             expect(result).toContain("RESEND");
             expect(result).toContain("Content to resend:\nretry me");
+            expect(getMemoriesByProject(db, "/repo/project")).toHaveLength(0);
+        });
+
+        it("echoes content when the authority-state probe fails", async () => {
+            db.prepare(
+                "INSERT INTO authority_managed(project_path, context_store_uuid, marked_at) VALUES (?, ?, ?)",
+            ).run("/repo/project", "store-1", Date.now());
+            const content = "preserve this exact prompt\nincluding its second line";
+            const authorityError = "supervisor state: MODULE transport unavailable";
+            const moduleTools = createCtxMemoryTools({
+                db,
+                resolveProjectPath: () => "/repo/project",
+                memoryEnabled: true,
+                embeddingEnabled: false,
+                rustToolBackends: {
+                    authorityState: async () => {
+                        throw new Error(authorityError);
+                    },
+                },
+            });
+
+            const result = await moduleTools.ctx_memory.execute(
+                { action: "write", category: "CONSTRAINTS", content },
+                toolContext(),
+            );
+
+            expect(result).toContain(
+                `Error: Rust memory authority is unavailable. ${authorityError}`,
+            );
+            expect(result).toContain("Write REFUSED and NOT saved");
+            expect(result).toContain("RESEND the same call");
+            expect(result).toContain("typically recovers in seconds-to-minutes");
+            expect(result).toContain(`Content to resend:\n${content}`);
+            expect(getMemoriesByProject(db, "/repo/project")).toHaveLength(0);
+        });
+
+        it("echoes content when the module call fails outside a drain", async () => {
+            const content = "module failure must preserve this content";
+            const moduleError = "supervisor state: MODULE call failed";
+            const moduleTools = createCtxMemoryTools({
+                db,
+                resolveProjectPath: () => "/repo/project",
+                memoryEnabled: true,
+                embeddingEnabled: false,
+                rustToolBackends: {
+                    authorityState: async () => "MODULE",
+                    memory: async () => {
+                        throw new Error(moduleError);
+                    },
+                },
+            });
+
+            const result = await moduleTools.ctx_memory.execute(
+                { action: "merge", ids: [1, 2], content },
+                toolContext(),
+            );
+
+            expect(result).toContain(`Error: Rust module ctx_memory failed. ${moduleError}`);
+            expect(result).toContain("Write REFUSED and NOT saved");
+            expect(result).toContain("RESEND the same call");
+            expect(result).toContain(`Content to resend:\n${content}`);
             expect(getMemoriesByProject(db, "/repo/project")).toHaveLength(0);
         });
 
@@ -1165,6 +1230,7 @@ describe("createCtxMemoryTools", () => {
                 category: "CONFIG_DEFAULTS",
                 content: "cache_ttl=5m",
             });
+            recordMemoryMapping(db, memory.id, [], 1_000, "host_rejected_fallback");
 
             const result = await tools.ctx_memory.execute(
                 {
@@ -1177,6 +1243,7 @@ describe("createCtxMemoryTools", () => {
 
             expect(result).toContain(`Updated memory [ID: ${memory.id}]`);
             expect(getMemoryById(db, memory.id)?.content).toBe("cache_ttl=10m");
+            expect(getMemoryVerifications(db, [memory.id]).has(memory.id)).toBe(false);
             expect(getProjectMemoryEpoch(db, "/repo/project")).toBe(0);
             expect(getMutationRows(db, "/repo/project", [memory.id])).toMatchObject([
                 {

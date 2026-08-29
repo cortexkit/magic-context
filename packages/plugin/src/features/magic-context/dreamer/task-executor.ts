@@ -257,12 +257,13 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
             })();
         const deadline = startedAt + config.timeoutMinutes * 60 * 1000;
         const backlogAtStart = getDreamTaskBacklog(db, projectIdentity, config.task);
-        const reportProgress = (processed: number): void => {
+        const reportProgress = (processed: number, refused?: number): void => {
             deps.onProgress?.({
                 task: config.task,
                 processed: Math.max(0, processed),
                 total: backlogAtStart.pending,
                 startedAt,
+                ...(refused === undefined ? {} : { refused: Math.max(0, refused) }),
             });
         };
         reportProgress(0);
@@ -505,13 +506,16 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                     fallbackModels: config.fallbackModels,
                     language: config.language ?? deps.language,
                     moduleRoute,
-                    onProgress: (processed) => reportProgress(processed),
+                    onProgress: (processed, refused) => reportProgress(processed, refused),
                 });
-                const processed = result.verified + result.updated + result.archived;
-                const broadProgress =
-                    config.task === "verify-broad"
-                        ? `verify-broad cycle ${result.broadCycleStartAt ?? "open"}: verified ${processed}, ${result.remaining} remain`
-                        : null;
+                const processed =
+                    result.verified +
+                    result.updated +
+                    result.archived +
+                    result.skipped +
+                    result.refused;
+                const verificationProgress = `${config.task}${config.task === "verify-broad" ? ` cycle ${result.broadCycleStartAt ?? "open"}` : ""}: processed ${processed} (verified ${result.verified}, updated ${result.updated}, archived ${result.archived}, skipped ${result.skipped}, refused ${result.refused}); ${result.remaining} remain`;
+                const broadProgress = config.task === "verify-broad" ? verificationProgress : null;
                 const backlogAfter =
                     config.task === "verify-broad"
                         ? { pending: result.remaining, total: backlogAtStart.total }
@@ -531,13 +535,14 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                     }
                     const error = incompleteMessage(result.remaining);
                     recordRun("failed", error, {
+                        progress: verificationProgress,
                         memoryChanges: computeMemoryDelta(memoryBefore),
                         backlogAfter,
                     });
                     return { status: "failed", transient: true, error };
                 }
                 recordRun("completed", null, {
-                    progress: broadProgress,
+                    progress: verificationProgress,
                     memoryChanges: computeMemoryDelta(memoryBefore),
                     backlogAfter,
                 });
@@ -580,6 +585,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                     leaseAcquisition,
                     model: config.model,
                     fallbackModels: config.fallbackModels,
+                    language: config.language ?? deps.language,
                     ...moduleArgs,
                     onProgress: (processed) => reportProgress(processed),
                 });

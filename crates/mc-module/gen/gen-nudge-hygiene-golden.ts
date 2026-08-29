@@ -132,6 +132,25 @@ const fixtures: Fixture[] = [
         tags: [{ tag_number: 1, block_id: "reminder-result#0", kind: "tool" }],
     },
     {
+        id: "user-reminder-span-excluded-from-both-terms",
+        protected_tags: 0,
+        messages: [
+            {
+                mid: "user-reminder",
+                ordinal: 1,
+                role: "user",
+                blocks: [
+                    {
+                        type: "text",
+                        unit: "kept prompt\n\n<system-reminder>\nreminder bytes are excluded on ordinary text\n</system-reminder>",
+                        repeat: 1,
+                    },
+                ],
+            },
+        ],
+        tags: [{ tag_number: 1, block_id: "user-reminder#0", kind: "message" }],
+    },
+    {
         id: "post-fold-fresh-tail",
         protected_tags: 0,
         messages: [

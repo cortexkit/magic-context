@@ -25,7 +25,7 @@ import {
     writeTaskScheduleState,
 } from "./storage-task-schedule";
 import { createDreamTaskExecutor } from "./task-executor";
-import { leaseKeyFor } from "./task-registry";
+import { type DreamTaskProgress, leaseKeyFor } from "./task-registry";
 import { type DreamTaskRuntimeConfig, runDueTasksForProject } from "./task-scheduler";
 
 let db: Database | null = null;
@@ -1479,4 +1479,56 @@ describe("createDreamTaskExecutor — retrospective", () => {
 
         expect(getUserMemoryCandidates(db)).toEqual([]);
     });
+});
+
+test("createDreamTaskExecutor surfaces host-refused verify counts", async () => {
+    db = freshDb();
+    const project = "/repo/verify-broad-directive-refusal";
+    seedTaskScheduleState(db, project, "verify-broad", null, null, "0 3 * * 0");
+    const memory = insertMemory(db, {
+        projectPath: project,
+        category: "PROJECT_RULES",
+        content: "Always inspect src/fact.ts first and brief workers with the result.",
+    });
+    recordMemoryVerifications(db, memory.id, ["src/fact.ts"], 1_000);
+    const client = {
+        session: {
+            list: mock(async () => ({ data: [] })),
+            create: mock(async () => ({ data: { id: "verify-refusal-child" } })),
+            prompt: mock(async () => ({})),
+            messages: mock(async () => ({
+                data: assistantMessages(
+                    `<verify><archive id="${memory.id}" reason="file omits the rule"/></verify>`,
+                ),
+            })),
+            delete: mock(async () => ({})),
+        },
+    };
+    const progress: (DreamTaskProgress | null)[] = [];
+    const executor = createDreamTaskExecutor({
+        client: client as never,
+        sessionDirectory: project,
+        openOpenCodeDb: () => null,
+        onProgress: (current) => progress.push(current),
+    });
+    const leaseKey = leaseKeyFor("verify-broad", project);
+    expect(acquireLease(db, "holder-broad-refusal", leaseKey)).toBe(true);
+
+    const result = await executor(
+        { task: "verify-broad", schedule: "0 3 * * 0", timeoutMinutes: 20 },
+        {
+            db,
+            projectIdentity: project,
+            holderId: "holder-broad-refusal",
+            leaseKey,
+        },
+    );
+
+    expect(result.status).toBe("completed");
+    const live = progress.find((current) => current?.refused === 1);
+    expect(live).toMatchObject({ task: "verify-broad", processed: 1, refused: 1 });
+    const task = JSON.parse(getDreamRuns(db, project)[0]?.tasks_json ?? "[]")[0] as {
+        progress?: string;
+    };
+    expect(task.progress).toContain("refused 1");
 });

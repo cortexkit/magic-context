@@ -26,6 +26,7 @@ import { getErrorMessage } from "../../shared/error-message";
 import { getHarness } from "../../shared/harness";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
+import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { updateCompactionMarkerAfterPublication } from "./compaction-marker-manager";
 import { buildCompartmentAgentPrompt } from "./compartment-prompt";
 import { queueDropsForCompartmentalizedMessages } from "./compartment-runner-drop-queue";
@@ -91,6 +92,7 @@ export function promoteRecompStagingWithM0Mutation(
     facts: Array<{ category: string; content: string }>;
 } | null {
     const now = Date.now();
+    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
     let finished = false;
     try {
@@ -127,6 +129,7 @@ export function promoteRecompStagingWithM0Mutation(
 
         db.exec("COMMIT");
         finished = true;
+        logSlowWriteTransaction("historian-publish:recomp", transactionStartedAt);
         return { compartments: staging.compartments, facts: staging.facts };
     } finally {
         if (!finished) {

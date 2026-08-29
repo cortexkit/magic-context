@@ -79,6 +79,7 @@ const DIFF_KEYS: &[&str] = &[
 ];
 /// Region-hint length: enough to identify the edited section, cheap to keep.
 const EDIT_REGION_HINT_LEN: usize = 40;
+pub(crate) const EDIT_INPUT_KEY_ORDER_MARKER: &str = "__cortexkit_edit_input_key_order_v1";
 /// The clamp sentinel appended to a region-hinted diff value.
 const TRUNCATION_SENTINEL: &str = "...[truncated]";
 
@@ -288,7 +289,7 @@ pub(crate) fn normalize_tool_name(name: &str) -> String {
         .unwrap_or(lower)
 }
 
-fn is_edit_tool(name: &str) -> bool {
+pub(crate) fn is_edit_tool(name: &str) -> bool {
     EDIT_TOOLS.contains(&name)
 }
 
@@ -583,14 +584,21 @@ fn region_hint(value: &str) -> String {
 }
 
 /// Build the edit_marker payload for a superseded edit/write ToolCall: filePath-like
-/// keys VERBATIM, diff keys clamped to a region hint, other keys untouched. Emitted as
-/// a canonical (sorted-key) JSON string so it is deterministic + pure. Mirrors the TS
-/// `applyEditMarkerToInput`.
+/// keys VERBATIM, diff keys clamped to a region hint, other keys untouched. Object
+/// insertion order is retained because TypeScript mutates the original object in place;
+/// that order survives the frozen payload's later parse and provider-wire render.
 fn edit_marker_payload(input: &serde_json::Value) -> String {
     let mut obj = match input.as_object() {
         Some(o) => o.clone(),
         None => return DROPPED_PLACEHOLDER.to_string(),
     };
+    let key_order = obj
+        .remove(EDIT_INPUT_KEY_ORDER_MARKER)
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
     for (key, value) in obj.iter_mut() {
         if FILE_PATH_KEYS.contains(&key.as_str()) {
             continue;
@@ -602,7 +610,31 @@ fn edit_marker_payload(input: &serde_json::Value) -> String {
             *value = serde_json::Value::String(region_hint(s));
         }
     }
-    canonical_json(&serde_json::Value::Object(obj))
+    if key_order.is_empty() {
+        return serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_default();
+    }
+    let mut seen = HashSet::new();
+    let mut keys = key_order
+        .into_iter()
+        .filter(|key| obj.contains_key(key) && seen.insert(key.clone()))
+        .collect::<Vec<_>>();
+    keys.extend(
+        obj.keys()
+            .filter(|key| seen.insert((*key).clone()))
+            .cloned(),
+    );
+    let fields = keys
+        .into_iter()
+        .filter_map(|key| {
+            let value = obj.get(&key)?;
+            Some(format!(
+                "{}:{}",
+                serde_json::to_string(&key).ok()?,
+                serde_json::to_string(value).ok()?
+            ))
+        })
+        .collect::<Vec<_>>();
+    format!("{{{}}}", fields.join(","))
 }
 
 /// Serialize a JSON value with sorted object keys (deterministic bytes across passes).
@@ -1160,16 +1192,23 @@ pub(crate) fn select_reductions_with_outcome(
         .map(|item| item.id.clone())
         .collect();
     let arcs = group_arcs(items, frozen_keys);
+    let incomplete_arc_ids = arcs
+        .iter()
+        .filter(|arc| arc.result_ids.is_empty())
+        .map(|arc| arc.arc_id.as_str())
+        .collect::<HashSet<_>>();
     let reasoning_ineligible_arcs = reasoning_ineligible_arc_ids(items);
     let reasoning_adjacency_collapse_arcs = reasoning_adjacency_collapse_arc_ids(items);
-    // The COMPOSED candidate pool: active (non-reduced), client-executed arcs only.
-    // frozen_keys is applied per-block at emit time (expand_arc skips frozen ids); an
-    // arc is "reduced/inactive" once ANY of its blocks is frozen — excluded here so it
-    // never re-enters candidate/reserve/reclaim accounting.
+    // A running call has no completed/errored result and is never reclaimable. This
+    // matches the TypeScript targets' completion guard and prevents a selector from
+    // rewriting tool input while the provider is still executing it.
     let active_arcs: Vec<&ToolArc> = arcs
         .iter()
         .filter(|a| {
-            !a.reduced && !a.provider_executed && !reasoning_ineligible_arcs.contains(&a.arc_id)
+            !a.reduced
+                && !a.provider_executed
+                && !incomplete_arc_ids.contains(a.arc_id.as_str())
+                && !reasoning_ineligible_arcs.contains(&a.arc_id)
         })
         .collect();
     let arc_by_id: HashMap<&str, &ToolArc> = active_arcs
@@ -1364,7 +1403,10 @@ pub(crate) fn select_reductions_with_outcome(
     out.retain(|decision| {
         arc_by_block_id
             .get(decision.target_id.as_str())
-            .is_none_or(|arc_id| !reasoning_ineligible_arcs.contains(*arc_id))
+            .is_none_or(|arc_id| {
+                !incomplete_arc_ids.contains(*arc_id)
+                    && !reasoning_ineligible_arcs.contains(*arc_id)
+            })
     });
 
     // Protection is block-specific, not an ordinal cutoff: remove protected targets from
@@ -1877,6 +1919,8 @@ mod tests {
         label: String,
         input: serde_json::Value,
         expected: serde_json::Value,
+        input_key_order: Vec<String>,
+        expected_json: String,
     }
 
     #[test]
@@ -1886,9 +1930,16 @@ mod tests {
                 .expect("parse edit-marker-golden.json");
         assert!(!cases.is_empty(), "empty edit-marker golden");
         for case in cases {
-            let actual: serde_json::Value = serde_json::from_str(&edit_marker_payload(&case.input))
-                .expect("Rust edit-marker payload must remain JSON");
+            let mut input = case.input;
+            input.as_object_mut().unwrap().insert(
+                EDIT_INPUT_KEY_ORDER_MARKER.to_string(),
+                serde_json::to_value(case.input_key_order).unwrap(),
+            );
+            let payload = edit_marker_payload(&input);
+            let actual: serde_json::Value =
+                serde_json::from_str(&payload).expect("Rust edit-marker payload must remain JSON");
             assert_eq!(actual, case.expected, "{}", case.label);
+            assert_eq!(payload, case.expected_json, "{} key order", case.label);
         }
     }
 

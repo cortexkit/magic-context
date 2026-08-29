@@ -691,6 +691,9 @@ export async function drainAuthority(args: {
             const next = getMirrorCursor(args.db, args.domain);
             if (next === cursor) break;
         }
+        if (args.domain === "memories") {
+            resolvePendingMemoryReferencesForDrain(args.db);
+        }
         for (const step of [
             "seed",
             "memories",
@@ -1170,7 +1173,7 @@ function prepareMirrorPageStatements(db: Database): MirrorPageStatements {
               mural_cue_rejection_count = ? WHERE id = ?`,
         ),
         updateSuperseded: db.prepare(
-            "UPDATE memories SET superseded_by_memory_id = ? WHERE id = ?",
+            "UPDATE memories SET superseded_by_memory_id = ?, updated_at = ? WHERE id = ?",
         ),
         deletePendingReference: db.prepare(
             "DELETE FROM mirror_pending_references WHERE domain = 'memories' AND module_project = ? AND module_row_id = ?",
@@ -1182,7 +1185,7 @@ function prepareMirrorPageStatements(db: Database): MirrorPageStatements {
             "DELETE FROM memory_verifications WHERE memory_id = ?",
         ),
         insertMemoryVerification: db.prepare(
-            "INSERT INTO memory_verifications(memory_id, file_path, verified_at, mapped_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO memory_verifications(memory_id, file_path, verified_at, mapped_at, mapping_origin) VALUES (?, ?, ?, ?, ?)",
         ),
         noteById: db.prepare("SELECT * FROM notes WHERE id = ?"),
         noteIdByStoreId: db.prepare(
@@ -1222,7 +1225,8 @@ function prepareMirrorPageStatements(db: Database): MirrorPageStatements {
                        AND target.module_row_id = pending.target_module_row_id
                      WHERE pending.domain = 'memories'
                        AND source.context_row_id = memories.id
-                )
+                ),
+                    updated_at = ?
               WHERE id IN (
                     SELECT source.context_row_id
                       FROM mirror_pending_references pending
@@ -1277,7 +1281,8 @@ function prepareMirrorPageStatements(db: Database): MirrorPageStatements {
         repairMemory: db.prepare(
             `UPDATE memories
                 SET source_type = COALESCE(?, source_type),
-                    importance = COALESCE(?, importance)
+                    importance = COALESCE(?, importance),
+                    updated_at = ?
               WHERE id = ?`,
         ),
         updateCursor: db.prepare(
@@ -1321,7 +1326,8 @@ export function applyMirroredNoteCompileFields(args: {
         const result = args.db
             .prepare(
                 `UPDATE notes
-                    SET compiled_provider = ?, compiled_config = ?, compiled_at = ?, compile_status = ?
+                    SET compiled_provider = ?, compiled_config = ?, compiled_at = ?, compile_status = ?,
+                        updated_at = ?
                   WHERE id = (
                         SELECT context_row_id
                           FROM mirror_identity
@@ -1333,6 +1339,7 @@ export function applyMirroredNoteCompileFields(args: {
                 args.fields.compiledConfig,
                 args.fields.compiledAt,
                 args.fields.compileStatus,
+                Date.now(),
                 args.moduleProject,
                 args.moduleRowId,
             );
@@ -1615,7 +1622,7 @@ function applyMemoryRow(db: Database, feed: ChangefeedRow, statements: MirrorPag
             statements,
         );
         if (translated) {
-            statements.updateSuperseded.run(translated.context_row_id, contextId);
+            statements.updateSuperseded.run(translated.context_row_id, Date.now(), contextId);
             statements.deletePendingReference.run(moduleProject, feed.module_row_id);
         } else {
             statements.upsertPendingReference.run(
@@ -1643,8 +1650,18 @@ function applyMemoryRow(db: Database, feed: ChangefeedRow, statements: MirrorPag
             ];
             const verifiedAt = rowNumber(row, "verified_at");
             const mappedAt = rowNumber(row, "updated_at", Date.now());
+            const mappingOrigin =
+                row.mapping_origin === "host_rejected_fallback"
+                    ? "host_rejected_fallback"
+                    : "mapper";
             for (const file of files.length > 0 ? files : [""]) {
-                statements.insertMemoryVerification.run(contextId, file, verifiedAt, mappedAt);
+                statements.insertMemoryVerification.run(
+                    contextId,
+                    file,
+                    verifiedAt,
+                    mappedAt,
+                    mappingOrigin,
+                );
             }
         }
     }
@@ -1680,7 +1697,7 @@ function repairNullClobberedMemoryRows(statements: MirrorPageStatements): void {
         if (sourceType === null && importance === null) continue;
         // This idempotent repair handles stores where sparse mapping records overwrote
         // source_type and importance with null before the mirror retained full snapshots.
-        statements.repairMemory.run(sourceType, importance, candidate.id);
+        statements.repairMemory.run(sourceType, importance, Date.now(), candidate.id);
     }
     // The candidate query is an intentional full pass only while dirty. Clearing the flag
     // makes subsequent mirror pages avoid the unindexed scan entirely.
@@ -1728,8 +1745,21 @@ function contextNoteId(
 }
 
 function translateMemoryReferences(statements: MirrorPageStatements): void {
-    statements.translateMemoryReferences.run();
+    statements.translateMemoryReferences.run(Date.now());
     statements.clearTranslatedReferences.run();
+}
+
+function resolvePendingMemoryReferencesForDrain(db: Database): void {
+    withPrivilegedWriter(db, () => {
+        db.transaction(() => {
+            const statements = prepareMirrorPageStatements(db);
+            // While queued mirror updates are being drained, mirroring is paused. Leave
+            // targets that still lack an identity in the durable pending-reference table,
+            // and resolve references whose target identity is now available before the
+            // TypeScript implementation regains control of memory writes.
+            translateMemoryReferences(statements);
+        }).immediate();
+    });
 }
 
 function applyNoteRow(db: Database, feed: ChangefeedRow, statements: MirrorPageStatements): void {

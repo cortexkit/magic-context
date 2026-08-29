@@ -2277,6 +2277,50 @@ export function addTrailingBlankDecisions(
     return false;
 }
 
+/**
+ * Convert keep decisions that would incorrectly preserve trailing blank content to strip
+ * without advancing the session metadata boundary. Returns the IDs changed by this call,
+ * or null when compare-and-swap retries are exhausted.
+ */
+export function demoteTrailingBlankKeepDecisions(
+    db: Database,
+    sessionId: string,
+    messageIds: Iterable<string>,
+): string[] | null {
+    const ids = new Set(messageIds);
+    if (ids.size === 0) return [];
+    ensureSessionMetaRow(db, sessionId);
+
+    for (let attempt = 0; attempt < CAS_RETRY_LIMIT; attempt += 1) {
+        const row = db
+            .prepare("SELECT trailing_blank_decisions FROM session_meta WHERE session_id = ?")
+            .get(sessionId) as { trailing_blank_decisions?: string | null } | undefined;
+        const rawStored = row ? (row.trailing_blank_decisions ?? null) : null;
+        const current = parseTrailingBlankDecisions(rawStored);
+        const demotedIds: string[] = [];
+        for (const id of ids) {
+            const decision = current.get(id);
+            if (decision === "keep" || decision?.startsWith("keep:") === true) {
+                current.set(id, "strip");
+                demotedIds.push(id);
+            }
+        }
+        if (demotedIds.length === 0) return [];
+        const nextBlob = JSON.stringify(Object.fromEntries(current));
+        const result = db
+            .prepare(
+                "UPDATE session_meta SET trailing_blank_decisions = ? WHERE session_id = ? AND trailing_blank_decisions IS ?",
+            )
+            .run(nextBlob, sessionId, rawStored);
+        if (result.changes > 0) return demotedIds;
+    }
+    sessionLog(
+        sessionId,
+        `trailing_blank_decisions demotion CAS: ${CAS_RETRY_LIMIT} retries exhausted`,
+    );
+    return null;
+}
+
 // ── Stale ctx_reduce stripped message IDs (frozen replay watermark) ──
 
 /**

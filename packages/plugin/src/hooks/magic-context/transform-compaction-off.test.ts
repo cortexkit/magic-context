@@ -27,6 +27,7 @@ import {
     closeDatabase,
     getOrCreateSessionMeta,
     getPendingOps,
+    getPersistedNoteNudge,
     getTagsBySession,
     openDatabase,
     queuePendingOp,
@@ -136,6 +137,7 @@ function makeOffTransform(args: {
     client?: PluginContext["client"];
     isSubagent?: boolean;
     maybeAutoEmbedSession?: (sessionId: string) => void;
+    commitSeenLastPass?: Map<string, boolean>;
     transformMode?: "ts" | "rust";
     rustModuleCall?: (request: Record<string, unknown>) => Promise<unknown>;
 }) {
@@ -172,6 +174,7 @@ function makeOffTransform(args: {
         compactionOff: args.compactionOff ?? true,
         client: args.client,
         maybeAutoEmbedSession: args.maybeAutoEmbedSession,
+        commitSeenLastPass: args.commitSeenLastPass,
         transformMode: args.transformMode,
         rustModeModuleClient: args.rustModuleCall
             ? ({ call: args.rustModuleCall } as never)
@@ -326,10 +329,12 @@ describe("compaction-off transform — additive-only proof (issue #266 S3)", () 
                 ],
             };
         });
+        const autoEmbed = mock((_sessionId: string) => {});
         const { transform } = makeOffTransform({
             sessionId,
             transformMode: "rust",
             rustModuleCall: moduleCall,
+            maybeAutoEmbedSession: autoEmbed,
         });
         const first = makeMessages(sessionId);
         const raw = JSON.parse(JSON.stringify(first)) as TestMessage[];
@@ -345,6 +350,7 @@ describe("compaction-off transform — additive-only proof (issue #266 S3)", () 
         ).toBe(true);
         expect(getPendingOps(db, sessionId)).toHaveLength(0);
         expect(getCompactionModeRecord(db, sessionId)).toBe("off");
+        expect(autoEmbed).toHaveBeenCalledWith(sessionId);
         const cleaned = new Database(opencodePath, { readonly: true });
         expect(
             cleaned.prepare("SELECT id FROM part WHERE id = ?").get("prt-mc-compaction"),
@@ -363,6 +369,42 @@ describe("compaction-off transform — additive-only proof (issue #266 S3)", () 
                 (call) => (call[0] as Record<string, unknown>).method === "transform",
             ),
         ).toHaveLength(2);
+    });
+
+    it("fires the shared commit-detection note trigger before Rust authority dispatch", async () => {
+        useTempDataHome("rust-commit-nudge-");
+        const sessionId = "ses-rust-commit-nudge";
+        createOpenCodeDbForSession(sessionId);
+        const nativeByPass: TestMessage[][] = [];
+        const moduleCall = mock(async (request: Record<string, unknown>) => {
+            if (request.method !== "transform") return { ok: true };
+            return {
+                action: "SOFT+",
+                native_messages: nativeByPass.shift() ?? [],
+            };
+        });
+        const commitSeenLastPass = new Map<string, boolean>();
+        const { db, transform } = makeOffTransform({
+            sessionId,
+            compactionOff: false,
+            transformMode: "rust",
+            rustModuleCall: moduleCall,
+            commitSeenLastPass,
+        });
+
+        const baseline = makeMessages(sessionId);
+        nativeByPass.push(baseline);
+        await transform({}, { messages: baseline });
+        expect(getPersistedNoteNudge(db, sessionId).triggerPending).toBe(false);
+
+        const committed = makeMessages(sessionId);
+        const assistantText = committed[1]?.parts[0];
+        if (assistantText?.type === "text") assistantText.text = "Committed abcdef1";
+        nativeByPass.push(committed);
+        await transform({}, { messages: committed });
+
+        expect(commitSeenLastPass.get(sessionId)).toBe(true);
+        expect(getPersistedNoteNudge(db, sessionId).triggerPending).toBe(true);
     });
 
     it("memory injection SURVIVES compaction-off (mutation direction: gating the injection off makes this red)", async () => {

@@ -134,6 +134,54 @@ describe("memory authority protocol", () => {
         });
     });
 
+    test("mirrored note compilation updates its audit timestamp", () => {
+        const database = db();
+        withPrivilegedWriter(database, () => {
+            database
+                .prepare(
+                    "INSERT INTO notes (id, type, status, content, project_path, session_id, created_at, updated_at) VALUES (71, 'smart', 'active', 'note', '/repo', 'session', 1, 1)",
+                )
+                .run();
+            database
+                .prepare(
+                    "INSERT INTO mirror_identity(domain, module_project, module_row_id, context_row_id) VALUES ('notes', '/repo', 7, 71)",
+                )
+                .run();
+        });
+
+        expect(
+            applyMirroredNoteCompileFields({
+                db: database,
+                moduleProject: "/repo",
+                moduleRowId: 7,
+                fields: {
+                    compiledProvider: "local-fs",
+                    compiledConfig: '{"kind":"path_exists"}',
+                    compiledAt: 99,
+                    compileStatus: "compiled",
+                },
+            }),
+        ).toBe(true);
+        const note = database
+            .prepare(
+                "SELECT compiled_provider, compiled_config, compiled_at, compile_status, updated_at FROM notes WHERE id = 71",
+            )
+            .get() as {
+            compiled_provider: string;
+            compiled_config: string;
+            compiled_at: number;
+            compile_status: string;
+            updated_at: number;
+        };
+        expect(note).toMatchObject({
+            compiled_provider: "local-fs",
+            compiled_config: '{"kind":"path_exists"}',
+            compiled_at: 99,
+            compile_status: "compiled",
+        });
+        expect(note.updated_at).toBeGreaterThan(1);
+    });
+
     test("repeated note drains replace a re-minted module row for the same context note", async () => {
         const database = db();
         const contextStoreUuid = ensureContextStoreUuid(database);
@@ -493,6 +541,7 @@ describe("memory authority protocol", () => {
                         status: "active",
                         verified_at: 1234,
                         mapping: ["src/lib.rs", "src/lib.rs"],
+                        mapping_origin: "mapper",
                         context_store_uuid: storeUuid,
                         context_row_id: contextMemory.id,
                     },
@@ -504,6 +553,7 @@ describe("memory authority protocol", () => {
             contextMemory.id,
         );
         expect(verification?.files).toEqual(["src/lib.rs"]);
+        expect(verification?.mappingOrigin).toBe("mapper");
         expect(verification?.verifiedAt).toBe(1234);
 
         applyMirrorPage({
@@ -529,6 +579,35 @@ describe("memory authority protocol", () => {
         expect(getMemoryVerifications(database, [contextMemory.id]).has(contextMemory.id)).toBe(
             false,
         );
+
+        applyMirrorPage({
+            db: database,
+            page: {
+                domain: "memories",
+                cursor: 2,
+                next_cursor: 3,
+                has_more: false,
+                rows: [
+                    {
+                        ...page.rows[0]!,
+                        feed_seq: 3,
+                        full_row_snapshot: {
+                            ...page.rows[0]!.full_row_snapshot,
+                            mapping: [],
+                            mapping_origin: "host_rejected_fallback",
+                            verified_at: 0,
+                        },
+                    },
+                ],
+            },
+        });
+        expect(
+            getMemoryVerifications(database, [contextMemory.id]).get(contextMemory.id),
+        ).toMatchObject({
+            files: [],
+            hasSentinel: true,
+            mappingOrigin: "host_rejected_fallback",
+        });
     });
     test("preserves source metadata across the historical 9397 mapping sequence", () => {
         const database = db();
@@ -685,8 +764,17 @@ describe("memory authority protocol", () => {
             page: { domain: "memories", cursor: 0, next_cursor: 0, has_more: false, rows: [] },
         });
         expect(
-            database.prepare("SELECT source_type, importance FROM memories WHERE id = 9397").get(),
-        ).toEqual({ source_type: "agent", importance: 66 });
+            database
+                .prepare("SELECT source_type, importance, updated_at FROM memories WHERE id = 9397")
+                .get(),
+        ).toMatchObject({ source_type: "agent", importance: 66 });
+        expect(
+            (
+                database.prepare("SELECT updated_at FROM memories WHERE id = 9397").get() as {
+                    updated_at: number;
+                }
+            ).updated_at,
+        ).toBeGreaterThan(1);
     });
 
     test("bounds authority seed frames below the management frame cap", async () => {
@@ -2211,9 +2299,135 @@ describe("memory authority protocol", () => {
             },
         });
         const rows = database
-            .prepare("SELECT id, superseded_by_memory_id FROM memories ORDER BY id")
-            .all() as Array<{ id: number; superseded_by_memory_id: number | null }>;
+            .prepare("SELECT id, superseded_by_memory_id, updated_at FROM memories ORDER BY id")
+            .all() as Array<{
+            id: number;
+            superseded_by_memory_id: number | null;
+            updated_at: number;
+        }>;
         expect(rows[0]?.superseded_by_memory_id).toBe(rows[1]?.id);
+        expect(rows[0]?.updated_at).toBeGreaterThan(0);
+    });
+
+    test("drain translates pending superseded references and preserves unresolved records", async () => {
+        const database = db();
+        const memory = (id: number, supersededBy: number) => ({
+            id,
+            project_path: "/repo",
+            category: "CONSTRAINTS",
+            content: `memory ${id}`,
+            normalized_hash: `h${id}`,
+            scope: "project",
+            shareable: 0,
+            seen_count: 1,
+            retrieval_count: 0,
+            first_seen_at: 0,
+            created_at: 0,
+            updated_at: 0,
+            last_seen_at: 0,
+            status: "active",
+            verification_status: "unverified",
+            superseded_by_memory_id: supersededBy,
+        });
+        applyMirrorPage({
+            db: database,
+            page: {
+                domain: "memories",
+                cursor: 0,
+                next_cursor: 2,
+                has_more: false,
+                rows: [
+                    {
+                        feed_seq: 1,
+                        domain: "memories",
+                        op: "insert",
+                        module_row_id: 10,
+                        full_row_snapshot: memory(10, 20),
+                        content_hash: "h10",
+                    },
+                    {
+                        feed_seq: 2,
+                        domain: "memories",
+                        op: "insert",
+                        module_row_id: 30,
+                        full_row_snapshot: memory(30, 40),
+                        content_hash: "h30",
+                    },
+                ],
+            },
+        });
+        const targetId = withPrivilegedWriter(database, () => {
+            const result = database
+                .prepare(
+                    "INSERT INTO memories(project_path, category, content, normalized_hash, first_seen_at, created_at, updated_at, last_seen_at) VALUES ('/repo', 'CONSTRAINTS', 'target', 'h20', 0, 0, 0, 0)",
+                )
+                .run() as { lastInsertRowid: number };
+            database
+                .prepare(
+                    "INSERT INTO mirror_identity(domain, module_project, module_row_id, context_row_id) VALUES ('memories', '/repo', 20, ?)",
+                )
+                .run(result.lastInsertRowid);
+            return Number(result.lastInsertRowid);
+        });
+        installAuthorityManagedMarker(database, "/repo");
+        let state: AuthorityStatus["state"] = "MODULE";
+        const module: AuthorityModuleClient = {
+            authorityStatus: async (args) => ({
+                authority: {
+                    ...authority(args.domain === "memories" ? state : "TS", 1),
+                    domain: args.domain,
+                },
+            }),
+            authorityPrepare: async () => ({ authority: authority("MODULE", 1) }),
+            authorityDrain: async (args) => {
+                state = args.action === "finish" ? "TS" : "DRAINING";
+                return {
+                    authority: {
+                        ...authority(state, 1),
+                        captured_upper_bound: 2,
+                        coordinator_token: "drain-pending-refs",
+                    },
+                };
+            },
+            mirrorPull: async (args) => ({
+                page: {
+                    domain: args.domain,
+                    cursor: args.cursor,
+                    next_cursor: args.cursor,
+                    has_more: false,
+                    rows: [],
+                },
+            }),
+        };
+
+        await expect(
+            drainAuthority({
+                db: database,
+                projectPath: "/repo",
+                domain: "memories",
+                module,
+                checksum: "same",
+            }),
+        ).resolves.toMatchObject({ state: "TS" });
+        const source = database
+            .prepare(
+                `SELECT memory.superseded_by_memory_id
+                   FROM memories memory
+                   JOIN mirror_identity identity
+                     ON identity.context_row_id = memory.id
+                  WHERE identity.domain = 'memories'
+                    AND identity.module_project = '/repo'
+                    AND identity.module_row_id = 10`,
+            )
+            .get();
+        expect(source).toEqual({ superseded_by_memory_id: targetId });
+        expect(
+            database
+                .prepare(
+                    "SELECT module_row_id, target_module_row_id FROM mirror_pending_references ORDER BY module_row_id",
+                )
+                .all(),
+        ).toEqual([{ module_row_id: 30, target_module_row_id: 40 }]);
     });
 
     test("privileged same-connection UPDATE between capture and verify aborts prepare", async () => {

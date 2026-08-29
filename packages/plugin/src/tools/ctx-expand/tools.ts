@@ -60,11 +60,25 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
             const sessionId = toolContext.sessionID;
 
             // By-ordinal mode: full recovery of a single message from stored history.
-            if (typeof args.message === "number" && args.message >= 1) {
+            if (args.message !== undefined) {
+                if (
+                    typeof args.message !== "number" ||
+                    !Number.isInteger(args.message) ||
+                    args.message < 1
+                ) {
+                    return "Error: message must be a positive integer.";
+                }
                 return renderMessageByOrdinal(sessionId, args.message);
             }
 
-            if (!args.start || !args.end || args.start < 1 || args.end < args.start) {
+            if (
+                !args.start ||
+                !args.end ||
+                !Number.isInteger(args.start) ||
+                !Number.isInteger(args.end) ||
+                args.start < 1 ||
+                args.end < args.start
+            ) {
                 return "Error: provide either message=<ordinal>, or start and end (positive integers, start <= end).";
             }
 

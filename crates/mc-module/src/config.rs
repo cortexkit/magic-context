@@ -4,9 +4,9 @@
 //! daemon config plane. Per-leaf trust policy is enforced during the read: model choice
 //! is user-tier only because it affects spend; project config may only raise the execute
 //! threshold (fire less often), and may override trusted memory, auto-search, caveman, promotion,
-//! and privacy settings. User-profile and historian budgets remain user-tier only. The Rust module
-//! intentionally keeps stricter model-selection policy than the current TypeScript implementation
-//! until both implementations are deliberately aligned.
+//! and privacy settings. User-profile, historian budgets, and output language remain user-tier
+//! only. The Rust module intentionally keeps stricter model-selection policy than the current
+//! TypeScript implementation until both implementations are deliberately aligned.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -82,6 +82,9 @@ impl Default for CavemanConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct McModuleConfig {
     pub model_chain: Vec<String>,
+    /// Trusted user-configured language for hidden-agent prose. Project config is deliberately
+    /// excluded because the language directive becomes provider-visible prompt text.
+    pub language: Option<String>,
     pub execute_threshold_percentage: f64,
     /// Whether compaction is enabled, as resolved during host startup. This determines which
     /// component controls context-window compaction for the request.
@@ -119,6 +122,7 @@ impl Default for McModuleConfig {
     fn default() -> Self {
         Self {
             model_chain: Vec::new(),
+            language: None,
             execute_threshold_percentage: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
             compaction_enabled: true,
             memory_enabled: true,
@@ -427,6 +431,14 @@ fn merge_tiers_with_warnings(
                 );
             }
         }
+        if let Some(language) = user
+            .pointer("/language")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|language| !language.is_empty())
+        {
+            cfg.language = Some(language.to_ascii_lowercase());
+        }
         if let Some(threshold) = number_at(user, "/execute_threshold_percentage") {
             cfg.execute_threshold_percentage = threshold;
         }
@@ -517,6 +529,7 @@ fn merge_tiers_with_warnings(
                 cfg.execute_threshold_percentage = project_threshold;
             }
         }
+        warn_ignored_project_key(project, "/language", &mut warnings);
         warn_ignored_project_key(project, "/compaction/enabled", &mut warnings);
         if let Some(enabled) = project.pointer("/memory/enabled").and_then(Value::as_bool) {
             cfg.memory_enabled = enabled;
@@ -823,6 +836,21 @@ mod tests {
         assert_eq!(cfg.model_chain, vec!["cheap", "fallback"]);
         assert_eq!(cfg.execute_threshold_percentage, 80.0);
         assert!(cfg.memory_enabled);
+    }
+
+    #[test]
+    fn language_is_normalized_from_user_config_and_rejected_from_project_config() {
+        let user = serde_json::json!({ "language": " Tr " });
+        let project = serde_json::json!({ "language": "nb" });
+
+        let (cfg, warnings) = merge_tiers_with_warnings(Some(&user), Some(&project));
+
+        assert_eq!(cfg.language.as_deref(), Some("tr"));
+        assert!(warnings.iter().any(|warning| {
+            warning.contains("/language")
+                && warning.contains("project tier")
+                && warning.contains("user-tier only")
+        }));
     }
 
     #[test]

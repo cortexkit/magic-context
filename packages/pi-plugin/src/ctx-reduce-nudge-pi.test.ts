@@ -8,6 +8,7 @@ import {
 	getChannel2NudgeState,
 	getOldestActiveUnprotectedToolTags,
 	insertTag,
+	setChannel1NudgeState,
 	setChannel2NudgeState,
 } from "@magic-context/core/features/magic-context/storage";
 import * as loggerModule from "@magic-context/core/shared/logger";
@@ -20,6 +21,44 @@ import {
 } from "./ctx-reduce-nudge-pi";
 import { countRealPiUserMessages } from "./tail-hygiene-walk-pi";
 import { createTestDb } from "./test-utils.test";
+
+type ReminderCopyGolden = {
+	schema: number;
+	cases: Array<{
+		id: string;
+		channel: "channel1" | "channel2";
+		level?: "gentle" | "firm" | "urgent";
+		reclaimable_tool_outputs: number;
+		reclaimable_tokens: number;
+		sticky?: boolean;
+		hint: Array<{ tag_number: number; tool_name: string | null }>;
+		expected: string;
+	}>;
+};
+
+const reminderCopyGolden = JSON.parse(
+	readFileSync(
+		join(
+			import.meta.dir,
+			"../../../crates/mc-module/testdata/ctx-reduce-nudge-copy-golden.json",
+		),
+		"utf8",
+	),
+) as ReminderCopyGolden;
+
+function reclaimableToolOutputParts(count: number) {
+	return Array.from({ length: count }, (_, index) => ({
+		key: `tool-output-${index}`,
+		contentHash: `hash-${index}`,
+		kind: "toolOutput" as const,
+		tokens: 1,
+		uTokens: 1,
+		tagNumber: index + 1,
+		tagStatus: "active",
+		protected: false,
+		queuedForDrop: false,
+	}));
+}
 
 function channel2BaselineFields(baselineU: number, baselineT: number) {
 	return {
@@ -44,6 +83,93 @@ afterEach(() => {
 
 describe("maybeChannel1ReminderForToolResult", () => {
 	const SESSION = "ses-ch1";
+
+	it("matches the shared copy golden for every Pi-rendered band", () => {
+		expect(reminderCopyGolden.schema).toBe(1);
+		const rendered: Array<{ id: string; text: string }> = [];
+		for (const reminder of reminderCopyGolden.cases) {
+			const db = createTestDb();
+			const sessionId = `ses-copy-${reminder.id}`;
+			const hints = reminder.hint.map(({ tag_number, tool_name }) => ({
+				tagNumber: tag_number,
+				toolName: tool_name,
+			}));
+			if (reminder.channel === "channel1") {
+				const [baselineU, baselineT] =
+					reminder.level === "gentle"
+						? [reminder.reclaimable_tokens, 400_000]
+						: reminder.level === "firm"
+							? [reminder.reclaimable_tokens, 200_000]
+							: [reminder.reclaimable_tokens, 120_000];
+				setPiChannel1Baseline(sessionId, {
+					...channel2BaselineFields(baselineU, baselineT),
+					reducedSinceRefresh: false,
+					baselineParts: reclaimableToolOutputParts(
+						reminder.reclaimable_tool_outputs,
+					),
+					oldestReclaimableToolTags: hints,
+				});
+				if (reminder.sticky) {
+					setChannel1NudgeState(db, sessionId, {
+						level: reminder.level ?? "firm",
+						ordinal: 1,
+					});
+				}
+				const block = maybeChannel1ReminderForToolResult({
+					db,
+					sessionId,
+					toolName: "bash",
+					content: [{ type: "text", text: "tool output" }],
+				});
+				expect(block?.text, reminder.id).toBe(reminder.expected);
+				rendered.push({ id: reminder.id, text: block?.text ?? "" });
+			} else {
+				setChannel2NudgeState(db, sessionId, "pending");
+				setPiChannel1Baseline(sessionId, {
+					...channel2BaselineFields(reminder.reclaimable_tokens, 100_000),
+					reducedSinceRefresh: false,
+					baselineParts: reclaimableToolOutputParts(
+						reminder.reclaimable_tool_outputs,
+					),
+					oldestReclaimableToolTags: hints,
+				});
+				let text = "";
+				expect(
+					maybeDeliverChannel2Pi(
+						{ sendMessage: (message) => (text = message.content) },
+						db,
+						sessionId,
+					),
+				).toBe(true);
+				expect(text, reminder.id).toBe(reminder.expected);
+				rendered.push({ id: reminder.id, text });
+			}
+			clearPiChannel1State(sessionId);
+		}
+
+		for (const reminder of rendered) {
+			expect(
+				reminder.text,
+				`${reminder.id} must not expose a denominator`,
+			).not.toContain("of ~");
+			expect(
+				reminder.text,
+				`${reminder.id} must not expose session capacity`,
+			).not.toContain("of this session");
+			expect(
+				reminder.text.match(/~\d+(?:\.\d+)?k\b/g) ?? [],
+				`${reminder.id} must expose only the reclaimable token mass`,
+			).toHaveLength(1);
+			expect(
+				reminder.text,
+				`${reminder.id} must not expose a percentage`,
+			).not.toMatch(/\b\d+(?:\.\d+)?\s*%/);
+			expect(
+				reminder.text,
+				`${reminder.id} must not expose context capacity`,
+			).not.toMatch(/\bwindow\b/i);
+		}
+	});
 
 	function seedBaseline(tailTokens: number): void {
 		setPiChannel1Baseline(SESSION, {
@@ -78,7 +204,7 @@ describe("maybeChannel1ReminderForToolResult", () => {
 		expect(block?.type).toBe("text");
 		expect(block?.text).toContain("<system-reminder>");
 		expect(block?.text).toContain(
-			"Housekeeping backlog: ~90k of this session's ~128k window is spent tool output",
+			"Housekeeping backlog: spent tool outputs (~90k tokens) are reclaimable",
 		);
 		clearPiChannel1State(SESSION);
 	});
@@ -229,7 +355,9 @@ describe("maybeChannel1ReminderForToolResult", () => {
 			toolName: "bash",
 			content: [{ type: "text", text: "output on next pass" }],
 		});
-		expect(nextPass?.text).toContain("Housekeeping backlog: ~90k");
+		expect(nextPass?.text).toContain(
+			"Housekeeping backlog: spent tool outputs (~90k tokens)",
+		);
 		clearPiChannel1State(SESSION);
 	});
 
@@ -339,7 +467,7 @@ describe("maybeChannel1ReminderForToolResult", () => {
 			content: [{ type: "text", text: "first output" }],
 		});
 		expect(first?.text).toContain(
-			"Housekeeping: ~50k of this session's ~128k window",
+			"Housekeeping: spent tool outputs (~50k tokens)",
 		);
 		expect(
 			db
@@ -358,9 +486,9 @@ describe("maybeChannel1ReminderForToolResult", () => {
 			content: [{ type: "text", text: "second output" }],
 		});
 		expect(sticky?.text).toContain(
-			"Reminder: ctx_reduce housekeeping still pending —",
+			"Reminder: spent tool outputs (~80k tokens) are still reclaimable",
 		);
-		expect(sticky?.text).not.toContain("Not a limit");
+		expect(sticky?.text).not.toContain("of this session");
 
 		const threeRealTurnsLater = [
 			{ role: "user", content: "m0 head" },
@@ -381,11 +509,9 @@ describe("maybeChannel1ReminderForToolResult", () => {
 			content: [{ type: "text", text: "third output" }],
 		});
 		expect(expired?.text).toContain(
-			"Housekeeping: ~110k of this session's ~128k window",
+			"Housekeeping: spent tool outputs (~110k tokens)",
 		);
-		expect(expired?.text).not.toContain(
-			"Reminder: ctx_reduce housekeeping still pending",
-		);
+		expect(expired?.text).not.toContain("Reminder: spent tool outputs");
 
 		setPiChannel1Baseline(SESSION, baseline(120_000, 180_000, 4));
 		const escalation = maybeChannel1ReminderForToolResult({
@@ -394,10 +520,10 @@ describe("maybeChannel1ReminderForToolResult", () => {
 			toolName: "bash",
 			content: [{ type: "text", text: "fourth output" }],
 		});
-		expect(escalation?.text).toContain("Housekeeping backlog: ~120k");
-		expect(escalation?.text).not.toContain(
-			"Reminder: ctx_reduce housekeeping still pending",
+		expect(escalation?.text).toContain(
+			"Housekeeping backlog: spent tool outputs (~120k tokens)",
 		);
+		expect(escalation?.text).not.toContain("Reminder: spent tool outputs");
 		clearPiChannel1State(SESSION);
 	});
 
@@ -432,11 +558,9 @@ describe("maybeChannel1ReminderForToolResult", () => {
 			content: [{ type: "text", text: "legacy output" }],
 		});
 		expect(block?.text).toContain(
-			"Housekeeping: ~80k of this session's ~128k window",
+			"Housekeeping: spent tool outputs (~80k tokens)",
 		);
-		expect(block?.text).not.toContain(
-			"Reminder: ctx_reduce housekeeping still pending",
-		);
+		expect(block?.text).not.toContain("Reminder: spent tool outputs");
 		expect(
 			db
 				.prepare(
@@ -503,7 +627,7 @@ describe("maybeDeliverChannel2Pi", () => {
 		expect(capturedCustomType).toBe("magic-context:ceiling-nudge");
 		expect(capturedContent).toContain("<system-reminder>");
 		expect(capturedContent).toContain(
-			"Routine housekeeping: an older span of this session folds into compact history automatically — nothing is lost and nothing pauses. Drop spent tool outputs with ctx_reduce first so the archive keeps only what matters (~75k of ~128k reclaimable).",
+			"Routine housekeeping: spent tool outputs (~75k tokens) are reclaimable — make a ctx_reduce pass at a natural stopping point.",
 		);
 		expect(capturedContent).toContain("oldest reclaimable");
 		expect(getChannel2NudgeState(db, SESSION)).toBe("delivered");

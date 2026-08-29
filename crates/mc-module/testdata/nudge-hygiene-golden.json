@@ -3,7 +3,7 @@
   "provenance": {
     "generator": "crates/mc-module/gen/gen-nudge-hygiene-golden.ts",
     "generator_version": "nudge-hygiene-ts-v2",
-    "input_sha256": "971579002cdbadc99feb573914a1843f1ff9878de318aee3352ce13fca0e7883"
+    "input_sha256": "e139175f8d45f2c644309bd6fe2d4305b5b01b55482a031bc87eb4212236c521"
   },
   "cases": [
     {
@@ -414,6 +414,36 @@
       "expected": {
         "u": 7,
         "t": 7,
+        "band": "quiet"
+      }
+    },
+    {
+      "id": "user-reminder-span-excluded-from-both-terms",
+      "protected_tags": 0,
+      "messages": [
+        {
+          "mid": "user-reminder",
+          "ordinal": 1,
+          "role": "user",
+          "blocks": [
+            {
+              "type": "text",
+              "unit": "kept prompt\n\n<system-reminder>\nreminder bytes are excluded on ordinary text\n</system-reminder>",
+              "repeat": 1
+            }
+          ]
+        }
+      ],
+      "tags": [
+        {
+          "tag_number": 1,
+          "block_id": "user-reminder#0",
+          "kind": "message"
+        }
+      ],
+      "expected": {
+        "u": 2,
+        "t": 2,
         "band": "quiet"
       }
     },

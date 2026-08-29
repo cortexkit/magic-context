@@ -14,7 +14,7 @@ import {
 import { resolveModelConfigOrDefault } from "../../shared/prompt-surface";
 
 export { escalationBands, MAX_EXECUTE_THRESHOLD };
-export const DEFAULT_CONTEXT_LIMIT = 128_000;
+export const DEFAULT_CONTEXT_LIMIT = 200_000;
 
 export function resolveContextWindowGeometry(
     providerID: string | undefined,
@@ -88,7 +88,7 @@ export function resolveContextLimit(
 
 /**
  * Like resolveContextLimit, but returns a limit ONLY when it is TRUSTED for the
- * current model, rather than the generic 128K `DEFAULT_CONTEXT_LIMIT`.
+ * current model, rather than the generic 200K `DEFAULT_CONTEXT_LIMIT`.
  *
  * Resolution precedence is:
  *   1. models.dev or a user provider override.

@@ -67,6 +67,10 @@ export interface SubagentRunOptions {
     model?: string | undefined;
     fallbackModels?: readonly ModelInput[];
     timeoutMs?: number | undefined;
+    /** Sampling temperature for the provider request when the harness can enforce it. */
+    temperature?: number | undefined;
+    /** Requested output-token budget for the provider request. */
+    maxOutputTokens?: number | undefined;
     cwd?: string | undefined;
     signal?: AbortSignal | undefined;
     /**

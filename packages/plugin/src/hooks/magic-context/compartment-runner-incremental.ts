@@ -53,6 +53,7 @@ import { insertUserMemoryCandidates } from "../../features/magic-context/user-me
 import { normalizeSDKResponse } from "../../shared";
 import { describeError } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
+import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { updateCompactionMarkerAfterPublication } from "./compaction-marker-manager";
 import { buildCompartmentAgentPrompt } from "./compartment-prompt";
 import { queueDropsForCompartmentalizedMessages } from "./compartment-runner-drop-queue";
@@ -629,6 +630,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             return;
         }
         let published = false;
+        const transactionStartedAt = performance.now();
         db.exec("BEGIN IMMEDIATE");
         try {
             if (!isCompartmentLeaseHeld(db, sessionId, holderId)) {
@@ -719,6 +721,7 @@ export async function runCompartmentAgent(deps: CompartmentRunnerDeps): Promise<
             }
             db.exec("COMMIT");
             published = true;
+            logSlowWriteTransaction("historian-publish", transactionStartedAt);
         } finally {
             if (!published) {
                 try {

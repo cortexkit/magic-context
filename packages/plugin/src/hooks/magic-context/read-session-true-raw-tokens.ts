@@ -497,20 +497,55 @@ export function buildToolArcs(messages: readonly RawMessage[]): ToolArc[] {
     );
 }
 
+export function fenceBoundaryForCompletedToolArcs(
+    candidate: number,
+    arcs: readonly ToolArc[],
+    publicationFloorOrdinal: number,
+): number {
+    const completed = arcs
+        .filter((arc): arc is ToolArc & { resOrdinal: number } => arc.resOrdinal !== null)
+        .map((arc) => ({ invocation: arc.invOrdinal, result: arc.resOrdinal }));
+    const component = completed.filter((arc) =>
+        completedToolArcCrossesBoundary(arc.invocation, arc.result, candidate),
+    );
+    if (component.length === 0) return candidate;
+
+    // Overlapping arcs are one atomic interval. Expand the whole component before
+    // selecting its safe side so moving around one pair cannot split its neighbor.
+    for (let pass = 0; pass <= completed.length; pass += 1) {
+        const minInvocation = Math.min(...component.map((arc) => arc.invocation));
+        const maxResult = Math.max(...component.map((arc) => arc.result));
+        const before = component.length;
+        for (const arc of completed) {
+            if (
+                arc.invocation <= maxResult &&
+                arc.result >= minInvocation &&
+                !component.includes(arc)
+            ) {
+                component.push(arc);
+            }
+        }
+        if (component.length === before) break;
+    }
+
+    const minInvocation = Math.min(...component.map((arc) => arc.invocation));
+    const maxResult = Math.max(...component.map((arc) => arc.result));
+    return minInvocation < publicationFloorOrdinal ? maxResult + 1 : minInvocation;
+}
+
 export function fenceBoundaryForToolArcs(
     candidate: number,
     arcs: readonly ToolArc[],
     lastCompartmentEndOrdinal: number,
     recentOpenArcCutoff: number,
 ): number {
-    let boundary = candidate;
+    let boundary = fenceBoundaryForCompletedToolArcs(
+        candidate,
+        arcs,
+        lastCompartmentEndOrdinal + 1,
+    );
     for (const arc of arcs) {
-        if (arc.resOrdinal !== null) {
-            if (completedToolArcCrossesBoundary(arc.invOrdinal, arc.resOrdinal, boundary)) {
-                boundary = arc.resOrdinal + 1;
-            }
-            continue;
-        }
+        if (arc.resOrdinal !== null) continue;
         // Open arc (a tool invocation with no matching result in the window).
         // Only an open arc inside the live protected-tail window
         // (invOrdinal >= recentOpenArcCutoff, the size-walk start) is treated as

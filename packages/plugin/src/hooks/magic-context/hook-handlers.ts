@@ -33,6 +33,7 @@ import {
     CHANNEL1_SENTINEL,
     type Channel1State,
     decideChannel1,
+    reclaimableToolOutputCount,
     shouldUseStickyChannel1Reminder,
     toolOutputTokens,
 } from "./ctx-reduce-nudge";
@@ -513,7 +514,7 @@ function maybeInjectChannel1Nudge(
     out.output += buildChannel1Reminder(
         decision.level,
         decision.undroppedTokens,
-        state.usableWindow,
+        reclaimableToolOutputCount(state.baselineParts),
         state.oldestReclaimableToolTags,
         sticky,
     );

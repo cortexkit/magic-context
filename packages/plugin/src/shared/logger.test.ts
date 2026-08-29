@@ -30,6 +30,10 @@ const logger = await import(loggerModuleUrl);
 const logPath = path.join(root, "nested", "magic-context.log");
 process.env.MAGIC_CONTEXT_LOG_PATH = logPath;
 logger.log("first");
+logger.log(
+    "tokens.input=45000 api_key=sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGH",
+    { authorization: "Bearer abcdefghijklmnop", totalInputTokens: 132000 },
+);
 logger.flushLogger();
 const healthyDiagnostics = logger.getLoggerDiagnostics();
 
@@ -100,6 +104,17 @@ describe("logger", () => {
 
         expect(result.exists).toBe(true);
         expect(result.content).toContain("second");
+    });
+
+    test("redacts secrets while preserving numeric diagnostics", async () => {
+        const result = await runLoggerScenario("diagnostics");
+
+        expect(result.content).toContain("tokens.input=45000");
+        expect(result.content).toContain('"totalInputTokens":132000');
+        expect(result.content).toContain("<REDACTED:api_key>");
+        expect(result.content).toContain("<REDACTED:authorization>");
+        expect(result.content).not.toContain("abcdefghijklmnopqrstuvwxyzABCDEFGH");
+        expect(result.content).not.toContain("abcdefghijklmnop");
     });
 
     test("reports swallowed writes while healthy writes leave the counter at zero", async () => {

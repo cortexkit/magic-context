@@ -5,6 +5,7 @@ import { getAuthorityManagedMarker } from "../../features/magic-context/context-
 import {
     archiveMemory,
     CATEGORY_PRIORITY,
+    clearMemoryVerifications,
     getMemoriesByIds,
     getMemoriesByProject,
     getMemoryByHash,
@@ -91,15 +92,14 @@ function normalizeCategory(category?: string): string | undefined {
     return trimmed ? trimmed : undefined;
 }
 
-function memoryAuthorityRefusal(args: CtxMemoryArgs): string {
+function memoryAuthorityRefusal(args: CtxMemoryArgs, cause?: string): string {
     const readiness = "Rust memory authority is not ready.";
-    if (
+    const refusal =
         (args.action === "write" || args.action === "update" || args.action === "merge") &&
         typeof args.content === "string"
-    ) {
-        return `Error: ${readiness} Write REFUSED and NOT saved; RESEND after authority is ready.\nContent to resend:\n${args.content}`;
-    }
-    return `Error: ${readiness} Request REFUSED and NOT applied; RESEND after authority is ready.`;
+            ? `Error: ${readiness} Write REFUSED and NOT saved; RESEND the same call after authority is ready; the Rust module typically recovers in seconds-to-minutes.\nContent to resend:\n${args.content}`
+            : `Error: ${readiness} Request REFUSED and NOT applied; RESEND the same call after authority is ready; the Rust module typically recovers in seconds-to-minutes.`;
+    return cause ? `${cause}\n${refusal}` : refusal;
 }
 
 function moduleMemoryText(response: unknown, args: CtxMemoryArgs): string | null {
@@ -350,6 +350,7 @@ function updateMemoryContentInCurrentTransaction(
         db.prepare("UPDATE memories SET classified_at = NULL WHERE id = ?").run(memory.id);
     }
     db.prepare("DELETE FROM memory_embeddings WHERE memory_id = ?").run(memory.id);
+    clearMemoryVerifications(db, memory.id);
     invalidateMemory(memory.projectPath, memory.id);
 }
 
@@ -433,7 +434,11 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                         })) ?? null;
                 } catch (error) {
                     if (marker) {
-                        return `Error: Rust memory authority is unavailable. ${error instanceof Error ? error.message : String(error)}`;
+                        const detail = error instanceof Error ? error.message : String(error);
+                        return memoryAuthorityRefusal(
+                            args,
+                            `Error: Rust memory authority is unavailable. ${detail}`,
+                        );
                     }
                 }
                 if (authorityState === "MODULE") {
@@ -465,7 +470,11 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                         if (isRustAuthorityDrainingError(error)) {
                             return memoryAuthorityRefusal(args);
                         }
-                        return `Error: Rust module ctx_memory failed. ${error instanceof Error ? error.message : String(error)}`;
+                        const detail = error instanceof Error ? error.message : String(error);
+                        return memoryAuthorityRefusal(
+                            args,
+                            `Error: Rust module ctx_memory failed. ${detail}`,
+                        );
                     }
                 }
                 if (marker || authorityState === "PREPARING" || authorityState === "DRAINING") {

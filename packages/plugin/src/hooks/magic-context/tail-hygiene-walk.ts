@@ -561,7 +561,8 @@ export function measureTailHygiene(input: {
                 continue;
             }
             if (type === "text") {
-                const content = firstString(part, ["text", "content"]);
+                const rawContent = firstString(part, ["text", "content"]);
+                const content = rawContent === null ? null : stripChannel1ReminderSpans(rawContent);
                 if (!content || isDropSentinel(content)) {
                     parts.push(excludedSnapshot(`${key}\0excluded`, part));
                     continue;

@@ -6,7 +6,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
-import { LATEST_MIGRATION_VERSION, MIGRATIONS, runMigrations } from "./migrations";
+import {
+    FORK_MIGRATION_VERSION_FLOOR,
+    LATEST_MIGRATION_VERSION,
+    MIGRATIONS,
+    runMigrations,
+} from "./migrations";
 import { closeDatabase, initializeDatabase, openDatabase, openDatabaseAsync } from "./storage-db";
 
 interface InitializerIndexAudit {
@@ -137,8 +142,16 @@ function seedHistoricalStoreFile(version: number): { dir: string; path: string }
 }
 
 function persistedVersion(db: Database): number {
+    // Mirror getPersistedSchemaVersion: rows at or above the reserved fork lane are a
+    // downstream namespace, not this binary's schema version. A bare MAX(version) reads
+    // a fork's 10_000+ row as the store version, so this assertion fails for any fork
+    // using the documented lane even though production resolves the version correctly.
     return (
-        db.prepare("SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations").get() as {
+        db
+            .prepare(
+                "SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations WHERE version < ?",
+            )
+            .get(FORK_MIGRATION_VERSION_FLOOR) as {
             version: number;
         }
     ).version;
@@ -231,6 +244,28 @@ describe("initializeDatabase legacy index ordering", () => {
             } finally {
                 closeQuietly(db);
             }
+        }
+    });
+
+    test("resolves the store version from the upstream lane when a fork migration row is present", () => {
+        const seeded = seedHistoricalStoreFile(6);
+        try {
+            const db = openDatabase(seeded.path);
+            expect(db).not.toBeNull();
+            // A downstream fork records its own migrations in the reserved >= 10_000 lane.
+            db!
+                .prepare(
+                    // OR REPLACE so the fixture is idempotent on a real fork, whose own
+                    // migration may already occupy this version.
+                    "INSERT OR REPLACE INTO schema_migrations (version, description, applied_at) VALUES (?, ?, ?)",
+                )
+                .run(FORK_MIGRATION_VERSION_FLOOR + 100, "downstream fork migration", Date.now());
+            // The store version is still this binary's latest upstream migration; the fork
+            // row is a separate namespace and must never be read as the schema version.
+            expect(persistedVersion(db!)).toBe(LATEST_MIGRATION_VERSION);
+        } finally {
+            closeDatabase();
+            rmSync(seeded.dir, { recursive: true, force: true });
         }
     });
 });

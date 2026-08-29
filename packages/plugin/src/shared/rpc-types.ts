@@ -147,6 +147,9 @@ export interface StatusDetail extends SidebarSnapshot {
     activeTags: number;
     droppedTags: number;
     totalTags: number;
+    /** False when Rust authority supplies only the exact total; active/dropped host-mirror
+     *  counts are not presented as module truth. Omitted by older RPC servers means true. */
+    tagCountsAuthoritative?: boolean;
     activeBytes: number;
     lastResponseTime: number;
     lastNudgeTokens: number;

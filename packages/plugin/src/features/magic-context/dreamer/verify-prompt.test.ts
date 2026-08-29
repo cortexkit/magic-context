@@ -1,28 +1,39 @@
 import { describe, expect, it } from "bun:test";
 
-import { buildVerifyPrompt, parseVerifyManifest, validateVerifyManifest } from "./verify-prompt";
+import {
+    buildVerifyPrompt,
+    parseVerifyManifest,
+    VERIFY_SYSTEM_PROMPT,
+    validateVerifyManifest,
+} from "./verify-prompt";
 
 describe("parseVerifyManifest", () => {
     it("parses verified / update / archive with attribute-order tolerance", () => {
         const text = `narration
 <verify>
 <verified id="1" files="a/b.ts,c/d.ts"/>
-<update id="2" files="x.ts">X uses Y now</update>
+<update id="2" files="x.ts" consolidation="true">X uses Y now</update>
 <archive id="3" reason="the symbol no longer exists"/>
 <verified files="z.ts" id="4"/>
+<skip id="5" reason="behavioral directive"/>
 </verify>`;
         const out = parseVerifyManifest(text);
         expect(out.verified).toEqual([
             { id: 1, files: ["a/b.ts", "c/d.ts"] },
             { id: 4, files: ["z.ts"] },
         ]);
-        expect(out.updated).toEqual([{ id: 2, files: ["x.ts"], content: "X uses Y now" }]);
+        expect(out.updated).toEqual([
+            { id: 2, files: ["x.ts"], content: "X uses Y now", consolidation: true },
+        ]);
         expect(out.archived).toEqual([{ id: 3, reason: "the symbol no longer exists" }]);
+        expect(out.skipped).toEqual([{ id: 5, reason: "behavioral directive" }]);
     });
 
     it("handles a self-closing update (no content)", () => {
         const out = parseVerifyManifest(`<verify><update id="7" files="a.ts"/></verify>`);
-        expect(out.updated).toEqual([{ id: 7, files: ["a.ts"], content: "" }]);
+        expect(out.updated).toEqual([
+            { id: 7, files: ["a.ts"], content: "", consolidation: false },
+        ]);
     });
 
     it("rejects a truncated manifest with no closing root", () => {
@@ -36,6 +47,7 @@ describe("parseVerifyManifest", () => {
             verified: [],
             updated: [],
             archived: [],
+            skipped: [],
         });
     });
 
@@ -98,6 +110,16 @@ describe("validateVerifyManifest", () => {
 });
 
 describe("buildVerifyPrompt", () => {
+    it("limits destructive verdicts to file-falsifiable code facts", () => {
+        expect(VERIFY_SYSTEM_PROMPT).toContain(
+            "UPDATE and ARCHIVE are ONLY for claims a repository file can falsify",
+        );
+        expect(VERIFY_SYSTEM_PROMPT).toContain(
+            "Behavioral directives (when to act, how to work, who decides, tool-usage discipline) can only be VERIFIED or SKIPPED",
+        );
+        expect(VERIFY_SYSTEM_PROMPT).toContain('consolidation="true"');
+    });
+
     it("lists each memory with its backing files and instructs default-verified", () => {
         const prompt = buildVerifyPrompt("git:abc", [
             { id: 1, category: "ARCHITECTURE", content: "foo", mappedFiles: ["a.ts", "b.ts"] },

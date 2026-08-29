@@ -300,6 +300,72 @@ describe("historian compartment sync fence", () => {
     });
 });
 
+describe("authority cold-start sequence matrix", () => {
+    it("bootstraps or adopts every adapter/module age combination without rewinding", async () => {
+        const cases = [
+            { name: "both fresh", senderSeq: 0, durableSeq: 0, senderWarm: false },
+            { name: "fresh module + old adapter", senderSeq: 7, durableSeq: 0, senderWarm: true },
+            { name: "fresh adapter + old module", senderSeq: 0, durableSeq: 7, senderWarm: false },
+            { name: "mid-turn adapter restart", senderSeq: 7, durableSeq: 7, senderWarm: false },
+        ] as const;
+
+        for (const fixture of cases) {
+            const db = createContextDb();
+            const sessionId = `ses-cold-matrix-${fixture.name.replaceAll(" ", "-")}`;
+            const baseline = loadModuleWatermarks({ db, sessionId });
+            const state: ModuleStateSyncState = {
+                ...syncState(),
+                lastAckedSeq: fixture.senderSeq,
+                lastAckedWatermarks: fixture.senderWarm ? baseline : null,
+                seedPassPending: !fixture.senderWarm,
+            };
+            if (fixture.senderWarm) {
+                updateSessionMeta(db, sessionId, { lastTodoState: '[{"content":"delta"}]' });
+            }
+            let durableSeq = fixture.durableSeq;
+            const observedExpectedSeqs: number[] = [];
+            const acceptedSeqs: number[] = [];
+            let mismatches = 0;
+
+            const result = await syncModuleState({
+                client: {
+                    async call(args) {
+                        const body = args.body as Record<string, unknown>;
+                        const expected = Number(body.expected_shadow_seq);
+                        observedExpectedSeqs.push(expected);
+                        if (expected !== durableSeq) {
+                            mismatches += 1;
+                            const error = new Error(
+                                JSON.stringify({
+                                    code: "authority_seq_mismatch",
+                                    durable_authority_seq: durableSeq,
+                                }),
+                            ) as Error & { code: string };
+                            error.code = "authority_seq_mismatch";
+                            throw error;
+                        }
+                        acceptedSeqs.push(expected);
+                        durableSeq += 1;
+                        return { result: { shadow_seq: durableSeq } };
+                    },
+                },
+                state,
+                pass: { db, sessionId, nowMs: 1 },
+                projectRoot: "/tmp/project",
+                force: !fixture.senderWarm,
+                options: { authority: true, authoritySeqAdoption: { used: false } },
+            });
+
+            expect(result.status, fixture.name).toBe("acked");
+            expect(state.lastAckedSeq, fixture.name).toBe(durableSeq);
+            expect(durableSeq, fixture.name).toBeGreaterThan(fixture.durableSeq);
+            expect(acceptedSeqs, fixture.name).toEqual([fixture.durableSeq]);
+            expect(mismatches, fixture.name).toBe(fixture.senderSeq === fixture.durableSeq ? 0 : 1);
+            expect(observedExpectedSeqs.at(-1), fixture.name).toBe(fixture.durableSeq);
+        }
+    });
+});
+
 describe("module state external epochs", () => {
     it("carries dashboard project and profile epochs on the completed sync page", async () => {
         const db = createContextDb();

@@ -657,7 +657,9 @@ describe("createToolExecuteAfterHook Channel-1 dampening", () => {
             state.agentDropsAppliedThisPass = false;
             const nextPass = { output: "output on next pass" };
             await hook({ tool: "bash", sessionID: sessionId }, nextPass);
-            expect(nextPass.output).toContain("Housekeeping backlog: ~90k");
+            expect(nextPass.output).toContain(
+                "Housekeeping backlog: spent tool outputs (~90k tokens)",
+            );
         } finally {
             closeQuietly(db);
         }
@@ -710,7 +712,7 @@ describe("createToolExecuteAfterHook Channel-1 dampening", () => {
         try {
             const first = { output: "first output" };
             await hook({ tool: "bash", sessionID: sessionId }, first);
-            expect(first.output).toContain("Housekeeping: ~50k of this session's ~128k window");
+            expect(first.output).toContain("Housekeeping: spent tool outputs (~50k tokens)");
             const frozenFirst = first.output;
             await hook({ tool: "bash", sessionID: sessionId }, first);
             expect(first.output).toBe(frozenFirst);
@@ -721,8 +723,10 @@ describe("createToolExecuteAfterHook Channel-1 dampening", () => {
             channel1StateBySession.set(sessionId, state(80_000, 180_000, sameTurnCount));
             const sticky = { output: "second output" };
             await hook({ tool: "bash", sessionID: sessionId }, sticky);
-            expect(sticky.output).toContain("Reminder: ctx_reduce housekeeping still pending —");
-            expect(sticky.output).not.toContain("Not a limit");
+            expect(sticky.output).toContain(
+                "Reminder: spent tool outputs (~80k tokens) are still reclaimable",
+            );
+            expect(sticky.output).not.toContain("of this session");
             const frozenSticky = sticky.output;
             await hook({ tool: "bash", sessionID: sessionId }, sticky);
             expect(sticky.output).toBe(frozenSticky);
@@ -737,16 +741,16 @@ describe("createToolExecuteAfterHook Channel-1 dampening", () => {
             );
             const expired = { output: "third output" };
             await hook({ tool: "bash", sessionID: sessionId }, expired);
-            expect(expired.output).toContain("Housekeeping: ~110k of this session's ~128k window");
-            expect(expired.output).not.toContain("Reminder: ctx_reduce housekeeping still pending");
+            expect(expired.output).toContain("Housekeeping: spent tool outputs (~110k tokens)");
+            expect(expired.output).not.toContain("Reminder: spent tool outputs");
 
             channel1StateBySession.set(sessionId, state(120_000, 180_000, 4));
             const escalation = { output: "fourth output" };
             await hook({ tool: "bash", sessionID: sessionId }, escalation);
-            expect(escalation.output).toContain("Housekeeping backlog: ~120k");
-            expect(escalation.output).not.toContain(
-                "Reminder: ctx_reduce housekeeping still pending",
+            expect(escalation.output).toContain(
+                "Housekeeping backlog: spent tool outputs (~120k tokens)",
             );
+            expect(escalation.output).not.toContain("Reminder: spent tool outputs");
         } finally {
             closeQuietly(db);
         }
@@ -783,8 +787,8 @@ describe("createToolExecuteAfterHook Channel-1 dampening", () => {
         try {
             const output = { output: "legacy output" };
             await hook({ tool: "bash", sessionID: sessionId }, output);
-            expect(output.output).toContain("Housekeeping: ~80k of this session's ~128k window");
-            expect(output.output).not.toContain("Reminder: ctx_reduce housekeeping still pending");
+            expect(output.output).toContain("Housekeeping: spent tool outputs (~80k tokens)");
+            expect(output.output).not.toContain("Reminder: spent tool outputs");
             expect(
                 db
                     .prepare("SELECT last_nudge_level FROM session_meta WHERE session_id = ?")

@@ -58,6 +58,8 @@ export interface DreamTaskProgress {
     processed: number;
     total: number;
     startedAt: number;
+    /** Update/archive verdicts refused by host-side verification safety gates during the current run. */
+    refused?: number;
 }
 
 /** Persisted per-task run counts used by dream-run history and summaries. */

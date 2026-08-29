@@ -192,6 +192,17 @@ function makeCortexkitDb() {
           updated_at INTEGER NOT NULL,
           harness TEXT NOT NULL DEFAULT 'opencode'
         );
+        CREATE TABLE authority_managed (
+          project_path TEXT PRIMARY KEY,
+          context_store_uuid TEXT NOT NULL,
+          marked_at INTEGER NOT NULL
+        );
+        CREATE TABLE session_projects (
+          session_id TEXT NOT NULL,
+          harness TEXT NOT NULL,
+          project_path TEXT NOT NULL,
+          PRIMARY KEY (session_id, harness)
+        );
         CREATE TABLE migration_pending (
           migration_key TEXT PRIMARY KEY,
           source_session_id TEXT NOT NULL,
@@ -486,6 +497,43 @@ describe("migrateOpenCodeSessionToPi", () => {
         expect(order[2]).toBe("rename");
         expect(order).not.toContain("unlink");
         // Success clears the journal row.
+        expect(readJournalRows(cortexkitDb)).toEqual([]);
+    });
+
+    it("refuses module-managed source sessions before staging output", () => {
+        const db = makeDb();
+        const { sessionId, cwd } = insertSyntheticSession(db);
+        const cortexkitDb = makeCortexkitDb();
+        cortexkitDb
+            .prepare(
+                "INSERT INTO authority_managed (project_path, context_store_uuid, marked_at) VALUES (?, 'store-test', 0)",
+            )
+            .run("git:managed");
+        cortexkitDb
+            .prepare(
+                "INSERT INTO session_projects (session_id, harness, project_path) VALUES (?, 'opencode', ?)",
+            )
+            .run(sessionId, "git:managed");
+        const writes: string[] = [];
+
+        expect(() =>
+            migrateOpenCodeSessionToPi({
+                db,
+                cortexkitDb,
+                sessionId,
+                piSessionsRoot: tempDir(),
+                fs: {
+                    writeFileAtomic: (path) => writes.push(path),
+                    unlinkSync: () => {},
+                    existsSync: (path) => existsSync(path),
+                    renameSync: (from, to) => renameSync(from, to),
+                    mkdirSync: (path, options) => mkdirSync(path, options),
+                },
+            }),
+        ).toThrow(
+            `context.db may contain only host mirrors, not the Rust engine truth. Drain authority to TypeScript with \`magic-context doctor drain-authority ${cwd}\``,
+        );
+        expect(writes).toEqual([]);
         expect(readJournalRows(cortexkitDb)).toEqual([]);
     });
 

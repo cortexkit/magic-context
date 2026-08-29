@@ -603,7 +603,7 @@ const StatusDialog = props => {
           },
           l: "Active",
           get v() {
-            return `${s().activeTags} (~${fmtBytes(s().activeBytes)})`;
+            return _$memo(() => s().tagCountsAuthoritative === false)() ? "n/a (module total only)" : `${s().activeTags} (~${fmtBytes(s().activeBytes)})`;
           }
         }), _el$51);
         _$insert(_el$47, _$createComponent(R, {
@@ -612,7 +612,7 @@ const StatusDialog = props => {
           },
           l: "Dropped",
           get v() {
-            return String(s().droppedTags);
+            return _$memo(() => s().tagCountsAuthoritative === false)() ? "n/a (module total only)" : String(s().droppedTags);
           }
         }), _el$51);
         _$insert(_el$47, _$createComponent(R, {
@@ -1014,7 +1014,7 @@ async function showRecompDialog(api, targetSessionId = getSessionId(api)) {
     });
     return false;
   }
-  const countResult = await getCompartmentCount(sessionId);
+  const countResult = await getCompartmentCount(sessionId, api.state.path.directory ?? "");
   // Ack only after the dialog is actually shown for the same active session;
   // route switches while the RPC detail load is in flight must leave it pending.
   if (getSessionId(api) !== sessionId) return false;
@@ -1114,11 +1114,20 @@ async function showStatusDialog(api, targetSessionId = getSessionId(api)) {
   }
   const directory = api.state.path.directory ?? "";
   const modelKey = getModelKeyFromMessages(api, sessionId);
-  const detail = await loadStatusDetail(sessionId, directory, modelKey);
+  const result = await loadStatusDetail(sessionId, directory, modelKey);
   if (getSessionId(api) !== sessionId) return false;
+  if (!result.ok) {
+    showToast(api, {
+      message: `Status unavailable: ${result.error}`,
+      variant: "warning"
+    });
+    return false;
+  }
   api.ui.dialog.replace(() => _$createComponent(StatusDialog, {
     api: api,
-    s: detail
+    get s() {
+      return result.detail;
+    }
   }));
   return true;
 }

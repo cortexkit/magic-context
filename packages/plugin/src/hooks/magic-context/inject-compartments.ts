@@ -811,6 +811,8 @@ export interface M0M1RenderOptions {
     projectDirectory?: string;
     /** Defaults true. When false, m[0] omits the <project-docs> block and stores an empty docs hash. */
     injectDocs?: boolean;
+    /** Defaults true. When false, suppress every memory-derived m[0]/m[1] surface. */
+    memoryEnabled?: boolean;
     memoryInjectionBudgetTokens?: number;
     historyBudgetTokens?: number;
     userProfileBudgetTokens?: number;
@@ -1145,6 +1147,8 @@ interface M0SnapshotMarkerReadArgs {
     projectPath?: string;
     projectDirectory?: string;
     injectDocs?: boolean;
+    /** False suppresses the profile and mural surfaces alongside project memory. */
+    memoryEnabled?: boolean;
     muralEnabled?: boolean;
     memoryInjectionBudgetTokens?: number;
     historyBudgetTokens?: number;
@@ -1390,7 +1394,7 @@ function readCurrentM0SnapshotMarkersUncached(args: M0SnapshotMarkerReadArgs): {
             toolSetHash: hard.toolSetHash ?? "",
             modelKey: piModelRefToCanonical(hard.modelKey),
             projectIdentity: args.projectPath ?? null,
-            muralEnabled: args.muralEnabled === true,
+            muralEnabled: args.memoryEnabled !== false && args.muralEnabled === true,
             renderBudgetIdentity: renderBudgetIdentity(
                 args.memoryInjectionBudgetTokens,
                 args.historyBudgetTokens,
@@ -1416,7 +1420,7 @@ function refreshVolatileMarkerInputs(
         toolSetHash: hard.toolSetHash ?? "",
         modelKey: hard.modelKey,
         projectIdentity: args.projectPath ?? null,
-        muralEnabled: args.muralEnabled === true,
+        muralEnabled: args.memoryEnabled !== false && args.muralEnabled === true,
         renderBudgetIdentity: renderBudgetIdentity(
             args.memoryInjectionBudgetTokens,
             args.historyBudgetTokens,
@@ -1522,6 +1526,15 @@ function snapshotMarkersFromCachedM0(state: M0M1State): M0SnapshotMarkers | null
  * whole point of the m[0]=frozen-prefix / m[1]=volatile-delta split: a routine
  * historian publish must keep the Anthropic prompt-cache prefix intact.
  */
+const MEMORY_DERIVED_BLOCK_PATTERN =
+    /<(?:project-memory|user-profile|new-user-profile|memory-updates|memory-mural)(?:>|\s)/;
+
+function cachedMemoryDerivedSurfacePresent(state: M0M1State): boolean {
+    return [state.cachedM0Bytes, state.cachedM1Bytes].some(
+        (bytes) => bytes !== null && MEMORY_DERIVED_BLOCK_PATTERN.test(bytes.toString("utf8")),
+    );
+}
+
 export function mustMaterialize(args: {
     db: Database;
     sessionId: string;
@@ -1531,6 +1544,8 @@ export function mustMaterialize(args: {
     hardSignals?: M0HardSignals;
     workspaceIdentitySet?: WorkspaceIdentitySet;
     injectDocs?: boolean;
+    /** False suppresses the profile and mural surfaces alongside project memory. */
+    memoryEnabled?: boolean;
     muralEnabled?: boolean;
     memoryInjectionBudgetTokens?: number;
     historyBudgetTokens?: number;
@@ -1539,10 +1554,19 @@ export function mustMaterialize(args: {
     if (!args.state.cachedM1Bytes) return { value: true, reason: "cached_m1_missing" };
     const hard = args.hardSignals ?? EMPTY_HARD_SIGNALS;
     // `current.workspaceFingerprint` is resolved inside readCurrentM0SnapshotMarkers
-    // (it resolves its own workspace context); the HARD memory gate below keys on
-    // that vs the cached fingerprint, so no local workspace context is needed here.
+    // (it resolves its own workspace context); the later workspace-identity HARD
+    // gate compares it with the cached fingerprint, so no local context is needed.
     const current = readCurrentM0SnapshotMarkers(args);
     const cachedUpgradeIdentity = decodeCachedM0UpgradeIdentity(args.state.cachedM0UpgradeState);
+
+    // The system-prompt hook runs after the message transform, so its changed hash
+    // reaches this decision one pass late. A memory-off process must not replay one
+    // request of the old memory-bearing m[0]/m[1] while waiting for that signal.
+    // The rendered bytes make this transition self-consuming without another
+    // durable flag: once suppressed, the next pass finds no memory-derived block.
+    if (args.memoryEnabled === false && cachedMemoryDerivedSurfacePresent(args.state)) {
+        return { value: true, reason: "render_config" };
+    }
 
     // Renderer-format changes must fold cached m[0] once before sanitized bytes can
     // mix with a stale baseline. Persisting the new component consumes this trigger.
@@ -2124,7 +2148,7 @@ function resolveMuralForM0(
     modelKey: string,
     budgetTokens: number,
 ): MuralWireOptions | undefined {
-    if (!options.muralEnabled) return undefined;
+    if (options.memoryEnabled === false || !options.muralEnabled) return undefined;
     return resolveMuralWire(options.db, projectPath, modelKey, true, budgetTokens);
 }
 
@@ -2164,6 +2188,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             projectPath,
             projectDirectory,
             injectDocs: options.injectDocs,
+            memoryEnabled: options.memoryEnabled,
             muralEnabled: options.muralEnabled,
             memoryInjectionBudgetTokens: options.memoryInjectionBudgetTokens,
             historyBudgetTokens: options.historyBudgetTokens,
@@ -2204,7 +2229,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
                       foldMaterializedAt,
                   )
             : [];
-        userMemories = safeGetActiveUserMemories(options.db);
+        userMemories = options.memoryEnabled === false ? [] : safeGetActiveUserMemories(options.db);
         options.db.exec("COMMIT");
     } catch (error) {
         try {
@@ -2239,8 +2264,10 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
     // (not on defers), so the injected image only swaps on a natural fold — the
     // baked-in cachedM0MuralDataUrl replays on defer passes.
     const mural =
-        options.mural ??
-        resolveMuralForM0(options, projectPath, snapshotMarkers.modelKey, memoryBudget);
+        options.memoryEnabled === false
+            ? undefined
+            : (options.mural ??
+              resolveMuralForM0(options, projectPath, snapshotMarkers.modelKey, memoryBudget));
     let decayPressureMultiplier = 1;
     let m0Text = renderM0({
         projectDocs: docs.renderedBlock,
@@ -2645,7 +2672,10 @@ function renderM1WithMetadata(
     if (newMemoriesBlock) blocks.push(newMemoriesBlock);
 
     const currentUserProfileVersion = getGlobalUserProfileVersion(options.db);
-    if (currentUserProfileVersion !== markers.projectUserProfileVersion) {
+    if (
+        options.memoryEnabled !== false &&
+        currentUserProfileVersion !== markers.projectUserProfileVersion
+    ) {
         const profileBlock = renderUserProfileBlock(
             trimUserMemoriesToBudget(
                 safeGetActiveUserMemories(options.db),
@@ -3009,6 +3039,7 @@ function renderFreshM0NonPersisted(options: M0M1RenderOptions): {
         projectPath,
         projectDirectory,
         injectDocs: options.injectDocs,
+        memoryEnabled: options.memoryEnabled,
         muralEnabled: options.muralEnabled,
         memoryInjectionBudgetTokens: options.memoryInjectionBudgetTokens,
         historyBudgetTokens: options.historyBudgetTokens,
@@ -3056,7 +3087,8 @@ function renderFreshM0NonPersisted(options: M0M1RenderOptions): {
                   snapshotMarkers.materializedAt,
               )
         : [];
-    const userMemories = safeGetActiveUserMemories(options.db);
+    const userMemories =
+        options.memoryEnabled === false ? [] : safeGetActiveUserMemories(options.db);
     const memoryBudget = options.memoryInjectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS;
     const memoryRenderOptions: MemoryRenderOptions = {
         sourceNameByMemoryId: sourceNamesForMemories({
@@ -3076,8 +3108,10 @@ function renderFreshM0NonPersisted(options: M0M1RenderOptions): {
         : trimMemoriesToBudgetV2(options.sessionId, memories, memoryBudget);
     const budget = options.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS;
     const mural =
-        options.mural ??
-        resolveMuralForM0(options, projectPath, snapshotMarkers.modelKey, memoryBudget);
+        options.memoryEnabled === false
+            ? undefined
+            : (options.mural ??
+              resolveMuralForM0(options, projectPath, snapshotMarkers.modelKey, memoryBudget));
     let decayPressureMultiplier = 1;
     let m0Text = renderM0({
         projectDocs: docs.renderedBlock,
@@ -3158,6 +3192,7 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         hardSignals: options.hardSignals,
         workspaceIdentitySet: options.workspaceIdentitySet,
         injectDocs: options.injectDocs,
+        memoryEnabled: options.memoryEnabled,
         muralEnabled: options.muralEnabled,
         memoryInjectionBudgetTokens: options.memoryInjectionBudgetTokens,
         historyBudgetTokens: options.historyBudgetTokens,

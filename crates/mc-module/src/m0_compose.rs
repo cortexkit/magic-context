@@ -451,7 +451,10 @@ pub fn compose_m0_from_store(
             rendered
         })
         .collect();
-    let mural = resolved_mural(inputs.mural);
+    let mural = inputs
+        .memory_enabled
+        .then(|| resolved_mural(inputs.mural))
+        .flatten();
     let mut m0_bytes = render_m0_with_decay_pressure_retry(
         &M0Inputs {
             project_docs: &docs.rendered_block,
@@ -489,10 +492,49 @@ pub fn compose_m0_from_store(
 mod tests {
     use super::*;
     use crate::test_support::FixtureBuilder;
-    use mc_store::{InsertMemoryInput, ModuleMeta, StoredCompartment};
+    use mc_store::{InsertMemoryInput, ModuleMeta, ModuleStateSyncRequest, StoredCompartment};
 
     fn no_estimate(_: &str) -> usize {
         0
+    }
+
+    fn seed_user_profile(store: &McStore, profile: &[String]) {
+        store
+            .apply_authority_state_sync(ModuleStateSyncRequest {
+                session_id: "ses",
+                project_path: "git:proj",
+                shadow_generation: 0,
+                expected_shadow_seq: 0,
+                seed_boundary_id: None,
+                drop_seeds: &[],
+                drop_seed_skipped: 0,
+                pending_agent_drops: &[],
+                pending_agent_drops_skipped: 0,
+                user_hint_seeds: &[],
+                auto_search_hint_skipped: 0,
+                note_nudge_anchors: None,
+                todo_synthetic_anchor: None,
+                todo_synthetic_anchor_present: false,
+                emergency_latches: None,
+                pending_compaction_marker: None,
+                deferred_execute_state: None,
+                channel2_nudge_state: None,
+                strip_seeds: &[],
+                strip_seed_skipped: 0,
+                reasoning_cleared_through_tag: None,
+                compartments: &[],
+                memories: &[],
+                memory_mutations: &[],
+                user_profile: profile,
+                user_profile_present: true,
+                workspace: None,
+                workspace_present: false,
+                last_todo_state: None,
+                project_memory_epoch: None,
+                user_profile_version: Some(1),
+                acked_watermarks: serde_json::json!({}),
+            })
+            .unwrap();
     }
 
     fn comp(seq: i64, start: i64, end: i64, end_id: &str) -> StoredCompartment {
@@ -659,6 +701,13 @@ mod tests {
                 now_ms: 1,
             })
             .unwrap();
+        seed_user_profile(store, &["profile must stay hidden".to_string()]);
+        let mural = M0MuralInput {
+            enabled: true,
+            supports_vision: true,
+            data_url: Some("data:image/png;base64,cHJvZmlsZS1tdXJhbA==".to_string()),
+            content_hash: Some("memory-off-mural".to_string()),
+        };
         let inputs = M0ComposeInputs {
             session_id: "ses",
             project_path: "git:proj",
@@ -671,12 +720,16 @@ mod tests {
             user_profile_budget_tokens: 4_000.0,
             inject_docs: true,
             temporal_awareness: true,
-            mural: None,
+            mural: Some(&mural),
         };
 
         let composed = compose_m0_from_store(&store, &inputs, no_estimate).unwrap();
         assert!(!composed.m0_bytes.contains("must stay hidden"));
         assert!(!composed.m0_bytes.contains("<project-memory>"));
+        assert!(!composed.m0_bytes.contains("<user-profile>"));
+        assert!(!composed.m0_bytes.contains("profile must stay hidden"));
+        assert!(!composed.m0_bytes.contains(MEMORY_MURAL_BLOCK));
+        assert!(composed.mural.is_none());
         assert!(composed.rendered_memory_ids.is_empty());
         assert_eq!(composed.max_memory_id, 0);
         assert_eq!(composed.memory_mutation_cursor, 0);

@@ -39,7 +39,7 @@ const toolReclaim = await import(resolve("./src/hooks/magic-context/tool-reclaim
 const emergency = await import(resolve("./src/hooks/magic-context/emergency-drop"));
 
 const { openDatabase, closeDatabase, insertTag } = storage as {
-    openDatabase: () => unknown;
+    openDatabase: (path?: string) => unknown;
     closeDatabase: () => void;
     insertTag: (...a: unknown[]) => number;
 };
@@ -64,6 +64,8 @@ interface TagFixture {
     reasoningByteSize?: number;
     /** ToolCall.input JSON (filePath / action / diff keys / edit content). */
     input?: Record<string, unknown>;
+    /** False models a call that is still running and therefore has no result/tag row. */
+    hasResult?: boolean;
     /** Mark this arc's blocks server-side (provider_executed=true → never targeted). */
     providerExecuted?: boolean;
 }
@@ -176,30 +178,36 @@ function buildItems(tags: TagFixture[]): SelItemJson[] {
     const items: SelItemJson[] = [];
     for (const t of tags) {
         const providerExecuted = t.providerExecuted ?? false;
+        const input = structuredClone(t.input ?? {});
+        if (["edit", "write"].includes(t.toolName)) {
+            input.__cortexkit_edit_input_key_order_v1 = Object.keys(input);
+        }
         // ToolCall block
         items.push({
             id: callBlockId(t.id),
             ordinal: t.n,
-            kind: { ToolCall: { name: t.toolName, input: t.input ?? {} } },
+            kind: { ToolCall: { name: t.toolName, input } },
             provider_executed: providerExecuted,
             byte_size: t.inputByteSize ?? 0,
             token_count: null,
             arc_id: callBlockId(t.id),
         });
-        // ToolResult block
-        const reclaimableTokens =
-            t.tokenCount === undefined && t.inputTokenCount === undefined
-                ? null
-                : (t.tokenCount ?? 0) + (t.inputTokenCount ?? 0);
-        items.push({
-            id: resultBlockId(t.id),
-            ordinal: t.n,
-            kind: { ToolResult: { tool_name: t.toolName } },
-            provider_executed: providerExecuted,
-            byte_size: t.byteSize,
-            token_count: reclaimableTokens,
-            arc_id: callBlockId(t.id),
-        });
+        // ToolResult block. A running call has no result and must remain ineligible.
+        if (t.hasResult !== false) {
+            const reclaimableTokens =
+                t.tokenCount === undefined && t.inputTokenCount === undefined
+                    ? null
+                    : (t.tokenCount ?? 0) + (t.inputTokenCount ?? 0);
+            items.push({
+                id: resultBlockId(t.id),
+                ordinal: t.n,
+                kind: { ToolResult: { tool_name: t.toolName } },
+                provider_executed: providerExecuted,
+                byte_size: t.byteSize,
+                token_count: reclaimableTokens,
+                arc_id: callBlockId(t.id),
+            });
+        }
         // optional Reasoning block adjacent to the call
         if ((t.reasoningByteSize ?? 0) > 0) {
             items.push({
@@ -255,13 +263,13 @@ function runTsSelector(spec: CaseSpec): Record<string, string> {
     }
 
     // DB-backed selectors: seed an isolated in-memory DB.
-    process.env.XDG_DATA_HOME = mkdtempSync(join(tmpdir(), "sel-golden-"));
-    const db = openDatabase();
+    const tempRoot = mkdtempSync(join(tmpdir(), "sel-golden-"));
+    const db = openDatabase(join(tempRoot, "selection.sqlite"));
     if (!db) throw new Error("db open failed");
     const SES = "ses-golden";
     try {
         for (const t of spec.tags) {
-            insertTag(
+            if (t.hasResult !== false) insertTag(
                 db,
                 SES,
                 t.id,
@@ -311,6 +319,7 @@ function runTsSelector(spec: CaseSpec): Record<string, string> {
         }
     } finally {
         closeDatabase();
+        rmSync(tempRoot, { force: true, recursive: true });
     }
     return expected;
 }
@@ -368,6 +377,16 @@ const cases: CaseSpec[] = [
             { id: "c1", toolName: "bash_status", n: 1, byteSize: 30 },
             { id: "c2", toolName: "bash_kill", n: 2, byteSize: 30 },
             { id: "c3", toolName: "bash", n: 3, byteSize: 30 },
+        ],
+    },
+    {
+        label: "supersession: running zero-value call stays untouched",
+        selector: "supersession",
+        smartDrops: true,
+        passClass: "Execute",
+        tags: [
+            { id: "running", toolName: "bash_status", n: 1, byteSize: 0, hasResult: false },
+            { id: "completed", toolName: "bash_kill", n: 2, byteSize: 30 },
         ],
     },
     {

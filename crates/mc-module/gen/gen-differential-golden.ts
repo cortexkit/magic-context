@@ -1,5 +1,5 @@
 /**
- * DG-1..5 reference generator.
+ * DG-1..6 reference generator.
  *
  * The reference side intentionally owns only canonical JSON and wire-visible fields. Rust
  * consumes the exact request fixtures in-process; neither side derives expected bytes from the
@@ -8,7 +8,7 @@
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 
-const generatorVersion = "dg-reference-v3";
+const generatorVersion = "dg-reference-v4";
 const textMessage = (role: string, text: string, id?: string) => ({
   role,
   content: [{ kind: { type: "text", text } }],
@@ -30,6 +30,64 @@ const userTerminatedReference = (messages: readonly ReturnType<typeof textMessag
       ),
   );
   if (userIndex >= 0 && contentless) output.push(...output.splice(userIndex, 1));
+  return output;
+};
+const incidentMessages = [
+  textMessage("assistant", "leading sibling text", "assistant-sibling"),
+  {
+    role: "assistant",
+    content: [
+      {
+        kind: {
+          type: "opaque",
+          source: { source: "opencode" },
+          kind: "step-start",
+          raw: { type: "step-start", snapshot: "raw-store-step" },
+        },
+      },
+      { kind: { type: "reasoning", text: "merged reasoning", signature: "sig" } },
+      {
+        kind: {
+          type: "tool_call",
+          id: "call-incident",
+          name: "TERMINAL",
+          input: { command: "pwd" },
+          provider_executed: false,
+        },
+      },
+      {
+        kind: {
+          type: "opaque",
+          source: { source: "opencode" },
+          kind: "step-finish",
+          raw: { type: "step-finish", reason: "tool-calls" },
+        },
+      },
+    ],
+    meta: { harness_id: "assistant-target" },
+  },
+] as const;
+const trailingBlankKeepReference = (messages: typeof incidentMessages) => {
+  const output = structuredClone(messages) as unknown as Array<{
+    content: Array<{ kind: { type: string; text?: string } }>;
+    meta?: { harness_id?: string };
+  }>;
+  const target = output.find((message) => message.meta?.harness_id === "assistant-target");
+  if (!target) throw new Error("incident target is missing");
+  let trailingCount = 0;
+  while (
+    trailingCount < target.content.length &&
+    target.content[target.content.length - trailingCount - 1]?.kind.type === "text" &&
+    target.content[target.content.length - trailingCount - 1]?.kind.text?.trim() === ""
+  ) {
+    trailingCount += 1;
+  }
+  // A keep normalizes a supplied suffix to one canonical blank, but an absent suffix is untouched.
+  if (trailingCount > 0) {
+    target.content.splice(target.content.length - trailingCount, trailingCount, {
+      kind: { type: "text", text: "" },
+    });
+  }
   return output;
 };
 const scenarios = [
@@ -79,6 +137,18 @@ const scenarios = [
     },
     output: { status: "ok", action: "passthrough", decision: "preserve-live-prompt" },
   },
+  {
+    id: "DG-6-trailing-blank-keep-zero-source",
+    family: "trailing-blank-keep-zero-source",
+    input: {
+      session_id: "dg-trailing-blank-incident",
+      markers: ["merged-composite", "frozen-keep", "zero-source-trailing"],
+      frozen_decision: { message_id: "assistant-target", decision: "keep" },
+      messages: incidentMessages,
+    },
+    output: { status: "ok", action: "passthrough", decision: "keep-no-manufacture" },
+    referenceWire: trailingBlankKeepReference(incidentMessages),
+  },
 ] as const;
 
 const canonical = (value: unknown): string => JSON.stringify(value, null, 2) + "\n";
@@ -90,19 +160,24 @@ const golden = {
     generator_version: generatorVersion,
     input_sha256: inputHash,
   },
-  cases: scenarios.map(({ id, family, input, output }) => ({
-    id,
-    family,
-    input,
-    // The TS reference's canonical transform output is the wire-visible surface plus gates.
-    expected: {
-      ...output,
-      wire:
-        family === "user-terminated-tail"
-          ? userTerminatedReference(input.messages)
-          : input.messages,
-    },
-  })),
+  cases: scenarios.map((scenario) => {
+    const { id, family, input, output } = scenario;
+    return {
+      id,
+      family,
+      input,
+      // Store both gate results (`status`, `action`, and `decision`) and the messages exposed on the wire.
+      expected: {
+        ...output,
+        wire:
+          "referenceWire" in scenario
+            ? scenario.referenceWire
+            : family === "user-terminated-tail"
+              ? userTerminatedReference(input.messages as ReturnType<typeof textMessage>[])
+              : input.messages,
+      },
+    };
+  }),
 };
 
 const outPath = join(dirname(import.meta.path), "../testdata/differential-golden.json");

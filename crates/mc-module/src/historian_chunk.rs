@@ -516,6 +516,7 @@ impl AssembledHistorianFiring {
         session_id: &'a str,
         project_path: &'a str,
         project_slug: &'a str,
+        content_language: Option<&'a str>,
     ) -> HistorianFireRequest<'a> {
         HistorianFireRequest {
             store,
@@ -523,9 +524,14 @@ impl AssembledHistorianFiring {
             project_path,
             project_slug,
             // The role-scoped historian system prompt. The assembler builds the USER
-            // prompt (chunk + references); the system prompt is the vendored constant —
-            // per-firing static, byte-identical across firings.
-            system: crate::historian_prompt::HISTORIAN_SYSTEM_PROMPT,
+            // prompt (chunk + references); content-language guidance belongs only on this
+            // producer request, never on the transform-served prompt surface.
+            system: crate::historian_prompt::with_content_language_directive(
+                crate::historian_prompt::HISTORIAN_SYSTEM_PROMPT,
+                content_language,
+                crate::historian_prompt::ContentLanguageDirectiveOptions::default(),
+            ),
+            content_language,
             prompt: &self.prompt,
             model_chain: &self.model_chain,
             from_ordinal: self.from_ordinal,

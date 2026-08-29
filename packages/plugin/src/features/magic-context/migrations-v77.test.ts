@@ -37,7 +37,7 @@ describe("migration v77: durable candidate provenance", () => {
 
             expect(columnNames(db, "user_memories")).toContain("source_candidate_provenance");
             expect(columnNames(db, "primers")).toContain("source_candidate_provenance");
-            expect(LATEST_SUPPORTED_VERSION).toBe(81);
+            expect(LATEST_SUPPORTED_VERSION).toBe(82);
             expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
         } finally {
             closeQuietly(db);

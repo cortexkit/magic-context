@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "cases": [
+    {
+      "id": "channel1-gentle",
+      "channel": "channel1",
+      "level": "gentle",
+      "reclaimable_tool_outputs": 16,
+      "reclaimable_tokens": 90000,
+      "sticky": false,
+      "hint": [{ "tag_number": 123, "tool_name": "read" }],
+      "expected": "\n\n<system-reminder>\nHousekeeping: 16 spent tool outputs (~90k tokens) are reclaimable — drop the ones you have already processed with ctx_reduce at a natural stopping point.\noldest reclaimable: §123§ read.\n</system-reminder>"
+    },
+    {
+      "id": "channel1-firm",
+      "channel": "channel1",
+      "level": "firm",
+      "reclaimable_tool_outputs": 16,
+      "reclaimable_tokens": 90000,
+      "sticky": false,
+      "hint": [{ "tag_number": 123, "tool_name": "read" }],
+      "expected": "\n\n<system-reminder>\nHousekeeping: 16 spent tool outputs (~90k tokens) are reclaimable — make a ctx_reduce pass at a natural stopping point.\noldest reclaimable: §123§ read.\n</system-reminder>"
+    },
+    {
+      "id": "channel1-urgent",
+      "channel": "channel1",
+      "level": "urgent",
+      "reclaimable_tool_outputs": 16,
+      "reclaimable_tokens": 90000,
+      "sticky": false,
+      "hint": [{ "tag_number": 123, "tool_name": "read" }],
+      "expected": "\n\n<system-reminder>\nHousekeeping backlog: 16 spent tool outputs (~90k tokens) are reclaimable — a ctx_reduce pass is due.\noldest reclaimable: §123§ read.\n</system-reminder>"
+    },
+    {
+      "id": "channel1-sticky",
+      "channel": "channel1",
+      "level": "firm",
+      "reclaimable_tool_outputs": 16,
+      "reclaimable_tokens": 90000,
+      "sticky": true,
+      "hint": [{ "tag_number": 123, "tool_name": "read" }],
+      "expected": "\n\n<system-reminder>\nReminder: 16 spent tool outputs (~90k tokens) are still reclaimable — ctx_reduce them at a natural stopping point.\noldest reclaimable: §123§ read.\n</system-reminder>"
+    },
+    {
+      "id": "channel2",
+      "channel": "channel2",
+      "reclaimable_tool_outputs": 16,
+      "reclaimable_tokens": 90000,
+      "hint": [{ "tag_number": 123, "tool_name": "read" }],
+      "expected": "<system-reminder>\nRoutine housekeeping: 16 spent tool outputs (~90k tokens) are reclaimable — make a ctx_reduce pass at a natural stopping point.\noldest reclaimable: §123§ read.\n</system-reminder>"
+    }
+  ]
+}

@@ -9,11 +9,13 @@ import {
     addProcessedImageStrippedIds,
     addStaleReduceStrippedIds,
     advanceToolReclaimWatermark,
+    applyStrippedPlaceholderDelta,
     getActiveTagsBySession,
     getChannel2NudgeState,
     getOrCreateSessionMeta,
     getPendingCompactionMarkerState,
     getProcessedImageStrippedIds,
+    getStrippedPlaceholderIds,
     getTagsBySession,
     insertTag,
     queueM0Mutation,
@@ -24,6 +26,8 @@ import {
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import {
+    addMergedReasoningStrippedIds,
+    addTrailingBlankDecisions,
     getMergedReasoningStrippedIds,
     getPersistedCompactionMarkerState,
     getPersistedTodoPermissionDenied,
@@ -42,6 +46,8 @@ import { clearToolPermissionDenied } from "./ctx-reduce-availability";
 import type { Channel1State } from "./ctx-reduce-nudge";
 import { estimateMessageTokens } from "./final-wire-token-estimate";
 import { injectM0M1, type M0HardSignals } from "./inject-compartments";
+import { snapshotTrailingBlankSourceDecisions } from "./strip-content";
+import { stripStructuralNoise } from "./strip-structural-noise";
 import {
     type MessageLike,
     type TagTarget,
@@ -427,6 +433,121 @@ function serializeAnthropicWireWithAdjacentAssistantMerge(messages: MessageLike[
     }
     return serializeAnthropicWirePrefix(merged);
 }
+
+function serializeAnthropicVisibleRoleGroups(messages: MessageLike[]): string {
+    const merged: Array<{ role: string | undefined; parts: MessageLike["parts"] }> = [];
+    for (const message of messages) {
+        const parts = message.parts.filter((part) => {
+            if (part === null || typeof part !== "object") return true;
+            const candidate = part as { type?: unknown; text?: unknown };
+            return candidate.type !== "text" || candidate.text !== "";
+        });
+        if (parts.length === 0) continue;
+        const previous = merged.at(-1);
+        if (previous?.role === message.info.role) previous.parts.push(...structuredClone(parts));
+        else merged.push({ role: message.info.role, parts: structuredClone(parts) });
+    }
+    return JSON.stringify(merged);
+}
+
+describe("stripped placeholder replay across temporary marker windows", () => {
+    for (const [missingPassDecision, replayPassDecision] of [
+        ["execute", "defer"],
+        ["defer", "execute"],
+    ] as const) {
+        it(`keeps frozen assistant bytes across ${missingPassDecision}→${replayPassDecision} passes`, async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = `ses-placeholder-marker-${missingPassDecision}`;
+            const assistantId = "assistant-at-marker-seam";
+            applyStrippedPlaceholderDelta(db, sessionId, { add: [assistantId] });
+
+            // A marker-applying pass can temporarily omit an older assistant even
+            // though adjacent retained user rows remain in the provider projection.
+            const missingAssistantPass = [
+                {
+                    info: { id: "user-before", role: "user", sessionID: sessionId },
+                    parts: [{ type: "text", text: "retained-before" }],
+                },
+                {
+                    info: { id: "user-after", role: "user", sessionID: sessionId },
+                    parts: [{ type: "text", text: "retained-after" }],
+                },
+            ] as unknown as MessageLike[];
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, missingAssistantPass, {
+                    schedulerDecision: missingPassDecision,
+                    resolvedProviderID: "anthropic",
+                }),
+            );
+            const foldWire = serializeAnthropicVisibleRoleGroups(missingAssistantPass);
+            expect(getStrippedPlaceholderIds(db, sessionId).has(assistantId)).toBe(true);
+
+            const replayPass = [
+                {
+                    info: { id: "user-before", role: "user", sessionID: sessionId },
+                    parts: [{ type: "text", text: "retained-before" }],
+                },
+                {
+                    info: { id: assistantId, role: "assistant", sessionID: sessionId },
+                    parts: [{ type: "text", text: "[dropped §70730§]" }],
+                },
+                {
+                    info: { id: "user-after", role: "user", sessionID: sessionId },
+                    parts: [{ type: "text", text: "retained-after" }],
+                },
+            ] as unknown as MessageLike[];
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, replayPass, {
+                    schedulerDecision: replayPassDecision,
+                    resolvedProviderID: "anthropic",
+                }),
+            );
+
+            expect(replayPass[1]?.parts).toEqual([{ type: "text", text: "" }]);
+            expect(serializeAnthropicVisibleRoleGroups(replayPass)).toBe(foldWire);
+        });
+    }
+
+    it("retains frozen ids while compaction is off and replays them when it resumes", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-placeholder-compaction-off";
+        const assistantId = "assistant-across-compaction-toggle";
+        applyStrippedPlaceholderDelta(db, sessionId, { add: [assistantId] });
+        const buildMessages = () =>
+            [
+                {
+                    info: { id: assistantId, role: "assistant", sessionID: sessionId },
+                    parts: [{ type: "text", text: "[dropped §70731§]" }],
+                },
+            ] as unknown as MessageLike[];
+
+        const compactionOffMessages = buildMessages();
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, compactionOffMessages, {
+                compactionOff: true,
+                schedulerDecision: "execute",
+                resolvedProviderID: "anthropic",
+            }),
+        );
+        expect(compactionOffMessages[0]?.parts).toEqual([
+            { type: "text", text: "[dropped §70731§]" },
+        ]);
+        expect(getStrippedPlaceholderIds(db, sessionId).has(assistantId)).toBe(true);
+
+        const resumedMessages = buildMessages();
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, resumedMessages, {
+                compactionOff: false,
+                schedulerDecision: "defer",
+                resolvedProviderID: "anthropic",
+            }),
+        );
+        expect(resumedMessages[0]?.parts).toEqual([{ type: "text", text: "" }]);
+        expect(getStrippedPlaceholderIds(db, sessionId).has(assistantId)).toBe(true);
+    });
+});
 
 describe("deferred compaction marker representation", () => {
     it("ignores a persisted message that carries a forged syntheticHead flag", () => {
@@ -2977,6 +3098,281 @@ describe("final message representation", () => {
         });
     });
 
+    it("mints from the raw store shape instead of a composed trailing sentinel", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-trailing-blank-artifact-observation";
+        const rawStoreMessages = [
+            {
+                info: { id: "assistant-sibling", role: "assistant" },
+                parts: [{ type: "text", text: "leading sibling text" }],
+            },
+            {
+                info: { id: "assistant-target", role: "assistant" },
+                parts: [
+                    { type: "step-start", snapshot: "raw-store-step" },
+                    { type: "reasoning", text: "merged reasoning", signature: "sig" },
+                    { type: "tool", callID: "call-1", state: { status: "completed" } },
+                    { type: "step-finish", reason: "tool-calls" },
+                ],
+            },
+            {
+                info: { id: "assistant-newest", role: "assistant" },
+                parts: [{ type: "text", text: "newest" }],
+            },
+        ] as unknown as MessageLike[];
+        const trailingBlankSourceDecisions = snapshotTrailingBlankSourceDecisions(rawStoreMessages);
+        const messages = cloneMessages(rawStoreMessages);
+        stripStructuralNoise(messages);
+        expect(findMessage(messages, "assistant-target").parts.at(-1)).toEqual({
+            type: "text",
+            text: "",
+        });
+        addMergedReasoningStrippedIds(db, sessionId, ["assistant-target"]);
+
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                schedulerDecision: "execute",
+                resolvedProviderID: "anthropic",
+                trailingBlankSourceDecisions,
+            }),
+        );
+
+        expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(new Set(["assistant-target"]));
+        expect(getTrailingBlankDecisions(db, sessionId).get("assistant-target")).toBe("strip");
+        expect(findMessage(messages, "assistant-target").parts.at(-1)).toMatchObject({
+            type: "tool",
+            callID: "call-1",
+        });
+    });
+
+    it("heals poisoned keeps only on a bust and replays the healed strip byte-stably", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-trailing-blank-poison-heal";
+        const buildPass = () => {
+            const rawStoreMessages = [
+                {
+                    info: { id: "assistant-sibling", role: "assistant" },
+                    parts: [{ type: "text", text: "leading sibling text" }],
+                },
+                {
+                    info: { id: "assistant-poisoned", role: "assistant" },
+                    parts: [
+                        { type: "step-start", snapshot: "raw-store-step" },
+                        { type: "reasoning", text: "merged reasoning", signature: "sig" },
+                        { type: "tool", callID: "call-poisoned", state: { status: "completed" } },
+                        { type: "step-finish", reason: "tool-calls" },
+                    ],
+                },
+                {
+                    info: { id: "assistant-newest", role: "assistant" },
+                    parts: [{ type: "text", text: "newest" }],
+                },
+            ] as unknown as MessageLike[];
+            const trailingBlankSourceDecisions =
+                snapshotTrailingBlankSourceDecisions(rawStoreMessages);
+            const messages = cloneMessages(rawStoreMessages);
+            stripStructuralNoise(messages);
+            return { messages, trailingBlankSourceDecisions };
+        };
+        addMergedReasoningStrippedIds(db, sessionId, ["assistant-poisoned"]);
+        addTrailingBlankDecisions(db, sessionId, [["assistant-poisoned", "keep"]]);
+
+        const preBustDefer = buildPass();
+        const expectedPreBustTargetParts = structuredClone(
+            findMessage(preBustDefer.messages, "assistant-poisoned").parts,
+        );
+        expectedPreBustTargetParts[1] = { type: "text", text: "" };
+        const expectedPreBustBytes = JSON.stringify(expectedPreBustTargetParts);
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, preBustDefer.messages, {
+                schedulerDecision: "defer",
+                resolvedProviderID: "anthropic",
+                trailingBlankSourceDecisions: preBustDefer.trailingBlankSourceDecisions,
+            }),
+        );
+        expect(JSON.stringify(findMessage(preBustDefer.messages, "assistant-poisoned").parts)).toBe(
+            expectedPreBustBytes,
+        );
+        expect(getTrailingBlankDecisions(db, sessionId).get("assistant-poisoned")).toBe("keep");
+
+        const sessionLog = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});
+        let bustBytes = "";
+        try {
+            const bust = buildPass();
+            const result = await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, bust.messages, {
+                    schedulerDecision: "execute",
+                    resolvedProviderID: "anthropic",
+                    trailingBlankSourceDecisions: bust.trailingBlankSourceDecisions,
+                }),
+            );
+            const bustTarget = findMessage(bust.messages, "assistant-poisoned");
+            bustBytes = JSON.stringify(bustTarget.parts);
+
+            expect(result.bustedThisPass).toBe(true);
+            expect(getTrailingBlankDecisions(db, sessionId).get("assistant-poisoned")).toBe(
+                "strip",
+            );
+            expect(bustTarget.parts.at(-1)).toMatchObject({
+                type: "tool",
+                callID: "call-poisoned",
+            });
+            expect(
+                sessionLog.mock.calls.filter(
+                    (call) =>
+                        call[0] === sessionId &&
+                        typeof call[1] === "string" &&
+                        call[1].includes("demoted message assistant-poisoned from keep to strip"),
+                ),
+            ).toHaveLength(1);
+        } finally {
+            sessionLog.mockRestore();
+        }
+
+        for (let replayIndex = 0; replayIndex < 2; replayIndex += 1) {
+            const replay = buildPass();
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, replay.messages, {
+                    schedulerDecision: "defer",
+                    resolvedProviderID: "anthropic",
+                    trailingBlankSourceDecisions: replay.trailingBlankSourceDecisions,
+                }),
+            );
+            expect(JSON.stringify(findMessage(replay.messages, "assistant-poisoned").parts)).toBe(
+                bustBytes,
+            );
+        }
+    });
+
+    it("does not first-apply a marker-absent poison heal when the id returns on defer", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-trailing-blank-marker-absence";
+        const buildPass = () => {
+            const rawStoreMessages = [
+                {
+                    info: { id: "assistant-poisoned", role: "assistant" },
+                    parts: [
+                        { type: "text", text: "answer before structural marker" },
+                        { type: "step-finish", reason: "tool-calls" },
+                    ],
+                },
+                {
+                    info: { id: "assistant-newest", role: "assistant" },
+                    parts: [{ type: "text", text: "newest" }],
+                },
+            ] as unknown as MessageLike[];
+            const trailingBlankSourceDecisions =
+                snapshotTrailingBlankSourceDecisions(rawStoreMessages);
+            const messages = cloneMessages(rawStoreMessages);
+            stripStructuralNoise(messages);
+            return { messages, trailingBlankSourceDecisions };
+        };
+        addTrailingBlankDecisions(db, sessionId, [["assistant-poisoned", "keep"]]);
+
+        const markerAbsent = buildPass();
+        markerAbsent.messages.splice(0, 1);
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, markerAbsent.messages, {
+                schedulerDecision: "execute",
+                resolvedProviderID: "anthropic",
+                trailingBlankSourceDecisions: markerAbsent.trailingBlankSourceDecisions,
+            }),
+        );
+        expect(getTrailingBlankDecisions(db, sessionId).get("assistant-poisoned")).toBe("keep");
+
+        const defer = buildPass();
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, defer.messages, {
+                schedulerDecision: "defer",
+                resolvedProviderID: "anthropic",
+                trailingBlankSourceDecisions: defer.trailingBlankSourceDecisions,
+            }),
+        );
+        const deferBytes = JSON.stringify(findMessage(defer.messages, "assistant-poisoned").parts);
+        expect(findMessage(defer.messages, "assistant-poisoned").parts.at(-1)).toEqual({
+            type: "text",
+            text: "",
+        });
+        expect(getTrailingBlankDecisions(db, sessionId).get("assistant-poisoned")).toBe("keep");
+
+        const visibleBust = buildPass();
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, visibleBust.messages, {
+                schedulerDecision: "execute",
+                resolvedProviderID: "anthropic",
+                trailingBlankSourceDecisions: visibleBust.trailingBlankSourceDecisions,
+            }),
+        );
+        expect(getTrailingBlankDecisions(db, sessionId).get("assistant-poisoned")).toBe("strip");
+        expect(JSON.stringify(findMessage(visibleBust.messages, "assistant-poisoned").parts)).not.toBe(
+            deferBytes,
+        );
+        expect(findMessage(visibleBust.messages, "assistant-poisoned").parts.at(-1)).toEqual({
+            type: "text",
+            text: "answer before structural marker",
+        });
+    });
+
+    it("preserves a legitimate provider blank without triggering the poison heal", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-trailing-blank-legitimate-keep";
+        const buildPass = () => {
+            const rawStoreMessages = [
+                {
+                    info: { id: "assistant-sibling", role: "assistant" },
+                    parts: [{ type: "text", text: "leading sibling text" }],
+                },
+                {
+                    info: { id: "assistant-legitimate", role: "assistant" },
+                    parts: [
+                        { type: "reasoning", text: "merged reasoning", signature: "sig" },
+                        { type: "tool", callID: "call-legitimate", state: { status: "completed" } },
+                        { type: "text", text: " " },
+                    ],
+                },
+                {
+                    info: { id: "assistant-newest", role: "assistant" },
+                    parts: [{ type: "text", text: "newest" }],
+                },
+            ] as unknown as MessageLike[];
+            return {
+                messages: cloneMessages(rawStoreMessages),
+                trailingBlankSourceDecisions:
+                    snapshotTrailingBlankSourceDecisions(rawStoreMessages),
+            };
+        };
+        addMergedReasoningStrippedIds(db, sessionId, ["assistant-legitimate"]);
+        addTrailingBlankDecisions(db, sessionId, [["assistant-legitimate", "keep"]]);
+
+        const bust = buildPass();
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, bust.messages, {
+                schedulerDecision: "execute",
+                resolvedProviderID: "anthropic",
+                trailingBlankSourceDecisions: bust.trailingBlankSourceDecisions,
+            }),
+        );
+        const bustBytes = JSON.stringify(findMessage(bust.messages, "assistant-legitimate").parts);
+        expect(getTrailingBlankDecisions(db, sessionId).get("assistant-legitimate")).toBe("keep");
+
+        const replay = buildPass();
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, replay.messages, {
+                schedulerDecision: "defer",
+                resolvedProviderID: "anthropic",
+                trailingBlankSourceDecisions: replay.trailingBlankSourceDecisions,
+            }),
+        );
+        expect(JSON.stringify(findMessage(replay.messages, "assistant-legitimate").parts)).toBe(
+            bustBytes,
+        );
+        expect(getTrailingBlankDecisions(db, sessionId).get("assistant-legitimate")).toBe("keep");
+    });
+
     it("skips merged-assistant reasoning persistence and stripping in compaction-off mode", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
@@ -3161,6 +3557,64 @@ describe("final message representation", () => {
             );
             expect(JSON.stringify(replayMessages[0].parts)).toBe(firstBytes);
         }
+    });
+
+    it("bounds a decisionless historical late blank at the next bust", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-trailing-blank-decisionless-late";
+        const buildMessages = () =>
+            [
+                {
+                    info: { id: "assistant-late", role: "assistant" },
+                    parts: [
+                        { type: "text", text: "historical answer" },
+                        { type: "text", text: " \t" },
+                    ],
+                },
+                {
+                    info: { id: "assistant-newest", role: "assistant" },
+                    parts: [{ type: "text", text: "newest answer" }],
+                },
+            ] as unknown as MessageLike[];
+
+        const deferMessages = buildMessages();
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, deferMessages, {
+                schedulerDecision: "defer",
+                resolvedProviderID: "anthropic",
+            }),
+        );
+        const deferBytes = JSON.stringify(findMessage(deferMessages, "assistant-late").parts);
+        expect(getTrailingBlankDecisions(db, sessionId).has("assistant-late")).toBe(false);
+        expect(findMessage(deferMessages, "assistant-late").parts.at(-1)).toEqual({
+            type: "text",
+            text: " \t",
+        });
+
+        const bustMessages = buildMessages();
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, bustMessages, {
+                schedulerDecision: "execute",
+                resolvedProviderID: "anthropic",
+            }),
+        );
+        expect(getTrailingBlankDecisions(db, sessionId).get("assistant-late")).toBe("keep");
+        expect(findMessage(bustMessages, "assistant-late").parts.at(-1)).toEqual({
+            type: "text",
+            text: "",
+        });
+        const bustBytes = JSON.stringify(findMessage(bustMessages, "assistant-late").parts);
+        expect(bustBytes).not.toBe(deferBytes);
+
+        const replayMessages = buildMessages();
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, replayMessages, {
+                schedulerDecision: "defer",
+                resolvedProviderID: "anthropic",
+            }),
+        );
+        expect(JSON.stringify(findMessage(replayMessages, "assistant-late").parts)).toBe(bustBytes);
     });
 
     it("freezes defer-served trailing shapes before late provider blanks arrive", async () => {

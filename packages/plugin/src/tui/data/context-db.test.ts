@@ -4,9 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MagicContextRpcServer } from "../../shared/rpc-server";
 import type { SidebarSnapshot } from "../../shared/rpc-types";
-import { closeRpc, getCompartmentCount, initRpcClient, loadSidebarSnapshot } from "./context-db";
+import {
+    closeRpc,
+    getCompartmentCount,
+    initRpcClient,
+    loadSidebarSnapshot,
+    loadStatusDetail,
+} from "./context-db";
 
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
+const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+const originalStorageDir = process.env.MAGIC_CONTEXT_STORAGE_DIR;
 const tempDirs: string[] = [];
 const servers: MagicContextRpcServer[] = [];
 
@@ -18,12 +26,19 @@ afterEach(() => {
     }
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalXdgDataHome;
+    if (originalTestDataDir === undefined) delete process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
+    else process.env.MAGIC_CONTEXT_TEST_DATA_DIR = originalTestDataDir;
+    if (originalStorageDir === undefined) delete process.env.MAGIC_CONTEXT_STORAGE_DIR;
+    else process.env.MAGIC_CONTEXT_STORAGE_DIR = originalStorageDir;
 });
 
 function makeDataHome(): string {
     const dir = mkdtempSync(join(tmpdir(), "mc-context-db-"));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
+    // The shared resolver gives test isolation priority. Keep both values
+    // aligned so the RPC client and fixture server exercise one directory.
+    process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dir;
     return dir;
 }
 
@@ -94,6 +109,21 @@ describe("TUI context RPC data", () => {
         expect((await loadSidebarSnapshot(sessionId, directory)).inputTokens).toBe(0);
         response = { error: "database busy again" };
         expect((await loadSidebarSnapshot(sessionId, directory)).inputTokens).toBe(0);
+    });
+
+    test("does not turn a status authority failure into an empty session", async () => {
+        const dataHome = makeDataHome();
+        const directory = "/repo-status-error";
+        const server = await startServer(dataHome, directory, () => ({}));
+        server.handle("status-detail", async () => ({
+            error: "Rust module status unavailable; canonical session state was not read",
+        }));
+        initRpcClient(directory);
+
+        expect(await loadStatusDetail("ses_rust", directory)).toEqual({
+            ok: false,
+            error: "Rust module status unavailable; canonical session state was not read",
+        });
     });
 
     test("distinguishes a real zero compartment count from an RPC failure", async () => {

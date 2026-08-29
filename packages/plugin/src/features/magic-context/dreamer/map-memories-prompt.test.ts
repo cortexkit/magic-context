@@ -6,6 +6,7 @@ import path from "node:path";
 import {
     buildMapMemoriesPrompt,
     extractMemoryCandidatePaths,
+    MAP_MEMORIES_SYSTEM_PROMPT,
     parseMapMemoriesManifest,
     validateMapMemoriesManifest,
 } from "./map-memories-prompt";
@@ -201,6 +202,15 @@ describe("validateMapMemoriesManifest", () => {
 });
 
 describe("buildMapMemoriesPrompt", () => {
+    it("states that behavioral directives stay independent despite named files", () => {
+        expect(MAP_MEMORIES_SYSTEM_PROMPT).toContain(
+            "A BEHAVIORAL claim (when to act, how to work, who decides, or tool-usage discipline) is file-independent",
+        );
+        expect(MAP_MEMORIES_SYSTEM_PROMPT).toContain(
+            "A path named inside a process directive is an action target or example",
+        );
+    });
+
     it("includes the seed line only when candidates exist", () => {
         const prompt = buildMapMemoriesPrompt("git:abc", [
             { id: 1, category: "ARCHITECTURE", content: "foo", candidates: ["a/b.ts"] },

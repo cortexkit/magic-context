@@ -4,10 +4,30 @@ import {
     normalizeModelEntry,
     resolveDreamerTaskModel,
     resolveFallbackEntries,
+    resolveHistorianAgentOverrides,
     resolveHistorianModel,
 } from "./model-resolution";
 
 describe("model-resolution", () => {
+    test("pins the historian calibration defaults while preserving explicit overrides", () => {
+        expect(resolveHistorianAgentOverrides(undefined)).toEqual({
+            temperature: 0.1,
+            maxTokens: 32_000,
+        });
+        expect(
+            resolveHistorianAgentOverrides({
+                temperature: 0.2,
+                maxTokens: 16_000,
+                opencode: { model: "google/flash", variant: "low" },
+            }),
+        ).toEqual({
+            temperature: 0.2,
+            maxTokens: 16_000,
+            model: "google/flash",
+            variant: "low",
+        });
+    });
+
     test("normalizes string and object entries to the same model identity", () => {
         expect(normalizeModelEntry("anthropic/sonnet", "opencode")).toEqual({
             model: "anthropic/sonnet",
@@ -34,6 +54,25 @@ describe("model-resolution", () => {
             { model: "anthropic/sonnet", qualifier: "high" },
             { model: "google/flash" },
         ]);
+    });
+
+    test("applies the flash-calibrated historian generation triple while preserving overrides", () => {
+        expect(
+            resolveHistorianAgentOverrides({
+                opencode: { model: { model: "google/flash", variant: "fast" } },
+                pi: { model: "pi/ignored" },
+                two_pass: true,
+            }),
+        ).toEqual({
+            temperature: 0.1,
+            maxTokens: 32_000,
+            two_pass: true,
+            model: "google/flash",
+            variant: "fast",
+        });
+        expect(
+            resolveHistorianAgentOverrides({ temperature: 0.2, maxTokens: 12_000 }),
+        ).toMatchObject({ temperature: 0.2, maxTokens: 12_000 });
     });
 
     test("does not inherit a block qualifier into unqualified fallbacks", () => {

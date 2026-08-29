@@ -366,6 +366,69 @@
     }
   },
   {
+    "label": "supersession: running zero-value call stays untouched",
+    "items": [
+      {
+        "id": "running#0",
+        "ordinal": 1,
+        "kind": {
+          "ToolCall": {
+            "name": "bash_status",
+            "input": {}
+          }
+        },
+        "provider_executed": false,
+        "byte_size": 0,
+        "token_count": null,
+        "arc_id": "running#0"
+      },
+      {
+        "id": "completed#0",
+        "ordinal": 2,
+        "kind": {
+          "ToolCall": {
+            "name": "bash_kill",
+            "input": {}
+          }
+        },
+        "provider_executed": false,
+        "byte_size": 0,
+        "token_count": null,
+        "arc_id": "completed#0"
+      },
+      {
+        "id": "completed#1",
+        "ordinal": 2,
+        "kind": {
+          "ToolResult": {
+            "tool_name": "bash_kill"
+          }
+        },
+        "provider_executed": false,
+        "byte_size": 30,
+        "token_count": null,
+        "arc_id": "completed#0"
+      }
+    ],
+    "ctx": {
+      "pass_class": "Execute",
+      "current_total_input_tokens": 0,
+      "ceiling_tokens": 0,
+      "protected_cutoff_ordinal": 0,
+      "last_execute_ordinal": 0,
+      "scheduler_pressure_execute": true,
+      "pass_already_busting": false,
+      "prior_input_sample": 0,
+      "has_prior_drop": false,
+      "agent_drop_ids": []
+    },
+    "smart_drops": true,
+    "frozen": [],
+    "expected": {
+      "completed#0": "drop"
+    }
+  },
+  {
     "label": "supersession: ctx_note read+dismiss drop, write keep",
     "items": [
       {
@@ -488,7 +551,12 @@
             "input": {
               "filePath": "a.ts",
               "oldString": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-              "newString": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+              "newString": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+              "__cortexkit_edit_input_key_order_v1": [
+                "filePath",
+                "oldString",
+                "newString"
+              ]
             }
           }
         },
@@ -519,7 +587,12 @@
             "input": {
               "filePath": "a.ts",
               "oldString": "pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp",
-              "newString": "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+              "newString": "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+              "__cortexkit_edit_input_key_order_v1": [
+                "filePath",
+                "oldString",
+                "newString"
+              ]
             }
           }
         },
@@ -549,7 +622,11 @@
             "name": "write",
             "input": {
               "filePath": "b.ts",
-              "content": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+              "content": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+              "__cortexkit_edit_input_key_order_v1": [
+                "filePath",
+                "content"
+              ]
             }
           }
         },
@@ -601,7 +678,11 @@
             "name": "edit",
             "input": {
               "oldString": "x",
-              "newString": "y"
+              "newString": "y",
+              "__cortexkit_edit_input_key_order_v1": [
+                "oldString",
+                "newString"
+              ]
             }
           }
         },
@@ -631,7 +712,11 @@
             "name": "edit",
             "input": {
               "oldString": "p",
-              "newString": "q"
+              "newString": "q",
+              "__cortexkit_edit_input_key_order_v1": [
+                "oldString",
+                "newString"
+              ]
             }
           }
         },
@@ -787,7 +872,9 @@
         "kind": {
           "ToolCall": {
             "name": "edit",
-            "input": {}
+            "input": {
+              "__cortexkit_edit_input_key_order_v1": []
+            }
           }
         },
         "provider_executed": false,

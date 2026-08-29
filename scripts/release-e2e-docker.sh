@@ -34,7 +34,6 @@ if [[ "$INNER" != 1 ]]; then
         --env MC_E2E_REPO_ROOT=/workspace \
         --env E2E_OC_FILES="${E2E_OC_FILES:-}" \
         --env E2E_PI_FILES="${E2E_PI_FILES:-}" \
-        --env E2E_RUST_FILES="${E2E_RUST_FILES:-}" \
         --env HOME=/tmp/mc-home \
         --env XDG_CONFIG_HOME=/tmp/mc-config \
         --env XDG_DATA_HOME=/tmp/mc-data \

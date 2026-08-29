@@ -3,6 +3,7 @@
 //! The builders in this module take already-loaded rows and strings. They do not read the
 //! store, call the clock, or inspect provider state; callers own those integration choices.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -93,6 +94,90 @@ pub struct ReferenceBlocks {
 /// implementations drive the model with the same role guidance; the generator script
 /// in gen/ re-vendors it and its --check mode fails on drift.
 pub const HISTORIAN_SYSTEM_PROMPT: &str = include_str!("../testdata/historian-system-prompt.txt");
+
+/// These options mirror TypeScript so both implementations generate the same instructions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContentLanguageDirectiveOptions {
+    pub preserve_user_quotes: bool,
+    pub retrospective: bool,
+}
+
+/// Build the content-language instruction used by hidden prose-producing agents.
+///
+/// The language-name resolver is generated from the TypeScript `Intl.DisplayNames`
+/// implementation so this text stays byte-identical to the TypeScript source of truth.
+pub fn build_content_language_directive(
+    language: Option<&str>,
+    options: ContentLanguageDirectiveOptions,
+) -> String {
+    let Some(target) = crate::content_language::resolve_language_name(language) else {
+        return String::new();
+    };
+
+    let mut directive = format!(
+        "## Output language\n\nWrite human-readable prose you author in: {target}.\n\nDo not translate or rename structural tokens. Copy required output schemas exactly:\n- XML tag names, XML attribute names, JSON keys, tool names, tool-call argument keys, enum values, booleans/null, and required sentinel strings stay in English exactly as shown.\n- Keep code identifiers, file paths, commands, config keys, CLI flags, URLs, commit hashes, model/provider IDs, stack traces, diagnostics, and transcript role markers such as U:, A:, and TC: verbatim.\n- Localize only free-text prose values/content: summaries, memory text, explanations, titles, observations, and answers — unless the prompt says to preserve original wording.\n\nThese literal values must remain English when used:\nPROJECT_RULES, ARCHITECTURE, CONSTRAINTS, CONFIG_VALUES, NAMING;\ncausal_incident, trajectory_correction;\nfeature, design, docs, release, investigation, bug, refactor, infra;\nmemory, observation; true, false; No relevant memories found.\n\nPreserve the required output shape. Do not add commentary outside the requested XML/JSON/tool output."
+    );
+    if options.preserve_user_quotes {
+        directive.push_str(&format!(
+            "\n\nPreserve U: lines and directly quoted user text in their original source language; write the surrounding summary prose in {target}."
+        ));
+    }
+    if options.retrospective {
+        directive.push_str(&format!(
+            "\n\nWrite the lesson text in {target}; paraphrase source text and never quote the user."
+        ));
+    }
+    directive
+}
+
+/// Append content-language guidance to a role-scoped hidden-agent system prompt.
+pub fn with_content_language_directive<'a>(
+    system_prompt: &'a str,
+    language: Option<&str>,
+    options: ContentLanguageDirectiveOptions,
+) -> Cow<'a, str> {
+    let directive = build_content_language_directive(language, options);
+    if directive.is_empty() {
+        Cow::Borrowed(system_prompt)
+    } else {
+        Cow::Owned(format!("{system_prompt}\n\n{directive}"))
+    }
+}
+
+/// Rebuild a rejected historian prompt without placing instructions before untrusted XML.
+///
+/// The language instruction is appended last so it cannot be overridden by the previous
+/// output, which is data rather than an instruction source.
+pub fn build_historian_repair_prompt(
+    original_prompt: &str,
+    previous_output: &str,
+    validation_error: &str,
+    language: Option<&str>,
+) -> String {
+    let validation_line = format!("Validation error: {validation_error}");
+    let prompt = [
+        original_prompt,
+        "",
+        "Your previous XML response was invalid and cannot be persisted.",
+        validation_line.as_str(),
+        "Return a corrected full XML response for the same existing state and new messages.",
+        "Do not skip any displayed raw ordinal or displayed raw range, even if the message looks trivial.",
+        "Every displayed message range must belong to exactly one compartment unless it is intentionally left in one trailing suffix marked by <unprocessed_from>.",
+        "",
+        "Previous invalid XML:",
+        previous_output,
+    ]
+    .join("\n");
+    with_content_language_directive(
+        &prompt,
+        language,
+        ContentLanguageDirectiveOptions {
+            preserve_user_quotes: true,
+            retrospective: false,
+        },
+    )
+    .into_owned()
+}
 
 pub struct CompartmentPromptInputs<'a> {
     pub seed_examples: &'a str,
@@ -463,6 +548,37 @@ mod tests {
         prompt_cases: Vec<PromptCase>,
     }
 
+    #[derive(Deserialize)]
+    struct LanguageNameCase {
+        language: String,
+        name: String,
+    }
+
+    #[derive(Deserialize)]
+    struct LanguageDirectiveCase {
+        label: String,
+        language: Option<String>,
+        preserve_user_quotes: bool,
+        retrospective: bool,
+        directive: String,
+    }
+
+    #[derive(Deserialize)]
+    struct RepairPromptCase {
+        language: Option<String>,
+        original_prompt: String,
+        previous_output: String,
+        validation_error: String,
+        prompt: String,
+    }
+
+    #[derive(Deserialize)]
+    struct ContentLanguageGoldenFile {
+        language_names: Vec<LanguageNameCase>,
+        directive_cases: Vec<LanguageDirectiveCase>,
+        repair_cases: Vec<RepairPromptCase>,
+    }
+
     fn memory(row: &GoldenMemory) -> StoredMemory {
         StoredMemory {
             id: row.id,
@@ -477,6 +593,66 @@ mod tests {
     fn xml_escaping_matches_prompt_reference_order() {
         assert_eq!(escape_xml_attr("&\"'<>"), "&amp;&quot;&apos;&lt;&gt;");
         assert_eq!(escape_xml_content("&<>\"'"), "&amp;&lt;&gt;\"'");
+    }
+
+    #[test]
+    fn content_language_directive_golden_matches_typescript_reference() {
+        let golden: ContentLanguageGoldenFile = serde_json::from_str(include_str!(
+            "../testdata/content-language-directive-golden.json"
+        ))
+        .expect("parse content-language-directive-golden.json");
+        assert!(
+            !golden.language_names.is_empty(),
+            "empty language-name golden"
+        );
+        assert!(!golden.directive_cases.is_empty(), "empty directive golden");
+        assert!(
+            !golden.repair_cases.is_empty(),
+            "empty repair-prompt golden"
+        );
+
+        for case in &golden.language_names {
+            assert_eq!(
+                crate::content_language::resolve_language_name(Some(&case.language)),
+                Some(case.name.as_str()),
+                "language name mismatch for {}",
+                case.language
+            );
+        }
+        assert_eq!(
+            crate::content_language::resolve_language_name(Some("zz")),
+            None,
+            "an unresolved TypeScript code must not produce a Rust directive"
+        );
+
+        for case in &golden.directive_cases {
+            let actual = build_content_language_directive(
+                case.language.as_deref(),
+                ContentLanguageDirectiveOptions {
+                    preserve_user_quotes: case.preserve_user_quotes,
+                    retrospective: case.retrospective,
+                },
+            );
+            assert_eq!(
+                actual, case.directive,
+                "directive mismatch in {}",
+                case.label
+            );
+        }
+
+        for case in &golden.repair_cases {
+            let actual = build_historian_repair_prompt(
+                &case.original_prompt,
+                &case.previous_output,
+                &case.validation_error,
+                case.language.as_deref(),
+            );
+            assert_eq!(
+                actual, case.prompt,
+                "repair prompt mismatch for {:?}",
+                case.language
+            );
+        }
     }
 
     #[test]

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { resolve } from "node:path";
 import { cavemanCompress } from "./caveman";
 
 describe("cavemanCompress", () => {
@@ -247,5 +248,29 @@ describe("cavemanCompress", () => {
             const out = cavemanCompress(input, "ultra");
             expect(out).toContain("U: We need to make sure the protected tail is not touched.");
         });
+    });
+});
+
+type CavemanGoldenCase = {
+    text: string;
+    lite: string;
+    full: string;
+    ultra: string;
+};
+
+describe("TypeScript/Rust caveman differential golden", () => {
+    test("renders every shared corpus row byte-for-byte", async () => {
+        const path = resolve(
+            import.meta.dir,
+            "../../../../../crates/mc-module/testdata/caveman-golden.json",
+        );
+        const cases = (await Bun.file(path).json()) as CavemanGoldenCase[];
+
+        expect(cases.length).toBeGreaterThan(30);
+        for (const fixture of cases) {
+            expect(cavemanCompress(fixture.text, "lite")).toBe(fixture.lite);
+            expect(cavemanCompress(fixture.text, "full")).toBe(fixture.full);
+            expect(cavemanCompress(fixture.text, "ultra")).toBe(fixture.ultra);
+        }
     });
 });

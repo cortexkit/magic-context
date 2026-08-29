@@ -704,6 +704,8 @@ If no candidates, omit the `<primer_candidates>` section entirely.
 
 Output valid XML only in this shape:
 
+Closing tags must match their opening tier tag (e.g. `<p1>...</p1>`, never `<p1>...</p2>`).
+
 ```xml
 <output>
 <compartments>

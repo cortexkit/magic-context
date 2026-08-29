@@ -36,7 +36,7 @@ describe("migration v74: detected context-limit provenance", () => {
             runMigrations(db);
 
             expect(columnNames(db, "session_meta")).toContain("detected_context_limit_provenance");
-            expect(LATEST_SUPPORTED_VERSION).toBe(81);
+            expect(LATEST_SUPPORTED_VERSION).toBe(82);
             expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
         } finally {
             closeQuietly(db);

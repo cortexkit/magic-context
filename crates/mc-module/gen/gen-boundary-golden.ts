@@ -25,6 +25,18 @@ const { resolveProtectedTailBoundary, hasRunnableCompartmentWindow } = boundaryM
     resolveProtectedTailBoundary: (ctx: Record<string, unknown>) => Record<string, unknown>;
     hasRunnableCompartmentWindow: (snapshot: Record<string, unknown>) => boolean;
 };
+const { DEFAULT_CONTEXT_LIMIT } = await import(
+    resolve("./src/hooks/magic-context/event-resolvers"),
+) as { DEFAULT_CONTEXT_LIMIT: number };
+const { fenceBoundaryForCompletedToolArcs } = await import(
+    resolve("./src/hooks/magic-context/read-session-true-raw-tokens"),
+) as {
+    fenceBoundaryForCompletedToolArcs: (
+        candidate: number,
+        arcs: Array<{ callId: string; invOrdinal: number; resOrdinal: number | null }>,
+        publicationFloorOrdinal: number,
+    ) => number;
+};
 const { readSessionChunk, withRawMessageProvider } = chunkMod as {
     readSessionChunk: (
         sessionId: string,
@@ -670,11 +682,35 @@ for (const reason of requiredTriggerReasons) {
     }
 }
 
+const completed_arc_fence_cases = [
+    {
+        label: "completed arc inv=2 result=4 fences head end=3 backward",
+        candidate: 3,
+        publication_floor_ordinal: 2,
+        arcs: [{ callId: "exact-381", invOrdinal: 2, resOrdinal: 4 }],
+    },
+    {
+        label: "completed arc below publication floor closes forward",
+        candidate: 3,
+        publication_floor_ordinal: 3,
+        arcs: [{ callId: "published-call", invOrdinal: 2, resOrdinal: 4 }],
+    },
+].map((fixture) => ({
+    ...fixture,
+    expected: fenceBoundaryForCompletedToolArcs(
+        fixture.candidate,
+        fixture.arcs,
+        fixture.publication_floor_ordinal,
+    ),
+}));
+
 const golden = {
     constants: constantsFromSource(),
+    default_context_limit: DEFAULT_CONTEXT_LIMIT,
     chunk_cases,
     boundary_cases,
     trigger_cases,
+    completed_arc_fence_cases,
 };
 
 const outPath = join(import.meta.dir, "..", "testdata", "boundary-golden.json");

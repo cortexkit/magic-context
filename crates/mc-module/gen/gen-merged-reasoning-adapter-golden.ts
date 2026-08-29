@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { encodeOpenCodeMessagesToCk } from "../../../packages/plugin/src/hooks/magic-context/module-wire";
 import { findLatestAssistantReasoningMutationExemptMessage } from "../../../packages/plugin/src/hooks/magic-context/strip-content";
+import { makeSentinel } from "../../../packages/plugin/src/hooks/magic-context/sentinel";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const output = resolve(
@@ -212,8 +213,9 @@ const rawCases = [
 	...fixtures.map((fixture) => ({
 		name: fixture.name,
 		target_mid: `${fixture.name}-target`,
-		expect_strip: fixture.expectStrip,
-		raw_messages: rawMessages(fixture.name, fixture.reasoningPart),
+        expect_strip: fixture.expectStrip,
+        expected_sentinel: makeSentinel(fixture.reasoningPart),
+        raw_messages: rawMessages(fixture.name, fixture.reasoningPart),
 	})),
 	{
 		name: "live_tool_continuation_request_shell",

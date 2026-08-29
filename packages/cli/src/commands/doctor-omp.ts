@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { MagicContextConfigSchema } from "@magic-context/core/config/schema/magic-context";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
-import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
+import { getMagicContextStorageResolution } from "@magic-context/core/shared/data-path";
 import { loadPiConfig } from "@magic-context/pi-core/config";
 import { parse as parseJsonc, stringify as stringifyJsonc } from "comment-json";
 import { OmpAdapter } from "../adapters/omp";
@@ -272,7 +272,9 @@ async function runHealthChecks(options: {
         add(results, "pass", "Magic Context runtime config loads successfully");
     else for (const warning of loaded.warnings.slice(0, 5)) add(results, "warn", warning);
 
-    const dbPath = join(getMagicContextStorageDir(), "context.db");
+    const storage = getMagicContextStorageResolution();
+    const dbPath = join(storage.path, "context.db");
+    add(results, "info", `Shared storage: ${storage.path} (source: ${storage.source})`);
     if (!existsSync(dbPath)) add(results, "info", `Shared context DB will be created at ${dbPath}`);
     else {
         let db: ContextDatabase | null = null;

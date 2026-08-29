@@ -11,11 +11,12 @@
  *   bun scripts/test-proactive-search.ts [sessionId] [--limit N] [--threshold 0.3]
  */
 import { Database } from "bun:sqlite";
+import { getMagicContextStorageDir } from "../src/shared/data-path";
 
 // ─── Config ──────────────────────────────────────────────
 
 const OPENCODE_DB = `${process.env.HOME}/.local/share/opencode/opencode.db`;
-const CONTEXT_DB = `${process.env.HOME}/.local/share/opencode/storage/plugin/magic-context/context.db`;
+const CONTEXT_DB = `${getMagicContextStorageDir()}/context.db`;
 
 const args = process.argv.slice(2);
 let sessionId = "";

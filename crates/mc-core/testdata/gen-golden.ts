@@ -21,6 +21,7 @@ import {
 } from "../../../packages/plugin/src/hooks/magic-context/decay-curve.ts";
 import {
     type DecayRenderCompartment,
+    renderCompartmentAtTier,
     renderDecayedCompartments,
 } from "../../../packages/plugin/src/hooks/magic-context/decay-render.ts";
 import { mkdtempSync, rmSync, writeFileSync as writeDocFile } from "node:fs";
@@ -77,8 +78,8 @@ console.log(`wrote ${tierCases.length} tier cases + ${pressureCases.length} pres
 // --- decay RENDERER golden (fixture for the Rust mc-module port of decay-render.ts) ---
 // All cases use a deliberately huge budget so the TS token-estimate demotion guard
 // never fires; the Rust port (which injects that guard as a no-op) then produces the
-// same output driven purely by the decay curve. Legacy/flat bodies are ASCII-only so
-// the TS UTF-16 string slice and the Rust char slice truncate identically. The cases
+// same output driven purely by the decay curve. Legacy/flat cases include adversarial
+// UTF-16 boundaries so astral splits remain byte-faithful to JavaScript. The cases
 // exercise: the P1..P4 paraphrase bodies across a set old enough to demote and archive
 // some rows, XML-safe single-line headings, escaped bodies, empty-P4 title-only headings,
 // legacy-row truncation, and the malformed-pseudo-v2 (empty p1) flat-content fallback.
@@ -102,9 +103,33 @@ const v2 = (
     legacy: 0,
 });
 
-const renderCases: Array<{ compartments: DecayRenderCompartment[]; budget: number; body: string }> = [];
+const renderCases: Array<{
+    compartments: DecayRenderCompartment[];
+    budget: number;
+    body?: string;
+    body_utf16_hex?: string;
+    forced_tier?: number;
+}> = [];
 const pushRender = (compartments: DecayRenderCompartment[], budget = LOOSE) => {
     renderCases.push({ compartments, body: renderDecayedCompartments({ compartments, historyBudgetTokens: budget }), budget });
+};
+const pushRenderUtf16 = (
+    compartments: DecayRenderCompartment[],
+    budget = LOOSE,
+    forcedTier?: number,
+) => {
+    const body =
+        forcedTier === undefined
+            ? renderDecayedCompartments({ compartments, historyBudgetTokens: budget })
+            : renderCompartmentAtTier(compartments[0], forcedTier);
+    renderCases.push({
+        compartments,
+        body_utf16_hex: Array.from({ length: body.length }, (_, index) =>
+            body.charCodeAt(index).toString(16).padStart(4, "0"),
+        ).join(""),
+        budget,
+        ...(forcedTier === undefined ? {} : { forced_tier: forcedTier }),
+    });
 };
 
 // 30 v2 compartments at mixed importance, old enough that the curve demotes the
@@ -145,6 +170,16 @@ pushRender([
     { startMessage: 1, endMessage: 5, title: "LegU", content: `U: question\n${"a".repeat(2000)}`, legacy: 1, importance: 50 },
     { startMessage: 6, endMessage: 9, title: "LegNoU", content: "b".repeat(2000), legacy: 1, importance: 50 },
 ]);
+// JavaScript slice retains a lone high surrogate when the 420/1200 boundary bisects
+// an astral scalar. Store expected UTF-16 units because JSON cannot round-trip that string.
+pushRenderUtf16([
+    { startMessage: 10, endMessage: 11, title: "Leg420", content: `U:\n${"a".repeat(416)}😀b`, legacy: 1, importance: 50 },
+]);
+pushRenderUtf16(
+    [{ startMessage: 12, endMessage: 13, title: "Leg1200", content: `U:\n${"a".repeat(1196)}😀b`, legacy: 1, importance: 50 }],
+    LOOSE,
+    2,
+);
 // malformed pseudo-v2 (legacy=0 but empty p1) → flat content
 pushRender([{ startMessage: 1, endMessage: 2, title: "Pseudo", content: "flat body here", p1: "", legacy: 0, importance: 50 }]);
 // mixed v2 + legacy in one set: legacy rows are excluded from the budget-pressure

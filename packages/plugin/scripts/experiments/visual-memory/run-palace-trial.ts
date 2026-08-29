@@ -7,10 +7,10 @@
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Database } from "bun:sqlite";
+import { getMagicContextStorageDir } from "../../../src/shared/data-path";
 
 import { extractCompleteManifestBody } from "../../../src/features/magic-context/dreamer/manifest-parser.ts";
 
@@ -186,7 +186,7 @@ function projectIdentity(): string {
 function databasePath(): string {
     return (
         process.env.PALACE_CONTEXT_DB ??
-        join(homedir(), ".local", "share", "cortexkit", "magic-context", "context.db")
+        join(getMagicContextStorageDir(), "context.db")
     );
 }
 
@@ -228,7 +228,10 @@ function buildCorpus(): PalaceCorpus {
         return {
             schemaVersion: 1,
             projectIdentity: projectIdentity(),
-            source: { databasePath: "~/.local/share/cortexkit/magic-context/context.db", activeStatus: "active" },
+            source: {
+                databasePath: "MAGIC_CONTEXT_STORAGE_DIR/context.db (or XDG-derived default)",
+                activeStatus: "active",
+            },
             memories,
         };
     } finally {

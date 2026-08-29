@@ -31,6 +31,9 @@ const isolatedDataHome = mkdtempSync(join(tmpdir(), `mc-plugin-test-xdg-pid-${pr
 // XDG_DATA_HOME to exercise path fallbacks), so it cannot be defeated and a
 // bare openDatabase() can never reach the user's real shared DB.
 process.env.MAGIC_CONTEXT_TEST_DATA_DIR = isolatedDataHome;
+// Existing tests sometimes replace XDG_DATA_HOME with their own fixture root.
+// The resolver uses this marker to distinguish that deliberate fixture switch
+// from the untouched real-preload state, where test isolation remains first.
 // XDG_DATA_HOME redirects everything ELSE (logs, embedding cache, etc.) for
 // tests that don't manipulate it themselves.
 process.env.XDG_DATA_HOME = isolatedDataHome;

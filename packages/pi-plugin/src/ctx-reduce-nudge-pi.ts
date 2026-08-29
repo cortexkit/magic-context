@@ -38,6 +38,7 @@ import {
 	CHANNEL1_SENTINEL,
 	decideChannel1,
 	evaluateChannel2,
+	reclaimableToolOutputCount,
 	type Channel1State as SharedChannel1State,
 	shouldUseStickyChannel1Reminder,
 } from "@magic-context/core/hooks/magic-context/ctx-reduce-nudge";
@@ -171,7 +172,7 @@ export function maybeChannel1ReminderForToolResult(args: {
 		text: buildChannel1Reminder(
 			decision.level,
 			decision.undroppedTokens,
-			state.usableWindow,
+			reclaimableToolOutputCount(state.baselineParts),
 			state.oldestReclaimableToolTags,
 			sticky,
 		),
@@ -266,7 +267,7 @@ export function maybeDeliverChannel2Pi(
 			customType: CHANNEL2_NUDGE_CUSTOM_TYPE,
 			content: buildChannel2Reminder(
 				undropped,
-				baseline.usableWindow,
+				reclaimableToolOutputCount(baseline.baselineParts),
 				baseline.oldestReclaimableToolTags,
 			),
 			display: false,

@@ -38,7 +38,7 @@ describe("event-resolvers", () => {
             const limit = resolveContextLimit(undefined, "gpt-4o");
 
             //#then
-            expect(limit).toBe(128_000);
+            expect(limit).toBe(200_000);
         });
 
         it("returns default for unknown provider/model not in models.dev or opencode.json", () => {
@@ -46,7 +46,7 @@ describe("event-resolvers", () => {
             const limit = resolveContextLimit("unknown-provider", "unknown-model-xyz");
 
             //#then
-            expect(limit).toBe(128_000);
+            expect(limit).toBe(200_000);
         });
 
         it("does not reserve output twice from a detected prompt-only ceiling", async () => {

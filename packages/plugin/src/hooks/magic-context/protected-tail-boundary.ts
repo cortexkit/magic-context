@@ -21,6 +21,7 @@ import {
     buildTrueRawTokenIndex,
     completedToolArcCrossesBoundary,
     computeRawRangeFingerprint,
+    fenceBoundaryForCompletedToolArcs,
     fenceBoundaryForToolArcs,
     type TrueRawTokenIndex,
 } from "./read-session-true-raw-tokens";
@@ -346,11 +347,30 @@ function applyHeadCap(args: {
     capTokens: number;
     recentOpenArcCutoff: number;
 }): { eligibleEndOrdinal: number; oversizeAtomicUnit: boolean } {
-    const { index, protectedTailStart, offset, arcs, capTokens, recentOpenArcCutoff } = args;
+    const {
+        index,
+        protectedTailStart,
+        offset,
+        arcs,
+        lastCompartmentEndOrdinal,
+        capTokens,
+        recentOpenArcCutoff,
+    } = args;
     if (offset >= protectedTailStart)
         return { eligibleEndOrdinal: offset, oversizeAtomicUnit: false };
     let end = index.findHeadEndForCap(offset, protectedTailStart, capTokens);
     let oversizeAtomicUnit = end === offset + 1 && index.tokenForOrdinal(offset) > capTokens;
+    const completedFence = fenceBoundaryForCompletedToolArcs(
+        end,
+        arcs,
+        lastCompartmentEndOrdinal + 1,
+    );
+    if (completedFence > end) {
+        end = Math.min(protectedTailStart, completedFence);
+        if (index.rangeTokens(offset, end) > capTokens) oversizeAtomicUnit = true;
+    } else {
+        end = completedFence;
+    }
     for (const arc of arcs) {
         const resOrdinal = arc.resOrdinal;
         if (resOrdinal === null) {
@@ -366,12 +386,6 @@ function applyHeadCap(args: {
             ) {
                 end = Math.min(end, arc.invOrdinal);
             }
-            continue;
-        }
-        if (arc.invOrdinal < end && end <= resOrdinal) {
-            end = Math.min(protectedTailStart, resOrdinal + 1);
-            if (index.rangeTokens(Math.max(offset, arc.invOrdinal), end) > capTokens)
-                oversizeAtomicUnit = true;
         }
     }
     if (end <= offset && offset < protectedTailStart) {

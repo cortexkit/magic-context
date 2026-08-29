@@ -31,6 +31,7 @@ import { queueMemoryMutation } from "../storage-memory-mutation-log";
 import { recordChildInvocation } from "../subagent-token-capture";
 import { type LeaseAcquisition, runLeaseGuardedWrite, startLeaseHeartbeat } from "./lease";
 import { assertNoDuplicateManifestIds } from "./manifest-parser";
+import { isDirectiveShapedProjectRule } from "./memory-claim-safety";
 import {
     DreamerModuleFailureError,
     type DreamerModuleRoute,
@@ -74,10 +75,15 @@ const VERIFY_BATCH_SIZE = 50;
 // the same outage, so leave the remaining memories for the scheduler retry.
 const IDENTICAL_PROVIDER_FAILURE_BATCH_LIMIT = 2;
 
-interface VerifyBatchResult {
+export interface VerifyVerdictCounts {
     verified: number;
     updated: number;
     archived: number;
+    skipped: number;
+    refused: number;
+}
+
+interface VerifyBatchResult extends VerifyVerdictCounts {
     providerFailure?: DreamerProviderOutputFailureError;
 }
 
@@ -96,13 +102,10 @@ export interface VerifyArgs {
     fallbackModels?: readonly ModelInput[];
     language?: string;
     moduleRoute?: DreamerModuleRoute;
-    onProgress?: (processed: number) => void;
+    onProgress?: (processed: number, refused: number) => void;
 }
 
-export interface VerifyResult {
-    verified: number;
-    updated: number;
-    archived: number;
+export interface VerifyResult extends VerifyVerdictCounts {
     batches: number;
     inScope: number;
     remaining: number;
@@ -137,6 +140,8 @@ export async function runVerify(args: VerifyArgs): Promise<VerifyResult> {
         verified: 0,
         updated: 0,
         archived: 0,
+        skipped: 0,
+        refused: 0,
         batches: 0,
         inScope: 0,
         remaining: 0,
@@ -193,9 +198,24 @@ export async function runVerify(args: VerifyArgs): Promise<VerifyResult> {
             result.verified += counts.verified;
             result.updated += counts.updated;
             result.archived += counts.archived;
-            result.remaining -= counts.verified + counts.updated + counts.archived;
+            result.skipped += counts.skipped;
+            result.refused += counts.refused;
+            const batchProcessed =
+                counts.verified +
+                counts.updated +
+                counts.archived +
+                counts.skipped +
+                counts.refused;
+            result.remaining -= batchProcessed;
             result.batches += 1;
-            args.onProgress?.(result.verified + result.updated + result.archived);
+            args.onProgress?.(
+                result.verified +
+                    result.updated +
+                    result.archived +
+                    result.skipped +
+                    result.refused,
+                result.refused,
+            );
 
             if (counts.providerFailure) {
                 lastProviderFailure = counts.providerFailure;
@@ -224,7 +244,7 @@ export async function runVerify(args: VerifyArgs): Promise<VerifyResult> {
         result.complete = result.remaining === 0;
         if (result.complete) closeBroadCycle(args, gate.broadCycleStartAt);
         log(
-            `[dreamer] ${args.forceBroad ? "verify-broad" : "verify"}: verified=${result.verified} updated=${result.updated} archived=${result.archived} batches=${result.batches} remaining=${result.remaining} complete=${result.complete}`,
+            `[dreamer] ${args.forceBroad ? "verify-broad" : "verify"}: verified=${result.verified} updated=${result.updated} archived=${result.archived} skipped=${result.skipped} refused=${result.refused} batches=${result.batches} remaining=${result.remaining} complete=${result.complete}`,
         );
         return result;
     } finally {
@@ -316,7 +336,14 @@ async function verifyOneBatch(
         );
         recordInvocation(args, startedAt, { status: "failed", error });
         if (error instanceof DreamerModuleFailureError || signal.aborted) throw error;
-        return { verified: 0, updated: 0, archived: 0, providerFailure };
+        return {
+            verified: 0,
+            updated: 0,
+            archived: 0,
+            skipped: 0,
+            refused: 0,
+            providerFailure,
+        };
     } finally {
         // Delete the child regardless of success/failure (a FAILED child still
         // holds the memory-pool snapshot fed into the prompt — leaving it only on
@@ -349,13 +376,16 @@ async function verifyOneBatch(
  * - archive: archive + queue an archive mutation (m[1] delta). Skipped when the
  *   memory is no longer primary-mutable (already archived/superseded), so a stale
  *   manifest can't fight a concurrent change.
+ * - skip/refusal: count the verdict for progress without changing the memory.
+ * Directive-shaped PROJECT_RULES and unsafe content-loss rewrites are refused
+ * before either the local or MODULE authority write path is built.
  * All writes happen under ONE lease-guarded transaction.
  */
 export async function applyVerifyManifest(
     args: VerifyArgs,
     batch: VerifyPromptMemory[],
     manifestText: string,
-): Promise<{ verified: number; updated: number; archived: number }> {
+): Promise<VerifyVerdictCounts> {
     return applyParsedVerifyManifest(args, batch, parseVerifyManifest(manifestText));
 }
 
@@ -363,22 +393,27 @@ async function applyParsedVerifyManifest(
     args: VerifyArgs,
     batch: VerifyPromptMemory[],
     parsed: ParsedVerifyManifest,
-): Promise<{ verified: number; updated: number; archived: number }> {
+): Promise<VerifyVerdictCounts> {
     const batchIds = new Set(batch.map((m) => m.id));
+    const batchById = new Map(batch.map((memory) => [memory.id, memory]));
     const valid = {
         verified: parsed.verified.filter((entry) => batchIds.has(entry.id)),
         updated: parsed.updated.filter((entry) => batchIds.has(entry.id)),
         archived: parsed.archived.filter((entry) => batchIds.has(entry.id)),
+        skipped: parsed.skipped.filter((entry) => batchIds.has(entry.id)),
     };
-    const unknown = [...parsed.verified, ...parsed.updated, ...parsed.archived].filter(
-        (entry) => !batchIds.has(entry.id),
-    );
+    const unknown = [
+        ...parsed.verified,
+        ...parsed.updated,
+        ...parsed.archived,
+        ...parsed.skipped,
+    ].filter((entry) => !batchIds.has(entry.id));
     if (unknown.length > 0) {
         log(
             `[dreamer] verify warning: dropping ${unknown.length} unknown verification entr${unknown.length === 1 ? "y" : "ies"} outside the current batch (${unknown.map((entry) => entry.id).join(", ")})`,
         );
     }
-    const validIds = [...valid.verified, ...valid.updated, ...valid.archived].map(
+    const validIds = [...valid.verified, ...valid.updated, ...valid.archived, ...valid.skipped].map(
         (entry) => entry.id,
     );
     assertNoDuplicateManifestIds(validIds, "verify");
@@ -391,7 +426,9 @@ async function applyParsedVerifyManifest(
             `verify manifest covers ${validIds.length}/${batch.length} batch ids after filtering unknown entries; rejecting mostly-wrong manifest`,
         );
     }
-    if (validIds.length === 0) return { verified: 0, updated: 0, archived: 0 };
+    if (validIds.length === 0) {
+        return { verified: 0, updated: 0, archived: 0, skipped: 0, refused: 0 };
+    }
     const now = Date.now();
 
     // Pre-normalize files OUTSIDE the transaction (git/realpath I/O). For each
@@ -401,17 +438,39 @@ async function applyParsedVerifyManifest(
         | { kind: "update"; id: number; files: string[]; content: string; hash: string }
         | { kind: "archive"; id: number; reason: string };
     const writes: VerifyWrite[] = [];
+    let refused = 0;
+    const skipped = valid.skipped.length;
     for (const v of valid.verified) {
         const files = await normalizeFiles(args, v.files);
         writes.push({ kind: "verify", id: v.id, files });
     }
     for (const u of valid.updated) {
+        const original = batchById.get(u.id);
+        if (!original) continue;
+        if (isDirectiveShapedProjectRule(original.category, original.content)) {
+            log(
+                `[dreamer] verify safety refusal: memory_id=${u.id} verdict=update reason=directive-shaped-project-rule`,
+            );
+            refused += 1;
+            continue;
+        }
         const content = u.content.trim();
         // An empty/oversized "update" is unsafe — fall back to a plain re-verify
         // (bank the progress, keep the old content) rather than wipe a memory.
         if (!content || content.length > 20_000) {
             const files = await normalizeFiles(args, u.files);
             writes.push({ kind: "verify", id: u.id, files });
+            continue;
+        }
+        const originalLength = original.content.trim().length;
+        // Losing more than half the claim is the characteristic denaturing shape.
+        // A model may cross this conservative belt only by explicitly declaring
+        // that the shorter rewrite is an intentional consolidation.
+        if (!u.consolidation && content.length * 2 < originalLength) {
+            log(
+                `[dreamer] verify safety refusal: memory_id=${u.id} verdict=update reason=content-loss original_chars=${originalLength} replacement_chars=${content.length}`,
+            );
+            refused += 1;
             continue;
         }
         const files = await normalizeFiles(args, u.files);
@@ -424,13 +483,22 @@ async function applyParsedVerifyManifest(
         });
     }
     for (const a of valid.archived) {
+        const original = batchById.get(a.id);
+        if (!original) continue;
+        if (isDirectiveShapedProjectRule(original.category, original.content)) {
+            log(
+                `[dreamer] verify safety refusal: memory_id=${a.id} verdict=archive reason=directive-shaped-project-rule`,
+            );
+            refused += 1;
+            continue;
+        }
         writes.push({ kind: "archive", id: a.id, reason: a.reason });
     }
-    if (writes.length === 0) return { verified: 0, updated: 0, archived: 0 };
 
     let verified = 0;
     let updated = 0;
     let archived = 0;
+    if (writes.length === 0) return { verified, updated, archived, skipped, refused };
     if (args.moduleRoute) {
         const identities = getModuleMemoryIdentities(
             args.db,
@@ -493,7 +561,7 @@ async function applyParsedVerifyManifest(
             else if (write.kind === "update") updated += 1;
             else archived += 1;
         }
-        return { verified, updated, archived };
+        return { verified, updated, archived, skipped, refused };
     }
     runLeaseGuardedWrite(args.db, args.holderId, args.leaseKey, () => {
         for (const w of writes) {
@@ -523,7 +591,7 @@ async function applyParsedVerifyManifest(
             }
         }
     });
-    return { verified, updated, archived };
+    return { verified, updated, archived, skipped, refused };
 }
 
 async function normalizeFiles(args: VerifyArgs, rawFiles: readonly string[]): Promise<string[]> {

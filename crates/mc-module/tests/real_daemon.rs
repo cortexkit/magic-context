@@ -375,7 +375,10 @@ fn seed_store(data_home: &Path) {
     // drop `store` here → release the single-writer lease before the module spawns
 }
 
-const M1_PLACEHOLDER: &str = "(no new content since last materialization)";
+// Reference the crate's constant rather than a local copy: this test's private
+// duplicate went stale when the placeholder gained its <session-history-since>
+// wrapper (TS-parity), and the drift only surfaces under the real-daemon env.
+use mc_module::memory_render::M1_PLACEHOLDER;
 
 fn ck(id: &str, ordinal: u64, bytes: &str) -> Value {
     json!({

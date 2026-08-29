@@ -15,6 +15,12 @@ describe("hermetic Rust process isolation", () => {
         );
     });
 
+    it("ignores a prebuilt module override when selecting the hermetic binary", () => {
+        expect(__hermeticSubcTest.currentTreeCkMcBinary("/tmp/stale/ck-mc")).toBe(
+            join(__hermeticSubcTest.rustE2eCargoTargetDir, "release/ck-mc"),
+        );
+    });
+
     it("reaps only stale PID records", () => {
         const nowMs = 10 * __hermeticSubcTest.stalePidAgeMs;
 

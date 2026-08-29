@@ -324,8 +324,7 @@ run_host_e2e() {
   # receive lists produced by the same validated manifest invocation.
   E2E_OC_FILES=$(manifest_files ts opencode)
   E2E_PI_FILES=$(manifest_files ts pi)
-  E2E_RUST_FILES=$(manifest_files rust all)
-  export E2E_OC_FILES E2E_PI_FILES E2E_RUST_FILES
+  export E2E_OC_FILES E2E_PI_FILES
 
   if [[ "$FORCE_E2E_HOST" -eq 0 ]] && docker_available; then
     echo "  [e2e] Docker is available; running both host e2e legs in the native container..."
@@ -349,32 +348,11 @@ run_host_e2e() {
   run_e2e_group "ts" "pi" "$E2E_PI_FILES"
 }
 
-check_rust_e2e_prerequisites() {
-  local detector="$E2E_DIR/scripts/check-rust-prerequisites.ts"
-  echo "  [e2e:rust:prerequisites:start] resolving ck-mc, sibling checkouts, and cargo workspace..."
-  if ! bun "$detector" --build; then
-    echo "Error: Rust e2e prerequisite detector failed; the rust group is RED (never skipped)."
-    echo "  [e2e:rust:prerequisites:end] status=fail"
-    return 1
-  fi
-  MC_E2E_CK_MC_BIN=$(bun "$detector" --print)
-  if [[ "$MC_E2E_CK_MC_BIN" == "$REPO_ROOT/target/release/ck-mc" ]]; then
-    # The harness rebuilds current source in its e2e-owned Cargo target directory.
-    unset MC_E2E_CK_MC_BIN
-  else
-    # A prebuilt PATH binary is accepted only when the workspace target is not
-    # available; pass that resolved path through the shared Rust stack.
-    export MC_E2E_CK_MC_BIN
-  fi
-  echo "  [e2e:rust:prerequisites] ck-mc=${MC_E2E_CK_MC_BIN:-$REPO_ROOT/target/release/ck-mc}"
-  echo "  [e2e:rust:prerequisites:end] status=pass"
-}
-
-# Rust stays on the host: the daemon and its private sibling path-dependencies
-# cross the container boundary and must be checked before this third group.
+# Rust stays on the host: its daemon and private sibling path dependencies cross
+# the container boundary. The shared executable owns the exact manifest selection,
+# prerequisites, and true-green summary check used by release CI as well.
 run_host_e2e
-check_rust_e2e_prerequisites
-run_e2e_group "rust" "hermetic" "$E2E_RUST_FILES"
+"$SCRIPT_DIR/run-rust-hermetic-e2e.sh"
 
 echo "  ✓ All checks passed"
 echo ""

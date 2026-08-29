@@ -2,8 +2,7 @@
  * TUI data layer — pure RPC client, no direct SQLite access.
  * All data is fetched from the server plugin via HTTP RPC.
  */
-import os from "node:os";
-import path from "node:path";
+import { getMagicContextStorageDir } from "../../shared/data-path";
 import { MagicContextRpcClient } from "../../shared/rpc-client";
 import type { EmbedDetail, SidebarSnapshot, StatusDetail } from "../../shared/rpc-types";
 
@@ -12,18 +11,9 @@ export type { EmbedDetail, SidebarSnapshot, StatusDetail };
 let rpcClient: MagicContextRpcClient | null = null;
 let rpcGeneration = 0;
 
-function getStorageDir(): string {
-    // Plugin v0.16+ uses the shared cortexkit/magic-context path so OpenCode
-    // and Pi can share state. The TUI just needs to point its RPC client at
-    // the same storage directory the server plugin uses for the lock-file
-    // discovery convention.
-    const dataDir = process.env.XDG_DATA_HOME ?? path.join(os.homedir(), ".local", "share");
-    return path.join(dataDir, "cortexkit", "magic-context");
-}
-
 /** Initialize the RPC client. Call once on TUI startup. */
 export function initRpcClient(directory: string): void {
-    const storageDir = getStorageDir();
+    const storageDir = getMagicContextStorageDir();
     // Bump the generation before replacing the client so late notification
     // responses from a disposed client are ignored (the WS socket observes the
     // new generation and abandons its in-flight connect).
@@ -172,63 +162,26 @@ export async function loadSidebarSnapshot(
     }
 }
 
-/** Fetch full status detail from the server via RPC. */
+export type StatusDetailResult = { ok: true; detail: StatusDetail } | { ok: false; error: string };
+
+/** Fetch full status detail without presenting transport failure as an empty session. */
 export async function loadStatusDetail(
     sessionId: string,
     directory: string,
     modelKey?: string,
-): Promise<StatusDetail> {
-    const emptyDetail: StatusDetail = {
-        ...EMPTY_SNAPSHOT,
-        sessionId,
-        activeProfile: null,
-        tagCounter: 0,
-        activeTags: 0,
-        droppedTags: 0,
-        totalTags: 0,
-        activeBytes: 0,
-        lastResponseTime: 0,
-        lastNudgeTokens: 0,
-        lastTransformError: null,
-        isSubagent: false,
-        pendingOps: [],
-        contextLimit: 0,
-        cacheTtlMs: 0,
-        cacheRemainingMs: 0,
-        cacheExpired: false,
-        cacheNeverExpires: false,
-        executeThreshold: 65,
-        executeThresholdMode: "percentage",
-        protectedTagCount: 20,
-        historyBudgetPercentage: 0.15,
-        historyBlockTokens: 0,
-        compressionBudget: null,
-        compressionUsage: null,
-        toastDurationMs: 5000,
-        loggerDiagnostics: {
-            swallowedWriteCount: 0,
-            lastErrorMessage: null,
-            lastErrorTime: null,
-        },
-        storage_versions: {
-            context_db_schema_version: null,
-            plugin_supported_version: 0,
-        },
-    };
-
-    if (!rpcClient) return emptyDetail;
+): Promise<StatusDetailResult> {
+    if (!rpcClient) return { ok: false, error: "RPC client is not initialized" };
     try {
         const result = await rpcClient.call<StatusDetail>("status-detail", {
             sessionId,
             directory,
             modelKey,
         });
-        if ((result as unknown as Record<string, unknown>).error) {
-            return emptyDetail;
-        }
-        return result;
-    } catch {
-        return emptyDetail;
+        const error = (result as unknown as Record<string, unknown>).error;
+        if (typeof error === "string") return { ok: false, error };
+        return { ok: true, detail: result };
+    } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
 }
 
@@ -262,12 +215,15 @@ export async function loadEmbedDetail(sessionId: string, directory: string): Pro
 export type CompartmentCountResult = { ok: true; count: number } | { ok: false; error: string };
 
 /** Get compartment count without making transport failure look like a real zero. */
-export async function getCompartmentCount(sessionId: string): Promise<CompartmentCountResult> {
+export async function getCompartmentCount(
+    sessionId: string,
+    directory?: string,
+): Promise<CompartmentCountResult> {
     if (!rpcClient) return { ok: false, error: "RPC client is not initialized" };
     try {
         const result = await rpcClient.call<{ count?: number; error?: string }>(
             "compartment-count",
-            { sessionId },
+            { sessionId, directory },
         );
         if (typeof result.error === "string") return { ok: false, error: result.error };
         if (typeof result.count !== "number" || !Number.isFinite(result.count)) {

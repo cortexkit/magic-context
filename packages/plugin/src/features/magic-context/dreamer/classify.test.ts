@@ -25,13 +25,16 @@ function assistantMessages(text: string) {
     ];
 }
 
-function successfulClassifyClient(onPrompt?: () => void) {
+function successfulClassifyClient(onPrompt?: () => void, onSystem?: (system: string) => void) {
     let manifest = "";
     return {
         session: {
             create: async () => ({ data: { id: "classify-child" } }),
-            prompt: async (args: { body?: { parts?: Array<{ text?: string }> } }) => {
+            prompt: async (args: {
+                body?: { system?: string; parts?: Array<{ text?: string }> };
+            }) => {
                 const prompt = args.body?.parts?.[0]?.text ?? "";
+                onSystem?.(args.body?.system ?? "");
                 const ids = [...prompt.matchAll(/^\[(\d+)\]/gm)].map((match) => Number(match[1]));
                 manifest = `<classify>${ids.map((id) => `<memory id="${id}" importance="80" scope="project" shareable="true"/>`).join("")}</classify>`;
                 onPrompt?.();
@@ -67,6 +70,29 @@ function classifyArgs(db: Database, projectIdentity: string): ClassifyArgs {
 }
 
 describe("runClassify disposition", () => {
+    test("localizes the TypeScript classifier system prompt", async () => {
+        const db = freshDb();
+        try {
+            const projectIdentity = "git:classify-language";
+            addMemoriesForDisposition(db, projectIdentity, 10);
+            const args = classifyArgs(db, projectIdentity);
+            args.language = "tr";
+            let system = "";
+            args.client = successfulClassifyClient(undefined, (value) => {
+                system = value;
+            }) as never;
+
+            const result = await runClassify(args);
+
+            expect(result.classified).toBe(10);
+            expect(system).toContain(
+                "Write human-readable prose you author in: Turkish (Türkçe).",
+            );
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
     test("banks a completed chunk and reports the deadline remainder", async () => {
         const db = freshDb();
         try {
@@ -248,7 +274,7 @@ describe("module-backed classification", () => {
         );
     }
 
-    test("translates mirrored context ids to module ids and uses the stored module hash", async () => {
+    test("sends profile-resolved models with translated module ids and hashes", async () => {
         const db = freshDb();
         try {
             const projectIdentity = "git:module-classify";
@@ -260,33 +286,34 @@ describe("module-backed classification", () => {
             installAuthorityManagedMarker(db, projectIdentity, "store");
 
             const calls: ClassifyModuleCallArgs[] = [];
-            const result = await runClassify(
-                moduleArgs(db, projectIdentity, (call) => {
-                    calls.push(call);
-                    if (call.method === "dreamer.run_task") {
-                        const items = (
-                            call.body as {
-                                payload: {
-                                    items: Array<{ memory_id: number; content_hash: string }>;
-                                };
-                            }
-                        ).payload.items;
-                        const manifest = items
-                            .map(
-                                (item) =>
-                                    `<memory id="${item.memory_id}" importance="80" scope="project" shareable="true"/>`,
-                            )
-                            .join("\n");
-                        return { result: { manifest_text: `<classify>${manifest}</classify>` } };
-                    }
-                    const rows = (
+            const args = moduleArgs(db, projectIdentity, (call) => {
+                calls.push(call);
+                if (call.method === "dreamer.run_task") {
+                    const items = (
                         call.body as {
-                            arguments: { rows: Array<{ memory_id: number }> };
+                            payload: {
+                                items: Array<{ memory_id: number; content_hash: string }>;
+                            };
                         }
-                    ).arguments.rows;
-                    return { result: { accepted: rows.map((row) => row.memory_id), rejected: [] } };
-                }),
-            );
+                    ).payload.items;
+                    const manifest = items
+                        .map(
+                            (item) =>
+                                `<memory id="${item.memory_id}" importance="80" scope="project" shareable="true"/>`,
+                        )
+                        .join("\n");
+                    return { result: { manifest_text: `<classify>${manifest}</classify>` } };
+                }
+                const rows = (
+                    call.body as {
+                        arguments: { rows: Array<{ memory_id: number }> };
+                    }
+                ).arguments.rows;
+                return { result: { accepted: rows.map((row) => row.memory_id), rejected: [] } };
+            });
+            args.model = "anthropic/profile-dreamer";
+            args.fallbackModels = ["openai/profile-fallback"];
+            const result = await runClassify(args);
 
             expect(result).toEqual({
                 classified: 10,
@@ -298,6 +325,10 @@ describe("module-backed classification", () => {
             });
             const taskCall = calls.find((call) => call.method === "dreamer.run_task");
             const applyCall = calls.find((call) => call.method === "memory.set_classification");
+            expect((taskCall?.body as { model_chain: string[] }).model_chain).toEqual([
+                "anthropic/profile-dreamer",
+                "openai/profile-fallback",
+            ]);
             expect(
                 (
                     taskCall?.body as {

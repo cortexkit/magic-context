@@ -567,6 +567,7 @@ function planMergedAssistantReasoningStrip(
 }
 
 export type TrailingBlankDecision = "keep" | `keep:${number}` | "strip";
+export type TrailingBlankSourceDecisions = ReadonlyMap<string, TrailingBlankDecision>;
 
 const MAX_FROZEN_TRAILING_BLANKS = 10_000;
 const CANONICAL_BLANK_PART = { type: "text", text: "" } as const;
@@ -597,40 +598,73 @@ function trailingBlankKeepCount(decision: TrailingBlankDecision): number | undef
         : undefined;
 }
 
+function trailingBlankDecisionForMessage(
+    message: MessageLike,
+): readonly [string, TrailingBlankDecision] | undefined {
+    const id = message.info.id;
+    if (message.info.role !== "assistant" || typeof id !== "string" || id.length === 0) {
+        return undefined;
+    }
+    let trailingCount = 0;
+    while (
+        trailingCount < message.parts.length &&
+        isSentinelInvisibleTextPart(message.parts[message.parts.length - trailingCount - 1])
+    ) {
+        trailingCount += 1;
+    }
+    if (trailingCount > MAX_FROZEN_TRAILING_BLANKS && trailingCount < message.parts.length) {
+        return undefined;
+    }
+    const decision: TrailingBlankDecision =
+        message.parts.length === 0 || trailingCount === message.parts.length
+            ? "keep"
+            : trailingCount === 0
+              ? "strip"
+              : trailingCount === 1
+                ? "keep"
+                : `keep:${trailingCount}`;
+    return [id, decision];
+}
+
+/** Capture trailing-blank shapes before Magic Context can insert synthetic parts. */
+export function snapshotTrailingBlankSourceDecisions(
+    messages: readonly MessageLike[],
+): Map<string, TrailingBlankDecision> {
+    const decisions = new Map<string, TrailingBlankDecision>();
+    for (const message of messages) {
+        const observed = trailingBlankDecisionForMessage(message);
+        if (observed) decisions.set(...observed);
+    }
+    return decisions;
+}
+
 /**
  * Capture the representation served for each assistant before a provider can append
  * a late blank. The newest assistant may be refreshed while it remains live; once a
  * later assistant appears, its last served choice becomes an immutable replay rule.
+ *
+ * Production callers supply sourceDecisions captured from the unmodified harness
+ * input. That prevents sentinels, canonical blanks, and synthetic messages added by
+ * Magic Context from becoming self-replaying observations.
  */
 export function findTrailingBlankDecisionCandidates(
     messages: MessageLike[],
     frozenDecisions: ReadonlyMap<string, TrailingBlankDecision>,
-    options?: { refreshMessageId?: string },
+    options?: {
+        refreshMessageId?: string;
+        sourceDecisions?: TrailingBlankSourceDecisions;
+    },
 ): Array<readonly [string, TrailingBlankDecision]> {
+    const observedDecisions =
+        options?.sourceDecisions ?? snapshotTrailingBlankSourceDecisions(messages);
+    const visibleIds = new Set(
+        messages.flatMap((message) =>
+            typeof message.info.id === "string" ? [message.info.id] : [],
+        ),
+    );
     const decisions: Array<readonly [string, TrailingBlankDecision]> = [];
-    for (const message of messages) {
-        const id = message.info.id;
-        if (message.info.role !== "assistant" || typeof id !== "string" || id.length === 0) {
-            continue;
-        }
-        let trailingCount = 0;
-        while (
-            trailingCount < message.parts.length &&
-            isSentinelInvisibleTextPart(message.parts[message.parts.length - trailingCount - 1])
-        ) {
-            trailingCount += 1;
-        }
-        if (trailingCount > MAX_FROZEN_TRAILING_BLANKS && trailingCount < message.parts.length) {
-            continue;
-        }
-        const decision: TrailingBlankDecision =
-            message.parts.length === 0 || trailingCount === message.parts.length
-                ? "keep"
-                : trailingCount === 0
-                  ? "strip"
-                  : trailingCount === 1
-                    ? "keep"
-                    : `keep:${trailingCount}`;
+    for (const [id, decision] of observedDecisions) {
+        if (!visibleIds.has(id)) continue;
         const frozen = frozenDecisions.get(id);
         if (frozen !== undefined && (id !== options?.refreshMessageId || frozen === decision)) {
             continue;
@@ -681,6 +715,7 @@ export function applyFrozenTrailingBlankDecisions(
         };
 
         if (lastMeaningfulIndex < 0) {
+            if (message.parts.length === 0) continue;
             if (message.parts.length !== 1 || !isCanonicalBlankPart(message.parts[0])) {
                 mutations += Math.max(1, message.parts.length);
                 replaceParts(0, message.parts.length, 1);
@@ -691,6 +726,11 @@ export function applyFrozenTrailingBlankDecisions(
         const trailingCount = message.parts.length - lastMeaningfulIndex - 1;
         const keepCount = trailingBlankKeepCount(decision);
         if (keepCount !== undefined) {
+            // A keep decision may stabilize a blank suffix that the harness supplied,
+            // but it must never recreate missing bytes. If a formerly present blank is
+            // absent now, accepting this pass's cache bust prevents an insert-observe-
+            // keep loop from manufacturing that blank forever.
+            if (trailingCount === 0) continue;
             const blankIndex = lastMeaningfulIndex + 1;
             const suffixIsCanonical =
                 trailingCount === keepCount &&

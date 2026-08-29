@@ -1,0 +1,252 @@
+{
+  "schema": 1,
+  "provenance": {
+    "generator": "crates/mc-module/gen/gen-ctx-facade-golden.ts",
+    "authority": "packages/plugin/src/tools/ctx-expand/render.ts",
+    "ck_encoder": "packages/plugin/src/hooks/magic-context/module-wire.ts"
+  },
+  "cases": [
+    {
+      "name": "merged-completed-tool-and-structural-noise",
+      "native_messages": [
+        {
+          "absolute_ordinal": 7,
+          "info": {
+            "id": "m7",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "step-start"
+            },
+            {
+              "type": "reasoning",
+              "text": "private scratchpad"
+            },
+            {
+              "type": "text",
+              "text": "Reading it now."
+            },
+            {
+              "type": "tool",
+              "tool": "read",
+              "callID": "read:7",
+              "state": {
+                "status": "completed",
+                "input": {
+                  "filePath": "src/config.ts"
+                },
+                "output": "line one\nline two\nline three",
+                "metadata": {
+                  "title": "Read the runtime configuration"
+                }
+              }
+            },
+            {
+              "type": "step-finish",
+              "tokens": {
+                "total": 1234
+              }
+            }
+          ]
+        }
+      ],
+      "ck_messages": [
+        {
+          "mid": "m7",
+          "ordinal": 7,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "opaque",
+                  "source": "opencode",
+                  "kind": "step-start",
+                  "raw": {
+                    "type": "step-start"
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "type": "reasoning",
+                  "text": "private scratchpad"
+                }
+              },
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "Reading it now."
+                }
+              },
+              {
+                "kind": {
+                  "type": "tool_call",
+                  "id": "read:7",
+                  "name": "read",
+                  "input": {
+                    "filePath": "src/config.ts"
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "type": "tool_result",
+                  "id": "read:7",
+                  "tool_name": "read",
+                  "output": {
+                    "kind": {
+                      "type": "text",
+                      "text": "line one\nline two\nline three"
+                    }
+                  }
+                }
+              }
+            ],
+            "provider_extras": {
+              "opencode": {
+                "ctx_expand_tool_titles": {
+                  "read:7": "Read the runtime configuration"
+                }
+              }
+            },
+            "meta": {
+              "harness_id": "m7",
+              "ordinal": 7,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        }
+      ],
+      "expected": {
+        "full": [
+          {
+            "ordinal": 7,
+            "text": "[7] A (assistant) — full recovery:\n\n  [text]\nReading it now.\n  [tool: read #read:7]\n  description: Read the runtime configuration\n  input: {\"filePath\":\"src/config.ts\"}\n  output:\nline one\nline two\nline three"
+          }
+        ],
+        "verbose": {
+          "text": "[7] A (assistant)\n    • [reasoning] private scratchpad\n    • Reading it now.\n    • tool read(src/config.ts) → output ~8 tok",
+          "lastOrdinal": 7,
+          "truncated": false
+        }
+      }
+    },
+    {
+      "name": "file-and-multi-message-range",
+      "native_messages": [
+        {
+          "absolute_ordinal": 10,
+          "info": {
+            "id": "m10",
+            "role": "user"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "Inspect this artifact."
+            },
+            {
+              "type": "file",
+              "filename": "artifact.txt",
+              "mime": "text/plain",
+              "url": "data:text/plain;base64,YXJ0aWZhY3Q="
+            }
+          ]
+        },
+        {
+          "absolute_ordinal": 11,
+          "info": {
+            "id": "m11",
+            "role": "assistant"
+          },
+          "parts": [
+            {
+              "type": "text",
+              "text": "Artifact inspected."
+            }
+          ]
+        }
+      ],
+      "ck_messages": [
+        {
+          "mid": "m10",
+          "ordinal": 10,
+          "ck": {
+            "role": "user",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "Inspect this artifact."
+                }
+              },
+              {
+                "kind": {
+                  "type": "opaque",
+                  "source": "opencode",
+                  "kind": "file",
+                  "raw": {
+                    "type": "file",
+                    "filename": "artifact.txt",
+                    "mime": "text/plain",
+                    "url": "data:text/plain;base64,YXJ0aWZhY3Q="
+                  }
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "m10",
+              "ordinal": 10,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        },
+        {
+          "mid": "m11",
+          "ordinal": 11,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "Artifact inspected."
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "m11",
+              "ordinal": 11,
+              "synthetic": false,
+              "summary": false,
+              "errored": false
+            }
+          }
+        }
+      ],
+      "expected": {
+        "full": [
+          {
+            "ordinal": 10,
+            "text": "[10] U (user) — full recovery:\n\n  [text]\nInspect this artifact.\n  [file] artifact.txt"
+          },
+          {
+            "ordinal": 11,
+            "text": "[11] A (assistant) — full recovery:\n\n  [text]\nArtifact inspected."
+          }
+        ],
+        "verbose": {
+          "text": "[10] U (user)\n    • Inspect this artifact.\n    • [file]\n\n[11] A (assistant)\n    • Artifact inspected.",
+          "lastOrdinal": 11,
+          "truncated": false
+        }
+      }
+    }
+  ]
+}

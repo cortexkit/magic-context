@@ -23,6 +23,7 @@ pub mod classify;
 pub mod codec;
 pub mod compartment_coverage;
 pub mod config;
+mod content_language;
 pub mod decay_render;
 pub mod divergence;
 pub mod healing;
@@ -79,8 +80,8 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use subc_client_rs::{
-    async_trait, HandlerOutcome, HealthReport, HealthStatus, ModuleHandler, RequestCtx,
-    RouteBindRequest, RouteHandle,
+    async_trait, build_provenance, HandlerOutcome, HealthReport, HealthStatus, ModuleHandler,
+    RequestCtx, RouteBindRequest, RouteHandle,
 };
 
 use boundary::{BoundaryBlock, BoundaryContext, BoundaryMsg, Role, TriggerContext};
@@ -3384,6 +3385,7 @@ impl historian::HistorianPublicationFence for ReattachSnapshotPublicationFence {
 struct HistorianFiringTask {
     store: Arc<McStore>,
     session_id: String,
+    language: Option<String>,
     project_path: String,
     project_root: PathBuf,
     project_slug: String,
@@ -3654,6 +3656,7 @@ impl McHandler {
             McModuleConfig {
                 cache_ttl_by_model: std::collections::BTreeMap::new(),
                 model_chain: vec!["test/model".to_string()],
+                language: None,
                 execute_threshold_percentage: 65.0,
                 compaction_enabled: true,
                 memory_enabled: true,
@@ -4854,7 +4857,11 @@ impl McHandler {
             });
         }
         let trigger_reason = trigger.reason.map(|r| r.as_str().to_string());
-        if cfg.model_chain.is_empty() {
+        let model_chain = parsed
+            .historian_model_chain
+            .as_deref()
+            .unwrap_or(&cfg.model_chain);
+        if model_chain.is_empty() {
             self.record_no_fire(&store, &parsed.session_id, &loaded, "no_models");
             return PreparedHistorianAction::Complete(HistorianDiagnostics {
                 fired: false,
@@ -4920,7 +4927,7 @@ impl McHandler {
                 session_id: parsed.session_id.clone(),
                 project_path: project_path.to_string(),
                 project_slug: project_slug.clone(),
-                model_chain: cfg.model_chain.clone(),
+                model_chain: model_chain.to_vec(),
                 token_budget: derive_historian_chunk_tokens(cfg.historian_context_limit_tokens),
                 boundary,
                 memory_enabled: cfg.memory_enabled,
@@ -4999,6 +5006,7 @@ impl McHandler {
             task: HistorianFiringTask {
                 store,
                 session_id: parsed.session_id.clone(),
+                language: cfg.language.clone(),
                 project_path: project_path.to_string(),
                 project_root: binding.project_root.clone(),
                 project_slug,
@@ -5067,6 +5075,7 @@ impl McHandler {
             .cloned()
             .collect::<Vec<_>>();
         let project_slug = project_slug(&binding.project_root);
+        let language = cfg.language.clone();
         let assemble = assemble_historian_firing(
             &store,
             &parsed.messages,
@@ -5115,6 +5124,7 @@ impl McHandler {
         PreparedWrapupAction::FireReady(Box::new(HistorianFiringTask {
             store,
             session_id: parsed.session_id.clone(),
+            language,
             project_path,
             project_root: binding.project_root.clone(),
             project_slug,
@@ -5165,6 +5175,7 @@ impl McHandler {
         let HistorianFiringTask {
             store,
             session_id,
+            language,
             project_path,
             project_root,
             project_slug,
@@ -5178,8 +5189,13 @@ impl McHandler {
         let configured_failure_backoff_at_ms = firing.failure_backoff_at_ms;
         match factory.connect(&project_root).await {
             Ok(mut producer) => {
-                let mut request =
-                    firing.as_fire_request(&store, &session_id, &project_path, &project_slug);
+                let mut request = firing.as_fire_request(
+                    &store,
+                    &session_id,
+                    &project_path,
+                    &project_slug,
+                    language.as_deref(),
+                );
                 request.publication_fence = publication_fence.as_deref();
                 run_historian_firing(&mut *producer, request).await
             }
@@ -9543,12 +9559,50 @@ impl McHandler {
             return replay_dream_task_response(&recorded.response_json);
         }
 
+        let requested_model_chain = match request.get("model_chain") {
+            None => None,
+            Some(Value::Array(entries)) if entries.len() <= 16 => {
+                let mut models = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    let Some(model) = entry.as_str() else {
+                        return invalid_params_error(
+                            "dreamer.run_task model_chain entries must be strings",
+                        );
+                    };
+                    if model.trim().is_empty() || model.len() > 256 {
+                        return invalid_params_error(
+                            "dreamer.run_task model_chain entries must be 1-256 bytes",
+                        );
+                    }
+                    if !models.iter().any(|existing| existing == model) {
+                        models.push(model.to_string());
+                    }
+                }
+                Some(models)
+            }
+            Some(Value::Array(_)) => {
+                return invalid_params_error(
+                    "dreamer.run_task model_chain supports at most 16 entries",
+                );
+            }
+            Some(_) => {
+                return invalid_params_error("dreamer.run_task model_chain must be an array");
+            }
+        };
+        let model_chain = requested_model_chain
+            .as_deref()
+            .unwrap_or(&binding.config.model_chain);
         let child_session = child_session_id(&authority_project, command_id);
+        let classify_system_prompt = historian_prompt::with_content_language_directive(
+            CLASSIFY_SYSTEM_PROMPT,
+            binding.config.language.as_deref(),
+            historian_prompt::ContentLanguageDirectiveOptions::default(),
+        );
         let _dreamer_run_guard = self.register_dreamer_run(&child_session);
         let mut attempts = 0usize;
         let mut last_error = String::new();
         let mut output = None;
-        for model in &binding.config.model_chain {
+        for model in model_chain {
             attempts += 1;
             let mut producer = match self.producer_factory.connect(&binding.project_root).await {
                 Ok(producer) => producer,
@@ -9560,7 +9614,7 @@ impl McHandler {
             let started = producer
                 .start_with_generation(
                     &child_session,
-                    CLASSIFY_SYSTEM_PROMPT,
+                    classify_system_prompt.as_ref(),
                     prompt_body,
                     model,
                     CLASSIFY_MAX_OUTPUT_TOKENS,
@@ -10047,10 +10101,24 @@ impl McHandler {
                 ),
                 _ => return invalid_params_error("mapped_files must be an array or null"),
             };
+            let mapping_origin = match row.get("mapping_origin") {
+                None => "mapper".to_string(),
+                Some(Value::String(origin))
+                    if matches!(origin.as_str(), "mapper" | "host_rejected_fallback") =>
+                {
+                    origin.to_string()
+                }
+                _ => {
+                    return invalid_params_error(
+                        "mapping_origin must be mapper or host_rejected_fallback",
+                    )
+                }
+            };
             updates.push(MappingUpdate {
                 memory_id,
                 content_hash_at_prompt: hash.to_string(),
                 mapped_files,
+                mapping_origin,
             });
         }
         let now = now_ms();
@@ -10537,9 +10605,9 @@ impl McHandler {
                 )
             }
             "merge" => {
-                let Some((target_id, source_ids)) = merge_ids(args) else {
+                let Some(ids) = merge_ids(args) else {
                     return tool_error_result(
-                        "Error: provide target_id plus source_ids, or ids with the target first, when action is 'merge'.",
+                        "Error: provide target_id plus source_ids, or at least two ids when action is 'merge'.",
                     );
                 };
                 let Some(content) = non_empty_string_arg(args, "content") else {
@@ -10557,22 +10625,23 @@ impl McHandler {
                         action,
                         command_id.as_deref(),
                         |tx| {
-                            let memory = tx
-                                .merge_memories(
+                            let (memory, superseded_ids) = tx
+                                .merge_memories_canonical(
                                     memory_project,
-                                    target_id,
-                                    &source_ids,
+                                    &ids,
                                     content,
+                                    Some(conversation_key),
                                     now_ms(),
                                 )
                                 .map_err(|error| error.to_string())?
-                                .ok_or_else(|| format!("memory {target_id} was not found"))?;
+                                .ok_or_else(|| "memories could not be merged".to_string())?;
                             facade_text_response(
                                 format!(
-                                    "Merged memories into [ID: {}] in {}; superseded [{}].",
+                                    "Merged memories [{}] into canonical memory [ID: {}] in {}; superseded [{}].",
+                                    join_i64s(&ids),
                                     memory.id,
                                     memory.category,
-                                    join_i64s(&source_ids)
+                                    join_i64s(&superseded_ids)
                                 ),
                                 false,
                             )
@@ -10623,6 +10692,7 @@ impl McHandler {
             return tool_error_result(format!("Error: {error}."));
         }
         let limit = usize_arg(args, "limit").unwrap_or(8).clamp(1, 25);
+        let sources = facade_search_sources(args);
         let facade_scope = match self
             .resolve_facade_scope(channel, Some(args), "memories", false)
             .await
@@ -10636,37 +10706,68 @@ impl McHandler {
         };
         let memory_project = facade_scope.memory_project_path.as_str();
         let conversation_key = facade_scope.conversation_key.as_str();
-        match memory_tool::search_memories_and_compartments_for_session(
+        let visible_memory_ids = match store.load(conversation_key) {
+            Ok(state) => state
+                .meta
+                .rendered_memory_ids
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            Err(error) => return tool_error_result(format!("Error: {error}")),
+        };
+        let include_memories = facade_scope.memory_enabled && sources.memory;
+        let workspace_membership = match store.resolve_workspace_membership(memory_project) {
+            Ok(membership) => membership,
+            Err(error) => return tool_error_result(format!("Error: {error}")),
+        };
+
+        if include_memories {
+            if let Some(ids) = parse_search_memory_ids(query) {
+                match memory_tool::resolve_memory_ids_for_search(
+                    store,
+                    memory_project,
+                    &ids,
+                    limit.max(ids.len()),
+                    &visible_memory_ids,
+                ) {
+                    Ok(Some(results)) => {
+                        return mcp_text_result(
+                            render_facade_search_results(
+                                query,
+                                &results,
+                                conversation_key,
+                                workspace_membership.as_ref(),
+                            ),
+                            false,
+                        )
+                    }
+                    Ok(None) => {}
+                    Err(error) => return tool_error_result(format!("Error: {error}")),
+                }
+            }
+        }
+
+        match memory_tool::search_available_corpora_for_session(
             store,
             memory_project,
             conversation_key,
             query,
-            limit,
-            facade_scope.memory_enabled,
+            memory_tool::MemorySearchOptions {
+                limit,
+                include_memories,
+                include_messages: sources.message,
+                include_notes: sources.note,
+                excluded_memory_ids: &visible_memory_ids,
+            },
         ) {
-            Ok(results) => {
-                let rendered = results
-                    .into_iter()
-                    .map(|result| {
-                        json!({
-                            "source": match result.source_kind {
-                                memory_tool::MemorySearchSourceKind::Memory => "memory",
-                                memory_tool::MemorySearchSourceKind::CompartmentTitle => "compartment_title",
-                                memory_tool::MemorySearchSourceKind::CompartmentBody => "compartment_body",
-                                memory_tool::MemorySearchSourceKind::Note => "note",
-                            },
-                            "id": result.id,
-                            "snippet": result.snippet,
-                            "category": result.category,
-                            "sequence": result.sequence,
-                            "title": result.title,
-                            "status": result.note_status,
-                            "surface_condition": result.surface_condition,
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                mcp_text_result(Value::Array(rendered).to_string(), false)
-            }
+            Ok(results) => mcp_text_result(
+                render_facade_search_results(
+                    query,
+                    &results,
+                    conversation_key,
+                    workspace_membership.as_ref(),
+                ),
+                false,
+            ),
             Err(error) => tool_error_result(format!("Error: {error}")),
         }
     }
@@ -10688,7 +10789,12 @@ impl McHandler {
             None => return store_unavailable_error(),
         };
         let session_id = facade_scope.conversation_key.as_str();
-        if let Some(message) = i64_arg(args, "message").filter(|value| *value >= 0) {
+        if args.get("message").is_some() {
+            // Ordinal 0 is a real message on the Claude Code leg (its chunk
+            // transcripts store 0-based ordinals), so the domain is non-negative.
+            let Some(message) = i64_arg(args, "message").filter(|value| *value >= 0) else {
+                return tool_error_result("Error: message must be a non-negative integer.");
+            };
             if let Some(raw_message) =
                 self.cached_expand_messages(session_id)
                     .and_then(|messages| {
@@ -10933,6 +11039,9 @@ impl McHandler {
         let args = &args;
         if let Err(error) = validate_string_cap(args, "content", MAX_NOTE_CONTENT_BYTES)
             .and_then(|_| validate_string_cap(args, "surface_condition", MAX_SHORT_FIELD_BYTES))
+            .and_then(|_| validate_string_cap(args, "compiled_provider", MAX_SHORT_FIELD_BYTES))
+            .and_then(|_| validate_string_cap(args, "compiled_config", MAX_NOTE_CONTENT_BYTES))
+            .and_then(|_| validate_string_cap(args, "compile_status", MAX_SHORT_FIELD_BYTES))
         {
             return tool_error_result(format!("Error: {error}."));
         }
@@ -11017,6 +11126,10 @@ impl McHandler {
                                         session_id: Some(session),
                                         content,
                                         surface_condition: Some(condition),
+                                        compiled_provider: string_arg(args, "compiled_provider"),
+                                        compiled_config: string_arg(args, "compiled_config"),
+                                        compiled_at: i64_arg(args, "compiled_at"),
+                                        compile_status: string_arg(args, "compile_status"),
                                         anchor_block_id: anchor.as_deref(),
                                         anchor_ordinal: None,
                                         now_ms: now,
@@ -11146,7 +11259,7 @@ impl McHandler {
                         "Error: 'note_id' is required when action is 'update'.",
                     );
                 };
-                let content = non_empty_string_arg(args, "content");
+                let content = string_arg(args, "content");
                 let condition = string_arg(args, "surface_condition")
                     .map(str::trim)
                     .filter(|value| !value.is_empty());
@@ -12477,7 +12590,7 @@ fn respond_transform(
     };
     let response_meta_encode_ms = response_encode_started_at.elapsed().as_secs_f64() * 1_000.0;
     let Some(messages) = messages else {
-        let outcome = HandlerOutcome::Response(encoded);
+        let outcome = HandlerOutcome::Response(transform::encode_js_surrogate_markers(encoded));
         emit_pass_timing(
             session_id,
             pass_timings.as_ref(),
@@ -12521,7 +12634,7 @@ fn respond_transform(
     output.push(b']');
     output.extend_from_slice(&encoded[null_start + 4..]);
     let response_splice_ms = response_splice_started_at.elapsed().as_secs_f64() * 1_000.0;
-    let outcome = HandlerOutcome::Response(output);
+    let outcome = HandlerOutcome::Response(transform::encode_js_surrogate_markers(output));
     emit_pass_timing(
         session_id,
         pass_timings.as_ref(),
@@ -12572,41 +12685,7 @@ fn guidance_bytes_for(text: &str, date_line: &str) -> String {
 }
 
 fn primary_language_directive(language: &str) -> Option<String> {
-    if language.len() != 2 || !language.bytes().all(|byte| byte.is_ascii_alphabetic()) {
-        return None;
-    }
-    let name = match language.to_ascii_lowercase().as_str() {
-        "ar" => "Arabic (العربية)",
-        "cs" => "Czech (Čeština)",
-        "da" => "Danish (Dansk)",
-        "de" => "German (Deutsch)",
-        "el" => "Greek (Ελληνικά)",
-        "en" => "English",
-        "es" => "Spanish (Español)",
-        "fi" => "Finnish (Suomi)",
-        "fr" => "French (Français)",
-        "he" => "Hebrew (עברית)",
-        "hi" => "Hindi (हिन्दी)",
-        "hu" => "Hungarian (Magyar)",
-        "id" => "Indonesian",
-        "it" => "Italian (Italiano)",
-        "ja" => "Japanese (日本語)",
-        "ko" => "Korean (한국어)",
-        "nl" => "Dutch (Nederlands)",
-        "no" => "Norwegian (Norsk)",
-        "pl" => "Polish (Polski)",
-        "pt" => "Portuguese (Português)",
-        "ro" => "Romanian (Română)",
-        "ru" => "Russian (Русский)",
-        "sk" => "Slovak (Slovenčina)",
-        "sv" => "Swedish (Svenska)",
-        "th" => "Thai (ไทย)",
-        "tr" => "Turkish (Türkçe)",
-        "uk" => "Ukrainian (Українська)",
-        "vi" => "Vietnamese (Tiếng Việt)",
-        "zh" => "Chinese (中文)",
-        _ => return None,
-    };
+    let name = crate::content_language::resolve_language_name(Some(language))?;
     Some(format!(
         "Use {name} for your natural-language replies to the user unless the user explicitly asks for another language. Keep code, identifiers, file paths, commands, logs, and quoted text verbatim."
     ))
@@ -13103,6 +13182,179 @@ fn usize_arg(args: &Map<String, Value>, key: &str) -> Option<usize> {
         .and_then(|value| usize::try_from(value).ok())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FacadeSearchSources {
+    memory: bool,
+    message: bool,
+    note: bool,
+}
+
+fn facade_search_sources(args: &Map<String, Value>) -> FacadeSearchSources {
+    let Some(values) = args.get("sources") else {
+        return FacadeSearchSources {
+            memory: true,
+            message: true,
+            note: true,
+        };
+    };
+    let Some(values) = values.as_array() else {
+        return FacadeSearchSources {
+            memory: true,
+            message: true,
+            note: true,
+        };
+    };
+    FacadeSearchSources {
+        memory: values.iter().any(|value| value.as_str() == Some("memory")),
+        message: values.iter().any(|value| value.as_str() == Some("message")),
+        note: values.iter().any(|value| value.as_str() == Some("note")),
+    }
+}
+
+fn parse_search_memory_ids(query: &str) -> Option<Vec<i64>> {
+    const MAX_IDS: usize = 5;
+    let tokens = query.trim().split(',').map(str::trim).collect::<Vec<_>>();
+    if tokens.is_empty() || tokens.len() > MAX_IDS {
+        return None;
+    }
+    let mut ids = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        let digits = token.strip_prefix('#').unwrap_or(token);
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let id = digits.parse::<i64>().ok().filter(|id| *id > 0)?;
+        ids.push(id);
+    }
+    Some(ids)
+}
+
+fn format_search_age(created_at_ms: i64) -> String {
+    let now_ms = now_ms();
+    if created_at_ms > now_ms {
+        return "future".to_string();
+    }
+    let age_ms = now_ms - created_at_ms;
+    let days = age_ms / (24 * 60 * 60 * 1_000);
+    if days <= 0 {
+        return "today".to_string();
+    }
+    if days == 1 {
+        return "1d ago".to_string();
+    }
+    if days < 30 {
+        return format!("{days}d ago");
+    }
+    let months = days / 30;
+    if months == 1 {
+        return "1mo ago".to_string();
+    }
+    if months < 12 {
+        return format!("{months}mo ago");
+    }
+    let years = days / 365;
+    if years == 1 {
+        "1y ago".to_string()
+    } else {
+        format!("{years}y ago")
+    }
+}
+
+fn render_facade_search_results(
+    query: &str,
+    results: &[memory_tool::MemorySearchResult],
+    current_session_id: &str,
+    workspace_membership: Option<&mc_store::WorkspaceMembership>,
+) -> String {
+    if results.is_empty() {
+        return format!(
+            "No results found for \"{query}\" across notes, memories, primers, git commits, or message history."
+        );
+    }
+
+    let mut body = Vec::with_capacity(results.len() + 2);
+    for (index, result) in results.iter().enumerate() {
+        let score = result.score_hundredths as f64 / 100.0;
+        let rendered = match result.source_kind {
+            memory_tool::MemorySearchSourceKind::Memory => {
+                let source = workspace_membership
+                    .and_then(|membership| {
+                        result
+                            .source_project_path
+                            .as_deref()
+                            .filter(|path| *path != membership.own_identity)
+                            .and_then(|path| membership.display_name_by_path.get(path))
+                    })
+                    .map(|name| format!(" source={name}"))
+                    .unwrap_or_default();
+                format!(
+                    "[{}] [memory] score={score:.2} id={} category={}{} match=fts\n{}",
+                    index + 1,
+                    result.id,
+                    result.category.as_deref().unwrap_or("uncategorized"),
+                    source,
+                    result.snippet,
+                )
+            }
+            memory_tool::MemorySearchSourceKind::CompartmentTitle
+            | memory_tool::MemorySearchSourceKind::CompartmentBody => format!(
+                "[{}] [message] score={score:.2} compartment_id={} range={}-{} match=fts title={}\nSnippet: {}",
+                index + 1,
+                result.id,
+                result.start_ordinal.unwrap_or_default(),
+                result.end_ordinal.unwrap_or_default(),
+                result.title.as_deref().unwrap_or(""),
+                result.snippet,
+            ),
+            memory_tool::MemorySearchSourceKind::Note => {
+                let anchor = match (result.note_anchor_ordinal, result.note_session_id.as_deref()) {
+                    (Some(ordinal), Some(session_id)) if session_id == current_session_id => {
+                        format!(" @msg {ordinal}")
+                    }
+                    _ => String::new(),
+                };
+                format!(
+                    "[{}] [note] score={score:.2} id=#{} status={} {}{anchor}\n{}",
+                    index + 1,
+                    result.id,
+                    result.note_status.as_deref().unwrap_or("active"),
+                    format_search_age(result.note_created_at_ms.unwrap_or_default()),
+                    result.snippet,
+                )
+            }
+        };
+        body.push(rendered);
+    }
+    if results.iter().any(|result| {
+        matches!(
+            result.source_kind,
+            memory_tool::MemorySearchSourceKind::CompartmentTitle
+                | memory_tool::MemorySearchSourceKind::CompartmentBody
+        )
+    }) {
+        body.push(
+            "Use ctx_expand(start, end) with the range from any message result above to read the full conversation context."
+                .to_string(),
+        );
+    }
+    if results.iter().any(|result| {
+        result.source_kind == memory_tool::MemorySearchSourceKind::Note
+            && result.note_anchor_ordinal.is_some()
+            && result.note_session_id.as_deref() == Some(current_session_id)
+    }) {
+        body.push(
+            "Use ctx_expand(start=N-10, end=N) around any note @msg anchor above to read the surrounding conversation context."
+                .to_string(),
+        );
+    }
+    format!(
+        "Found {} result{} for \"{query}\":\n\n{}",
+        results.len(),
+        if results.len() == 1 { "" } else { "s" },
+        body.join("\n\n")
+    )
+}
+
 fn truncate_expand_output(mut output: String) -> String {
     if output.len() <= CTX_EXPAND_BYTE_BUDGET {
         return output;
@@ -13167,12 +13419,29 @@ fn render_cached_message_expand(message: &ck_wire::CkIngressMessage) -> String {
         "user" => "U (user)",
         role => role,
     };
-    let parts = message
-        .ck
-        .content
-        .iter()
-        .filter_map(render_cached_expand_part)
-        .collect::<Vec<_>>();
+    let mut parts = Vec::new();
+    let mut index = 0;
+    while let Some(part) = message.ck.content.get(index) {
+        if let Some((name, id, input, output)) =
+            paired_expand_tool(part, message.ck.content.get(index + 1))
+        {
+            let mut rendered = format!("  [tool: {name} #{id}]");
+            if let Some(title) = expand_recovery_tool_title(message, id) {
+                rendered.push_str(&format!("\n  description: {title}"));
+            }
+            rendered.push_str(&format!(
+                "\n  input: {input}\n  output:\n{}",
+                expand_tool_output_text(output)
+            ));
+            parts.push(rendered);
+            index += 2;
+            continue;
+        }
+        if let Some(rendered) = render_cached_expand_part(part) {
+            parts.push(rendered);
+        }
+        index += 1;
+    }
     let mut lines = vec![
         format!("[{}] {role} — full recovery:", message.ordinal),
         String::new(),
@@ -13185,6 +13454,47 @@ fn render_cached_message_expand(message: &ck_wire::CkIngressMessage) -> String {
         lines.extend(parts);
     }
     lines.join("\n")
+}
+
+fn expand_recovery_tool_title<'a>(
+    message: &'a ck_wire::CkIngressMessage,
+    call_id: &str,
+) -> Option<&'a str> {
+    message
+        .ck
+        .provider_extras
+        .get("opencode")?
+        .get("ctx_expand_tool_titles")?
+        .as_object()?
+        .get(call_id)?
+        .as_str()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+}
+
+fn paired_expand_tool<'a>(
+    call: &'a ck_wire::CkWireBlock,
+    result: Option<&'a ck_wire::CkWireBlock>,
+) -> Option<(&'a str, &'a str, &'a Value, &'a ck_wire::CkToolOutput)> {
+    let ck_wire::CkKind::ToolCall {
+        id, name, input, ..
+    } = &call.kind
+    else {
+        return None;
+    };
+    let ck_wire::CkKind::ToolResult {
+        id: result_id,
+        output,
+        ..
+    } = &result?.kind
+    else {
+        return None;
+    };
+    (id == result_id).then_some((name.as_str(), id.as_str(), input, output))
+}
+
+fn expand_file_label(filename: Option<&str>) -> String {
+    filename.map_or_else(|| "  [file]".to_string(), |name| format!("  [file] {name}"))
 }
 
 fn render_cached_expand_part(part: &ck_wire::CkWireBlock) -> Option<String> {
@@ -13204,7 +13514,14 @@ fn render_cached_expand_part(part: &ck_wire::CkWireBlock) -> Option<String> {
             "  [tool: {tool_name} #{id}]\n  output:\n{}",
             expand_tool_output_text(output)
         )),
-        ck_wire::CkKind::Media(_) => Some("  [media]".to_string()),
+        ck_wire::CkKind::Media(media) => Some(expand_file_label(media.filename.as_deref())),
+        ck_wire::CkKind::Opaque(opaque) if opaque.kind == "file" => Some(expand_file_label(
+            opaque
+                .raw
+                .get("filename")
+                .or_else(|| opaque.raw.get("url"))
+                .and_then(Value::as_str),
+        )),
         ck_wire::CkKind::Text { .. }
         | ck_wire::CkKind::Reasoning { .. }
         | ck_wire::CkKind::RedactedReasoning { .. }
@@ -13500,12 +13817,30 @@ fn render_verbose_expand_message(message: &ck_wire::CkIngressMessage) -> String 
         "user" => "U (user)",
         role => role,
     };
-    let previews = message
-        .ck
-        .content
-        .iter()
-        .filter_map(render_verbose_expand_part)
-        .collect::<Vec<_>>();
+    let mut previews = Vec::new();
+    let mut index = 0;
+    while let Some(part) = message.ck.content.get(index) {
+        if let Some((name, _id, input, output)) =
+            paired_expand_tool(part, message.ck.content.get(index + 1))
+        {
+            let argument = verbose_expand_key_argument(input);
+            let head = if argument.is_empty() {
+                name.to_string()
+            } else {
+                format!("{name}({argument})")
+            };
+            previews.push(format!(
+                "    • tool {head} → output ~{} tok",
+                mc_tokenizer::estimate_tokens(&expand_tool_output_text(output))
+            ));
+            index += 2;
+            continue;
+        }
+        if let Some(rendered) = render_verbose_expand_part(part) {
+            previews.push(rendered);
+        }
+        index += 1;
+    }
     if previews.is_empty() {
         format!("[{}] {role}", message.ordinal)
     } else {
@@ -13538,8 +13873,13 @@ fn render_verbose_expand_part(part: &ck_wire::CkWireBlock) -> Option<String> {
             "    • [reasoning] {}",
             truncate_expand_preview(text, CTX_EXPAND_VERBOSE_REASONING_PREVIEW_CHARS)
         )),
-        ck_wire::CkKind::Media(_) => Some("    • [media]".to_string()),
+        ck_wire::CkKind::Media(_) => Some("    • [file]".to_string()),
         ck_wire::CkKind::RedactedReasoning { .. } => Some("    • [redacted_reasoning]".to_string()),
+        ck_wire::CkKind::Opaque(opaque)
+            if opaque.kind == "step-start" || opaque.kind == "step-finish" =>
+        {
+            None
+        }
         ck_wire::CkKind::Opaque(opaque) => Some(format!("    • [{}]", opaque.kind)),
     }
 }
@@ -13811,24 +14151,20 @@ fn memory_ids(args: &Map<String, Value>, _action: &str) -> Vec<i64> {
     ids
 }
 
-fn merge_ids(args: &Map<String, Value>) -> Option<(i64, Vec<i64>)> {
-    if let Some(target_id) = i64_arg(args, "target_id") {
-        let source_ids = args
-            .get("source_ids")
-            .and_then(Value::as_array)?
-            .iter()
-            .filter_map(Value::as_i64)
-            .collect::<Vec<_>>();
-        if source_ids.is_empty() {
-            return None;
-        }
-        return Some((target_id, dedup_i64s(source_ids)));
-    }
-    let ids = memory_ids(args, "merge");
-    if ids.len() < 2 {
-        return None;
-    }
-    Some((ids[0], ids[1..].to_vec()))
+fn merge_ids(args: &Map<String, Value>) -> Option<Vec<i64>> {
+    let ids = if let Some(target_id) = i64_arg(args, "target_id") {
+        let mut ids = vec![target_id];
+        ids.extend(
+            args.get("source_ids")
+                .and_then(Value::as_array)?
+                .iter()
+                .filter_map(Value::as_i64),
+        );
+        dedup_i64s(ids)
+    } else {
+        memory_ids(args, "merge")
+    };
+    (ids.len() >= 2).then_some(ids)
 }
 
 fn dedup_i64s(ids: Vec<i64>) -> Vec<i64> {
@@ -14695,6 +15031,12 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
         // declarations. MC requests nothing beyond its role grants, so None keeps
         // the HELLO identical to the pre-field wire shape (serde skips None).
         capabilities: None,
+        // Introduced by subc-protocol 0.13: build provenance for the deploy ladder.
+        // The git sha is stamped by the release build command (MC_BUILD_SHA env at
+        // compile time); a bare `cargo build` leaves it absent rather than wrong.
+        // The daemon renders these in module status, which gives deploy
+        // verification a queryable build identity instead of binary archaeology.
+        provenance: Some(build_provenance(option_env!("MC_BUILD_SHA"), None, None)),
         provides: vec![ProviderRole::ToolProvider {
             tools: prompt_surface::module_tools(&PromptSurfaceSelection::default()),
             identity_scope: vec![IdentityScope::Project, IdentityScope::Session],
@@ -14751,7 +15093,12 @@ mod tests {
             final_wire_trusted: false,
         };
         let (limit, _, pct) = usage_numbers(Some(&tiny), None);
-        assert_eq!(limit, 200_000.0);
+        let boundary_golden: Value =
+            serde_json::from_str(include_str!("../testdata/boundary-golden.json")).unwrap();
+        assert_eq!(
+            limit,
+            boundary_golden["default_context_limit"].as_f64().unwrap()
+        );
         assert!((pct - 25.0).abs() < 0.01, "pct={pct}");
 
         let ok = ModuleUsage {
@@ -16129,6 +16476,8 @@ mod tests {
         outputs: Mutex<VecDeque<String>>,
         next_fact: Mutex<Option<String>>,
         prompts: Mutex<Vec<String>>,
+        systems: Mutex<Vec<String>>,
+        models: Mutex<Vec<String>>,
         on_await_output: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     }
 
@@ -16172,9 +16521,9 @@ mod tests {
         async fn start(
             &mut self,
             _session_id: &str,
-            _system: &str,
+            system: &str,
             prompt: &str,
-            _model: &str,
+            model: &str,
         ) -> Result<RunHandle, HistorianProducerError> {
             let n = self.state.starts.fetch_add(1, Ordering::SeqCst) + 1;
             self.state
@@ -16182,6 +16531,16 @@ mod tests {
                 .lock()
                 .expect("prompts mutex")
                 .push(prompt.to_string());
+            self.state
+                .systems
+                .lock()
+                .expect("systems mutex")
+                .push(system.to_string());
+            self.state
+                .models
+                .lock()
+                .expect("models mutex")
+                .push(model.to_string());
             if let Some(result) = self
                 .state
                 .start_errors
@@ -16407,6 +16766,7 @@ mod tests {
         McModuleConfig {
             cache_ttl_by_model: std::collections::BTreeMap::new(),
             model_chain: vec!["test/model".to_string()],
+            language: None,
             execute_threshold_percentage: 65.0,
             compaction_enabled: true,
             memory_enabled: true,
@@ -16709,14 +17069,6 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string()
-    }
-
-    fn tool_json_array(outcome: HandlerOutcome) -> Vec<Value> {
-        let body = tool_body(outcome);
-        let text = body["content"][0]["text"]
-            .as_str()
-            .unwrap_or_else(|| panic!("tool response missing text: {body}"));
-        serde_json::from_str(text).unwrap_or_else(|error| panic!("tool text was not JSON: {error}"))
     }
 
     fn insert_memory(
@@ -18816,7 +19168,12 @@ mod tests {
         let first_ingress = vec![ck_reasoning("reasoning-1", 1, "signed-1")];
         let first_native = vec![json!({
             "info": { "id": "reasoning-1", "role": "assistant" },
-            "parts": [{ "type": "reasoning", "text": "signed-1", "metadata": { "signature": "sig-1" } }]
+            "parts": [{
+                "type": "reasoning",
+                "text": "signed-1",
+                "metadata": { "signature": "sig-1" },
+                "cache_control": { "type": "ephemeral" }
+            }]
         })];
         let mut first_request = native_cache_request(
             "native-reasoning-movement",
@@ -18881,7 +19238,11 @@ mod tests {
         let native = second.native_messages.unwrap();
         assert_eq!(
             native[0]["parts"][0],
-            json!({ "type": "reasoning", "text": "" })
+            json!({
+                "type": "text",
+                "text": "",
+                "cache_control": { "type": "ephemeral" }
+            })
         );
         assert_eq!(native[1]["parts"][0]["text"], "signed-2");
     }
@@ -20614,9 +20975,11 @@ mod tests {
         let first_text = first["host_directives"]["channel2_nudge"]["text"]
             .as_str()
             .expect("due OpenCode pass must carry channel2 text");
-        assert!(first_text.contains("Routine housekeeping: an older span of this session folds into compact history automatically — nothing is lost and nothing pauses."));
-        assert!(first_text.contains("(~"));
-        assert!(first_text.contains("of ~100k reclaimable)"));
+        assert!(first_text.contains("Routine housekeeping: "));
+        assert!(first_text.contains("spent tool outputs (~"));
+        assert!(!first_text.contains("of ~"));
+        assert!(!first_text.contains("of this session"));
+        assert!(!first_text.contains("window"));
         assert!(first.get("channel2_directive").is_none());
 
         let mut terminal_request = opencode_request;
@@ -20653,8 +21016,11 @@ mod tests {
             .as_object()
             .expect("due Claude Code pass must carry the gateway directive");
         let cc_text = cc_directive["text"].as_str().unwrap();
-        assert!(cc_text.contains("Routine housekeeping: an older span of this session folds into compact history automatically — nothing is lost and nothing pauses."));
-        assert!(cc_text.contains("of ~100k reclaimable)"));
+        assert!(cc_text.contains("Routine housekeeping: "));
+        assert!(cc_text.contains("spent tool outputs (~"));
+        assert!(!cc_text.contains("of ~"));
+        assert!(!cc_text.contains("of this session"));
+        assert!(!cc_text.contains("window"));
         assert!(!cc_text.contains("<system-reminder>"));
         assert_eq!(cc_directive["directive_id"].as_str().unwrap().len(), 64);
         assert!(cc_directive["armed_at_ms"].as_i64().unwrap() > 0);
@@ -21725,8 +22091,8 @@ mod tests {
         let read = tool_text(call_facade(&handler, "ctx_note", json!({"action": "read"})).await);
         assert!(read.contains("remember the lattice"));
         let hits =
-            tool_json_array(call_facade(&handler, "ctx_search", json!({"query": "lattice"})).await);
-        assert!(hits.iter().any(|hit| hit["source"] == "note"));
+            tool_text(call_facade(&handler, "ctx_search", json!({"query": "lattice"})).await);
+        assert!(hits.contains("[note]"));
 
         let note_id = store
             .search_notes_like(project.to_str().unwrap(), "ses", "lattice")
@@ -22116,6 +22482,10 @@ mod tests {
                 session_id: Some("session"),
                 content: "surface after evaluation",
                 surface_condition: Some("when ready"),
+                compiled_provider: None,
+                compiled_config: None,
+                compiled_at: None,
+                compile_status: None,
                 anchor_block_id: None,
                 anchor_ordinal: None,
                 now_ms: 1,
@@ -22156,6 +22526,10 @@ mod tests {
                 session_id: Some("ses"),
                 content: "identity note lifecycle",
                 surface_condition: Some("when ready"),
+                compiled_provider: None,
+                compiled_config: None,
+                compiled_at: None,
+                compile_status: None,
                 anchor_block_id: None,
                 anchor_ordinal: None,
                 now_ms: 1,
@@ -22260,6 +22634,10 @@ mod tests {
                     session_id: Some("session"),
                     content: &format!("ready note {index}"),
                     surface_condition: Some("condition"),
+                    compiled_provider: None,
+                    compiled_config: None,
+                    compiled_at: None,
+                    compile_status: None,
                     anchor_block_id: None,
                     anchor_ordinal: None,
                     now_ms: index,
@@ -22571,7 +22949,7 @@ mod tests {
         )
         .await;
         assert!(!tool_is_error(a));
-        let b_search = tool_json_array(
+        let b_search = tool_text(
             call_facade_on_channel(
                 &handler,
                 8,
@@ -22580,7 +22958,7 @@ mod tests {
             )
             .await,
         );
-        assert!(b_search.iter().any(|row| row["source"] == "memory"));
+        assert!(b_search.contains("[memory]"), "{b_search}");
 
         let b = call_facade_on_channel(
             &handler,
@@ -22610,7 +22988,7 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        let a_comp = tool_json_array(
+        let a_comp = tool_text(
             call_facade_on_channel(
                 &handler,
                 7,
@@ -22619,8 +22997,8 @@ mod tests {
             )
             .await,
         );
-        assert!(a_comp.iter().any(|row| row["source"] == "compartment_body"));
-        let a_cannot_see_b = tool_json_array(
+        assert!(a_comp.contains("[message]"), "{a_comp}");
+        let a_cannot_see_b = tool_text(
             call_facade_on_channel(
                 &handler,
                 7,
@@ -22629,8 +23007,11 @@ mod tests {
             )
             .await,
         );
-        assert!(a_cannot_see_b.is_empty());
-        let b_comp = tool_json_array(
+        assert_eq!(
+            a_cannot_see_b,
+            "No results found for \"beta-compartment-only\" across notes, memories, primers, git commits, or message history."
+        );
+        let b_comp = tool_text(
             call_facade_on_channel(
                 &handler,
                 8,
@@ -22639,7 +23020,7 @@ mod tests {
             )
             .await,
         );
-        assert!(b_comp.iter().any(|row| row["source"] == "compartment_body"));
+        assert!(b_comp.contains("[message]"), "{b_comp}");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -23220,21 +23601,34 @@ mod tests {
             json!({"action": "update", "ids": [1], "content": "first updated"}),
             json!({"action": "write", "category": "CONSTRAINTS", "content": "second"}),
             json!({"action": "merge", "ids": [1, 2], "content": "merged"}),
-            json!({"action": "get", "ids": [1]}),
-            json!({"action": "archive", "ids": [1]}),
         ] {
             let outcome = call_facade(&handler, "ctx_memory", arguments.clone()).await;
             assert!(!tool_is_error(outcome), "action failed: {arguments}");
         }
-        let memory = store.get_memory_full(1).unwrap().unwrap();
-        assert_eq!(memory.content, "merged");
-        assert_eq!(memory.status, "archived");
-        assert!(store
-            .get_memory_full(2)
+        let canonical = store
+            .get_memory_full(1)
             .unwrap()
             .unwrap()
             .superseded_by_memory_id
-            .is_some());
+            .expect("new merged content creates a canonical row");
+        for arguments in [
+            json!({"action": "get", "ids": [canonical]}),
+            json!({"action": "archive", "ids": [canonical]}),
+        ] {
+            let outcome = call_facade(&handler, "ctx_memory", arguments.clone()).await;
+            assert!(!tool_is_error(outcome), "action failed: {arguments}");
+        }
+        let memory = store.get_memory_full(canonical).unwrap().unwrap();
+        assert_eq!(memory.content, "merged");
+        assert_eq!(memory.status, "archived");
+        assert_eq!(
+            store
+                .get_memory_full(2)
+                .unwrap()
+                .unwrap()
+                .superseded_by_memory_id,
+            Some(canonical)
+        );
         let feed = store.pull_changefeed("memories", 0, 100).unwrap();
         assert!(
             feed.rows.len() >= 6,
@@ -23619,6 +24013,24 @@ mod tests {
             .rows
             .iter()
             .any(|row| row.full_row_snapshot.get("mapping").is_some()));
+        let fallback_mapping = call_facade(&handler, "memory.set_mapping", json!({
+            "memory_project": identity, "context_store_uuid": "context", "authority_generation": generation,
+            "rows": [{"memory_id": verified_id, "content_hash_at_prompt": hash(verified_id), "mapped_files": null, "mapping_origin": "host_rejected_fallback"}]
+        })).await;
+        assert!(matches!(fallback_mapping, HandlerOutcome::Response(_)));
+        let fallback_feed = store
+            .pull_changefeed("memories", 0, 1000)
+            .unwrap()
+            .rows
+            .into_iter()
+            .rev()
+            .find(|row| row.module_row_id == verified_id)
+            .unwrap();
+        assert_eq!(fallback_feed.full_row_snapshot["mapping"], json!([]));
+        assert_eq!(
+            fallback_feed.full_row_snapshot["mapping_origin"],
+            json!("host_rejected_fallback")
+        );
         let generation_error = call_facade(&handler, "memory.set_mapping", json!({
             "memory_project": identity, "context_store_uuid": "context", "authority_generation": generation - 1,
             "rows": []
@@ -23818,7 +24230,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn dreamer_run_task_advances_model_chain_after_outage_text() {
+    async fn dreamer_run_task_uses_profile_resolved_chain_and_advances_after_outage_text() {
         let producer = Arc::new(ProducerState::default());
         producer
             .await_results
@@ -23838,8 +24250,8 @@ mod tests {
             handler_with_store(Arc::clone(&producer), default_test_config());
         let route_root = project.to_str().unwrap();
         let mut route_binding = binding(route_root, "ses");
-        route_binding.config.model_chain =
-            vec!["test/bad-model".to_string(), "test/good-model".to_string()];
+        route_binding.config.model_chain = vec!["test/base-dreamer".to_string()];
+        route_binding.config.language = Some("tr".to_string());
         handler.bind_route(7, route_binding);
         activate_module_authority(&store, "context", "git:identity", route_root, "memories");
         let generation = store
@@ -23857,6 +24269,7 @@ mod tests {
                     "task": CLASSIFY_TASK,
                     "command_id": "model-chain-command",
                     "authority_generation": generation,
+                    "model_chain": ["test/profile-bad-model", "test/profile-good-model"],
                     "payload": { "prompt_body": "classify", "items": [] },
                 }),
             )
@@ -23868,8 +24281,21 @@ mod tests {
 
         assert_eq!(producer.starts.load(Ordering::SeqCst), 2);
         assert_eq!(response["manifest_text"], json!("<classify></classify>"));
-        assert_eq!(response["diagnostics"]["model"], json!("test/good-model"));
+        assert_eq!(
+            producer.models.lock().expect("models mutex").as_slice(),
+            ["test/profile-bad-model", "test/profile-good-model"]
+        );
+        assert_eq!(
+            response["diagnostics"]["model"],
+            json!("test/profile-good-model")
+        );
         assert_eq!(response["diagnostics"]["attempts"], json!(2));
+        let systems = producer.systems.lock().expect("systems mutex");
+        assert_eq!(systems.len(), 2);
+        assert!(systems
+            .iter()
+            .all(|system| system
+                .contains("Write human-readable prose you author in: Turkish (Türkçe).")));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -23989,6 +24415,13 @@ mod tests {
         )
         .await;
         assert!(!tool_is_error(merge));
+        let canonical = store
+            .get_memory_full(source)
+            .unwrap()
+            .unwrap()
+            .superseded_by_memory_id
+            .expect("merge created a canonical replacement");
+        assert_ne!(canonical, target);
         let revision_after = crate::m1_compose::m1_revision_signal(&store, project, "ses").unwrap();
         assert_ne!(revision_before, revision_after);
         assert_eq!(
@@ -24012,7 +24445,7 @@ mod tests {
             "{transition_m1}"
         );
         assert!(
-            transition_m1.contains(&format!("<superseded id=\"{source}\" by=\"{target}\"/>")),
+            transition_m1.contains(&format!("<superseded id=\"{source}\" by=\"{canonical}\"/>")),
             "{transition_m1}"
         );
         let stable = call_transform_request(&handler, request).await;
@@ -24203,6 +24636,120 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn ctx_search_matches_typescript_shape_for_available_module_corpora() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver = FakeSessionResolver::with(&[("token", FakeResolve::Hit("ses".to_string()))]);
+        let (handler, store, _dir, project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        let project = project.to_str().unwrap();
+        handler.bind_route(7, binding(project, "token"));
+
+        let visible_id = insert_memory(&store, project, "CONSTRAINTS", "needle visible", 10);
+        let first_id = insert_memory(&store, project, "CONSTRAINTS", "needle memory first", 20);
+        let second_id = insert_memory(&store, project, "CONSTRAINTS", "needle memory second", 20);
+        assert_eq!(
+            parse_search_memory_ids(&format!("#{first_id}, {second_id}")),
+            Some(vec![first_id, second_id])
+        );
+        assert_eq!(
+            parse_search_memory_ids(&format!("{first_id} {second_id}")),
+            None,
+            "direct memory ids require TypeScript's comma-separated query shape"
+        );
+        store
+            .replace_compartments("ses", &[stored_comp(1, 10, 20, "m20", "needle history")])
+            .unwrap();
+        let note = store
+            .insert_project_note(NoteWriteInput {
+                project_path: project,
+                route_project_root: None,
+                session_id: Some("ses"),
+                content: "needle note",
+                surface_condition: None,
+                compiled_provider: None,
+                compiled_config: None,
+                compiled_at: None,
+                compile_status: None,
+                anchor_block_id: Some("m18#0"),
+                anchor_ordinal: Some(18),
+                now_ms: now_ms(),
+            })
+            .unwrap();
+        store
+            .commit(
+                "ses",
+                None,
+                &CoreState::default(),
+                &ModuleMeta {
+                    rendered_memory_ids: vec![visible_id],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let all = tool_text(
+            call_facade(
+                &handler,
+                "ctx_search",
+                json!({"query": "needle", "limit": 10}),
+            )
+            .await,
+        );
+        assert!(all.starts_with("Found 4 results for \"needle\":"), "{all}");
+        assert!(!all.lines().any(|line| {
+            line.contains("[memory]") && line.contains(&format!("id={visible_id} "))
+        }));
+        assert!(all.contains(&format!("[memory] score=1.00 id={first_id}")));
+        assert!(all.contains(&format!("[memory] score=1.00 id={second_id}")));
+        assert!(
+            all.find(&format!("id={first_id}")) < all.find(&format!("id={second_id}")),
+            "equal-score/equal-recency memory ties must use ascending ids: {all}"
+        );
+        assert!(
+            all.contains("[message] score=0.90 compartment_id=1 range=10-20 match=fts title=C1")
+        );
+        assert!(all.contains(&format!("[note] score=0.95 id=#{}", note.id)));
+        assert!(all.contains("@msg 18"));
+        assert!(all.contains("Use ctx_expand(start, end)"));
+
+        let message_only = tool_text(
+            call_facade(
+                &handler,
+                "ctx_search",
+                json!({"query": "needle", "sources": ["message"]}),
+            )
+            .await,
+        );
+        assert!(message_only.contains("[message]"));
+        assert!(!message_only.contains("[memory]"));
+        assert!(!message_only.contains("[note]"));
+
+        let id_lookup = tool_text(
+            call_facade(
+                &handler,
+                "ctx_search",
+                json!({"query": format!("#{second_id}"), "sources": ["memory"]}),
+            )
+            .await,
+        );
+        assert!(id_lookup.contains(&format!("id={second_id}")));
+        assert!(id_lookup.contains("match=fts"));
+
+        let unsupported_corpus = tool_text(
+            call_facade(
+                &handler,
+                "ctx_search",
+                json!({"query": "needle", "sources": ["primer", "git_commit"]}),
+            )
+            .await,
+        );
+        assert_eq!(
+            unsupported_corpus,
+            "No results found for \"needle\" across notes, memories, primers, git commits, or message history."
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn memory_disabled_rejects_mutation_and_excludes_memory_search() {
         let producer = Arc::new(ProducerState::default());
         let resolver = FakeSessionResolver::with(&[("token", FakeResolve::Hit("ses".to_string()))]);
@@ -24224,8 +24771,8 @@ mod tests {
             .await
         ));
         let results =
-            tool_json_array(call_facade(&handler, "ctx_search", json!({"query": "needle"})).await);
-        assert!(results.iter().all(|result| result["source"] != "memory"));
+            tool_text(call_facade(&handler, "ctx_search", json!({"query": "needle"})).await);
+        assert!(!results.contains("[memory]"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -25081,6 +25628,74 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn content_language_changes_only_the_historian_producer_system_prompt() {
+        let producer = Arc::new(ProducerState::default());
+        let mut config = default_test_config();
+        config.language = Some("tr".to_string());
+        let (handler, store, _dir, _project) = handler_with_store(Arc::clone(&producer), config);
+
+        let response = call_transform(&handler, big_messages()).await;
+        assert_eq!(response["historian"]["fired"], true);
+        wait_for_count(&producer.starts, 1).await;
+
+        let expected = crate::historian_prompt::with_content_language_directive(
+            crate::historian_prompt::HISTORIAN_SYSTEM_PROMPT,
+            Some("tr"),
+            crate::historian_prompt::ContentLanguageDirectiveOptions::default(),
+        );
+        assert_eq!(
+            producer.systems.lock().unwrap().as_slice(),
+            [expected.as_ref()],
+            "language guidance belongs to the producer system role"
+        );
+        wait_for_idle(&store).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn content_language_is_byte_invisible_to_transform_output() {
+        let plain_producer = Arc::new(ProducerState::default());
+        let (plain_handler, _plain_store, _plain_dir, _plain_project) =
+            handler_with_store(plain_producer, default_test_config());
+
+        let localized_producer = Arc::new(ProducerState::default());
+        let mut localized_config = default_test_config();
+        localized_config.language = Some("tr".to_string());
+        let (localized_handler, _localized_store, _localized_dir, _localized_project) =
+            handler_with_store(localized_producer, localized_config);
+
+        let fixture = request(vec![ck("language-wire", 1, "same rust-mode fixture")]);
+        let HandlerOutcome::Response(plain) = plain_handler
+            .handle_transform_for_test(7, fixture.clone())
+            .await
+        else {
+            panic!("plain transform fixture did not return bytes");
+        };
+        let HandlerOutcome::Response(localized) = localized_handler
+            .handle_transform_for_test(7, fixture)
+            .await
+        else {
+            panic!("localized transform fixture did not return bytes");
+        };
+
+        let mut plain: Value = serde_json::from_slice(&plain).expect("plain transform JSON");
+        let mut localized: Value =
+            serde_json::from_slice(&localized).expect("localized transform JSON");
+        assert_eq!(
+            serde_json::to_vec(&plain["ck_messages"]).unwrap(),
+            serde_json::to_vec(&localized["ck_messages"]).unwrap(),
+            "language must not change transform-served wire bytes, including m0/m1"
+        );
+        // Timings are measured per invocation and intentionally cannot be byte-stable.
+        // Every provider-visible response field, including the primary system hash, must match.
+        plain.as_object_mut().unwrap().remove("timings");
+        localized.as_object_mut().unwrap().remove("timings");
+        assert_eq!(
+            localized, plain,
+            "language must not change any deterministic transform output or primary system hash"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn handler_full_autonomous_cycle_fires_publishes_and_next_pass_folds() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) =
@@ -25900,6 +26515,12 @@ mod tests {
                         token_count: 2,
                         source_bytes: b"nine".to_vec(),
                     },
+                    TagMintInput {
+                        block_id: "m11#0".to_string(),
+                        kind: "message".to_string(),
+                        token_count: 2,
+                        source_bytes: b"eleven".to_vec(),
+                    },
                 ],
                 2,
             )
@@ -25916,10 +26537,10 @@ mod tests {
         assert!(summary.contains("coverage ordinal 10"));
         assert!(summary.contains("boundary present"));
         assert!(summary.contains("1 pending drop"));
-        assert!(summary.contains("2 tags"));
+        assert!(summary.contains("3 tags"));
         assert!(summary.contains("pending m1 delta true age_ms=0"));
         assert!(summary.contains("last historian: published seq 3"));
-        assert_eq!(body["tag_count"], json!(2));
+        assert_eq!(body["tag_count"], json!(3));
         assert_eq!(body["pending_m1_delta"], json!(true));
         assert_eq!(body["pending_m1_age_ms"], json!(0));
         assert_eq!(body["tail_identity_re_adopt_count"], json!(0));
@@ -28546,7 +29167,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn status_diagnostics_surface_pending_historian_side_channel_failure() {
+    async fn status_diagnostics_do_not_advertise_lossy_historian_side_channels_as_pending() {
         let producer = Arc::new(ProducerState::default());
         let (handler, store, _dir, _project) = handler_with_store(producer, default_test_config());
         seed_historian_phase(&store, HistorianPhase::Publishing);
@@ -28584,24 +29205,33 @@ mod tests {
 
         let status =
             call_dispatch_request(&handler, json!({ "kind": "status", "session_id": "ses" })).await;
-        assert_eq!(status["historian"]["side_channel_pending_count"], 1);
-        assert!(status["historian"]["side_channel_last_failure"]
-            .as_str()
-            .is_some_and(|error| error.contains("event")));
-
-        tokio::time::sleep(Duration::from_millis(1_100)).await;
-        let _ = call_transform(
-            &handler,
-            vec![ck("m21", 21, "follow up"), ck("m22", 22, "small reply")],
-        )
-        .await;
-        assert_eq!(store.load_compartment_events("ses").unwrap().len(), 1);
-        let recovered =
-            call_dispatch_request(&handler, json!({ "kind": "status", "session_id": "ses" })).await;
-        assert_eq!(recovered["historian"]["side_channel_pending_count"], 0);
+        assert_eq!(status["historian"]["side_channel_pending_count"], 0);
         assert_eq!(
-            recovered["historian"]["side_channel_last_failure"],
+            status["historian"]["side_channel_last_failure"],
             Value::Null
+        );
+        assert!(store.load_compartment_events("ses").unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn profile_resolved_transform_models_override_base_config_for_broca_dispatch() {
+        let producer = Arc::new(ProducerState::default());
+        let mut config = default_test_config();
+        config.model_chain = vec!["anthropic/base-historian".to_string()];
+        let (handler, store, _dir, _project) = handler_with_store(Arc::clone(&producer), config);
+        let mut transform = request(big_messages());
+        transform["serializer_profile"] = json!("opencode-aisdk");
+        transform["historian_model_chain"] =
+            json!(["anthropic/profile-historian", "openai/profile-fallback"]);
+
+        let response = call_transform_request(&handler, transform).await;
+        assert_eq!(response["historian"]["fired"], true);
+        wait_for_count(&producer.starts, 1).await;
+        wait_for_idle(&store).await;
+        assert_eq!(
+            producer.models.lock().expect("models mutex").as_slice(),
+            ["anthropic/profile-historian"],
+            "the Broca dispatch must use the host's profile-resolved primary instead of module-local base config"
         );
     }
 
@@ -30693,32 +31323,117 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ctx_expand_accepts_native_ordinal_zero_in_message_and_range_forms() {
+    async fn ctx_expand_preserves_typescript_tool_titles_immediately_and_after_snapshot_loss() {
+        let golden: Value =
+            serde_json::from_str(include_str!("../testdata/ctx-facade-golden.json")).unwrap();
+        let case = golden["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["name"] == "merged-completed-tool-and-structural-noise")
+            .unwrap();
+        let messages: Vec<ck_wire::CkIngressMessage> =
+            serde_json::from_value(case["ck_messages"].clone()).unwrap();
+        let expected = case["expected"]["full"][0]["text"].as_str().unwrap();
+        assert!(expected.contains("description: Read the runtime configuration"));
+
         let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
         let (handler, store, _dir, project) = handler_with_store_and_resolver(
             Arc::new(ProducerState::default()),
             default_test_config(),
             resolver,
         );
-        publish_ctx_expand_fixture(
-            &store,
-            "ses",
-            project.to_str().unwrap(),
-            &[ck_with_role("m0", 0, "user", "ordinal zero")],
+        publish_ctx_expand_fixture(&store, "ses", project.to_str().unwrap(), &messages);
+
+        let request = Arc::new(transform_request(messages.clone(), 1_000, 128_000));
+        let retained_bytes = request.retained_bytes();
+        {
+            let mut snapshots = handler.transform_snapshots.lock().unwrap();
+            let generation = snapshots.begin("ses");
+            snapshots.finish_ready("ses", generation, Arc::clone(&request), 0, retained_bytes);
+        }
+        let immediate = tool_text(call_facade(&handler, "ctx_expand", json!({"message": 7})).await);
+        assert_eq!(immediate, expected);
+
+        handler.transform_snapshots.lock().unwrap().remove("ses");
+        let after_snapshot_loss =
+            tool_text(call_facade(&handler, "ctx_expand", json!({"message": 7})).await);
+        assert_eq!(after_snapshot_loss, expected);
+    }
+
+    #[test]
+    fn ctx_expand_renderers_match_typescript_facade_golden() {
+        let golden: Value =
+            serde_json::from_str(include_str!("../testdata/ctx-facade-golden.json")).unwrap();
+        assert_eq!(golden["schema"], json!(1));
+        let cases = golden["cases"].as_array().expect("golden cases");
+        assert!(!cases.is_empty(), "ctx facade golden must not be empty");
+        for case in cases {
+            let name = case["name"].as_str().expect("case name");
+            let messages: Vec<ck_wire::CkIngressMessage> =
+                serde_json::from_value(case["ck_messages"].clone()).expect("CK messages");
+            for expected in case["expected"]["full"]
+                .as_array()
+                .expect("full render cases")
+            {
+                let ordinal = expected["ordinal"].as_u64().expect("full ordinal");
+                let message = messages
+                    .iter()
+                    .find(|message| message.ordinal == ordinal)
+                    .expect("golden message ordinal");
+                assert_eq!(
+                    render_cached_message_expand(message),
+                    expected["text"].as_str().expect("full text"),
+                    "full renderer drifted for {name} ordinal {ordinal}"
+                );
+            }
+            let start = i64::try_from(messages.first().expect("messages").ordinal).unwrap();
+            let end = i64::try_from(messages.last().expect("messages").ordinal).unwrap();
+            let rendered = render_verbose_range_expand_with_budget(&messages, start, end, 15_000);
+            let expected = &case["expected"]["verbose"];
+            assert_eq!(
+                rendered.text,
+                expected["text"].as_str().expect("verbose text"),
+                "verbose renderer drifted for {name}"
+            );
+            assert_eq!(
+                rendered.last_ordinal,
+                expected["lastOrdinal"].as_i64().expect("last ordinal"),
+                "verbose last ordinal drifted for {name}"
+            );
+            assert_eq!(
+                rendered.truncated,
+                expected["truncated"].as_bool().expect("truncated"),
+                "verbose truncation drifted for {name}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ctx_expand_accepts_ordinal_zero_because_cc_transcripts_are_zero_based() {
+        // The ordinal DOMAINS deliberately differ across legs: OpenCode/Pi
+        // transcripts are 1-based (the TypeScript facade rejects 0), while
+        // Claude Code chunk transcripts store 0-based ordinals — so the module
+        // facade must accept ordinal 0 or a CC session's first message becomes
+        // permanently unexpandable. Same-schema-everywhere is false parity here.
+        let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".to_string()))]);
+        let (handler, _store, _dir, _project) = handler_with_store_and_resolver(
+            Arc::new(ProducerState::default()),
+            default_test_config(),
+            resolver,
         );
 
-        // R5-11: the shape published by a zero-based native history round-trips exactly.
-        let by_message =
-            tool_text(call_facade(&handler, "ctx_expand", json!({"message": 0})).await);
-        assert!(by_message.contains("[0] U (user) — full recovery:"));
-        assert!(by_message.contains("ordinal zero"));
-        let by_range =
-            tool_text(call_facade(&handler, "ctx_expand", json!({"start": 0, "end": 0})).await);
-        assert!(by_range.contains("Messages 0-0"));
-        assert!(by_range.contains("[0] U: ordinal zero"));
+        // Ordinal 0 passes domain validation (the miss is a not-found, not a
+        // domain rejection), and negatives still refuse.
+        let by_message = call_facade(&handler, "ctx_expand", json!({"message": 0})).await;
+        assert!(!tool_text(by_message).contains("must be a"));
+        let by_range = call_facade(&handler, "ctx_expand", json!({"start": 0, "end": 0})).await;
+        assert!(!tool_text(by_range).contains("non-negative integers"));
+        let negative = call_facade(&handler, "ctx_expand", json!({"message": -1})).await;
+        assert!(tool_is_error(negative));
         let schema = ctx_expand_schema();
-        assert_eq!(schema["properties"]["message"]["minimum"], json!(0));
-        assert_eq!(schema["properties"]["start"]["minimum"], json!(0));
-        assert_eq!(schema["properties"]["end"]["minimum"], json!(0));
+        for property in ["message", "start", "end"] {
+            assert_eq!(schema["properties"][property]["minimum"], json!(0));
+        }
     }
 }

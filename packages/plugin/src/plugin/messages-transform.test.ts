@@ -355,7 +355,9 @@ describe("createMessagesTransformHandler — issue #327 wire tail", () => {
             "user",
         ]);
         expect(output.messages.at(-1)?.info.id).toBe("m1");
-        expect(output.messages[0].parts).toEqual([{ type: "text", text: "" }]);
+        // Re-anchoring preserves the pending shell without letting `keep`
+        // manufacture content that was absent from the harness object.
+        expect(output.messages[0].parts).toEqual([]);
     });
 
     it("re-anchors a persisted error-only assistant shell without deleting it", async () => {

@@ -1,17 +1,17 @@
 import type { Database } from "../../../shared/sqlite";
+import { logSlowWriteTransaction } from "../../../shared/write-transaction-timing";
 import { deleteDreamState, getDreamState, setDreamState } from "./storage-dream-state";
 
-const LEASE_DURATION_MS = 2 * 60 * 1000; // 2 minutes — renewed periodically during task execution
+const LEASE_DURATION_MS = 2 * 60 * 1000; // Expires after 2 minutes unless the heartbeat renews it.
 
 /**
- * Dreamer v2 uses one lease PER CONFLICT-DOMAIN (memory:<project>,
- * key-files:<project>, user-memories, …) so disjoint-state tasks don't block
- * each other while the memory-mutating tasks still serialize. A lease is four
- * `dream_state` rows under a key namespace.
+ * Each lease key identifies an independent conflict domain (memory:<project>,
+ * key-files:<project>, user-memories, …). Different keys can be used at the same
+ * time, while work using the same key is serialized. Each lease is represented by
+ * four `dream_state` rows under its key namespace.
  *
- * `DREAMING_LEASE_KEY` is the legacy single-lease key. It keeps the original
- * `acquireLease(db, holderId)` signature working (the lease-key param defaults to
- * it) for the still-suite-based runner until the per-task scheduler replaces it.
+ * `DREAMING_LEASE_KEY` is the legacy default key. Keeping it as the default
+ * preserves callers that still use `acquireLease(db, holderId)` without a key.
  */
 export const DREAMING_LEASE_KEY = "dreaming";
 
@@ -23,8 +23,8 @@ interface LeaseRowKeys {
 }
 
 function rowKeys(leaseKey: string): LeaseRowKeys {
-    // The legacy lease retains its historical un-namespaced row keys so an
-    // in-flight pre-upgrade lease isn't orphaned across the boundary.
+    // Preserve the legacy row names so leases created by an older plugin version
+    // remain readable during an upgrade.
     if (leaseKey === DREAMING_LEASE_KEY) {
         return {
             holder: "dreaming_lease_holder",
@@ -96,22 +96,27 @@ export function leaseOwnershipMatches(
     );
 }
 
-// The lease spans four dream_state rows (holder/heartbeat/expiry/generation), so it can't
-// be a single-statement CAS like compartment-lease.ts. Instead each mutation
-// runs under BEGIN IMMEDIATE: the write lock is taken at BEGIN time (not at the
-// first write, as the deferred BEGIN that db.transaction() emits would), so the
-// read-then-write is atomic across the OpenCode+Pi processes that share this
-// SQLite file. Without IMMEDIATE, two processes could both read isLeaseActive()
-// = false under WAL snapshot isolation and both write — double-acquiring the
-// lease and spawning duplicate dreamer workers. busy_timeout (set in
-// initializeDatabase) makes the loser wait rather than throw SQLITE_BUSY.
-function runImmediate<T>(db: Database, body: () => T): T {
+// Mutations that update a lease use BEGIN IMMEDIATE. SQLite takes the write lock
+// before code reads and updates the four lease rows, making each decision atomic
+// across handles sharing the database and preventing duplicate acquisition.
+// busy_timeout (set in initializeDatabase) makes a contending process wait rather
+// than fail immediately with SQLITE_BUSY.
+function runImmediate<T>(
+    db: Database,
+    body: () => T,
+    site?: string,
+    slowWriteThresholdMs?: number,
+): T {
+    const transactionStartedAt = site === undefined ? undefined : performance.now();
     db.exec("BEGIN IMMEDIATE");
     let committed = false;
     try {
         const result = body();
         db.exec("COMMIT");
         committed = true;
+        if (site !== undefined && transactionStartedAt !== undefined) {
+            logSlowWriteTransaction(site, transactionStartedAt, slowWriteThresholdMs);
+        }
         return result;
     } finally {
         if (!committed) {
@@ -190,48 +195,40 @@ export function runLeaseGuardedWrite<T>(
     holderId: string,
     leaseKey: string,
     fn: () => T,
+    slowWriteThresholdMs?: number,
 ): T {
-    return runImmediate(db, () => {
-        // The lease is checked after BEGIN IMMEDIATE has acquired SQLite's write
-        // lock. That removes the deferred-transaction gap where another process
-        // could steal the lease after a peek but before the durable mutation.
-        if (!peekLeaseHolderAndExpiry(db, holderId, leaseKey)) {
-            throw new Error("Dream lease lost before guarded write");
-        }
-        return fn();
-    });
+    return runImmediate(
+        db,
+        () => {
+            // Check ownership after BEGIN IMMEDIATE acquires the write lock. This
+            // prevents another process from taking the lease before fn performs its
+            // write.
+            if (!peekLeaseHolderAndExpiry(db, holderId, leaseKey)) {
+                throw new Error("Dream lease lost before guarded write");
+            }
+            return fn();
+        },
+        `lease-guarded-write:${leaseKey}`,
+        slowWriteThresholdMs,
+    );
 }
 
-/** Renewal beat interval. The lease TTL is LEASE_DURATION_MS (2×), so a single
- *  missed or contended beat still leaves a full interval of runway. */
+/** Renew halfway through the 120-second lease, leaving about 60 seconds for a
+ * delayed or contended renewal before the lease expires. */
 const LEASE_HEARTBEAT_INTERVAL_MS = 60 * 1000;
 
 export interface LeaseHeartbeat {
     /** Stop the heartbeat timer. Safe to call more than once. */
     stop(): void;
-    /** True once the lease was confirmed genuinely lost (and onLost was called). */
+    /** True after this process no longer owns the lease and onLost was called. */
     readonly lost: boolean;
 }
 
 /**
- * Keep a held lease alive on a background interval, tolerating transient DB
- * contention. The brittle inline pattern this replaces aborted the whole task on
- * the FIRST renewal hiccup — including a transient SQLITE_BUSY throw under a
- * multi-instance lock storm — even though the 2-minute TTL means one missed 60s
- * beat is harmless. That killed multi-minute dreamer runs (map-memories/verify)
- * with "prompt aborted by external signal" when the lease was never actually
- * lost.
- *
- * We declare the lease lost (and call onLost ONCE) only when:
- *   - a DIFFERENT holder actively owns it — renewLease fails and acquireLease
- *     can't reclaim it (acquireLease reclaims an expired-but-free lease, so a
- *     self-inflicted expiry from our own delayed beat recovers instead of
- *     killing the run); or
- *   - a full TTL has elapsed with no confirmed renewal (only reachable via
- *     repeated transient throws), past which exclusive ownership can't be
- *     guaranteed.
- * A transient throw with a recent successful renewal is swallowed and retried on
- * the next beat.
+ * Keep a held lease alive on a background interval. Transient renewal errors are
+ * retried, an expired lease is reacquired when no other holder claimed it, and
+ * lease loss is reported once after another holder is confirmed or a full
+ * two-minute lease period passes without a confirmed renewal.
  */
 export function startLeaseHeartbeat(
     db: Database,
@@ -257,8 +254,8 @@ export function startLeaseHeartbeat(
     const beat = () => {
         if (lost) return;
         try {
-            // Continuous ownership: renewLease keeps it if still ours. This is
-            // the always-safe path — we never lost the lease.
+            // A successful renewal confirms that this process still owns the lease
+            // and refreshes the confirmation time.
             if (
                 renewLease(
                     db,
@@ -277,21 +274,17 @@ export function startLeaseHeartbeat(
                 declareLost("lease generation changed — another holder acquired it");
                 return;
             }
-            // renewLease failed → we are no longer the recorded holder OR the
-            // lease lapsed. If the gap since our last confirmed beat exceeds a
-            // full TTL, the lease was provably claimable by another process for a
-            // meaningful window — a sibling could have acquired AND mutated in the
-            // gap (a >2min stall / machine sleep), so blindly reclaiming a now-free
-            // lease and continuing on our stale snapshot is split-brain. Declare
-            // lost instead. A SHORT delay (≤ TTL, e.g. a slightly-late 60s beat
-            // causing self-inflicted expiry) still recovers via reclaim below.
+            // If renewal fails and the gap since the last confirmation exceeds a
+            // two-minute lease period, another process may have acquired and used
+            // the lease while this worker was unable to confirm ownership. Do not
+            // let this worker reclaim the lease without current ownership. If the
+            // gap is shorter, the next beat can reacquire an unowned lease below.
             if (Date.now() - lastConfirmedAt > LEASE_DURATION_MS) {
                 declareLost("lease lapsed past TTL — another holder may have run");
                 return;
             }
-            // reclaim an expired-but-free lease after only a short gap (our own
-            // delayed beat); returns false only when a different holder is
-            // actively in possession.
+            // On this beat, reacquire an expired lease if no other holder has
+            // claimed it. This returns false when another holder owns it.
             const reacquired = acquireLeaseWithAcquisition(db, holderId, leaseKey);
             if (reacquired) {
                 if (expectedGeneration !== null && reacquired.generation !== expectedGeneration) {
@@ -310,9 +303,9 @@ export function startLeaseHeartbeat(
         }
     };
 
-    // Confirm ownership before the caller can begin work. Without this first
-    // synchronous beat, a long pre-prompt stall could let the TTL expire and a
-    // same-domain runner start while this runner still waits for the 60s timer.
+    // Confirm ownership synchronously before returning. Otherwise the caller could
+    // pause until the lease expires and begin work after another task acquires the
+    // same lease key.
     beat();
 
     const timer = lost ? undefined : setInterval(beat, intervalMs);
