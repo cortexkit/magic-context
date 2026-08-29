@@ -394,6 +394,21 @@ function isOverlayLive(todo: TodoItem): boolean {
 
 export class TodoOverlay {
 	private spinTimer: ReturnType<typeof setInterval> | undefined;
+	private syncSpinTimer(hasInProgress: boolean): void {
+		if (hasInProgress && this.widgetRegistered) {
+			if (this.spinTimer) return;
+			// Wall-clock repaint so the in_progress glyph animates between
+			// todowrite events; keyed on the presence of an in_progress todo so
+			// an overlay of pending/completed rows costs nothing.
+			this.spinTimer = setInterval(() => {
+				this.tui?.requestRender();
+			}, 160);
+			this.spinTimer.unref?.();
+		} else if (this.spinTimer) {
+			clearInterval(this.spinTimer);
+			this.spinTimer = undefined;
+		}
+	}
 	private uiCtx: ExtensionUIContext | undefined;
 	private sessionId: string | undefined;
 	private widgetRegistered = false;
@@ -452,15 +467,9 @@ export class TodoOverlay {
 				{ placement: "aboveEditor" },
 			);
 			this.widgetRegistered = true;
-			if (!this.spinTimer) {
-				// Wall-clock repaint so the in_progress glyph animates between
-				// todowrite events; cleared whenever the widget unmounts.
-				this.spinTimer = setInterval(() => {
-					this.tui?.requestRender();
-				}, 160);
-				this.spinTimer.unref?.();
-			}
+			this.syncSpinTimer(visible.some((todo) => todo.status === "in_progress"));
 		} else {
+			this.syncSpinTimer(visible.some((todo) => todo.status === "in_progress"));
 			this.tui?.requestRender();
 		}
 	}
