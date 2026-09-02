@@ -46,6 +46,14 @@
       "description": "Enable automatic npm self-update checks for the OpenCode plugin. Security: USER-only in config loader, so hostile project configs cannot suppress updates.",
       "type": "boolean"
     },
+    "anthropic_transport_providers": {
+      "description": "ProviderIDs whose Claude-named models are served through OpenCode's \"@ai-sdk/anthropic\" adapter (e.g. [\"github-copilot\"] for Copilot Claude), i.e. the wire drops empty text/reasoning parts before the API exactly like the canonical Anthropic provider. Extends Magic Context's reasoning-strip machinery to those routes. Security: USER-only in the config loader; a project config cannot widen the gate. List a provider only if every Claude model under it uses the @ai-sdk/anthropic adapter.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
     "language": {
       "description": "Output language for Magic Context's generated content and guidance, as a 2-letter ISO 639-1 code (e.g. \"tr\", \"es\", \"de\", \"ja\", \"pt\"). When set, the historian, dreamer, sidekick, and the agent-guidance block instruct the model to write its PROSE in this language while keeping all structural tokens (XML tags, the five memory category names, code identifiers, file paths) in English. USER-LEVEL ONLY (ignored in project config for security). Unset = today's behavior (model mirrors the conversation; English scaffolding). Changing it triggers one cache re-materialization; existing compartments/memories keep their original language until naturally rewritten.",
       "type": "string"

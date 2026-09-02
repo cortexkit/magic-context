@@ -31,9 +31,48 @@ export const WHOLE_MESSAGE_PLACEHOLDER_TEXT = "[dropped]";
  *
  * Unknown or non-canonical providers therefore must keep native parts (or use
  * non-empty whole-message placeholders) rather than producing empty sentinels.
+ *
+ * One user-asserted exception exists: providerIDs listed in the user-tier
+ * `anthropic_transport_providers` setting serve Claude-named models through
+ * OpenCode's `@ai-sdk/anthropic` adapter as well, so the wire filter drops
+ * empty sentinels for them too (see isClaudeModelUnderConfiguredAnthropicTransport).
  */
-export function modelAcceptsEmptyContent(providerID?: string): boolean {
-    return providerID === "anthropic";
+export function modelAcceptsEmptyContent(providerID?: string, modelName?: string): boolean {
+    if (providerID === "anthropic") return true;
+    return isClaudeModelUnderConfiguredAnthropicTransport(providerID, modelName);
+}
+
+let anthropicTransportProviders: ReadonlySet<string> = new Set();
+
+/**
+ * Populate the Anthropic-transport allow-list from the user-tier setting
+ * `anthropic_transport_providers` (see config entry point). Only providers
+ * whose Claude models ride OpenCode's `@ai-sdk/anthropic` adapter belong here:
+ * that adapter filters empty text/reasoning parts before the wire. A provider
+ * that mixes adapters (Claude models on @ai-sdk/anthropic, other models on an
+ * openai-compatible adapter) is safe to list because the gate additionally
+ * requires a Claude-named model. Fail-closed: unlisted providers, missing
+ * model names, and non-Claude model names keep native parts.
+ */
+export function setAnthropicTransportProviders(providerIDs?: Iterable<string>): void {
+    const normalized = new Set<string>();
+    for (const id of providerIDs ?? []) {
+        if (typeof id === "string" && id.trim().length > 0) {
+            normalized.add(id.trim().toLowerCase());
+        }
+    }
+    anthropicTransportProviders = normalized;
+}
+
+function isClaudeModelUnderConfiguredAnthropicTransport(
+    providerID?: string,
+    modelName?: string,
+): boolean {
+    if (!providerID || !modelName) return false;
+    return (
+        anthropicTransportProviders.has(providerID.toLowerCase()) &&
+        modelName.toLowerCase().includes("claude")
+    );
 }
 
 /**

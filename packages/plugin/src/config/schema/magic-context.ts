@@ -751,6 +751,9 @@ export interface MagicContextConfig {
     /** Auto-update the cached OpenCode plugin wrapper when a newer npm version is available.
      *  USER config only; project configs cannot disable it. Default: true. */
     auto_update?: boolean;
+    /** ProviderIDs whose Claude models ride OpenCode's @ai-sdk/anthropic transport.
+     *  USER config only; project configs cannot set it. See sentinel.modelAcceptsEmptyContent. */
+    anthropic_transport_providers?: string[];
     /** Output language for generated Magic Context prose. USER config only. */
     language?: string;
     /** Active user-owned model profile after user/project resolution. */
@@ -956,6 +959,12 @@ export const MagicContextConfigSchema = z
             .optional()
             .describe(
                 "Enable automatic npm self-update checks for the OpenCode plugin. Security: USER-only in config loader, so hostile project configs cannot suppress updates.",
+            ),
+        anthropic_transport_providers: z
+            .array(z.string().trim().toLowerCase().min(1))
+            .optional()
+            .describe(
+                'ProviderIDs whose Claude-named models are served through OpenCode\'s "@ai-sdk/anthropic" adapter (e.g. ["github-copilot"] for Copilot Claude), i.e. the wire drops empty text/reasoning parts before the API exactly like the canonical Anthropic provider. Extends Magic Context\'s reasoning-strip machinery to those routes. Security: USER-only in the config loader; a project config cannot widen the gate. List a provider only if every Claude model under it uses the @ai-sdk/anthropic adapter.',
             ),
         language: z
             .string()

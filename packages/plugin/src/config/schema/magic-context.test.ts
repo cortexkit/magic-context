@@ -239,6 +239,16 @@ describe("MagicContextConfigSchema", () => {
             expect(MagicContextConfigSchema.parse({ auto_update: true }).auto_update).toBe(true);
         });
 
+        it("accepts an optional anthropic_transport_providers allow-list and normalizes it", () => {
+            const parsed = MagicContextConfigSchema.parse({
+                anthropic_transport_providers: [" GitHub-Copilot "],
+            });
+            expect(parsed.anthropic_transport_providers).toEqual(["github-copilot"]);
+            expect(
+                MagicContextConfigSchema.parse({}).anthropic_transport_providers,
+            ).toBeUndefined();
+        });
+
         it("accepts an explicitly configured Pi subagent extension allowlist", () => {
             expect(
                 MagicContextConfigSchema.parse({

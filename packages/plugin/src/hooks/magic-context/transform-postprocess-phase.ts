@@ -679,6 +679,14 @@ interface RunPostTransformPhaseArgs {
      * cannot diverge from the main transform on cold DB-recovered passes.
      */
     resolvedProviderID?: string;
+    /**
+     * Model identifier resolved once by the main transform for this pass.
+     * Extends the empty-sentinel gate to Claude models served under
+     * user-configured Anthropic-transport providerIDs (see
+     * sentinel.modelAcceptsEmptyContent); call sites without a model name
+     * stay canonical-only.
+     */
+    resolvedModelName?: string;
     /** True only when the live request is canonical Anthropic Fable 5.1. */
     thinkingBindingRecoveryEnabledForModel?: boolean;
     /** Raw harness observations captured before any Magic Context insertion or sentinelization. */
@@ -815,10 +823,11 @@ export function finalizeMessageRepresentation(
         trailingBlankDecisions?: ReadonlyMap<string, TrailingBlankDecision>;
         skipMergedReasoningStrip?: boolean;
         skipTrailingWhitespaceStrip?: boolean;
+        resolvedModelName?: string;
     },
 ): { clearedParts: number; mergedReasoningParts: number } {
     let clearedParts = 0;
-    if (modelAcceptsEmptyContent(resolvedProviderID)) {
+    if (modelAcceptsEmptyContent(resolvedProviderID, options?.resolvedModelName)) {
         const prependedMessageCount = Math.min(
             messages.length,
             Math.max(0, options?.prependedMessageCount ?? 0),
@@ -852,6 +861,7 @@ export function finalizeMessageRepresentation(
               messages,
               resolvedProviderID,
               options?.thinkingBindingRecoveryMessageIds ?? new Set(),
+              options?.resolvedModelName,
           );
     const mergedReasoningParts =
         bindingRecoveryParts +
@@ -860,8 +870,12 @@ export function finalizeMessageRepresentation(
             : stripReasoningFromMergedAssistants(messages, resolvedProviderID, {
                   mutationExemptMessage: options?.reasoningMutationExemptMessage,
                   frozenMessageIds: options?.mergedReasoningStrippedIds,
+                  modelName: options?.resolvedModelName,
               }));
-    if (!options?.skipTrailingWhitespaceStrip && modelAcceptsEmptyContent(resolvedProviderID)) {
+    if (
+        !options?.skipTrailingWhitespaceStrip &&
+        modelAcceptsEmptyContent(resolvedProviderID, options?.resolvedModelName)
+    ) {
         applyFrozenTrailingBlankDecisions(
             messages,
             typeof newestAssistant?.info.id === "string" ? newestAssistant.info.id : undefined,
@@ -1168,7 +1182,10 @@ export async function runPostTransformPhase(
             sessionLog(args.sessionId, "ctx_reduce permission read failed (ignored):", error);
         }
     }
-    const canUseEmptySentinels = modelAcceptsEmptyContent(args.resolvedProviderID);
+    const canUseEmptySentinels = modelAcceptsEmptyContent(
+        args.resolvedProviderID,
+        args.resolvedModelName,
+    );
     if (shouldRunHeuristics) {
         const subagentRerun =
             !args.fullFeatureMode &&
@@ -2269,7 +2286,10 @@ export async function runPostTransformPhase(
                 const candidates = findMergedReasoningStripCandidateIds(
                     args.messages,
                     args.resolvedProviderID,
-                    { mutationExemptMessage: reasoningMutationExemptMessage },
+                    {
+                        mutationExemptMessage: reasoningMutationExemptMessage,
+                        modelName: args.resolvedModelName,
+                    },
                 );
                 const newlyDetectedIds = candidates.filter(
                     (id) => !mergedReasoningStrippedIds.has(id),
@@ -2380,6 +2400,7 @@ export async function runPostTransformPhase(
             reasoningMutationExemptMessage,
             trailingBlankNewestAssistant,
             mergedReasoningStrippedIds,
+            resolvedModelName: args.resolvedModelName,
             thinkingBindingRecoveryMessageIds,
             trailingBlankDecisions,
             skipMergedReasoningStrip: compactionOff,

@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { setAnthropicTransportProviders } from "./sentinel";
 import {
     clearOldReasoning,
     findLatestAssistantReasoningMutationExemptMessage,
@@ -1184,7 +1185,7 @@ describe("strip-content", () => {
                 expect(a2.parts[0]).toEqual({ type: "reasoning", text: "second reasoning" });
             });
 
-            it("#then is a no-op for github-copilot", () => {
+            it("#then is a no-op for github-copilot without a configured transport allow-list", () => {
                 const u = message("m-u", "user", [{ type: "text", text: "hi" }]);
                 const a1 = message("m-a1", "assistant", [{ type: "reasoning", text: "first" }]);
                 const a2 = message("m-a2", "assistant", [{ type: "reasoning", text: "second" }]);
@@ -1192,6 +1193,81 @@ describe("strip-content", () => {
                 const stripped = stripReasoningFromMergedAssistants([u, a1, a2], "github-copilot");
 
                 expect(stripped).toBe(0);
+            });
+
+            it("#then strips github-copilot Claude models when the provider is in anthropic_transport_providers", () => {
+                setAnthropicTransportProviders(["github-copilot"]);
+                try {
+                    const u = message("m-u", "user", [{ type: "text", text: "hi" }]);
+                    const a1 = message("m-a1", "assistant", [{ type: "reasoning", text: "first" }]);
+                    const a2 = message("m-a2", "assistant", [
+                        { type: "reasoning", text: "second" },
+                    ]);
+
+                    const stripped = stripReasoningFromMergedAssistants(
+                        [u, a1, a2],
+                        "github-copilot",
+                        {
+                            modelName: "claude-sonnet-4-6",
+                        },
+                    );
+
+                    expect(stripped).toBe(1);
+                    // The first assistant keeps its reasoning (index-0 rule); the
+                    // second is replaced with an empty-text sentinel.
+                    expect(a1.parts[0]).toEqual({ type: "reasoning", text: "first" });
+                    expect(a2.parts[0]).toEqual({ type: "text", text: "" });
+                } finally {
+                    setAnthropicTransportProviders([]);
+                }
+            });
+
+            it("#then keeps non-Claude models under a configured provider untouched", () => {
+                setAnthropicTransportProviders(["github-copilot"]);
+                try {
+                    const u = message("m-u", "user", [{ type: "text", text: "hi" }]);
+                    const a1 = message("m-a1", "assistant", [{ type: "reasoning", text: "first" }]);
+                    const a2 = message("m-a2", "assistant", [
+                        { type: "reasoning", text: "second" },
+                    ]);
+
+                    const stripped = stripReasoningFromMergedAssistants(
+                        [u, a1, a2],
+                        "github-copilot",
+                        {
+                            modelName: "gpt-5.5",
+                        },
+                    );
+
+                    expect(stripped).toBe(0);
+                    expect(a1.parts[0]).toEqual({ type: "reasoning", text: "first" });
+                    expect(a2.parts[0]).toEqual({ type: "reasoning", text: "second" });
+                } finally {
+                    setAnthropicTransportProviders([]);
+                }
+            });
+
+            it("#then findMergedReasoningStripCandidateIds follows the same gate", () => {
+                const u = message("m-u", "user", [{ type: "text", text: "hi" }]);
+                const a1 = message("m-a1", "assistant", [{ type: "reasoning", text: "first" }]);
+                const a2 = message("m-a2", "assistant", [{ type: "reasoning", text: "second" }]);
+
+                expect(
+                    findMergedReasoningStripCandidateIds([u, a1, a2], "github-copilot", {
+                        modelName: "claude-sonnet-4-6",
+                    }),
+                ).toEqual([]);
+
+                setAnthropicTransportProviders(["github-copilot"]);
+                try {
+                    expect(
+                        findMergedReasoningStripCandidateIds([u, a1, a2], "github-copilot", {
+                            modelName: "claude-sonnet-4-6",
+                        }),
+                    ).toEqual(["m-a2"]);
+                } finally {
+                    setAnthropicTransportProviders([]);
+                }
             });
 
             it("#then runs normally for providerID === 'anthropic'", () => {

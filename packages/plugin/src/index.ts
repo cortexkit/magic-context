@@ -42,6 +42,7 @@ import { createLiveSessionState } from "./hooks/magic-context/live-session-state
 import { SubcModuleTransport } from "./hooks/magic-context/module-transport";
 import { preloadTokenizer } from "./hooks/magic-context/read-session-formatting";
 import type { RustModeModuleClient } from "./hooks/magic-context/rust-mode-transform";
+import { setAnthropicTransportProviders } from "./hooks/magic-context/sentinel";
 import { beginBootQuietPeriod, scheduleAfterBootQuiet } from "./plugin/boot-quiet";
 import { cleanupConflictWarnings, sendConflictWarning } from "./plugin/conflict-warning-hook";
 import { startDreamScheduleTimer } from "./plugin/dream-timer";
@@ -109,6 +110,10 @@ const server: Plugin = async (ctx) => {
     // Debug data-collection toggle: when on, keep subagent child sessions
     // (historian/dreamer/sidekick/migration) instead of deleting on success.
     setKeepSubagents(pluginConfig.keep_subagents === true);
+    // Anthropic-transport allow-list (user-tier `anthropic_transport_providers`):
+    // extends the empty-sentinel gate to Claude models served through listed
+    // providerIDs whose wire is OpenCode's @ai-sdk/anthropic adapter.
+    setAnthropicTransportProviders(pluginConfig.anthropic_transport_providers);
     const autoUpdateAbort = new AbortController();
     // Abort on process exit via the shared single-listener registry. Registering
     // a process.once("exit") here directly would add one listener PER plugin

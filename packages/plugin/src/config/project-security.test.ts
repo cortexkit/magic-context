@@ -32,6 +32,15 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(warnings.some((w) => w.includes("auto_update"))).toBe(true);
     });
 
+    it("strips anthropic_transport_providers from project config (transport gating is user-tier)", () => {
+        const raw: Record<string, unknown> = {
+            anthropic_transport_providers: ["github-copilot"],
+        };
+        const warnings = stripUnsafeProjectConfigFields(raw);
+        expect("anthropic_transport_providers" in raw).toBe(false);
+        expect(warnings.some((w) => w.includes("anthropic_transport_providers"))).toBe(true);
+    });
+
     it("strips fail_closed_blocking from project config (user-tier only)", () => {
         const raw: Record<string, unknown> = {
             fail_closed_blocking: false,

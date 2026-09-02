@@ -2250,10 +2250,13 @@ export function createTransform(deps: TransformDeps) {
             // the primary agent that spawned them.
             cavemanTextCompression: !reducedMode ? deps.cavemanTextCompression : undefined,
             smartDrops: deps.smartDrops === true,
-            // Pass the single resolved provider through to postprocess so every
-            // empty-sentinel gate and whole-message placeholder choice agrees for
-            // this transform pass, including cold DB-recovered passes.
+            // Pass the single resolved provider + model through to postprocess
+            // so every empty-sentinel gate and whole-message placeholder choice
+            // agrees for this transform pass, including cold DB-recovered passes.
+            // The model name extends the gate to Claude models served under
+            // user-configured Anthropic-transport providerIDs.
             resolvedProviderID,
+            resolvedModelName: modelForBudget?.modelID,
             thinkingBindingRecoveryEnabledForModel: isFable51ThinkingBindingModel(
                 modelForBudget?.providerID,
                 modelForBudget?.modelID,

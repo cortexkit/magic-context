@@ -317,6 +317,15 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         );
     }
 
+    // Widening the empty-sentinel gate is a wire-behavior decision; a cloned
+    // repo must not declare that its models filter empty parts.
+    if ("anthropic_transport_providers" in projectRaw) {
+        delete projectRaw.anthropic_transport_providers;
+        warnings.push(
+            "Ignoring anthropic_transport_providers from project config (security: transport gating is a user-level setting).",
+        );
+    }
+
     if ("fail_closed_blocking" in projectRaw) {
         delete projectRaw.fail_closed_blocking;
         warnings.push(

@@ -246,6 +246,7 @@ Behavior tuning most installs never need to touch.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
+| `anthropic_transport_providers` | string[] | — | ProviderIDs whose Claude-named models are served through OpenCode's "@ai-sdk/anthropic" adapter (e.g. ["github-copilot"] for Copilot Claude), i.e. the wire drops empty text/reasoning parts before the API exactly like the canonical Anthropic provider. Extends Magic Context's reasoning-strip machinery to those routes. Security: USER-only in the config loader; a project config cannot widen the gate. List a provider only if every Claude model under it uses the @ai-sdk/anthropic adapter. |
 | `smart_notes.retina_handoff` | boolean | `false` | When true, dreamer skips smart notes whose surface conditions compiled to retina provider configs at authoring time. Default false keeps both paths active until the retina consumer is deployed. |
 | `models.window_overlay_path` | string | — |  |
 | `toast_duration_ms` | number (0–60000) | `5000` | TUI toast lifetime in milliseconds for Magic Context notifications. Set to 0 to disable Magic Context toasts entirely (min: 0, max: 60000, default: 5000) |

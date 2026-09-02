@@ -1,5 +1,10 @@
 import { isRecord } from "../../shared/record-type-guard";
-import { isSentinel, makeSentinel, makeWholeMessageSentinel } from "./sentinel";
+import {
+    isSentinel,
+    makeSentinel,
+    makeWholeMessageSentinel,
+    modelAcceptsEmptyContent,
+} from "./sentinel";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
 
 const DROPPED_PLACEHOLDER_PATTERN = /^\[dropped §\d+§\]$/;
@@ -797,9 +802,9 @@ export function applyFrozenTrailingBlankDecisions(
 export function findMergedReasoningStripCandidateIds(
     messages: MessageLike[],
     providerID?: string,
-    options?: { mutationExemptMessage?: MessageLike },
+    options?: { mutationExemptMessage?: MessageLike; modelName?: string },
 ): string[] {
-    if (providerID !== "anthropic") return [];
+    if (!modelAcceptsEmptyContent(providerID, options?.modelName)) return [];
 
     const ids = new Set<string>();
     for (const entry of planMergedAssistantReasoningStrip(
@@ -861,8 +866,10 @@ export function stripReasoningFromAssistantIds(
     messages: MessageLike[],
     providerID: string | undefined,
     messageIds: ReadonlySet<string>,
+    modelName?: string,
 ): number {
-    if (providerID !== "anthropic" || messageIds.size === 0) return 0;
+    if (messageIds.size === 0) return 0;
+    if (!modelAcceptsEmptyContent(providerID, modelName)) return 0;
     let stripped = 0;
     for (const message of messages) {
         const id = message.info.id;
@@ -883,15 +890,18 @@ export function stripReasoningFromMergedAssistants(
     options?: {
         mutationExemptMessage?: MessageLike;
         frozenMessageIds?: ReadonlySet<string>;
+        modelName?: string;
     },
 ): number {
-    // Anthropic-only workaround for @ai-sdk/anthropic's groupIntoBlocks
-    // index-0-thinking rule. openai-compatible providers like Kimi/
-    // Moonshot enforce the opposite invariant (every tool-call assistant
-    // must have non-empty `reasoning_content`), so the strip would
-    // trigger 400 "reasoning_content is missing" there. See call site
-    // in transform.ts for the full rationale.
-    if (providerID !== "anthropic") return 0;
+    // Workaround for @ai-sdk/anthropic's groupIntoBlocks index-0-thinking
+    // rule. Besides the canonical provider, user-configured Anthropic-transport
+    // providers running Claude models (see sentinel.ts) hit the same signed-
+    // block contract. OpenAI-compatible non-Claude models like Kimi/Moonshot
+    // enforce the opposite invariant (every tool-call assistant must have
+    // non-empty `reasoning_content`), so they stay excluded — the strip would
+    // trigger 400 "reasoning_content is missing" there. See the call site in
+    // transform.ts for the full rationale.
+    if (!modelAcceptsEmptyContent(providerID, options?.modelName)) return 0;
 
     let stripped = 0;
     for (const entry of planMergedAssistantReasoningStrip(
