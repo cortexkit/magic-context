@@ -346,6 +346,51 @@ describe("Pi doctor", () => {
         expect(output).toContain("WARN 2");
     });
 
+    it("skips unrelated local dev-path packages and broken trees when probing the embedding runtime", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("mc-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+
+        // Unrelated local extension: has a package.json but is NOT the
+        // magic-context plugin. Must not be probed as an embedding candidate.
+        const unrelatedPlugin = makeTempRoot("mc-pi-doctor-unrelated-");
+        writeFileSync(
+            join(unrelatedPlugin, "package.json"),
+            JSON.stringify({ name: "pi-tree-git-checkpoint", version: "0.0.0" }),
+        );
+        // Local dev tree of the actual plugin that is missing all embedding deps.
+        const brokenDevTree = makeTempRoot("mc-pi-doctor-dev-");
+        writeFileSync(
+            join(brokenDevTree, "package.json"),
+            JSON.stringify({ name: "@cortexkit/pi-magic-context", version: "0.0.0-dev" }),
+        );
+
+        writeFileSync(
+            join(agentDir, "settings.json"),
+            JSON.stringify({
+                packages: [
+                    "npm:@cortexkit/pi-magic-context",
+                    unrelatedPlugin,
+                    brokenDevTree,
+                ],
+            }),
+        );
+        createInstalledPiPlugin(agentDir, true);
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor(baseOptions(root, cwd, prompts));
+
+        expect(code).toBe(0);
+        const output = prompts.messages.join("\n");
+        expect(output).toContain(
+            "PASS Embedding provider: local (native runtime selected and OK)",
+        );
+        expect(output).not.toContain(
+            "WARN Embedding provider: local — native runtime and WASM fallback both unavailable",
+        );
+    });
+
     it("reports the WASM fallback when onnxruntime-node is completely absent", async () => {
         const root = makeTempRoot();
         const cwd = makeTempRoot("mc-pi-doctor-cwd-");
