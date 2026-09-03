@@ -391,6 +391,93 @@ describe("Pi doctor", () => {
         );
     });
 
+    it("prefers a later native-capable install over an earlier WASM fallback", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("mc-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+
+        // Local dev tree of the actual plugin with only a WASM fallback
+        // (no native binding) — probing it alone would report a degraded
+        // runtime.
+        const wasmDevTree = makeTempRoot("mc-pi-doctor-wasm-dev-");
+        mkdirSync(join(wasmDevTree, "node_modules", "onnxruntime-web"), {
+            recursive: true,
+        });
+        writeFileSync(
+            join(wasmDevTree, "node_modules", "onnxruntime-web", "package.json"),
+            JSON.stringify({ name: "onnxruntime-web", main: "index.js" }),
+        );
+        writeFileSync(
+            join(wasmDevTree, "node_modules", "onnxruntime-web", "index.js"),
+            "module.exports = {};\n",
+        );
+        mkdirSync(join(wasmDevTree, "dist"), { recursive: true });
+        writeFileSync(
+            join(wasmDevTree, "dist", "transformers-node-wasm.js"),
+            "export {};\n",
+        );
+        writeFileSync(
+            join(wasmDevTree, "package.json"),
+            JSON.stringify({ name: "@cortexkit/pi-magic-context", version: "0.0.0-dev" }),
+        );
+
+        writeFileSync(
+            join(agentDir, "settings.json"),
+            JSON.stringify({
+                packages: ["npm:@cortexkit/pi-magic-context", wasmDevTree],
+            }),
+        );
+        createInstalledPiPlugin(agentDir, true);
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor(baseOptions(root, cwd, prompts));
+
+        expect(code).toBe(0);
+        const output = prompts.messages.join("\n");
+        expect(output).toContain(
+            "PASS Embedding provider: local (native runtime selected and OK)",
+        );
+        expect(output).not.toContain(
+            "WARN Embedding provider: local — onnxruntime-node native binding failed",
+        );
+    });
+
+    it("reports unverified, not a broken-runtime WARN, when only unrelated local packages are registered", async () => {
+        const root = makeTempRoot();
+        const cwd = makeTempRoot("mc-pi-doctor-cwd-");
+        const agentDir = setEnv(root, cwd);
+        writeHealthyFiles(agentDir, cwd);
+
+        // Only an unrelated local extension is registered; the magic-context
+        // managed install tree is absent. The unrelated package must not be
+        // probed as an embedding candidate, so doctor reports unverified
+        // instead of blaming it for a missing onnxruntime.
+        const unrelatedPlugin = makeTempRoot("mc-pi-doctor-unrelated-");
+        writeFileSync(
+            join(unrelatedPlugin, "package.json"),
+            JSON.stringify({ name: "pi-tree-git-checkpoint", version: "0.0.0" }),
+        );
+        writeFileSync(
+            join(agentDir, "settings.json"),
+            JSON.stringify({
+                packages: ["npm:@cortexkit/pi-magic-context", unrelatedPlugin],
+            }),
+        );
+        const prompts = new MockPrompts();
+
+        const code = await runDoctor(baseOptions(root, cwd, prompts));
+
+        expect(code).toBe(0);
+        const output = prompts.messages.join("\n");
+        expect(output).toContain(
+            "selected runtime unverified (no installed plugin tree found to inspect)",
+        );
+        expect(output).not.toContain(
+            "WARN Embedding provider: local — native runtime and WASM fallback both unavailable",
+        );
+    });
+
     it("reports the WASM fallback when onnxruntime-node is completely absent", async () => {
         const root = makeTempRoot();
         const cwd = makeTempRoot("mc-pi-doctor-cwd-");

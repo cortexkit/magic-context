@@ -798,6 +798,9 @@ async function runHealthChecks(options: {
         // persistence-capable Node WASM fallback. Resolution starts from the
         // installed plugin dir and stays silent when no tree can be inspected.
         let runtimeReported = false;
+        let firstFallback: ReturnType<
+            typeof checkLocalEmbeddingRuntimeByResolution
+        > | null = null;
         let firstBroken: ReturnType<
             typeof checkLocalEmbeddingRuntimeByResolution
         > | null = null;
@@ -828,9 +831,11 @@ async function runHealthChecks(options: {
                 break;
             }
             if (runtime.state === "wasm-fallback") {
-                add(results, "warn", formatLocalEmbeddingRuntimeWasmFallback(runtime));
-                runtimeReported = true;
-                break;
+                // Remember the best degraded candidate but keep probing: a WASM
+                // fallback in an earlier tree must not mask a later native-capable
+                // install.
+                firstFallback ??= runtime;
+                continue;
             }
             if (isLocalEmbeddingRuntimeBroken(runtime)) {
                 // Keep probing: an earlier broken candidate (e.g. a stale local
@@ -841,7 +846,9 @@ async function runHealthChecks(options: {
             if (runtime.state === "unknown") runtimeUnverifiedReason = runtime.reason;
         }
         if (!runtimeReported) {
-            if (firstBroken) {
+            if (firstFallback) {
+                add(results, "warn", formatLocalEmbeddingRuntimeWasmFallback(firstFallback));
+            } else if (firstBroken) {
                 add(results, "warn", formatLocalEmbeddingRuntimeDoctorWarning(firstBroken));
             } else {
                 add(
