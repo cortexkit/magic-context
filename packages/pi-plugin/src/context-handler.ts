@@ -3640,7 +3640,15 @@ function spawnPiHistorianRun(args: {
 			// Close the cross-process check/lease race: /ctx-wrapup may have published
 			// its marker after the first check but before this process won the lease.
 			sessionLog(sessionId, "historian skipped: /ctx-wrapup became active");
-			releaseCompartmentLease(db, sessionId, holderId);
+			try {
+				releaseCompartmentLease(db, sessionId, holderId);
+			} catch (err) {
+				// Same best-effort contract as the finally-block release below.
+				sessionLog(
+					sessionId,
+					`historian lease release failed (expires via TTL): ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
 			return;
 		}
 		const renewal = startPiCompartmentLeaseRenewal(db, sessionId, holderId);
@@ -3726,15 +3734,32 @@ function spawnPiHistorianRun(args: {
 			});
 		} finally {
 			clearInterval(renewal);
-			releaseCompartmentLease(db, sessionId, holderId);
+			try {
+				releaseCompartmentLease(db, sessionId, holderId);
+			} catch (err) {
+				// Best-effort teardown: the lease row expires via its own TTL, so a
+				// busy_timeout-starved DELETE must not escape and reject this promise.
+				sessionLog(
+					sessionId,
+					`historian lease release failed (expires via TTL): ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
 		}
-	})().finally(() => {
-		inFlightHistorian.delete(sessionId);
-		unregister();
-		if (isContextHandlerSessionActive(sessionId)) {
-			historian.onStatusChange?.(ctx, sessionId);
-		}
-	});
+	})()
+		.catch((err) => {
+			// Parity with OpenCode's startCompartmentAgent .catch: the historian run
+			// promise is parked in inFlightHistorian for emergency/shutdown awaits,
+			// so an unhandled rejection here crashes the host via
+			// processTicksAndRejections instead of surfacing as a session log.
+			sessionLog(sessionId, "historian run failed:", err);
+		})
+		.finally(() => {
+			inFlightHistorian.delete(sessionId);
+			unregister();
+			if (isContextHandlerSessionActive(sessionId)) {
+				historian.onStatusChange?.(ctx, sessionId);
+			}
+		});
 	inFlightHistorian.set(sessionId, runPromise);
 	historian.onStatusChange?.(ctx, sessionId);
 }

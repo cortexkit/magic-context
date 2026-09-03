@@ -398,6 +398,7 @@ export async function runPiWrapup(
 						);
 					}
 				}, COMPARTMENT_LEASE_RENEWAL_MS);
+				let chunkFailure: string | null = null;
 				try {
 					const runHistorian = deps.runPiHistorianForWrapup ?? runPiHistorian;
 					await runHistorian({
@@ -451,11 +452,28 @@ export async function runPiWrapup(
 							signalPiDeferredMaterialization(sessionId);
 						},
 					});
+				} catch (err) {
+					// Parity with OpenCode: runCompartmentAgent carries its own .catch,
+					// so its wrapup finally only sees settled promises. Pi lacks that
+					// inner layer; record the failure instead of letting a busy-starved
+					// release (or any historian throw) escape the command handler.
+					chunkFailure = err instanceof Error ? err.message : String(err);
 				} finally {
 					clearInterval(leaseRenewal);
-					releaseCompartmentLease(deps.db, sessionId, leaseHolder);
+					try {
+						releaseCompartmentLease(deps.db, sessionId, leaseHolder);
+					} catch (err) {
+						// Best-effort teardown: the lease row expires via its own TTL.
+						console.warn(
+							`[magic-context][pi] /ctx-wrapup compartment lease release failed for ${sessionId} (expires via TTL): ${err instanceof Error ? err.message : String(err)}`,
+						);
+					}
 				}
 
+				if (chunkFailure) {
+					failure = `historian chunk failed (${chunkFailure}); wrapped up through message ${lastEnd}. Run /ctx-wrapup again to continue.`;
+					break;
+				}
 				const afterEnd = getLastCompartmentEndMessage(deps.db, sessionId);
 				if (afterEnd <= lastEnd) {
 					failure = `No forward progress after chunk ${chunkIndex}; wrapped up through message ${lastEnd}. Run /ctx-wrapup again to continue.`;

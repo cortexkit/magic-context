@@ -1,6 +1,8 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, it, mock } from "bun:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	acquireCompartmentLease,
 	releaseCompartmentLease,
@@ -34,6 +36,14 @@ import {
 
 function createDb(): Database {
 	const db = new Database(":memory:");
+	initializeDatabase(db);
+	runMigrations(db);
+	return db;
+}
+
+function createFileDb(name: string): Database {
+	const path = join(tmpdir(), `${name}-${crypto.randomUUID()}.db`);
+	const db = new Database(path);
 	initializeDatabase(db);
 	runMigrations(db);
 	return db;
@@ -271,6 +281,54 @@ describe("Pi /ctx-wrapup", () => {
 			expect(runPiHistorianForWrapup).not.toHaveBeenCalled();
 			expect(getWrapupInProgressState(db, sessionId)).toBeNull();
 			releaseCompartmentLease(db, sessionId, foreignHolder);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("survives a busy-database lease release failure without rejecting", async () => {
+		// Cross-connection lock contention requires a shared file; two :memory:
+		// databases never contend. Mirrors the production shape: a second
+		// connection (omp session, dreamer, FTS indexer) holds BEGIN IMMEDIATE
+		// past busy_timeout while wrapup releases its compartment lease.
+		const db = createFileDb("pi-wrapup-busy-release");
+		try {
+			const sessionId = "pi-wrapup-busy-release";
+			const runPiHistorianForWrapup = mock(async (args) => {
+				const start = getLastCompartmentEndMessage(db, sessionId) + 1;
+				const end = Math.min(
+					args.boundarySnapshot.eligibleEndOrdinal - 1,
+					start + 2,
+				);
+				appendRange(db, sessionId, start, end);
+				args.onPublished?.();
+				// Simulate the production contention window: another process holds
+				// the writer lock past busy_timeout while wrapup releases its lease.
+				const blocker = new Database(db.filename);
+				blocker.exec("PRAGMA busy_timeout=1; BEGIN IMMEDIATE;");
+				try {
+					// Shrink the release connection's busy wait so the expected
+					// SQLITE_BUSY lands well inside bun's 5s default test timeout
+					// (initializeDatabase sets 5000ms; plain `bun test` in CI has
+					// no override — project constraint #5917).
+					db.exec("PRAGMA busy_timeout=250");
+					releaseCompartmentLease(db, sessionId, "stale-holder");
+				} finally {
+					blocker.exec("ROLLBACK");
+					blocker.close();
+				}
+			});
+
+			const result = await runPiWrapup(
+				pi().api,
+				deps(db, { runPiHistorianForWrapup }),
+				ctx(sessionId, 8),
+				sessionId,
+				2,
+			);
+
+			expect(result).toContain("## Magic Wrapup");
+			expect(getWrapupInProgressState(db, sessionId)).toBeNull();
 		} finally {
 			closeQuietly(db);
 		}
