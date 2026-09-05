@@ -309,18 +309,35 @@ function packagesFrom(settings: Record<string, unknown>): unknown[] {
  * <cwd>/.pi/npm/node_modules/<pkg> (project). We collect every plausible dir
  * with a package.json; the resolver stays SILENT for any that don't exist.
  */
+/** True when the directory's package.json declares the magic-context Pi plugin. */
+function isPiMagicContextPackageDir(dir: string): boolean {
+    const packageJson = join(dir, "package.json");
+    if (!existsSync(packageJson)) return false;
+    try {
+        const pkg = JSON.parse(readFileSync(packageJson, "utf-8")) as {
+            name?: unknown;
+        };
+        return typeof pkg.name === "string" && pkg.name === PACKAGE_NAME;
+    } catch {
+        return false;
+    }
+}
+
 function piPluginDirCandidates(packages: unknown[], cwd: string): string[] {
     const dirs: string[] = [];
     const agentDir = getPiAgentConfigDir();
 
     // Local dev-path entries: a string spec that is NOT an npm: specifier and
     // resolves to a directory on disk. Relative entries are resolved against the
-    // Pi agent dir (Pi's settings.packages base).
+    // Pi agent dir (Pi's settings.packages base). Only directories whose
+    // package.json names the magic-context plugin itself are candidates — other
+    // local extensions registered in packages[] must not be probed for the
+    // embedding runtime.
     for (const entry of packages) {
         const spec = typeof entry === "string" ? entry.trim() : "";
         if (!spec || spec.startsWith("npm:")) continue;
         const resolved = isAbsolute(spec) ? spec : join(agentDir, spec);
-        dirs.push(resolved);
+        if (isPiMagicContextPackageDir(resolved)) dirs.push(resolved);
     }
 
     // Managed npm install roots (hoisted): <root>/node_modules/<pkg>.
@@ -805,6 +822,12 @@ async function runHealthChecks(options: {
         // persistence-capable Node WASM fallback. Resolution starts from the
         // installed plugin dir and stays silent when no tree can be inspected.
         let runtimeReported = false;
+        let firstFallback: ReturnType<
+            typeof checkLocalEmbeddingRuntimeByResolution
+        > | null = null;
+        let firstBroken: ReturnType<
+            typeof checkLocalEmbeddingRuntimeByResolution
+        > | null = null;
         let runtimeUnverifiedReason = "no installed plugin tree found to inspect";
         for (const pluginDir of piPluginDirCandidates(packages, options.cwd)) {
             const runtime = checkLocalEmbeddingRuntimeByResolution(
@@ -832,23 +855,32 @@ async function runHealthChecks(options: {
                 break;
             }
             if (runtime.state === "wasm-fallback") {
-                add(results, "warn", formatLocalEmbeddingRuntimeWasmFallback(runtime));
-                runtimeReported = true;
-                break;
+                // Remember the best degraded candidate but keep probing: a WASM
+                // fallback in an earlier tree must not mask a later native-capable
+                // install.
+                firstFallback ??= runtime;
+                continue;
             }
             if (isLocalEmbeddingRuntimeBroken(runtime)) {
-                add(results, "warn", formatLocalEmbeddingRuntimeDoctorWarning(runtime));
-                runtimeReported = true;
-                break;
+                // Keep probing: an earlier broken candidate (e.g. a stale local
+                // dev-path tree) must not mask a healthy managed install.
+                firstBroken ??= runtime;
+                continue;
             }
             if (runtime.state === "unknown") runtimeUnverifiedReason = runtime.reason;
         }
         if (!runtimeReported) {
-            add(
-                results,
-                "warn",
-                `Embedding provider ${loadedConfig.config.embedding.provider}: selected runtime unverified (${runtimeUnverifiedReason})`,
-            );
+            if (firstFallback) {
+                add(results, "warn", formatLocalEmbeddingRuntimeWasmFallback(firstFallback));
+            } else if (firstBroken) {
+                add(results, "warn", formatLocalEmbeddingRuntimeDoctorWarning(firstBroken));
+            } else {
+                add(
+                    results,
+                    "warn",
+                    `Embedding provider ${loadedConfig.config.embedding.provider}: selected runtime unverified (${runtimeUnverifiedReason})`,
+                );
+            }
         }
     }
 
