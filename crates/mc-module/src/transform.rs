@@ -7727,7 +7727,11 @@ fn pending_passthrough_messages(
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
             let mut rendered = message.ck.clone();
-            if !blocks.is_empty() {
+            if !blocks.is_empty()
+                && (mutation_exempt_mid != Some(message.mid.as_str())
+                    || SerializerProfile::parse(&req.serializer_profile)
+                        == Some(SerializerProfile::ClaudeCodeAnthropic))
+            {
                 apply_tag_overlay_to_message(
                     &mut rendered,
                     message,
@@ -8650,11 +8654,8 @@ fn apply_tag_overlay_to_message(
     blocks: &[&FlatBlock],
     overlay: Option<&TagOverlayState>,
     is_reduced: impl Fn(&FlatBlock) -> bool,
-    mutation_exempt: bool,
+    tags_only: bool,
 ) {
-    if mutation_exempt {
-        return;
-    }
     let Some(overlay) = overlay else {
         return;
     };
@@ -8669,8 +8670,10 @@ fn apply_tag_overlay_to_message(
         if !is_reduced(block) {
             let target = &mut message.content[block.block_index];
             let mut block_changed = false;
-            if let Some(prefix) = overlay.temporal_by_block_id.get(&block.id) {
-                block_changed |= prepend_temporal_to_block(target, prefix);
+            if !tags_only {
+                if let Some(prefix) = overlay.temporal_by_block_id.get(&block.id) {
+                    block_changed |= prepend_temporal_to_block(target, prefix);
+                }
             }
             if let Some(kind) = taggable_kind(block) {
                 if let Some(tag_number) = overlay.tag_by_block_id.get(&block.id) {
@@ -8685,11 +8688,13 @@ fn apply_tag_overlay_to_message(
                 // before this request are available. Newly seen blocks wait for a normal
                 // accepted pass rather than consuming tag numbers on rejected lineage.
             }
-            if let Some(hint) = overlay.user_hint_by_block_id.get(&block.id) {
-                block_changed |= append_user_hint_to_block(target, hint);
-            }
-            if let Some(reminder) = overlay.channel1_by_block_id.get(&block.id) {
-                block_changed |= append_channel1_to_block(target, reminder);
+            if !tags_only {
+                if let Some(hint) = overlay.user_hint_by_block_id.get(&block.id) {
+                    block_changed |= append_user_hint_to_block(target, hint);
+                }
+                if let Some(reminder) = overlay.channel1_by_block_id.get(&block.id) {
+                    block_changed |= append_channel1_to_block(target, reminder);
+                }
             }
             if block_changed {
                 // Overlay edits mutate the typed kind in place, but Serialize
@@ -9046,7 +9051,15 @@ fn compute_active_overlay_decisions(
         let work = tag_mint_inputs_from(
             projection,
             core,
-            mutation_exempt_mid,
+            // Claude Code text and completed tool outputs are final on first sight,
+            // even while their assistant is protected from reductions and reasoning edits.
+            if SerializerProfile::parse(&req.serializer_profile)
+                == Some(SerializerProfile::ClaudeCodeAnthropic)
+            {
+                None
+            } else {
+                mutation_exempt_mid
+            },
             lineage_anchor_mid,
             &existing_tag_ids,
             trusted_projection_prefix,
@@ -13256,7 +13269,7 @@ fn build_output_with_tags_inner(
                     &mut rebuilt,
                     msg,
                     blocks,
-                    tag_overlay,
+                    tag_overlay.filter(|_| !lineage_anchor_exempt),
                     |_| false,
                     mutation_exempt,
                 );
@@ -13283,6 +13296,22 @@ fn build_output_with_tags_inner(
                         .collect()
                 };
                 let mut rebuilt = msg.ck.clone();
+                // Minting and rendering must happen together: deferring a prefix until
+                // a newer reasoning assistant arrives rewrites an already served tail.
+                // Signed reasoning and every non-tag overlay keep their existing guards.
+                if mutation_exempt
+                    && !lineage_anchor_exempt
+                    && serializer_profile == Some(SerializerProfile::ClaudeCodeAnthropic)
+                {
+                    apply_tag_overlay_to_message(
+                        &mut rebuilt,
+                        msg,
+                        blocks,
+                        tag_overlay,
+                        |_| false,
+                        true,
+                    );
+                }
                 if !reduced.is_empty() {
                     rebuilt.mark_modified();
                     for block in blocks {
@@ -13597,8 +13626,8 @@ pub(crate) fn latest_assistant_reasoning_mutation_exempt_mid(
 }
 
 /// Whole-message mutation protection is narrower than signed-reasoning protection. It keeps the
-/// existing live-response guard for tag, reduction, and overlay mutations without withholding
-/// those unrelated mutations from every completed latest assistant.
+/// live-response guard for reductions and overlays without withholding them from every completed
+/// latest assistant. Claude Code tag prefixes are the exception: they mint and render on first sight.
 fn latest_assistant_message_mutation_exempt_mid(
     messages: &[CkIngressMessage],
     profile: Option<SerializerProfile>,
@@ -22207,7 +22236,8 @@ pub(crate) mod tests {
             "whole-block removal must still pass the reasoning-adjacency skeleton check"
         );
         let applied_state = db.load("cc-reasoning-age").unwrap();
-        assert_eq!(applied_state.meta.reasoning_cleared_through_tag, 1);
+        // The latest text now owns tag 4 on first sight; age 2 freezes cutoff 2.
+        assert_eq!(applied_state.meta.reasoning_cleared_through_tag, 2);
         assert!(applied_state
             .core
             .frozen_units
@@ -26610,6 +26640,83 @@ pub(crate) mod tests {
             serde_json::to_vec(first.messages()).unwrap(),
             serde_json::to_vec(replay.messages()).unwrap()
         );
+    }
+
+    #[test]
+    fn tool_loop_first_sight_tag_bytes_survive_new_reasoning_assistant() {
+        let golden: Value =
+            serde_json::from_str(include_str!("../testdata/cc-tool-loop-tag-golden.json")).unwrap();
+        let profile = "claude-code-anthropic";
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut request = active_cc_req(profile, "cfg0", vec![item("prompt", 1, "inspect tests")]);
+        request.serializer_profile = profile.to_string();
+        request.provider_id = Some("anthropic".to_string());
+        run(&s, &request, &spine());
+        request.mid_turn = true;
+        let mut target = wire_tool_call("message-52", 52, "call_result-53");
+        target.ck = serde_json::from_value(json!({
+                "role": "assistant",
+                "meta": { "harness_id": "message-52" },
+                "content": [
+                    { "kind": { "type": "reasoning", "text": golden["thinking"], "signature": golden["signature"] } },
+                    { "kind": { "type": "text", "text": golden["text"] } },
+                    { "kind": { "type": "tool_call", "id": "call_result-53", "name": "probe", "input": {} } }
+                ]
+            })).unwrap();
+        let signed_bytes = serde_json::to_vec(&target.ck.content[0]).unwrap();
+        request.messages.push(target);
+        request.messages.push(wire_tool_result(
+            "result-53",
+            53,
+            json!({"kind": {"type": "text", "text": "tests"}}),
+        ));
+        // The captured first pass already has a newer assistant, but it has no reasoning.
+        request
+            .messages
+            .push(wire_tool_call("message-54", 54, "call_result-55"));
+        request.messages.push(wire_tool_result(
+            "result-55",
+            55,
+            json!({"kind": {"type": "text", "text": "more tests"}}),
+        ));
+        let first = run(&s, &request, &spine());
+        assert_eq!(first.action, "SOFT+");
+        let served_target = |response: &TransformResponse| {
+            response
+                .messages()
+                .iter()
+                .find(|message| message.meta.harness_id.as_deref() == Some("message-52"))
+                .unwrap()
+                .clone()
+        };
+        let before = served_target(&first);
+        let mut newer = wire_tool_call("message-56", 56, "call_result-57");
+        newer.ck.content.insert(0, serde_json::from_value(json!({"kind": {"type": "reasoning", "text": "next step", "signature": "next-signature"}})).unwrap());
+        newer.ck.mark_modified();
+        request.messages.push(newer);
+        request.messages.push(wire_tool_result(
+            "result-57",
+            57,
+            json!({"kind": {"type": "text", "text": "done"}}),
+        ));
+        let second = run(&s, &request, &spine());
+        assert_eq!(second.action, "SOFT+");
+        let after = served_target(&second);
+        assert_eq!(
+            serde_json::to_vec(&before).unwrap(),
+            serde_json::to_vec(&after).unwrap(),
+            "{profile}: message 52 must not acquire a tag one pass late"
+        );
+        assert_eq!(
+            first_block_text(&before.content[1]),
+            golden["expected_text"].as_str()
+        );
+        assert_eq!(
+            serde_json::to_vec(&before.content[0]).unwrap(),
+            signed_bytes
+        );
+        assert_eq!(serde_json::to_vec(&after.content[0]).unwrap(), signed_bytes);
     }
 
     #[test]
@@ -32384,8 +32491,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn staged_epoch_bump_takes_exactly_one_hard_when_client_config_frozen() {
-        assert_eq!(crate::TAGGER_FEATURE_EPOCH, 3);
+    fn cc_profile_epoch_bump_takes_exactly_one_hard_when_client_config_frozen() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let r1 = "pe1/tf1/gfull";
@@ -32400,11 +32506,8 @@ pub(crate) mod tests {
             r1,
             format!("mre{}", crate::MEMORY_RENDER_FORMAT_EPOCH),
             format!("cre{}", crate::COMPARTMENT_RENDER_FORMAT_EPOCH),
-            format!(
-                "mpe{}",
-                crate::profile_render_epoch(SerializerProfile::ClaudeCodeAnthropic)
-            ),
-            "tfe2".to_string(),
+            "mpe2".to_string(),
+            "tfe3".to_string(),
         );
         s.commit("staged-tfe", loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
@@ -32414,24 +32517,21 @@ pub(crate) mod tests {
         // coordinate two folds instead of the one fold owned by the module upgrade.
         let pass_a = run(&s, &request, &spine());
         assert_eq!(pass_a.action, "HARD");
-        let expected_tfe3 = effective_render_config_with_epochs(
+        let expected_profile_epoch_3 = effective_render_config_with_epochs(
             &s,
             r1,
             format!("mre{}", crate::MEMORY_RENDER_FORMAT_EPOCH),
             format!("cre{}", crate::COMPARTMENT_RENDER_FORMAT_EPOCH),
-            format!(
-                "mpe{}",
-                crate::profile_render_epoch(SerializerProfile::ClaudeCodeAnthropic)
-            ),
+            "mpe3".to_string(),
             "tfe3".to_string(),
         );
         assert_eq!(
             s.load("staged-tfe").unwrap().meta.last_render_config,
-            expected_tfe3
+            expected_profile_epoch_3
         );
 
         let pass_b = run(&s, &request, &spine());
-        assert_ne!(pass_b.action, "HARD");
+        assert_eq!(pass_b.action, "SOFT+");
         assert_eq!(
             serde_json::to_vec(pass_a.messages()).unwrap(),
             serde_json::to_vec(pass_b.messages()).unwrap()
@@ -32442,6 +32542,47 @@ pub(crate) mod tests {
         assert_eq!(
             pass_c.action, "HARD",
             "the opaque client base is independently identity-bearing"
+        );
+    }
+
+    #[test]
+    fn opencode_identity_refuses_collateral_cc_profile_epoch_hard() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let request = active_opencode_req(
+            "opencode-profile-epoch",
+            "rust-mode/tf1/gfull",
+            vec![wire_item("user", "m1", 1, &["stable bytes"])],
+        );
+        run(&s, &request, &spine());
+        let mut loaded = s.load(&request.session_id).unwrap();
+        // Pin the previous format epochs to verify compatibility independently of this binary:
+        // memory 2, compartments 2, no OpenCode profile epoch, shared tagger 3.
+        let master_identity = effective_render_config_with_epochs(
+            &s,
+            &request.render_config,
+            "mre2".to_string(),
+            "cre2".to_string(),
+            String::new(),
+            "tfe3".to_string(),
+        );
+        assert_eq!(
+            loaded.meta.last_render_config.as_bytes(),
+            master_identity.as_bytes(),
+            "a Claude Code-only byte change must not alter OpenCode's render identity"
+        );
+        loaded.meta.last_render_config = master_identity;
+        s.commit(
+            &request.session_id,
+            loaded.row_version,
+            &loaded.core,
+            &loaded.meta,
+        )
+        .unwrap();
+        let replay = run(&s, &request, &spine());
+        assert_eq!(
+            replay.action, "SOFT+",
+            "OpenCode must not pay a collateral HARD"
         );
     }
 
@@ -32474,7 +32615,7 @@ pub(crate) mod tests {
 
     #[test]
     fn profile_epoch_fold_hards_epoch_zero_cc_state_once() {
-        assert_eq!(crate::PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC, 2);
+        assert_eq!(crate::PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC, 3);
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         s.replace_compartments("ses", &[comp(1, 1, 1, "m1", "SUMMARY")])
@@ -32513,22 +32654,22 @@ pub(crate) mod tests {
             m0_bytes(&transitioned)
         );
         assert!(!m0_bytes(&transitioned).contains("OLD-M0"));
-        // The bumped profile epoch (2) must flow into the committed effective render
-        // config as the `mpe2` member: that token is what makes the next pass see an
+        // The bumped profile epoch (3) must flow into the committed effective render
+        // config as the `mpe3` member: that token is what makes the next pass see an
         // unchanged config and stop folding.
         assert!(
             s.load("ses")
                 .unwrap()
                 .meta
                 .last_render_config
-                .contains("mpe2"),
-            "PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC=2 must fold into effective_render_config"
+                .contains("mpe3"),
+            "PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC=3 must fold into effective_render_config"
         );
 
         let one_shot = run(&s, &current, &spine());
         assert_eq!(
             one_shot.action, "SOFT+",
-            "after last_render_config records mpe2, the profile fold must not loop"
+            "after last_render_config records mpe3, the profile fold must not loop"
         );
     }
 

@@ -1,0 +1,121 @@
+{
+  "capture_hashes_verified": 16,
+  "exchanges": {
+    "12989": {
+      "message_count": 56,
+      "last_assistant_index": 54,
+      "last_reasoning_first_mid": "ccm-283",
+      "tail_shapes": [
+        {
+          "index": 52,
+          "role": "assistant",
+          "blocks": [
+            "thinking",
+            "text",
+            "tool_use"
+          ]
+        },
+        {
+          "index": 53,
+          "role": "user",
+          "blocks": [
+            "tool_result"
+          ]
+        },
+        {
+          "index": 54,
+          "role": "assistant",
+          "blocks": [
+            "tool_use"
+          ]
+        },
+        {
+          "index": 55,
+          "role": "user",
+          "blocks": [
+            "tool_result"
+          ]
+        }
+      ],
+      "mid_turn": true,
+      "model_key": "anthropic/claude-sonnet-5",
+      "action": "SOFT+",
+      "scheduler_decision": "defer",
+      "scheduler_defer_reason": "mid_turn_boundary",
+      "first_divergence": null
+    },
+    "12990": {
+      "message_count": 58,
+      "last_assistant_index": 56,
+      "last_reasoning_first_mid": "ccm-287",
+      "tail_shapes": [
+        {
+          "index": 52,
+          "role": "assistant",
+          "blocks": [
+            "thinking",
+            "text",
+            "tool_use"
+          ]
+        },
+        {
+          "index": 53,
+          "role": "user",
+          "blocks": [
+            "tool_result"
+          ]
+        },
+        {
+          "index": 54,
+          "role": "assistant",
+          "blocks": [
+            "tool_use"
+          ]
+        },
+        {
+          "index": 55,
+          "role": "user",
+          "blocks": [
+            "tool_result"
+          ]
+        },
+        {
+          "index": 56,
+          "role": "assistant",
+          "blocks": [
+            "thinking",
+            "tool_use"
+          ]
+        },
+        {
+          "index": 57,
+          "role": "user",
+          "blocks": [
+            "tool_result"
+          ]
+        }
+      ],
+      "mid_turn": true,
+      "model_key": "anthropic/claude-sonnet-5",
+      "action": "SOFT+",
+      "scheduler_decision": "defer",
+      "scheduler_defer_reason": "mid_turn_boundary",
+      "first_divergence": {
+        "approx_token_depth": 28848,
+        "block_id_new": "served_message:52#1",
+        "block_id_old": "served_message:52#1",
+        "index": 68,
+        "kind": "content_changed"
+      }
+    }
+  },
+  "first_differing_message": 52,
+  "message_52": {
+    "old_text": "No existing tests cover the quick-switcher yet. Let me find a similar overlay test to model regression tests after.",
+    "new_text": "§186§ No existing tests cover the quick-switcher yet. Let me find a similar overlay test to model regression tests after.",
+    "thinking_identical": true,
+    "tool_use_identical": true,
+    "prefix_only_text_change": true
+  },
+  "m0_m1_identical": true
+}
