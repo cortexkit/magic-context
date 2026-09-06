@@ -33,6 +33,7 @@
  * across passes.
  */
 
+import { getProtectionWindowForSession } from "@magic-context/core/features/magic-context/protection-window";
 import {
 	type ContextDatabase,
 	getActiveTagsBySession,
@@ -81,7 +82,10 @@ const DEDUP_SAFE_TOOLS = new Set([
 ]);
 
 export interface PiHeuristicCleanupConfig {
-	protectedTags: number;
+	protectedTags?: number;
+	cutoff?: number | null;
+	floor?: number;
+	protectedTokens?: number;
 	/** Run age-sensitive cleanup; emergency selection remains independent. */
 	routine?: boolean;
 	/**
@@ -323,7 +327,23 @@ export function applyPiHeuristicCleanup(
 	// regardless of status. `getMaxTagNumberBySession` resolves with a
 	// single backward index seek (O(log N)).
 	const maxTag = getMaxTagNumberBySession(db, sessionId);
-	const protectedCutoff = maxTag - config.protectedTags;
+	const windowResult = getProtectionWindowForSession(db, sessionId);
+	// Coordinate space: tag-number
+	// Empty-window behaviour: absent cutoff branch (cutoff is null)
+	const resolvedCutoff =
+		config.cutoff !== undefined
+			? config.cutoff
+			: typeof config.protectedTags === "number"
+				? null
+				: windowResult.ordinalCutoff.cutoff;
+	const protectedCutoff =
+		resolvedCutoff !== null
+			? resolvedCutoff - 1
+			: typeof config.protectedTags === "number"
+				? maxTag - config.protectedTags
+				: windowResult.ordinalCutoff.cutoff !== null
+					? windowResult.ordinalCutoff.cutoff - 1
+					: maxTag;
 	const routine = config.routine !== false;
 	// Stale ctx_reduce removal uses the protected-tail window after first retaining
 	// the newest housekeeping exemplars; only older calls can become stale.
@@ -360,7 +380,10 @@ export function applyPiHeuristicCleanup(
 			tags: droppableTags as readonly EmergencyDropTag[],
 			floorTags: activeTags as readonly EmergencyDropTag[],
 			maxTag,
-			protectedTags: config.protectedTags,
+			protectedTags:
+				resolvedCutoff !== null
+					? Math.max(0, maxTag - (resolvedCutoff - 1))
+					: (config.protectedTags ?? 0),
 			currentTotalInputTokens: emergency.currentTotalInputTokens,
 			ceilingTokens: emergency.ceilingTokens,
 			usagePercentage: emergency.usagePercentage,
@@ -566,7 +589,7 @@ export function applyPiHeuristicCleanup(
 		const cavemanResult = applyCavemanCleanup(sessionId, db, targets, tags, {
 			enabled: true,
 			minChars: config.caveman.minChars,
-			protectedTags: config.protectedTags,
+			protectedTags: config.protectedTags ?? 20,
 		});
 		compressedTextTags =
 			cavemanResult.compressedToLite +

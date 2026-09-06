@@ -507,6 +507,22 @@ function logPiConfigLoad(args: {
 	}
 }
 
+export function formatProtectedTagsDeprecationNotice(): string {
+	return '⚠️ Magic Context: The "protected_tags" setting is deprecated and ignored. Use "protected_tokens" instead.';
+}
+
+let protectedTagsDeprecationClaimed = false;
+
+export function claimProtectedTagsDeprecationNoticeOnce(): boolean {
+	if (protectedTagsDeprecationClaimed) return false;
+	protectedTagsDeprecationClaimed = true;
+	return true;
+}
+
+export function resetClaimedProtectedTagsDeprecationNoticeForTesting(): void {
+	protectedTagsDeprecationClaimed = false;
+}
+
 export const __test = {
 	logPiConfigLoad,
 	resetLoggedPiConfigDirs(): void {
@@ -515,6 +531,9 @@ export const __test = {
 	clearPiInProcessSubagentInitContext,
 	claimPiStartupMaintenance,
 	clearPiStartupMaintenanceClaim,
+	formatProtectedTagsDeprecationNotice,
+	claimProtectedTagsDeprecationNoticeOnce,
+	resetClaimedProtectedTagsDeprecationNoticeForTesting,
 };
 
 function formatTokens(value: number): string {
@@ -1012,6 +1031,7 @@ async function startPiMagicContextRuntime(
 		registrationPromptSurface,
 		configParseFailures,
 		cacheTtlConfigured,
+		hasDeprecatedProtectedTags,
 	} = loadPiConfig({
 		cwd: projectDir,
 	});
@@ -1102,6 +1122,7 @@ async function startPiMagicContextRuntime(
 		dreamerEnabled: boolean;
 		configParseFailures: typeof configParseFailures;
 		cacheTtlConfigured: boolean;
+		hasDeprecatedProtectedTags: boolean;
 	};
 
 	// Per-cwd runtime deps. Pi can switch projects mid-process (`/cd`,
@@ -1173,6 +1194,7 @@ async function startPiMagicContextRuntime(
 		loadMetadata: {
 			configParseFailures: typeof configParseFailures;
 			cacheTtlConfigured: boolean;
+			hasDeprecatedProtectedTags?: boolean;
 		},
 	): ResolvedPiProjectDeps {
 		const hist = resolveHistorianFromConfig(cfg);
@@ -1199,6 +1221,8 @@ async function startPiMagicContextRuntime(
 			dreamerEnabled: isDreamerRunnable(cfg),
 			configParseFailures: loadMetadata.configParseFailures,
 			cacheTtlConfigured: loadMetadata.cacheTtlConfigured,
+			hasDeprecatedProtectedTags:
+				loadMetadata.hasDeprecatedProtectedTags ?? false,
 		};
 	}
 
@@ -1227,6 +1251,7 @@ async function startPiMagicContextRuntime(
 		const built = buildProjectDeps(dir, switchedIdentity, switchedConfig, {
 			configParseFailures: switchedLoad.configParseFailures,
 			cacheTtlConfigured: switchedLoad.cacheTtlConfigured,
+			hasDeprecatedProtectedTags: switchedLoad.hasDeprecatedProtectedTags,
 		});
 		projectDepsByDir.set(dir, built);
 		return built;
@@ -1251,6 +1276,7 @@ async function startPiMagicContextRuntime(
 		{
 			configParseFailures,
 			cacheTtlConfigured,
+			hasDeprecatedProtectedTags,
 		},
 	);
 	projectDepsByDir.set(projectDir, bootProjectDeps);
@@ -1355,6 +1381,13 @@ async function startPiMagicContextRuntime(
 		if (ctx.hasUI && failuresToShow.length > 0) {
 			ctx.ui.notify(formatConfigParseNotice(failuresToShow), "error");
 		}
+		if (
+			ctx.hasUI &&
+			current.hasDeprecatedProtectedTags &&
+			claimProtectedTagsDeprecationNoticeOnce()
+		) {
+			ctx.ui.notify(formatProtectedTagsDeprecationNotice(), "warning");
+		}
 
 		const sessionId = resolveSessionId(ctx);
 		const model = ctx.model;
@@ -1451,6 +1484,7 @@ async function startPiMagicContextRuntime(
 		cacheTtlConfig: bootProjectDeps.config.cache_ttl,
 		cacheTtlConfigured: bootProjectDeps.cacheTtlConfigured,
 		configParseFailures: bootProjectDeps.configParseFailures,
+		hasDeprecatedProtectedTags: bootProjectDeps.hasDeprecatedProtectedTags,
 		resolveStatusDeps: (ctx) => {
 			const current = resolveCurrentProjectDeps(ctx);
 			return {
@@ -1470,6 +1504,7 @@ async function startPiMagicContextRuntime(
 				cacheTtlConfig: current.config.cache_ttl,
 				cacheTtlConfigured: current.cacheTtlConfigured,
 				configParseFailures: current.configParseFailures,
+				hasDeprecatedProtectedTags: current.hasDeprecatedProtectedTags,
 			};
 		},
 	});

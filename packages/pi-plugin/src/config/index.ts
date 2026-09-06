@@ -49,6 +49,7 @@ export interface LoadPiConfigResult {
 	configParseFailures: ConfigParseFailure[];
 	warningDetails: ConfigWarningDetail[];
 	cacheTtlConfigured: boolean;
+	hasDeprecatedProtectedTags?: boolean;
 }
 
 export type LoadOutcome =
@@ -295,8 +296,18 @@ function parsePiConfig(
 	warnings: string[];
 } {
 	const preMigrationWarnings: string[] = [];
+	const hasDeprecatedProtectedTags = Object.hasOwn(rawConfig, "protected_tags");
+	if (hasDeprecatedProtectedTags) {
+		preMigrationWarnings.push(
+			'The "protected_tags" setting is deprecated and ignored. Use "protected_tokens" instead.',
+		);
+	}
+	const configToMigrate = { ...rawConfig };
+	if (hasDeprecatedProtectedTags) {
+		delete configToMigrate.protected_tags;
+	}
 	const agentMigrated = migrateLegacyAgentEnabledInMemory(
-		rawConfig,
+		configToMigrate,
 		preMigrationWarnings,
 	);
 	// Relocate graduated experimental.* keys (temporal_awareness, caveman →
@@ -417,6 +428,7 @@ export function loadPiConfig(
 		configParseFailures: detailed.configParseFailures,
 		warningDetails: detailed.warningDetails,
 		cacheTtlConfigured: detailed.cacheTtlConfigured,
+		hasDeprecatedProtectedTags: detailed.hasDeprecatedProtectedTags,
 	};
 }
 
@@ -583,6 +595,10 @@ export function loadPiConfigDetailed(
 		}
 	}
 
+	const hasDeprecatedProtectedTags =
+		Object.hasOwn(userRaw, "protected_tags") ||
+		Object.hasOwn(projectRaw, "protected_tags") ||
+		Object.hasOwn(rawConfig, "protected_tags");
 	const recoveredTopLevelKeys: string[] = [];
 	const cacheTtlConfigured = Object.hasOwn(rawConfig, "cache_ttl");
 	const parsed = parsePiConfig(rawConfig, recoveredTopLevelKeys);
@@ -637,5 +653,6 @@ export function loadPiConfigDetailed(
 		configParseFailures,
 		warningDetails,
 		cacheTtlConfigured,
+		hasDeprecatedProtectedTags,
 	};
 }

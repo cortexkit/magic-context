@@ -48,6 +48,7 @@ export interface RegisterCtxStatusDeps {
 	cacheTtlConfig?: MagicContextConfig["cache_ttl"];
 	cacheTtlConfigured?: boolean;
 	configParseFailures?: ConfigParseFailure[];
+	hasDeprecatedProtectedTags?: boolean;
 }
 
 export type CtxStatusRuntimeDeps = Omit<
@@ -171,10 +172,13 @@ export function registerCtxStatusCommand(
 				const details = buildStatusDetails(currentDeps, sessionId);
 				const profileStatus = currentDeps.activeProfile ?? "none";
 				const storage = getMagicContextStorageResolution();
+				const deprecationNotice = currentDeps.hasDeprecatedProtectedTags
+					? '\n\n⚠️ Config: "protected_tags" is deprecated and ignored; use "protected_tokens" instead.'
+					: "";
 				sendStatus(
 					{
 						title: "/ctx-status",
-						text: `${statusText}\n\nActive profile: ${profileStatus}\n\nStorage: ${storage.path} (${storage.source})`,
+						text: `${statusText}${deprecationNotice}\n\nActive profile: ${profileStatus}\n\nStorage: ${storage.path} (${storage.source})`,
 						level: "info",
 						rpcDisplay: "dialog",
 					},
