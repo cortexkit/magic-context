@@ -13,6 +13,11 @@ import {
 import type { MagicContextConfig } from "@magic-context/core/config/schema/magic-context";
 import { getCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import { getMemoryCount } from "@magic-context/core/features/magic-context/memory/storage-memory";
+import {
+	getProtectionWindowForSession,
+	type ProtectionWindowStatus,
+	readEpochFloorSnapshot,
+} from "@magic-context/core/features/magic-context/protection-window";
 import { parseCacheTtl } from "@magic-context/core/features/magic-context/scheduler";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
@@ -77,6 +82,8 @@ const REFRESH_INTERVAL_MS = 1000;
 export interface StatusDialogDeps {
 	db: ContextDatabase;
 	projectIdentity: string;
+	protectedTokens?: number;
+	floor?: number;
 	protectedTags?: number;
 	executeThresholdPercentage?:
 		| number
@@ -92,6 +99,7 @@ export interface StatusDialogDeps {
 	cacheTtlConfig?: MagicContextConfig["cache_ttl"];
 	cacheTtlConfigured?: boolean;
 	configParseFailures?: ConfigParseFailure[];
+	hasDeprecatedProtectedTags?: boolean;
 }
 
 interface StatusDialogDetail {
@@ -130,7 +138,7 @@ interface StatusDialogDetail {
 	executeThresholdClamped?: boolean;
 	/** Raw configured value before clamping, for showing the math in the clamp note. */
 	executeThresholdConfigured?: number;
-	protectedTagCount: number;
+	protectedTokens: ProtectionWindowStatus;
 	historyBlockTokens: number;
 	compressionBudget: number | null;
 	compressionUsage: string | null;
@@ -153,6 +161,7 @@ interface StatusDialogDetail {
 	upgradeNeededCount: number;
 	/** A detached /ctx-recomp or /ctx-session-upgrade is running in background. */
 	recompInFlight: boolean;
+	hasDeprecatedProtectedTags: boolean;
 }
 
 export async function showStatusDialog(
@@ -294,7 +303,16 @@ function renderInner(
 	for (const failure of s.configParseFailures) {
 		lines.push(theme.fg("error", formatConfigParseStatusLine(failure)));
 	}
-	if (s.configParseFailures.length > 0) lines.push("");
+	if (s.hasDeprecatedProtectedTags) {
+		lines.push(
+			theme.fg(
+				"warning",
+				'Config: DEPRECATED KEY — "protected_tags" is deprecated and ignored; use "protected_tokens" instead.',
+			),
+		);
+	}
+	if (s.configParseFailures.length > 0 || s.hasDeprecatedProtectedTags)
+		lines.push("");
 
 	// Context summary
 	lines.push(
@@ -401,7 +419,7 @@ function renderInner(
 		)}`,
 	);
 	lines.push(
-		`Protected tags ${s.protectedTagCount} · Subagent ${s.isSubagent ? "yes" : "no"} · History block ~${fmt(s.historyBlockTokens)} tok${
+		`Protected tokens ${fmt(s.protectedTokens.protectedMass)} tok (${s.protectedTokens.protectedCount} tags / floor ${fmt(s.protectedTokens.floor)}) · Subagent ${s.isSubagent ? "yes" : "no"} · History block ~${fmt(s.historyBlockTokens)} tok${
 			s.compressionBudget
 				? ` · Budget ~${fmt(s.compressionBudget)} tok (${s.compressionUsage} used)`
 				: ""
@@ -440,6 +458,18 @@ function drawBorder(inner: string[], width: number, theme: Theme): string[] {
 	}
 	out.push(bottom);
 	return out;
+}
+
+export function deriveDefaultProtectedTokensFloor(usableSoft?: number): number {
+	const soft =
+		typeof usableSoft === "number" &&
+		Number.isFinite(usableSoft) &&
+		usableSoft > 0
+			? usableSoft
+			: 200_000;
+	const low = Math.min(16_000, Math.round(0.08 * soft));
+	const val = Math.round(0.05 * soft);
+	return Math.max(low, Math.min(64_000, val));
 }
 
 export function buildPiStatusDetail(
@@ -675,7 +705,17 @@ export function buildPiStatusDetail(
 		executeThresholdMode: threshold.mode,
 		executeThresholdClamped: threshold.clamped,
 		executeThresholdConfigured: threshold.configuredValue,
-		protectedTagCount: deps.protectedTags ?? 20,
+		protectedTokens: getProtectionWindowForSession(
+			deps.db,
+			sessionId,
+			typeof deps.floor === "number" && Number.isFinite(deps.floor)
+				? deps.floor
+				: (readEpochFloorSnapshot(deps.db, sessionId) ??
+						(typeof deps.protectedTokens === "number" &&
+						Number.isFinite(deps.protectedTokens)
+							? deps.protectedTokens
+							: deriveDefaultProtectedTokensFloor(windowGeometry?.usableSoft))),
+		).status,
 		historyBlockTokens,
 		compressionBudget,
 		compressionUsage:
@@ -702,6 +742,7 @@ export function buildPiStatusDetail(
 			0,
 		),
 		recompInFlight: isPiRecompInFlight(sessionId),
+		hasDeprecatedProtectedTags: deps.hasDeprecatedProtectedTags ?? false,
 	};
 }
 

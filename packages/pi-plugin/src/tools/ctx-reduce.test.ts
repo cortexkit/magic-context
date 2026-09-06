@@ -24,7 +24,9 @@ import {
 	insertTag,
 	markWhitespaceAssistantTagInert,
 	updateTagStatus,
+	updateTagTokenCount,
 } from "@magic-context/core/features/magic-context/storage-tags";
+import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { createTestDb, fakeContext } from "../test-utils.test";
 import { createCtxReduceTool } from "./ctx-reduce";
 
@@ -51,10 +53,14 @@ async function callDrop(args: {
 	sessionId: string;
 	drop: string;
 	protectedTags?: number;
+	floor?: number;
+	protectedTokens?: number;
 }) {
 	const tool = createCtxReduceTool({
 		db: args.db,
-		protectedTags: args.protectedTags ?? 0,
+		protectedTags: args.protectedTags,
+		floor: args.floor,
+		protectedTokens: args.protectedTokens,
 	});
 	const result = await tool.execute(
 		"call-1",
@@ -253,5 +259,53 @@ describe("Pi ctx_reduce tool", () => {
 		expect((result.content[0] as { text: string }).text).toContain(
 			"'drop' must",
 		);
+	});
+
+	it("derives protectedSet from shared protection window for tool tags", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-reduce-window";
+		try {
+			for (let i = 1; i <= 5; i++) {
+				insertTag(db, sessionId, `m${i}`, "tool", 4000, i);
+				updateTagTokenCount(db, sessionId, i, 4000);
+			}
+			// Floor 16,000 with 5 tags each 4,000:
+			// Tags 5 (4k), 4 (8k), 3 (12k), 2 (16k) are protected -> protectedSet {2, 3, 4, 5}.
+			// Tag 1 is not protected.
+			const { isError, text } = await callDrop({
+				db,
+				sessionId,
+				drop: "1,4",
+				floor: 16_000,
+			});
+			expect(isError).toBe(false);
+			expect(text).toContain("drop §1§");
+			expect(text).toContain("deferred drop §4§");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("applies empty-window behavior (F8): empty protectedSet, drops are immediate", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-reduce-f8";
+		try {
+			// Variant (b): non-tool tags, 0 tool tags
+			for (let i = 1; i <= 3; i++) {
+				insertTag(db, sessionId, `m${i}`, "message", 500, i);
+			}
+			const { isError, text } = await callDrop({
+				db,
+				sessionId,
+				drop: "1,2",
+				floor: 16_000,
+			});
+			expect(isError).toBe(false);
+			// Both dropped immediately, nothing deferred
+			expect(text).toContain("drop §1§, §2§");
+			expect(text).not.toContain("deferred drop");
+		} finally {
+			closeQuietly(db);
+		}
 	});
 });

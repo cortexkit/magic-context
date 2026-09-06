@@ -652,4 +652,63 @@ describe("loadPiConfig", () => {
 			'Removed invalid "historian.enabled" in-memory (run doctor to persist).',
 		);
 	});
+
+	describe("protected_tags deprecation", () => {
+		it("accepts protected_tags: 20 with loud deprecation warning and behavior identical to absent", () => {
+			const cwd = makeTempRoot("mc-pi-dep-cwd-");
+			const home = makeTempRoot("mc-pi-dep-home-");
+			withHome(home);
+			writeProjectConfig(cwd, JSON.stringify({ protected_tags: 20 }));
+
+			const result = loadPiConfig({ cwd });
+			const baselineAbsent = loadPiConfig({
+				cwd: makeTempRoot("mc-pi-absent-"),
+			});
+
+			// Behavior identical to absent
+			expect(result.config.execute_threshold_percentage).toBe(
+				baselineAbsent.config.execute_threshold_percentage,
+			);
+			// Deprecation warning names replacement protected_tokens
+			const warnings = result.warnings.join("\n");
+			expect(warnings).toContain("protected_tags");
+			expect(warnings).toContain("deprecated");
+			expect(warnings).toContain("protected_tokens");
+			expect(result.hasDeprecatedProtectedTags).toBe(true);
+		});
+
+		it("accepts protected_tags: 0 without bounds rejection and identical warning", () => {
+			const cwd = makeTempRoot("mc-pi-dep0-cwd-");
+			const home = makeTempRoot("mc-pi-dep0-home-");
+			withHome(home);
+			writeProjectConfig(cwd, JSON.stringify({ protected_tags: 0 }));
+
+			// Config parse must SUCCEED (no bounds error / no schema failure on deprecated key)
+			const result = loadPiConfig({ cwd });
+			expect(result.configParseFailures).toHaveLength(0);
+
+			const warnings = result.warnings.join("\n");
+			expect(warnings).toContain("protected_tags");
+			expect(warnings).toContain("deprecated");
+			expect(warnings).toContain("protected_tokens");
+			expect(result.hasDeprecatedProtectedTags).toBe(true);
+		});
+
+		it("accepts protected_tags: 101 without bounds rejection and identical warning", () => {
+			const cwd = makeTempRoot("mc-pi-dep101-cwd-");
+			const home = makeTempRoot("mc-pi-dep101-home-");
+			withHome(home);
+			writeProjectConfig(cwd, JSON.stringify({ protected_tags: 101 }));
+
+			// Config parse must SUCCEED (no bounds error / no schema failure on deprecated key)
+			const result = loadPiConfig({ cwd });
+			expect(result.configParseFailures).toHaveLength(0);
+
+			const warnings = result.warnings.join("\n");
+			expect(warnings).toContain("protected_tags");
+			expect(warnings).toContain("deprecated");
+			expect(warnings).toContain("protected_tokens");
+			expect(result.hasDeprecatedProtectedTags).toBe(true);
+		});
+	});
 });

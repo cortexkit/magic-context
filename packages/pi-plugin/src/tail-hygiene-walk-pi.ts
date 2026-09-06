@@ -25,7 +25,12 @@ const FNV1A_32_PRIME = 0x01000193;
 export interface PiTailHygieneWalkInput {
 	messages: readonly unknown[];
 	tags: readonly TagEntry[];
-	protectedTags: number;
+	protectedTags?: number;
+	/**
+	 * Canonical protection window tag numbers (Coordinate space: tag-number).
+	 * Empty-window behaviour: empty set.
+	 */
+	protectedTagNumbers?: ReadonlySet<number>;
 	/** Active tags whose drop is queued but has not yet changed the rendered Pi entries. */
 	pendingDropTagNumbers?: ReadonlySet<number>;
 	stableId?: (message: unknown, index: number) => string | undefined;
@@ -433,17 +438,23 @@ function finalizeParts(
 	drafts: readonly DraftPart[],
 	protectedTags: number,
 	pendingDropTagNumbers: ReadonlySet<number>,
+	protectedTagNumbers?: ReadonlySet<number>,
 ): TailHygieneMeasurement {
 	const visibleTags = new Map<number, TagEntry>();
 	for (const part of drafts) {
 		if (part.kind !== "excluded" && part.tag)
 			visibleTags.set(part.tag.tagNumber, part.tag);
 	}
-	const protectedNumbers = new Set(
-		[...visibleTags.keys()]
-			.sort((left, right) => right - left)
-			.slice(0, Math.max(0, protectedTags)),
-	);
+	// Coordinate space: tag-number
+	// Empty-window behaviour: empty set
+	const protectedNumbers =
+		protectedTagNumbers !== undefined
+			? new Set(protectedTagNumbers)
+			: new Set(
+					[...visibleTags.keys()]
+						.sort((left, right) => right - left)
+						.slice(0, Math.max(0, protectedTags)),
+				);
 	const exemplarNumbers = [...visibleTags.values()]
 		.filter((tag) => tag.type === "tool" && tag.toolName === "ctx_reduce")
 		.sort((left, right) => right.tagNumber - left.tagNumber)
@@ -647,8 +658,9 @@ export function measurePiTailHygiene(
 	}
 	return finalizeParts(
 		drafts,
-		input.protectedTags,
+		input.protectedTags ?? 20,
 		input.pendingDropTagNumbers ?? new Set<number>(),
+		input.protectedTagNumbers,
 	);
 }
 

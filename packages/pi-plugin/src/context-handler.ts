@@ -50,6 +50,7 @@ import {
 	scheduleIncrementalIndex,
 	scheduleReconciliation,
 } from "@magic-context/core/features/magic-context/message-index-async";
+import { getProtectionWindowForSession } from "@magic-context/core/features/magic-context/protection-window";
 import {
 	createScheduler,
 	parseCacheTtl,
@@ -3247,6 +3248,11 @@ export function registerPiContextHandler(
 				const sessionMetaForCh1 = getOrCreateSessionMeta(options.db, sessionId);
 				if (!options.compactionOff && !sessionMetaForCh1.isSubagent) {
 					const tags = getTagsBySession(options.db, sessionId);
+					const windowResult = getProtectionWindowForSession(
+						options.db,
+						sessionId,
+					);
+					const protectedTagNumbers = windowResult.tagNumberSet.tagNumbers;
 					const protectedTags = options.protectedTags ?? 20;
 					// Queued ctx_reduce drops are completed agent decisions. Their bytes
 					// remain in T until a cache-busting materialization, but not in U.
@@ -3263,6 +3269,7 @@ export function registerPiContextHandler(
 						messages: outputMessages,
 						tags,
 						protectedTags,
+						protectedTagNumbers,
 						pendingDropTagNumbers,
 						stableId,
 						syntheticLeadingCount: result.syntheticLeadingCount,

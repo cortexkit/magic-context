@@ -14,6 +14,10 @@
  */
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import {
+	getProtectionWindowForSession,
+	readEpochFloorSnapshot,
+} from "@magic-context/core/features/magic-context/protection-window";
 import { parseRangeString } from "@magic-context/core/features/magic-context/range-parser";
 import {
 	type ContextDatabase,
@@ -60,14 +64,11 @@ function formatIds(ids: number[]): string {
 
 export interface CtxReduceToolDeps {
 	db: ContextDatabase;
-	protectedTags: number;
-	/** Resolve the protected-tail size from the current cwd at tool-call time.
-	 *  Pi keeps the tool registered across `/cd`, so the threshold must follow
-	 *  the active project rather than the launch project. */
+	protectedTags?: number;
+	floor?: number;
+	protectedTokens?: number;
+	resolveFloor?: (ctx: { cwd: string }) => number | undefined;
 	resolveProtectedTags?: (ctx: { cwd: string }) => number | undefined;
-	/** Optional callback to read live session input tokens; falls back to
-	 *  `getOrCreateSessionMeta(...).lastInputTokens`. Mirrors OpenCode's
-	 *  `getSessionTokens` deps field. */
 	getSessionTokens?: (sessionId: string) => number;
 }
 
@@ -88,10 +89,6 @@ export function createCtxReduceTool(
 		) {
 			params = unwrapImitatedReducedArgs(params, ["drop"], { drop: "string" });
 			const sessionId = ctx.sessionManager.getSessionId();
-			const protectedTags = Math.max(
-				0,
-				Math.floor(deps.resolveProtectedTags?.(ctx) ?? deps.protectedTags),
-			);
 
 			if (!params.drop) {
 				return err("Error: 'drop' must be provided.");
@@ -116,11 +113,31 @@ export function createCtxReduceTool(
 			}
 
 			const activeTags = allTags.filter((tag) => tag.status === "active");
-			const protectedTagIds = activeTags
-				.map((tag) => tag.tagNumber)
-				.sort((left, right) => right - left)
-				.slice(0, protectedTags);
-			const protectedSet = new Set(protectedTagIds);
+
+			// Resolve the effective token floor threshold used to compute the protection window
+			const effectiveFloor =
+				readEpochFloorSnapshot(deps.db, sessionId) ??
+				deps.resolveFloor?.(ctx) ??
+				deps.floor ??
+				deps.protectedTokens ??
+				16_000;
+			// Protection window membership in tag-number coordinate space (empty-window behaviour: empty set)
+			const windowResult = getProtectionWindowForSession(
+				deps.db,
+				sessionId,
+				effectiveFloor,
+			);
+			const hasToolTags = allTags.some((t) => t.type === "tool");
+			const protectedSet = hasToolTags
+				? windowResult.tagNumberSet.tagNumbers
+				: typeof deps.protectedTags === "number" && deps.protectedTags > 0
+					? new Set(
+							activeTags
+								.map((tag) => tag.tagNumber)
+								.sort((left, right) => right - left)
+								.slice(0, deps.protectedTags),
+						)
+					: new Set<number>();
 
 			const tagStatusMap = new Map(
 				allTags.map((tag) => [tag.tagNumber, tag.status]),
