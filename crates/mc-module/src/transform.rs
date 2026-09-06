@@ -26568,7 +26568,7 @@ pub(crate) mod tests {
         let transitioned_config = s.load("opencode-flip").unwrap().meta.last_render_config;
         assert_eq!(transition.action, "HARD");
         assert_ne!(transitioned_config, before_config);
-        assert!(transitioned_config.contains("tfe:4:tfe4"));
+        assert!(transitioned_config.contains("tfe:4:tfe3"));
         assert!(!serde_json::to_string(transition.messages())
             .unwrap()
             .contains("§1§"));
@@ -26610,7 +26610,7 @@ pub(crate) mod tests {
             .unwrap()
             .meta
             .last_render_config
-            .contains("tfe:4:tfe4"));
+            .contains("tfe:4:tfe3"));
 
         let after_commit = run(&s, &request, &spine());
         assert_eq!(after_commit.action, "SOFT+");
@@ -26632,7 +26632,7 @@ pub(crate) mod tests {
             .unwrap()
             .meta
             .last_render_config
-            .contains("tfe4"));
+            .contains("tfe3"));
 
         let replay = run(&s, &request, &spine());
         assert_eq!(replay.action, "SOFT+");
@@ -29121,7 +29121,7 @@ pub(crate) mod tests {
         let on_config = store.load("surface-flip").unwrap().meta.last_render_config;
         assert!(on_config.contains("tf1"));
         assert!(on_config.contains("gfull"));
-        assert!(on_config.contains("tfe:4:tfe4"));
+        assert!(on_config.contains("tfe:4:tfe3"));
         let on_steady = run(&store, &active, &spine());
         assert_ne!(on_steady.action, "HARD");
         assert_eq!(on_steady.surface_state, SurfaceState::Active);
@@ -32491,8 +32491,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn staged_epoch_bump_takes_exactly_one_hard_when_client_config_frozen() {
-        assert_eq!(crate::TAGGER_FEATURE_EPOCH, 4);
+    fn cc_profile_epoch_bump_takes_exactly_one_hard_when_client_config_frozen() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let r1 = "pe1/tf1/gfull";
@@ -32507,11 +32506,8 @@ pub(crate) mod tests {
             r1,
             format!("mre{}", crate::MEMORY_RENDER_FORMAT_EPOCH),
             format!("cre{}", crate::COMPARTMENT_RENDER_FORMAT_EPOCH),
-            format!(
-                "mpe{}",
-                crate::profile_render_epoch(SerializerProfile::ClaudeCodeAnthropic)
-            ),
-            "tfe2".to_string(),
+            "mpe2".to_string(),
+            "tfe3".to_string(),
         );
         s.commit("staged-tfe", loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
@@ -32521,24 +32517,21 @@ pub(crate) mod tests {
         // coordinate two folds instead of the one fold owned by the module upgrade.
         let pass_a = run(&s, &request, &spine());
         assert_eq!(pass_a.action, "HARD");
-        let expected_tfe4 = effective_render_config_with_epochs(
+        let expected_profile_epoch_3 = effective_render_config_with_epochs(
             &s,
             r1,
             format!("mre{}", crate::MEMORY_RENDER_FORMAT_EPOCH),
             format!("cre{}", crate::COMPARTMENT_RENDER_FORMAT_EPOCH),
-            format!(
-                "mpe{}",
-                crate::profile_render_epoch(SerializerProfile::ClaudeCodeAnthropic)
-            ),
-            "tfe4".to_string(),
+            "mpe3".to_string(),
+            "tfe3".to_string(),
         );
         assert_eq!(
             s.load("staged-tfe").unwrap().meta.last_render_config,
-            expected_tfe4
+            expected_profile_epoch_3
         );
 
         let pass_b = run(&s, &request, &spine());
-        assert_ne!(pass_b.action, "HARD");
+        assert_eq!(pass_b.action, "SOFT+");
         assert_eq!(
             serde_json::to_vec(pass_a.messages()).unwrap(),
             serde_json::to_vec(pass_b.messages()).unwrap()
@@ -32549,6 +32542,47 @@ pub(crate) mod tests {
         assert_eq!(
             pass_c.action, "HARD",
             "the opaque client base is independently identity-bearing"
+        );
+    }
+
+    #[test]
+    fn opencode_identity_refuses_collateral_cc_profile_epoch_hard() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let request = active_opencode_req(
+            "opencode-profile-epoch",
+            "rust-mode/tf1/gfull",
+            vec![wire_item("user", "m1", 1, &["stable bytes"])],
+        );
+        run(&s, &request, &spine());
+        let mut loaded = s.load(&request.session_id).unwrap();
+        // Pin the previous format epochs to verify compatibility independently of this binary:
+        // memory 2, compartments 2, no OpenCode profile epoch, shared tagger 3.
+        let master_identity = effective_render_config_with_epochs(
+            &s,
+            &request.render_config,
+            "mre2".to_string(),
+            "cre2".to_string(),
+            String::new(),
+            "tfe3".to_string(),
+        );
+        assert_eq!(
+            loaded.meta.last_render_config.as_bytes(),
+            master_identity.as_bytes(),
+            "a Claude Code-only byte change must not alter OpenCode's render identity"
+        );
+        loaded.meta.last_render_config = master_identity;
+        s.commit(
+            &request.session_id,
+            loaded.row_version,
+            &loaded.core,
+            &loaded.meta,
+        )
+        .unwrap();
+        let replay = run(&s, &request, &spine());
+        assert_eq!(
+            replay.action, "SOFT+",
+            "OpenCode must not pay a collateral HARD"
         );
     }
 
@@ -32581,7 +32615,7 @@ pub(crate) mod tests {
 
     #[test]
     fn profile_epoch_fold_hards_epoch_zero_cc_state_once() {
-        assert_eq!(crate::PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC, 2);
+        assert_eq!(crate::PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC, 3);
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         s.replace_compartments("ses", &[comp(1, 1, 1, "m1", "SUMMARY")])
@@ -32620,22 +32654,22 @@ pub(crate) mod tests {
             m0_bytes(&transitioned)
         );
         assert!(!m0_bytes(&transitioned).contains("OLD-M0"));
-        // The bumped profile epoch (2) must flow into the committed effective render
-        // config as the `mpe2` member: that token is what makes the next pass see an
+        // The bumped profile epoch (3) must flow into the committed effective render
+        // config as the `mpe3` member: that token is what makes the next pass see an
         // unchanged config and stop folding.
         assert!(
             s.load("ses")
                 .unwrap()
                 .meta
                 .last_render_config
-                .contains("mpe2"),
-            "PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC=2 must fold into effective_render_config"
+                .contains("mpe3"),
+            "PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC=3 must fold into effective_render_config"
         );
 
         let one_shot = run(&s, &current, &spine());
         assert_eq!(
             one_shot.action, "SOFT+",
-            "after last_render_config records mpe2, the profile fold must not loop"
+            "after last_render_config records mpe3, the profile fold must not loop"
         );
     }
 

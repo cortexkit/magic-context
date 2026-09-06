@@ -611,22 +611,24 @@ pub const MEMORY_RENDER_FORMAT_EPOCH: u32 = 2;
 /// `<compartment>` elements with markdown headings in m0 and m1; epoch 2 sanitizes
 /// historian-authored titles before placing them inside the session-history wrapper.
 pub const COMPARTMENT_RENDER_FORMAT_EPOCH: u32 = 2;
-/// Bumps when the rendered m0 prefix format changes for the claude-code-anthropic
-/// profile; epoch 1 includes covered system messages in m0 instead of sending them as
+/// Bumps for provider-visible byte changes local to the claude-code-anthropic profile,
+/// without invalidating other profiles. Epoch 1 includes covered system messages in m0 instead of sending them as
 /// separate system-role messages. Epoch 2 flips the profile to full-array tail reclaim
 /// (the Thalamus peer retired the byte-splice at U0), so tool-absent sessions gain the
 /// age/pressure tail reclaim they never had; the bump forces one self-coordinated HARD
-/// fold on the first pass under the new binary, per the epoch contract above.
-pub const PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC: u32 = 2;
-/// Bumps when any active tag overlay changes provider-visible bytes. Epoch 4 tags completed
-/// Claude Code assistant text on first sight even when protected from other mutations.
-/// Every change requires one cache-breaking fold before the new overlay can render. Inactive
-/// requests omit the component and retain their identity.
-pub const TAGGER_FEATURE_EPOCH: u32 = 4;
+/// fold on the first pass under the new binary, per the epoch contract above. Epoch 3 tags
+/// completed assistant text on first sight even when protected from other mutations.
+pub const PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC: u32 = 3;
+/// Bumps for tagger-wide provider-visible byte changes across active tagging surfaces.
+/// Profile-local changes belong in that profile's render epoch instead, so unchanged
+/// profiles do not pay a collateral HARD. Epoch 3 freezes temporal-marker decisions in
+/// durable rows. Every bump requires a cache-breaking fold; inactive requests omit this
+/// component and retain their identity.
+pub const TAGGER_FEATURE_EPOCH: u32 = 3;
 
 /// The module-owned rendered-prefix format epoch for a serializer profile.
 ///
-/// Future profile-specific m0 format epochs slot in here so the module folds them into
+/// Profile-local rendered-byte epochs slot in here so the module folds them into
 /// its effective render_config even when a consumer sends a static base render_config.
 pub const fn profile_render_epoch(profile: SerializerProfile) -> u32 {
     match profile {
@@ -22569,7 +22571,7 @@ mod tests {
         assert_eq!(status["session_id"], "ses");
         assert_eq!(status["row_version"], Value::Null);
         assert_eq!(status["historian"]["last_no_fire"], Value::Null);
-        assert_eq!(PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC, 2);
+        assert_eq!(PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC, 3);
         assert_eq!(
             status["epochs"]["memory_render_epoch"],
             json!(MEMORY_RENDER_FORMAT_EPOCH)
@@ -22578,7 +22580,7 @@ mod tests {
             status["epochs"]["compartment_render_epoch"],
             json!(COMPARTMENT_RENDER_FORMAT_EPOCH)
         );
-        assert_eq!(status["epochs"]["profile_epoch"], json!(2));
+        assert_eq!(status["epochs"]["profile_epoch"], json!(3));
         assert_eq!(
             status["epochs"]["tagger_epoch"],
             json!(TAGGER_FEATURE_EPOCH)
