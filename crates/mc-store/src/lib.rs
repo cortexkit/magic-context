@@ -3611,6 +3611,32 @@ pub struct TailHygieneBaseline {
     pub channel1_post_reduce_grace_pre_level: String,
 }
 
+/// Compartment coverage composed into one frozen prefix unit. Empty fields mean the unit
+/// contained no compartments; an absent proof on ModuleMeta means the old bytes are unproven.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenderedCompartmentCoverage {
+    pub max_sequence: Option<i64>,
+    pub boundary_ordinal: Option<u64>,
+}
+
+impl RenderedCompartmentCoverage {
+    pub fn from_coverage(sequence: i64, boundary_ordinal: Option<u64>) -> Self {
+        Self {
+            max_sequence: boundary_ordinal.map(|_| sequence),
+            boundary_ordinal,
+        }
+    }
+}
+
+/// Narrow structural projection used to validate an applied prefix without loading summaries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompartmentBoundary {
+    pub sequence: i64,
+    pub start_message: i64,
+    pub end_message: i64,
+    pub end_message_id: String,
+}
+
 /// The non-CoreState durable blob: bootstrap + epoch-detection + coverage watermark.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModuleMeta {
@@ -3709,6 +3735,12 @@ pub struct ModuleMeta {
     /// observation bound without acknowledging that its summaries have been rendered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boundary_divergence_observed_compartment_seq: Option<i64>,
+    /// Minted from the m0 composition and committed with its bytes, never reconstructed on replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendered_m0_coverage: Option<RenderedCompartmentCoverage>,
+    /// Minted from the m1 composition. A legacy m0 stays unproven until it is actually rebuilt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendered_m1_coverage: Option<RenderedCompartmentCoverage>,
     /// The last materializing pass had cross-session memory disabled. The negative form keeps
     /// pre-field metadata and fresh default state compatible with the historical enabled mode.
     #[serde(default)]
@@ -10065,6 +10097,31 @@ impl McStore {
                 .query_map(params![session_id], Self::stored_compartment_from_row)?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(mapped)
+        })?;
+        Ok(rows)
+    }
+
+    /// Read only structural boundaries from one SQLite snapshot, without summary bodies.
+    pub fn load_compartment_boundaries(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<CompartmentBoundary>, McStoreError> {
+        let rows = self.inner.with_conn(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT sequence, start_message, end_message, end_message_id
+                 FROM mc_compartments WHERE session_id = ?1 ORDER BY sequence ASC",
+            )?;
+            let rows = stmt
+                .query_map(params![session_id], |row| {
+                    Ok(CompartmentBoundary {
+                        sequence: row.get(0)?,
+                        start_message: row.get(1)?,
+                        end_message: row.get(2)?,
+                        end_message_id: row.get(3)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
         })?;
         Ok(rows)
     }
@@ -17707,6 +17764,9 @@ mod tests {
         let mut left_meta = left.meta.clone();
         left_meta.boundary_divergence_pending_count = 1;
         left_meta.boundary_divergence_observed_compartment_seq = Some(47);
+        left_meta.rendered_m0_coverage =
+            Some(RenderedCompartmentCoverage::from_coverage(47, Some(2_400)));
+        left_meta.rendered_m1_coverage = Some(RenderedCompartmentCoverage::default());
         store
             .commit(session, left.row_version, &left.core, &left_meta)
             .unwrap();
@@ -17714,6 +17774,8 @@ mod tests {
         let mut right_meta = right.meta.clone();
         right_meta.boundary_divergence_pending_count = 1;
         right_meta.boundary_divergence_observed_compartment_seq = Some(48);
+        right_meta.rendered_m0_coverage =
+            Some(RenderedCompartmentCoverage::from_coverage(48, Some(2_401)));
         let loser = store.commit(session, right.row_version, &right.core, &right_meta);
         assert!(matches!(
             loser,
@@ -17739,8 +17801,20 @@ mod tests {
                 .boundary_divergence_observed_compartment_seq,
             Some(47)
         );
+        assert_eq!(
+            store.load(session).unwrap().meta.rendered_m0_coverage,
+            left_meta.rendered_m0_coverage
+        );
         drop(store);
         let reopened = McStore::open(&descriptor(dir.path())).unwrap();
+        assert_eq!(
+            reopened.load(session).unwrap().meta.rendered_m0_coverage,
+            left_meta.rendered_m0_coverage
+        );
+        assert_eq!(
+            reopened.load(session).unwrap().meta.rendered_m1_coverage,
+            left_meta.rendered_m1_coverage
+        );
         assert_eq!(
             reopened
                 .load(session)
@@ -21216,6 +21290,38 @@ mod tests {
 
         // distinct sessions are isolated
         assert!(store.load_compartments("ses_b").unwrap().is_empty());
+    }
+
+    #[test]
+    fn compartment_boundary_projection_keeps_structural_fields_and_session_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        store
+            .replace_compartments(
+                "prefix",
+                &[StoredCompartment {
+                    sequence: 7,
+                    start_message: 11,
+                    end_message: 20,
+                    end_message_id: "end#1".to_string(),
+                    content: "summary body is not part of the projection".to_string(),
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            store.load_compartment_boundaries("prefix").unwrap(),
+            vec![CompartmentBoundary {
+                sequence: 7,
+                start_message: 11,
+                end_message: 20,
+                end_message_id: "end#1".to_string()
+            }]
+        );
+        assert!(store
+            .load_compartment_boundaries("other")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

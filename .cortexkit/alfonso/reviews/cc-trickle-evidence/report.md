@@ -1,6 +1,20 @@
 # Claude Code cache investigation: cadence fixes and wire contract
 
-## Athena review resolution — bounded repair, refuted wildcard pin
+## Current structural resolution — rendered evidence, not counter discrimination
+
+**Current evidence-package delta:** [structural-prefix-review.md](structural-prefix-review.md). This supersedes the host-flag and publication-progress discriminators recorded in the historical review sections below.
+
+- Persist `rendered_m0_coverage` and `rendered_m1_coverage` (actual composition maximum compartment sequence and terminal ordinal) with the corresponding frozen units in the same CAS commit. Replay never fabricates those proofs from applied metadata.
+- **CONSUMABLE:** rendered evidence and applied coverage agree on a valid store prefix, with a new suffix in the store. It never counts or repair-recuts; one publication can wait through ten mid-turn observations unchanged, and six publications still coalesce at the boundary.
+- **INCOHERENT:** rendered evidence contradicts applied coverage or the current store prefix. New publications, host mid-turn, active historian, and wrapup cannot erase its observations. Unequal-revision damage repairs on pass 3; the existing immediate equal-revision repair arm remains intact.
+- A consumable prefix rewound at pass 4 is detected structurally and recuts at pass 6. The ASTRO damaged fixture was preserved, with a table-driven consistent-rendered-proof twin to distinguish real damage from pending publication.
+- Existing count and observed-sequence fields remain for legacy compatibility. Missing proofs retain the prior count/progress policy; a legacy SOFT proves only m1, and the next actual m0 rebuild establishes complete proof without guessing old contents. No migration or forced deployment bust was added.
+
+All five requested scenarios, a 21-case classifier table, proof minting across HARD/SOFT/pressure-refold, legacy transition, active-producer damage, and CAS/reopen persistence are executable regressions. Five executed mutation controls are recorded in the delta document.
+
+Final structural gate details are in that document: mc-store 136 tests passed; strict Clippy and fmt passed; the final mc-module full run had only the already-known timing flake (54.123 µs/pass), which passed isolated at 17.952 µs/pass without weakening the assertion. No structural test failed. No module bounce or master push occurred.
+
+## Prior Athena review — counter bound superseded for proven prefixes; wildcard pin still refuted
 
 ### BLOCK resolved: three coherent observations per unchanged compartment revision
 

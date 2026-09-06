@@ -17,6 +17,7 @@ use std::collections::{hash_map::DefaultHasher, HashSet};
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
+use mc_store::RenderedCompartmentCoverage;
 use mc_store::{McStore, McStoreError, ModuleMeta, NoteDelivery, StoredMemory, StoredNote};
 
 use crate::compartment_coverage::{partition_by_folded_seq, resolve_coverage, CoverageGap};
@@ -227,6 +228,8 @@ pub struct M1Composition {
     /// Number of memory corrections represented in the m1 body, for the pressure backstop.
     pub memory_update_count: usize,
     pub new_coverage: Option<(String, u64)>,
+    /// Coverage of the compartment delta composed into these bytes, independent of applied meta.
+    pub rendered_coverage: RenderedCompartmentCoverage,
     pub note_deliveries: Vec<NoteDelivery>,
     /// True only when the pending profile version produced a non-empty, budgeted block.
     pub profile_rendered: bool,
@@ -322,6 +325,15 @@ pub fn compose_m1_from_store(
         .collect();
     let new_comp_refs: Vec<&DecayRenderCompartment> = new_comp_decay.iter().collect();
     let new_compartments_block = render_new_compartments(&new_comp_refs);
+    let rendered_coverage =
+        new_comps
+            .last()
+            .map_or_else(RenderedCompartmentCoverage::default, |last| {
+                RenderedCompartmentCoverage::from_coverage(
+                    last.sequence,
+                    Some(last.end_message.max(0) as u64),
+                )
+            });
 
     // a new compartment EXTENDS coverage when the full set's coverage end is past what
     // m0+m1 currently cover (meta.coverage_ordinal). Then the SOFT advances the anchor.
@@ -491,6 +503,7 @@ pub fn compose_m1_from_store(
     );
 
     Ok(M1Composition {
+        rendered_coverage,
         body,
         memory_update_count: mutations.len(),
         new_coverage,

@@ -60,6 +60,7 @@ use mc_store::{
     TemporalMarkInput, TemporalMarkRow, TransformCommit, TransformOverlayBatch,
     UserHintDecisionInput, UserHintRow,
 };
+use mc_store::{CompartmentBoundary, RenderedCompartmentCoverage};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -2861,6 +2862,8 @@ fn apply_additive_only(
                 .as_ref()
                 .map(|mural| mural.content_hash.clone())
                 .unwrap_or_default();
+            meta.rendered_m0_coverage = Some(RenderedCompartmentCoverage::default());
+            meta.rendered_m1_coverage = Some(RenderedCompartmentCoverage::default());
             let mut rendered_units = vec![synth_region("m0", composition.m0_bytes)];
             if let Some(mural_unit) = mural_unit {
                 rendered_units.push(mural_unit);
@@ -2936,6 +2939,7 @@ fn apply_additive_only(
             )?;
             note_deliveries = m1.note_deliveries.clone();
             let profile_rendered = m1.profile_rendered;
+            meta.rendered_m1_coverage = Some(m1.rendered_coverage);
             core.step(PassInput {
                 proposed: Some(mc_core::Action::Soft),
                 boundary_present: "-".to_string(),
@@ -3830,6 +3834,7 @@ fn apply_once(
         detect_boundary_divergence_candidate(
             store,
             &req.session_id,
+            &loaded.core,
             &loaded.meta,
             &live,
             fallback_tail_allowance,
@@ -3865,44 +3870,51 @@ fn apply_once(
         .map_or(m1_signal.revision == loaded.meta.m1_revision, |applied| {
             applied == m1_signal.max_compartment_seq
         });
-    // A non-idle durable historian phase and the process-local wrapup latch are state proofs that
-    // publication may legitimately be ahead of rendered coverage. Retain prior evidence while
-    // either proof holds: incrementing would manufacture a provider-cache bust, while resetting
-    // would forget a genuinely damaged row. A damaged row seen during wrapup waits for the latch
-    // guard to end, bounded by the 3,800-second wrapup request budget documented on the context.
-    let active_legitimate_publication_window = ctx.historian_active || ctx.wrapup_active;
+    // Legacy rows can borrow an active producer's publication window while their bytes lack
+    // composition evidence. A proven mismatch between rendered coverage and applied metadata
+    // cannot be repaired by another publication, so neither producer nor host activity masks it.
+    let consumable_publication = divergence_candidate
+        .is_some_and(|candidate| candidate.class == BoundaryDivergenceClass::Consumable);
+    let incoherent_prefix = divergence_candidate
+        .is_some_and(|candidate| candidate.class == BoundaryDivergenceClass::Incoherent);
+    let active_legitimate_publication_window =
+        !incoherent_prefix && (ctx.historian_active || ctx.wrapup_active);
     let mut boundary_divergence_observed_compartment_seq =
         loaded.meta.boundary_divergence_observed_compartment_seq;
-    // An advancing compartment sequence proves publication progress while summaries wait to render.
-    // A host's mid-turn flag alone proves no progress: count unchanged revisions so a stuck flag
-    // cannot suppress repair forever. Retain legacy counts until a revision change is observed.
-    let publication_progress = boundary_divergence_observed_compartment_seq
-        .is_some_and(|observed| observed < m1_signal.max_compartment_seq);
-    let mut boundary_divergence_pending_count =
-        if req.is_subagent || divergence_inputs_moved || active_legitimate_publication_window {
-            loaded.meta.boundary_divergence_pending_count
-        } else if divergence_candidate.is_some() {
-            if boundary_divergence_retry || compartment_revision_matches {
+    // Only legacy rows need the old progress heuristic. New publication cannot repair a
+    // rendered prefix that contradicts its applied metadata; proven pending deltas never count.
+    let publication_progress = !incoherent_prefix
+        && boundary_divergence_observed_compartment_seq
+            .is_some_and(|observed| observed < m1_signal.max_compartment_seq);
+    let mut boundary_divergence_pending_count = if req.is_subagent || divergence_inputs_moved {
+        loaded.meta.boundary_divergence_pending_count
+    } else if consumable_publication {
+        0
+    } else if active_legitimate_publication_window {
+        loaded.meta.boundary_divergence_pending_count
+    } else if divergence_candidate.is_some() {
+        if boundary_divergence_retry || compartment_revision_matches {
+            0
+        } else {
+            boundary_divergence_observed_compartment_seq = Some(m1_signal.max_compartment_seq);
+            let previous_count = if publication_progress {
                 0
             } else {
-                boundary_divergence_observed_compartment_seq = Some(m1_signal.max_compartment_seq);
-                let previous_count = if publication_progress {
-                    0
-                } else {
-                    loaded.meta.boundary_divergence_pending_count
-                };
-                previous_count
-                    .saturating_add(1)
-                    .min(BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT)
-            }
-        } else {
-            0
-        };
-    let boundary_divergence_recut = divergence_candidate.filter(|_| {
-        boundary_divergence_retry
-            || compartment_revision_matches
-            || (!active_legitimate_publication_window
-                && boundary_divergence_pending_count >= BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT)
+                loaded.meta.boundary_divergence_pending_count
+            };
+            previous_count
+                .saturating_add(1)
+                .min(BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT)
+        }
+    } else {
+        0
+    };
+    let boundary_divergence_recut = divergence_candidate.filter(|candidate| {
+        candidate.class != BoundaryDivergenceClass::Consumable
+            && (boundary_divergence_retry
+                || compartment_revision_matches
+                || (!active_legitimate_publication_window
+                    && boundary_divergence_pending_count >= BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT))
     });
     if boundary_divergence_recut.is_some() && !active_legitimate_publication_window {
         boundary_divergence_pending_count = 0;
@@ -4743,6 +4755,11 @@ fn apply_once(
                     .as_ref()
                     .map(|mural| mural.content_hash.clone())
                     .unwrap_or_default();
+                meta.rendered_m0_coverage = Some(RenderedCompartmentCoverage::from_coverage(
+                    comp.folded_compartment_seq,
+                    comp.coverage_ordinal,
+                ));
+                meta.rendered_m1_coverage = Some(RenderedCompartmentCoverage::default());
                 let mut rendered = vec![synth_region("m0", comp.m0_bytes)];
                 if let Some(mural_unit) = mural_unit {
                     rendered.push(mural_unit);
@@ -4966,6 +4983,11 @@ fn apply_once(
                         .as_ref()
                         .map(|mural| mural.content_hash.clone())
                         .unwrap_or_default();
+                    meta.rendered_m0_coverage = Some(RenderedCompartmentCoverage::from_coverage(
+                        comp.folded_compartment_seq,
+                        comp.coverage_ordinal,
+                    ));
+                    meta.rendered_m1_coverage = Some(RenderedCompartmentCoverage::default());
                     let mut rendered = vec![synth_region("m0", comp.m0_bytes)];
                     if let Some(mural_unit) = mural_unit {
                         rendered.push(mural_unit);
@@ -5018,6 +5040,7 @@ fn apply_once(
                     meta.m1_pending_since_ms = None;
                     commit_memory_revision = Some(comp.memory_revision);
                 } else {
+                    meta.rendered_m1_coverage = Some(m1.rendered_coverage);
                     let mut rendered = vec![render_m1_body(&m1.body)];
                     rendered.extend(new_reduction_units(
                         &core,
@@ -5153,14 +5176,16 @@ fn apply_once(
     // A todo-only SOFT splice changes neither the m0/m1 divider nor the covered tail. Keep
     // divergence evidence across that bust so repeated todo churn cannot postpone repair. A
     // structural boundary/coverage move, or a converged observation, still closes the episode.
-    if boundary_divergence_reset_allowed(
-        is_bust_pass,
-        active_legitimate_publication_window,
-        divergence_candidate.is_none(),
-        divergence_inputs_moved,
-        compartment_revision_matches,
-        boundary_or_coverage_state_moved(&loaded.core, &core, &loaded.meta, &meta),
-    ) {
+    if (!incoherent_prefix || matches!(plan, PassPlan::Hard | PassPlan::MigrateHard))
+        && boundary_divergence_reset_allowed(
+            is_bust_pass,
+            active_legitimate_publication_window,
+            divergence_candidate.is_none(),
+            divergence_inputs_moved,
+            compartment_revision_matches,
+            boundary_or_coverage_state_moved(&loaded.core, &core, &loaded.meta, &meta),
+        )
+    {
         meta.boundary_divergence_pending_count = 0;
         meta.boundary_divergence_observed_compartment_seq = None;
     }
@@ -6700,10 +6725,93 @@ fn is_uncovered_leading_system(message: &CkIngressMessage, meta: &ModuleMeta) ->
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundaryDivergenceClass {
+    Aligned,
+    Consumable,
+    Incoherent,
+    Legacy,
+}
+
+/// Compare composition-time evidence with applied metadata and the current store prefix.
+/// Pending summaries cannot repair an m0 whose rendered coverage already disagrees with meta.
+fn classify_boundary_divergence(
+    core: &CoreState,
+    meta: &ModuleMeta,
+    boundaries: &[CompartmentBoundary],
+) -> BoundaryDivergenceClass {
+    use BoundaryDivergenceClass::{Aligned, Consumable, Incoherent, Legacy};
+    let (Some(m0), Some(m1)) = (meta.rendered_m0_coverage, meta.rendered_m1_coverage) else {
+        return Legacy;
+    };
+    if boundaries
+        .iter()
+        .any(|row| row.start_message < 0 || row.end_message < row.start_message)
+        || boundaries.windows(2).any(|pair| {
+            pair[0].sequence >= pair[1].sequence || pair[0].end_message >= pair[1].start_message
+        })
+    {
+        return Incoherent;
+    }
+    for proof in [m0, m1] {
+        match (proof.max_sequence, proof.boundary_ordinal) {
+            (None, None) => {}
+            (Some(sequence), Some(ordinal)) => {
+                if !boundaries.iter().any(|row| {
+                    row.sequence == sequence && u64::try_from(row.end_message).ok() == Some(ordinal)
+                }) {
+                    return Incoherent;
+                }
+            }
+            _ => return Incoherent,
+        }
+    }
+    if m1.max_sequence.is_some()
+        && m0.max_sequence.is_some()
+        && (m1.max_sequence <= m0.max_sequence || m1.boundary_ordinal <= m0.boundary_ordinal)
+    {
+        return Incoherent;
+    }
+    let rendered = if m1.max_sequence.is_some() { m1 } else { m0 };
+    let applied_sequence = rendered.max_sequence.unwrap_or(0);
+    if meta.coverage_ordinal != rendered.boundary_ordinal
+        || meta.folded_compartment_seq != m0.max_sequence.unwrap_or(0)
+        || meta
+            .coverage_compartment_seq
+            .is_some_and(|seq| seq != applied_sequence)
+        || meta
+            .m1_compartment_seq
+            .is_some_and(|seq| seq != applied_sequence)
+    {
+        return Incoherent;
+    }
+    if let Some(sequence) = rendered.max_sequence {
+        let applied = boundaries
+            .iter()
+            .find(|row| row.sequence == sequence)
+            .expect("proof endpoint checked above");
+        if core.boundary_id != applied.end_message_id
+            || meta.coverage_start_ordinal.is_some_and(|start| {
+                boundaries.first().map(|row| row.start_message as u64) != Some(start)
+            })
+        {
+            return Incoherent;
+        }
+    } else if !core.boundary_id.is_empty() {
+        return Incoherent;
+    }
+    if boundaries.last().map(|row| row.sequence) == rendered.max_sequence {
+        Aligned
+    } else {
+        Consumable
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BoundaryDivergenceRecut {
     old_coverage: u64,
     new_coverage: u64,
     live_tail_allowance: u64,
+    class: BoundaryDivergenceClass,
 }
 
 fn protected_tail_floor_ordinal(
@@ -6772,6 +6880,7 @@ fn boundary_divergence_reset_allowed(
 fn detect_boundary_divergence_candidate(
     store: &McStore,
     session_id: &str,
+    core: &CoreState,
     meta: &ModuleMeta,
     live: &[&FlatBlock],
     fallback_tail_allowance: u64,
@@ -6781,9 +6890,21 @@ fn detect_boundary_divergence_candidate(
     }
 
     let max_end = store.max_compartment_end_ordinal(session_id)?;
-    let Ok(new_coverage) = u64::try_from(max_end) else {
+    let Ok(mut new_coverage) = u64::try_from(max_end) else {
         return Ok(None);
     };
+    let class = if meta.rendered_m0_coverage.is_some() && meta.rendered_m1_coverage.is_some() {
+        let boundaries = store.load_compartment_boundaries(session_id)?;
+        new_coverage = boundaries
+            .last()
+            .map_or(0, |row| row.end_message.max(0) as u64);
+        classify_boundary_divergence(core, meta, &boundaries)
+    } else {
+        BoundaryDivergenceClass::Legacy
+    };
+    if class == BoundaryDivergenceClass::Aligned {
+        return Ok(None);
+    }
     let old_coverage = meta.coverage_ordinal.unwrap_or(0);
     let newest_live = live
         .iter()
@@ -6803,7 +6924,7 @@ fn detect_boundary_divergence_candidate(
                     .map_or(0, |span| span.saturating_add(1))
             });
     let coverage_gap = new_coverage.saturating_sub(old_coverage);
-    if coverage_gap <= live_tail_allowance {
+    if class == BoundaryDivergenceClass::Legacy && coverage_gap <= live_tail_allowance {
         return Ok(None);
     }
 
@@ -6811,6 +6932,7 @@ fn detect_boundary_divergence_candidate(
         old_coverage,
         new_coverage,
         live_tail_allowance,
+        class,
     }))
 }
 
@@ -17615,11 +17737,8 @@ pub(crate) mod tests {
                 assert_eq!(m0_bytes(&held), m0_bytes(&boot));
                 let held_meta = s.load("ses").unwrap().meta;
                 assert!(held_meta.deferred_execute_state.is_some());
-                assert_eq!(held_meta.boundary_divergence_pending_count, 1);
-                assert_eq!(
-                    held_meta.boundary_divergence_observed_compartment_seq,
-                    Some(2 + chunk)
-                );
+                assert_eq!(held_meta.boundary_divergence_pending_count, 0);
+                assert_eq!(held_meta.boundary_divergence_observed_compartment_seq, None);
             }
             request.mid_turn = finish_mid_turn;
             request = with_usage(request, finish_usage, 100);
@@ -23765,6 +23884,434 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn rendered_prefix_classifier_distinguishes_consumable_damage_and_legacy() {
+        fn proof(sequence: i64, ordinal: u64) -> RenderedCompartmentCoverage {
+            RenderedCompartmentCoverage::from_coverage(sequence, Some(ordinal))
+        }
+        type EditCase = fn(&mut CoreState, &mut ModuleMeta, &mut Vec<CompartmentBoundary>);
+        use BoundaryDivergenceClass::{Aligned, Consumable, Incoherent, Legacy};
+        let cases: &[(&str, EditCase, BoundaryDivergenceClass)] = &[
+            (
+                "consistent rendered prefix, store ahead",
+                |_, _, _| {},
+                Consumable,
+            ),
+            (
+                "same metadata but frozen m0 carries later summaries",
+                |_, m, _| m.rendered_m0_coverage = Some(proof(2, 20)),
+                Incoherent,
+            ),
+            (
+                "frozen m0 behind metadata",
+                |_, m, _| m.rendered_m0_coverage = Some(RenderedCompartmentCoverage::default()),
+                Incoherent,
+            ),
+            (
+                "frozen m1 ahead of applied coverage",
+                |_, m, _| m.rendered_m1_coverage = Some(proof(2, 20)),
+                Incoherent,
+            ),
+            (
+                "equal sequences and consistent prefix",
+                |_, _, rows| rows.truncate(1),
+                Aligned,
+            ),
+            (
+                "equal sequences but rendered ordinal disagrees",
+                |_, m, rows| {
+                    rows.truncate(1);
+                    m.rendered_m0_coverage = Some(proof(1, 9));
+                },
+                Incoherent,
+            ),
+            (
+                "applied component claims store max beyond rendered prefix",
+                |_, m, _| m.m1_compartment_seq = Some(2),
+                Incoherent,
+            ),
+            (
+                "stale component behind applied prefix",
+                |_, m, _| m.m1_compartment_seq = Some(0),
+                Incoherent,
+            ),
+            (
+                "missing old component marker with proven prefix",
+                |_, m, _| m.m1_compartment_seq = None,
+                Consumable,
+            ),
+            (
+                "missing both old component markers with proven prefix",
+                |_, m, _| {
+                    m.m1_compartment_seq = None;
+                    m.coverage_compartment_seq = None;
+                },
+                Consumable,
+            ),
+            (
+                "missing observed sequence does not weaken rendered proof",
+                |_, m, _| m.boundary_divergence_observed_compartment_seq = None,
+                Consumable,
+            ),
+            (
+                "legacy m0 has no composition proof",
+                |_, m, _| m.rendered_m0_coverage = None,
+                Legacy,
+            ),
+            (
+                "legacy m1 has no composition proof",
+                |_, m, _| m.rendered_m1_coverage = None,
+                Legacy,
+            ),
+            (
+                "core boundary differs from store prefix",
+                |c, _, _| c.boundary_id = "wrong#0".into(),
+                Incoherent,
+            ),
+            (
+                "store rewound below rendered prefix",
+                |_, _, rows| rows.clear(),
+                Incoherent,
+            ),
+            (
+                "store changed rendered endpoint",
+                |_, _, rows| rows[0].end_message = 9,
+                Incoherent,
+            ),
+            (
+                "store lost leading coverage",
+                |_, _, rows| rows[0].start_message = 2,
+                Incoherent,
+            ),
+            (
+                "overlapping store ranges",
+                |_, _, rows| rows[1].start_message = 10,
+                Incoherent,
+            ),
+            (
+                "half-missing proof is not legacy",
+                |_, m, _| m.rendered_m0_coverage.as_mut().unwrap().max_sequence = None,
+                Incoherent,
+            ),
+            (
+                "valid m0 plus m1 matches store",
+                |c, m, _| {
+                    c.boundary_id = "b#0".into();
+                    m.coverage_ordinal = Some(20);
+                    m.coverage_compartment_seq = Some(2);
+                    m.m1_compartment_seq = Some(2);
+                    m.rendered_m1_coverage = Some(proof(2, 20));
+                },
+                Aligned,
+            ),
+            (
+                "applied sequence beyond store maximum",
+                |c, m, rows| {
+                    c.boundary_id = "b#0".into();
+                    m.coverage_ordinal = Some(20);
+                    m.coverage_compartment_seq = Some(2);
+                    m.m1_compartment_seq = Some(2);
+                    m.rendered_m1_coverage = Some(proof(2, 20));
+                    rows.truncate(1);
+                },
+                Incoherent,
+            ),
+        ];
+        for (name, edit, expected) in cases {
+            let mut core = CoreState {
+                boundary_id: "a#0".into(),
+                ..CoreState::default()
+            };
+            let mut meta = ModuleMeta {
+                initialized: true,
+                coverage_ordinal: Some(10),
+                coverage_start_ordinal: Some(1),
+                coverage_compartment_seq: Some(1),
+                m1_compartment_seq: Some(1),
+                folded_compartment_seq: 1,
+                rendered_m0_coverage: Some(proof(1, 10)),
+                rendered_m1_coverage: Some(RenderedCompartmentCoverage::default()),
+                boundary_divergence_observed_compartment_seq: Some(99),
+                ..ModuleMeta::default()
+            };
+            let mut rows = vec![
+                CompartmentBoundary {
+                    sequence: 1,
+                    start_message: 1,
+                    end_message: 10,
+                    end_message_id: "a#0".into(),
+                },
+                CompartmentBoundary {
+                    sequence: 2,
+                    start_message: 11,
+                    end_message: 20,
+                    end_message_id: "b#0".into(),
+                },
+            ];
+            edit(&mut core, &mut meta, &mut rows);
+            assert_eq!(
+                classify_boundary_divergence(&core, &meta, &rows),
+                *expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_proof_tracks_hard_soft_and_pressure_refold_compositions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let (mut request, _) = seed_structural_prefix_pair(&store, "proof-compositions");
+        let initial = store.load("proof-compositions").unwrap().meta;
+        assert_eq!(
+            initial.rendered_m0_coverage,
+            Some(RenderedCompartmentCoverage::from_coverage(2, Some(2)))
+        );
+        assert_eq!(
+            initial.rendered_m1_coverage,
+            Some(RenderedCompartmentCoverage::default())
+        );
+        request.mid_turn = false;
+        let mut context = pctx("git:proj", "/nonexistent-docs", 2_001);
+        let soft = transform(&store, &request, &context).unwrap();
+        assert_eq!(soft.action, "SOFT");
+        let after_soft = store.load("proof-compositions").unwrap().meta;
+        assert_eq!(
+            after_soft.rendered_m0_coverage,
+            initial.rendered_m0_coverage
+        );
+        assert_eq!(
+            after_soft.rendered_m1_coverage,
+            Some(RenderedCompartmentCoverage::from_coverage(3, Some(3)))
+        );
+        store
+            .append_compartments("proof-compositions", &[comp(4, 4, 4, "later", "LATER")])
+            .unwrap();
+        context.history_budget_tokens = 1.0;
+        let hard = transform(&store, &request, &context).unwrap();
+        assert_eq!(hard.materialize_reason.as_deref(), Some("pressure_refold"));
+        let after_hard = store.load("proof-compositions").unwrap().meta;
+        assert_eq!(
+            after_hard.rendered_m0_coverage,
+            Some(RenderedCompartmentCoverage::from_coverage(4, Some(4)))
+        );
+        assert_eq!(
+            after_hard.rendered_m1_coverage,
+            Some(RenderedCompartmentCoverage::default())
+        );
+    }
+
+    fn seed_structural_prefix_pair(
+        store: &McStore,
+        session: &str,
+    ) -> (TransformRequest, TransformResponse) {
+        store
+            .replace_compartments(
+                session,
+                &[
+                    comp(1, 1, 1, "head", "FIRST"),
+                    comp(2, 2, 2, "applied", "SECOND"),
+                ],
+            )
+            .unwrap();
+        let mut request = with_usage(
+            cc_req(
+                session,
+                "cfg0",
+                vec![
+                    item("head", 1, "head"),
+                    item("applied", 2, "applied"),
+                    item("pending", 3, "pending"),
+                    item("later", 4, "later"),
+                    item("tail", 5, "tail"),
+                ],
+            ),
+            75,
+            100,
+        );
+        let boot = transform(
+            store,
+            &request,
+            &pctx("git:proj", "/nonexistent-docs", 2_000),
+        )
+        .unwrap();
+        assert_eq!(boot.action, "HARD");
+        store
+            .append_compartments(session, &[comp(3, 3, 3, "pending", "PENDING")])
+            .unwrap();
+        request.mid_turn = true;
+        (request, boot)
+    }
+
+    #[test]
+    fn healthy_single_publication_waits_ten_mid_turn_passes_then_applies_one_soft() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let (mut request, boot) = seed_structural_prefix_pair(&store, "healthy-stall");
+        let context = pctx("git:proj", "/nonexistent-docs", 2_001);
+        for _ in 0..10 {
+            let held = transform(&store, &request, &context).unwrap();
+            assert_eq!(held.action, "SOFT+");
+            assert_eq!(m0_bytes(&held), m0_bytes(&boot));
+            assert_eq!(m1_bytes(&held), m1_bytes(&boot));
+        }
+        request.mid_turn = false;
+        let consumed = transform(&store, &request, &context).unwrap();
+        assert_eq!(consumed.action, "SOFT");
+        assert_eq!(m0_bytes(&consumed), m0_bytes(&boot));
+        assert!(m1_bytes(&consumed).contains("PENDING"));
+    }
+
+    #[test]
+    fn incoherent_rendered_prefix_recuts_despite_a_new_publication_every_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let session = "astro-progressing-damage";
+        let mut request = with_usage(
+            seed_astro_divergence(&store, session, 2_408),
+            70_000,
+            100_000,
+        );
+        request.mid_turn = true;
+        let loaded = store.load(session).unwrap();
+        let mut stale = loaded.meta.clone();
+        stale.m1_revision ^= u64::MAX;
+        stale.m1_compartment_seq = Some(1);
+        store
+            .commit(session, loaded.row_version, &loaded.core, &stale)
+            .unwrap();
+        let mut context = pctx("git:proj", "/nonexistent-docs", 2_000);
+        let mut recut_at = None;
+        for pass in 1..=BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT + 1 {
+            let end = 2_400 + i64::from(pass);
+            store
+                .append_compartments(
+                    session,
+                    &[comp(
+                        47 + i64::from(pass),
+                        end,
+                        end,
+                        &format!("m{end}"),
+                        "NEW",
+                    )],
+                )
+                .unwrap();
+            context.now_ms += 1;
+            context.observed_last_response_at_ms = Some(context.now_ms);
+            let response = transform(&store, &request, &context).unwrap();
+            assert_eq!(response.scheduler_decision.as_deref(), Some("defer"));
+            if response.materialize_reason.as_deref() == Some("boundary_divergence_recut") {
+                assert_eq!(response.action, "HARD");
+                recut_at = Some(pass);
+                break;
+            }
+        }
+        assert_eq!(recut_at, Some(BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT));
+    }
+
+    #[test]
+    fn consumable_prefix_rewound_on_pass_four_recuts_on_pass_six() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let (request, boot) = seed_structural_prefix_pair(&store, "rewound-prefix");
+        let context = pctx("git:proj", "/nonexistent-docs", 2_001);
+        for pass in 1..=6 {
+            if pass == 4 {
+                store
+                    .replace_compartments("rewound-prefix", &[comp(1, 1, 1, "head", "FIRST")])
+                    .unwrap();
+            }
+            let response = transform(&store, &request, &context).unwrap();
+            if pass < 6 {
+                assert_eq!(response.action, "SOFT+", "pass {pass}");
+                assert_eq!(m0_bytes(&response), m0_bytes(&boot));
+                assert_eq!(m1_bytes(&response), m1_bytes(&boot));
+            } else {
+                assert_eq!(
+                    response.materialize_reason.as_deref(),
+                    Some("boundary_divergence_recut")
+                );
+                assert_eq!(response.action, "HARD");
+                assert_eq!(response.coverage_ordinal, Some(1));
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_soft_mints_only_m1_proof_without_guessing_frozen_m0_coverage() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let (mut request, _) = seed_structural_prefix_pair(&store, "legacy-soft-proof");
+        let loaded = store.load("legacy-soft-proof").unwrap();
+        let mut legacy = loaded.meta.clone();
+        legacy.rendered_m0_coverage = None;
+        legacy.rendered_m1_coverage = None;
+        store
+            .commit(
+                "legacy-soft-proof",
+                loaded.row_version,
+                &loaded.core,
+                &legacy,
+            )
+            .unwrap();
+        request.mid_turn = false;
+        let response = transform(
+            &store,
+            &request,
+            &pctx("git:proj", "/nonexistent-docs", 2_001),
+        )
+        .unwrap();
+        assert_eq!(response.action, "SOFT");
+        let after = store.load("legacy-soft-proof").unwrap().meta;
+        assert_eq!(after.rendered_m0_coverage, None);
+        assert_eq!(
+            after.rendered_m1_coverage,
+            Some(RenderedCompartmentCoverage::from_coverage(3, Some(3)))
+        );
+    }
+
+    #[test]
+    fn legacy_prefix_keeps_counting_until_hard_mints_rendered_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let (request, _) = seed_structural_prefix_pair(&store, "legacy-proof");
+        let loaded = store.load("legacy-proof").unwrap();
+        let mut value = serde_json::to_value(&loaded.meta).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("rendered_m0_coverage");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("rendered_m1_coverage");
+        let legacy: ModuleMeta = serde_json::from_value(value).unwrap();
+        store
+            .commit("legacy-proof", loaded.row_version, &loaded.core, &legacy)
+            .unwrap();
+        let context = pctx("git:proj", "/nonexistent-docs", 2_001);
+        for _ in 1..BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT {
+            assert_eq!(
+                transform(&store, &request, &context).unwrap().action,
+                "SOFT+"
+            );
+        }
+        let upgraded = transform(&store, &request, &context).unwrap();
+        assert_eq!(upgraded.action, "HARD");
+        let value = serde_json::to_value(store.load("legacy-proof").unwrap().meta).unwrap();
+        assert!(value["rendered_m0_coverage"].is_object());
+        assert!(value["rendered_m1_coverage"].is_object());
+        store
+            .append_compartments("legacy-proof", &[comp(4, 4, 4, "later", "LATER")])
+            .unwrap();
+        for _ in 0..10 {
+            let held = transform(&store, &request, &context).unwrap();
+            assert_eq!(held.action, "SOFT+");
+            assert_eq!(m0_bytes(&held), m0_bytes(&upgraded));
+            assert_eq!(m1_bytes(&held), m1_bytes(&upgraded));
+        }
+    }
+
+    #[test]
     fn wedged_mid_turn_with_unchanged_stale_revision_recuts_within_pending_pass_limit() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
@@ -23809,12 +24356,53 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn active_wrapup_retains_divergence_count_until_the_window_closes() {
+    fn rendered_prefix_damage_counts_through_active_historian_and_wrapup() {
+        for (historian_active, wrapup_active) in [(true, false), (false, true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            let session = "proven-active-damage";
+            let mut request = with_usage(
+                seed_astro_divergence(&store, session, 2_402),
+                70_000,
+                100_000,
+            );
+            request.mid_turn = true;
+            let loaded = store.load(session).unwrap();
+            let mut stale = loaded.meta.clone();
+            stale.m1_revision ^= u64::MAX;
+            stale.m1_compartment_seq = Some(1);
+            store
+                .commit(session, loaded.row_version, &loaded.core, &stale)
+                .unwrap();
+            let mut context = pctx("git:proj", "/nonexistent-docs", 2_000);
+            context.observed_last_response_at_ms = Some(2_000);
+            context.historian_active = historian_active;
+            context.wrapup_active = wrapup_active;
+            for _ in 1..BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT {
+                assert_eq!(
+                    transform(&store, &request, &context).unwrap().action,
+                    "SOFT+"
+                );
+            }
+            let repaired = transform(&store, &request, &context).unwrap();
+            assert_eq!(
+                repaired.materialize_reason.as_deref(),
+                Some("boundary_divergence_recut")
+            );
+            assert_eq!(repaired.action, "HARD");
+        }
+    }
+
+    #[test]
+    fn legacy_active_wrapup_retains_divergence_count_until_the_window_closes() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         let request = seed_astro_divergence(&store, "astro-wrapup-window", 2_402);
         let loaded = store.load("astro-wrapup-window").unwrap();
         let mut stale = loaded.meta.clone();
+        // Rows written before composition proofs retain the original active-wrapup policy.
+        stale.rendered_m0_coverage = None;
+        stale.rendered_m1_coverage = None;
         stale.m1_revision ^= u64::MAX;
         stale.m1_compartment_seq = Some(1);
         store
