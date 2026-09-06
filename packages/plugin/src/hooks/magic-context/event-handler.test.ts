@@ -1317,6 +1317,7 @@ describe("createEventHandler", () => {
 
         expect(getTagsBySession(openDatabase(), "ses-removed")).toEqual([
             {
+                id: 3,
                 tagNumber: 3,
                 messageId: "msg-keep:p0",
                 type: "message",
@@ -1329,6 +1330,7 @@ describe("createEventHandler", () => {
                 sessionId: "ses-removed",
                 cavemanDepth: 0,
                 toolOwnerMessageId: null,
+                tokenCount: null,
             },
         ]);
         // The removal path clears synchronously. Async reconciliation is scheduled
