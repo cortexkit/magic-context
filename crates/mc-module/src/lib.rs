@@ -15743,23 +15743,23 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
     // #[non_exhaustive], so builder methods are the only construction path that survives additive
     // field landings. Every field below is set to the exact value the pre-builder struct literal
     // produced, so the serialized HELLO is byte-identical to the pre-migration wire shape.
-    ModuleManifest::builder(
-        module_id.to_string(),
-        env!("CARGO_PKG_VERSION").to_string(),
-        TrustTier::FirstParty,
-        Bindings {
-            storage: StorageBinding {
-                kind: StorageKind::Sqlite,
-                scope: StorageScope::Project,
-                owns_schema: true,
-            },
-            vault_grants: Vec::new(),
-            identity: IdentityBinding {
-                requires: vec![IdentityScope::Project],
-                optional: vec![IdentityScope::Session],
-            },
+    // subc-protocol 0.19 made trust_tier and bindings optional builder setters because the
+    // daemon reads neither on a production path; we keep declaring both so the HELLO stays
+    // byte-identical to the pre-0.19 wire shape.
+    ModuleManifest::builder(module_id.to_string(), env!("CARGO_PKG_VERSION").to_string())
+    .trust_tier(Some(TrustTier::FirstParty))
+    .bindings(Some(Bindings {
+        storage: StorageBinding {
+            kind: StorageKind::Sqlite,
+            scope: StorageScope::Project,
+            owns_schema: true,
         },
-    )
+        vault_grants: Vec::new(),
+        identity: IdentityBinding {
+            requires: vec![IdentityScope::Project],
+            optional: vec![IdentityScope::Session],
+        },
+    }))
     .protocol_ver(PROTOCOL_VERSION)
     // Introduced by subc-protocol 0.12: optional pre-validated capability
     // declarations. MC requests nothing beyond its role grants, so None keeps
@@ -16647,7 +16647,7 @@ mod tests {
         let m = manifest("magic-context");
         assert_eq!(m.module_id, "magic-context");
         assert_eq!(m.module_version, env!("CARGO_PKG_VERSION"));
-        assert_eq!(m.trust_tier, TrustTier::FirstParty);
+        assert_eq!(m.trust_tier, Some(TrustTier::FirstParty));
         assert_eq!(m.protocol_ver, PROTOCOL_VERSION);
         // The builder migration must preserve the deliberate empty self-signal
         // marker ("examined, none to register") byte-identically; actual signal
