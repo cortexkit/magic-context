@@ -103,7 +103,7 @@ import {
     assistantHasReasoningPart,
     clearOldReasoning,
     findLatestAssistantReasoningMutationExemptMessage,
-    findMergedReasoningStripCandidateIds,
+    findMergedReasoningStripDecisions,
     findNewestReasoningBearingAssistantId,
     findTrailingBlankDecisionCandidates,
     snapshotTrailingBlankSourceDecisions,
@@ -2515,9 +2515,10 @@ export async function runPostTransformPhase(
             }
 
             if (isCacheBustingPass) {
-                const candidates = findMergedReasoningStripCandidateIds(
+                const candidates = findMergedReasoningStripDecisions(
                     args.messages,
                     args.resolvedProviderID,
+                    mergedReasoningStrippedIds,
                     { mutationExemptMessage: reasoningMutationExemptMessage },
                 );
                 const newlyDetectedIds = candidates.filter(
@@ -2530,7 +2531,12 @@ export async function runPostTransformPhase(
                         newlyDetectedIds,
                     );
                     if (persisted) {
-                        for (const id of newlyDetectedIds) mergedReasoningStrippedIds.add(id);
+                        // A concurrent writer may have frozen a different part selection.
+                        // Serve only the committed winner, never our speculative plan.
+                        mergedReasoningStrippedIds.clear();
+                        for (const id of getMergedReasoningStrippedIds(args.db, args.sessionId)) {
+                            mergedReasoningStrippedIds.add(id);
+                        }
                         bustedThisPass = true;
                     } else {
                         args.passOutcome?.record("merged-reasoning-strip-persistence-failure");

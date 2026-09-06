@@ -40,6 +40,18 @@ describe("merged_reasoning_stripped_ids", () => {
         );
     });
 
+    it("keeps the first committed exact-part decision when a stale writer proposes another", () => {
+        const winner = '__merged_reasoning_parts_v1__:["assistant-1",["part-2"]]';
+        const loser = '__merged_reasoning_parts_v1__:["assistant-1",["part-1","part-2"]]';
+        expect(addMergedReasoningStrippedIds(db, sessionId, ["assistant-1", winner])).toBe(true);
+        expect(
+            addMergedReasoningStrippedIds(db, sessionId, ["assistant-1", loser, "assistant-2"]),
+        ).toBe(true);
+        expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(
+            new Set(["assistant-1", winner, "assistant-2"]),
+        );
+    });
+
     it("removes the applied set when the session is cleared", () => {
         addMergedReasoningStrippedIds(db, sessionId, ["assistant-1"]);
         expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(new Set(["assistant-1"]));

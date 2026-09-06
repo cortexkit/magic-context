@@ -7,6 +7,10 @@ import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { stableStringify } from "../../shared/stable-json";
+import {
+    decodeMergedReasoningParts,
+    readFrozenMergedReasoningParts,
+} from "./merged-reasoning-decisions";
 import { ensureSessionMetaRow } from "./storage-meta-shared";
 import type { ContextUsage } from "./types";
 
@@ -2388,10 +2392,11 @@ export function clearThinkingBindingRecoveryIf(
 // ── Merged-assistant reasoning stripped IDs (frozen replay watermark) ──
 
 /**
- * Assistant message ids whose merged-run reasoning neutralization has already
- * been first-applied on a cache-busting pass. The set is replayed on every pass
- * and never shrinks while the session exists, so tail growth or a fresh object
- * rebuild cannot introduce a new prefix mutation on a defer pass.
+ * Assistant message ids and versioned exact-part decisions whose merged-run
+ * reasoning neutralization was first-applied on a cache-busting pass. Bare ids
+ * retain legacy layout-dependent replay until an applying pass freezes parts.
+ * Exact-part decisions survive fresh host rebuilds and changing adjacency;
+ * the applied set never shrinks while the session exists.
  */
 export function getMergedReasoningStrippedIds(db: Database, sessionId: string): Set<string> {
     const row = db
@@ -2420,10 +2425,17 @@ export function addMergedReasoningStrippedIds(
             .get(sessionId) as { merged_reasoning_stripped_ids?: string | null } | undefined;
         const rawStored = row ? (row.merged_reasoning_stripped_ids ?? null) : null;
         const current = new Set<string>(parseStrippedBlob(rawStored));
+        const frozenParts = readFrozenMergedReasoningParts(current);
         let changed = false;
         for (const id of add) {
+            const decision = decodeMergedReasoningParts(id);
+            // The first successful persistence fixes the exact reasoning parts.
+            // Concurrent transforms must replay that selection rather than
+            // replace it with a different plan for the same assistant.
+            if (decision && frozenParts.has(decision[0])) continue;
             if (!current.has(id)) {
                 current.add(id);
+                if (decision) frozenParts.set(...decision);
                 changed = true;
             }
         }
