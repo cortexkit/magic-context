@@ -105,6 +105,26 @@
       "expected": 58
     },
     {
+      "model_key": "openai/gpt-6-astra",
+      "label": "provider wildcard keys are not threshold candidates",
+      "percentage_config": {
+        "default": 75,
+        "openai/*": 30
+      },
+      "fallback": 65,
+      "expected": 75
+    },
+    {
+      "model_key": "opencode/test-model",
+      "label": "OMP provider spelling resolves from canonical threshold identity",
+      "percentage_config": {
+        "default": 75,
+        "opencode-zen/test-model": 70
+      },
+      "fallback": 65,
+      "expected": 70
+    },
+    {
       "tokens_config": {
         "default": 32000
       },

@@ -880,14 +880,34 @@ fn resolve_tokens_match(
         .map(|value| (*value, "default".to_string()))
 }
 
-fn model_key_lookup_order(model_key: &str) -> Vec<String> {
+pub(crate) fn model_key_lookup_order(model_key: &str) -> Vec<String> {
     let slash = model_key.find('/');
     let provider = slash.map_or("", |idx| &model_key[..idx]);
+    // Try the provider name used by shared configuration before its compatibility aliases,
+    // and try the full model name before a bare or dash-stripped name.
+    let canonical_provider = match provider {
+        "openai-codex" => "openai",
+        "google-antigravity" => "google",
+        "opencode-zen" => "opencode",
+        other => other,
+    };
+    let native_provider = match canonical_provider {
+        "openai" => "openai-codex",
+        "google" => "google-antigravity",
+        "opencode" => "opencode-zen",
+        other => other,
+    };
+    let mut providers = Vec::new();
+    for candidate in [canonical_provider, provider, native_provider] {
+        if !candidate.is_empty() && !providers.contains(&candidate) {
+            providers.push(candidate);
+        }
+    }
     let mut model_id = slash.map_or(model_key, |idx| &model_key[idx + 1..]);
     let mut keys = Vec::new();
 
     while !model_id.is_empty() {
-        if !provider.is_empty() {
+        for provider in &providers {
             keys.push(format!("{provider}/{model_id}"));
         }
         keys.push(model_id.to_string());
@@ -1433,6 +1453,39 @@ mod tests {
 
             let exited = advance_drain_latch(held, threshold - 10.1, threshold, t + 3);
             assert_eq!(exited.active_since_ms, None, "threshold {threshold}");
+        }
+    }
+
+    #[test]
+    fn inherited_drain_at_63_percent_holds_without_forcing_execute() {
+        let mut inputs = base_inputs();
+        inputs.drain_latch = LatchState {
+            active_since_ms: Some(1_000),
+        };
+        inputs.context_limit = Some(100_000.0);
+        for (percentage, expected_pass, expected_active) in [
+            (63.0, PassDecision::Defer, true),
+            (65.0, PassDecision::Execute, true),
+            (55.0, PassDecision::Defer, true),
+            (54.9, PassDecision::Defer, false),
+        ] {
+            inputs.usage.percentage = percentage;
+            inputs.usage.input_tokens = percentage * 1_000.0;
+            let outcome = decide(&inputs);
+            assert_eq!(outcome.pass, expected_pass, "usage {percentage}");
+            assert_eq!(
+                outcome.drain_latch.is_active(),
+                expected_active,
+                "usage {percentage}"
+            );
+            let unlatched = decide(&SchedulerInputs {
+                drain_latch: LatchState::default(),
+                ..inputs.clone()
+            });
+            assert_eq!(
+                outcome.pass, unlatched.pass,
+                "latch must not choose the pass"
+            );
         }
     }
 
