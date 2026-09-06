@@ -3870,12 +3870,14 @@ fn apply_once(
     // either proof holds: incrementing would manufacture a provider-cache bust, while resetting
     // would forget a genuinely damaged row. A damaged row seen during wrapup waits for the latch
     // guard to end, bounded by the 3,800-second wrapup request budget documented on the context.
-    // Published compartments may wait for the host to finish the assistant turn before rendering.
-    // Do not count those pending summaries as damaged coverage and rebuild m0 after three passes.
-    // If the compartment revision was already acknowledged, the repair path still applies.
-    let active_legitimate_publication_window = ctx.historian_active
-        || ctx.wrapup_active
-        || (req.mid_turn && !compartment_revision_matches);
+    let active_legitimate_publication_window = ctx.historian_active || ctx.wrapup_active;
+    let mut boundary_divergence_observed_compartment_seq =
+        loaded.meta.boundary_divergence_observed_compartment_seq;
+    // An advancing compartment sequence proves publication progress while summaries wait to render.
+    // A host's mid-turn flag alone proves no progress: count unchanged revisions so a stuck flag
+    // cannot suppress repair forever. Retain legacy counts until a revision change is observed.
+    let publication_progress = boundary_divergence_observed_compartment_seq
+        .is_some_and(|observed| observed < m1_signal.max_compartment_seq);
     let mut boundary_divergence_pending_count =
         if req.is_subagent || divergence_inputs_moved || active_legitimate_publication_window {
             loaded.meta.boundary_divergence_pending_count
@@ -3883,9 +3885,13 @@ fn apply_once(
             if boundary_divergence_retry || compartment_revision_matches {
                 0
             } else {
-                loaded
-                    .meta
-                    .boundary_divergence_pending_count
+                boundary_divergence_observed_compartment_seq = Some(m1_signal.max_compartment_seq);
+                let previous_count = if publication_progress {
+                    0
+                } else {
+                    loaded.meta.boundary_divergence_pending_count
+                };
+                previous_count
                     .saturating_add(1)
                     .min(BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT)
             }
@@ -4328,6 +4334,11 @@ fn apply_once(
     timings.state_clone = elapsed_ms(state_clone_started_at);
     let state_evolution_started_at = Instant::now();
     meta.boundary_divergence_pending_count = boundary_divergence_pending_count;
+    meta.boundary_divergence_observed_compartment_seq = if boundary_divergence_pending_count > 0 {
+        boundary_divergence_observed_compartment_seq
+    } else {
+        None
+    };
     if !identity_observed && coordinator_identity {
         // Persist the first provider/model/system/upgrade observation without folding. This
         // lets an already-materialized session adopt the coordinator's identity safely.
@@ -5151,6 +5162,7 @@ fn apply_once(
         boundary_or_coverage_state_moved(&loaded.core, &core, &loaded.meta, &meta),
     ) {
         meta.boundary_divergence_pending_count = 0;
+        meta.boundary_divergence_observed_compartment_seq = None;
     }
     if lineage_anchor_failure {
         // The soft-pressure path can preserve an existing reconcile state but cannot create
@@ -17601,7 +17613,13 @@ pub(crate) mod tests {
                 );
                 assert_eq!(serde_json::to_vec(&held.messages()[1]).unwrap(), frozen_m1);
                 assert_eq!(m0_bytes(&held), m0_bytes(&boot));
-                assert!(s.load("ses").unwrap().meta.deferred_execute_state.is_some());
+                let held_meta = s.load("ses").unwrap().meta;
+                assert!(held_meta.deferred_execute_state.is_some());
+                assert_eq!(held_meta.boundary_divergence_pending_count, 1);
+                assert_eq!(
+                    held_meta.boundary_divergence_observed_compartment_seq,
+                    Some(2 + chunk)
+                );
             }
             request.mid_turn = finish_mid_turn;
             request = with_usage(request, finish_usage, 100);
@@ -23743,6 +23761,50 @@ pub(crate) mod tests {
                 .meta
                 .boundary_divergence_pending_count,
             0
+        );
+    }
+
+    #[test]
+    fn wedged_mid_turn_with_unchanged_stale_revision_recuts_within_pending_pass_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let mut request = with_usage(
+            seed_astro_divergence(&store, "astro-wedged-turn", 2_402),
+            70_000,
+            100_000,
+        );
+        request.mid_turn = true;
+        let loaded = store.load("astro-wedged-turn").unwrap();
+        let mut stale = loaded.meta.clone();
+        stale.m1_revision ^= u64::MAX;
+        stale.m1_compartment_seq = Some(1);
+        store
+            .commit(
+                "astro-wedged-turn",
+                loaded.row_version,
+                &loaded.core,
+                &stale,
+            )
+            .unwrap();
+        let mut context = pctx("git:proj", "/nonexistent-docs", 1_000);
+        let mut recut_at = None;
+        for pass in 1..=BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT + 1 {
+            context.now_ms += 1;
+            context.observed_last_response_at_ms = Some(context.now_ms);
+            let response = transform(&store, &request, &context).unwrap();
+            assert_eq!(response.scheduler_decision.as_deref(), Some("defer"));
+            if response.materialize_reason.as_deref() == Some("boundary_divergence_recut") {
+                assert_eq!(response.action, "HARD");
+                assert_eq!(response.coverage_ordinal, Some(2_400));
+                recut_at = Some(pass);
+                break;
+            }
+            assert_eq!(response.action, "SOFT+");
+        }
+        assert_eq!(
+            recut_at,
+            Some(BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT),
+            "an unchanged stale revision must repair even when the host never closes its turn"
         );
     }
 

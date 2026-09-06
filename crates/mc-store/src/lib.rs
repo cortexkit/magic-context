@@ -3705,6 +3705,10 @@ pub struct ModuleMeta {
     /// resetting it; legacy or damaged rows resume escalation after those bounded windows close.
     #[serde(default, skip_serializing_if = "u8_is_zero")]
     pub boundary_divergence_pending_count: u8,
+    /// Compartment revision counted for divergence repair. A new publication restarts the
+    /// observation bound without acknowledging that its summaries have been rendered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary_divergence_observed_compartment_seq: Option<i64>,
     /// The last materializing pass had cross-session memory disabled. The negative form keeps
     /// pre-field metadata and fresh default state compatible with the historical enabled mode.
     #[serde(default)]
@@ -17702,12 +17706,14 @@ mod tests {
 
         let mut left_meta = left.meta.clone();
         left_meta.boundary_divergence_pending_count = 1;
+        left_meta.boundary_divergence_observed_compartment_seq = Some(47);
         store
             .commit(session, left.row_version, &left.core, &left_meta)
             .unwrap();
 
         let mut right_meta = right.meta.clone();
         right_meta.boundary_divergence_pending_count = 1;
+        right_meta.boundary_divergence_observed_compartment_seq = Some(48);
         let loser = store.commit(session, right.row_version, &right.core, &right_meta);
         assert!(matches!(
             loser,
@@ -17725,8 +17731,24 @@ mod tests {
             1
         );
 
+        assert_eq!(
+            store
+                .load(session)
+                .unwrap()
+                .meta
+                .boundary_divergence_observed_compartment_seq,
+            Some(47)
+        );
         drop(store);
         let reopened = McStore::open(&descriptor(dir.path())).unwrap();
+        assert_eq!(
+            reopened
+                .load(session)
+                .unwrap()
+                .meta
+                .boundary_divergence_observed_compartment_seq,
+            Some(47)
+        );
         assert_eq!(
             reopened
                 .load(session)

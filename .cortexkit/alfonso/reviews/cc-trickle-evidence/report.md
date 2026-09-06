@@ -1,5 +1,61 @@
 # Claude Code cache investigation: cadence fixes and wire contract
 
+## Athena review resolution — bounded repair, refuted wildcard pin
+
+### BLOCK resolved: three coherent observations per unchanged compartment revision
+
+The review correctly identified that the first mid-turn fix could suppress repair indefinitely. `mid_turn=true` is no longer an active-publication-window exemption. The existing **BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT = 3** stays unchanged (`crates/mc-module/src/transform.rs:85`). Host mid-turn passes now participate in unequal-revision escalation; a wedged host with an unchanged stale revision triggers `boundary_divergence_recut` on **pass 3**, satisfying the requested by-pass-4 bound without relying on time.
+
+To preserve healthy coalescing, `ModuleMeta.boundary_divergence_observed_compartment_seq` records the last compartment sequence counted by the repair detector (`mc-store/src/lib.rs:3708–3711`). A strictly advancing sequence proves a new publication and restarts the observation count at 1 (`transform.rs:3874–3898`). An unchanged sequence increments the count; the host flag, fresh response timestamps, and unrelated memory/notes changes do not reset it. A missing observation watermark on older metadata does not erase an already accumulated count. Existing active-historian and wrapup windows retain their prior behavior and are separate from the removed host-flag exemption.
+
+The new observation watermark is optional serde-defaulted blob metadata, omitted when absent; no SQLite schema migration is required. It commits with the counter under the same transform CAS (`transform.rs:4337–4341`) and clears when the counter clears after convergence/repair (`:5165`). The existing store CAS/reopen test now verifies that a losing write cannot replace the winner's observed sequence and that the winner's value survives reopening (`mc-store/src/lib.rs:17709–17750`).
+
+**Red-first executable reproduction:** `transform::tests::wedged_mid_turn_with_unchanged_stale_revision_recuts_within_pending_pass_limit` starts from the existing ASTRO stale-component damaged fixture. Every pass has `mid_turn=true`, 70% usage below force, a fresh response observation, no refresh, no active historian/wrapup, and a scheduler Defer. On the prior implementation it completed four attempts without repair and failed `left: None, right: Some(3)` (exit 101). After the fix it recuts on pass 3 with reason `boundary_divergence_recut` and coverage 2400, rather than passing because of TTL, pressure, or another HARD arm.
+
+**Healthy arm preserved:** `cc_mid_turn_publications_coalesce_until_boundary_with_force_and_flush_escape` still supplies six distinct tiny publications and observes byte-identical m1/m0 until one boundary application. It now also asserts counter **1** and the newly observed sequence after every publish. Six publishes therefore do not mean six observations of one stalled revision. The parent explicitly chose this progress-sensitive interpretation after confirming that the constant is 3, not greater than 6. Force/Emergency/flush escapes and below-threshold boundary consumption remain green.
+
+### PIN refuted against this branch; no wildcard behavior added
+
+The panel's claim that TS threshold lookup appends `provider/*` candidates does not match the checked-in oracle:
+
+- `packages/plugin/src/hooks/magic-context/event-resolvers.ts:242–257` yields provider spellings and bare names at each dash-stripped specificity level, then **ends**. There is no provider-wildcard append.
+- `packages/plugin/src/shared/harness-provider-map.ts:110–120` has four input *slots* (canonical, raw, Pi, OMP), but deduplicates them. Its current maps at `:39–59` give at most two distinct provider spellings: openai/openai-codex, google/google-antigravity, or opencode/opencode-zen. Unknown providers stay identities. There is no currently reachable missing fourth provider spelling for Rust to port.
+- Rust's existing canonical/raw/native order covers those current sets. It is unchanged by this review fix.
+
+Parent ruling: **do not add wildcard support to either leg**; document the pin as refuted and pin the present behavior through the actual TS oracle. `gen-scheduler-golden.ts:104–115` now generates two cases by calling production `resolveExecuteThreshold`:
+
+| Case | Configuration / model | TS result and Rust expected result |
+|---|---|---:|
+| Provider wildcard is not a threshold candidate | `{default:75, "openai/*":30}`, model `openai/gpt-6-astra` | **75**, not 30 |
+| OMP-spelled override is accepted | `{default:75, "opencode-zen/test-model":70}`, model `opencode/test-model` | **70** |
+
+`bun crates/mc-module/gen/gen-scheduler-golden.ts` generated these values; the golden diff contains only these two added cases. Both the scheduler's differential test and the config-reader differential test pass. Any future wildcard support must change the TS/Rust contract explicitly, not silently add Rust-only resolution. Direct generator typechecking also exposed stale local type assertions for the existing overflow oracle; replacing that duplicated declaration with `typeof import(...)` fixes the annotations without changing generated values or overflow behavior.
+
+### Review mutation evidence
+
+Every control used `git add -A` before the labeled mutation, captured a non-empty index-relative `git diff --stat`, ran the named two-test command, then restored with `git checkout -- <path> && touch <path>` and captured an **empty** index-relative diff. All controls were restored before final gates.
+
+| Control | Applied diff / restored diff | Exact red test and unaffected control | Actual failure |
+|---|---|---|---|
+| Restore unbounded `req.mid_turn` publication exemption | `transform.rs`: 2 insertions, 1 deletion / empty | `wedged_mid_turn_with_unchanged_stale_revision_recuts_within_pending_pass_limit` FAILED; `permanently_unequal_compartment_revision_escalates_on_third_pass` passed | `left: None, right: Some(3)`; 1 passed / 1 failed; exit 101 |
+| Ignore actual compartment-sequence progress | `transform.rs`: 1 insertion, 2 deletions / empty | `cc_mid_turn_publications_coalesce_until_boundary_with_force_and_flush_escape` FAILED; wedged-turn regression passed | observation counter `left: 2, right: 1`; 1 passed / 1 failed; exit 101 |
+| Add unsupported provider wildcard candidates to Rust | `scheduler.rs`: 2 insertions / empty | `execute_threshold_config_matches_typescript_percentage_goldens` FAILED; `execute_threshold_object_lookup_and_project_floor_preserve_model_identity` passed | case `provider wildcard keys are not threshold candidates`: `left: 30.0, right: 75.0`; 1 passed / 1 failed; exit 101 |
+
+### Review final gates
+
+- `cargo test -p mc-module -- --test-threads=2` — **exit 0**, 1058 library tests passed, 4 ignored; binary golden and both integration tests passed; doc-tests passed. Unpiped, bounded concurrency as in the prior gate.
+- `cargo test -p mc-store` — **exit 0**, 135 tests passed; doc-tests passed.
+- `cargo clippy -p mc-module -p mc-store --all-targets -- -D warnings` — **exit 0**.
+- `cargo fmt --all -- --check` — **exit 0**.
+- `bun crates/mc-module/gen/gen-scheduler-golden.ts` — **exit 0**; actual TS oracle produced the negative wildcard and positive OMP cases.
+- `bun run --cwd packages/plugin typecheck` — **exit 0** using the repository's tsc script.
+- `bun run --cwd packages/plugin tsc --noEmit --skipLibCheck --target esnext --module preserve --moduleResolution bundler --types bun-types ../../crates/mc-module/gen/gen-scheduler-golden.ts` — **exit 0** for the changed generator itself. Initial direct checking found stale pre-existing overflow return annotations, now corrected as described above. An initial root `node_modules/.bin/tsc` path was absent; the package-local compiler is the successful gate.
+- Golden generation initially could not load zod; `bun install --frozen-lockfile` inside this worktree restored the locked workspace dependencies. No package manifest or Bun lockfile changed. Generated Cargo path-dependency lockfile churn is excluded/restored before commit.
+- `aft_inspect` completed fresh but had no authoritative reports for the scoped Rust/generator files; Cargo/tsc are the verification authority.
+- Sidekick reviewed the two changed comments and flagged none.
+
+The bounded observation rule in this section supersedes the initial host-flag exemption described in the earlier follow-up narrative below. No module bounce, live store mutation, or master push was performed.
+
 ## Follow-up finding (1): mid-turn coalescing was missing at both ends
 
 **The six m1 changes were genuine publications but their immediate application was an economic cadence defect.** Native forwarded requests 12967/12969/12972/12974/12978/12979 all end in `user` messages containing `tool_result`, preceded by assistant `tool_use` (sometimes text plus tool_use). Tool results complete a tool *arc*, not the assistant's multi-step *turn*.
@@ -10,7 +66,7 @@ Consumer default: `TransformRequestWire.mid_turn` is `#[serde(default)] bool`, n
 
 **Implemented:** both the compaction-enabled and additive-only scheduler calls now supply `req.mid_turn` (`transform.rs:2740,3948`). `tail_state_from_live` honors true before its legacy unpaired-arc fallback. With no host continuation assertion, a newer real user content block also closes an interrupted assistant turn even if an old tool never answered; user-role tool-result blocks alone do not. The shared scheduler's existing boundary deferral (`scheduler.rs:559–579,792–805`) then returns Defer with `mid_turn_boundary`, preserving a durable deferred Execute intent. `apply_scheduler_meta` persists the intent on Defer and clears it on a successful non-Defer commit; normal transform CAS means failed work does not commit the clear. Every request re-evaluates the current host flag and live tail rather than treating the old deferred flag as proof the turn ended.
 
-The red-first test exposed a second interaction: after three withheld publishes, the existing boundary-divergence detector would interpret deliberately unapplied coverage as damage and force an m0 HARD. The legitimate-publication window now also includes **host mid-turn plus an unapplied compartment revision** (`transform.rs:3873–3878`). Already-acknowledged revisions keep the repair path. This prevents coalescing from simply moving the repeated loss from m1 to m0.
+The red-first test exposed a second interaction: after three withheld publishes, the existing boundary-divergence detector would interpret deliberately unapplied coverage as damage and force an m0 HARD. The initial follow-up made **host mid-turn plus an unapplied compartment revision** a legitimate-publication window. Athena correctly identified that as unbounded; the review resolution above replaces it with progress-sensitive three-pass observations. Already-acknowledged revisions keep the repair path, and real new publications reset the count so healthy coalescing does not simply move repeated loss from m1 to m0.
 
 TS twins: OpenCode `read-session-db.ts:135–200` retains mid-turn for newest-assistant `finish === "tool-calls"` or a non-provider-executed tool part, absent a newer real user message. Pi `read-session-pi.ts:146–222` retains it for `stopReason === "toolUse"` or an unpaired tool call, absent a newer real user message. Shared `boundary-execution.ts:13–21,38–67` applies the same force/explicit-bust/subagent exceptions and `mid_turn_boundary` vocabulary. These predicates do not equate user-role tool-result carriers with user-authored turn boundaries.
 

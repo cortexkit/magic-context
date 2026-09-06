@@ -30,16 +30,7 @@ const { resolveExecuteThreshold } = eventResolvers as {
     ) => number;
 };
 const { detectOverflow, extractErrorMessage, parseReportedLimit, OVERFLOW_PATTERNS } =
-    overflowMod as {
-        detectOverflow: (error: unknown) => {
-            isOverflow: boolean;
-            reportedLimit?: number;
-            matchedPattern?: string;
-        };
-        extractErrorMessage: (error: unknown) => string;
-        parseReportedLimit: (message: string) => number | undefined;
-        OVERFLOW_PATTERNS: ReadonlyArray<RegExp>;
-    };
+    overflowMod as typeof import("../../../packages/plugin/src/features/magic-context/overflow-detection");
 
 interface Scheduler {
     shouldExecute(
@@ -107,6 +98,18 @@ const thresholdCases = [
         label: "per-model derived bare model fallback",
         percentage_config: { default: 65, "gpt-5.4": 58 },
         model_key: "openai/gpt-5.4-fast",
+        fallback: 65,
+    },
+    {
+        label: "provider wildcard keys are not threshold candidates",
+        percentage_config: { default: 75, "openai/*": 30 },
+        model_key: "openai/gpt-6-astra",
+        fallback: 65,
+    },
+    {
+        label: "OMP provider spelling resolves from canonical threshold identity",
+        percentage_config: { default: 75, "opencode-zen/test-model": 70 },
+        model_key: "opencode/test-model",
         fallback: 65,
     },
     {
