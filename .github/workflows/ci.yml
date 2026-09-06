@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [master, main]
+    # train/** runs the same checks on a train branch before it is fast-forwarded
+    # onto master; required status checks on master are satisfied by that run.
+    branches: [master, main, "train/**"]
   # This private-source drift leg runs only on the default branch's scheduled
   # workflow revision, never against untrusted branch code.
   schedule:

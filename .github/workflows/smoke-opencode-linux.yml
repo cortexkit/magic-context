@@ -24,7 +24,7 @@ name: Smoke (opencode bring-up on Linux)
 
 on:
   push:
-    branches: [master, main]
+    branches: [master, main, "train/**"]
   pull_request:
   workflow_dispatch:
 
