@@ -177,8 +177,13 @@ export function computeProtectionWindow<TRow extends ProtectionWindowRow = Prote
         }
     }
 
+    // The walk is descending, so the last row pushed carries the smallest tag_number. A spread
+    // over the member list would hit the engine argument-count ceiling on sessions with tens of
+    // thousands of tool tags.
     const mass_cutoff =
-        massWindowRows.length > 0 ? Math.min(...massWindowRows.map(getRowTagNumber)) : null;
+        massWindowRows.length > 0
+            ? getRowTagNumber(massWindowRows[massWindowRows.length - 1] as TRow)
+            : null;
 
     // Structural minimum: newest min(3, N) tool-kind tags by tag_number descending
     const distinctToolTagNumbers = tieGroupsDescending.map((g) => getRowTagNumber(g[0]));
