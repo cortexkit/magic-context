@@ -2737,7 +2737,7 @@ fn apply_additive_only(
         now_ms: ctx.now_ms.max(0) as u64,
         model_key: ctx.model_key.clone(),
         context_limit: Some(context_limit_tokens),
-        tail_state: tail_state_from_live(&live),
+        tail_state: tail_state_from_live(&live, req.mid_turn),
         deferred_execute: loaded
             .meta
             .deferred_execute_state
@@ -3870,7 +3870,12 @@ fn apply_once(
     // either proof holds: incrementing would manufacture a provider-cache bust, while resetting
     // would forget a genuinely damaged row. A damaged row seen during wrapup waits for the latch
     // guard to end, bounded by the 3,800-second wrapup request budget documented on the context.
-    let active_legitimate_publication_window = ctx.historian_active || ctx.wrapup_active;
+    // Published compartments may wait for the host to finish the assistant turn before rendering.
+    // Do not count those pending summaries as damaged coverage and rebuild m0 after three passes.
+    // If the compartment revision was already acknowledged, the repair path still applies.
+    let active_legitimate_publication_window = ctx.historian_active
+        || ctx.wrapup_active
+        || (req.mid_turn && !compartment_revision_matches);
     let mut boundary_divergence_pending_count =
         if req.is_subagent || divergence_inputs_moved || active_legitimate_publication_window {
             loaded.meta.boundary_divergence_pending_count
@@ -3940,7 +3945,7 @@ fn apply_once(
         now_ms: ctx.now_ms.max(0) as u64,
         model_key: ctx.model_key.clone(),
         context_limit: Some(context_limit_tokens),
-        tail_state: tail_state_from_live(&live),
+        tail_state: tail_state_from_live(&live, req.mid_turn),
         deferred_execute: loaded
             .meta
             .deferred_execute_state
@@ -6339,7 +6344,12 @@ fn apply_scheduler_meta(meta: &mut ModuleMeta, outcome: &scheduler::SchedulerOut
         .unwrap_or(0);
 }
 
-fn tail_state_from_live(live: &[&FlatBlock]) -> TailState {
+fn tail_state_from_live(live: &[&FlatBlock], mid_turn: bool) -> TailState {
+    // A completed tool arc is not necessarily a completed assistant turn. The host knows
+    // whether another model step belongs to that turn, even after all tool results arrived.
+    if mid_turn {
+        return TailState { mid_tool_use: true };
+    }
     let Some(newest_assistant_ordinal) = live
         .iter()
         .filter(|block| block.role == "assistant")
@@ -6350,6 +6360,17 @@ fn tail_state_from_live(live: &[&FlatBlock]) -> TailState {
             mid_tool_use: false,
         };
     };
+    // A real user interruption ends the assistant turn even if an old tool never answered.
+    // User-role tool-result carriers alone are continuations, not interruptions.
+    if live.iter().any(|block| {
+        block.role == "user"
+            && block.ordinal() > newest_assistant_ordinal
+            && block.kind_tag != "tool_result"
+    }) {
+        return TailState {
+            mid_tool_use: false,
+        };
+    }
     let completed_arcs: HashSet<&str> = live
         .iter()
         .filter(|block| block.kind_tag == "tool_result" && !block.provider_executed)
@@ -16280,14 +16301,26 @@ pub(crate) mod tests {
         let projection = project_messages(&messages).unwrap();
         let live = projection.blocks.iter().collect::<Vec<_>>();
         assert!(
-            tail_state_from_live(&live).mid_tool_use,
+            tail_state_from_live(&live, false).mid_tool_use,
             "an unrelated result must not end the newest unpaired tool arc"
         );
 
         messages.push(tool_result("newest_result", 4, "call-new", "done"));
         let projection = project_messages(&messages).unwrap();
         let live = projection.blocks.iter().collect::<Vec<_>>();
-        assert!(!tail_state_from_live(&live).mid_tool_use);
+        assert!(!tail_state_from_live(&live, false).mid_tool_use);
+    }
+
+    #[test]
+    fn real_user_interruption_ends_an_unanswered_tool_turn_unless_host_says_continuation() {
+        let messages = vec![
+            assistant_tool_call("call", 1, "pending"),
+            item("interrupt", 2, "stop and answer this instead"),
+        ];
+        let projection = project_messages(&messages).unwrap();
+        let live = projection.blocks.iter().collect::<Vec<_>>();
+        assert!(!tail_state_from_live(&live, false).mid_tool_use);
+        assert!(tail_state_from_live(&live, true).mid_tool_use);
     }
 
     #[test]
@@ -17469,6 +17502,122 @@ pub(crate) mod tests {
             assert_eq!(m0_bytes(&published), m0_bytes(&boot));
             assert_eq!(m1_bytes(&published).contains("PUBLISHED"), applies);
             assert_eq!(s.load("ses").unwrap().meta.emergency_drain_active, latched);
+        }
+    }
+
+    #[test]
+    fn mid_turn_wire_defaults_false_and_explicit_true_reaches_all_profile_schedulers() {
+        for profile in ["claude-code-anthropic", "opencode-aisdk", "pi"] {
+            let mut wire = serde_json::to_value(req("wire", "cfg0", vec![])).unwrap();
+            wire["serializer_profile"] = serde_json::json!(profile);
+            wire.as_object_mut().unwrap().remove("mid_turn");
+            let absent: TransformRequest = serde_json::from_value(wire.clone()).unwrap();
+            assert!(!absent.mid_turn);
+            wire["mid_turn"] = serde_json::json!(true);
+            let present: TransformRequest = serde_json::from_value(wire).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            let response = transform(
+                &s,
+                &with_usage(present, 75, 100),
+                &pctx("git:proj", "/nonexistent-docs", 2_000),
+            )
+            .unwrap();
+            assert_eq!(response.scheduler_decision.as_deref(), Some("defer"));
+            assert_eq!(
+                response.scheduler_defer_reason.as_deref(),
+                Some("mid_turn_boundary")
+            );
+        }
+    }
+
+    #[test]
+    fn mid_turn_does_not_hide_already_acknowledged_coverage_damage() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let mut request = seed_astro_divergence(&store, "mid-turn-damage", 2_402);
+        request.mid_turn = true;
+        let response = run(&store, &request, &spine());
+        assert_eq!(response.action, "HARD");
+        assert_eq!(
+            response.materialize_reason.as_deref(),
+            Some("boundary_divergence_recut")
+        );
+    }
+
+    #[test]
+    fn cc_mid_turn_publications_coalesce_until_boundary_with_force_and_flush_escape() {
+        for (finish_usage, finish_mid_turn, flush) in [
+            (75, false, false),
+            (10, false, false),
+            (85, true, false),
+            (95, true, false),
+            (75, true, true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            s.replace_compartments("ses", &[comp(1, 1, 1, "anchor", "FOLDED")])
+                .unwrap();
+            let mut messages = vec![item("anchor", 1, "summary anchor")];
+            for pair in 0..7 {
+                let ordinal = 2 + pair * 2;
+                messages.push(assistant_tool_call(
+                    &format!("call-{pair}"),
+                    ordinal,
+                    &format!("tool-{pair}"),
+                ));
+                messages.push(tool_result(
+                    &format!("result-{pair}"),
+                    ordinal + 1,
+                    &format!("tool-{pair}"),
+                    "small result",
+                ));
+            }
+            let mut request = with_usage(cc_req("ses", "cfg0", messages), 75, 100);
+            let mut ctx = pctx("git:proj", "/nonexistent-docs", 2_000);
+            let boot = transform(&s, &request, &ctx).unwrap();
+            assert_eq!(boot.action, "HARD");
+            let frozen_m1 = serde_json::to_vec(&boot.messages()[1]).unwrap();
+            request.mid_turn = true;
+            for chunk in 0..6 {
+                let start = 2 + chunk * 2;
+                s.append_compartments(
+                    "ses",
+                    &[comp(
+                        2 + chunk,
+                        start,
+                        start + 1,
+                        &format!("result-{chunk}"),
+                        &format!("DELTA-{chunk}"),
+                    )],
+                )
+                .unwrap();
+                ctx.now_ms += 10_000;
+                let held = transform(&s, &request, &ctx).unwrap();
+                assert_eq!(held.scheduler_decision.as_deref(), Some("defer"));
+                assert_eq!(
+                    held.scheduler_defer_reason.as_deref(),
+                    Some("mid_turn_boundary")
+                );
+                assert_eq!(serde_json::to_vec(&held.messages()[1]).unwrap(), frozen_m1);
+                assert_eq!(m0_bytes(&held), m0_bytes(&boot));
+                assert!(s.load("ses").unwrap().meta.deferred_execute_state.is_some());
+            }
+            request.mid_turn = finish_mid_turn;
+            request = with_usage(request, finish_usage, 100);
+            if flush {
+                let mut loaded = s.load("ses").unwrap();
+                loaded.meta.soft_refresh_pending = true;
+                s.commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+                    .unwrap();
+            }
+            let consumed = transform(&s, &request, &ctx).unwrap();
+            assert_eq!(consumed.action, "SOFT");
+            for chunk in 0..6 {
+                assert!(m1_bytes(&consumed).contains(&format!("DELTA-{chunk}")));
+            }
+            assert_eq!(m0_bytes(&consumed), m0_bytes(&boot));
+            assert!(s.load("ses").unwrap().meta.deferred_execute_state.is_none());
         }
     }
 

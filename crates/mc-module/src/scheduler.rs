@@ -880,14 +880,34 @@ fn resolve_tokens_match(
         .map(|value| (*value, "default".to_string()))
 }
 
-fn model_key_lookup_order(model_key: &str) -> Vec<String> {
+pub(crate) fn model_key_lookup_order(model_key: &str) -> Vec<String> {
     let slash = model_key.find('/');
     let provider = slash.map_or("", |idx| &model_key[..idx]);
+    // Try the provider name used by shared configuration before its compatibility aliases,
+    // and try the full model name before a bare or dash-stripped name.
+    let canonical_provider = match provider {
+        "openai-codex" => "openai",
+        "google-antigravity" => "google",
+        "opencode-zen" => "opencode",
+        other => other,
+    };
+    let native_provider = match canonical_provider {
+        "openai" => "openai-codex",
+        "google" => "google-antigravity",
+        "opencode" => "opencode-zen",
+        other => other,
+    };
+    let mut providers = Vec::new();
+    for candidate in [canonical_provider, provider, native_provider] {
+        if !candidate.is_empty() && !providers.contains(&candidate) {
+            providers.push(candidate);
+        }
+    }
     let mut model_id = slash.map_or(model_key, |idx| &model_key[idx + 1..]);
     let mut keys = Vec::new();
 
     while !model_id.is_empty() {
-        if !provider.is_empty() {
+        for provider in &providers {
             keys.push(format!("{provider}/{model_id}"));
         }
         keys.push(model_id.to_string());

@@ -3200,6 +3200,7 @@ pub struct McHandler {
     /// lock-free map) is appropriate because writes are rare (once per route open/close)
     /// and reads are one cheap lookup per transform.
     bindings: Mutex<HashMap<u16, SessionBinding>>,
+    threshold_logged_routes: Mutex<HashSet<u16>>,
     /// Per-project evaluator capability asserted by the host's state-sync payload. Absence is
     /// fail-closed so a Rust-authority smart note cannot become permanently pending.
     note_evaluation_capabilities: Mutex<HashMap<String, bool>>,
@@ -3684,6 +3685,7 @@ impl McHandler {
             #[cfg(test)]
             publication_fence_write_hook: Arc::new(Mutex::new(None)),
             bindings: Mutex::new(HashMap::new()),
+            threshold_logged_routes: Mutex::new(HashSet::new()),
             note_evaluation_capabilities: Mutex::new(HashMap::new()),
             transform_route_channels: Mutex::new(HashMap::new()),
             transform_session_roots: Mutex::new(HashMap::new()),
@@ -3871,6 +3873,9 @@ impl McHandler {
                 historian_temperature: None,
                 language: None,
                 execute_threshold_percentage: 65.0,
+                execute_threshold_user_config: None,
+                execute_threshold_user_configured: false,
+                execute_threshold_project_config: None,
                 compaction_enabled: true,
                 memory_enabled: true,
                 auto_search: crate::config::AutoSearchConfig::default(),
@@ -3943,6 +3948,7 @@ impl McHandler {
             #[cfg(test)]
             publication_fence_write_hook: Arc::new(Mutex::new(None)),
             bindings: Mutex::new(HashMap::new()),
+            threshold_logged_routes: Mutex::new(HashSet::new()),
             note_evaluation_capabilities: Mutex::new(HashMap::new()),
             transform_route_channels: Mutex::new(HashMap::new()),
             transform_session_roots: Mutex::new(HashMap::new()),
@@ -3962,6 +3968,10 @@ impl McHandler {
     /// this only overwrites a stale entry that somehow survived (defensive).
     fn bind_route(&self, channel: u16, binding: SessionBinding) {
         DISPATCH_HEALTH.route_open(channel);
+        self.threshold_logged_routes
+            .lock()
+            .expect("threshold log mutex")
+            .remove(&channel);
         self.transform_route_channels
             .lock()
             .expect("transform route channels mutex")
@@ -4310,6 +4320,10 @@ impl McHandler {
 
     /// Remove a route and evict process-local session state after its final binding closes.
     fn unbind_route(&self, channel: u16) {
+        self.threshold_logged_routes
+            .lock()
+            .expect("threshold log mutex")
+            .remove(&channel);
         DISPATCH_HEALTH.route_gone(channel);
         self.transform_route_channels
             .lock()
@@ -5065,8 +5079,10 @@ impl McHandler {
                         context_limit,
                         // Historian preparation reloads module config independently, but a host-
                         // resolved request threshold is still authoritative for this pass.
-                        execute_threshold_percentage: parsed
-                            .execute_threshold_or(cfg.execute_threshold_percentage),
+                        execute_threshold_percentage: parsed.execute_threshold_or(
+                            cfg.resolve_execute_threshold(parsed.model_key.as_deref())
+                                .percentage,
+                        ),
                         usage_percentage,
                         usage_input_tokens: input_tokens,
                         last_compartment_end_ordinal,
@@ -6981,7 +6997,11 @@ impl McHandler {
         let wrapup_cfg = self.effective_config(&binding.project_root);
         let (wrapup_context_limit, _, _) =
             usage_numbers(parsed.usage.as_ref(), parsed.geometry.as_ref());
-        let wrapup_threshold = parsed.execute_threshold_or(wrapup_cfg.execute_threshold_percentage);
+        let wrapup_threshold = parsed.execute_threshold_or(
+            wrapup_cfg
+                .resolve_execute_threshold(parsed.model_key.as_deref())
+                .percentage,
+        );
         let plan = boundary::resolve_wrapup_boundary(
             &boundary_messages,
             initial_end,
@@ -8469,6 +8489,26 @@ impl McHandler {
         let trace_received_started_at = Instant::now();
         let _ = store.trace_pass_received(&parsed.session_id, pass_now);
         let trace_received_ms = trace_received_started_at.elapsed().as_secs_f64() * 1_000.0;
+        // Bind frames have no model identity. Emit the resolved threshold once on the first
+        // transform for this binding, when the host's model and optional override are available.
+        if self
+            .threshold_logged_routes
+            .lock()
+            .expect("threshold log mutex")
+            .insert(channel)
+        {
+            let resolved = binding
+                .config
+                .resolve_execute_threshold(parsed.model_key.as_deref());
+            eprintln!(
+                "mc-module: execute_threshold channel={channel} model={} configured={} provenance={} effective={} source={}",
+                parsed.model_key.as_deref().unwrap_or("default"),
+                resolved.percentage,
+                resolved.provenance,
+                parsed.execute_threshold_or(resolved.percentage),
+                if parsed.effective_execute_threshold.is_some() { "host" } else { "config" },
+            );
+        }
         let run_transform = || {
             let resolved_cache_ttl = parsed.cache_ttl.clone().map_or_else(
                 || {
@@ -8501,9 +8541,13 @@ impl McHandler {
                 user_profile_budget_tokens: binding.config.user_profile_budget_tokens,
                 now_ms: pass_now,
                 // The host resolves per-model/token thresholds against this pass's usable window.
-                // Bind-time scalar config is only the old-host compatibility fallback.
-                execute_threshold_percentage: parsed
-                    .execute_threshold_or(binding.config.execute_threshold_percentage),
+                // Without a host override, resolve the bind-time config using this request's model.
+                execute_threshold_percentage: parsed.execute_threshold_or(
+                    binding
+                        .config
+                        .resolve_execute_threshold(parsed.model_key.as_deref())
+                        .percentage,
+                ),
                 // Route-bound configuration selects either the full pipeline or the
                 // additive-only memory/docs transform for every consumer profile.
                 compaction_enabled: binding.config.compaction_enabled,
@@ -17562,6 +17606,45 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn cc_dispatch_resolves_model_threshold_and_keeps_host_override_authoritative() {
+        let mut config = default_test_config();
+        config.execute_threshold_user_config = Some(scheduler::ExecuteThresholdConfig::ByModel(
+            [
+                ("default".to_string(), 75.0),
+                ("openai/gpt-6-astra".to_string(), 85.0),
+            ]
+            .into_iter()
+            .collect(),
+        ));
+        config.execute_threshold_user_configured = true;
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), config.clone());
+        let mut route = binding(project.to_str().unwrap(), "ses");
+        route.config = config;
+        handler.bind_route(7, route.clone());
+        for (model, usage, host, expected) in [
+            ("anthropic/claude-sonnet-5", 70_000, None, "defer"),
+            ("anthropic/claude-sonnet-5", 70_000, Some(65), "execute"),
+            ("openai/gpt-6-astra-fast", 80_000, None, "defer"),
+        ] {
+            let mut wire = request(vec![ck("tail", 1, "raw tail")]);
+            wire["serializer_profile"] = json!("claude-code-anthropic");
+            wire["model_key"] = json!(model);
+            handler.record_response_observation("ses", now_ms());
+            wire["usage"] =
+                json!({"current_total_input_tokens": usage, "context_limit_tokens": 100_000});
+            if let Some(host) = host {
+                wire["effective_execute_threshold"] = json!(host);
+            }
+            let response = call_transform_request(&handler, wire).await;
+            assert_eq!(response["scheduler_decision"], expected, "{response}");
+        }
+        assert!(handler.threshold_logged_routes.lock().unwrap().contains(&7));
+        handler.bind_route(7, route);
+        assert!(!handler.threshold_logged_routes.lock().unwrap().contains(&7));
+    }
+
     #[test]
     fn wire_execute_threshold_overrides_config_and_absence_preserves_fallback_both_directions() {
         fn decision(wire_threshold: Option<f64>, config_threshold: f64) -> scheduler::BaseDecision {
@@ -17612,6 +17695,9 @@ mod tests {
             historian_temperature: None,
             language: None,
             execute_threshold_percentage: 65.0,
+            execute_threshold_user_config: None,
+            execute_threshold_user_configured: false,
+            execute_threshold_project_config: None,
             compaction_enabled: true,
             memory_enabled: true,
             auto_search: crate::config::AutoSearchConfig::default(),
