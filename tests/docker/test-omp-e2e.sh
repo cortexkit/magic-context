@@ -4,7 +4,9 @@ set -euo pipefail
 PASS=0
 FAIL=0
 DB_PATH="$HOME/.local/share/cortexkit/magic-context/context.db"
-PLUGIN_LOG="$(node -e 'console.log(require("os").tmpdir())')/pi/magic-context/magic-context.log"
+# OMP is a first-class harness: it logs under its own tmpdir subtree and records
+# session_meta rows as harness='omp', not 'pi'.
+PLUGIN_LOG="$(node -e 'console.log(require("os").tmpdir())')/omp/magic-context/magic-context.log"
 
 check() {
     local label="$1"
@@ -193,8 +195,8 @@ check "Magic Context extension initialized" "test -s $PLUGIN_LOG"
 check "shared context database exists" "test -f $DB_PATH"
 if [[ -f "$DB_PATH" ]]; then
     SESSION_COUNT=$(sqlite3 "$DB_PATH" \
-        "SELECT COUNT(*) FROM session_meta WHERE harness='pi'" 2>/dev/null || echo 0)
-    check "OMP turn persisted through the Pi-compatible runtime" \
+        "SELECT COUNT(*) FROM session_meta WHERE harness='omp'" 2>/dev/null || echo 0)
+    check "OMP turn persisted under the omp harness" \
         "test \"$SESSION_COUNT\" -gt 0"
 fi
 
