@@ -17382,6 +17382,150 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn cc_coverage_crossing_system_reminder_forces_hard_with_existing_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ses", &[comp(1, 44, 44, "anchor", "INHERITED")])
+            .unwrap();
+        let mut reminder = item("reminder", 47, "retained system reminder");
+        reminder.ck.role = "system".to_string();
+        let request = with_usage(
+            cc_req(
+                "ses",
+                "cfg0",
+                vec![
+                    item("anchor", 44, "summary anchor"),
+                    item("first", 45, "first raw message"),
+                    reminder,
+                    item("end", 53, "last covered message"),
+                    item("tail", 54, "live tail"),
+                ],
+            ),
+            63,
+            100,
+        );
+        let ctx = pctx("git:proj", "/nonexistent-docs", 2_000);
+        let boot = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(boot.action, "HARD");
+        assert_eq!(boot.boundary_id, "anchor#0");
+        assert!(!m0_bytes(&boot).contains("retained system reminder"));
+        assert!(!cached_m1_missing(&s.load("ses").unwrap().core));
+        s.append_compartments("ses", &[comp(2, 45, 53, "end", "PUBLISHED")])
+            .unwrap();
+        let folded = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(folded.scheduler_decision.as_deref(), Some("defer"));
+        assert_eq!(folded.action, "HARD");
+        assert_eq!(folded.boundary_id, "end#0");
+        assert!(m0_bytes(&folded).contains("<covered-system-messages>"));
+        assert!(m0_bytes(&folded).contains("retained system reminder"));
+        assert!(m0_bytes(&folded).contains("PUBLISHED"));
+        assert!(folded
+            .messages()
+            .iter()
+            .all(|message| message.role != "system"));
+        let replay = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(replay.action, "SOFT+");
+        assert_eq!(m0_bytes(&replay), m0_bytes(&folded));
+    }
+
+    #[test]
+    fn cc_publish_on_execute_applies_immediately_and_latch_bypasses_historian_veto() {
+        for (latched, historian_active, applies) in [
+            (false, false, true),
+            (true, true, true),
+            (false, true, false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            s.replace_compartments("ses", &[comp(1, 44, 44, "anchor", "INHERITED")])
+                .unwrap();
+            let request = with_usage(
+                cc_req(
+                    "ses",
+                    "cfg0",
+                    vec![
+                        item("anchor", 44, "summary anchor"),
+                        item("end", 45, "new history"),
+                        item("tail", 46, "live tail"),
+                    ],
+                ),
+                70,
+                100,
+            );
+            let mut ctx = pctx("git:proj", "/nonexistent-docs", 2_000);
+            let boot = transform(&s, &request, &ctx).unwrap();
+            assert_eq!(boot.action, "HARD");
+            let mut loaded = s.load("ses").unwrap();
+            loaded.meta.emergency_drain_active = latched;
+            loaded.meta.emergency_drain_entered_at_ms = if latched { 1_000 } else { 0 };
+            s.commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+                .unwrap();
+            s.append_compartments("ses", &[comp(2, 45, 45, "end", "PUBLISHED")])
+                .unwrap();
+            ctx.historian_active = historian_active;
+            let published = transform(&s, &request, &ctx).unwrap();
+            assert_eq!(published.scheduler_decision.as_deref(), Some("execute"));
+            assert_eq!(published.action, if applies { "SOFT" } else { "SOFT+" });
+            assert_eq!(m0_bytes(&published), m0_bytes(&boot));
+            assert_eq!(m1_bytes(&published).contains("PUBLISHED"), applies);
+            assert_eq!(s.load("ses").unwrap().meta.emergency_drain_active, latched);
+        }
+    }
+
+    #[test]
+    fn cc_constant_inputs_keep_m1_byte_identical_across_execute_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ses", &[comp(1, 1, 1, "anchor", "FOLDED")])
+            .unwrap();
+        let request = with_usage(
+            cc_req(
+                "ses",
+                "cfg0",
+                vec![
+                    item("anchor", 1, "summary anchor"),
+                    item("published", 2, "published raw history"),
+                    item("next", 3, "next raw history"),
+                    item("tail", 4, "live tail"),
+                ],
+            ),
+            75,
+            100,
+        );
+        let mut ctx = pctx("git:proj", "/nonexistent-docs", 2_000);
+        assert_eq!(transform(&s, &request, &ctx).unwrap().action, "HARD");
+        s.append_compartments("ses", &[comp(2, 2, 2, "published", "FIRST DELTA")])
+            .unwrap();
+        let published = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(published.action, "SOFT");
+        assert!(m1_bytes(&published).contains("FIRST DELTA"));
+        let frozen_m1 = serde_json::to_vec(&published.messages()[1]).unwrap();
+        for pass in 1..=6 {
+            ctx.now_ms = 2_000 + pass * 10_000;
+            let replay = transform(&s, &request, &ctx).unwrap();
+            assert_eq!(replay.scheduler_decision.as_deref(), Some("execute"));
+            assert!(!s.load("ses").unwrap().meta.emergency_drain_active);
+            assert_eq!(
+                serde_json::to_vec(&replay.messages()[1]).unwrap(),
+                frozen_m1
+            );
+            assert_eq!(m0_bytes(&replay), m0_bytes(&published));
+            assert_eq!(replay.action, "SOFT+");
+        }
+        s.append_compartments("ses", &[comp(3, 3, 3, "next", "SECOND DELTA")])
+            .unwrap();
+        let changed = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(changed.action, "SOFT");
+        assert!(m1_bytes(&changed).contains("FIRST DELTA"));
+        assert!(m1_bytes(&changed).contains("SECOND DELTA"));
+        assert_ne!(
+            serde_json::to_vec(&changed.messages()[1]).unwrap(),
+            frozen_m1
+        );
+        assert_eq!(m0_bytes(&changed), m0_bytes(&published));
+    }
+
+    #[test]
     fn pending_in_session_delta_is_consumed_on_execute_but_deferred_passes_replay() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());

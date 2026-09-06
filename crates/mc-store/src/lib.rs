@@ -17689,8 +17689,10 @@ mod tests {
         let store = McStore::open(&descriptor(dir.path())).unwrap();
         let session = "counter-cas";
         let core = CoreState::default();
-        let mut initial_meta = ModuleMeta::default();
-        initial_meta.boundary_divergence_pending_count = 0;
+        let initial_meta = ModuleMeta {
+            boundary_divergence_pending_count: 0,
+            ..ModuleMeta::default()
+        };
         store.commit(session, None, &core, &initial_meta).unwrap();
 
         let left = store.load(session).unwrap();
@@ -26839,6 +26841,45 @@ mod lineage_descent_tests {
         let target = store.load("B").unwrap();
         assert_eq!(target.meta.coverage_ordinal, Some(11));
         assert_eq!(target.core.boundary_id, "ccm-0#1");
+    }
+
+    #[test]
+    fn descent_preserves_initialized_boundary_and_active_drain_episode() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_lineage(&store, "A", 43);
+        let mut source = store.load("A").unwrap();
+        source.meta.emergency_drain_active = true;
+        source.meta.emergency_drain_entered_at_ms = 1_000;
+        store
+            .commit("A", source.row_version, &source.core, &source.meta)
+            .unwrap();
+        let hops = direct_hop("A", "B", 2);
+        let anchor = anchor();
+        let outcome = store
+            .descend_lineage(LineageDescentRequest {
+                target_key: "B",
+                expected_target_row_version: None,
+                edge_id: 44,
+                prior_key: "A",
+                prior_epoch: 1,
+                new_epoch: 2,
+                constituents: &hops,
+                compaction_observed: true,
+                anchor: Some(&anchor),
+                now_ms: 61_000,
+            })
+            .unwrap();
+        assert_eq!(outcome.disposition, LineageDescentDisposition::Descended);
+        let target = store.load("B").unwrap();
+        assert!(target.meta.initialized);
+        assert_eq!(target.core.boundary_id, "summary#1");
+        assert!(!target.core.reconcile_pending);
+        assert_eq!(target.meta.coverage_ordinal, Some(44));
+        assert_eq!(target.meta.ordinal_continuation_base, Some(43));
+        assert!(target.meta.emergency_drain_active);
+        assert_eq!(target.meta.emergency_drain_entered_at_ms, 1_000);
+        assert!(outcome.materialization_required);
     }
 
     /// A mid-space anchor (neither a fresh origin nor the placeholder) must

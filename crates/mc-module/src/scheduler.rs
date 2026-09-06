@@ -1437,6 +1437,39 @@ mod tests {
     }
 
     #[test]
+    fn inherited_drain_at_63_percent_holds_without_forcing_execute() {
+        let mut inputs = base_inputs();
+        inputs.drain_latch = LatchState {
+            active_since_ms: Some(1_000),
+        };
+        inputs.context_limit = Some(100_000.0);
+        for (percentage, expected_pass, expected_active) in [
+            (63.0, PassDecision::Defer, true),
+            (65.0, PassDecision::Execute, true),
+            (55.0, PassDecision::Defer, true),
+            (54.9, PassDecision::Defer, false),
+        ] {
+            inputs.usage.percentage = percentage;
+            inputs.usage.input_tokens = percentage * 1_000.0;
+            let outcome = decide(&inputs);
+            assert_eq!(outcome.pass, expected_pass, "usage {percentage}");
+            assert_eq!(
+                outcome.drain_latch.is_active(),
+                expected_active,
+                "usage {percentage}"
+            );
+            let unlatched = decide(&SchedulerInputs {
+                drain_latch: LatchState::default(),
+                ..inputs.clone()
+            });
+            assert_eq!(
+                outcome.pass, unlatched.pass,
+                "latch must not choose the pass"
+            );
+        }
+    }
+
+    #[test]
     fn decide_is_deterministic_for_identical_inputs() {
         let mut inputs = base_inputs();
         inputs.usage.percentage = 86.0;
