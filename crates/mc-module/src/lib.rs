@@ -112,10 +112,7 @@ use session_resolver::{
 #[cfg(test)]
 use subc_protocol::manifest::ExecutionMode;
 use subc_protocol::{
-    manifest::{
-        Bindings, Concurrency, ConsumerRole, IdentityBinding, IdentityScope, ModuleManifest,
-        ProviderRole, StorageBinding, StorageKind, StorageScope, TrustTier,
-    },
+    manifest::{Concurrency, ConsumerRole, IdentityScope, ModuleManifest, ProviderRole, TrustTier},
     ModuleHelloAckBody, PROTOCOL_VERSION,
 };
 #[cfg(test)]
@@ -15745,23 +15742,16 @@ pub fn manifest(module_id: &str) -> ModuleManifest {
     // #[non_exhaustive], so builder methods are the only construction path that survives additive
     // field landings. Every field below is set to the exact value the pre-builder struct literal
     // produced, so the serialized HELLO is byte-identical to the pre-migration wire shape.
-    // subc-protocol 0.19 made trust_tier and bindings optional builder setters because the
-    // daemon reads neither on a production path; we keep declaring both so the HELLO stays
-    // byte-identical to the pre-0.19 wire shape.
+    // Each optional manifest field is declared in whichever direction is TRUE of this
+    // module, and a test pins both directions on the struct and on the wire because the
+    // compiler stopped requiring them in subc-protocol 0.19. trust_tier stays: this module
+    // is first-party. bindings is absent: the only storage scope the enum can express is
+    // `Project`, but the store at ~/.local/share/cortexkit/magic-context/store.db is one per
+    // MACHINE (every project on the host shares it, rows are project-keyed inside), so any
+    // bindings block would assert a partition that does not exist. The daemon hands this
+    // module its StorageDescriptor from its own config and never reads the binding.
     ModuleManifest::builder(module_id.to_string(), env!("CARGO_PKG_VERSION").to_string())
     .trust_tier(Some(TrustTier::FirstParty))
-    .bindings(Some(Bindings {
-        storage: StorageBinding {
-            kind: StorageKind::Sqlite,
-            scope: StorageScope::Project,
-            owns_schema: true,
-        },
-        vault_grants: Vec::new(),
-        identity: IdentityBinding {
-            requires: vec![IdentityScope::Project],
-            optional: vec![IdentityScope::Session],
-        },
-    }))
     .protocol_ver(PROTOCOL_VERSION)
     // Introduced by subc-protocol 0.12: optional pre-validated capability
     // declarations. MC requests nothing beyond its role grants, so None keeps
@@ -16649,7 +16639,21 @@ mod tests {
         let m = manifest("magic-context");
         assert_eq!(m.module_id, "magic-context");
         assert_eq!(m.module_version, env!("CARGO_PKG_VERSION"));
+        // Both optional 0.19 fields are pinned in their TRUE direction on the struct AND on
+        // the serialized HELLO (a field can be set and still skipped at serialization):
+        // first-party is a fact, so it is present; no expressible storage scope is true of a
+        // machine-shared store, so bindings is absent.
         assert_eq!(m.trust_tier, Some(TrustTier::FirstParty));
+        assert_eq!(
+            m.bindings, None,
+            "bindings must stay absent: the store is machine-scoped"
+        );
+        let wire = serde_json::to_value(&m).expect("manifest serializes");
+        assert_eq!(wire["trust_tier"], serde_json::json!("first_party"));
+        assert!(
+            wire.get("bindings").is_none() || wire["bindings"].is_null(),
+            "bindings must not appear on the wire"
+        );
         assert_eq!(m.protocol_ver, PROTOCOL_VERSION);
         // The builder migration must preserve the deliberate empty self-signal
         // marker ("examined, none to register") byte-identically; actual signal
