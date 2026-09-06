@@ -4263,10 +4263,13 @@ fn apply_once(
         loaded.meta.coverage_ordinal,
     );
     let classify_started_at = Instant::now();
+    // The drain latch can remain active after pressure falls below the force threshold.
+    // It does not mean this request is already rewriting the cached prefix: pending m1
+    // publications still need Execute or an independently authorized repair/force/flush.
     let independent_bust_opportunity =
         (matches!(scheduler_outcome.pass, scheduler::PassDecision::Execute)
             && !ordinary_historian_veto)
-            || pass_already_busting;
+            || supersession_ride_available;
     let bust_opportunity = independent_bust_opportunity || reductions_pending_now;
     let mut plan = classify(&ClassifierInput {
         initialized: loaded.meta.initialized && !loaded.meta.bootstrap_seed_fold_pending,
@@ -17785,6 +17788,86 @@ pub(crate) mod tests {
             assert_eq!(m0_bytes(&consumed), m0_bytes(&boot));
             assert!(s.load("ses").unwrap().meta.deferred_execute_state.is_none());
         }
+    }
+
+    #[test]
+    fn cc_latched_mid_turn_publications_wait_for_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ses", &[comp(1, 1, 1, "anchor", "FOLDED")])
+            .unwrap();
+        let mut request = with_usage(
+            cc_req(
+                "ses",
+                "cfg0",
+                vec![
+                    item("anchor", 1, "summary anchor"),
+                    item("published", 2, "published raw history"),
+                    item("next", 3, "next raw history"),
+                    item("tail", 4, "live tail"),
+                ],
+            ),
+            75,
+            100,
+        );
+        let mut ctx = pctx("git:proj", "/nonexistent-docs", 2_000);
+        assert_eq!(transform(&s, &request, &ctx).unwrap().action, "HARD");
+        s.append_compartments("ses", &[comp(2, 2, 2, "published", "FORCE DELTA")])
+            .unwrap();
+        request = with_usage(request, 85, 100);
+        request.mid_turn = true;
+        let force = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(force.scheduler_decision.as_deref(), Some("execute"));
+        assert_eq!(
+            s.load_pass_trace("ses")
+                .unwrap()
+                .unwrap()
+                .scheduler_history
+                .last()
+                .unwrap()
+                .scheduler_decision,
+            "Force85"
+        );
+        assert!(s.load("ses").unwrap().meta.emergency_drain_active);
+        assert!(m1_bytes(&force).contains("FORCE DELTA"));
+        let frozen = serde_json::to_vec(force.messages()).unwrap();
+        let applied_seq = s.load("ses").unwrap().meta.m1_compartment_seq;
+
+        s.append_compartments("ses", &[comp(3, 3, 3, "next", "BOUNDARY DELTA")])
+            .unwrap();
+        request = with_usage(request, 83, 100);
+        for _ in 0..3 {
+            ctx.now_ms += 10_000;
+            let held = transform(&s, &request, &ctx).unwrap();
+            assert_eq!(held.scheduler_decision.as_deref(), Some("defer"));
+            assert_eq!(
+                held.scheduler_defer_reason.as_deref(),
+                Some("mid_turn_boundary")
+            );
+            assert_eq!(m0_bytes(&held), m0_bytes(&force));
+            assert_eq!(m1_bytes(&held), m1_bytes(&force));
+            assert_eq!(serde_json::to_vec(held.messages()).unwrap(), frozen);
+            assert!(held.first_divergence.is_none());
+            let meta = s.load("ses").unwrap().meta;
+            assert!(meta.emergency_drain_active);
+            assert_eq!(meta.m1_compartment_seq, applied_seq);
+            assert!(meta.deferred_execute_state.is_some());
+            assert_eq!(meta.boundary_divergence_pending_count, 0);
+        }
+        request.mid_turn = false;
+        let consumed = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(consumed.action, "SOFT");
+        assert_eq!(m0_bytes(&consumed), m0_bytes(&force));
+        assert!(m1_bytes(&consumed).contains("BOUNDARY DELTA"));
+        assert_eq!(s.load("ses").unwrap().meta.m1_compartment_seq, Some(3));
+        assert!(s.load("ses").unwrap().meta.deferred_execute_state.is_none());
+        let replay = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(replay.action, "SOFT+");
+        assert_eq!(
+            serde_json::to_vec(replay.messages()).unwrap(),
+            serde_json::to_vec(consumed.messages()).unwrap()
+        );
+        assert!(replay.first_divergence.is_none());
     }
 
     #[test]
