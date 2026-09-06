@@ -713,6 +713,15 @@ const BaseEmbeddingConfigSchema = z
             .describe(
                 "Optional maximum input tokens for chunk embeddings. Defaults conservatively to 512 when omitted.",
             ),
+        dimensions: z
+            .number()
+            .int()
+            .positive()
+            .max(8192)
+            .optional()
+            .describe(
+                "Optional embedding dimensions for Matryoshka models like Qwen3-Embedding (e.g. 768, 1024, 4096). When set, sent as dimensions in the embedding request body. Omitted keeps provider default.",
+            ),
         local_runtime: z
             .enum(["auto", "native", "wasm"])
             .default("auto")
@@ -777,6 +786,7 @@ export const EmbeddingConfigSchema = BaseEmbeddingConfigSchema.transform((data) 
             ...(inputType ? { input_type: inputType } : {}),
             ...(queryInputType ? { query_input_type: queryInputType } : {}),
             ...(truncate ? { truncate } : {}),
+            ...(data.dimensions ? { dimensions: data.dimensions } : {}),
             ...(data.max_input_tokens ? { max_input_tokens: data.max_input_tokens } : {}),
         };
     }
@@ -810,6 +820,7 @@ export const EmbeddingConfigSchema = BaseEmbeddingConfigSchema.transform((data) 
             ...(inputType ? { input_type: inputType } : {}),
             ...(queryInputType ? { query_input_type: queryInputType } : {}),
             ...(truncate ? { truncate } : {}),
+            ...(data.dimensions ? { dimensions: data.dimensions } : {}),
             ...(data.max_input_tokens ? { max_input_tokens: data.max_input_tokens } : {}),
         };
     }

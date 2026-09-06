@@ -53,6 +53,7 @@ function fallbackConfig(
     const queryInputType =
         typeof raw.query_input_type === "string" ? raw.query_input_type.trim() : "";
     const truncate = typeof raw.truncate === "string" ? raw.truncate.trim() : "";
+    const dimensions = typeof raw.dimensions === "number" ? raw.dimensions : undefined;
     const maxInputTokens =
         typeof raw.max_input_tokens === "number" ? raw.max_input_tokens : undefined;
 
@@ -66,6 +67,7 @@ function fallbackConfig(
             ...(inputType ? { input_type: inputType } : {}),
             ...(queryInputType ? { query_input_type: queryInputType } : {}),
             ...(truncate ? { truncate } : {}),
+            ...(dimensions !== undefined ? { dimensions } : {}),
             ...(maxInputTokens !== undefined ? { max_input_tokens: maxInputTokens } : {}),
         };
     }

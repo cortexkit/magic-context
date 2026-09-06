@@ -34,6 +34,10 @@ export function getEmbeddingProviderIdentity(config: EmbeddingConfig): string {
     }
 
     const truncate = config.provider === "openai-compatible" ? config.truncate?.trim() : undefined;
+    const dimensions =
+        config.provider === "openai-compatible"
+            ? (config as unknown as { dimensions?: number }).dimensions
+            : undefined;
     // local_dtype changes the produced vectors (a quantized ONNX model emits
     // different embeddings than fp32), so a non-default dtype MUST fold into the
     // model identity — switching dtype re-embeds rather than mixing vector
@@ -66,6 +70,7 @@ export function getEmbeddingProviderIdentity(config: EmbeddingConfig): string {
                   // lazily GCs, never a destructive wipe).
                   inputType: config.input_type?.trim() || "",
                   ...(truncate ? { truncate } : {}),
+                  ...(dimensions ? { dimensions } : {}),
               }
             : {
                   provider: "local",

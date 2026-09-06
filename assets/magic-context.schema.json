@@ -2256,6 +2256,12 @@
           "exclusiveMinimum": 0,
           "maximum": 9007199254740991
         },
+        "dimensions": {
+          "description": "Optional embedding dimensions for Matryoshka models like Qwen3-Embedding (e.g. 768, 1024, 4096). When set, sent as dimensions in the embedding request body. Omitted keeps provider default.",
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 8192
+        },
         "local_runtime": {
           "default": "auto",
           "description": "Local provider only: ONNX runtime selection. 'auto' uses native under Node and uses WASM under Bun versions before 1.4.0, where Bun's NAPI teardown race can panic on quit; native is restored automatically on Bun 1.4.0+. Set 'native' only to prefer speed while accepting that pre-1.4.0 Bun crash risk, or 'wasm' to avoid loading the native addon.",

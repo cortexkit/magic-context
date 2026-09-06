@@ -422,6 +422,7 @@ function resolveEmbeddingConfig(config?: EmbeddingConfig): EmbeddingConfig {
             ...(inputType ? { input_type: inputType } : {}),
             ...(queryInputType ? { query_input_type: queryInputType } : {}),
             ...(truncate ? { truncate } : {}),
+            ...(config.dimensions ? { dimensions: config.dimensions } : {}),
             ...(config.max_input_tokens
                 ? {
                       max_input_tokens: normalizeCompartmentChunkMaxInputTokens(
@@ -502,6 +503,7 @@ function createProvider(
             inputType: config.input_type,
             queryInputType: config.query_input_type,
             truncate: config.truncate,
+            dimensions: (config as unknown as { dimensions?: number }).dimensions,
             maxInputTokens: config.max_input_tokens,
         });
     }
@@ -585,6 +587,7 @@ function getChunkEmbeddingModelId(config: EmbeddingConfig, providerIdentity: str
             "max_input_tokens" in config ? config.max_input_tokens : undefined,
         ),
         truncate: config.provider === "openai-compatible" ? (config.truncate ?? "") : "",
+        dimensions: config.provider === "openai-compatible" ? ((config as unknown as { dimensions?: number }).dimensions ?? "") : "",
     };
     return `${providerIdentity}:chunk:${sha256Prefix(stableStringify(chunkIdentity))}`;
 }
