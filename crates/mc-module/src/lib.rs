@@ -618,11 +618,11 @@ pub const COMPARTMENT_RENDER_FORMAT_EPOCH: u32 = 2;
 /// age/pressure tail reclaim they never had; the bump forces one self-coordinated HARD
 /// fold on the first pass under the new binary, per the epoch contract above.
 pub const PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC: u32 = 2;
-/// Bumps when any active tag overlay changes provider-visible bytes. Epoch 3 freezes
-/// temporal-marker decisions in durable rows instead of deriving them from each request array.
+/// Bumps when any active tag overlay changes provider-visible bytes. Epoch 4 tags completed
+/// Claude Code assistant text on first sight even when protected from other mutations.
 /// Every change requires one cache-breaking fold before the new overlay can render. Inactive
 /// requests omit the component and retain their identity.
-pub const TAGGER_FEATURE_EPOCH: u32 = 3;
+pub const TAGGER_FEATURE_EPOCH: u32 = 4;
 
 /// The module-owned rendered-prefix format epoch for a serializer profile.
 ///

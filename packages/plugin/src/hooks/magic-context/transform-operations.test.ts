@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import toolLoopGolden from "../../../../../crates/mc-module/testdata/cc-tool-loop-tag-golden.json";
 import { closeDatabase, getTagById, openDatabase } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
 import { byteSize } from "./tag-content-primitives";
@@ -50,6 +51,52 @@ function useTempDataHome(prefix: string): void {
 }
 
 describe("tagMessages", () => {
+    it("matches the Rust tool-loop first-sight tag golden across a newer reasoning assistant", () => {
+        useTempDataHome("tag-tool-loop-first-sight-");
+        const db = openDatabase();
+        const tagger = createTagger();
+        const target: TestMessage = {
+            info: { id: "message-52", role: "assistant" },
+            parts: [
+                { type: "thinking", thinking: toolLoopGolden.thinking },
+                { type: "text", text: toolLoopGolden.text },
+                { type: "tool-invocation", callID: "call-53" },
+            ],
+        };
+        const raw: TestMessage[] = [
+            { info: { id: "prompt", role: "user" }, parts: [{ type: "text", text: "inspect tests" }] },
+            target,
+            {
+                info: { id: "result-53", role: "tool" },
+                parts: [{ type: "tool", callID: "call-53", state: { output: "tests" } }],
+            },
+            {
+                info: { id: "message-54", role: "assistant" },
+                parts: [{ type: "tool-invocation", callID: "call-55" }],
+            },
+            {
+                info: { id: "result-55", role: "tool" },
+                parts: [{ type: "tool", callID: "call-55", state: { output: "more tests" } }],
+            },
+        ];
+        const first = structuredClone(raw);
+        tagMessages("tool-loop", first, tagger, db);
+        expect((first[1].parts[1] as TextPart).text).toBe(toolLoopGolden.expected_text);
+        expect(first[1].parts[0]).toEqual(target.parts[0]);
+        raw.push({
+            info: { id: "message-56", role: "assistant" },
+            parts: [
+                { type: "thinking", thinking: "next step" },
+                { type: "tool-invocation", callID: "call-57" },
+            ],
+        });
+        raw.push({
+            info: { id: "result-57", role: "tool" },
+            parts: [{ type: "tool", callID: "call-57", state: { output: "done" } }],
+        });
+        tagMessages("tool-loop", raw, tagger, db);
+        expect(JSON.stringify(raw[1])).toBe(JSON.stringify(first[1]));
+    });
     describe("#given assistant message with thinking + tool_use but no text", () => {
         it("#then stores preceding thinking bytes on the tool tag", () => {
             useTempDataHome("tag-tool-reasoning-bytes-");

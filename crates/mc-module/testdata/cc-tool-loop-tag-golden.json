@@ -1,0 +1,6 @@
+{
+  "text": "No existing tests cover the quick-switcher yet. Let me find a similar overlay test to follow.",
+  "thinking": "Inspect the existing overlay tests before implementing the next step.",
+  "signature": "fixture-signed-thinking",
+  "expected_text": "§2§ No existing tests cover the quick-switcher yet. Let me find a similar overlay test to follow."
+}
