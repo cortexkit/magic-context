@@ -42,7 +42,10 @@ import {
     setPersistedTodoPermissionDenied,
     setPersistedTodoSyntheticAnchor,
 } from "../../features/magic-context/storage-meta-persisted";
-import { markWhitespaceAssistantTagInert } from "../../features/magic-context/storage-tags";
+import {
+    markWhitespaceAssistantTagInert,
+    updateTagStatus,
+} from "../../features/magic-context/storage-tags";
 import { createTagger } from "../../features/magic-context/tagger";
 import * as loggerModule from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
@@ -3831,7 +3834,10 @@ describe("final message representation", () => {
         const bustTarget = findMessage(bustMessages, "assistant-transitioned");
         expect(bustTarget.parts[0]).toEqual({ type: "text", text: "" });
         expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(
-            new Set(["assistant-transitioned"]),
+            new Set([
+                "assistant-transitioned",
+                '__merged_reasoning_parts_v1__:["assistant-transitioned",[0]]',
+            ]),
         );
         expect(getMergedReasoningStrippedIds(db, sessionId).has("assistant-newest")).toBe(false);
 
@@ -3893,7 +3899,9 @@ describe("final message representation", () => {
             }),
         );
 
-        expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(new Set(["assistant-target"]));
+        expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(
+            new Set(["assistant-target", '__merged_reasoning_parts_v1__:["assistant-target",[1]]']),
+        );
         expect(getTrailingBlankDecisions(db, sessionId).get("assistant-target")).toBe("strip");
         expect(findMessage(messages, "assistant-target").parts.at(-1)).toMatchObject({
             type: "tool",
@@ -5193,5 +5201,161 @@ describe("reconcileMarkerRepresentation on rust-mode output heads", () => {
             "msg_real1",
         ]);
         expect(messages[2]?.info.role).toBe("assistant");
+    });
+});
+
+describe("marker-drain reasoning representation", () => {
+    it("freezes the applying marker-drain strip when the defer batch removes empty predecessors", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-marker-drain-reasoning";
+        createOpenCodeDbWithoutMessages("marker-drain-reasoning-");
+        const hostDb = new Database(join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db"));
+        hostDb
+            .prepare("INSERT INTO message VALUES (?, ?, ?, ?, ?)")
+            .run("boundary", sessionId, 1000, 1000, JSON.stringify({ role: "user" }));
+        hostDb.close();
+        appendCompartments(db, sessionId, [
+            {
+                sequence: 0,
+                startMessage: 1,
+                endMessage: 10,
+                startMessageId: "boundary",
+                endMessageId: "boundary",
+                title: "history",
+                content: "covered",
+            },
+        ]);
+        setPendingCompactionMarkerState(db, sessionId, {
+            ordinal: 10,
+            endMessageId: "boundary",
+            publishedAt: 1,
+        });
+        const source = (): MessageLike[] =>
+            [
+                {
+                    info: { id: "boundary", role: "user" },
+                    parts: [{ type: "text", text: "covered" }],
+                },
+                {
+                    info: { id: "hidden", role: "assistant" },
+                    parts: [{ type: "text", text: "[dropped §1§]" }],
+                },
+                {
+                    info: { id: "turn", role: "user" },
+                    parts: [{ type: "text", text: "retained turn" }],
+                },
+                {
+                    info: { id: "predecessor", role: "assistant" },
+                    parts: [
+                        { type: "step-start" },
+                        {
+                            type: "tool",
+                            tool: "read",
+                            callID: "read-call",
+                            state: { status: "completed", input: {}, output: "old output" },
+                        },
+                        { type: "step-finish" },
+                    ],
+                },
+                {
+                    info: { id: "error-assistant", role: "assistant" },
+                    parts: [
+                        { type: "step-start" },
+                        {
+                            id: "signed-part",
+                            type: "reasoning",
+                            text: "signed reasoning",
+                            metadata: { anthropic: { signature: "sig" } },
+                        },
+                        { type: "text", text: "" },
+                        {
+                            type: "tool",
+                            tool: "aft_zoom",
+                            callID: "error-call",
+                            state: { status: "error", input: {}, error: "symbol not found" },
+                        },
+                        { type: "step-finish" },
+                    ],
+                },
+                {
+                    info: { id: "newest", role: "assistant" },
+                    parts: [{ type: "text", text: "latest response" }],
+                },
+            ] as MessageLike[];
+        const applyingRaw = source();
+        const applying = applyingRaw.slice(2);
+        const tagger = createTagger();
+        // The transform tags applyingRaw so rows hidden by compaction can retain
+        // their drop decisions if the host later exposes them again. Tool removal
+        // then prunes applyingRaw, leaving empty assistant objects in applying.
+        const first = tagMessages(sessionId, applyingRaw, tagger, db);
+        expect(first.messageTagNumbers.has(applyingRaw[4])).toBe(false);
+        addMergedReasoningStrippedIds(db, sessionId, ["error-assistant"]);
+        const readTag = getTagsBySession(db, sessionId).find(
+            (tag) => tag.messageId === "read-call",
+        )!.tagNumber;
+        updateTagStatus(db, sessionId, readTag, "dropped");
+        applyFlushedStatuses(sessionId, db, first.targets);
+        first.batch.finalize();
+        stripStructuralNoise(applying);
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, applying, {
+                ...first,
+                tagger,
+                resolvedProviderID: "anthropic",
+                deferredMaterializationSessions: new Set([sessionId]),
+                hiddenMessagesAtCompactionSeam: [applyingRaw[1]],
+                deferredHistoryWasPendingAtPassStart: true,
+                historyRebuiltThisPass: true,
+                canConsumeDeferredLate: true,
+                deferredHistoryRefreshSessions: new Set([sessionId]),
+                pendingCompartmentInjection: {
+                    block: "",
+                    compartmentEndMessage: 10,
+                    compartmentEndMessageId: "boundary",
+                    compartmentCount: 1,
+                    skippedVisibleMessages: 2,
+                    factCount: 0,
+                    memoryCount: 0,
+                    rebuiltFromDb: true,
+                },
+            }),
+        );
+        expect(getPersistedCompactionMarkerState(db, sessionId)?.boundaryOrdinal).toBe(10);
+        expect(getPendingCompactionMarkerState(db, sessionId)).toBeNull();
+        expect(applying.some((m) => m.info.id === "predecessor")).toBe(true);
+        const firstAssistant = applying.find((m) => m.info.id === "error-assistant")!;
+        expect(firstAssistant.parts.some((p) => (p as { type: string }).type === "reasoning")).toBe(
+            false,
+        );
+        const appliedBytes = JSON.stringify(firstAssistant.parts);
+        const frozenBeforeServe = getMergedReasoningStrippedIds(db, sessionId);
+        expect(frozenBeforeServe).toEqual(
+            new Set([
+                "error-assistant",
+                '__merged_reasoning_parts_v1__:["error-assistant",["signed-part"]]',
+            ]),
+        );
+
+        const deferred = source().slice(2);
+        const freshTagger = createTagger();
+        freshTagger.initFromDb(sessionId, db);
+        const second = tagMessages(sessionId, deferred, freshTagger, db);
+        applyFlushedStatuses(sessionId, db, second.targets);
+        second.batch.finalize();
+        stripStructuralNoise(deferred);
+        expect(deferred.some((m) => m.info.id === "predecessor")).toBe(false);
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, deferred, {
+                ...second,
+                tagger: freshTagger,
+                resolvedProviderID: "anthropic",
+            }),
+        );
+        expect(JSON.stringify(deferred.find((m) => m.info.id === "error-assistant")!.parts)).toBe(
+            appliedBytes,
+        );
+        expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(frozenBeforeServe);
     });
 });

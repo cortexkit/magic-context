@@ -5,6 +5,7 @@ import {
     clearOldReasoning,
     findLatestAssistantReasoningMutationExemptMessage,
     findMergedReasoningStripCandidateIds,
+    findMergedReasoningStripDecisions,
     replayStrippedInlineThinking,
     stripClearedReasoning,
     stripDroppedPlaceholderMessages,
@@ -1291,5 +1292,84 @@ describe("strip-content", () => {
         expect(guardedInlineCount).toBe(oldInlineCount);
         expect(guardedDropped.stripped).toBe(oldDroppedCount);
         expect(JSON.stringify(guarded)).toBe(JSON.stringify(before));
+    });
+});
+
+describe("frozen merged reasoning parts", () => {
+    it("preserves the pre-deploy bare-id partial-strip bytes", () => {
+        const build = () => [
+            message("legacy", "assistant", [
+                { type: "reasoning", text: "kept first" },
+                { type: "text", text: "between" },
+                { type: "reasoning", text: "stripped second" },
+            ]),
+        ];
+        const legacy = build();
+        stripReasoningFromMergedAssistants(legacy, "anthropic", {
+            frozenMessageIds: new Set(["legacy"]),
+        });
+        expect(legacy[0].parts).toEqual([
+            { type: "reasoning", text: "kept first" },
+            { type: "text", text: "between" },
+            SENTINEL,
+        ]);
+        const fresh = build();
+        stripReasoningFromMergedAssistants(fresh, "anthropic", {
+            frozenMessageIds: new Set(["legacy"]),
+        });
+        expect(JSON.stringify(fresh)).toBe(JSON.stringify(legacy));
+    });
+
+    it("replays only frozen part ids after adjacency and part positions change", () => {
+        const build = () =>
+            message("partial", "assistant", [
+                { id: "first", type: "reasoning", text: "kept first" },
+                { type: "text", text: "between" },
+                { id: "second", type: "reasoning", text: "stripped second" },
+            ]);
+        const first = build();
+        const frozen = new Set(findMergedReasoningStripDecisions([first], "anthropic", new Set()));
+        stripReasoningFromMergedAssistants([first], "anthropic", { frozenMessageIds: frozen });
+        expect(first.parts[0]).toMatchObject({ type: "reasoning", text: "kept first" });
+        expect(first.parts[2]).toEqual(SENTINEL);
+        const fresh = build();
+        fresh.parts.unshift({ type: "text", text: "new framing" });
+        const changedRun = [
+            message("preceding", "assistant", [{ type: "text", text: "prior" }]),
+            fresh,
+        ];
+        expect(findMergedReasoningStripDecisions(changedRun, "anthropic", frozen)).toEqual([]);
+        stripReasoningFromMergedAssistants(changedRun, "anthropic", { frozenMessageIds: frozen });
+        expect(fresh.parts[1]).toMatchObject({ type: "reasoning", text: "kept first" });
+        expect(fresh.parts[3]).toEqual(SENTINEL);
+    });
+
+    it("replays index fallbacks without promoting a newly eligible first thinking part", () => {
+        const build = () =>
+            message("indexed", "assistant", [
+                { type: "reasoning", text: "frozen" },
+                { type: "text", text: "answer" },
+            ]);
+        const first = build();
+        const frozen = new Set(
+            findMergedReasoningStripDecisions(
+                [message("preceding", "assistant", [{ type: "text", text: "prior" }]), first],
+                "anthropic",
+                new Set(),
+            ),
+        );
+        stripReasoningFromMergedAssistants([first], "anthropic", { frozenMessageIds: frozen });
+        expect(first.parts[0]).toEqual(SENTINEL);
+        const exempt = build();
+        expect(
+            stripReasoningFromMergedAssistants([exempt], "anthropic", {
+                frozenMessageIds: frozen,
+                mutationExemptMessage: exempt,
+            }),
+        ).toBe(0);
+        expect(exempt.parts[0]).toMatchObject({ type: "reasoning" });
+        expect(
+            stripReasoningFromMergedAssistants([exempt], "openai", { frozenMessageIds: frozen }),
+        ).toBe(0);
     });
 });
