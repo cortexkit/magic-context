@@ -130,11 +130,25 @@ cat > /tmp/omp-subagent-system.txt <<'PROMPT'
 Reply once, then stop.
 PROMPT
 OMP_PACKAGE_DIR="$(npm root -g)/@oh-my-pi/pi-coding-agent"
-MAGIC_CONTEXT_PI_SUBAGENT=1 PI_PACKAGE_DIR="$OMP_PACKAGE_DIR" \
-    node --input-type=module > /tmp/omp-subagent-argv <<'NODE'
-import { buildArgs } from "/test/e2e/subagent-runner-e2e.mjs";
+node -e 'const m = require(process.argv[1]); console.log(`OMP package manifest: name=${m.name} version=${m.version} bin=${JSON.stringify(m.bin)}`)' \
+    "$OMP_PACKAGE_DIR/package.json"
+OMP_BIN_PATH="$(command -v omp)"
+BUN_EXEC_PATH="$(command -v bun)"
+MAGIC_CONTEXT_PI_SUBAGENT=1 \
+    OMP_BIN_PATH="$OMP_BIN_PATH" \
+    BUN_EXEC_PATH="$BUN_EXEC_PATH" \
+    node --input-type=module > /tmp/omp-subagent-invocation <<'NODE'
+import { __test } from "/test/e2e/subagent-runner-e2e.mjs";
 
-const args = buildArgs(
+const invocation = __test.resolvePiInvocation({
+    execPath: process.env.BUN_EXEC_PATH,
+    argv1: process.env.OMP_BIN_PATH,
+    resolvePackageJson: () => null,
+});
+if (invocation.targetHarness !== "omp") {
+    throw new Error(`resolved real OMP installation as ${invocation.targetHarness}`);
+}
+const args = __test.buildArgs(
     {
         agent: "historian",
         systemPrompt: "loaded from the explicit path",
@@ -142,19 +156,30 @@ const args = buildArgs(
         model: "mock/mock-model",
     },
     {
+        targetHarness: invocation.targetHarness,
         systemPromptPath: "/tmp/omp-subagent-system.txt",
         modelRef: "mock/mock-model",
     },
 );
-for (const arg of args) console.log(arg);
+if (!args.includes("--no-rules")) {
+    throw new Error("resolved OMP argv is missing --no-rules");
+}
+for (const flag of ["--no-prompt-templates", "--no-context-files"]) {
+    if (args.includes(flag)) throw new Error(`resolved OMP argv includes ${flag}`);
+}
+for (const arg of [invocation.command, ...invocation.prefixArgs, ...args]) {
+    console.log(arg);
+}
 NODE
-mapfile -t OMP_SUBAGENT_ARGS < /tmp/omp-subagent-argv
-printf 'OMP generated subagent argv:'
-printf ' %q' "${OMP_SUBAGENT_ARGS[@]}"
+mapfile -t OMP_SUBAGENT_INVOCATION < /tmp/omp-subagent-invocation
+OMP_SUBAGENT_COMMAND="${OMP_SUBAGENT_INVOCATION[0]}"
+OMP_SUBAGENT_ARGS=("${OMP_SUBAGENT_INVOCATION[@]:1}")
+printf 'OMP resolved subagent invocation:'
+printf ' %q' "$OMP_SUBAGENT_COMMAND" "${OMP_SUBAGENT_ARGS[@]}"
 printf '\n'
 set +e
 MAGIC_CONTEXT_PI_SUBAGENT=1 timeout --signal=KILL 60 \
-    omp "${OMP_SUBAGENT_ARGS[@]}" > /tmp/omp-subagent.log 2>&1
+    "$OMP_SUBAGENT_COMMAND" "${OMP_SUBAGENT_ARGS[@]}" > /tmp/omp-subagent.log 2>&1
 OMP_SUBAGENT_EXIT=$?
 set -e
 echo "OMP subagent exit: $OMP_SUBAGENT_EXIT"

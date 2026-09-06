@@ -248,7 +248,7 @@ function writePiCliFixture(bin: string, useBinShim = false) {
 // ships no `pi` bin. The resolver must accept the `omp` key so an OMP host
 // without a standalone `pi` on PATH still spawns its own CLI instead of the
 // bare `pi` fallback (which ENOENTs).
-function writeOmpCliFixture(bin: string) {
+function writeOmpCliFixture(bin: string, useBinShim = false) {
 	const root = mkdtempSync(join(tmpdir(), "mc-omp-cli-layout-"));
 	const packageRoot = join(
 		root,
@@ -267,7 +267,12 @@ function writeOmpCliFixture(bin: string) {
 		}),
 	);
 	writeFileSync(cliPath, "#!/usr/bin/env node\n");
-	return { root, packageRoot, cliPath, entry: cliPath };
+	if (!useBinShim) return { root, packageRoot, cliPath, entry: cliPath };
+
+	const shim = join(root, "bin", "omp");
+	mkdirSync(dirname(shim), { recursive: true });
+	symlinkSync(cliPath, shim);
+	return { root, packageRoot, cliPath, entry: shim };
 }
 
 const originalTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
@@ -362,12 +367,11 @@ describe("subagent-runner pure helpers", () => {
 		}
 	});
 
-	it("resolves an OMP host CLI via bin.omp, never the bare pi fallback", () => {
-		// Regression: @oh-my-pi/pi-coding-agent declares `bin: { omp: ... }`
-		// (no `pi` key), so the pre-fix resolver returned null and every
-		// subagent spawn fell through to bare `pi` — "Executable not found in
-		// $PATH: \"pi\"" on OMP hosts without a standalone Pi install.
-		const fixture = writeOmpCliFixture("dist/cli.js");
+	it("resolves the global OMP bin shim via bin.omp, never the bare pi fallback", () => {
+		// npm installs `omp` as a symlink to the package's `bin.omp` entry. Follow
+		// that real layout so the target harness comes from the resolved package,
+		// not merely from an entry path whose basename happens to contain `omp`.
+		const fixture = writeOmpCliFixture("dist/cli.js", true);
 		try {
 			const invocation = __test.resolvePiInvocation({
 				execPath: "/runtime/node",
