@@ -17,8 +17,10 @@ import {
     getTagsBySession,
     getTopNBySize,
     insertTag,
+    TAG_SELECT_COLUMNS,
     updateTagDropMode,
     updateTagStatus,
+    updateTagTokenCount,
 } from "./storage-tags";
 
 let db: Database;
@@ -906,6 +908,72 @@ describe("storage-tags", () => {
             expect(agg.toolCall).toBe(600);
             // but reclaimable toolOutput excludes the protected top-2
             expect(agg.toolOutput).toBe(100);
+        });
+    });
+
+    describe("#given TAG_SELECT_COLUMNS and TagEntry tokenCount", () => {
+        it("#then TAG_SELECT_COLUMNS explicitly includes token_count", () => {
+            expect(TAG_SELECT_COLUMNS.split(",").map((c) => c.trim())).toContain("token_count");
+        });
+
+        it("#when tags are loaded #then TagEntry carries tokenCount", () => {
+            db = makeMemoryDatabase();
+            insertTag(db, "ses-1", "call-1", "tool", 100, 1, 0, "read", 50, null, null, {
+                tokenCount: 420,
+                inputTokenCount: 10,
+                reasoningTokenCount: 0,
+            });
+            insertTag(db, "ses-1", "msg-1", "message", 50, 2);
+
+            const tags = getTagsBySession(db, "ses-1");
+            expect(tags).toHaveLength(2);
+            expect(tags[0].tokenCount).toBe(420);
+            expect(tags[1].tokenCount).toBeNull();
+
+            const single = getTagById(db, "ses-1", 1);
+            expect(single?.tokenCount).toBe(420);
+
+            const active = getActiveTagsBySession(db, "ses-1");
+            expect(active[0].tokenCount).toBe(420);
+        });
+    });
+
+    describe("#given updateTagTokenCount with MAX-guard", () => {
+        it("#when row token_count is NULL #then backfills through MAX-guard", () => {
+            db = makeMemoryDatabase();
+            insertTag(db, "ses-1", "call-9", "tool", 100, 9);
+            const before = getTagById(db, "ses-1", 9);
+            expect(before?.tokenCount).toBeNull();
+
+            updateTagTokenCount(db, "ses-1", 9, 4000);
+
+            const after = getTagById(db, "ses-1", 9);
+            expect(after?.tokenCount).toBe(4000);
+        });
+
+        it("#when update is downward #then update is rejected and stored value is unchanged", () => {
+            db = makeMemoryDatabase();
+            insertTag(db, "ses-1", "call-9", "tool", 100, 9);
+            updateTagTokenCount(db, "ses-1", 9, 4000);
+            expect(getTagById(db, "ses-1", 9)?.tokenCount).toBe(4000);
+
+            // Downward update to 1000
+            updateTagTokenCount(db, "ses-1", 9, 1000);
+
+            // Stored value remains 4000
+            expect(getTagById(db, "ses-1", 9)?.tokenCount).toBe(4000);
+        });
+
+        it("#when update is upward #then new higher value is stored", () => {
+            db = makeMemoryDatabase();
+            insertTag(db, "ses-1", "call-9", "tool", 100, 9);
+            updateTagTokenCount(db, "ses-1", 9, 4000);
+            expect(getTagById(db, "ses-1", 9)?.tokenCount).toBe(4000);
+
+            // Upward update to 8000
+            updateTagTokenCount(db, "ses-1", 9, 8000);
+
+            expect(getTagById(db, "ses-1", 9)?.tokenCount).toBe(8000);
         });
     });
 });

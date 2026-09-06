@@ -4,6 +4,15 @@ import type { Database, Statement as PreparedStatement } from "../../shared/sqli
 import { newestCtxReduceTagNumbers } from "./reclaim-protection";
 import type { TagEntry } from "./types";
 
+declare module "./types" {
+    interface TagEntry {
+        id?: number;
+        tokenCount?: number | null;
+    }
+}
+
+export type { TagEntry } from "./types";
+
 const insertTagStatements = new WeakMap<Database, PreparedStatement>();
 const updateTagStatusStatements = new WeakMap<Database, PreparedStatement>();
 const updateTagDropModeStatements = new WeakMap<Database, PreparedStatement>();
@@ -516,7 +525,7 @@ function getUpdateTagTokenCountStatement(db: Database): PreparedStatement {
     let stmt = updateTagTokenCountStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "UPDATE tags SET token_count = ? WHERE session_id = ? AND tag_number = ?",
+            "UPDATE tags SET token_count = MAX(COALESCE(token_count, 0), ?) WHERE session_id = ? AND tag_number = ?",
         );
         updateTagTokenCountStatements.set(db, stmt);
     }
@@ -703,9 +712,12 @@ export function backfillTagTokenCounts(
 ): void {
     db.prepare(
         `UPDATE tags
-            SET token_count = ?, input_token_count = ?, reasoning_token_count = ?
+            SET token_count = CASE WHEN ? IS NOT NULL THEN MAX(COALESCE(token_count, 0), ?) ELSE token_count END,
+                input_token_count = ?,
+                reasoning_token_count = ?
             WHERE session_id = ? AND tag_number = ? AND token_count IS NULL`,
     ).run(
+        counts.tokenCount ?? null,
         counts.tokenCount ?? null,
         counts.inputTokenCount ?? null,
         counts.reasoningTokenCount ?? null,
@@ -808,6 +820,7 @@ interface TagRow {
     tag_number: number;
     caveman_depth: number | null;
     tool_owner_message_id: string | null;
+    token_count?: number | null;
 }
 
 interface TagNumberRow {
@@ -838,6 +851,7 @@ function toTagEntry(row: TagRow): TagEntry {
     const status = row.status === "dropped" || row.status === "compacted" ? row.status : "active";
 
     return {
+        id: row.id,
         tagNumber: row.tag_number,
         messageId: row.message_id,
         type,
@@ -865,6 +879,7 @@ function toTagEntry(row: TagRow): TagEntry {
         // backfill populate this column at runtime; see plan v3.3.1.
         toolOwnerMessageId:
             typeof row.tool_owner_message_id === "string" ? row.tool_owner_message_id : null,
+        tokenCount: typeof row.token_count === "number" ? row.token_count : null,
     };
 }
 
@@ -1791,8 +1806,8 @@ export function deriveTagLoadFloor(
 // migration v10's tool_owner_message_id) — every TagEntry-producing
 // reader must include the new column or downstream callers will see
 // undefined where they expect a typed field.
-const TAG_SELECT_COLUMNS =
-    "id, message_id, type, status, drop_mode, tool_name, input_byte_size, byte_size, reasoning_byte_size, session_id, tag_number, caveman_depth, tool_owner_message_id";
+export const TAG_SELECT_COLUMNS =
+    "id, message_id, type, status, drop_mode, tool_name, input_byte_size, byte_size, reasoning_byte_size, session_id, tag_number, caveman_depth, tool_owner_message_id, token_count";
 
 export function getTagsBySession(db: Database, sessionId: string): TagEntry[] {
     const rows = db
