@@ -83,6 +83,15 @@ export const COMPACTION_OFF_FLIP_NOTICE = [
 ].join("\n");
 
 /**
+ * Flip-off notice for DCP coexistence where markers are preserved.
+ */
+export const COMPACTION_OFF_DCP_COEXIST_NOTICE = [
+    "## Magic Context — DCP coexistence active",
+    "",
+    "Magic Context's compaction markers for this session are preserved as the context baseline. DCP now manages further context pruning on top of that baseline; no previously-hidden history becomes visible.",
+].join("\n");
+
+/**
  * Flip-back suggestion, emitted out of band exactly once per off→on
  * transition and only when the historian is runnable (never advertising an
  * unavailable command). The gap accumulated while off is digested by the
@@ -170,6 +179,8 @@ export function reconcileCompactionMode(args: {
     historianRunnable: boolean;
     /** Pass-local session meta (drives the stale compartmentInProgress clear). */
     compartmentInProgress: boolean;
+    /** Preserve MC compaction markers when off-transition is due to DCP coexistence. */
+    preserveMarkersForDcp: boolean;
 }): CompactionModeTransitionResult {
     const { db, sessionId } = args;
     const stored = getCompactionModeRecord(db, sessionId);
@@ -235,6 +246,9 @@ export function reconcileCompactionMode(args: {
         // This separate durable state means a successful notice delivery never
         // suppresses a retry after marker verification failed. It resolves as
         // off for all normal gates while retrying only the unverified cleanup.
+        if (args.preserveMarkersForDcp) {
+            return NO_TRANSITION;
+        }
         const markerCleanup = cleanupOffMarkers(sessionId);
         return {
             ...NO_TRANSITION,
@@ -253,21 +267,25 @@ export function reconcileCompactionMode(args: {
 
     // 1. Delete MC-owned marker lineages from opencode.db (canonical +
     //    supported legacy). No opencode.db means no markers — not an error.
-    const markerCleanup = cleanupOffMarkers(sessionId);
-    if (markerCleanup.removedRows > 0) clearedSomething = true;
+    const markerCleanup = args.preserveMarkersForDcp
+        ? { verified: true, removedLineages: 0, removedRows: 0, retainedLineages: 0 }
+        : cleanupOffMarkers(sessionId);
+    if (!args.preserveMarkersForDcp && markerCleanup.removedRows > 0) clearedSomething = true;
 
     // 2. Clear the context.db marker bookkeeping that references the deleted
     //    rows. Leaving it would dangle: the reconciler would replay a summary
     //    whose opencode.db rows are gone, and a flip-back drain would re-inject
     //    a marker at a boundary whose lineage was just removed.
-    if (getPersistedCompactionMarkerState(db, sessionId) !== null) {
-        setPersistedCompactionMarkerState(db, sessionId, null);
-        clearedSomething = true;
-    }
-    const pendingMarker = getPendingCompactionMarkerState(db, sessionId);
-    if (pendingMarker !== null) {
-        clearPendingCompactionMarkerStateIf(db, sessionId, pendingMarker);
-        clearedSomething = true;
+    if (!args.preserveMarkersForDcp) {
+        if (getPersistedCompactionMarkerState(db, sessionId) !== null) {
+            setPersistedCompactionMarkerState(db, sessionId, null);
+            clearedSomething = true;
+        }
+        const pendingMarker = getPendingCompactionMarkerState(db, sessionId);
+        if (pendingMarker !== null) {
+            clearPendingCompactionMarkerStateIf(db, sessionId, pendingMarker);
+            clearedSomething = true;
+        }
     }
 
     // 3. Clear the emergency-recovery latch: a persisted
@@ -298,7 +316,9 @@ export function reconcileCompactionMode(args: {
     //    though historical compartment rows exist. Not counted toward the
     //    notice gate — the spec's "cleared something" list is the MC-state
     //    items above.
-    const invalidatedM0Baseline = clearCachedM0Baseline(db, sessionId);
+    const invalidatedM0Baseline = args.preserveMarkersForDcp
+        ? false
+        : clearCachedM0Baseline(db, sessionId);
 
     // 7. A stale compartmentInProgress flag (a historian run that crashed
     //    before the flip) can never be consumed in off mode; clear it so the
@@ -321,21 +341,28 @@ export function reconcileCompactionMode(args: {
         );
     }
 
-    const notice = clearedSomething || completingOffNotice ? COMPACTION_OFF_FLIP_NOTICE : null;
-    if (!notice && !markerCleanup.verified) {
-        // No notice is warranted, but verification must still be retried even
-        // though the mode record is now present and resolves to off.
-        setCompactionModeRecord(db, sessionId, "off_cleanup_pending");
+    let notice: string | null = null;
+    if (args.preserveMarkersForDcp) {
+        notice = COMPACTION_OFF_DCP_COEXIST_NOTICE;
+    } else {
+        notice = clearedSomething || completingOffNotice ? COMPACTION_OFF_FLIP_NOTICE : null;
+        if (!notice && !markerCleanup.verified) {
+            // No notice is warranted, but verification must still be retried even
+            // though the mode record is now present and resolves to off.
+            setCompactionModeRecord(db, sessionId, "off_cleanup_pending");
+        }
     }
 
     return {
-        recordToWrite: notice
-            ? markerCleanup.verified
-                ? "off"
-                : "off_cleanup_pending"
-            : markerCleanup.verified
-              ? "off"
-              : null,
+        recordToWrite: args.preserveMarkersForDcp
+            ? "off"
+            : notice
+                ? markerCleanup.verified
+                    ? "off"
+                    : "off_cleanup_pending"
+                : markerCleanup.verified
+                    ? "off"
+                    : null,
         notice,
         invalidatedM0Baseline,
         historianCatchUpSignaled: false,

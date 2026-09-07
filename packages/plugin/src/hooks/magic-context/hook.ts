@@ -183,6 +183,10 @@ export interface MagicContextDeps {
          *  resolved boolean is threaded to the transform phases. */
         compaction?: { enabled?: boolean };
         mural?: { enabled: boolean; model?: string };
+        /** DCP-coexistence gate (issue #266 follow-up): user-level only, lets
+         *  MC stay enabled in compaction-off mode when DCP is the sole
+         *  detected conflict. See shared/conflict-detector.ts. */
+        conflicts?: { allow_dcp?: boolean };
     };
     /** Registration-owned prompt-surface loader shared with the tool registry. */
     promptSurfaceRuntime?: PromptSurfaceRuntime;
@@ -478,6 +482,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     // boundary and threaded to every phase as a boolean — internal phases
     // never re-read the config path.
     const compactionOff = !isCompactionEnabled(deps.config);
+    const preserveMarkersForDcp = compactionOff && deps.config.conflicts?.allow_dcp === true;
 
     // Shared context for the recomp/upgrade orchestrator. Both `/ctx-recomp` and
     // `/ctx-session-upgrade` (command paths) build this so they run through the
@@ -1146,6 +1151,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         projectPath,
         historianRunnable,
         compactionOff,
+        preserveMarkersForDcp,
         experimentalUserMemories: userMemoryCollectionEnabled(dreamerConfig),
         experimentalTemporalAwareness: deps.config.temporal_awareness === true,
         muralEnabled: deps.config.mural?.enabled === true,

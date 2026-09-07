@@ -590,6 +590,11 @@ export interface TransformDeps {
      * delivery.
      */
     compactionOff?: boolean;
+    /**
+     * Preserve MC compaction markers when compaction is off due to DCP coexistence.
+     * When true, the on→off transition skips marker deletion and baseline invalidation.
+     */
+    preserveMarkersForDcp?: boolean;
     getNotificationParams?: (
         sessionId: string,
     ) => import("./send-session-notification").NotificationParams;
@@ -781,6 +786,7 @@ export function createTransform(deps: TransformDeps) {
                 compactionOff,
                 historianRunnable: deps.historianRunnable !== false,
                 compartmentInProgress: sessionMeta.compartmentInProgress,
+                preserveMarkersForDcp: deps.preserveMarkersForDcp ?? false,
             });
             const hasTransitionEffects =
                 transition.recordToWrite !== null ||

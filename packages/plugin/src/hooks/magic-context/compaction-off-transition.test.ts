@@ -44,6 +44,7 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { MARKER_SUMMARY_TEXT } from "./compaction-marker-manager";
 import {
+    COMPACTION_OFF_DCP_COEXIST_NOTICE,
     COMPACTION_OFF_FLIP_NOTICE,
     COMPACTION_ON_WRAPUP_SUGGESTION,
     commitCompactionModeRecord,
@@ -586,13 +587,7 @@ describe("reconcileCompactionMode — transition algebra", () => {
 
         const db = openDatabase();
         getOrCreateSessionMeta(db, "ses-1");
-        const first = reconcileCompactionMode({
-            db,
-            sessionId: "ses-1",
-            compactionOff: true,
-            historianRunnable: true,
-            compartmentInProgress: false,
-        });
+        const first = reconcileCompactionMode({ db, sessionId: "ses-1", compactionOff: true, historianRunnable: true, compartmentInProgress: false, preserveMarkersForDcp: false });
 
         expect(first.markerCleanup.verified).toBe(false);
         expect(first.recordToWrite).toBeNull();
@@ -607,13 +602,7 @@ describe("reconcileCompactionMode — transition algebra", () => {
         // schema. Resetting the probe cache is the process-boundary equivalent.
         closeCompactionMarkerDb();
         ocDb.exec("ALTER TABLE part ADD COLUMN time_updated INTEGER NOT NULL DEFAULT 0");
-        const second = reconcileCompactionMode({
-            db,
-            sessionId: "ses-1",
-            compactionOff: true,
-            historianRunnable: true,
-            compartmentInProgress: false,
-        });
+        const second = reconcileCompactionMode({ db, sessionId: "ses-1", compactionOff: true, historianRunnable: true, compartmentInProgress: false, preserveMarkersForDcp: false });
 
         expect(second.markerCleanup.verified).toBe(true);
         expect(second.markerCleanup.removedLineages).toBe(1);
@@ -639,13 +628,7 @@ describe("reconcileCompactionMode — transition algebra", () => {
         const db = openDatabase();
         getOrCreateSessionMeta(db, "ses-1");
         queuePendingOp(db, "ses-1", 9, "drop");
-        const first = reconcileCompactionMode({
-            db,
-            sessionId: "ses-1",
-            compactionOff: true,
-            historianRunnable: true,
-            compartmentInProgress: false,
-        });
+        const first = reconcileCompactionMode({ db, sessionId: "ses-1", compactionOff: true, historianRunnable: true, compartmentInProgress: false, preserveMarkersForDcp: false });
 
         expect(first.markerCleanup.verified).toBe(false);
         expect(first.notice).toBe(COMPACTION_OFF_FLIP_NOTICE);
@@ -662,13 +645,7 @@ describe("reconcileCompactionMode — transition algebra", () => {
 
         closeCompactionMarkerDb();
         ocDb.exec("ALTER TABLE part ADD COLUMN time_updated INTEGER NOT NULL DEFAULT 0");
-        const second = reconcileCompactionMode({
-            db,
-            sessionId: "ses-1",
-            compactionOff: true,
-            historianRunnable: true,
-            compartmentInProgress: false,
-        });
+        const second = reconcileCompactionMode({ db, sessionId: "ses-1", compactionOff: true, historianRunnable: true, compartmentInProgress: false, preserveMarkersForDcp: false });
 
         expect(second.markerCleanup.verified).toBe(true);
         expect(second.notice).toBeNull();
@@ -709,13 +686,7 @@ describe("reconcileCompactionMode — transition algebra", () => {
         const db = openDatabase();
         getOrCreateSessionMeta(db, "ses-1");
 
-        const result = reconcileCompactionMode({
-            db,
-            sessionId: "ses-1",
-            compactionOff: false,
-            historianRunnable: true,
-            compartmentInProgress: false,
-        });
+        const result = reconcileCompactionMode({ db, sessionId: "ses-1", compactionOff: false, historianRunnable: true, compartmentInProgress: false, preserveMarkersForDcp: false });
 
         expect(result.recordToWrite).toBe("on");
         expect(result.notice).toBeNull();
@@ -729,13 +700,7 @@ describe("reconcileCompactionMode — transition algebra", () => {
         const db = openDatabase();
         getOrCreateSessionMeta(db, "ses-1");
 
-        const result = reconcileCompactionMode({
-            db,
-            sessionId: "ses-1",
-            compactionOff: true,
-            historianRunnable: true,
-            compartmentInProgress: false,
-        });
+        const result = reconcileCompactionMode({ db, sessionId: "ses-1", compactionOff: true, historianRunnable: true, compartmentInProgress: false, preserveMarkersForDcp: false });
 
         expect(result.recordToWrite).toBe("off");
         expect(result.clearedSomething).toBe(false);
@@ -768,25 +733,13 @@ describe("reconcileCompactionMode — transition algebra", () => {
         `);
 
         expect(() =>
-            reconcileCompactionMode({
-                db,
-                sessionId: "ses-1",
-                compactionOff: true,
-                historianRunnable: true,
-                compartmentInProgress: false,
-            }),
+            reconcileCompactionMode({ db, sessionId: "ses-1", compactionOff: true, historianRunnable: true, compartmentInProgress: false, preserveMarkersForDcp: false }),
         ).toThrow("simulated interrupt after notice intent");
         expect(getCompactionModeRecord(db, "ses-1")).toBe("off_notice_pending");
         expect(getPersistedCompactionMarkerState(db, "ses-1")).not.toBeNull();
 
         db.exec("DROP TRIGGER interrupt_first_off_clear");
-        const resumed = reconcileCompactionMode({
-            db,
-            sessionId: "ses-1",
-            compactionOff: true,
-            historianRunnable: true,
-            compartmentInProgress: false,
-        });
+        const resumed = reconcileCompactionMode({ db, sessionId: "ses-1", compactionOff: true, historianRunnable: true, compartmentInProgress: false, preserveMarkersForDcp: false });
         expect(resumed.notice).toBe(COMPACTION_OFF_FLIP_NOTICE);
         expect(getPersistedCompactionMarkerState(db, "ses-1")).toBeNull();
     });
@@ -814,13 +767,7 @@ describe("reconcileCompactionMode — transition algebra", () => {
             publishedAt: Date.now(),
         });
 
-        const result = reconcileCompactionMode({
-            db,
-            sessionId: "ses-1",
-            compactionOff: true,
-            historianRunnable: true,
-            compartmentInProgress: true,
-        });
+        const result = reconcileCompactionMode({ db, sessionId: "ses-1", compactionOff: true, historianRunnable: true, compartmentInProgress: true, preserveMarkersForDcp: false });
 
         expect(result.recordToWrite).toBe("off");
         expect(result.clearedSomething).toBe(true);
@@ -847,13 +794,7 @@ describe("reconcileCompactionMode — transition algebra", () => {
         recordOverflowDetected(db, "ses-1", undefined);
         setChannel2NudgeState(db, "ses-1", "claimed");
 
-        const result = reconcileCompactionMode({
-            db,
-            sessionId: "ses-1",
-            compactionOff: true,
-            historianRunnable: true,
-            compartmentInProgress: false,
-        });
+        const result = reconcileCompactionMode({ db, sessionId: "ses-1", compactionOff: true, historianRunnable: true, compartmentInProgress: false, preserveMarkersForDcp: false });
 
         expect(result.recordToWrite).toBe("off");
         expect(result.clearedSomething).toBe(true);
@@ -872,13 +813,7 @@ describe("reconcileCompactionMode — transition algebra", () => {
         // flip-back BEFORE raw-tail trimming resumes.
         expect(meta).not.toBeNull();
 
-        const result = reconcileCompactionMode({
-            db,
-            sessionId: "ses-1",
-            compactionOff: false,
-            historianRunnable: true,
-            compartmentInProgress: false,
-        });
+        const result = reconcileCompactionMode({ db, sessionId: "ses-1", compactionOff: false, historianRunnable: true, compartmentInProgress: false, preserveMarkersForDcp: false });
 
         expect(result.recordToWrite).toBe("on");
         expect(getCompactionModeRecord(db, "ses-1")).toBe("on_notice_pending");
@@ -898,13 +833,7 @@ describe("reconcileCompactionMode — transition algebra", () => {
         getOrCreateSessionMeta(db, "ses-1");
         setCompactionModeRecord(db, "ses-1", "off");
 
-        const result = reconcileCompactionMode({
-            db,
-            sessionId: "ses-1",
-            compactionOff: false,
-            historianRunnable: false,
-            compartmentInProgress: false,
-        });
+        const result = reconcileCompactionMode({ db, sessionId: "ses-1", compactionOff: false, historianRunnable: false, compartmentInProgress: false, preserveMarkersForDcp: false });
 
         expect(result.recordToWrite).toBe("on");
         expect(result.historianCatchUpSignaled).toBe(false);
@@ -923,20 +852,8 @@ describe("reconcileCompactionMode — transition algebra", () => {
         setCompactionModeRecord(db, "ses-on", "on");
         setCompactionModeRecord(db, "ses-off", "off");
 
-        const onOn = reconcileCompactionMode({
-            db,
-            sessionId: "ses-on",
-            compactionOff: false,
-            historianRunnable: true,
-            compartmentInProgress: false,
-        });
-        const offOff = reconcileCompactionMode({
-            db,
-            sessionId: "ses-off",
-            compactionOff: true,
-            historianRunnable: true,
-            compartmentInProgress: false,
-        });
+        const onOn = reconcileCompactionMode({ db, sessionId: "ses-on", compactionOff: false, historianRunnable: true, compartmentInProgress: false, preserveMarkersForDcp: false });
+        const offOff = reconcileCompactionMode({ db, sessionId: "ses-off", compactionOff: true, historianRunnable: true, compartmentInProgress: false, preserveMarkersForDcp: false });
 
         expect(onOn.recordToWrite).toBeNull();
         expect(onOn.notice).toBeNull();
@@ -953,13 +870,7 @@ describe("reconcileCompactionMode — transition algebra", () => {
 
         // First attempt: work succeeds and stages its notice record, then the
         // process crashes before the caller can deliver or settle it.
-        const first = reconcileCompactionMode({
-            db,
-            sessionId: "ses-1",
-            compactionOff: true,
-            historianRunnable: true,
-            compartmentInProgress: false,
-        });
+        const first = reconcileCompactionMode({ db, sessionId: "ses-1", compactionOff: true, historianRunnable: true, compartmentInProgress: false, preserveMarkersForDcp: false });
         expect(first.recordToWrite).toBe("off");
         expect(first.clearedSomething).toBe(true);
         expect(getCompactionModeRecord(db, "ses-1")).toBe("off_notice_pending");
@@ -967,13 +878,7 @@ describe("reconcileCompactionMode — transition algebra", () => {
         // Retry: same logical transition. Cleanup is idempotent — no duplicated
         // side effect (pending ops stay empty, the latch stays cleared), while
         // the durable record still asks the caller to deliver the same notice.
-        const second = reconcileCompactionMode({
-            db,
-            sessionId: "ses-1",
-            compactionOff: true,
-            historianRunnable: true,
-            compartmentInProgress: false,
-        });
+        const second = reconcileCompactionMode({ db, sessionId: "ses-1", compactionOff: true, historianRunnable: true, compartmentInProgress: false, preserveMarkersForDcp: false });
         expect(second.recordToWrite).toBe("off");
         expect(second.notice).toBe(COMPACTION_OFF_FLIP_NOTICE);
         expect(getPendingOps(db, "ses-1")).toHaveLength(0);
@@ -982,13 +887,7 @@ describe("reconcileCompactionMode — transition algebra", () => {
         expect(getCompactionModeRecord(db, "ses-1")).toBe("off");
 
         // A third pass with the record committed is a pure no-op.
-        const third = reconcileCompactionMode({
-            db,
-            sessionId: "ses-1",
-            compactionOff: true,
-            historianRunnable: true,
-            compartmentInProgress: false,
-        });
+        const third = reconcileCompactionMode({ db, sessionId: "ses-1", compactionOff: true, historianRunnable: true, compartmentInProgress: false, preserveMarkersForDcp: false });
         expect(third.recordToWrite).toBeNull();
     });
 
@@ -999,17 +898,54 @@ describe("reconcileCompactionMode — transition algebra", () => {
         setCompactionModeRecord(db, "ses-1", "on");
         setChannel2NudgeState(db, "ses-1", "delivered");
 
+        const result = reconcileCompactionMode({ db, sessionId: "ses-1", compactionOff: true, historianRunnable: true, compartmentInProgress: false, preserveMarkersForDcp: false });
+
+        expect(getChannel2NudgeState(db, "ses-1")).toBe("delivered");
+        // Nothing else to clear in this fixture → no notice.
+        expect(result.clearedSomething).toBe(false);
+        expect(result.notice).toBeNull();
+    });
+
+    it("preserves markers on on→off transition when preserveMarkersForDcp is true", () => {
+        useTempDataHome("mc-mode-preserve-markers-");
+        const db = openDatabase();
+        getOrCreateSessionMeta(db, "ses-1");
+        setCompactionModeRecord(db, "ses-1", "on");
+
         const result = reconcileCompactionMode({
             db,
             sessionId: "ses-1",
             compactionOff: true,
             historianRunnable: true,
             compartmentInProgress: false,
+            preserveMarkersForDcp: true,
         });
 
-        expect(getChannel2NudgeState(db, "ses-1")).toBe("delivered");
-        // Nothing else to clear in this fixture → no notice.
-        expect(result.clearedSomething).toBe(false);
+        expect(result.markerCleanup.verified).toBe(true);
+        expect(result.markerCleanup.removedRows).toBe(0);
+        expect(result.invalidatedM0Baseline).toBe(false);
+        expect(result.notice).toBe(COMPACTION_OFF_DCP_COEXIST_NOTICE);
+        expect(result.recordToWrite).toBe("off");
+    });
+
+    it("returns NO_TRANSITION for off_cleanup_pending when preserveMarkersForDcp is true", () => {
+        useTempDataHome("mc-mode-preserve-cleanup-pending-");
+        const db = openDatabase();
+        getOrCreateSessionMeta(db, "ses-1");
+        setCompactionModeRecord(db, "ses-1", "off_cleanup_pending");
+
+        const result = reconcileCompactionMode({
+            db,
+            sessionId: "ses-1",
+            compactionOff: true,
+            historianRunnable: true,
+            compartmentInProgress: false,
+            preserveMarkersForDcp: true,
+        });
+
+        expect(result.recordToWrite).toBeNull();
         expect(result.notice).toBeNull();
+        expect(result.invalidatedM0Baseline).toBe(false);
+        expect(result.clearedSomething).toBe(false);
     });
 });
