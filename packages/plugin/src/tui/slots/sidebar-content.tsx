@@ -5,7 +5,6 @@ import packageJson from "../../../package.json"
 import { badgeTextColor } from '../badge-contrast';
 import { loadSidebarSnapshot, type SidebarSnapshot } from "../data/context-db"
 import { formatThresholdPercent } from "../../shared/format-threshold"
-import { formatTailHygiene } from "../../shared/tail-hygiene-status"
 import { compactionOffSidebarRows, nativeCompactionContextLabel } from "../compaction-off"
 import {
     computeEffectiveOrder,
@@ -104,6 +103,16 @@ function compactTokens(value: number): string {
     if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
     if (value >= 1_000) return `${(value / 1_000).toFixed(0)}K`
     return String(value)
+}
+
+/**
+ * Sidebar form of the tail-hygiene reading: the reclaimable share and the
+ * two masses it is computed from, in the same compact token unit as the
+ * breakdown rows so the value fits beside its label at sidebar width. The
+ * long, unit-spelled form stays in the status dialog.
+ */
+function hygieneValue(status: { severity: number; u: number; t: number }): string {
+    return `${(status.severity * 100).toFixed(1)}% · ${compactTokens(status.u)}/${compactTokens(status.t)}`
 }
 
 function relativeTime(ms: number): string {
@@ -240,7 +249,7 @@ const TokenBreakdown = (props: {
             key: "conv",
             tokens: s.conversationTokens,
             color: COLORS.conversation,
-            label: "Conversation*",
+                label: "Conversation",
         })
 
         // Tool Calls = tool_use/tool_result/tool/tool-invocation parts in messages
@@ -321,7 +330,6 @@ const TokenBreakdown = (props: {
                             </box>
                         )
                     })}
-                    <text fg={props.theme.textMuted}>* includes Reasoning; hygiene excludes it</text>
                 </box>
             )}
         </box>
@@ -798,14 +806,11 @@ const SidebarContent = (props: {
                         </box>
                     )}
                     <TokenBreakdown theme={props.theme} snapshot={s()!} collapsed={collapsed()} />
-                    {!collapsed() && (
-                        <text fg={props.theme.textMuted}>Conversation includes reasoning estimates; hygiene excludes reasoning.</text>
-                    )}
                     {s()!.tailHygiene !== undefined && (
                         <StatRow
                             theme={props.theme}
                             label="Hygiene"
-                            value={formatTailHygiene(s()!.tailHygiene!)}
+                            value={hygieneValue(s()!.tailHygiene!)}
                             warning={!s()!.tailHygiene!.evaluable}
                         />
                     )}

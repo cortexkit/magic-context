@@ -206,7 +206,7 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
             segs.push({ label: "User Profile", tokens: d.profileTokens, color: COLORS.profile })
 
         if (d.conversationTokens > 0)
-            segs.push({ label: "Conversation*", tokens: d.conversationTokens, color: COLORS.conversation })
+            segs.push({ label: "Conversation", tokens: d.conversationTokens, color: COLORS.conversation })
         if (d.toolCallTokens > 0)
             segs.push({ label: "Tool Calls", tokens: d.toolCallTokens, color: COLORS.toolCalls })
         if (d.toolDefinitionTokens > 0)
@@ -279,7 +279,7 @@ const StatusDialog = (props: { api: TuiPluginApi; s: StatusDetail }) => {
                         </box>
                     )
                 })}
-                <text fg={t().textMuted}>* Conversation includes Reasoning; hygiene excludes it</text>
+                <text fg={t().textMuted}>Conversation includes reasoning; hygiene excludes it</text>
                 {s().tailHygiene !== undefined && (
                     <R
                         t={t()}

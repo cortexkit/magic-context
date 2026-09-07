@@ -201,7 +201,7 @@ const StatusDialog = props => {
       color: COLORS.profile
     });
     if (d.conversationTokens > 0) segs.push({
-      label: "Conversation*",
+      label: "Conversation",
       tokens: d.conversationTokens,
       color: COLORS.conversation
     });
@@ -384,7 +384,7 @@ const StatusDialog = props => {
         return _el$35;
       })();
     }), _el$15);
-    _$insertNode(_el$15, _$createTextNode(`* Conversation includes Reasoning; hygiene excludes it`));
+    _$insertNode(_el$15, _$createTextNode(`Conversation includes reasoning; hygiene excludes it`));
     _$insert(_el$14, (() => {
       var _c$4 = _$memo(() => s().tailHygiene !== undefined);
       return () => _c$4() && _$createComponent(R, {
