@@ -1,0 +1,10 @@
+{
+  "name": "session-lifecycle",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npx --yes hyperframes@0.8.31 preview",
+    "check": "npx --yes hyperframes@0.8.31 check --at 1,9,14,18,24,27,31,36,40,47,50.5,56,60,65,69,74,78,82",
+    "render": "npx --yes hyperframes@0.8.31 render --fps 30 --quality high --workers 2 --no-browser-gpu --output out/session-lifecycle.mp4"
+  }
+}

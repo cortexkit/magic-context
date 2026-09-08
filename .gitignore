@@ -116,3 +116,8 @@ tests/docker/.generated/
 
 # Magic Context mints a per-project data dir stub when a session runs inside a package dir
 packages/*/.cortexkit/
+
+# Editable video source is tracked; renders and browser audit files are local.
+packages/docs/video/session-lifecycle/out/
+packages/docs/video/session-lifecycle/.hyperframes/
+packages/docs/video/session-lifecycle/snapshots/

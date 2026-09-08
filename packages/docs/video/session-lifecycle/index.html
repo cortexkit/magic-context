@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=1920, height=1080">
+  <title>The life of a Magic Context session</title>
+  <script src="assets/gsap.min.js"></script>
+  <style>
+    @font-face { font-family: Inter; src: url('assets/inter-regular.woff2'); font-weight: 400; }
+    @font-face { font-family: Inter; src: url('assets/inter-semibold.woff2'); font-weight: 600; }
+    @font-face { font-family: Mono; src: url('assets/roboto-mono.woff2'); }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #0b1018; color: #eff3fa; font-family: Inter, sans-serif; }
+    #root { position: relative; width: 1920px; height: 1080px; overflow: hidden; background: #0b1018; }
+    .brand { position: absolute; left: 120px; top: 58px; font-size: 27px; font-weight: 600; letter-spacing: -.6px; }
+    .series { position: absolute; right: 120px; top: 62px; font-size: 23px; color: #a8b5c9; }
+    .chapter { position: absolute; left: 120px; top: 125px; width: 1680px; height: 178px; }
+    h1 { margin: 0 0 18px; font-size: 64px; line-height: 1.12; letter-spacing: -2px; font-weight: 600; }
+    .subtitle { margin: 0; font-size: 35px; line-height: 1.4; max-width: 1620px; color: #c2cee0; }
+    code { font-family: Mono, monospace; font-size: .94em; }
+    .legend { position: absolute; top: 312px; left: 120px; display: flex; gap: 42px; font-size: 24px; }
+    .key { display: flex; align-items: center; gap: 12px; }
+    .dot { width: 14px; height: 14px; border-radius: 3px; background: var(--tone); }
+    .sys { --tone: #7e8ca4; } .mem { --tone: #f0bd67; } .hist { --tone: #b39aff; } .live { --tone: #54d7e7; }
+    #chart { position: absolute; top: 422px; left: 120px; width: 1680px; height: 126px; }
+    .track { position: absolute; inset: 0; border: 1px solid #344158; border-radius: 6px; background: #151e2c; }
+    .segment { position: absolute; left: 0; top: 8px; width: 1680px; height: 110px; transform-origin: left center; }
+    #system { background: #7e8ca4; } #memory { background: #f0bd67; }
+    #history { background: #b39aff; } #settled { background: #298b9b; }
+    #conversation { background: #54d7e7; }
+    #tools { background: repeating-linear-gradient(135deg,#54d7e7 0px,#54d7e7 10px,#35b8cc 10px,#35b8cc 15px); }
+    #threshold { position: absolute; left: 1092px; top: -48px; height: 194px; width: 2px; background: #e8edf5; z-index: 4; }
+    #threshold-label { position: absolute; left: 938px; top: -86px; font-size: 25px; white-space: nowrap; }
+    #usage-label { position: absolute; right: 0; top: 151px; color: #a8b5c9; font-size: 23px; }
+    #rewrite { position: absolute; top: -8px; left: -8px; width: 1696px; height: 142px; border: 3px solid #eff3fa; border-radius: 10px; opacity: 0; }
+    #prefix-bracket { position: absolute; left: 0; top: 147px; width: 1680px; height: 14px; border-left: 2px solid #8998b2; border-bottom: 2px solid #8998b2; border-right: 2px solid #8998b2; transform-origin: left center; }
+    .status { position: absolute; left: 120px; top: 595px; font-size: 25px; color: #c2cee0; }
+    .detail { position: absolute; left: 120px; top: 669px; width: 1680px; height: 231px; }
+    .row { display: flex; gap: 24px; }
+    .card { position: relative; width: 544px; padding: 24px 28px; min-height: 195px; border: 1px solid #344158; border-radius: 8px; background: #151e2c; }
+    .card h2 { font-size: 29px; line-height: 1.35; margin: 0 0 14px; font-weight: 600; }
+    .card p { font-size: 25px; line-height: 1.5; margin: 0; color: #c2cee0; }
+    .cyan { color: #54d7e7; } .violet { color: #b39aff; } .amber { color: #f0bd67; }
+    .tool-card { position: absolute; top: 0; width: 530px; height: 199px; }
+    .tool-bg { position: absolute; inset: 0; background: #112c37; border: 1px solid #35b8cc; border-radius: 8px; transform-origin: top center; }
+    .tool-copy { position: absolute; left: 28px; top: 23px; font-size: 28px; }
+    .tool-copy p { font-size: 25px; color: #c2cee0; margin: 20px 0 0; }
+    .placeholder { position: absolute; left: 28px; top: 15px; font-size: 25px; color: #c2cee0; opacity: 0; }
+    .wide { width: 1112px; }
+    .small-label { font-size: 23px; color: #a8b5c9; margin-bottom: 14px; }
+    .big-number { font-size: 75px; font-weight: 600; letter-spacing: -3px; line-height: 1; }
+    .caption { position: absolute; left: 120px; top: 939px; width: 1680px; font-size: 30px; line-height: 1.4; color: #e1e8f3; }
+    #progress { position: absolute; left: 120px; top: 1030px; width: 1680px; height: 3px; background: #54d7e7; transform-origin: left center; }
+    .tier-line { height: 5px; background: #b39aff; margin-top: 12px; border-radius: 2px; }
+  </style>
+</head>
+<body>
+<div id="root" data-composition-id="session" data-start="0" data-duration="84" data-width="1920" data-height="1080" data-fps="30">
+  <div class="brand">Magic Context</div>
+  <div class="series">One session, from first turn to hours later</div>
+
+  <section id="fresh-title" class="chapter clip" data-start="0" data-duration="10" data-track-index="1">
+    <h1>Your session starts small.</h1><p class="subtitle">System instructions and project memory are already here. Your conversation grows turn by turn.</p>
+  </section>
+  <section id="reduce-title" class="chapter clip" data-start="10" data-duration="10" data-track-index="1">
+    <h1>Your agent marks spent output.</h1><p class="subtitle"><code>ctx_reduce</code> queues drops. The blocks shrink when a cache-rebuilding pass applies them.</p>
+  </section>
+  <section id="historian-title" class="chapter clip" data-start="20" data-duration="8" data-track-index="1">
+    <h1>Older conversation becomes settled.</h1><p class="subtitle">The historian works in the background. It folds settled work into compartments: structured summaries.</p>
+  </section>
+  <section id="tiers-title" class="chapter clip" data-start="28" data-duration="6" data-track-index="1">
+    <h1>History stays in the prompt.</h1><p class="subtitle">At a history rebuild, older compartments can render at shorter tiers.</p>
+  </section>
+  <section id="execute-title" class="chapter clip" data-start="34" data-duration="10" data-track-index="1">
+    <h1>The threshold triggers one execute pass.</h1><p class="subtitle">Queued drops, eligible old tool output, and ready history are applied together.</p>
+  </section>
+  <section id="later-title" class="chapter clip" data-start="44" data-duration="8" data-track-index="1">
+    <h1>Later, the same session lands higher.</h1><p class="subtitle">Recent work stays protected. Less of the window is ready to reclaim.</p>
+  </section>
+  <section id="cache-title" class="chapter clip" data-start="52" data-duration="10" data-track-index="1">
+    <h1>Between passes, only the tail grows.</h1><p class="subtitle">The prefix — system instructions and materialized history — stays frozen / cached.</p>
+  </section>
+  <section id="recall-title" class="chapter clip" data-start="62" data-duration="13" data-track-index="1">
+    <h1>You can still retrieve the details.</h1><p class="subtitle">Your agent asks: “Why did we choose this approach earlier?”</p>
+  </section>
+  <section id="close-title" class="chapter clip" data-start="75" data-duration="9" data-track-index="1">
+    <h1>Hours later, you keep working.</h1><p class="subtitle">The same window holds history, memory, and the live tail.</p>
+  </section>
+
+  <div class="legend">
+    <div class="key sys"><span class="dot"></span>System instructions</div>
+    <div class="key mem"><span class="dot"></span>Project memory</div>
+    <div class="key hist"><span class="dot"></span>History</div>
+    <div class="key live"><span class="dot"></span>Live conversation + tool output</div>
+  </div>
+  <div id="chart">
+    <div class="track"></div>
+    <div id="system" class="segment"></div><div id="memory" class="segment"></div>
+    <div id="history" class="segment"></div><div id="settled" class="segment"></div>
+    <div id="conversation" class="segment"></div><div id="tools" class="segment"></div>
+    <div id="threshold"></div><div id="threshold-label" data-layout-allow-overflow>execute threshold (default 65%)</div>
+    <div id="rewrite"></div><div id="prefix-bracket"></div>
+    <div id="usage-label">Context window · illustrative sizes</div>
+  </div>
+
+  <div id="fresh-status" class="status clip" data-start="0" data-duration="10" data-track-index="2">Stable prefix → new turns append on the right</div>
+  <div id="queued-status" class="status clip" data-start="10" data-duration="6" data-track-index="2"><code>ctx_reduce(drop="3,5")</code> · queued, not immediate</div>
+  <div id="reduce-status" class="status clip" data-start="16" data-duration="4" data-track-index="2">Cache-rebuilding pass · priced rewrite → stable again</div>
+  <div id="historian-status" class="status clip" data-start="20" data-duration="8" data-track-index="2">Settled conversation → historian working → history ready</div>
+  <div id="tiers-status" class="status clip" data-start="28" data-duration="6" data-track-index="2">History rebuild · priced rewrite → summaries replace the raw settled span</div>
+  <div id="due-status" class="status clip" data-start="34" data-duration="4" data-track-index="2">Usage crosses the line · one execute pass is due</div>
+  <div id="landing-status" class="status clip" data-start="38" data-duration="6" data-track-index="2">One execute pass · priced rewrite → stable at 45%</div>
+  <div id="growth-status" class="status clip" data-start="44" data-duration="5" data-track-index="2">More turns arrive · the prefix stays frozen</div>
+  <div id="later-status" class="status clip" data-start="49" data-duration="3" data-track-index="2">One execute pass · priced rewrite → stable at ~60%</div>
+  <div id="cache-status" class="status clip" data-start="52" data-duration="10" data-track-index="2">Frozen / cached prefix → growing live tail</div>
+  <div id="recall-status" class="status clip" data-start="62" data-duration="13" data-track-index="2">Recall adds detail to the live tail, not a rewrite of the prefix</div>
+  <div id="time-status" class="status clip" data-start="75" data-duration="3" data-track-index="2">Time passes · another batched fold · priced rewrite</div>
+  <div id="close-status" class="status clip" data-start="78" data-duration="6" data-track-index="2">History + memory + live tail · still under the line</div>
+
+  <section id="outputs" class="detail clip" data-start="0" data-duration="20" data-track-index="3">
+    <div id="output3" class="tool-card" style="left:0"><div id="bg3" class="tool-bg"></div><div id="raw3" class="tool-copy"><code class="cyan">§3§ Tool output</code><p>Project files and search results</p><p>The agent reads and moves on.</p></div><code id="drop3" class="placeholder">[dropped §3§]</code></div>
+    <div id="output5" class="tool-card" style="left:568px"><div id="bg5" class="tool-bg"></div><div id="raw5" class="tool-copy"><code class="cyan">§5§ Tool output</code><p>Build log and test results</p><p>The agent finishes using them.</p></div><code id="drop5" class="placeholder">[dropped §5§]</code></div>
+    <div id="output8" class="tool-card" style="left:1136px"><div class="tool-bg"></div><div class="tool-copy"><code class="cyan">§8§ Tool output</code><p>Current working detail</p><p>Recent work stays available.</p></div></div>
+  </section>
+  <section id="historian-detail" class="detail clip" data-start="20" data-duration="8" data-track-index="3">
+    <div class="row"><div id="settled-card" class="card"><h2 class="cyan">Settled conversation</h2><p>Earlier decisions and outcomes</p><p>No longer the current task</p></div><div id="historian-card" class="card"><h2>Historian · background</h2><p>Preserve the meaning.</p><p>Prepare structured summaries.</p></div><div id="ready-card" class="card"><h2 class="violet">Compartments ready</h2><p>Keep the session’s story.</p><p>Replace the covered raw span.</p></div></div>
+  </section>
+  <section id="tiers-detail" class="detail clip" data-start="28" data-duration="6" data-track-index="3">
+    <div class="row"><div class="card"><h2 class="violet">Compartment tiers</h2><p>Full → compressed → concise</p><p>→ anchor-only title</p></div><div class="card"><h2 class="violet">Older history, less detail</h2><div id="tier1" class="tier-line" style="width:440px"></div><div id="tier2" class="tier-line" style="width:380px"></div><div id="tier3" class="tier-line" style="width:320px"></div><p style="margin-top:16px">Age, importance, budget</p></div><div class="card"><h2>History budget · default 15%</h2><p>Of context at the execute threshold, not the full window.</p></div></div>
+  </section>
+  <section id="execute-detail" class="detail clip" data-start="34" data-duration="4" data-track-index="3">
+    <div class="row"><div class="card"><h2><code class="cyan">ctx_reduce</code></h2><p>Apply queued drops.</p></div><div class="card"><h2 class="cyan">Automatic reclaim</h2><p>Remove eligible old tool output on this rebuilding pass.</p></div><div class="card"><h2 class="violet">Ready history</h2><p>Install compartments.</p><p>Keep recent work.</p></div></div>
+  </section>
+  <section id="landing-detail" class="detail clip" data-start="38" data-duration="6" data-track-index="3">
+    <div class="row"><div class="card"><div class="small-label">After this pass</div><div class="big-number cyan">45%</div></div><div class="card wide"><h2>More settled conversation can become history.</h2><p>The retained pieces happen to total 45% of the window.</p><p>That is an outcome, not a setting.</p></div></div>
+  </section>
+  <section id="later-detail" class="detail clip" data-start="44" data-duration="8" data-track-index="3">
+    <div class="row"><div class="card"><div class="small-label">After the next pass</div><div id="second-number" class="big-number cyan">~60%</div></div><div class="card wide"><h2>More recent work must stay.</h2><p>Less old output is eligible. This pass frees less room.</p><p>Same session. Same trigger. Different landing.</p></div></div>
+  </section>
+  <section id="cache-detail" class="detail clip" data-start="52" data-duration="10" data-track-index="3">
+    <div class="row"><div class="card"><h2>Frozen / cached</h2><p>System + materialized history</p><p>The prefix stays byte-identical.</p></div><div class="card"><h2 class="cyan">Append</h2><p>New messages and tool results</p><p>Only the live tail grows.</p></div><div class="card"><h2>Priced rewrite</h2><p>A pass changes the prefix.</p><p>Due folds are batched together.</p></div></div>
+  </section>
+  <section id="recall-detail" class="detail clip" data-start="62" data-duration="13" data-track-index="3">
+    <div class="row"><div id="search-card" class="card"><h2><code class="violet">ctx_search</code></h2><p>Find the earlier decision in memories or compacted history.</p></div><div id="expand-card" class="card"><h2><code class="cyan">ctx_expand</code></h2><p>Bring back the raw exchange for one look.</p></div><div id="exchange-card" class="card"><h2 class="cyan">Earlier exchange · raw</h2><p>You: “Why this approach?”</p><p>Agent: “It keeps retries safe.”</p></div></div>
+  </section>
+  <section id="close-detail" class="detail clip" data-start="75" data-duration="9" data-track-index="3">
+    <div class="row"><div class="card"><h2 class="violet">History</h2><p>Earlier work stays readable.</p></div><div class="card"><h2 class="amber">Project memory</h2><p>Durable knowledge stays useful.</p></div><div class="card"><h2 class="cyan">Live tail</h2><p>Room for the next turn.</p></div></div>
+  </section>
+
+  <div id="fresh-caption" class="caption clip" data-start="0" data-duration="10" data-track-index="4">Tool outputs arrive as tagged blocks. The tags let your agent refer to them later.</div>
+  <div id="reduce-caption" class="caption clip" data-start="10" data-duration="10" data-track-index="4">The raw transcript stays in the local database. Nothing is lost.</div>
+  <div id="historian-caption" class="caption clip" data-start="20" data-duration="14" data-track-index="4">Compartments are history in the prompt, not dropped placeholders.</div>
+  <div id="execute-caption" class="caption clip" data-start="34" data-duration="18" data-track-index="4">The threshold is a trigger, not a target. Where it lands depends on what was in the window.</div>
+  <div id="cache-caption" class="caption clip" data-start="52" data-duration="10" data-track-index="4">Folds are batched so the cache is rebuilt once, not many times.</div>
+  <div id="recall-caption" class="caption clip" data-start="62" data-duration="13" data-track-index="4">Compacted, not deleted. The raw transcript is still in the local database.</div>
+  <div id="close-caption" class="caption clip" data-start="75" data-duration="9" data-track-index="4">Long sessions without a context wall. Cache-stable prompts. Nothing lost.</div>
+  <div id="progress"></div>
+</div>
+<script>
+  const tl = gsap.timeline({ paused: true });
+  const segments = ['system', 'memory', 'history', 'settled', 'conversation', 'tools'];
+  const barWidth = 1680;
+  // Percentages describe one illustrative session, not measured product telemetry.
+  // The first threshold pass reproduces the documented 200k-window composition.
+  const states = [
+    [0, 0, [3, 3, 0, 0, 0, 0]],
+    [2, .8, [3, 3, 0, 0, 6, 8]],
+    [5, .8, [3, 3, 0, 0, 10, 14]],
+    [8, .8, [3, 3, 0, 0, 14, 18]],
+    [16, 1, [3, 3, 0, 0, 14, 14]],
+    [21, 1.2, [3, 3, 0, 20, 14, 20]],
+    [28, 1.2, [3, 3, 6, 0, 14, 16]],
+    [34.5, 1.8, [3, 3, 6, 24, 14, 20]],
+    [38, 1.2, [3, 3, 9.5, 0, 14, 15.5]],
+    [44.5, 2, [3, 3, 9.5, 0, 29, 25.5]],
+    [49, 1.2, [3, 3, 9.5, 0, 29, 15.5]],
+    [54, 2, [3, 3, 9.5, 0, 30, 15.5]],
+    [58, 2, [3, 3, 9.5, 0, 32, 15.5]],
+    [68, .8, [3, 3, 9.5, 0, 32, 16.5]],
+    [73, .6, [3, 3, 9.5, 0, 32, 15.5]],
+    [76, 1, [3, 3, 9.5, 0, 27, 15.5]],
+    [80, 2, [3, 3, 9.5, 0, 28, 15.5]],
+  ];
+  for (const [at, duration, values] of states) {
+    let offset = 0;
+    values.forEach((value, index) => {
+      tl.to(`#${segments[index]}`, { x: barWidth * offset / 100, scaleX: value / 100, duration, ease: 'power2.inOut' }, at);
+      offset += value;
+    });
+    tl.to('#prefix-bracket', { scaleX: (values[0] + values[1] + values[2]) / 100, duration, ease: 'power2.inOut' }, at);
+  }
+  for (const [selector, at] of [['#output3',2], ['#output5',5], ['#output8',8], ['#historian-card',22], ['#ready-card',25], ['#search-card',63], ['#expand-card',66], ['#exchange-card',68]]) {
+    tl.from(selector, { opacity: 0, y: 22, duration: .65, ease: 'power2.out' }, at);
+  }
+  for (const tag of [3,5]) {
+    tl.to(`#bg${tag}`, { scaleY: .3, duration: .8, ease: 'power2.inOut' },16);
+    tl.to(`#raw${tag}`, { opacity: 0, duration: .25 },16);
+    tl.to(`#drop${tag}`, { opacity: 1, duration: .35 },16.5);
+  }
+  for (const at of [16,28,38,49,76]) {
+    tl.to('#rewrite', { opacity: 1, duration: .15 }, at);
+    tl.to('#rewrite', { opacity: 0, duration: 1 }, at + .2);
+  }
+  tl.to('#settled-card', { opacity: .4, scale: .94, duration: 1 },26.8);
+  tl.to('#tier1', { scaleX: .75, transformOrigin: 'left', duration: 1 },29.5);
+  tl.to('#tier2', { scaleX: .5, transformOrigin: 'left', duration: 1 },30.2);
+  tl.to('#tier3', { scaleX: .2, transformOrigin: 'left', duration: 1 },30.9);
+  tl.from('#second-number', { opacity: 0, duration: .6 },49);
+  tl.to('#exchange-card', { opacity: 0, y: -12, duration: .6 },73);
+  tl.fromTo('#progress', { scaleX: 0 }, { scaleX: 1, duration: 84, ease: 'none' },0);
+  window.__timelines = window.__timelines || {};
+  window.__timelines['session'] = tl;
+</script>
+</body>
+</html>
