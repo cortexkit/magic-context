@@ -194,7 +194,16 @@ export function replaySentinelByMessageIds(
             replayed += 1;
             continue;
         }
-        if (msg.parts.length === 1 && isSentinel(msg.parts[0])) continue;
+        const sentinel = msg.parts.length === 1 ? msg.parts[0] : undefined;
+        const expectedText = acceptsEmptySentinels ? "" : WHOLE_MESSAGE_PLACEHOLDER_TEXT;
+        if (
+            sentinel !== undefined &&
+            isSentinel(sentinel) &&
+            isRecord(sentinel) &&
+            sentinel.text === expectedText
+        ) {
+            continue;
+        }
         msg.parts.length = 0;
         msg.parts.push(makeWholeMessageSentinel(acceptsEmptySentinels));
         replayed += 1;

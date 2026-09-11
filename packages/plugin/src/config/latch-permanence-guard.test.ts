@@ -168,7 +168,7 @@ const KNOWN_SLOTS: Record<string, KnownSlot> = {
     },
     "packages/plugin/src/hooks/magic-context/anthropic-wire.ts:loadPromise": {
         classification: "VERDICT",
-        reason: "Saved: only a successful load is memoized. A failure clears the slot and retries after a 60-second cooldown, and callers read anthropicWireRegistryLoaded() so an unresolved registry carries the session's persisted answer forward instead of narrowing it.",
+        reason: "Saved: only a successful load is memoized. A failure clears the slot and retries after a 60-second cooldown. resolveEmptySentinelCapability() carries the session's prior answer forward while the registry is unresolved, so it does not narrow.",
     },
 };
 
