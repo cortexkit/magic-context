@@ -3,7 +3,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import type { PluginContext } from "../../plugin/types";
 import {
-    anthropicWireRegistryLoaded,
     ensureAnthropicWireModelsLoaded,
     isAnthropicWireModel,
     resetAnthropicWireModelsForTest,
@@ -143,10 +142,12 @@ describe("anthropic-wire", () => {
             expect(isAnthropicWireModel("my_gateway", "claude-opus-5")).toBe(false);
         });
 
-        it("#then fails closed when the lookup throws", async () => {
+        it("#then fails closed without retrying every pass when the lookup throws", async () => {
+            let calls = 0;
             const client = {
                 provider: {
                     list: async () => {
+                        calls += 1;
                         throw new Error("no server");
                     },
                 },
@@ -155,6 +156,8 @@ describe("anthropic-wire", () => {
             await ensureAnthropicWireModelsLoaded(client);
 
             expect(isAnthropicWireModel("my_gateway", "claude-opus-5")).toBe(false);
+            await ensureAnthropicWireModelsLoaded(client);
+            expect(calls).toBe(1);
         });
     });
 
@@ -254,47 +257,6 @@ describe("anthropic-wire", () => {
         });
     });
 
-    describe("#given a caller that must tell 'not widened' from 'not known yet'", () => {
-        // Reading unresolved as `false` would narrow a session that already served
-        // widened bytes, which stops replaying persisted merged-reasoning strips and
-        // puts the rejected thinking layout back on the wire. Callers therefore ask
-        // whether the registry resolved at all.
-        it("#then reports unresolved before a successful load and resolved after", async () => {
-            expect(anthropicWireRegistryLoaded()).toBe(false);
-            const { client } = fakeClient([
-                provider("gateway", {
-                    "claude-opus-5": { id: "claude-opus-5", api: anthropicWire },
-                }),
-            ]);
-
-            await ensureAnthropicWireModelsLoaded(client);
-
-            expect(anthropicWireRegistryLoaded()).toBe(true);
-        });
-
-        it("#then stays unresolved after a failure, and holds off a retry for the cooldown", async () => {
-            let calls = 0;
-            const client = {
-                provider: {
-                    list: async () => {
-                        calls += 1;
-                        throw new Error("no server");
-                    },
-                },
-            } as unknown as PluginContext["client"];
-
-            await ensureAnthropicWireModelsLoaded(client);
-            expect(anthropicWireRegistryLoaded()).toBe(false);
-            expect(calls).toBe(1);
-
-            // Not latched forever, but not hammered either: the next attempt waits
-            // out the cooldown instead of retrying on every transform pass.
-            await ensureAnthropicWireModelsLoaded(client);
-            expect(calls).toBe(1);
-            expect(anthropicWireRegistryLoaded()).toBe(false);
-        });
-    });
-
     describe("#given resolveEmptySentinelCapability", () => {
         const GATEWAY = { providerID: "my_gateway", modelID: "claude-opus-5" };
         const GATEWAY_KEY = "my_gateway/claude-opus-5";
@@ -349,7 +311,6 @@ describe("anthropic-wire", () => {
         it("#then carries a widened session forward while the registry is unresolved", () => {
             // The dangerous direction: narrowing here would stop replaying strips this
             // session already persisted and put signed thinking back on the wire.
-            expect(anthropicWireRegistryLoaded()).toBe(false);
             expect(
                 resolveEmptySentinelCapability({
                     ...GATEWAY,
@@ -373,6 +334,18 @@ describe("anthropic-wire", () => {
                     cachedWidenedByCustomProvider: true,
                 }),
             ).toEqual({ acceptsEmptySentinels: false, widenedByCustomProvider: false });
+        });
+
+        it("#then compares aliased model keys in their canonical form", () => {
+            expect(
+                resolveEmptySentinelCapability({
+                    providerID: "openai-codex",
+                    modelID: "claude-opus-5",
+                    modelKey: "openai-codex/claude-opus-5",
+                    cachedModelKey: "openai/claude-opus-5",
+                    cachedWidenedByCustomProvider: true,
+                }),
+            ).toEqual({ acceptsEmptySentinels: true, widenedByCustomProvider: true });
         });
 
         it("#then claims nothing when no model is observable", () => {

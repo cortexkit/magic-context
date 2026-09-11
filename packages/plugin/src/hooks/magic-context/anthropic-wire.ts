@@ -1,4 +1,5 @@
 import type { PluginContext } from "../../plugin/types";
+import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { log } from "../../shared/logger";
 import { isRecord } from "../../shared/record-type-guard";
 
@@ -67,15 +68,9 @@ export function isAnthropicWireModel(providerID?: string, modelID?: string): boo
  * has to be stable: `modelAcceptsEmptyContent` decides provider-visible bytes,
  * so a flip mid-session rewrites an already-served prefix.
  *
- * A FAILED load is not memoized. Holding a failure would be the more dangerous
- * direction: a process that answers `false` where an earlier process answered
- * `true` stops replaying the merged-reasoning strips it already persisted, which
- * puts native signed thinking back on the wire and reinstates the 400 this whole
- * capability exists to prevent. So a failure retries after a cooldown,
- * `resolveEmptySentinelCapability` carries the session's answer forward until it
- * succeeds, and any real change is priced through the m[0] upgrade identity
- * (`ANTHROPIC_WIRE_COMPONENT_PREFIX` in `compartment-render-epoch.ts`) so it folds
- * exactly once.
+ * A FAILED load is not memoized: answering `false` is the more dangerous
+ * direction (see `resolveEmptySentinelCapability`), so it retries after a
+ * cooldown while that resolver holds the session's answer steady in the meantime.
  */
 export function ensureAnthropicWireModelsLoaded(client?: PluginContext["client"]): Promise<void> {
     if (loadPromise) return loadPromise;
@@ -156,19 +151,6 @@ async function loadAnthropicWireModels(client: PluginContext["client"]): Promise
     }
 }
 
-/**
- * True once a lookup has successfully read the provider list in this process.
- *
- * Callers use this to tell "not widened" apart from "not known yet". Those two
- * must not be conflated: answering `false` while the registry is unresolved
- * would narrow a session that has already served widened bytes, which both
- * rewrites a cached prefix and stops replaying merged-reasoning strips that are
- * already persisted — putting the rejected thinking layout back on the wire.
- */
-export function anthropicWireRegistryLoaded(): boolean {
-    return registryLoaded;
-}
-
 export interface EmptySentinelCapability {
     /** Whether empty-part sentinels are valid on this pass's wire. */
     acceptsEmptySentinels: boolean;
@@ -200,22 +182,27 @@ export interface EmptySentinelCapability {
 export function resolveEmptySentinelCapability(args: {
     providerID?: string;
     modelID?: string;
-    /** Model key of the live request, or empty when it is not observable. */
+    /**
+     * Model key of the live request, or empty when it is not observable. Compared
+     * against `cachedModelKey` after canonicalization, because the cached side is
+     * stored canonicalized (`inject-compartments.ts` normalizes both sides of its
+     * own model comparison the same way). Skipping that here would make the
+     * comparison silently never match for the aliased provider ids.
+     */
     modelKey?: string;
     /** Model key the cached m[0] baseline was materialized under. */
     cachedModelKey?: string | null;
     /** Whether that cached baseline was widened by the registry. */
     cachedWidenedByCustomProvider: boolean;
-    isAnthropicWire?: (providerID?: string, modelID?: string) => boolean;
 }): EmptySentinelCapability {
     const canonical = args.providerID === "anthropic";
-    const resolved = args.isAnthropicWire ?? isAnthropicWireModel;
     if (args.modelID && registryLoaded) {
-        const widened = !canonical && resolved(args.providerID, args.modelID);
+        const widened = !canonical && isAnthropicWireModel(args.providerID, args.modelID);
         return { acceptsEmptySentinels: canonical || widened, widenedByCustomProvider: widened };
     }
+    const liveKey = piModelRefToCanonical(args.modelKey ?? "");
     const sameModel =
-        !!args.modelKey && args.modelKey.length > 0 && args.modelKey === args.cachedModelKey;
+        liveKey.length > 0 && liveKey === piModelRefToCanonical(args.cachedModelKey ?? "");
     const widened = sameModel && args.cachedWidenedByCustomProvider;
     return { acceptsEmptySentinels: canonical || widened, widenedByCustomProvider: widened };
 }
