@@ -119,6 +119,7 @@ import { RECOVERY_NO_HEAD_LIMIT } from "./protected-tail-boundary";
 import { RawFallbackContextLimitError } from "./raw-fallback-context-limit";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import type { RawMessageOrdinalAnchor } from "./read-session-raw";
+import { modelAcceptsEmptyContent } from "./sentinel";
 import { snapshotTrailingBlankSourceDecisions } from "./strip-content";
 import { computeSyntheticCallId, normalizeTodoStateJson } from "./todo-view";
 import type { TransformDeps } from "./transform";
@@ -1707,7 +1708,9 @@ export function createRustModeTransform(
             db: deps.db,
             sessionId,
             messages: replay.messages as MessageLike[],
-            resolvedProviderID: replayModel?.providerID,
+            // Rust mode stays canonical-Anthropic only; the module keeps its own
+            // `provider_id == "anthropic"` gates and both lanes must agree.
+            acceptsEmptySentinels: modelAcceptsEmptyContent(replayModel?.providerID),
         });
         const trustedReplayLimit = replayModel
             ? resolveTrustedContextLimit(replayModel.providerID, replayModel.modelID, {
@@ -3147,7 +3150,11 @@ export function createRustModeTransform(
                         materializedBoundary,
                         fullFeatureMode: !sessionMeta.isSubagent,
                         compactionOff: deps.compactionOff,
-                        resolvedProviderID: model?.providerID,
+                        // Rust mode stays canonical-Anthropic only. The module keeps its
+                        // own `provider_id == "anthropic"` gates, so widening the host side
+                        // alone would let the two lanes disagree on the served bytes. See
+                        // `anthropic-wire.ts` for the TS-mode capability.
+                        acceptsEmptySentinels: modelAcceptsEmptyContent(model?.providerID),
                         thinkingBindingRecoveryEnabledForModel: isFable51ThinkingBindingModel(
                             model?.providerID,
                             model?.modelID,

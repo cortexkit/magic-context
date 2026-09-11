@@ -1,6 +1,7 @@
 import { isFable51ThinkingBindingModel } from "../../features/magic-context/overflow-detection";
 import { canonicalModelIdentity } from "../../shared/harness-provider-map";
 import { isRecord } from "../../shared/record-type-guard";
+import { isAnthropicWireModel } from "./anthropic-wire";
 
 /**
  * Whole-message sentinel placeholder for providers that must not receive empty
@@ -20,22 +21,29 @@ import { isRecord } from "../../shared/record-type-guard";
 export const WHOLE_MESSAGE_PLACEHOLDER_TEXT = "[dropped]";
 
 /**
- * Decide whether empty-text sentinels are safe for the provider's wire path.
+ * Decide whether empty-text sentinels are safe for the model's wire path.
  *
- * The gate is deliberately canonical-Anthropic only. OpenCode filters empty
- * text/reasoning parts only in the `@ai-sdk/anthropic` branch before sending
- * to the provider; github-copilot and other non-Anthropic adapters forward
- * `{type:"text", text:""}` parts as real content blocks. Bedrock also filters
- * empty text later, but native `step-start` boundaries and empty sentinels are
- * not byte-equivalent before that filter runs. Google Vertex Anthropic maps to
- * an Anthropic SDK key but does not enter OpenCode's `@ai-sdk/anthropic`
- * empty-part filter.
+ * The gate is the `@ai-sdk/anthropic` adapter, not the provider name. OpenCode
+ * filters empty text/reasoning parts only in that branch before sending to the
+ * provider; other adapters forward `{type:"text", text:""}` parts as real
+ * content blocks. Bedrock Converse also filters empty text later, but native
+ * `step-start` boundaries and empty sentinels are not byte-equivalent before
+ * that filter runs. Google Vertex Anthropic maps to an Anthropic SDK key but
+ * does not enter OpenCode's `@ai-sdk/anthropic` empty-part filter.
  *
- * Unknown or non-canonical providers therefore must keep native parts (or use
- * non-empty whole-message placeholders) rather than producing empty sentinels.
+ * Canonical `anthropic` answers true without a lookup so the registry is never
+ * on the critical path for the common case. Any other provider must be reported
+ * by `provider.list()` as serving this model on `@ai-sdk/anthropic` — see
+ * `anthropic-wire.ts`. Unknown models keep native parts (or use non-empty
+ * whole-message placeholders) rather than producing empty sentinels.
+ *
+ * This is the only place the WIRE RULE lives. `resolveEmptySentinelCapability`
+ * in `anthropic-wire.ts` wraps it with the unresolved-model policy and is what
+ * the transform calls; every consumer downstream takes the resolved boolean, so
+ * no two phases of one pass can disagree and oscillate the cached prefix.
  */
-export function modelAcceptsEmptyContent(providerID?: string): boolean {
-    return providerID === "anthropic";
+export function modelAcceptsEmptyContent(providerID?: string, modelID?: string): boolean {
+    return providerID === "anthropic" || isAnthropicWireModel(providerID, modelID);
 }
 
 /**
@@ -129,19 +137,19 @@ export function makeSentinel(originalPart: unknown): {
 /**
  * Create a sentinel for replacing a WHOLE assistant message's parts list.
  *
- * Picks `""` when the live provider is the canonical Anthropic provider
- * (whose AI-SDK normalization filters empty content from the wire),
- * `[dropped]` otherwise. See `modelAcceptsEmptyContent` for the rule.
+ * Picks `""` when the live model rides the Anthropic wire (whose AI-SDK
+ * normalization filters empty content off the wire), `[dropped]` otherwise.
+ * See `modelAcceptsEmptyContent` for the rule that resolves the flag.
  *
  * The chosen placeholder text is kept in `WHOLE_MESSAGE_PLACEHOLDER_TEXT`
  * so `isSentinel` recognizes both shapes (idempotency on replay).
  */
 export function makeWholeMessageSentinel(
-    providerID?: string,
+    acceptsEmptySentinels?: boolean,
 ): { type: "text"; text: string } & Record<string, unknown> {
     return {
         type: "text",
-        text: modelAcceptsEmptyContent(providerID) ? "" : WHOLE_MESSAGE_PLACEHOLDER_TEXT,
+        text: acceptsEmptySentinels ? "" : WHOLE_MESSAGE_PLACEHOLDER_TEXT,
     };
 }
 
@@ -163,14 +171,14 @@ export function isSentinel(part: unknown): boolean {
 
 /**
  * Replay persisted whole-message decisions onto a fresh host projection.
- * Canonical Anthropic keeps empty sentinels because its adapter filters them.
- * For non-empty-sentinel providers, hidden seam rows are removed instead: they
+ * Anthropic-wire models keep empty sentinels because the adapter filters them.
+ * For non-empty-sentinel models, hidden seam rows are removed instead: they
  * were absent on the fold pass, so removal is the only byte-identical replay.
  */
 export function replaySentinelByMessageIds(
     messages: Array<{ info: { id?: string }; parts: unknown[] }>,
     ids: Set<string>,
-    providerID?: string,
+    acceptsEmptySentinels?: boolean,
     hiddenSeamIds: ReadonlySet<string> = new Set(),
 ): { replayed: number; missingIds: string[] } {
     if (ids.size === 0) return { replayed: 0, missingIds: [] };
@@ -181,14 +189,14 @@ export function replaySentinelByMessageIds(
         const id = msg.info.id;
         if (!id || !ids.has(id)) continue;
         seen.add(id);
-        if (!modelAcceptsEmptyContent(providerID) && hiddenSeamIds.has(id)) {
+        if (!acceptsEmptySentinels && hiddenSeamIds.has(id)) {
             messages.splice(index, 1);
             replayed += 1;
             continue;
         }
         if (msg.parts.length === 1 && isSentinel(msg.parts[0])) continue;
         msg.parts.length = 0;
-        msg.parts.push(makeWholeMessageSentinel(providerID));
+        msg.parts.push(makeWholeMessageSentinel(acceptsEmptySentinels));
         replayed += 1;
     }
     const missingIds: string[] = [];

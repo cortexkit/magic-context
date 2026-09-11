@@ -374,7 +374,7 @@ describe("createMessagesTransformHandler — issue #327 wire tail", () => {
                         },
                         parts: [],
                     });
-                    finalizeMessageRepresentation(out.messages as any, "anthropic", {
+                    finalizeMessageRepresentation(out.messages as any, true, {
                         trailingBlankDecisions: new Map([["assistant-pending", "keep"]]),
                     });
                 },

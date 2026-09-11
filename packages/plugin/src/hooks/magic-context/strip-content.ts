@@ -51,7 +51,7 @@ function isSystemInjectedText(text: string): boolean {
 export function stripSystemInjectedMessages(
     messages: MessageLike[],
     protectedTailStart: number,
-    providerID?: string,
+    acceptsEmptySentinels?: boolean,
 ): { stripped: number; sentineledIds: string[] } {
     let stripped = 0;
     const sentineledIds: string[] = [];
@@ -105,7 +105,7 @@ export function stripSystemInjectedMessages(
 
         if (hasContentPart && allContentIsSystemInjection) {
             msg.parts.length = 0;
-            msg.parts.push(makeWholeMessageSentinel(providerID));
+            msg.parts.push(makeWholeMessageSentinel(acceptsEmptySentinels));
             stripped++;
             if (typeof msg.info.id === "string") sentineledIds.push(msg.info.id);
         }
@@ -164,7 +164,7 @@ const METADATA_PART_TYPES = new Set([
  */
 export function stripDroppedPlaceholderMessages(
     messages: MessageLike[],
-    providerID?: string,
+    acceptsEmptySentinels?: boolean,
 ): {
     stripped: number;
     sentineledIds: string[];
@@ -245,7 +245,7 @@ export function stripDroppedPlaceholderMessages(
 
         if (hasContentPart && !hasNonDroppedContent) {
             msg.parts.length = 0;
-            msg.parts.push(makeWholeMessageSentinel(providerID));
+            msg.parts.push(makeWholeMessageSentinel(acceptsEmptySentinels));
             stripped++;
             if (typeof msg.info.id === "string") sentineledIds.push(msg.info.id);
         }
@@ -371,9 +371,9 @@ const CLEARED_REASONING_TYPES = new Set(["thinking", "reasoning"]);
  * sentinels so message.parts length stays constant between passes.
  *
  * See strip-structural-noise.ts for the cache-safety rationale. Caller contract:
- * run only when `modelAcceptsEmptyContent(providerID)` is true. OpenCode's
- * canonical Anthropic adapter filters empty text sentinels before the wire;
- * other adapters can forward them as real content blocks.
+ * run only when the pass's resolved `acceptsEmptySentinels` is true. OpenCode's
+ * `@ai-sdk/anthropic` adapter filters empty text sentinels before the wire; other
+ * adapters can forward them as real content blocks.
  */
 export function stripClearedReasoning(messages: MessageLike[]): number {
     let stripped = 0;
@@ -808,10 +808,10 @@ export function applyFrozenTrailingBlankDecisions(
  */
 export function findMergedReasoningStripCandidateIds(
     messages: MessageLike[],
-    providerID?: string,
+    acceptsEmptySentinels?: boolean,
     options?: { mutationExemptMessage?: MessageLike },
 ): string[] {
-    if (providerID !== "anthropic") return [];
+    if (!acceptsEmptySentinels) return [];
 
     const ids = new Set<string>();
     for (const entry of planMergedAssistantReasoningStrip(
@@ -871,10 +871,10 @@ export function findMergedReasoningStripCandidateIds(
  */
 export function stripReasoningFromAssistantIds(
     messages: MessageLike[],
-    providerID: string | undefined,
+    acceptsEmptySentinels: boolean | undefined,
     messageIds: ReadonlySet<string>,
 ): number {
-    if (providerID !== "anthropic" || messageIds.size === 0) return 0;
+    if (!acceptsEmptySentinels || messageIds.size === 0) return 0;
     let stripped = 0;
     for (const message of messages) {
         const id = message.info.id;
@@ -895,11 +895,11 @@ export function stripReasoningFromAssistantIds(
  */
 export function findMergedReasoningStripDecisions(
     messages: MessageLike[],
-    providerID: string | undefined,
+    acceptsEmptySentinels: boolean | undefined,
     frozenIds: ReadonlySet<string>,
     options?: { mutationExemptMessage?: MessageLike },
 ): string[] {
-    if (providerID !== "anthropic") return [];
+    if (!acceptsEmptySentinels) return [];
     const frozenParts = readFrozenMergedReasoningParts(frozenIds);
     const decisions: string[] = [];
     for (const entry of planMergedAssistantReasoningStrip(
@@ -920,7 +920,7 @@ export function findMergedReasoningStripDecisions(
 
 export function stripReasoningFromMergedAssistants(
     messages: MessageLike[],
-    providerID?: string,
+    acceptsEmptySentinels?: boolean,
     options?: {
         mutationExemptMessage?: MessageLike;
         frozenMessageIds?: ReadonlySet<string>;
@@ -932,7 +932,7 @@ export function stripReasoningFromMergedAssistants(
     // must have non-empty `reasoning_content`), so the strip would
     // trigger 400 "reasoning_content is missing" there. See call site
     // in transform.ts for the full rationale.
-    if (providerID !== "anthropic") return 0;
+    if (!acceptsEmptySentinels) return 0;
 
     let stripped = 0;
     const frozenParts = readFrozenMergedReasoningParts(options?.frozenMessageIds ?? new Set());
@@ -999,9 +999,8 @@ export interface StripProcessedImagesResult {
  * incl. defer) re-strips only already-frozen ids, byte-identical regardless of
  * how the live array grew.
  *
- * Caller contract: run only when `modelAcceptsEmptyContent(providerID)` is
- * true, because non-Anthropic adapters can forward the empty text replacement
- * to the wire.
+ * Caller contract: run only when the pass's resolved `acceptsEmptySentinels` is
+ * true, because other adapters can forward the empty text replacement to the wire.
  */
 export function stripProcessedImages(
     messages: MessageLike[],

@@ -59,9 +59,11 @@ import type { ModelInput } from "../../shared/model-resolution";
 import { getSdkContextLimit } from "../../shared/models-dev-cache";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
+import { ensureAnthropicWireModelsLoaded, resolveEmptySentinelCapability } from "./anthropic-wire";
 import { canConsumeDeferredOnThisPass } from "./cache-busting-signals";
 import { replayCavemanCompression } from "./caveman-cleanup";
 import { commitCompactionModeRecord, reconcileCompactionMode } from "./compaction-off-transition";
+import { decodeCachedM0UpgradeIdentity } from "./compartment-render-epoch";
 import { getActiveCompartmentRun, startCompartmentAgent } from "./compartment-runner";
 import { buildTriggerInMemoryTail, checkCompartmentTrigger } from "./compartment-trigger";
 import {
@@ -110,7 +112,6 @@ import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { extractInMemoryMessageViews } from "./read-session-raw";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendStatusNotification } from "./send-session-notification";
-import { modelAcceptsEmptyContent } from "./sentinel";
 import {
     replayClearedReasoning,
     replayStrippedInlineThinking,
@@ -1304,12 +1305,32 @@ export function createTransform(deps: TransformDeps) {
                 deps.liveModelBySession?.set(sessionId, recovered);
             }
         }
-        // Single pass-local provider resolution for every empty-sentinel producer.
-        // A cold pass may recover the model from OpenCode's DB above; hot passes hit
-        // the live map. Reusing this value keeps cold/hot output identical and keeps
-        // postprocess from making a divergent provider decision later in the pass.
+        // Single pass-local provider resolution. A cold pass may recover the model
+        // from OpenCode's DB above; hot passes hit the live map. Reusing this value
+        // keeps cold/hot output identical. Empty-sentinel producers no longer read
+        // the provider id at all — they take the resolved capability below.
         const resolvedProviderID = modelForBudget?.providerID;
-        const canUseEmptySentinels = modelAcceptsEmptyContent(resolvedProviderID);
+        // Read the resolved adapter of every configured model once per process,
+        // before the first gate reads it. Awaiting here (memoized after the first
+        // pass) keeps the answer identical for every phase of every pass, so the
+        // capability can never flip mid-session and rewrite a cached prefix.
+        await ensureAnthropicWireModelsLoaded(deps.client);
+        // One resolution for the whole pass, including the unresolved case. See
+        // `resolveEmptySentinelCapability` for why unresolved carries the session's
+        // last materialized answer forward instead of narrowing to `false`, and why
+        // that carry-forward is keyed to the model rather than the session.
+        const { acceptsEmptySentinels: canUseEmptySentinels, widenedByCustomProvider } =
+            resolveEmptySentinelCapability({
+                providerID: resolvedProviderID,
+                modelID: modelForBudget?.modelID,
+                modelKey: modelForBudget
+                    ? `${modelForBudget.providerID}/${modelForBudget.modelID}`
+                    : "",
+                cachedModelKey: sessionMeta.cachedM0ModelKey,
+                cachedWidenedByCustomProvider: decodeCachedM0UpgradeIdentity(
+                    sessionMeta.cachedM0UpgradeState,
+                ).anthropicWireWidened,
+            });
         const resolvedContextLimit = modelForBudget
             ? resolveTrustedContextLimit(modelForBudget.providerID, modelForBudget.modelID, {
                   db,
@@ -1733,7 +1754,7 @@ export function createTransform(deps: TransformDeps) {
                     boundaryContextLimit,
                     inMemoryTail,
                     taggerFloor,
-                    { providerID: resolvedProviderID },
+                    { canClearReasoning: canUseEmptySentinels },
                 );
                 if (triggerResult.shouldFire) {
                     sessionLog(
@@ -2197,6 +2218,7 @@ export function createTransform(deps: TransformDeps) {
                 injectDocs: deps.injectDocs,
                 memoryEnabled: deps.memoryConfig?.enabled,
                 muralEnabled: deps.muralEnabled,
+                anthropicWireWidened: widenedByCustomProvider,
                 memoryInjectionBudgetTokens: deps.memoryConfig?.injectionBudgetTokens,
                 historyBudgetTokens,
                 hardSignals: m0HardSignals,
@@ -2311,10 +2333,10 @@ export function createTransform(deps: TransformDeps) {
             // the primary agent that spawned them.
             cavemanTextCompression: !reducedMode ? deps.cavemanTextCompression : undefined,
             smartDrops: deps.smartDrops === true,
-            // Pass the single resolved provider through to postprocess so every
+            // Pass the single resolved capability through to postprocess so every
             // empty-sentinel gate and whole-message placeholder choice agrees for
             // this transform pass, including cold DB-recovered passes.
-            resolvedProviderID,
+            acceptsEmptySentinels: canUseEmptySentinels,
             thinkingBindingRecoveryEnabledForModel: isFable51ThinkingBindingModel(
                 modelForBudget?.providerID,
                 modelForBudget?.modelID,
@@ -2339,6 +2361,7 @@ export function createTransform(deps: TransformDeps) {
                 temporalAwareness: deps.experimentalTemporalAwareness,
                 hardSignals: m0HardSignals,
                 muralEnabled: deps.muralEnabled,
+                anthropicWireWidened: widenedByCustomProvider,
             },
         });
         passOutcome.markFinalized();
