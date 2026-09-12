@@ -603,10 +603,12 @@ export function checkCompartmentTrigger(
         return { shouldFire: false };
     }
 
-    // Never project reclaimed reasoning unless this harness can actually clear
-    // it from the provider wire. The OpenCode fallback shares the sentinel
-    // predicate with the postprocess clearing path; Pi explicitly supplies its
-    // own provider-independent capability.
+    // Never project reclaimed reasoning unless this harness can actually clear it
+    // from the provider wire. Both harnesses now supply `canClearReasoning`
+    // explicitly — OpenCode passes the capability its transform already resolved,
+    // Pi passes its own. The predicate below is a provider-id-only fallback for a
+    // caller that supplies neither; it under-reports for a custom provider serving
+    // Claude, so a new caller should pass the capability rather than rely on it.
     const canClearReasoning =
         reasoningProjection?.canClearReasoning ??
         modelAcceptsEmptyContent(reasoningProjection?.providerID);

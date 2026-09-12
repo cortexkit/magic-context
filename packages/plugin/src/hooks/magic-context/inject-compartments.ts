@@ -762,6 +762,14 @@ export interface M0SnapshotMarkers {
     muralHash?: string | null;
     muralEnabled: boolean | null;
     renderBudgetIdentity: string | null;
+    /**
+     * True only when the adapter registry widened the empty-sentinel gate for
+     * this pass. It changes provider-visible tail bytes (structural-noise
+     * sentinels, whole-message placeholder text), so it belongs in the m[0]
+     * upgrade identity: the flip then folds exactly once instead of
+     * first-applying on a defer pass that promised byte-identical replay.
+     */
+    anthropicWireWidened: boolean;
 }
 
 /**
@@ -843,6 +851,9 @@ export interface M0M1RenderOptions {
      * and the fold's model accepts images, materializeM0 resolves + renders the
      * deterministic mural on demand and folds its image into the m[0] baseline. */
     muralEnabled?: boolean;
+    /** True only when the adapter registry widened the empty-sentinel gate; it
+     *  becomes part of the m[0] upgrade identity so the flip folds once. */
+    anthropicWireWidened?: boolean;
     isCacheBustingPass?: boolean;
     /** Force/emergency may serve a fresh recovery prefix even if persistence loses contention. */
     allowFreshContentionFallback?: boolean;
@@ -1174,6 +1185,7 @@ interface M0SnapshotMarkerReadArgs {
     /** False suppresses the profile and mural surfaces alongside project memory. */
     memoryEnabled?: boolean;
     muralEnabled?: boolean;
+    anthropicWireWidened?: boolean;
     memoryInjectionBudgetTokens?: number;
     historyBudgetTokens?: number;
     hardSignals?: M0HardSignals;
@@ -1421,6 +1433,7 @@ function readCurrentM0SnapshotMarkersUncached(args: M0SnapshotMarkerReadArgs): {
                 args.memoryInjectionBudgetTokens,
                 args.historyBudgetTokens,
             ),
+            anthropicWireWidened: args.anthropicWireWidened === true,
         },
     };
 }
@@ -1438,6 +1451,7 @@ function refreshVolatileMarkerInputs(
         modelKey: hard.modelKey,
         projectIdentity: args.projectPath ?? null,
         muralEnabled: args.memoryEnabled !== false && args.muralEnabled === true,
+        anthropicWireWidened: args.anthropicWireWidened === true,
         renderBudgetIdentity: renderBudgetIdentity(
             args.memoryInjectionBudgetTokens,
             args.historyBudgetTokens,
@@ -1525,6 +1539,7 @@ function snapshotMarkersFromCachedM0(state: M0M1State): M0SnapshotMarkers | null
         muralHash: state.cachedM0MuralHash ?? null,
         muralEnabled: cachedUpgradeIdentity.muralEnabled,
         renderBudgetIdentity: cachedUpgradeIdentity.renderBudgetIdentity,
+        anthropicWireWidened: cachedUpgradeIdentity.anthropicWireWidened,
     };
 }
 
@@ -1565,6 +1580,7 @@ export function mustMaterialize(args: {
     /** False suppresses the profile and mural surfaces alongside project memory. */
     memoryEnabled?: boolean;
     muralEnabled?: boolean;
+    anthropicWireWidened?: boolean;
     memoryInjectionBudgetTokens?: number;
     historyBudgetTokens?: number;
 }): MaterializeDecision {
@@ -1600,6 +1616,29 @@ export function mustMaterialize(args: {
             cachedUpgradeIdentity.muralEnabled !== current.muralEnabled) ||
         (cachedUpgradeIdentity.renderBudgetIdentity !== null &&
             cachedUpgradeIdentity.renderBudgetIdentity !== current.renderBudgetIdentity)
+    ) {
+        return { value: true, reason: "render_config" };
+    }
+    // The empty-sentinel capability is a provider-visible byte fact, so a change has
+    // to fold rather than rewrite the tail underneath a cached prefix. The fold also
+    // opens the mutation gates on that same pass, so the merged-reasoning strip
+    // first-applies into the bust it just paid for (ARCHITECTURE invariant 1).
+    //
+    // Scoped to a KNOWN, UNCHANGED model, for two separate reasons:
+    //   - An empty live model key means "unknown this pass", and an unknown signal
+    //     must never fold (same rule the model-change gate below states). Reading
+    //     unknown as "not widened" would fold once on the next pass that resolves
+    //     the model, on a session whose capability never actually changed.
+    //   - A model that DID change already folds through `model_change` below, which
+    //     rewrites this component as part of the same materialization. Comparing here
+    //     too would only mis-attribute that fold.
+    // Absence reads as `false` on both sides (see ANTHROPIC_WIRE_COMPONENT_PREFIX),
+    // so canonical Anthropic and non-Anthropic sessions never fold for this reason.
+    const liveModelKeyForWire = piModelRefToCanonical(hard.modelKey);
+    if (
+        liveModelKeyForWire !== "" &&
+        liveModelKeyForWire === piModelRefToCanonical(args.state.cachedM0ModelKey ?? "") &&
+        cachedUpgradeIdentity.anthropicWireWidened !== current.anthropicWireWidened
     ) {
         return { value: true, reason: "render_config" };
     }
@@ -2123,6 +2162,7 @@ function applyMarkersToState(
         markers.compartmentRenderEpoch,
         markers.muralEnabled,
         markers.renderBudgetIdentity,
+        markers.anthropicWireWidened,
     );
     // Runtime markers must be mirrored into flat state because the next
     // mustMaterialize pass reads cachedM0SystemHash/ToolSetHash/ModelKey directly
@@ -2208,6 +2248,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             injectDocs: options.injectDocs,
             memoryEnabled: options.memoryEnabled,
             muralEnabled: options.muralEnabled,
+            anthropicWireWidened: options.anthropicWireWidened,
             memoryInjectionBudgetTokens: options.memoryInjectionBudgetTokens,
             historyBudgetTokens: options.historyBudgetTokens,
             hardSignals: options.hardSignals,
@@ -2379,6 +2420,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             projectIdentity: projectPath ?? null,
             muralEnabled: snapshotMarkers.muralEnabled,
             renderBudgetIdentity: snapshotMarkers.renderBudgetIdentity,
+            anthropicWireWidened: snapshotMarkers.anthropicWireWidened,
         };
         // NOTE: maxMemoryId is deliberately EXCLUDED from this stale-check.
         // Additive memory writes (write/promote) do not invalidate the rendered
@@ -2440,6 +2482,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
                 snapshotMarkers.compartmentRenderEpoch,
                 snapshotMarkers.muralEnabled,
                 snapshotMarkers.renderBudgetIdentity,
+                snapshotMarkers.anthropicWireWidened,
             ),
             systemHash: snapshotMarkers.systemHash,
             toolSetHash: snapshotMarkers.toolSetHash,
@@ -2854,6 +2897,7 @@ function markersFromCachedRow(row: CachedM0M1Row): M0SnapshotMarkers | null {
         muralHash: row.cached_m0_mural_hash ?? null,
         muralEnabled: cachedUpgradeIdentity.muralEnabled,
         renderBudgetIdentity: cachedUpgradeIdentity.renderBudgetIdentity,
+        anthropicWireWidened: cachedUpgradeIdentity.anthropicWireWidened,
     };
 }
 
@@ -2908,6 +2952,7 @@ function applyCachedRowToState(state: M0M1State, row: CachedM0M1Row): void {
         markers.compartmentRenderEpoch,
         markers.muralEnabled,
         markers.renderBudgetIdentity,
+        markers.anthropicWireWidened,
     );
     state.cachedM0SystemHash = markers.systemHash;
     state.cachedM0ToolSetHash = markers.toolSetHash;
@@ -3066,6 +3111,7 @@ function renderFreshM0NonPersisted(options: M0M1RenderOptions): {
         injectDocs: options.injectDocs,
         memoryEnabled: options.memoryEnabled,
         muralEnabled: options.muralEnabled,
+        anthropicWireWidened: options.anthropicWireWidened,
         memoryInjectionBudgetTokens: options.memoryInjectionBudgetTokens,
         historyBudgetTokens: options.historyBudgetTokens,
         hardSignals: options.hardSignals,
@@ -3293,6 +3339,7 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         injectDocs: options.injectDocs,
         memoryEnabled: options.memoryEnabled,
         muralEnabled: options.muralEnabled,
+        anthropicWireWidened: options.anthropicWireWidened,
         memoryInjectionBudgetTokens: options.memoryInjectionBudgetTokens,
         historyBudgetTokens: options.historyBudgetTokens,
     });

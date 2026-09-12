@@ -99,7 +99,7 @@ import { markNoteNudgeDelivered, peekNoteNudgeText } from "./note-nudger";
 import { hasVisibleNoteReadCall } from "./note-visibility";
 import type { PassOutcome } from "./pass-outcome";
 import { estimateTokens } from "./read-session-formatting";
-import { modelAcceptsEmptyContent, replaySentinelByMessageIds } from "./sentinel";
+import { replaySentinelByMessageIds } from "./sentinel";
 import {
     applyFrozenTrailingBlankDecisions,
     assistantHasReasoningPart,
@@ -399,16 +399,16 @@ export function replayRustModeBindingMismatchStrips(args: {
     db: ContextDatabase;
     sessionId: string;
     messages: MessageLike[];
-    resolvedProviderID?: string;
+    acceptsEmptySentinels?: boolean;
 }): void {
-    if (!modelAcceptsEmptyContent(args.resolvedProviderID)) return;
+    if (!args.acceptsEmptySentinels) return;
     const recoveryMessageIds = new Set<string>();
     for (const id of getMergedReasoningStrippedIds(args.db, args.sessionId)) {
         if (!id.startsWith(THINKING_BINDING_RECOVERY_FROZEN_PREFIX)) continue;
         const messageId = id.slice(THINKING_BINDING_RECOVERY_FROZEN_PREFIX.length);
         if (messageId.length > 0) recoveryMessageIds.add(messageId);
     }
-    stripReasoningFromAssistantIds(args.messages, args.resolvedProviderID, recoveryMessageIds);
+    stripReasoningFromAssistantIds(args.messages, args.acceptsEmptySentinels, recoveryMessageIds);
 }
 
 /**
@@ -516,7 +516,7 @@ export function runRustModePostprocess(args: {
     materializedBoundary?: RustMaterializedCompactionBoundary;
     fullFeatureMode: boolean;
     compactionOff?: boolean;
-    resolvedProviderID?: string;
+    acceptsEmptySentinels?: boolean;
     thinkingBindingRecoveryEnabledForModel?: boolean;
     trailingBlankSourceDecisions?: TrailingBlankSourceDecisions;
     trailingBlankNewestAssistantId?: string;
@@ -569,7 +569,7 @@ export function runRustModePostprocess(args: {
         }
     }
     const trailingBlankDecisions = new Map<string, TrailingBlankDecision>();
-    if (modelAcceptsEmptyContent(args.resolvedProviderID)) {
+    if (args.acceptsEmptySentinels) {
         try {
             for (const [id, decision] of getTrailingBlankDecisions(args.db, args.sessionId)) {
                 trailingBlankDecisions.set(id, decision);
@@ -638,7 +638,7 @@ export function runRustModePostprocess(args: {
 
     const recoveryMessageIds = new Set<string>();
     let thinkingBindingRecovery: { flagTarget: string; messageId: string } | null = null;
-    if (modelAcceptsEmptyContent(args.resolvedProviderID)) {
+    if (args.acceptsEmptySentinels) {
         try {
             for (const id of getMergedReasoningStrippedIds(args.db, args.sessionId)) {
                 if (!id.startsWith(THINKING_BINDING_RECOVERY_FROZEN_PREFIX)) continue;
@@ -673,7 +673,11 @@ export function runRustModePostprocess(args: {
         } catch (error) {
             sessionLog(args.sessionId, "rust thinking binding recovery failed:", error);
         }
-        stripReasoningFromAssistantIds(args.messages, args.resolvedProviderID, recoveryMessageIds);
+        stripReasoningFromAssistantIds(
+            args.messages,
+            args.acceptsEmptySentinels,
+            recoveryMessageIds,
+        );
     }
     const marker = getPersistedCompactionMarkerState(args.db, args.sessionId);
     return {
@@ -929,11 +933,13 @@ interface RunPostTransformPhaseArgs {
      */
     smartDrops?: boolean;
     /**
-     * Provider resolved once by the main transform for this pass. Used for every
-     * empty-sentinel gate and whole-message placeholder choice so postprocess
-     * cannot diverge from the main transform on cold DB-recovered passes.
+     * Empty-sentinel capability, resolved once by the main transform for this pass
+     * (`resolveEmptySentinelCapability`). Every empty-sentinel gate and
+     * whole-message placeholder choice reads THIS, never a provider id, so
+     * postprocess cannot diverge from the main transform on cold DB-recovered
+     * passes — a divergence would rewrite a prefix the main pass already served.
      */
-    resolvedProviderID?: string;
+    acceptsEmptySentinels?: boolean;
     /** True only when the live request is canonical Anthropic Fable 5.1. */
     thinkingBindingRecoveryEnabledForModel?: boolean;
     /** Raw harness observations captured before any Magic Context insertion or sentinelization. */
@@ -953,6 +959,12 @@ interface RunPostTransformPhaseArgs {
         /** mural.enabled — drives the on-demand deterministic mural
          *  render inside the HARD fold. */
         muralEnabled?: boolean;
+        /**
+         * True only when the adapter registry widened the empty-sentinel gate.
+         * Carried into the m[0] upgrade identity so the flip folds once instead of
+         * rewriting the tail underneath an already-served prefix.
+         */
+        anthropicWireWidened?: boolean;
     };
 }
 
@@ -1059,7 +1071,7 @@ export function evaluateEmergencyFailClosed(input: {
 
 export function finalizeMessageRepresentation(
     messages: MessageLike[],
-    resolvedProviderID?: string,
+    acceptsEmptySentinels?: boolean,
     options?: {
         prependedMessageCount?: number;
         reasoningMutatedMessages?: Iterable<MessageLike>;
@@ -1072,7 +1084,7 @@ export function finalizeMessageRepresentation(
     },
 ): { clearedParts: number; mergedReasoningParts: number } {
     let clearedParts = 0;
-    if (modelAcceptsEmptyContent(resolvedProviderID)) {
+    if (acceptsEmptySentinels) {
         const prependedMessageCount = Math.min(
             messages.length,
             Math.max(0, options?.prependedMessageCount ?? 0),
@@ -1095,18 +1107,18 @@ export function finalizeMessageRepresentation(
         ? 0
         : stripReasoningFromAssistantIds(
               messages,
-              resolvedProviderID,
+              acceptsEmptySentinels,
               options?.thinkingBindingRecoveryMessageIds ?? new Set(),
           );
     const mergedReasoningParts =
         bindingRecoveryParts +
         (options?.skipMergedReasoningStrip
             ? 0
-            : stripReasoningFromMergedAssistants(messages, resolvedProviderID, {
+            : stripReasoningFromMergedAssistants(messages, acceptsEmptySentinels, {
                   mutationExemptMessage: options?.reasoningMutationExemptMessage,
                   frozenMessageIds: options?.mergedReasoningStrippedIds,
               }));
-    if (!options?.skipTrailingWhitespaceStrip && modelAcceptsEmptyContent(resolvedProviderID)) {
+    if (!options?.skipTrailingWhitespaceStrip && acceptsEmptySentinels) {
         applyFrozenTrailingBlankDecisions(messages, options?.trailingBlankDecisions ?? new Map());
     }
     return { clearedParts, mergedReasoningParts };
@@ -1212,6 +1224,7 @@ export async function runPostTransformPhase(
                   injectDocs: args.m0M1.injectDocs,
                   memoryEnabled: args.m0M1.memoryEnabled,
                   muralEnabled: args.m0M1.muralEnabled,
+                  anthropicWireWidened: args.m0M1.anthropicWireWidened,
                   memoryInjectionBudgetTokens: args.m0M1.memoryInjectionBudgetTokens,
                   historyBudgetTokens: args.m0M1.historyBudgetTokens,
                   hardSignals: args.m0M1.hardSignals,
@@ -1264,6 +1277,7 @@ export async function runPostTransformPhase(
                 allowFreshContentionFallback: forceMaterialization || emergencyDropEligible,
                 hardSignals: args.m0M1.hardSignals,
                 muralEnabled: args.m0M1.muralEnabled,
+                anthropicWireWidened: args.m0M1.anthropicWireWidened,
                 compactionOff,
             });
             preparedPrefix = foldResult;
@@ -1409,7 +1423,7 @@ export async function runPostTransformPhase(
             sessionLog(args.sessionId, "ctx_reduce permission read failed (ignored):", error);
         }
     }
-    const canUseEmptySentinels = modelAcceptsEmptyContent(args.resolvedProviderID);
+    const canUseEmptySentinels = args.acceptsEmptySentinels;
     if (shouldRunHeuristics) {
         const subagentRerun =
             !args.fullFeatureMode &&
@@ -1965,6 +1979,7 @@ export async function runPostTransformPhase(
                 allowFreshContentionFallback: forceMaterialization || emergencyDropEligible,
                 hardSignals: args.m0M1.hardSignals,
                 muralEnabled: args.m0M1.muralEnabled,
+                anthropicWireWidened: args.m0M1.anthropicWireWidened,
                 // Compaction-off materializes through the zero-compartment
                 // path: memory/docs/user-profile render, but historical
                 // compartment rows never reach <session-history>.
@@ -2092,7 +2107,7 @@ export async function runPostTransformPhase(
             const { replayed } = replaySentinelByMessageIds(
                 args.messages,
                 persistedIds,
-                args.resolvedProviderID,
+                args.acceptsEmptySentinels,
                 hiddenSeamIds,
             );
             if (replayed > 0) {
@@ -2114,7 +2129,7 @@ export async function runPostTransformPhase(
         if (isCacheBustingPass) {
             const droppedResult = stripDroppedPlaceholderMessages(
                 args.messages,
-                args.resolvedProviderID,
+                args.acceptsEmptySentinels,
             );
             const protectedTailStart = Math.max(
                 0,
@@ -2123,17 +2138,17 @@ export async function runPostTransformPhase(
             const systemInjectedResult = stripSystemInjectedMessages(
                 args.messages,
                 protectedTailStart,
-                args.resolvedProviderID,
+                args.acceptsEmptySentinels,
             );
             const hiddenMessages = args.hiddenMessagesAtCompactionSeam ?? [];
             const hiddenDroppedResult = stripDroppedPlaceholderMessages(
                 hiddenMessages,
-                args.resolvedProviderID,
+                args.acceptsEmptySentinels,
             );
             const hiddenSystemInjectedResult = stripSystemInjectedMessages(
                 hiddenMessages,
                 hiddenMessages.length,
-                args.resolvedProviderID,
+                args.acceptsEmptySentinels,
             );
 
             const newlyNeutralized =
@@ -2544,7 +2559,7 @@ export async function runPostTransformPhase(
             if (isCacheBustingPass) {
                 const candidates = findMergedReasoningStripDecisions(
                     args.messages,
-                    args.resolvedProviderID,
+                    args.acceptsEmptySentinels,
                     mergedReasoningStrippedIds,
                     { mutationExemptMessage: reasoningMutationExemptMessage },
                 );
@@ -2698,7 +2713,7 @@ export async function runPostTransformPhase(
     const tFinalRepresentation = performance.now();
     const finalRepresentation = finalizeMessageRepresentation(
         args.messages,
-        args.resolvedProviderID,
+        args.acceptsEmptySentinels,
         {
             prependedMessageCount,
             reasoningMutatedMessages,

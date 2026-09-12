@@ -166,6 +166,10 @@ const KNOWN_SLOTS: Record<string, KnownSlot> = {
         classification: "PUBLICATION",
         reason: "Publishes last-known-good model metadata, not a failure verdict; refresh writes a later successful value.",
     },
+    "packages/plugin/src/hooks/magic-context/anthropic-wire.ts:loadPromise": {
+        classification: "VERDICT",
+        reason: "Saved: only a successful load is memoized. A failure clears the slot and retries after a 60-second cooldown. resolveEmptySentinelCapability() carries the session's prior answer forward while the registry is unresolved, so it does not narrow.",
+    },
 };
 
 function sourceFiles(directory: string): string[] {
