@@ -39,10 +39,11 @@ export const EMBEDDING_AFFECTING_KEYS = new Set([
     // not let a broken value re-register mid-session.
     "embedding.input_type",
     "embedding.truncate",
-    // max_input_tokens + query_input_type fold into the chunk-embedding identity
+    // max_input_tokens + query_input_type + dimensions fold into the chunk-embedding identity
     // (getChunkEmbeddingModelId); a failed substitution on either would otherwise
     // register as trusted and could drive a bogus chunk identity / GC.
     "embedding.max_input_tokens",
+    "embedding.dimensions",
     "embedding.query_input_type",
     "embedding.fallback_provider",
     "subc",

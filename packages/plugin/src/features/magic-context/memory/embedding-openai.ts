@@ -15,6 +15,8 @@ interface OpenAICompatibleEmbeddingProviderOptions {
     queryInputType?: string;
     /** Optional `truncate` body field (e.g. NVIDIA NIM 'NONE'/'START'/'END'). */
     truncate?: string;
+    /** Optional `dimensions` body field for Matryoshka models like Qwen3-Embedding (e.g. 768, 1024, 4096). */
+    dimensions?: number;
     /** Maximum safe input tokens for chunk embeddings. */
     maxInputTokens?: number;
 }
@@ -142,6 +144,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
     private readonly inputType: string;
     private readonly queryInputType: string;
     private readonly truncate: string;
+    private readonly dimensions: number | undefined;
     private initialized = false;
 
     // Circuit breaker state (per provider instance — resets when config
@@ -166,6 +169,10 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
         this.inputType = options.inputType?.trim() ?? "";
         this.queryInputType = options.queryInputType?.trim() ?? "";
         this.truncate = options.truncate?.trim() ?? "";
+        this.dimensions =
+            typeof options.dimensions === "number" && Number.isFinite(options.dimensions)
+                ? Math.max(1, Math.floor(options.dimensions))
+                : undefined;
         this.maxInputTokens =
             typeof options.maxInputTokens === "number" && Number.isFinite(options.maxInputTokens)
                 ? Math.max(1, Math.floor(options.maxInputTokens))
@@ -182,6 +189,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
             // different model_id than reads/GC resolve, silently zeroing results
             // and reaping valid vectors.
             ...(this.truncate ? { truncate: this.truncate } : {}),
+            ...(this.dimensions ? { dimensions: this.dimensions } : {}),
         });
     }
 
@@ -300,6 +308,7 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                     // unaffected.
                     ...(inputTypeForRequest ? { input_type: inputTypeForRequest } : {}),
                     ...(this.truncate ? { truncate: this.truncate } : {}),
+                    ...(this.dimensions ? { dimensions: this.dimensions } : {}),
                 }),
                 // SSRF: refuse to FOLLOW redirects. The pre-flight SSRF check only
                 // validates the configured endpoint; default redirect-follow would
