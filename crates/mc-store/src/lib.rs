@@ -2554,6 +2554,183 @@ const MIGRATIONS: &[Migration] = &[
         END;
         "#,
     },
+    Migration {
+        version: 53,
+        // SQLite persists trigger SQL in the database and evaluates it on every connection.
+        // Connection-local UDFs therefore made CLI, dashboard, and repair writes fail before
+        // the guard could apply its plain-writer semantics. Keep the scope in a singleton row
+        // changed only inside the writer transaction: SQLite permits one writer at a time, and
+        // uncommitted scope values are invisible to every other connection.
+        //
+        // McStore::open intentionally logs and accepts a store-ahead outcome for rollback
+        // binaries. This migration removes no table or column needed by rollback binaries and
+        // keeps legacy UDF registration in McStore::open; an older binary does not replay
+        // v24/v33 over these rebuilt, same-named triggers.
+        statements: r#"
+        CREATE TABLE IF NOT EXISTS mc_privilege_state (
+            id                      INTEGER PRIMARY KEY CHECK (id = 1),
+            facade_authority_domain TEXT NOT NULL DEFAULT ''
+                CHECK (facade_authority_domain IN ('', 'memories', 'notes')),
+            facade_authority_route  TEXT NOT NULL DEFAULT '',
+            note_caller_project     TEXT NOT NULL DEFAULT ''
+        );
+        INSERT OR IGNORE INTO mc_privilege_state(id) VALUES (1);
+
+        DROP TRIGGER IF EXISTS mc_notes_ownership_insert;
+        DROP TRIGGER IF EXISTS mc_notes_ownership_update;
+        DROP TRIGGER IF EXISTS mc_notes_ownership_delete;
+        CREATE TRIGGER mc_notes_ownership_insert
+        BEFORE INSERT ON mc_notes
+        WHEN NEW.project_path = ''
+          OR COALESCE((
+                 SELECT note_caller_project FROM mc_privilege_state WHERE id = 1
+             ), '') IS NOT NEW.project_path
+        BEGIN
+            SELECT RAISE(ABORT, 'note ownership insert is outside the caller project');
+        END;
+        CREATE TRIGGER mc_notes_ownership_update
+        BEFORE UPDATE ON mc_notes
+        WHEN (NEW.id IS NOT OLD.id OR NEW.type IS NOT OLD.type
+              OR NEW.session_id IS NOT OLD.session_id OR NEW.project_path IS NOT OLD.project_path
+              OR NEW.context_store_uuid IS NOT OLD.context_store_uuid
+              OR NEW.context_row_id IS NOT OLD.context_row_id)
+          AND NOT (
+              COALESCE((
+                  SELECT note_caller_project FROM mc_privilege_state WHERE id = 1
+              ), '') IS OLD.project_path
+              OR COALESCE((
+                  SELECT note_caller_project FROM mc_privilege_state WHERE id = 1
+              ), '') IS NEW.project_path
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'note ownership update is outside the old or new project');
+        END;
+        CREATE TRIGGER mc_notes_ownership_delete
+        BEFORE DELETE ON mc_notes
+        WHEN COALESCE((
+                 SELECT note_caller_project FROM mc_privilege_state WHERE id = 1
+             ), '') IS NOT OLD.project_path
+        BEGIN
+            SELECT RAISE(ABORT, 'note ownership delete is outside the row project');
+        END;
+
+        DROP TRIGGER IF EXISTS mc_memories_facade_authority_insert;
+        DROP TRIGGER IF EXISTS mc_memories_facade_authority_update;
+        DROP TRIGGER IF EXISTS mc_memories_facade_authority_delete;
+        CREATE TRIGGER mc_memories_facade_authority_insert
+        BEFORE INSERT ON mc_memories
+        WHEN COALESCE((
+                 SELECT facade_authority_domain FROM mc_privilege_state WHERE id = 1
+             ), '') = 'memories'
+          AND EXISTS (
+              SELECT 1 FROM mc_authority_route_bindings binding
+              JOIN mc_authority authority
+                ON authority.context_store_uuid = binding.context_store_uuid
+               AND authority.project = binding.project
+             WHERE binding.route_project_root = COALESCE((
+                       SELECT facade_authority_route FROM mc_privilege_state WHERE id = 1
+                   ), '')
+               AND authority.domain = 'memories'
+               AND authority.project = NEW.project_path
+               AND authority.state != 'MODULE'
+          )
+        BEGIN SELECT RAISE(ABORT, 'authority_draining'); END;
+        CREATE TRIGGER mc_memories_facade_authority_update
+        BEFORE UPDATE ON mc_memories
+        WHEN COALESCE((
+                 SELECT facade_authority_domain FROM mc_privilege_state WHERE id = 1
+             ), '') = 'memories'
+          AND EXISTS (
+              SELECT 1 FROM mc_authority_route_bindings binding
+              JOIN mc_authority authority
+                ON authority.context_store_uuid = binding.context_store_uuid
+               AND authority.project = binding.project
+             WHERE binding.route_project_root = COALESCE((
+                       SELECT facade_authority_route FROM mc_privilege_state WHERE id = 1
+                   ), '')
+               AND authority.domain = 'memories'
+               AND authority.project IN (OLD.project_path, NEW.project_path)
+               AND authority.state != 'MODULE'
+          )
+        BEGIN SELECT RAISE(ABORT, 'authority_draining'); END;
+        CREATE TRIGGER mc_memories_facade_authority_delete
+        BEFORE DELETE ON mc_memories
+        WHEN COALESCE((
+                 SELECT facade_authority_domain FROM mc_privilege_state WHERE id = 1
+             ), '') = 'memories'
+          AND EXISTS (
+              SELECT 1 FROM mc_authority_route_bindings binding
+              JOIN mc_authority authority
+                ON authority.context_store_uuid = binding.context_store_uuid
+               AND authority.project = binding.project
+             WHERE binding.route_project_root = COALESCE((
+                       SELECT facade_authority_route FROM mc_privilege_state WHERE id = 1
+                   ), '')
+               AND authority.domain = 'memories'
+               AND authority.project = OLD.project_path
+               AND authority.state != 'MODULE'
+          )
+        BEGIN SELECT RAISE(ABORT, 'authority_draining'); END;
+
+        DROP TRIGGER IF EXISTS mc_notes_facade_authority_insert;
+        DROP TRIGGER IF EXISTS mc_notes_facade_authority_update;
+        DROP TRIGGER IF EXISTS mc_notes_facade_authority_delete;
+        CREATE TRIGGER mc_notes_facade_authority_insert
+        BEFORE INSERT ON mc_notes
+        WHEN COALESCE((
+                 SELECT facade_authority_domain FROM mc_privilege_state WHERE id = 1
+             ), '') = 'notes'
+          AND EXISTS (
+              SELECT 1 FROM mc_authority_route_bindings binding
+              JOIN mc_authority authority
+                ON authority.context_store_uuid = binding.context_store_uuid
+               AND authority.project = binding.project
+             WHERE binding.route_project_root = COALESCE((
+                       SELECT facade_authority_route FROM mc_privilege_state WHERE id = 1
+                   ), '')
+               AND authority.domain = 'notes'
+               AND authority.project = NEW.project_path
+               AND authority.state != 'MODULE'
+          )
+        BEGIN SELECT RAISE(ABORT, 'authority_draining'); END;
+        CREATE TRIGGER mc_notes_facade_authority_update
+        BEFORE UPDATE ON mc_notes
+        WHEN COALESCE((
+                 SELECT facade_authority_domain FROM mc_privilege_state WHERE id = 1
+             ), '') = 'notes'
+          AND EXISTS (
+              SELECT 1 FROM mc_authority_route_bindings binding
+              JOIN mc_authority authority
+                ON authority.context_store_uuid = binding.context_store_uuid
+               AND authority.project = binding.project
+             WHERE binding.route_project_root = COALESCE((
+                       SELECT facade_authority_route FROM mc_privilege_state WHERE id = 1
+                   ), '')
+               AND authority.domain = 'notes'
+               AND authority.project IN (OLD.project_path, NEW.project_path)
+               AND authority.state != 'MODULE'
+          )
+        BEGIN SELECT RAISE(ABORT, 'authority_draining'); END;
+        CREATE TRIGGER mc_notes_facade_authority_delete
+        BEFORE DELETE ON mc_notes
+        WHEN COALESCE((
+                 SELECT facade_authority_domain FROM mc_privilege_state WHERE id = 1
+             ), '') = 'notes'
+          AND EXISTS (
+              SELECT 1 FROM mc_authority_route_bindings binding
+              JOIN mc_authority authority
+                ON authority.context_store_uuid = binding.context_store_uuid
+               AND authority.project = binding.project
+             WHERE binding.route_project_root = COALESCE((
+                       SELECT facade_authority_route FROM mc_privilege_state WHERE id = 1
+                   ), '')
+               AND authority.domain = 'notes'
+               AND authority.project = OLD.project_path
+               AND authority.state != 'MODULE'
+          )
+        BEGIN SELECT RAISE(ABORT, 'authority_draining'); END;
+        "#,
+    },
 ];
 
 /// The highest `mc_cache` schema migration this binary ships.
@@ -6509,17 +6686,81 @@ impl<'a> FacadeMutationTxn<'a> {
     }
 }
 
-pub struct McStore {
+/// SQLite handle that copies process-local facade identity into a durable transaction row.
+///
+/// The singleton row is safe because SQLite allows only one writer, and its elevated values are
+/// cleared before commit. A second connection therefore sees only the committed empty state.
+struct ScopedSqliteStore {
     inner: SqliteStore,
+    note_caller_project: Arc<Mutex<Option<String>>>,
+    facade_authority_scope: Arc<Mutex<Option<FacadeAuthorityScope>>>,
+}
+
+impl std::ops::Deref for ScopedSqliteStore {
+    type Target = SqliteStore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl ScopedSqliteStore {
+    fn with_conn_fenced<T>(
+        &self,
+        operation: impl FnOnce(&rusqlite::Transaction<'_>) -> rusqlite::Result<T>,
+    ) -> Result<T, StoreError> {
+        let authority = self
+            .facade_authority_scope
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .filter(|scope| scope.owner == std::thread::current().id())
+            .map(|scope| (scope.domain.clone(), scope.route_project_root.clone()));
+        let note_caller = self
+            .note_caller_project
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if authority.is_none() && note_caller.is_none() {
+            return self.inner.with_conn_fenced(operation);
+        }
+        let (authority_domain, authority_route) = authority.unwrap_or_default();
+        let note_caller = note_caller.unwrap_or_default();
+        self.inner.with_conn_fenced(|tx| {
+            tx.execute(
+                "INSERT INTO mc_privilege_state(
+                     id, facade_authority_domain, facade_authority_route, note_caller_project
+                 ) VALUES (1, ?1, ?2, ?3)
+                 ON CONFLICT(id) DO UPDATE SET
+                     facade_authority_domain = excluded.facade_authority_domain,
+                     facade_authority_route = excluded.facade_authority_route,
+                     note_caller_project = excluded.note_caller_project",
+                params![authority_domain, authority_route, note_caller],
+            )?;
+            let result = operation(tx)?;
+            tx.execute(
+                "UPDATE mc_privilege_state
+                    SET facade_authority_domain = '',
+                        facade_authority_route = '',
+                        note_caller_project = ''
+                  WHERE id = 1",
+                [],
+            )?;
+            Ok(result)
+        })
+    }
+}
+
+pub struct McStore {
+    inner: ScopedSqliteStore,
     // Distinguishes independent stores in the process-local tag baseline cache. Production
     // opens one store for the module lifetime; tests and embedded callers may open several.
     tag_cache_namespace: u64,
-    /// The connection-local caller identity used by note ownership triggers. It is
-    /// installed only while a fenced note mutation is executing, so an unwrapped SQL
-    /// writer fails closed instead of inheriting a previous operation's project.
+    /// The process-local note caller copied into `mc_privilege_state` for each fenced write.
+    /// The legacy UDF reads the same scope while an old-shape store is migrating.
     note_caller_project: Arc<Mutex<Option<String>>>,
-    /// Facade scope is visible to SQLite triggers for the duration of a mutation. A separate
-    /// lock serializes scopes so one request cannot lend its authority identity to another.
+    /// Facade scope is copied into the durable privilege row for each write transaction. A
+    /// separate lock serializes scopes so one request cannot lend its authority to another.
     facade_authority_scope: Arc<Mutex<Option<FacadeAuthorityScope>>>,
     facade_mutation_lock: Mutex<()>,
     #[cfg(any(test, feature = "test-support"))]
@@ -6755,8 +6996,9 @@ impl McStore {
         let note_udf_scope = Arc::clone(&note_caller_project);
         let facade_domain_scope = Arc::clone(&facade_authority_scope);
         let facade_route_scope = Arc::clone(&facade_authority_scope);
-        // Register before migrations: migrations create triggers that call these functions,
-        // and the same connection must expose them before the first guarded write is possible.
+        // Register before migrations: stores below v53 still install the historical UDF-backed
+        // triggers before v53 replaces them. Keeping the functions registered also lets a new
+        // binary open an old-shape/store-ahead database without a bootstrap-only failure.
         inner.with_conn(move |conn| {
             conn.create_scalar_function(
                 "mc_note_caller_project",
@@ -6812,7 +7054,11 @@ impl McStore {
             );
         }
         let store = McStore {
-            inner,
+            inner: ScopedSqliteStore {
+                inner,
+                note_caller_project: Arc::clone(&note_caller_project),
+                facade_authority_scope: Arc::clone(&facade_authority_scope),
+            },
             tag_cache_namespace: NEXT_TAG_CACHE_NAMESPACE.fetch_add(1, Ordering::Relaxed),
             note_caller_project,
             facade_authority_scope,
@@ -7339,21 +7585,16 @@ impl McStore {
         caller_project: &str,
         operation: impl FnOnce(&rusqlite::Transaction<'_>) -> rusqlite::Result<T>,
     ) -> Result<T, McStoreError> {
-        let caller_project = caller_project.to_string();
-        let caller_scope = Arc::clone(&self.note_caller_project);
-        self.inner
-            .with_conn_fenced(|tx| {
-                let previous = caller_scope
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .replace(caller_project);
-                let result = operation(tx);
-                *caller_scope
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = previous;
-                result
-            })
-            .map_err(Into::into)
+        let previous = self
+            .note_caller_project
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .replace(caller_project.to_string());
+        let _scope_guard = FacadeNoteScopeGuard {
+            scope: &self.note_caller_project,
+            previous,
+        };
+        self.inner.with_conn_fenced(operation).map_err(Into::into)
     }
 
     /// The applied schema version of this store's `mc_cache` migration chain:
@@ -11139,6 +11380,10 @@ impl McStore {
                 projects
             };
             for note_project in note_projects {
+                tx.execute(
+                    "UPDATE mc_privilege_state SET note_caller_project = ?1 WHERE id = 1",
+                    params![note_project],
+                )?;
                 let previous_project = note_caller_project
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -11172,6 +11417,10 @@ impl McStore {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = previous_project;
                 copy_result?;
+                tx.execute(
+                    "UPDATE mc_privilege_state SET note_caller_project = '' WHERE id = 1",
+                    [],
+                )?;
             }
             tx.execute(
                 "INSERT INTO mc_compartments (
@@ -12029,9 +12278,9 @@ impl McStore {
                         )?;
                     } else {
                         tx.execute(
-                            "UPDATE mc_memories SET status = 'archived', updated_at = ?1 WHERE id = ?2",
-                            params![now_ms, memory.id],
-                        )?;
+                        "UPDATE mc_memories SET status = 'archived', updated_at = ?1 WHERE id = ?2",
+                        params![now_ms, memory.id],
+                    )?;
                     }
                     append_memory_mutation_tx(
                         tx,
@@ -21500,6 +21749,272 @@ mod tests {
         );
         assert_eq!(durable.compiled_at, Some(123));
         assert_eq!(durable.compile_status.as_deref(), Some("compiled"));
+    }
+
+    #[test]
+    fn unregistered_second_connection_uses_durable_privilege_state_guards() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.db");
+        let store = McStore::open(&descriptor(dir.path())).unwrap();
+        let memory_id = store
+            .insert_memory(InsertMemoryInput {
+                project_path: "authority-project",
+                route_project_root: None,
+                category: "CONSTRAINTS",
+                content: "guarded memory",
+                source_session_id: None,
+                source_type: Some("test"),
+                importance: Some(50),
+                expires_at: None,
+                metadata_json: None,
+                now_ms: 1,
+            })
+            .unwrap();
+        store
+            .with_facade_mutation("/unbound-route", "memories", || {
+                store.insert_memory(InsertMemoryInput {
+                    project_path: "/unbound-route",
+                    route_project_root: Some("/unbound-route"),
+                    category: "CONSTRAINTS",
+                    content: "successful facade write",
+                    source_session_id: None,
+                    source_type: Some("test"),
+                    importance: Some(50),
+                    expires_at: None,
+                    metadata_json: None,
+                    now_ms: 1,
+                })
+            })
+            .unwrap();
+        let cleared_scope = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT facade_authority_domain, facade_authority_route, note_caller_project
+                       FROM mc_privilege_state WHERE id = 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+            })
+            .unwrap();
+        assert_eq!(cleared_scope, (String::new(), String::new(), String::new()));
+        store
+            .inner
+            .with_conn_fenced(|tx| {
+                tx.execute(
+                    "INSERT INTO mc_authority(context_store_uuid, project, domain, state)
+                     VALUES ('context', 'authority-project', 'memories', 'DRAINING')",
+                    [],
+                )?;
+                tx.execute(
+                    "INSERT INTO mc_authority_route_bindings(
+                         route_project_root, context_store_uuid, project
+                     ) VALUES ('/route', 'context', 'authority-project')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let note_id = store
+            .insert_note(NoteInput {
+                project_path: "authority-project",
+                route_project_root: None,
+                session_id: "session",
+                content: "guarded note",
+                surface_condition: None,
+                anchor_block_id: None,
+                now_ms: 1,
+            })
+            .unwrap()
+            .id;
+
+        let second = rusqlite::Connection::open(path).unwrap();
+        second
+            .execute(
+                "UPDATE mc_memories SET created_at = 2 WHERE id = ?1",
+                params![memory_id],
+            )
+            .unwrap();
+        assert_eq!(
+            second
+                .query_row(
+                    "SELECT created_at FROM mc_memories WHERE id = ?1",
+                    params![memory_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+        second
+            .execute(
+                "UPDATE mc_notes SET created_at_ms = 2 WHERE id = ?1",
+                params![note_id],
+            )
+            .unwrap();
+        assert_eq!(
+            second
+                .query_row(
+                    "SELECT created_at_ms FROM mc_notes WHERE id = ?1",
+                    params![note_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+
+        let ownership_error = second
+            .execute(
+                "INSERT INTO mc_notes(type, project_path, content, status)
+                 VALUES ('smart', 'authority-project', 'plain writer', 'active')",
+                [],
+            )
+            .unwrap_err();
+        assert!(ownership_error
+            .to_string()
+            .contains("note ownership insert is outside the caller project"));
+
+        second.execute_batch("BEGIN IMMEDIATE").unwrap();
+        second
+            .execute(
+                "UPDATE mc_privilege_state
+                    SET facade_authority_domain = 'memories',
+                        facade_authority_route = '/route'
+                  WHERE id = 1",
+                [],
+            )
+            .unwrap();
+        let authority_error = second
+            .execute(
+                "UPDATE mc_memories SET content = 'facade write' WHERE id = ?1",
+                params![memory_id],
+            )
+            .unwrap_err();
+        assert!(authority_error.to_string().contains("authority_draining"));
+        second.execute_batch("ROLLBACK").unwrap();
+    }
+
+    #[test]
+    fn migration_53_replaces_legacy_udf_guards_and_store_ahead_does_not_recreate_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let descriptor = descriptor(dir.path());
+        let legacy = open_sqlite(&descriptor).unwrap();
+        legacy
+            .with_conn(|conn| {
+                conn.create_scalar_function(
+                    "mc_note_caller_project",
+                    0,
+                    FunctionFlags::SQLITE_UTF8,
+                    |_context| Ok("authority-project".to_string()),
+                )?;
+                conn.create_scalar_function(
+                    "mc_facade_authority_domain",
+                    0,
+                    FunctionFlags::SQLITE_UTF8,
+                    |_context| Ok(String::new()),
+                )?;
+                conn.create_scalar_function(
+                    "mc_facade_authority_route",
+                    0,
+                    FunctionFlags::SQLITE_UTF8,
+                    |_context| Ok(String::new()),
+                )
+            })
+            .unwrap();
+        let old_chain = &MIGRATIONS[..MIGRATIONS.len() - 1];
+        let old_outcome = legacy.migrate(NS, old_chain).unwrap();
+        assert!(!old_outcome.store_ahead());
+        drop(legacy);
+
+        let migrated = McStore::open(&descriptor).unwrap();
+        assert_eq!(
+            migrated.module_store_schema_version().unwrap(),
+            LATEST_MIGRATION_VERSION
+        );
+        let trigger_sql = migrated
+            .inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare(
+                    "SELECT sql FROM sqlite_master
+                       WHERE type = 'trigger'
+                         AND (name LIKE 'mc_%_facade_authority_%'
+                              OR name LIKE 'mc_notes_ownership_%')
+                       ORDER BY name",
+                )?;
+                let rows = statement
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .unwrap();
+        assert_eq!(trigger_sql.len(), 9);
+        for sql in &trigger_sql {
+            assert!(sql.contains("mc_privilege_state"));
+            assert!(!sql.contains("mc_facade_authority_domain()"));
+            assert!(!sql.contains("mc_facade_authority_route()"));
+            assert!(!sql.contains("mc_note_caller_project()"));
+        }
+        drop(migrated);
+
+        let rollback = open_sqlite(&descriptor).unwrap();
+        rollback
+            .with_conn(|conn| {
+                conn.create_scalar_function(
+                    "mc_note_caller_project",
+                    0,
+                    FunctionFlags::SQLITE_UTF8,
+                    |_context| Ok("authority-project".to_string()),
+                )?;
+                conn.create_scalar_function(
+                    "mc_facade_authority_domain",
+                    0,
+                    FunctionFlags::SQLITE_UTF8,
+                    |_context| Ok(String::new()),
+                )?;
+                conn.create_scalar_function(
+                    "mc_facade_authority_route",
+                    0,
+                    FunctionFlags::SQLITE_UTF8,
+                    |_context| Ok(String::new()),
+                )
+            })
+            .unwrap();
+        let rollback_outcome = rollback.migrate(NS, old_chain).unwrap();
+        assert!(rollback_outcome.store_ahead());
+        let rollback_trigger_sql = rollback
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT sql FROM sqlite_master
+                       WHERE type = 'trigger' AND name = 'mc_notes_ownership_insert'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+            })
+            .unwrap();
+        assert!(rollback_trigger_sql.contains("mc_privilege_state"));
+        assert!(!rollback_trigger_sql.contains("mc_note_caller_project()"));
+
+        // The store-ahead policy leaves v53's durable triggers intact instead of replaying the
+        // old definitions. An older writer still opens and registers its UDFs, but because it
+        // cannot populate mc_privilege_state, ownership-sensitive note writes fail closed. This
+        // known rollback limitation is why v53 requires a coordinated module bounce.
+        let rollback_error = rollback
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO mc_notes(type, project_path, content, status)
+                     VALUES ('smart', 'authority-project', 'rollback note', 'active')",
+                    [],
+                )
+            })
+            .unwrap_err();
+        assert!(rollback_error
+            .to_string()
+            .contains("note ownership insert is outside the caller project"));
     }
 
     #[test]

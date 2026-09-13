@@ -36,7 +36,18 @@ function moduleDatabase(): Database {
             session_id TEXT NOT NULL,
             sequence INTEGER NOT NULL,
             created_at INTEGER NOT NULL
-        )
+        );
+        CREATE TABLE mc_privilege_state (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            facade_authority_domain TEXT NOT NULL DEFAULT ''
+        );
+        INSERT INTO mc_privilege_state(id) VALUES (1);
+        CREATE TRIGGER mc_memories_facade_authority_update
+        BEFORE UPDATE ON mc_memories
+        WHEN COALESCE((
+                 SELECT facade_authority_domain FROM mc_privilege_state WHERE id = 1
+             ), '') = 'memories'
+        BEGIN SELECT RAISE(ABORT, 'authority_draining'); END
     `);
     return database;
 }

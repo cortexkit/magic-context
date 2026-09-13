@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import { getMagicContextStorageDir } from "../src/shared/data-path";
@@ -236,44 +236,10 @@ function loadRepairPlan(contextDb: Database, moduleDb: Database): PlannedRepair[
     });
 }
 
-export interface ModuleStoreRepairRow {
-    rowid: number;
-    createdAt: number;
-}
-
-/**
- * The module-store half of a plan: rows whose timestamps must be written into
- * store.db. Exposed so an external writer can apply it when this process cannot
- * (see `moduleStoreWriter: "external"` below).
- */
-export function moduleStoreRepairRows(contextDb: Database, moduleDb: Database): ModuleStoreRepairRow[] {
-    return loadRepairPlan(contextDb, moduleDb)
-        .filter(
-            (entry) =>
-                entry.source &&
-                entry.repairCreatedAt !== null &&
-                (entry.report.disposition === "repaired-from-compartment" ||
-                    entry.report.disposition === "repaired-from-neighbour"),
-        )
-        .map((entry) => ({ rowid: entry.source!.rowid, createdAt: entry.repairCreatedAt! }));
-}
-
 export function repairMirrorCreatedAt(
     contextDb: Database,
     moduleDb: Database,
-    options: {
-        apply: boolean;
-        /**
-         * "direct": this process updates store.db itself (works on a connection that
-         * exposes the module's guard UDFs, e.g. in tests that register them).
-         * "external": the module half was already applied by
-         * scripts/apply-module-store-timestamps.mjs; only the mirror is written here.
-         * The module store's authority triggers call connection-local SQLite functions
-         * that only the module (and node:sqlite with stubs) can provide; bun:sqlite
-         * cannot register functions, so a bun run must use "external".
-         */
-        moduleStoreWriter?: "direct" | "external";
-    },
+    options: { apply: boolean },
 ): MirrorCreatedAtRepairReport {
     const plan = loadRepairPlan(contextDb, moduleDb);
     if (!options.apply) {
@@ -287,7 +253,7 @@ export function repairMirrorCreatedAt(
             (entry.report.disposition === "repaired-from-compartment" ||
                 entry.report.disposition === "repaired-from-neighbour"),
     );
-    if (derivedRepairs.length > 0 && options.moduleStoreWriter !== "external") {
+    if (derivedRepairs.length > 0) {
         const updateModule = moduleDb.prepare(
             `UPDATE mc_memories
                 SET first_seen_at = CASE WHEN first_seen_at <= 0 THEN ? ELSE first_seen_at END,
@@ -378,14 +344,10 @@ export function formatMirrorCreatedAtRepairReport(report: MirrorCreatedAtRepairR
 
 function parseArgs(argv: string[]): {
     apply: boolean;
-    moduleStoreApplied: boolean;
-    planJsonPath: string | undefined;
     contextDbPath: string;
     moduleDbPath: string;
 } {
     let apply = false;
-    let moduleStoreApplied = false;
-    let planJsonPath: string | undefined;
     let explicitDryRun = false;
     let contextDbPath: string | undefined;
     let moduleDbPath: string | undefined;
@@ -397,17 +359,6 @@ function parseArgs(argv: string[]): {
         }
         if (arg === "--dry-run") {
             explicitDryRun = true;
-            continue;
-        }
-        if (arg === "--module-store-applied") {
-            moduleStoreApplied = true;
-            continue;
-        }
-        if (arg === "--plan-json") {
-            const value = argv[index + 1];
-            if (!value || value.startsWith("--")) throw new Error(`${arg} requires a path`);
-            planJsonPath = resolve(value);
-            index += 1;
             continue;
         }
         if (arg === "--context-db" || arg === "--module-db") {
@@ -424,8 +375,6 @@ function parseArgs(argv: string[]): {
     const storageDir = getMagicContextStorageDir();
     return {
         apply,
-        moduleStoreApplied,
-        planJsonPath,
         contextDbPath: contextDbPath ?? join(storageDir, "context.db"),
         moduleDbPath: moduleDbPath ?? join(storageDir, "store.db"),
     };
@@ -443,15 +392,7 @@ if (import.meta.main) {
         const contextDb = new Database(args.contextDbPath, args.apply ? undefined : { readonly: true });
         const moduleDb = new Database(args.moduleDbPath, args.apply ? undefined : { readonly: true });
         try {
-            if (args.planJsonPath) {
-                const rows = moduleStoreRepairRows(contextDb, moduleDb);
-                writeFileSync(args.planJsonPath, `${JSON.stringify({ moduleDbPath: args.moduleDbPath, rows })}\n`);
-                process.stdout.write(`module-store plan: ${rows.length} rows -> ${args.planJsonPath}\n`);
-            }
-            const report = repairMirrorCreatedAt(contextDb, moduleDb, {
-                apply: args.apply,
-                moduleStoreWriter: args.moduleStoreApplied ? "external" : "direct",
-            });
+            const report = repairMirrorCreatedAt(contextDb, moduleDb, { apply: args.apply });
             process.stdout.write(formatMirrorCreatedAtRepairReport(report));
         } finally {
             moduleDb.close();
