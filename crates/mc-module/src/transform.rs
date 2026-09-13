@@ -34559,7 +34559,7 @@ pub(crate) mod tests {
             &request.render_config,
             "mre2".to_string(),
             "cre2".to_string(),
-            String::new(),
+            "mpe1".to_string(),
             "tfe3".to_string(),
         );
         let new_identity = effective_render_config_with_epochs(
@@ -34567,7 +34567,7 @@ pub(crate) mod tests {
             &request.render_config,
             "mre2".to_string(),
             "cre2".to_string(),
-            String::new(),
+            "mpe1".to_string(),
             "tfe4".to_string(),
         );
         assert_ne!(old_identity, new_identity);
@@ -34725,6 +34725,95 @@ pub(crate) mod tests {
             one_shot.action, "SOFT+",
             "after last_render_config records mpe3, the profile fold must not loop"
         );
+    }
+
+    #[test]
+    fn tool_result_codec_profile_epochs_hard_once_then_restart_replay_identically() {
+        for profile in [SerializerProfile::OpencodeAiSdk, SerializerProfile::Pi] {
+            assert_eq!(crate::profile_render_epoch(profile), 1);
+            let dir = tempfile::tempdir().unwrap();
+            let session = format!("tool-result-epoch-{}", profile.wire_id());
+            let golden: Value = serde_json::from_str(include_str!(
+                "../testdata/codec/tool-result-child-parity.json"
+            ))
+            .unwrap();
+            let mut result_ingress = match profile {
+                SerializerProfile::OpencodeAiSdk => {
+                    crate::codec::decode_opencode(golden["opencode_messages"].as_array().unwrap())
+                        .messages
+                        .into_iter()
+                        .next()
+                        .unwrap()
+                }
+                SerializerProfile::Pi => {
+                    crate::codec::decode_pi(golden["pi_entries"].as_array().unwrap())
+                        .messages
+                        .into_iter()
+                        .next()
+                        .unwrap()
+                }
+                _ => unreachable!(),
+            };
+            result_ingress
+                .ck
+                .content
+                .retain(|block| matches!(&block.kind, ck_wire::CkKind::ToolResult { .. }));
+            result_ingress.ck.role = "tool".to_string();
+            result_ingress.mid = "m2".to_string();
+            result_ingress.ordinal = 2;
+            result_ingress.ck.meta.harness_id = Some("m2".to_string());
+            result_ingress.ck.meta.ordinal = Some(2);
+            let request = profile_req(
+                profile,
+                &session,
+                "cfg0",
+                vec![wire_tool_call("m1", 1, "call-parity"), result_ingress],
+            );
+            let transitioned_bytes;
+            {
+                let s = store(dir.path());
+                s.replace_compartments(&session, &[comp(1, 1, 2, "m2", "SUMMARY")])
+                    .unwrap();
+                assert_eq!(run(&s, &request, &spine()).action, "HARD");
+
+                let mut loaded = s.load(&session).unwrap();
+                loaded.meta.last_render_config = global_epoch_effective_render_config(&s, "cfg0");
+                loaded
+                    .core
+                    .frozen_units
+                    .iter_mut()
+                    .find(|unit| unit.key == "m0")
+                    .unwrap()
+                    .frozen_payload = "PRE-CHANGE-TOOL-RESULT-CHILD-BYTES".to_string();
+                s.commit(&session, loaded.row_version, &loaded.core, &loaded.meta)
+                    .unwrap();
+
+                let transitioned = run(&s, &request, &spine());
+                assert_eq!(transitioned.action, "HARD");
+                assert_eq!(
+                    transitioned.materialize_reason.as_deref(),
+                    Some("epoch_change")
+                );
+                assert!(!m0_bytes(&transitioned).contains("PRE-CHANGE-TOOL-RESULT-CHILD-BYTES"));
+                transitioned_bytes = serde_json::to_vec(transitioned.messages()).unwrap();
+
+                let defer = run(&s, &request, &spine());
+                assert_eq!(defer.action, "SOFT+");
+                assert!(!defer.committed);
+                assert_eq!(
+                    serde_json::to_vec(defer.messages()).unwrap(),
+                    transitioned_bytes
+                );
+            }
+
+            let restarted = run(&store(dir.path()), &request, &spine());
+            assert_eq!(restarted.action, "SOFT+");
+            assert!(!restarted.committed);
+            assert_eq!(
+                serde_json::to_vec(restarted.messages()).unwrap(),
+                transitioned_bytes
+            );
+        }
     }
 
     #[test]

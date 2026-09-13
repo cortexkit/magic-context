@@ -1,0 +1,50 @@
+{
+  "opencode_messages": [
+    {
+      "info": {
+        "id": "tool-result-child-parity",
+        "role": "assistant"
+      },
+      "parts": [
+        {
+          "type": "tool",
+          "callID": "call-parity",
+          "tool": "inspect",
+          "state": {
+            "status": "completed",
+            "input": {},
+            "output": "",
+            "attachments": [
+              { "type": "text", "text": "shared text" },
+              {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": "c2hhcmVkLWltYWdl"
+              },
+              { "type": "text", "text": { "malformed": true } },
+              { "type": "image", "mimeType": "image/png", "data": 17 }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "pi_entries": [
+    {
+      "role": "toolResult",
+      "toolCallId": "call-parity",
+      "toolName": "inspect",
+      "isError": false,
+      "content": [
+        { "type": "text", "text": "shared text" },
+        {
+          "type": "image",
+          "mimeType": "image/png",
+          "data": "c2hhcmVkLWltYWdl"
+        },
+        { "type": "text", "text": { "malformed": true } },
+        { "type": "image", "mimeType": "image/png", "data": 17 }
+      ]
+    }
+  ]
+}

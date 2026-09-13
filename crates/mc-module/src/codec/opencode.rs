@@ -10,6 +10,7 @@ use crate::ck_wire::{
 };
 use crate::injection::SYNTHETIC_TIMESTAMP;
 
+use super::common::{classify_tool_result_child, ToolResultChildAdapter};
 use super::sidecar::{
     block_is_unchanged, decoded_block_fingerprint, is_synthetic_part, match_block_metas,
     meta_for_ck, stable_hash_prefix, stamp_block_identity, BlockMeta, DecodeSidecar,
@@ -708,37 +709,13 @@ fn tool_output_from_part(part: &Value, is_error: bool, output_text: String) -> C
         });
     }
     for attachment in attachments {
-        if !attachment.is_object() {
-            continue;
-        }
         let mut provider_extras = ProviderExtras::new();
         provider_extras
             .entry(HARNESS.to_string())
             .or_default()
             .insert("rawAttachment".to_string(), attachment.clone());
-        let has_media_shape = attachment.get("mime").is_some()
-            || attachment.get("mimeType").is_some()
-            || matches!(
-                attachment.get("type").and_then(Value::as_str),
-                Some("file" | "image")
-            );
-        let kind = if has_media_shape {
-            ResultBlockKind::Media {
-                media: media_from_part(attachment),
-            }
-        } else {
-            ResultBlockKind::Opaque {
-                opaque: OpaqueBlock {
-                    source: json!({ "type": "harness", "harness": HARNESS }),
-                    kind: string_field(attachment, "type")
-                        .unwrap_or_else(|| "attachment".to_string()),
-                    raw: attachment.clone(),
-                    arc: None,
-                },
-            }
-        };
         blocks.push(ResultBlock {
-            kind,
+            kind: classify_tool_result_child(attachment, ToolResultChildAdapter::OpenCode),
             provider_extras,
         });
     }
@@ -1354,6 +1331,13 @@ fn output_status_text(output: &CkToolOutput) -> (&'static str, String) {
         CkOutputKind::Content { blocks } | CkOutputKind::ErrorContent { blocks } => {
             let text = blocks
                 .iter()
+                .filter(|block| {
+                    block
+                        .provider_extras
+                        .get(HARNESS)
+                        .and_then(|namespace| namespace.get("rawAttachment"))
+                        .is_none()
+                })
                 .filter_map(|block| match &block.kind {
                     ResultBlockKind::Text { text } => Some(text.as_str()),
                     _ => None,
@@ -1378,11 +1362,30 @@ fn output_attachments(output: &CkToolOutput) -> Vec<Value> {
     blocks
         .iter()
         .filter_map(|block| match &block.kind {
-            ResultBlockKind::Text { .. } => None,
+            ResultBlockKind::Text { text } => render_tool_text_attachment(block, text),
             ResultBlockKind::Media { media } => Some(render_tool_attachment(block, media)),
             ResultBlockKind::Opaque { opaque } => Some(opaque.raw.clone()),
         })
         .collect()
+}
+
+fn render_tool_text_attachment(block: &ResultBlock, text: &str) -> Option<Value> {
+    let mut retained = block
+        .provider_extras
+        .get(HARNESS)
+        .and_then(|namespace| namespace.get("rawAttachment"))
+        .cloned()?;
+    if retained.get("type").and_then(Value::as_str) == Some("text")
+        && retained.get("text").and_then(Value::as_str) == Some(text)
+    {
+        return Some(retained);
+    }
+    let Some(object) = retained.as_object_mut() else {
+        return Some(json!({ "type": "text", "text": text }));
+    };
+    object.insert("type".to_string(), Value::String("text".to_string()));
+    object.insert("text".to_string(), Value::String(text.to_string()));
+    Some(retained)
 }
 
 fn render_tool_attachment(block: &ResultBlock, media: &MediaBlock) -> Value {
@@ -2801,6 +2804,61 @@ mod tests {
             "§5548§ All three match the live keystore..."
         );
         assert_eq!(parts[3]["callID"], "toolu_019MxMREqQYT875aJy8Q5w6W");
+    }
+
+    #[test]
+    fn malformed_tool_attachments_round_trip_as_opaque_bytes() {
+        let raw = vec![json!({
+            "info": { "id": "malformed-attachments", "role": "assistant" },
+            "parts": [{
+                "type": "tool",
+                "callID": "call-malformed",
+                "tool": "inspect",
+                "state": {
+                    "status": "completed",
+                    "input": {},
+                    "output": "",
+                    "attachments": [
+                        {
+                            "type": "text",
+                            "text": { "not": "a string" },
+                            "vendor": [3, 2, 1]
+                        },
+                        {
+                            "type": "image",
+                            "mime": "image/png",
+                            "url": 17,
+                            "vendor": { "keep": true }
+                        }
+                    ]
+                }
+            }]
+        })];
+        let ingress_bytes =
+            serde_json::to_vec(&raw[0]["parts"][0]["state"]["attachments"]).unwrap();
+        let decoded = decode_opencode(&raw);
+        let mut message = decoded.messages[0].ck.clone();
+        let result = message
+            .content
+            .iter_mut()
+            .find(|block| matches!(&block.kind, CkKind::ToolResult { .. }))
+            .expect("tool result");
+        let CkKind::ToolResult { output, .. } = &result.kind else {
+            unreachable!();
+        };
+        let CkOutputKind::Content { blocks } = &output.kind else {
+            panic!("malformed attachments must remain structured content");
+        };
+        assert!(blocks
+            .iter()
+            .all(|block| matches!(block.kind, ResultBlockKind::Opaque { .. })));
+        result.mark_modified();
+        message.mark_modified();
+
+        let encoded = encode_opencode(&[message], &decoded.sidecar, None);
+        let replay_bytes =
+            serde_json::to_vec(&encoded[0]["parts"][0]["state"]["attachments"]).unwrap();
+        assert_eq!(replay_bytes, ingress_bytes);
     }
 
     #[test]

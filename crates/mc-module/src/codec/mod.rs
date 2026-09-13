@@ -1,3 +1,4 @@
+mod common;
 pub mod opencode;
 pub mod pi;
 pub mod sidecar;
@@ -17,7 +18,7 @@ mod tests {
     use serde::Deserialize;
     use serde_json::{json, Value};
 
-    use crate::ck_wire::CkWireMessage;
+    use crate::ck_wire::{CkKind, CkOutputKind, CkWireMessage, ResultBlockKind};
     use crate::injection::build_synthetic_todo_pair;
     use crate::test_support::FixtureBuilder;
 
@@ -49,6 +50,12 @@ mod tests {
     #[derive(Deserialize)]
     struct PiCase {
         entries: Vec<Value>,
+    }
+
+    #[derive(Deserialize)]
+    struct ToolResultChildParityGolden {
+        opencode_messages: Vec<Value>,
+        pi_entries: Vec<Value>,
     }
 
     #[test]
@@ -210,6 +217,78 @@ mod tests {
             assert_eq!(encoded, encoded_again);
             assert_eq!(encoded, strip_pi_compaction(case.entries));
         }
+    }
+
+    #[test]
+    fn tool_result_child_classification_matches_across_adapters() {
+        let golden: ToolResultChildParityGolden = serde_json::from_str(include_str!(
+            "../../testdata/codec/tool-result-child-parity.json"
+        ))
+        .unwrap();
+        let opencode = decode_opencode(&golden.opencode_messages);
+        let pi = decode_pi(&golden.pi_entries);
+
+        let result_blocks = |messages: &[crate::ck_wire::CkIngressMessage]| {
+            messages
+                .iter()
+                .flat_map(|message| message.ck.content.iter())
+                .find_map(|block| match &block.kind {
+                    CkKind::ToolResult { output, .. } => match &output.kind {
+                        CkOutputKind::Content { blocks }
+                        | CkOutputKind::ErrorContent { blocks } => Some(blocks.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .expect("fixture must decode to structured tool-result content")
+        };
+        let opencode_blocks = result_blocks(&opencode.messages);
+        let pi_blocks = result_blocks(&pi.messages);
+        let kind_vector = |blocks: &[crate::ck_wire::ResultBlock]| {
+            blocks
+                .iter()
+                .map(|block| match &block.kind {
+                    ResultBlockKind::Text { .. } => "text",
+                    ResultBlockKind::Media { .. } => "media",
+                    ResultBlockKind::Opaque { .. } => "opaque",
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(kind_vector(&opencode_blocks), kind_vector(&pi_blocks));
+        assert_eq!(
+            kind_vector(&opencode_blocks),
+            vec!["text", "media", "opaque", "opaque"]
+        );
+        assert!(matches!(
+            (&opencode_blocks[0].kind, &pi_blocks[0].kind),
+            (
+                ResultBlockKind::Text { text: opencode_text },
+                ResultBlockKind::Text { text: pi_text }
+            ) if opencode_text == pi_text
+        ));
+
+        let mut opencode_message = opencode.messages[0].ck.clone();
+        opencode_message
+            .content
+            .iter_mut()
+            .find(|block| matches!(&block.kind, CkKind::ToolResult { .. }))
+            .unwrap()
+            .mark_modified();
+        opencode_message.mark_modified();
+        let opencode_encoded = encode_opencode(&[opencode_message], &opencode.sidecar, None);
+        let opencode_children = &opencode_encoded[0]["parts"][0]["state"]["attachments"];
+
+        let mut pi_message = pi.messages[0].ck.clone();
+        pi_message.content[0].mark_modified();
+        pi_message.mark_modified();
+        let pi_encoded = encode_pi(&[pi_message], &pi.sidecar);
+        let pi_children = &pi_encoded[0]["content"];
+
+        assert_eq!(
+            serde_json::to_vec(opencode_children).unwrap(),
+            serde_json::to_vec(pi_children).unwrap()
+        );
     }
 
     #[test]
