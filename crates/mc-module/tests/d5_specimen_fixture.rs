@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 const DB_SHA256: &str = "f589668287f41abaeb2a6526ee6d6f9d162e7ed80b1650f1ca5ec0a45984b8c0";
 const CAPTURE_SHA256: &str = "766c26e1fab1129e0866e275c22d79e111a4382140f4334095279c46f26f526b";
-const INDEX_SHA256: &str = "db1bfb2367cfaefcc9c047d439442ab2c1e3cfb8b4466a96c3ade218516ef000";
+const INDEX_SHA256: &str = "54cd51a54920ebefde642e63f3af85273230d3d08a82fe4a5114230c14f33b0b";
 const CANONICAL_VECTORS_SHA256: &str =
     "8fc5b1b90997378941534bd5a0d88bebd6b10282f030ad25315612d77285f012";
 const DIGEST_PLACEHOLDER: &str = "<computed-by-slice-0>";
@@ -602,12 +602,14 @@ fn d5_fixture_index_pins_every_sibling_and_scans_for_secrets() {
             "{name} size"
         );
         assert_eq!(text(&entry["sha256"]), sha256_hex(&bytes), "{name} digest");
-        if name == "canonical-json-vectors-v1.json" {
+        if name == "canonical-json-vectors-v1.json" || name == "redeem-vectors-v1.json" {
             assert_eq!(entry["derived"], Value::Bool(false));
-            assert_eq!(
-                text(&entry["source"]),
+            let expected_source = if name == "canonical-json-vectors-v1.json" {
                 "hand-written independent canonical-form vectors"
-            );
+            } else {
+                "owner-authored D5 redeem contract vectors"
+            };
+            assert_eq!(text(&entry["source"]), expected_source);
         } else {
             assert_eq!(entry["derived"], Value::Bool(true));
             assert_eq!(text(&entry["source"]), format!("VACUUM {DB_SHA256}"));

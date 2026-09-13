@@ -1,0 +1,1393 @@
+{
+  "schema": "mc.d5.redeem-vectors.v1",
+  "encoding_rule": {
+    "lineage_request": "Internally tagged JSON object with discriminator op; redeem fields are siblings of op with no args wrapper.",
+    "lineage_response": "Externally keyed operation object {\"redeem\":{\"result\":...}}, following clause 2 wording redeem {result: RedeemResult}.",
+    "nested_unions": "Internally tagged JSON objects with discriminator kind; unit Role and BlockKind enums are strings; Option none is null in these complete vectors.",
+    "implementation_status": "No D5 lineage serializer exists at this baseline; this is the pinned rule slice 2 must implement."
+  },
+  "serde_evidence": [
+    {
+      "path": "crates/mc-module/src/tail_hygiene.rs",
+      "lines": "1212-1238",
+      "finding": "The module test fixture uses #[serde(tag = \"type\", rename_all = \"snake_case\")] for an internally tagged payload union."
+    },
+    {
+      "path": "crates/mc-module/src/lib.rs",
+      "lines": "793-863",
+      "finding": "The current facade state-sync request is a struct, not a lineage operation union; no contrary LineageRequest serializer is present."
+    }
+  ],
+  "sealed_scope": {
+    "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+    "recognition_token": "aaisem2ekvthpcezvk5q",
+    "stored_edge": {
+      "edge_id": "11111111-2222-4333-8444-555555555555",
+      "predecessor_key": "session-predecessor-0001",
+      "successor_key": "session-successor-0001",
+      "agent": "agent-main",
+      "F": {
+        "digest": "8273dd5001275e071997f82a4d46744d643b5ae58748b5852d3d05e204189103",
+        "normalization_version": 1,
+        "excluded_additions": []
+      },
+      "lineage_id": "22222222-3333-4444-8555-666666666666",
+      "continuation_identity": {
+        "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+        "recognition_token": "aaisem2ekvthpcezvk5q"
+      },
+      "native_continuation_identity": {
+        "mid": "mid-successor-user-0001",
+        "index": 0,
+        "ordinal": 1940
+      }
+    },
+    "fence_generation": 12
+  },
+  "token_values": [
+    {
+      "recognition_token": "aaisem2ekvthpcezvk5q",
+      "input_96_bits_hex": "00112233445566778899aabb",
+      "round_trip_matches_input": true
+    },
+    {
+      "recognition_token": "77xn3tf3vkmyq53gkvca",
+      "input_96_bits_hex": "ffeeddccbbaa998877665544",
+      "round_trip_matches_input": true
+    },
+    {
+      "recognition_token": "caqdaqcqmbyibefawdaa",
+      "input_96_bits_hex": "102030405060708090a0b0c0",
+      "round_trip_matches_input": true
+    }
+  ],
+  "precedence_table": [
+    {
+      "row_id": "P01_absent_scope",
+      "priority": 1,
+      "preconditions": {
+        "scope_state": "absent",
+        "observation_class": "any",
+        "candidate_relation": "any"
+      },
+      "expected_variant": "REFUSED",
+      "expected_reason_or_cause": "resolved_absent"
+    },
+    {
+      "row_id": "P02_redeemed_matching_candidate_and_marker",
+      "priority": 2,
+      "preconditions": {
+        "scope_state": "REDEEMED",
+        "observation_class": "single_valid_stored_marker",
+        "candidate_relation": "stored_edge_equal"
+      },
+      "expected_variant": "REDEEMED",
+      "expected_reason_or_cause": null
+    },
+    {
+      "row_id": "P03_redeemed_matching_candidate_negative_observation",
+      "priority": 3,
+      "preconditions": {
+        "scope_state": "REDEEMED",
+        "observation_class": "negative",
+        "candidate_relation": "stored_edge_equal"
+      },
+      "expected_variant": "REFUSED",
+      "expected_reason_or_cause": "already_redeemed"
+    },
+    {
+      "row_id": "P04_redeemed_different_candidate",
+      "priority": 4,
+      "preconditions": {
+        "scope_state": "REDEEMED",
+        "observation_class": "any",
+        "candidate_relation": "different"
+      },
+      "expected_variant": "REFUSED",
+      "expected_reason_or_cause": "already_redeemed"
+    },
+    {
+      "row_id": "P05_redeemed_no_candidate",
+      "priority": 5,
+      "preconditions": {
+        "scope_state": "REDEEMED",
+        "observation_class": "any",
+        "candidate_relation": "absent"
+      },
+      "expected_variant": "REFUSED",
+      "expected_reason_or_cause": "already_redeemed"
+    },
+    {
+      "row_id": "P06_sealed_wrong_token_with_candidate",
+      "priority": 6,
+      "preconditions": {
+        "scope_state": "SEALED",
+        "observation_class": "same_receipt_wrong_token",
+        "candidate_relation": "present"
+      },
+      "expected_variant": "REFUSED",
+      "expected_reason_or_cause": "seal_material_mismatch"
+    },
+    {
+      "row_id": "P07_sealed_candidate_without_single_valid_marker",
+      "priority": 7,
+      "preconditions": {
+        "scope_state": "SEALED",
+        "observation_class": "negative",
+        "candidate_relation": "present"
+      },
+      "expected_variant": "REFUSED",
+      "expected_reason_or_cause": "invalid_arguments"
+    },
+    {
+      "row_id": "P08_sealed_candidate_marker_identity_mismatch",
+      "priority": 8,
+      "preconditions": {
+        "scope_state": "SEALED",
+        "observation_class": "single_valid_stored_marker",
+        "candidate_relation": "continuation_identity_mismatch"
+      },
+      "expected_variant": "REFUSED",
+      "expected_reason_or_cause": "invalid_arguments"
+    },
+    {
+      "row_id": "P09_sealed_candidate_native_identity_mismatch",
+      "priority": 9,
+      "preconditions": {
+        "scope_state": "SEALED",
+        "observation_class": "single_valid_stored_marker",
+        "candidate_relation": "native_identity_mismatch"
+      },
+      "expected_variant": "REFUSED",
+      "expected_reason_or_cause": "invalid_arguments"
+    },
+    {
+      "row_id": "P10_sealed_no_candidate_block",
+      "priority": 10,
+      "preconditions": {
+        "scope_state": "SEALED",
+        "observation_class": "no_candidate_block",
+        "candidate_relation": "absent"
+      },
+      "expected_variant": "UNRECOGNIZED",
+      "expected_reason_or_cause": "no_candidate_block"
+    },
+    {
+      "row_id": "P11_sealed_no_marker",
+      "priority": 11,
+      "preconditions": {
+        "scope_state": "SEALED",
+        "observation_class": "no_marker",
+        "candidate_relation": "absent"
+      },
+      "expected_variant": "UNRECOGNIZED",
+      "expected_reason_or_cause": "no_marker"
+    },
+    {
+      "row_id": "P12_sealed_malformed_marker",
+      "priority": 12,
+      "preconditions": {
+        "scope_state": "SEALED",
+        "observation_class": "malformed_marker",
+        "candidate_relation": "absent"
+      },
+      "expected_variant": "UNRECOGNIZED",
+      "expected_reason_or_cause": "malformed_marker"
+    },
+    {
+      "row_id": "P13_sealed_duplicate_valid_marker",
+      "priority": 13,
+      "preconditions": {
+        "scope_state": "SEALED",
+        "observation_class": "duplicate_marker",
+        "candidate_relation": "absent"
+      },
+      "expected_variant": "UNRECOGNIZED",
+      "expected_reason_or_cause": "duplicate_marker"
+    },
+    {
+      "row_id": "P14_sealed_foreign_receipt",
+      "priority": 14,
+      "preconditions": {
+        "scope_state": "SEALED",
+        "observation_class": "foreign_marker",
+        "candidate_relation": "absent"
+      },
+      "expected_variant": "UNRECOGNIZED",
+      "expected_reason_or_cause": "foreign_marker"
+    },
+    {
+      "row_id": "P15_sealed_positive",
+      "priority": 15,
+      "preconditions": {
+        "scope_state": "SEALED",
+        "observation_class": "single_valid_stored_marker",
+        "candidate_relation": "observation_consistent"
+      },
+      "expected_variant": "REDEEMED",
+      "expected_reason_or_cause": null
+    }
+  ],
+  "vectors": [
+    {
+      "id": "V01",
+      "name": "empty user content",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "",
+        "scanned_bytes_sha256": null
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": null,
+          "scanned_bytes_sha256": null,
+          "scanned_role": "user",
+          "scanned_kind": null,
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "no_candidate_block"
+          },
+          "observed_markers": [],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": null
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "UNRECOGNIZED",
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "cause": "no_candidate_block"
+          }
+        }
+      },
+      "precedence_row": "P10_sealed_no_candidate_block"
+    },
+    {
+      "id": "V02",
+      "name": "no user message",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": null,
+        "scanned_bytes_sha256": null
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": null,
+          "scanned_bytes_sha256": null,
+          "scanned_role": null,
+          "scanned_kind": null,
+          "native_user_index": null,
+          "scan_source": {
+            "kind": "no_candidate_block"
+          },
+          "observed_markers": [],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": null
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "UNRECOGNIZED",
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "cause": "no_candidate_block"
+          }
+        }
+      },
+      "precedence_row": "P10_sealed_no_candidate_block"
+    },
+    {
+      "id": "V03",
+      "name": "text without marker",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "ordinary successor text",
+        "scanned_bytes_sha256": "b5e985fc72446c6d4822c80b4f3c2f133cf0a1bf61a8a771cc0d996dbfc8b81b"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "b5e985fc72446c6d4822c80b4f3c2f133cf0a1bf61a8a771cc0d996dbfc8b81b",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": null
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "UNRECOGNIZED",
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "cause": "no_marker"
+          }
+        }
+      },
+      "precedence_row": "P11_sealed_no_marker"
+    },
+    {
+      "id": "V04",
+      "name": "malformed marker missing leading space",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "d0e9022d3e64175b7afcb88b6af336b571f098c9a0ec6629f31c25c434eb0b05"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "d0e9022d3e64175b7afcb88b6af336b571f098c9a0ec6629f31c25c434eb0b05",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "malformed",
+              "token_prefix": "mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q"
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": null
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "UNRECOGNIZED",
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "cause": "malformed_marker"
+          }
+        }
+      },
+      "precedence_row": "P12_sealed_malformed_marker"
+    },
+    {
+      "id": "V05",
+      "name": "malformed marker wrong length",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": " mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5",
+        "scanned_bytes_sha256": "7d1662d8b509b836abb25fd11f192d5a4abcba95b0335bba9e053a1489f72cc6"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "7d1662d8b509b836abb25fd11f192d5a4abcba95b0335bba9e053a1489f72cc6",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "malformed",
+              "token_prefix": " mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5"
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": null
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "UNRECOGNIZED",
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "cause": "malformed_marker"
+          }
+        }
+      },
+      "precedence_row": "P12_sealed_malformed_marker"
+    },
+    {
+      "id": "V06",
+      "name": "malformed marker non-canonical base32",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": " mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5b",
+        "scanned_bytes_sha256": "32e479864a14b5b0892dbb19b6b641aeb370bb6e252ea5187be3750a7d3026f0"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "32e479864a14b5b0892dbb19b6b641aeb370bb6e252ea5187be3750a7d3026f0",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "malformed",
+              "token_prefix": " mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5b"
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": null
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "UNRECOGNIZED",
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "cause": "malformed_marker"
+          }
+        }
+      },
+      "precedence_row": "P12_sealed_malformed_marker"
+    },
+    {
+      "id": "V07",
+      "name": "malformed marker non-lowercase base32",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": " mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:AAISEM2EKVTHPCEZVK5Q",
+        "scanned_bytes_sha256": "1ce6024262d53d4b48504c2a5943b53e4d7975d70e78f2bce897e086684eb7be"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "1ce6024262d53d4b48504c2a5943b53e4d7975d70e78f2bce897e086684eb7be",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "malformed",
+              "token_prefix": " mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:AAISEM2EKVTHPCEZVK5Q"
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": null
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "UNRECOGNIZED",
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "cause": "malformed_marker"
+          }
+        }
+      },
+      "precedence_row": "P12_sealed_malformed_marker"
+    },
+    {
+      "id": "V08",
+      "name": "malformed marker bad UUID form",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": " mc-d5:0f5c2d7e12344abc8def0123456789abxxxx:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "3cc9d2cc9c761d04d6a2f7fc7ae0542bb7df6995b73394fb305941392d5a2623"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "3cc9d2cc9c761d04d6a2f7fc7ae0542bb7df6995b73394fb305941392d5a2623",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "malformed",
+              "token_prefix": " mc-d5:0f5c2d7e12344abc8def0123456789abxxxx:aaisem2ekvthpcezvk5q"
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": null
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "UNRECOGNIZED",
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "cause": "malformed_marker"
+          }
+        }
+      },
+      "precedence_row": "P12_sealed_malformed_marker"
+    },
+    {
+      "id": "V09",
+      "name": "duplicate valid marker",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "duplicate mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "d27549779b71725933917c11e8f98ab344da3e0df6157a3704a79121d161e4c9"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "d27549779b71725933917c11e8f98ab344da3e0df6157a3704a79121d161e4c9",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            },
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": null
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "UNRECOGNIZED",
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "cause": "duplicate_marker"
+          }
+        }
+      },
+      "precedence_row": "P13_sealed_duplicate_valid_marker"
+    },
+    {
+      "id": "V10",
+      "name": "foreign receipt marker",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "foreign mc-d5:8d1bb6a0-5678-4cde-9abc-fedcba987654:caqdaqcqmbyibefawdaa",
+        "scanned_bytes_sha256": "69b3dea78b1b1b082a94e8a3a7732adbd0a4e0d5977de3053c79b8a0b9ba8092"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "69b3dea78b1b1b082a94e8a3a7732adbd0a4e0d5977de3053c79b8a0b9ba8092",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "8d1bb6a0-5678-4cde-9abc-fedcba987654",
+                "recognition_token": "caqdaqcqmbyibefawdaa"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": null
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "UNRECOGNIZED",
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "cause": "foreign_marker"
+          }
+        }
+      },
+      "precedence_row": "P14_sealed_foreign_receipt"
+    },
+    {
+      "id": "V11",
+      "name": "wrong token with candidate",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "wrong token mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:77xn3tf3vkmyq53gkvca",
+        "scanned_bytes_sha256": "f78c27816902a05a9931ed12dcbb591cf1c5f8748fdd03372b968233c3cf0226"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "f78c27816902a05a9931ed12dcbb591cf1c5f8748fdd03372b968233c3cf0226",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "77xn3tf3vkmyq53gkvca"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "77xn3tf3vkmyq53gkvca"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "seal_material_mismatch",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "field",
+                "field": "recognition_token",
+                "reason": "marker token does not match sealed receipt"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P06_sealed_wrong_token_with_candidate"
+    },
+    {
+      "id": "V12",
+      "name": "candidate without valid marker",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "candidate but no marker",
+        "scanned_bytes_sha256": "49d02d2123f0f7a4e805d3fd2c9815e95870192e1173bcaaf592598ffe74097d"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "49d02d2123f0f7a4e805d3fd2c9815e95870192e1173bcaaf592598ffe74097d",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "invalid_arguments",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "field",
+                "field": "candidate",
+                "reason": "candidate requires one valid scoped marker"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P07_sealed_candidate_without_single_valid_marker"
+    },
+    {
+      "id": "V13",
+      "name": "candidate observation identity mismatch",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "marker identity mismatch mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "a7568bbf493a3b5ab5dee55be88ddcf43d24aa30afe8473ab7b70037a7f64eb2"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "a7568bbf493a3b5ab5dee55be88ddcf43d24aa30afe8473ab7b70037a7f64eb2",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "77xn3tf3vkmyq53gkvca"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "invalid_arguments",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "field",
+                "field": "candidate.continuation_identity",
+                "reason": "candidate marker identity differs from observation"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P08_sealed_candidate_marker_identity_mismatch"
+    },
+    {
+      "id": "V14",
+      "name": "candidate native identity mismatch",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "native identity mismatch mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "224eb26348d273e251ced70b6197fecfc87b507f6e84df465148a90ccd69e97b"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "224eb26348d273e251ced70b6197fecfc87b507f6e84df465148a90ccd69e97b",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "text_block"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0002",
+            "index": 1,
+            "ordinal": 1941
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "invalid_arguments",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "field",
+                "field": "candidate.native_continuation_identity",
+                "reason": "candidate native identity differs from scanned identity"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P09_sealed_candidate_native_identity_mismatch"
+    },
+    {
+      "id": "V15",
+      "name": "positive redemption",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "positive successor mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REDEEMED",
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "edge": {
+              "edge_id": "11111111-2222-4333-8444-555555555555",
+              "predecessor_key": "session-predecessor-0001",
+              "successor_key": "session-successor-0001",
+              "agent": "agent-main",
+              "F": {
+                "digest": "8273dd5001275e071997f82a4d46744d643b5ae58748b5852d3d05e204189103",
+                "normalization_version": 1,
+                "excluded_additions": []
+              },
+              "lineage_id": "22222222-3333-4444-8555-666666666666",
+              "continuation_identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              },
+              "native_continuation_identity": {
+                "mid": "mid-successor-user-0001",
+                "index": 0,
+                "ordinal": 1940
+              }
+            },
+            "existing": false,
+            "fence_generation": 12
+          }
+        }
+      },
+      "precedence_row": "P15_sealed_positive"
+    },
+    {
+      "id": "V16",
+      "name": "replay matching candidate and marker",
+      "scope_state": "REDEEMED",
+      "scanned_material": {
+        "source_text": "replay successor mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "b6cfa0defcc071962ec8ccfe0acb4ee6541af671ef0dc8c399130f6b899a5762"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "b6cfa0defcc071962ec8ccfe0acb4ee6541af671ef0dc8c399130f6b899a5762",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REDEEMED",
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "edge": {
+              "edge_id": "11111111-2222-4333-8444-555555555555",
+              "predecessor_key": "session-predecessor-0001",
+              "successor_key": "session-successor-0001",
+              "agent": "agent-main",
+              "F": {
+                "digest": "8273dd5001275e071997f82a4d46744d643b5ae58748b5852d3d05e204189103",
+                "normalization_version": 1,
+                "excluded_additions": []
+              },
+              "lineage_id": "22222222-3333-4444-8555-666666666666",
+              "continuation_identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              },
+              "native_continuation_identity": {
+                "mid": "mid-successor-user-0001",
+                "index": 0,
+                "ordinal": 1940
+              }
+            },
+            "existing": true,
+            "fence_generation": 12
+          }
+        }
+      },
+      "precedence_row": "P02_redeemed_matching_candidate_and_marker"
+    },
+    {
+      "id": "V17",
+      "name": "replay matching candidate with negative observation",
+      "scope_state": "REDEEMED",
+      "scanned_material": {
+        "source_text": "replay without marker",
+        "scanned_bytes_sha256": "636151c4475d01e360b32f54fe866c34a3ebf124ec16de9ebd24df37f3a53482"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "636151c4475d01e360b32f54fe866c34a3ebf124ec16de9ebd24df37f3a53482",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "already_redeemed",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "winner",
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P03_redeemed_matching_candidate_negative_observation"
+    },
+    {
+      "id": "V18",
+      "name": "redeemed scope with different candidate",
+      "scope_state": "REDEEMED",
+      "scanned_material": {
+        "source_text": "different candidate mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "64eec0ddafb92bfa93652dc652bfd8ddff78f5c57bee648b0e5d749565c9db6d"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "64eec0ddafb92bfa93652dc652bfd8ddff78f5c57bee648b0e5d749565c9db6d",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0002",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "already_redeemed",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "winner",
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P04_redeemed_different_candidate"
+    },
+    {
+      "id": "V19",
+      "name": "redeemed scope without candidate",
+      "scope_state": "REDEEMED",
+      "scanned_material": {
+        "source_text": "no candidate replay mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "73ef951dad3cac30fd31c2a35de5e29b743723fbe886e2c0f8b672be35ed45b3"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "73ef951dad3cac30fd31c2a35de5e29b743723fbe886e2c0f8b672be35ed45b3",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": null
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "already_redeemed",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "winner",
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P05_redeemed_no_candidate"
+    },
+    {
+      "id": "V20",
+      "name": "absent scope",
+      "scope_state": "absent",
+      "scanned_material": {
+        "source_text": "absent scope mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "e9382f430d0ed6f030968115213d10d4810b15513f3a0bf4e140f98ad3bf1680"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "e9382f430d0ed6f030968115213d10d4810b15513f3a0bf4e140f98ad3bf1680",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "resolved_absent",
+              "receipt_id": null,
+              "details": {
+                "kind": "resolved_absent",
+                "attempt_id": "redeem-scope-lookup",
+                "incarnation": 7
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P01_absent_scope"
+    }
+  ]
+}

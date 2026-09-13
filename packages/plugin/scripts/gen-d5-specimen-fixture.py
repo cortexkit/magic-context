@@ -43,6 +43,7 @@ GATEWAY_PRIVATE_EVIDENCE = {
 SOURCE_LABEL = f"VACUUM {DB_SHA256}"
 GENERATOR_PATH = "packages/plugin/scripts/gen-d5-specimen-fixture.py"
 CANONICAL_VECTORS_PATH = "crates/mc-module/tests/fixtures/d5-specimen/canonical-json-vectors-v1.json"
+REDEEM_VECTORS_PATH = "crates/mc-module/tests/fixtures/d5-specimen/redeem-vectors-v1.json"
 DIGEST_PLACEHOLDER = "<computed-by-slice-0>"
 PREDECESSOR_KEY = "d5-fixture-predecessor"
 ATTEMPT_ID = "d5-fixture-attempt-0001"
@@ -1268,6 +1269,10 @@ OpenCode and Pi consume different API structures and are not inputs to the Claud
 
 `expected-manifest-v1.json` and `expected-archive-v1.json` remain scaffolds, not oracles, despite the real structure and lengths. Readiness stays `scaffold` until slice 0 fills every pending digest from **independent** reference-implementation preimage vectors and hand-checked CE1 preimage vectors—not from the codec under test—and freezes the results.
 
+## Redeem vector encoding
+
+No D5 lineage serializer exists at this baseline. The closest tagged module fixture union is internally tagged (`crates/mc-module/src/tail_hygiene.rs:1212-1238`), while the current facade state-sync request is a struct rather than an operation union (`crates/mc-module/src/lib.rs:793-863`). Clause 2 therefore controls deliberately: `LineageRequest` is one internally tagged object whose `op` discriminator and redeem fields are siblings with no `args` wrapper; `LineageResponse` uses the externally keyed clause spelling `{{"redeem":{{"result":...}}}}`; and nested payload unions are internally tagged by `kind`. This is the pinned wire rule slice 2 must implement. The owner-authored expectations in `redeem-vectors-v1.json` are independent fixture data, never generated from the precedence evaluator.
+
 Regenerate from the two private inputs:
 
 ```sh
@@ -1290,12 +1295,14 @@ def write_fixture(
     output.mkdir(parents=True, exist_ok=True)
     repository_root = Path(__file__).resolve().parents[3]
     canonical_vectors = (repository_root / CANONICAL_VECTORS_PATH).read_bytes()
+    redeem_vectors = (repository_root / REDEEM_VECTORS_PATH).read_bytes()
     validate_representation_contract(canonical_vectors)
     payloads = {
         "source-segment-v1.json": json_bytes(source_segment),
         "expected-manifest-v1.json": json_bytes(manifest),
         "expected-archive-v1.json": json_bytes(archive),
         "canonical-json-vectors-v1.json": canonical_vectors,
+        "redeem-vectors-v1.json": redeem_vectors,
         "README.md": readme_text().encode(),
     }
     for name, data in payloads.items():
@@ -1307,14 +1314,19 @@ def write_fixture(
         "138 members retain no source text and three probe members retain only their approved probe string"
     )
     for name, data in payloads.items():
-        if name == "canonical-json-vectors-v1.json":
+        if name in {"canonical-json-vectors-v1.json", "redeem-vectors-v1.json"}:
+            source = (
+                "hand-written independent canonical-form vectors"
+                if name == "canonical-json-vectors-v1.json"
+                else "owner-authored D5 redeem contract vectors"
+            )
             entries.append(
                 {
                     "path": name,
                     "byte_size": len(data),
                     "sha256": sha256(data),
                     "derived": False,
-                    "source": "hand-written independent canonical-form vectors",
+                    "source": source,
                     "generation_script": GENERATOR_PATH,
                 }
             )
@@ -1356,12 +1368,55 @@ def write_fixture(
     (output / "fixture-index-v1.json").write_bytes(json_bytes(index))
 
 
+def refresh_fixture_index(output: Path) -> None:
+    """Refresh hashes without requiring the private source inputs."""
+    index_path = output / "fixture-index-v1.json"
+    index = load_json(index_path.read_bytes())
+    entries = {entry["path"]: entry for entry in index["files"]}
+    redeem_path = output / "redeem-vectors-v1.json"
+    redeem_bytes = redeem_path.read_bytes()
+    entries[redeem_path.name] = {
+        "path": redeem_path.name,
+        "byte_size": len(redeem_bytes),
+        "sha256": sha256(redeem_bytes),
+        "derived": False,
+        "source": "owner-authored D5 redeem contract vectors",
+        "generation_script": GENERATOR_PATH,
+    }
+    ordered_names = [
+        "source-segment-v1.json",
+        "expected-manifest-v1.json",
+        "expected-archive-v1.json",
+        "canonical-json-vectors-v1.json",
+        "redeem-vectors-v1.json",
+        "README.md",
+    ]
+    for name in ordered_names:
+        data = (output / name).read_bytes()
+        entries[name]["byte_size"] = len(data)
+        entries[name]["sha256"] = sha256(data)
+    index["files"] = [entries[name] for name in ordered_names]
+    index_path.write_bytes(json_bytes(index))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("db", type=Path, help="private d5-specimen.db")
-    parser.add_argument("capture", type=Path, help="private 13610-req-body")
+    parser.add_argument("db", nargs="?", type=Path, help="private d5-specimen.db")
+    parser.add_argument("capture", nargs="?", type=Path, help="private 13610-req-body")
     parser.add_argument("--output", type=Path, help="fixture output directory")
+    parser.add_argument(
+        "--refresh-index-only",
+        action="store_true",
+        help="refresh hashes for already-generated public fixture files",
+    )
     args = parser.parse_args()
+    output = args.output or Path(__file__).resolve().parents[3] / "crates/mc-module/tests/fixtures/d5-specimen"
+    if args.refresh_index_only:
+        refresh_fixture_index(output)
+        print(f"refreshed deterministic D5 specimen index at {output}")
+        return
+    if args.db is None or args.capture is None:
+        parser.error("db and capture are required unless --refresh-index-only is used")
 
     db_path = args.db.resolve()
     capture_path = args.capture.resolve()
@@ -1377,7 +1432,6 @@ def main() -> None:
     source_segment, manifest, archive, member_sources = build_fixture(
         state, capture, raw_provider_blocks, probes
     )
-    output = args.output or Path(__file__).resolve().parents[3] / "crates/mc-module/tests/fixtures/d5-specimen"
     write_fixture(output, source_segment, manifest, archive, member_sources)
     print(f"wrote deterministic D5 specimen to {output}")
 
