@@ -72,12 +72,33 @@ cd "$REPO_ROOT"
 E2E_MANIFEST_VALIDATOR="$REPO_ROOT/packages/e2e-tests/scripts/validate-mode-manifest.ts"
 
 BUN_CACHE_DIR="$XDG_CACHE_HOME/bun-install"
-echo "  [e2e:docker] bun install (container-local cache)..."
-bun install \
+# Install only the workspaces the e2e legs exercise. The docs and dashboard
+# workspaces pull large native optional binaries (workerd, esbuild) that are
+# never used here; their tarball downloads were the source of two release
+# gate failures ("Fail extracting tarball") and add nothing to the tests.
+# A truncated download is retried a bounded number of times from a fresh
+# cache directory so one bad transfer cannot fail the whole gate.
+echo "  [e2e:docker] bun install (container-local cache, e2e workspaces only)..."
+install_attempt=0
+until bun install \
     --frozen-lockfile \
     --linker=hoisted \
     --cache-dir "$BUN_CACHE_DIR" \
-    --no-progress
+    --no-progress \
+    --filter '@cortexkit/opencode-magic-context' \
+    --filter '@cortexkit/pi-magic-context' \
+    --filter '@cortexkit/magic-context' \
+    --filter '@cortexkit/retina-local-fs' \
+    --filter '@cortexkit/opencode-magic-context-e2e'; do
+    install_attempt=$((install_attempt + 1))
+    if [[ "$install_attempt" -ge 3 ]]; then
+        echo "Error: container bun install failed after $install_attempt attempts" >&2
+        exit 1
+    fi
+    echo "  [e2e:docker] bun install failed (attempt $install_attempt); retrying with a fresh cache..." >&2
+    rm -rf "$BUN_CACHE_DIR"
+    sleep 5
+done
 
 # release.sh builds these artifacts before reaching the gate. Building only when
 # they are absent keeps the standalone runner useful without duplicating release
