@@ -647,6 +647,14 @@ pub const COMPARTMENT_RENDER_FORMAT_EPOCH: u32 = 2;
 /// fold on the first pass under the new binary, per the epoch contract above. Epoch 3 tags
 /// completed assistant text on first sight even when protected from other mutations.
 pub const PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC: u32 = 3;
+/// Bumps for provider-visible byte changes local to OpenCode's AI SDK codec. Epoch 1
+/// promotes valid text attachments from opaque to text and demotes malformed media-shaped
+/// attachments to opaque so their retained ingress representation is replayed verbatim.
+pub const PROFILE_EPOCH_OPENCODE_AI_SDK: u32 = 1;
+/// Bumps for provider-visible byte changes local to Pi's codec. Epoch 1 demotes malformed
+/// text, image, and file result children to opaque so their retained ingress representation
+/// is replayed verbatim.
+pub const PROFILE_EPOCH_PI: u32 = 1;
 /// Bumps for tagger-wide provider-visible byte changes across active tagging surfaces.
 /// Profile-local changes belong in that profile's render epoch instead, so unchanged
 /// profiles do not pay a collateral HARD. Epoch 3 freezes temporal-marker decisions in
@@ -662,10 +670,9 @@ pub const TAGGER_FEATURE_EPOCH: u32 = 4;
 pub const fn profile_render_epoch(profile: SerializerProfile) -> u32 {
     match profile {
         SerializerProfile::ClaudeCodeAnthropic => PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC,
-        SerializerProfile::OwnedLlmRunner
-        | SerializerProfile::OwnedBroca
-        | SerializerProfile::OpencodeAiSdk
-        | SerializerProfile::Pi => 0,
+        SerializerProfile::OpencodeAiSdk => PROFILE_EPOCH_OPENCODE_AI_SDK,
+        SerializerProfile::Pi => PROFILE_EPOCH_PI,
+        SerializerProfile::OwnedLlmRunner | SerializerProfile::OwnedBroca => 0,
     }
 }
 
@@ -17199,8 +17206,15 @@ mod tests {
             PROFILE_EPOCH_CLAUDE_CODE_ANTHROPIC
         );
         assert_eq!(profile_render_epoch(SerializerProfile::OwnedLlmRunner), 0);
-        assert_eq!(profile_render_epoch(SerializerProfile::Pi), 0);
-        assert_eq!(profile_render_epoch(SerializerProfile::OpencodeAiSdk), 0);
+        assert_eq!(profile_render_epoch(SerializerProfile::OwnedBroca), 0);
+        assert_eq!(
+            profile_render_epoch(SerializerProfile::Pi),
+            PROFILE_EPOCH_PI
+        );
+        assert_eq!(
+            profile_render_epoch(SerializerProfile::OpencodeAiSdk),
+            PROFILE_EPOCH_OPENCODE_AI_SDK
+        );
     }
 
     #[test]

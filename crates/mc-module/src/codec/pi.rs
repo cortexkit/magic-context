@@ -6,6 +6,7 @@ use crate::ck_wire::{
     ResultBlockKind,
 };
 
+use super::common::{classify_tool_result_child, ToolResultChildAdapter};
 use super::sidecar::{
     block_is_unchanged, decoded_block_fingerprint, match_block_metas, meta_for_ck,
     stable_hash_prefix, stamp_block_identity, BlockMeta, DecodeSidecar, DecodedHarnessMessages,
@@ -849,12 +850,13 @@ fn pi_tool_result_output(message: &Value, is_error: bool) -> CkToolOutput {
                 .all(|key| matches!(key.as_str(), "type" | "text"))
         });
         if only_plain_fields && part.get("type").and_then(Value::as_str) == Some("text") {
-            let text = string_field(part, "text").unwrap_or_default();
-            return CkToolOutput::bare(if is_error {
-                CkOutputKind::ErrorText { text }
-            } else {
-                CkOutputKind::Text { text }
-            });
+            if let Some(text) = string_field(part, "text") {
+                return CkToolOutput::bare(if is_error {
+                    CkOutputKind::ErrorText { text }
+                } else {
+                    CkOutputKind::Text { text }
+                });
+            }
         }
     }
 
@@ -866,32 +868,8 @@ fn pi_tool_result_output(message: &Value, is_error: bool) -> CkToolOutput {
                 .entry(HARNESS.to_string())
                 .or_default()
                 .insert("rawResultPart".to_string(), part.clone());
-            let kind = match part.get("type").and_then(Value::as_str) {
-                Some("text") => ResultBlockKind::Text {
-                    text: string_field(part, "text").unwrap_or_default(),
-                },
-                Some("image" | "file") => ResultBlockKind::Media {
-                    media: pi_media_from_part(part),
-                },
-                Some(other) => ResultBlockKind::Opaque {
-                    opaque: OpaqueBlock {
-                        source: json!({ "type": "harness", "harness": HARNESS }),
-                        kind: other.to_string(),
-                        raw: part.clone(),
-                        arc: None,
-                    },
-                },
-                None => ResultBlockKind::Opaque {
-                    opaque: OpaqueBlock {
-                        source: json!({ "type": "harness", "harness": HARNESS }),
-                        kind: "unknown".to_string(),
-                        raw: part.clone(),
-                        arc: None,
-                    },
-                },
-            };
             ResultBlock {
-                kind,
+                kind: classify_tool_result_child(part, ToolResultChildAdapter::Pi),
                 provider_extras,
             }
         })
@@ -1481,6 +1459,48 @@ mod tests {
         message.content.clear();
 
         assert!(encode_pi(&[message], &decoded.sidecar).is_empty());
+    }
+
+    #[test]
+    fn malformed_tool_result_children_round_trip_as_opaque_bytes() {
+        let raw = vec![json!({
+            "role": "toolResult",
+            "toolCallId": "call-malformed",
+            "toolName": "inspect",
+            "isError": false,
+            "content": [
+                {
+                    "type": "text",
+                    "text": { "not": "a string" },
+                    "vendor": [3, 2, 1]
+                },
+                {
+                    "type": "image",
+                    "mimeType": "image/png",
+                    "data": 17,
+                    "vendor": { "keep": true }
+                }
+            ]
+        })];
+        let ingress_bytes = serde_json::to_vec(&raw[0]["content"]).unwrap();
+        let decoded = decode_pi(&raw);
+        let mut message = decoded.messages[0].ck.clone();
+        let result = &mut message.content[0];
+        let CkKind::ToolResult { output, .. } = &result.kind else {
+            panic!("expected tool result");
+        };
+        let CkOutputKind::Content { blocks } = &output.kind else {
+            panic!("malformed children must remain structured content");
+        };
+        assert!(blocks
+            .iter()
+            .all(|block| matches!(block.kind, ResultBlockKind::Opaque { .. })));
+        result.mark_modified();
+        message.mark_modified();
+
+        let encoded = encode_pi(&[message], &decoded.sidecar);
+        let replay_bytes = serde_json::to_vec(&encoded[0]["content"]).unwrap();
+        assert_eq!(replay_bytes, ingress_bytes);
     }
 
     #[test]

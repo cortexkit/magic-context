@@ -113,7 +113,31 @@ fn load_pre_fix_reasoning_fixture(dir: &std::path::Path) -> (McStore, TransformR
     // stamps are not serialized into the fixture request envelope.
     request.messages =
         crate::codec::decode_opencode(request.native_messages.as_ref().unwrap()).messages;
-    (store(dir), request, fixture)
+    let db = store(dir);
+    // The captured database predates the tool-result codec epoch. Advance only that
+    // identity component so these fixtures continue to isolate reasoning replay behavior.
+    let mut loaded = db.load(&request.session_id).unwrap();
+    let profile_epoch = crate::profile_render_epoch(SerializerProfile::OpencodeAiSdk);
+    let profile_component = format!("mpe{profile_epoch}");
+    let tagger_delimiter = ";tfe:";
+    assert!(!loaded.meta.last_render_config.contains(";mpe:"));
+    assert!(loaded.meta.last_render_config.contains(tagger_delimiter));
+    loaded.meta.last_render_config = loaded.meta.last_render_config.replacen(
+        tagger_delimiter,
+        &format!(
+            ";mpe:{}:{profile_component}{tagger_delimiter}",
+            profile_component.len()
+        ),
+        1,
+    );
+    db.commit(
+        &request.session_id,
+        loaded.row_version,
+        &loaded.core,
+        &loaded.meta,
+    )
+    .unwrap();
+    (db, request, fixture)
 }
 
 fn append_native_reasoning(request: &mut TransformRequest, id: &str) {
