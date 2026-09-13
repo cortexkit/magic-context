@@ -66,10 +66,37 @@
       "row_id": "P01_absent_scope",
       "priority": 1,
       "preconditions": {
-        "scope_state": "absent",
-        "observation_class": "any",
-        "candidate_relation": "any"
+        "scope_state": [
+          "absent"
+        ],
+        "observation_class": [
+          "no_candidate_block",
+          "no_marker",
+          "malformed",
+          "duplicate_valid",
+          "foreign_receipt",
+          "matching_receipt_wrong_token",
+          "single_valid_stored_marker"
+        ],
+        "candidate": [
+          "none",
+          "other"
+        ],
+        "delivery_evidence": [
+          "ok",
+          "missing"
+        ],
+        "metadata": [
+          "consistent",
+          "inconsistent"
+        ]
       },
+      "applies_regardless_of": [
+        "observation_class",
+        "candidate",
+        "delivery_evidence",
+        "metadata"
+      ],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "resolved_absent"
     },
@@ -77,155 +104,540 @@
       "row_id": "P02_redeemed_matching_candidate_and_marker",
       "priority": 2,
       "preconditions": {
-        "scope_state": "REDEEMED",
-        "observation_class": "single_valid_stored_marker",
-        "candidate_relation": "stored_edge_equal"
+        "scope_state": [
+          "REDEEMED"
+        ],
+        "observation_class": [
+          "single_valid_stored_marker"
+        ],
+        "candidate": [
+          "stored_edge_equal"
+        ],
+        "delivery_evidence": [
+          "ok"
+        ],
+        "metadata": [
+          "consistent"
+        ]
       },
+      "applies_regardless_of": [],
       "expected_variant": "REDEEMED",
       "expected_reason_or_cause": null
     },
     {
-      "row_id": "P03_redeemed_matching_candidate_negative_observation",
+      "row_id": "P03_redeemed_nonmatching_observation",
       "priority": 3,
       "preconditions": {
-        "scope_state": "REDEEMED",
-        "observation_class": "negative",
-        "candidate_relation": "stored_edge_equal"
+        "scope_state": [
+          "REDEEMED"
+        ],
+        "observation_class": [
+          "no_candidate_block",
+          "no_marker",
+          "malformed",
+          "duplicate_valid",
+          "foreign_receipt",
+          "matching_receipt_wrong_token"
+        ],
+        "candidate": [
+          "none",
+          "stored_edge_equal",
+          "continuation_mismatch",
+          "native_mismatch",
+          "other"
+        ],
+        "delivery_evidence": [
+          "ok"
+        ],
+        "metadata": [
+          "consistent"
+        ]
       },
+      "applies_regardless_of": [
+        "candidate"
+      ],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "already_redeemed"
     },
     {
-      "row_id": "P04_redeemed_different_candidate",
+      "row_id": "P04_redeemed_nonmatching_candidate",
       "priority": 4,
       "preconditions": {
-        "scope_state": "REDEEMED",
-        "observation_class": "any",
-        "candidate_relation": "different"
+        "scope_state": [
+          "REDEEMED"
+        ],
+        "observation_class": [
+          "single_valid_stored_marker"
+        ],
+        "candidate": [
+          "none",
+          "continuation_mismatch",
+          "native_mismatch",
+          "other"
+        ],
+        "delivery_evidence": [
+          "ok"
+        ],
+        "metadata": [
+          "consistent"
+        ]
       },
+      "applies_regardless_of": [],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "already_redeemed"
     },
     {
-      "row_id": "P05_redeemed_no_candidate",
+      "row_id": "P05a_redeemed_delivery_missing",
       "priority": 5,
       "preconditions": {
-        "scope_state": "REDEEMED",
-        "observation_class": "any",
-        "candidate_relation": "absent"
+        "scope_state": [
+          "REDEEMED"
+        ],
+        "observation_class": [
+          "no_candidate_block",
+          "no_marker",
+          "malformed",
+          "duplicate_valid",
+          "foreign_receipt",
+          "matching_receipt_wrong_token",
+          "single_valid_stored_marker"
+        ],
+        "candidate": [
+          "none",
+          "stored_edge_equal",
+          "continuation_mismatch",
+          "native_mismatch",
+          "other"
+        ],
+        "delivery_evidence": [
+          "missing"
+        ],
+        "metadata": [
+          "consistent",
+          "inconsistent"
+        ]
       },
+      "applies_regardless_of": [
+        "observation_class",
+        "candidate",
+        "metadata"
+      ],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "already_redeemed"
     },
     {
-      "row_id": "P06_sealed_wrong_token_with_candidate",
+      "row_id": "P05b_redeemed_metadata_inconsistent",
       "priority": 6,
       "preconditions": {
-        "scope_state": "SEALED",
-        "observation_class": "same_receipt_wrong_token",
-        "candidate_relation": "present"
+        "scope_state": [
+          "REDEEMED"
+        ],
+        "observation_class": [
+          "no_candidate_block",
+          "no_marker",
+          "malformed",
+          "duplicate_valid",
+          "foreign_receipt",
+          "matching_receipt_wrong_token",
+          "single_valid_stored_marker"
+        ],
+        "candidate": [
+          "none",
+          "stored_edge_equal",
+          "continuation_mismatch",
+          "native_mismatch",
+          "other"
+        ],
+        "delivery_evidence": [
+          "ok"
+        ],
+        "metadata": [
+          "inconsistent"
+        ]
       },
+      "applies_regardless_of": [
+        "observation_class",
+        "candidate"
+      ],
+      "expected_variant": "REFUSED",
+      "expected_reason_or_cause": "already_redeemed"
+    },
+    {
+      "row_id": "P06_sealed_wrong_token_any_candidate",
+      "priority": 7,
+      "preconditions": {
+        "scope_state": [
+          "SEALED"
+        ],
+        "observation_class": [
+          "matching_receipt_wrong_token"
+        ],
+        "candidate": [
+          "none",
+          "observation_consistent",
+          "continuation_mismatch",
+          "native_mismatch",
+          "other"
+        ],
+        "delivery_evidence": [
+          "ok"
+        ],
+        "metadata": [
+          "consistent"
+        ]
+      },
+      "applies_regardless_of": [
+        "candidate"
+      ],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "seal_material_mismatch"
     },
     {
       "row_id": "P07_sealed_candidate_without_single_valid_marker",
-      "priority": 7,
+      "priority": 8,
       "preconditions": {
-        "scope_state": "SEALED",
-        "observation_class": "negative",
-        "candidate_relation": "present"
+        "scope_state": [
+          "SEALED"
+        ],
+        "observation_class": [
+          "no_candidate_block",
+          "no_marker",
+          "malformed",
+          "duplicate_valid",
+          "foreign_receipt"
+        ],
+        "candidate": [
+          "observation_consistent",
+          "continuation_mismatch",
+          "native_mismatch",
+          "other"
+        ],
+        "delivery_evidence": [
+          "ok"
+        ],
+        "metadata": [
+          "consistent"
+        ]
       },
+      "applies_regardless_of": [],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "invalid_arguments"
     },
     {
       "row_id": "P08_sealed_candidate_marker_identity_mismatch",
-      "priority": 8,
+      "priority": 9,
       "preconditions": {
-        "scope_state": "SEALED",
-        "observation_class": "single_valid_stored_marker",
-        "candidate_relation": "continuation_identity_mismatch"
+        "scope_state": [
+          "SEALED"
+        ],
+        "observation_class": [
+          "single_valid_stored_marker"
+        ],
+        "candidate": [
+          "continuation_mismatch"
+        ],
+        "delivery_evidence": [
+          "ok"
+        ],
+        "metadata": [
+          "consistent"
+        ]
       },
+      "applies_regardless_of": [],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "invalid_arguments"
     },
     {
       "row_id": "P09_sealed_candidate_native_identity_mismatch",
-      "priority": 9,
+      "priority": 10,
       "preconditions": {
-        "scope_state": "SEALED",
-        "observation_class": "single_valid_stored_marker",
-        "candidate_relation": "native_identity_mismatch"
+        "scope_state": [
+          "SEALED"
+        ],
+        "observation_class": [
+          "single_valid_stored_marker"
+        ],
+        "candidate": [
+          "native_mismatch"
+        ],
+        "delivery_evidence": [
+          "ok"
+        ],
+        "metadata": [
+          "consistent"
+        ]
       },
+      "applies_regardless_of": [],
       "expected_variant": "REFUSED",
       "expected_reason_or_cause": "invalid_arguments"
     },
     {
       "row_id": "P10_sealed_no_candidate_block",
-      "priority": 10,
+      "priority": 11,
       "preconditions": {
-        "scope_state": "SEALED",
-        "observation_class": "no_candidate_block",
-        "candidate_relation": "absent"
+        "scope_state": [
+          "SEALED"
+        ],
+        "observation_class": [
+          "no_candidate_block"
+        ],
+        "candidate": [
+          "none"
+        ],
+        "delivery_evidence": [
+          "ok"
+        ],
+        "metadata": [
+          "consistent"
+        ]
       },
+      "applies_regardless_of": [],
       "expected_variant": "UNRECOGNIZED",
       "expected_reason_or_cause": "no_candidate_block"
     },
     {
       "row_id": "P11_sealed_no_marker",
-      "priority": 11,
+      "priority": 12,
       "preconditions": {
-        "scope_state": "SEALED",
-        "observation_class": "no_marker",
-        "candidate_relation": "absent"
+        "scope_state": [
+          "SEALED"
+        ],
+        "observation_class": [
+          "no_marker"
+        ],
+        "candidate": [
+          "none"
+        ],
+        "delivery_evidence": [
+          "ok"
+        ],
+        "metadata": [
+          "consistent"
+        ]
       },
+      "applies_regardless_of": [],
       "expected_variant": "UNRECOGNIZED",
       "expected_reason_or_cause": "no_marker"
     },
     {
       "row_id": "P12_sealed_malformed_marker",
-      "priority": 12,
+      "priority": 13,
       "preconditions": {
-        "scope_state": "SEALED",
-        "observation_class": "malformed_marker",
-        "candidate_relation": "absent"
+        "scope_state": [
+          "SEALED"
+        ],
+        "observation_class": [
+          "malformed"
+        ],
+        "candidate": [
+          "none"
+        ],
+        "delivery_evidence": [
+          "ok"
+        ],
+        "metadata": [
+          "consistent"
+        ]
       },
+      "applies_regardless_of": [],
       "expected_variant": "UNRECOGNIZED",
       "expected_reason_or_cause": "malformed_marker"
     },
     {
       "row_id": "P13_sealed_duplicate_valid_marker",
-      "priority": 13,
+      "priority": 14,
       "preconditions": {
-        "scope_state": "SEALED",
-        "observation_class": "duplicate_marker",
-        "candidate_relation": "absent"
+        "scope_state": [
+          "SEALED"
+        ],
+        "observation_class": [
+          "duplicate_valid"
+        ],
+        "candidate": [
+          "none"
+        ],
+        "delivery_evidence": [
+          "ok"
+        ],
+        "metadata": [
+          "consistent"
+        ]
       },
+      "applies_regardless_of": [],
       "expected_variant": "UNRECOGNIZED",
       "expected_reason_or_cause": "duplicate_marker"
     },
     {
       "row_id": "P14_sealed_foreign_receipt",
-      "priority": 14,
+      "priority": 15,
       "preconditions": {
-        "scope_state": "SEALED",
-        "observation_class": "foreign_marker",
-        "candidate_relation": "absent"
+        "scope_state": [
+          "SEALED"
+        ],
+        "observation_class": [
+          "foreign_receipt"
+        ],
+        "candidate": [
+          "none"
+        ],
+        "delivery_evidence": [
+          "ok"
+        ],
+        "metadata": [
+          "consistent"
+        ]
       },
+      "applies_regardless_of": [],
       "expected_variant": "UNRECOGNIZED",
       "expected_reason_or_cause": "foreign_marker"
     },
     {
       "row_id": "P15_sealed_positive",
-      "priority": 15,
+      "priority": 16,
       "preconditions": {
-        "scope_state": "SEALED",
-        "observation_class": "single_valid_stored_marker",
-        "candidate_relation": "observation_consistent"
+        "scope_state": [
+          "SEALED"
+        ],
+        "observation_class": [
+          "single_valid_stored_marker"
+        ],
+        "candidate": [
+          "observation_consistent"
+        ],
+        "delivery_evidence": [
+          "ok"
+        ],
+        "metadata": [
+          "consistent"
+        ]
       },
+      "applies_regardless_of": [],
       "expected_variant": "REDEEMED",
       "expected_reason_or_cause": null
+    },
+    {
+      "row_id": "P16_sealed_marker_without_candidate",
+      "priority": 17,
+      "preconditions": {
+        "scope_state": [
+          "SEALED"
+        ],
+        "observation_class": [
+          "single_valid_stored_marker"
+        ],
+        "candidate": [
+          "none"
+        ],
+        "delivery_evidence": [
+          "ok"
+        ],
+        "metadata": [
+          "consistent"
+        ]
+      },
+      "applies_regardless_of": [],
+      "expected_variant": "REFUSED",
+      "expected_reason_or_cause": "invalid_arguments"
+    },
+    {
+      "row_id": "P17_sealed_marker_other_candidate",
+      "priority": 18,
+      "preconditions": {
+        "scope_state": [
+          "SEALED"
+        ],
+        "observation_class": [
+          "single_valid_stored_marker"
+        ],
+        "candidate": [
+          "other"
+        ],
+        "delivery_evidence": [
+          "ok"
+        ],
+        "metadata": [
+          "consistent"
+        ]
+      },
+      "applies_regardless_of": [],
+      "expected_variant": "REFUSED",
+      "expected_reason_or_cause": "invalid_arguments"
+    },
+    {
+      "row_id": "P18_sealed_delivery_missing",
+      "priority": 19,
+      "preconditions": {
+        "scope_state": [
+          "SEALED"
+        ],
+        "observation_class": [
+          "no_candidate_block",
+          "no_marker",
+          "malformed",
+          "duplicate_valid",
+          "foreign_receipt",
+          "matching_receipt_wrong_token",
+          "single_valid_stored_marker"
+        ],
+        "candidate": [
+          "none",
+          "observation_consistent",
+          "continuation_mismatch",
+          "native_mismatch",
+          "other"
+        ],
+        "delivery_evidence": [
+          "missing"
+        ],
+        "metadata": [
+          "consistent",
+          "inconsistent"
+        ]
+      },
+      "applies_regardless_of": [
+        "observation_class",
+        "candidate",
+        "metadata"
+      ],
+      "expected_variant": "REFUSED",
+      "expected_reason_or_cause": "invalid_arguments"
+    },
+    {
+      "row_id": "P19_sealed_metadata_inconsistent",
+      "priority": 20,
+      "preconditions": {
+        "scope_state": [
+          "SEALED"
+        ],
+        "observation_class": [
+          "no_candidate_block",
+          "no_marker",
+          "malformed",
+          "duplicate_valid",
+          "foreign_receipt",
+          "matching_receipt_wrong_token",
+          "single_valid_stored_marker"
+        ],
+        "candidate": [
+          "none",
+          "observation_consistent",
+          "continuation_mismatch",
+          "native_mismatch",
+          "other"
+        ],
+        "delivery_evidence": [
+          "ok"
+        ],
+        "metadata": [
+          "inconsistent"
+        ]
+      },
+      "applies_regardless_of": [
+        "observation_class",
+        "candidate"
+      ],
+      "expected_variant": "REFUSED",
+      "expected_reason_or_cause": "invalid_arguments"
     }
   ],
   "vectors": [
@@ -766,7 +1178,7 @@
           }
         }
       },
-      "precedence_row": "P06_sealed_wrong_token_with_candidate"
+      "precedence_row": "P06_sealed_wrong_token_any_candidate"
     },
     {
       "id": "V12",
@@ -1193,7 +1605,7 @@
           }
         }
       },
-      "precedence_row": "P03_redeemed_matching_candidate_negative_observation"
+      "precedence_row": "P03_redeemed_nonmatching_observation"
     },
     {
       "id": "V18",
@@ -1261,7 +1673,7 @@
           }
         }
       },
-      "precedence_row": "P04_redeemed_different_candidate"
+      "precedence_row": "P04_redeemed_nonmatching_candidate"
     },
     {
       "id": "V19",
@@ -1318,7 +1730,7 @@
           }
         }
       },
-      "precedence_row": "P05_redeemed_no_candidate"
+      "precedence_row": "P04_redeemed_nonmatching_candidate"
     },
     {
       "id": "V20",
@@ -1388,6 +1800,940 @@
         }
       },
       "precedence_row": "P01_absent_scope"
+    },
+    {
+      "id": "V21",
+      "name": "Thalamus repro: V15 observation with no candidate",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "positive successor mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": null
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "invalid_arguments",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "field",
+                "field": "candidate",
+                "reason": "recognition requires a candidate bound to the single valid stored marker"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P16_sealed_marker_without_candidate"
+    },
+    {
+      "id": "V22",
+      "name": "Thalamus repro: V11 wrong-token observation with no candidate",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "wrong token mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:77xn3tf3vkmyq53gkvca",
+        "scanned_bytes_sha256": "f78c27816902a05a9931ed12dcbb591cf1c5f8748fdd03372b968233c3cf0226"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "f78c27816902a05a9931ed12dcbb591cf1c5f8748fdd03372b968233c3cf0226",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "77xn3tf3vkmyq53gkvca"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": null
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "seal_material_mismatch",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "field",
+                "field": "recognition_token",
+                "reason": "marker token does not match sealed receipt"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P06_sealed_wrong_token_any_candidate"
+    },
+    {
+      "id": "V23",
+      "name": "Thalamus repro: redeemed stored edge with V11 wrong-token material",
+      "scope_state": "REDEEMED",
+      "scanned_material": {
+        "source_text": "wrong token mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:77xn3tf3vkmyq53gkvca",
+        "scanned_bytes_sha256": "f78c27816902a05a9931ed12dcbb591cf1c5f8748fdd03372b968233c3cf0226"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "f78c27816902a05a9931ed12dcbb591cf1c5f8748fdd03372b968233c3cf0226",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "77xn3tf3vkmyq53gkvca"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "already_redeemed",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "winner",
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P03_redeemed_nonmatching_observation"
+    },
+    {
+      "id": "V24",
+      "name": "sealed delivery evidence missing",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "positive successor mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": false,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "invalid_arguments",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "field",
+                "field": "observation.delivery_evidence",
+                "reason": "may_have_replied is false and ack is null"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P18_sealed_delivery_missing"
+    },
+    {
+      "id": "V25",
+      "name": "redeemed delivery evidence missing",
+      "scope_state": "REDEEMED",
+      "scanned_material": {
+        "source_text": "replay successor mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "b6cfa0defcc071962ec8ccfe0acb4ee6541af671ef0dc8c399130f6b899a5762"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "b6cfa0defcc071962ec8ccfe0acb4ee6541af671ef0dc8c399130f6b899a5762",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": false,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "already_redeemed",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "winner",
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P05a_redeemed_delivery_missing"
+    },
+    {
+      "id": "V26",
+      "name": "metadata inconsistent: direct scalar with null scanned identity",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "positive successor mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": null,
+          "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "invalid_arguments",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "field",
+                "field": "observation",
+                "reason": "recognition metadata is inconsistent"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P19_sealed_metadata_inconsistent"
+    },
+    {
+      "id": "V27",
+      "name": "metadata inconsistent: no-candidate block with scanned identity",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "",
+        "scanned_bytes_sha256": null
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": null,
+          "scanned_role": "user",
+          "scanned_kind": null,
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "no_candidate_block"
+          },
+          "observed_markers": [],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": null
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "invalid_arguments",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "field",
+                "field": "observation",
+                "reason": "recognition metadata is inconsistent"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P19_sealed_metadata_inconsistent"
+    },
+    {
+      "id": "V28",
+      "name": "metadata inconsistent: no-candidate block with text kind",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "",
+        "scanned_bytes_sha256": null
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": null,
+          "scanned_bytes_sha256": null,
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "no_candidate_block"
+          },
+          "observed_markers": [],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": null
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "invalid_arguments",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "field",
+                "field": "observation",
+                "reason": "recognition metadata is inconsistent"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P19_sealed_metadata_inconsistent"
+    },
+    {
+      "id": "V29",
+      "name": "metadata inconsistent: markers with null scanned identity on redeemed scope",
+      "scope_state": "REDEEMED",
+      "scanned_material": {
+        "source_text": "replay successor mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "b6cfa0defcc071962ec8ccfe0acb4ee6541af671ef0dc8c399130f6b899a5762"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": null,
+          "scanned_bytes_sha256": "b6cfa0defcc071962ec8ccfe0acb4ee6541af671ef0dc8c399130f6b899a5762",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "already_redeemed",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "winner",
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P05b_redeemed_metadata_inconsistent"
+    },
+    {
+      "id": "V30",
+      "name": "combined precedence: absent scope beats missing delivery and inconsistent metadata",
+      "scope_state": "absent",
+      "scanned_material": {
+        "source_text": "wrong token mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:77xn3tf3vkmyq53gkvca",
+        "scanned_bytes_sha256": "f78c27816902a05a9931ed12dcbb591cf1c5f8748fdd03372b968233c3cf0226"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": null,
+          "scanned_bytes_sha256": "f78c27816902a05a9931ed12dcbb591cf1c5f8748fdd03372b968233c3cf0226",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "77xn3tf3vkmyq53gkvca"
+              }
+            }
+          ],
+          "may_have_replied": false,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "77xn3tf3vkmyq53gkvca"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "resolved_absent",
+              "receipt_id": null,
+              "details": {
+                "kind": "resolved_absent",
+                "attempt_id": "redeem-scope-lookup",
+                "incarnation": 7
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P01_absent_scope"
+    },
+    {
+      "id": "V31",
+      "name": "combined precedence: missing delivery beats metadata and wrong token",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "wrong token mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:77xn3tf3vkmyq53gkvca",
+        "scanned_bytes_sha256": "f78c27816902a05a9931ed12dcbb591cf1c5f8748fdd03372b968233c3cf0226"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": null,
+          "scanned_bytes_sha256": "f78c27816902a05a9931ed12dcbb591cf1c5f8748fdd03372b968233c3cf0226",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "77xn3tf3vkmyq53gkvca"
+              }
+            }
+          ],
+          "may_have_replied": false,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "77xn3tf3vkmyq53gkvca"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "invalid_arguments",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "field",
+                "field": "observation.delivery_evidence",
+                "reason": "may_have_replied is false and ack is null"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P18_sealed_delivery_missing"
+    },
+    {
+      "id": "V32",
+      "name": "combined precedence: inconsistent metadata beats wrong token",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "wrong token mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:77xn3tf3vkmyq53gkvca",
+        "scanned_bytes_sha256": "f78c27816902a05a9931ed12dcbb591cf1c5f8748fdd03372b968233c3cf0226"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": null,
+          "scanned_bytes_sha256": "f78c27816902a05a9931ed12dcbb591cf1c5f8748fdd03372b968233c3cf0226",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "77xn3tf3vkmyq53gkvca"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "77xn3tf3vkmyq53gkvca"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "invalid_arguments",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "field",
+                "field": "observation",
+                "reason": "recognition metadata is inconsistent"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P19_sealed_metadata_inconsistent"
+    },
+    {
+      "id": "V33",
+      "name": "combined precedence: wrong token beats candidate mismatch",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "wrong token mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:77xn3tf3vkmyq53gkvca",
+        "scanned_bytes_sha256": "f78c27816902a05a9931ed12dcbb591cf1c5f8748fdd03372b968233c3cf0226"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "f78c27816902a05a9931ed12dcbb591cf1c5f8748fdd03372b968233c3cf0226",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "77xn3tf3vkmyq53gkvca"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0001",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "seal_material_mismatch",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "field",
+                "field": "recognition_token",
+                "reason": "marker token does not match sealed receipt"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P06_sealed_wrong_token_any_candidate"
+    },
+    {
+      "id": "V34",
+      "name": "single valid marker with other candidate",
+      "scope_state": "SEALED",
+      "scanned_material": {
+        "source_text": "positive successor mc-d5:0f5c2d7e-1234-4abc-8def-0123456789ab:aaisem2ekvthpcezvk5q",
+        "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072"
+      },
+      "request": {
+        "op": "redeem",
+        "P": "session-predecessor-0001",
+        "agent": "agent-main",
+        "incarnation": 7,
+        "observation": {
+          "scanned_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "scanned_bytes_sha256": "c2cc8feeb11c1892fa7e87d788355b6244ced44752ccad917f4673a2f080d072",
+          "scanned_role": "user",
+          "scanned_kind": "text",
+          "native_user_index": 0,
+          "scan_source": {
+            "kind": "direct_scalar"
+          },
+          "observed_markers": [
+            {
+              "kind": "valid",
+              "identity": {
+                "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+                "recognition_token": "aaisem2ekvthpcezvk5q"
+              }
+            }
+          ],
+          "may_have_replied": true,
+          "ack": null
+        },
+        "candidate": {
+          "successor_key": "session-successor-0002",
+          "native_continuation_identity": {
+            "mid": "mid-successor-user-0001",
+            "index": 0,
+            "ordinal": 1940
+          },
+          "continuation_identity": {
+            "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+            "recognition_token": "aaisem2ekvthpcezvk5q"
+          }
+        }
+      },
+      "expected": {
+        "redeem": {
+          "result": {
+            "kind": "REFUSED",
+            "refusal": {
+              "reason": "invalid_arguments",
+              "receipt_id": "0f5c2d7e-1234-4abc-8def-0123456789ab",
+              "details": {
+                "kind": "field",
+                "field": "candidate",
+                "reason": "recognition requires a candidate bound to the single valid stored marker"
+              }
+            }
+          }
+        }
+      },
+      "precedence_row": "P17_sealed_marker_other_candidate"
     }
-  ]
+  ],
+  "precondition_space": {
+    "evaluation_order": [
+      "scope_state",
+      "delivery_evidence",
+      "metadata",
+      "observation_class",
+      "candidate"
+    ],
+    "dimensions": {
+      "scope_state": [
+        "absent",
+        "SEALED",
+        "REDEEMED"
+      ],
+      "observation_class": [
+        "no_candidate_block",
+        "no_marker",
+        "malformed",
+        "duplicate_valid",
+        "foreign_receipt",
+        "matching_receipt_wrong_token",
+        "single_valid_stored_marker"
+      ],
+      "candidate_by_scope": {
+        "absent": [
+          "none",
+          "other"
+        ],
+        "SEALED": [
+          "none",
+          "observation_consistent",
+          "continuation_mismatch",
+          "native_mismatch",
+          "other"
+        ],
+        "REDEEMED": [
+          "none",
+          "stored_edge_equal",
+          "continuation_mismatch",
+          "native_mismatch",
+          "other"
+        ]
+      },
+      "delivery_evidence": [
+        "ok",
+        "missing"
+      ],
+      "metadata": [
+        "consistent",
+        "inconsistent"
+      ]
+    },
+    "delivery_evidence_rule": "missing exactly when may_have_replied is false and ack is null; every other schema-valid pair is ok",
+    "metadata_rule": "consistent no_candidate_block uses null identity, digest, and kind; empty markers; and either user/rank-0 or all-null role/rank. Consistent direct_scalar or text_block uses a non-null identity and digest, user role, text kind, and rank 0. All other schema-valid metadata is inconsistent."
+  }
 }

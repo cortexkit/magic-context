@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -17,6 +17,7 @@ struct Fixture {
     serde_evidence: Vec<SerdeEvidence>,
     sealed_scope: SealedScope,
     token_values: Vec<TokenValue>,
+    precondition_space: PreconditionSpace,
     precedence_table: Vec<PrecedenceRow>,
     vectors: Vec<Vector>,
 }
@@ -57,10 +58,30 @@ struct TokenValue {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct PreconditionSpace {
+    evaluation_order: Vec<String>,
+    dimensions: PreconditionDimensions,
+    delivery_evidence_rule: String,
+    metadata_rule: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreconditionDimensions {
+    scope_state: Vec<String>,
+    observation_class: Vec<String>,
+    candidate_by_scope: BTreeMap<String, Vec<String>>,
+    delivery_evidence: Vec<String>,
+    metadata: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PrecedenceRow {
     row_id: String,
     priority: u64,
     preconditions: Preconditions,
+    applies_regardless_of: Vec<String>,
     expected_variant: String,
     expected_reason_or_cause: Option<String>,
 }
@@ -68,9 +89,11 @@ struct PrecedenceRow {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Preconditions {
-    scope_state: String,
-    observation_class: String,
-    candidate_relation: String,
+    scope_state: Vec<String>,
+    observation_class: Vec<String>,
+    candidate: Vec<String>,
+    delivery_evidence: Vec<String>,
+    metadata: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,7 +115,7 @@ struct ScannedMaterial {
     scanned_bytes_sha256: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 enum ScopeState {
     #[serde(rename = "SEALED")]
     Sealed,
@@ -112,7 +135,7 @@ impl ScopeState {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)]
 enum LineageRequest {
     Redeem {
@@ -131,7 +154,7 @@ enum LineageResponse {
     Redeem { result: RedeemResult },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RecognitionObservation {
     scanned_identity: Option<BlockIdentity>,
@@ -145,7 +168,7 @@ struct RecognitionObservation {
     ack: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum Role {
     User,
@@ -154,7 +177,7 @@ enum Role {
     Tool,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum BlockKind {
     Text,
@@ -166,7 +189,7 @@ enum BlockKind {
     Document,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum ScanSource {
     DirectScalar,
@@ -176,21 +199,21 @@ enum ScanSource {
     Other { source: String },
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum ObservedMarker {
     Valid { identity: RecognitionIdentity },
     Malformed { token_prefix: String },
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct RecognitionIdentity {
     receipt_id: String,
     recognition_token: String,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct SuccessorCandidate {
     successor_key: String,
@@ -198,7 +221,7 @@ struct SuccessorCandidate {
     continuation_identity: RecognitionIdentity,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct BlockIdentity {
     mid: String,
@@ -497,7 +520,7 @@ fn observation_class(observation: &RecognitionObservation, sealed: &SealedScope)
         .iter()
         .any(|marker| matches!(marker, ObservedMarker::Malformed { .. }))
     {
-        return "malformed_marker";
+        return "malformed";
     }
     let valid = observation
         .observed_markers
@@ -508,78 +531,124 @@ fn observation_class(observation: &RecognitionObservation, sealed: &SealedScope)
         })
         .collect::<Vec<_>>();
     if valid.len() != 1 {
-        return "duplicate_marker";
+        return "duplicate_valid";
     }
     if valid[0].receipt_id != sealed.receipt_id {
-        return "foreign_marker";
+        return "foreign_receipt";
     }
     if valid[0].recognition_token != sealed.recognition_token {
-        return "same_receipt_wrong_token";
+        return "matching_receipt_wrong_token";
     }
     "single_valid_stored_marker"
 }
 
-fn is_negative_observation(class: &str) -> bool {
-    matches!(
-        class,
-        "no_candidate_block"
-            | "no_marker"
-            | "malformed_marker"
-            | "duplicate_marker"
-            | "foreign_marker"
-    )
+fn delivery_evidence(observation: &RecognitionObservation) -> &'static str {
+    if !observation.may_have_replied && observation.ack.is_none() {
+        "missing"
+    } else {
+        "ok"
+    }
 }
 
-fn candidate_relation(
+fn metadata_class(observation: &RecognitionObservation) -> &'static str {
+    let consistent = match observation.scan_source {
+        ScanSource::NoCandidateBlock => {
+            observation.scanned_identity.is_none()
+                && observation.scanned_bytes_sha256.is_none()
+                && observation.scanned_kind.is_none()
+                && observation.observed_markers.is_empty()
+                && matches!(
+                    (observation.scanned_role, observation.native_user_index),
+                    (Some(Role::User), Some(0)) | (None, None)
+                )
+        }
+        ScanSource::DirectScalar | ScanSource::TextBlock => {
+            observation.scanned_identity.is_some()
+                && observation.scanned_bytes_sha256.is_some()
+                && observation.scanned_role == Some(Role::User)
+                && observation.scanned_kind == Some(BlockKind::Text)
+                && observation.native_user_index == Some(0)
+        }
+        ScanSource::ToolResult | ScanSource::Other { .. } => false,
+    };
+    if consistent {
+        "consistent"
+    } else {
+        "inconsistent"
+    }
+}
+
+fn candidate_class(
     scope: ScopeState,
     observation: &RecognitionObservation,
     candidate: Option<&SuccessorCandidate>,
     sealed: &SealedScope,
 ) -> &'static str {
     let Some(candidate) = candidate else {
-        return "absent";
+        return "none";
     };
-    if scope == ScopeState::Redeemed {
-        return if candidate.successor_key == sealed.stored_edge.successor_key
-            && candidate.native_continuation_identity
-                == sealed.stored_edge.native_continuation_identity
-            && candidate.continuation_identity == sealed.stored_edge.continuation_identity
-        {
-            "stored_edge_equal"
-        } else {
-            "different"
-        };
-    }
-    let observed_identity = observation
-        .observed_markers
-        .iter()
-        .find_map(|marker| match marker {
-            ObservedMarker::Valid { identity } => Some(identity),
-            ObservedMarker::Malformed { .. } => None,
-        });
-    if let Some(observed_identity) = observed_identity {
-        if candidate.continuation_identity != *observed_identity {
-            return "continuation_identity_mismatch";
+    match scope {
+        ScopeState::Absent => "other",
+        ScopeState::Redeemed => {
+            if candidate.continuation_identity != sealed.stored_edge.continuation_identity {
+                "continuation_mismatch"
+            } else if candidate.native_continuation_identity
+                != sealed.stored_edge.native_continuation_identity
+            {
+                "native_mismatch"
+            } else if candidate.successor_key == sealed.stored_edge.successor_key {
+                "stored_edge_equal"
+            } else {
+                "other"
+            }
         }
-        if observation.scanned_identity.as_ref() != Some(&candidate.native_continuation_identity) {
-            return "native_identity_mismatch";
+        ScopeState::Sealed => {
+            let observed_identity = observation.observed_markers.iter().find_map(|marker| {
+                if let ObservedMarker::Valid { identity } = marker {
+                    Some(identity)
+                } else {
+                    None
+                }
+            });
+            let Some(observed_identity) = observed_identity else {
+                return "other";
+            };
+            if candidate.continuation_identity != *observed_identity {
+                "continuation_mismatch"
+            } else if observation.scanned_identity.as_ref()
+                != Some(&candidate.native_continuation_identity)
+            {
+                "native_mismatch"
+            } else if candidate.successor_key == sealed.stored_edge.successor_key {
+                "observation_consistent"
+            } else {
+                "other"
+            }
         }
-        return "observation_consistent";
     }
-    "present"
 }
 
-fn row_matches(row: &PrecedenceRow, scope: ScopeState, observation: &str, candidate: &str) -> bool {
-    let scope_matches = row.preconditions.scope_state == "any"
-        || row.preconditions.scope_state == scope.wire_name();
-    let observation_matches = row.preconditions.observation_class == "any"
-        || row.preconditions.observation_class == observation
-        || (row.preconditions.observation_class == "negative"
-            && is_negative_observation(observation));
-    let candidate_matches = row.preconditions.candidate_relation == "any"
-        || row.preconditions.candidate_relation == candidate
-        || (row.preconditions.candidate_relation == "present" && candidate != "absent");
-    scope_matches && observation_matches && candidate_matches
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PreconditionCell {
+    scope_state: String,
+    observation_class: String,
+    candidate: String,
+    delivery_evidence: String,
+    metadata: String,
+}
+
+fn row_matches(row: &PrecedenceRow, cell: &PreconditionCell) -> bool {
+    row.preconditions.scope_state.contains(&cell.scope_state)
+        && row
+            .preconditions
+            .observation_class
+            .contains(&cell.observation_class)
+        && row.preconditions.candidate.contains(&cell.candidate)
+        && row
+            .preconditions
+            .delivery_evidence
+            .contains(&cell.delivery_evidence)
+        && row.preconditions.metadata.contains(&cell.metadata)
 }
 
 fn outcome_signature(result: &RedeemResult) -> OutcomeSignature<'_> {
@@ -667,7 +736,7 @@ fn outcome_signature(result: &RedeemResult) -> OutcomeSignature<'_> {
     }
 }
 
-fn assert_marker_and_digest_provenance(
+fn assert_source_and_token_provenance(
     vector: &Vector,
     observation: &RecognitionObservation,
     token_inputs: &BTreeMap<&str, [u8; 12]>,
@@ -677,48 +746,17 @@ fn assert_marker_and_digest_provenance(
         "{} digest provenance disagrees with request",
         vector.id
     );
-    match &vector.scanned_material.source_text {
-        Some(source_text) if observation.scanned_identity.is_some() => {
-            let digest = sha256_hex(source_text.as_bytes());
-            assert_eq!(
-                observation.scanned_bytes_sha256.as_deref(),
-                Some(digest.as_str()),
-                "{} scanned digest is not the source_text SHA-256",
-                vector.id
-            );
-        }
-        Some(source_text) => {
-            assert!(
-                source_text.is_empty(),
-                "{} unscanned source must be empty",
-                vector.id
-            );
-            assert!(observation.scanned_bytes_sha256.is_none());
-        }
-        None => assert!(observation.scanned_bytes_sha256.is_none()),
+    if let (Some(source_text), Some(expected_digest)) = (
+        vector.scanned_material.source_text.as_deref(),
+        observation.scanned_bytes_sha256.as_deref(),
+    ) {
+        assert_eq!(
+            sha256_hex(source_text.as_bytes()),
+            expected_digest,
+            "{} scanned digest is not the source_text SHA-256",
+            vector.id
+        );
     }
-
-    if observation.scan_source == ScanSource::NoCandidateBlock {
-        assert!(observation.scanned_identity.is_none());
-        assert!(observation.scanned_bytes_sha256.is_none());
-        assert!(observation.scanned_kind.is_none());
-        match vector.scanned_material.source_text.as_deref() {
-            Some("") => {
-                assert_eq!(observation.scanned_role, Some(Role::User));
-                assert_eq!(observation.native_user_index, Some(0));
-            }
-            None => {
-                assert!(observation.scanned_role.is_none());
-                assert!(observation.native_user_index.is_none());
-            }
-            Some(_) => panic!("{} invalid no_candidate_block source", vector.id),
-        }
-    } else {
-        assert_eq!(observation.scanned_role, Some(Role::User));
-        assert_eq!(observation.scanned_kind, Some(BlockKind::Text));
-        assert_eq!(observation.native_user_index, Some(0));
-    }
-    assert!(observation.may_have_replied || observation.ack.is_some());
 
     let source_text = vector.scanned_material.source_text.as_deref().unwrap_or("");
     for marker in &observation.observed_markers {
@@ -807,11 +845,428 @@ fn assert_immutable_specimen_files(index: &Value) {
     }
 }
 
-#[test]
-fn d5_redeem_vectors_are_complete_and_coherent() {
+fn load_fixture() -> (Fixture, Vec<u8>) {
     let fixture_bytes =
         fs::read(fixture_dir().join("redeem-vectors-v1.json")).expect("read D5 redeem vectors");
-    let fixture: Fixture = serde_json::from_slice(&fixture_bytes).expect("parse fixture schema");
+    let fixture = serde_json::from_slice(&fixture_bytes).expect("parse fixture schema");
+    (fixture, fixture_bytes)
+}
+
+fn assert_precondition_space(space: &PreconditionSpace) {
+    assert_eq!(
+        space.evaluation_order,
+        [
+            "scope_state",
+            "delivery_evidence",
+            "metadata",
+            "observation_class",
+            "candidate"
+        ]
+    );
+    assert_eq!(
+        space.dimensions.scope_state,
+        ["absent", "SEALED", "REDEEMED"]
+    );
+    assert_eq!(
+        space.dimensions.observation_class,
+        [
+            "no_candidate_block",
+            "no_marker",
+            "malformed",
+            "duplicate_valid",
+            "foreign_receipt",
+            "matching_receipt_wrong_token",
+            "single_valid_stored_marker"
+        ]
+    );
+    assert_eq!(space.dimensions.delivery_evidence, ["ok", "missing"]);
+    assert_eq!(space.dimensions.metadata, ["consistent", "inconsistent"]);
+    assert_eq!(
+        space.dimensions.candidate_by_scope["absent"],
+        ["none", "other"]
+    );
+    assert_eq!(
+        space.dimensions.candidate_by_scope["SEALED"],
+        [
+            "none",
+            "observation_consistent",
+            "continuation_mismatch",
+            "native_mismatch",
+            "other"
+        ]
+    );
+    assert_eq!(
+        space.dimensions.candidate_by_scope["REDEEMED"],
+        [
+            "none",
+            "stored_edge_equal",
+            "continuation_mismatch",
+            "native_mismatch",
+            "other"
+        ]
+    );
+    assert!(space.delivery_evidence_rule.contains("exactly when"));
+    assert!(space.metadata_rule.contains("All other schema-valid"));
+}
+
+fn precondition_cells(space: &PreconditionSpace) -> Vec<PreconditionCell> {
+    let mut cells = Vec::new();
+    for scope in &space.dimensions.scope_state {
+        for observation in &space.dimensions.observation_class {
+            for candidate in &space.dimensions.candidate_by_scope[scope] {
+                for delivery in &space.dimensions.delivery_evidence {
+                    for metadata in &space.dimensions.metadata {
+                        cells.push(PreconditionCell {
+                            scope_state: scope.clone(),
+                            observation_class: observation.clone(),
+                            candidate: candidate.clone(),
+                            delivery_evidence: delivery.clone(),
+                            metadata: metadata.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    cells
+}
+
+fn values(values: &[String]) -> BTreeSet<&str> {
+    values.iter().map(String::as_str).collect()
+}
+
+fn assert_regardless_markers(fixture: &Fixture) {
+    let allowed_names = [
+        "observation_class",
+        "candidate",
+        "delivery_evidence",
+        "metadata",
+    ];
+    for row in &fixture.precedence_table {
+        assert_eq!(
+            row.preconditions.scope_state.len(),
+            1,
+            "{} scope",
+            row.row_id
+        );
+        let scope = &row.preconditions.scope_state[0];
+        let dimensions = [
+            (
+                "observation_class",
+                values(&row.preconditions.observation_class),
+                values(&fixture.precondition_space.dimensions.observation_class),
+            ),
+            (
+                "candidate",
+                values(&row.preconditions.candidate),
+                values(&fixture.precondition_space.dimensions.candidate_by_scope[scope]),
+            ),
+            (
+                "delivery_evidence",
+                values(&row.preconditions.delivery_evidence),
+                values(&fixture.precondition_space.dimensions.delivery_evidence),
+            ),
+            (
+                "metadata",
+                values(&row.preconditions.metadata),
+                values(&fixture.precondition_space.dimensions.metadata),
+            ),
+        ];
+        assert!(row
+            .applies_regardless_of
+            .iter()
+            .all(|name| allowed_names.contains(&name.as_str())));
+        for (name, covered, domain) in dimensions {
+            assert_eq!(
+                row.applies_regardless_of
+                    .iter()
+                    .any(|marked| marked == name),
+                covered == domain,
+                "{} must explicitly mark exactly the dimensions it covers regardless of",
+                row.row_id
+            );
+        }
+    }
+}
+
+#[test]
+fn d5_redeem_precedence_table_is_total() {
+    let (fixture, _) = load_fixture();
+    assert_precondition_space(&fixture.precondition_space);
+    assert_regardless_markers(&fixture);
+    for cell in precondition_cells(&fixture.precondition_space) {
+        let matches = fixture
+            .precedence_table
+            .iter()
+            .filter(|row| row_matches(row, &cell))
+            .count();
+        assert!(matches > 0, "precedence totality: {cell:?} has no row");
+    }
+}
+
+#[test]
+fn d5_redeem_precedence_table_is_disjoint() {
+    let (fixture, _) = load_fixture();
+    assert_precondition_space(&fixture.precondition_space);
+    for cell in precondition_cells(&fixture.precondition_space) {
+        let matching_rows = fixture
+            .precedence_table
+            .iter()
+            .filter(|row| row_matches(row, &cell))
+            .map(|row| row.row_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            matching_rows.len() <= 1,
+            "precedence disjointness: {cell:?} overlaps rows {matching_rows:?}"
+        );
+    }
+}
+
+fn generated_marker_lists(sealed: &SealedScope) -> Vec<Vec<ObservedMarker>> {
+    let stored = RecognitionIdentity {
+        receipt_id: sealed.receipt_id.clone(),
+        recognition_token: sealed.recognition_token.clone(),
+    };
+    let wrong_token = RecognitionIdentity {
+        receipt_id: sealed.receipt_id.clone(),
+        recognition_token: "77xn3tf3vkmyq53gkvca".to_string(),
+    };
+    let foreign = RecognitionIdentity {
+        receipt_id: "8d1bb6a0-5678-4cde-9abc-fedcba987654".to_string(),
+        recognition_token: "caqdaqcqmbyibefawdaa".to_string(),
+    };
+    vec![
+        vec![],
+        vec![ObservedMarker::Malformed {
+            token_prefix: "mc-d5:malformed".to_string(),
+        }],
+        vec![ObservedMarker::Valid {
+            identity: stored.clone(),
+        }],
+        vec![ObservedMarker::Valid {
+            identity: wrong_token,
+        }],
+        vec![ObservedMarker::Valid { identity: foreign }],
+        vec![
+            ObservedMarker::Valid {
+                identity: stored.clone(),
+            },
+            ObservedMarker::Valid {
+                identity: stored.clone(),
+            },
+        ],
+        vec![
+            ObservedMarker::Malformed {
+                token_prefix: " mc-d5:truncated".to_string(),
+            },
+            ObservedMarker::Valid {
+                identity: stored.clone(),
+            },
+        ],
+        vec![
+            ObservedMarker::Valid {
+                identity: stored.clone(),
+            },
+            ObservedMarker::Valid {
+                identity: stored.clone(),
+            },
+            ObservedMarker::Valid { identity: stored },
+        ],
+    ]
+}
+
+fn generated_candidate_shapes(sealed: &SealedScope) -> Vec<Option<SuccessorCandidate>> {
+    let exact = SuccessorCandidate {
+        successor_key: sealed.stored_edge.successor_key.clone(),
+        native_continuation_identity: sealed.stored_edge.native_continuation_identity.clone(),
+        continuation_identity: sealed.stored_edge.continuation_identity.clone(),
+    };
+    let mut continuation_mismatch = exact.clone();
+    continuation_mismatch
+        .continuation_identity
+        .recognition_token = "77xn3tf3vkmyq53gkvca".to_string();
+    let mut native_mismatch = exact.clone();
+    native_mismatch.native_continuation_identity.mid = "mid-successor-user-0002".to_string();
+    let mut other = exact.clone();
+    other.successor_key = "session-successor-0002".to_string();
+    vec![
+        None,
+        Some(exact),
+        Some(continuation_mismatch),
+        Some(native_mismatch),
+        Some(other),
+    ]
+}
+
+#[test]
+fn d5_redeem_classifiers_cover_schema_valid_request_grammar() {
+    let (fixture, _) = load_fixture();
+    let domain = precondition_cells(&fixture.precondition_space)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let identities = [
+        None,
+        Some(
+            fixture
+                .sealed_scope
+                .stored_edge
+                .native_continuation_identity
+                .clone(),
+        ),
+    ];
+    let digests = [None, Some("00".repeat(32))];
+    let roles = [None, Some(Role::User)];
+    let kinds = [None, Some(BlockKind::Text)];
+    let indices = [None, Some(0)];
+    let scan_sources = [
+        ScanSource::DirectScalar,
+        ScanSource::TextBlock,
+        ScanSource::ToolResult,
+        ScanSource::NoCandidateBlock,
+        ScanSource::Other {
+            source: "schema-valid-other".to_string(),
+        },
+    ];
+    let marker_lists = generated_marker_lists(&fixture.sealed_scope);
+    let candidate_shapes = generated_candidate_shapes(&fixture.sealed_scope);
+    let delivery_shapes = [
+        (false, None),
+        (true, None),
+        (false, Some("durable-ack".to_string())),
+        (true, Some("durable-ack".to_string())),
+    ];
+    let scopes = [ScopeState::Absent, ScopeState::Sealed, ScopeState::Redeemed];
+    let mut observed_classes = BTreeMap::<&str, BTreeSet<String>>::new();
+
+    for scope in scopes {
+        for scanned_identity in &identities {
+            for scanned_digest in &digests {
+                for scanned_role in roles {
+                    for scanned_kind in kinds {
+                        for native_user_index in indices {
+                            for scan_source in &scan_sources {
+                                for observed_markers in &marker_lists {
+                                    for candidate in &candidate_shapes {
+                                        for (may_have_replied, ack) in &delivery_shapes {
+                                            let request = LineageRequest::Redeem {
+                                                predecessor_key: "session-predecessor-0001"
+                                                    .to_string(),
+                                                agent: "agent-main".to_string(),
+                                                incarnation: 7,
+                                                observation: RecognitionObservation {
+                                                    scanned_identity: scanned_identity.clone(),
+                                                    scanned_bytes_sha256: scanned_digest.clone(),
+                                                    scanned_role,
+                                                    scanned_kind,
+                                                    native_user_index,
+                                                    scan_source: scan_source.clone(),
+                                                    observed_markers: observed_markers.clone(),
+                                                    may_have_replied: *may_have_replied,
+                                                    ack: ack.clone(),
+                                                },
+                                                candidate: candidate.clone(),
+                                            };
+                                            let wire = serde_json::to_value(&request)
+                                                .expect("serialize generated request");
+                                            let decoded: LineageRequest =
+                                                serde_json::from_value(wire)
+                                                    .expect("generated request follows schema");
+                                            let LineageRequest::Redeem {
+                                                observation,
+                                                candidate,
+                                                ..
+                                            } = decoded;
+                                            let cell = PreconditionCell {
+                                                scope_state: scope.wire_name().to_string(),
+                                                observation_class: observation_class(
+                                                    &observation,
+                                                    &fixture.sealed_scope,
+                                                )
+                                                .to_string(),
+                                                candidate: candidate_class(
+                                                    scope,
+                                                    &observation,
+                                                    candidate.as_ref(),
+                                                    &fixture.sealed_scope,
+                                                )
+                                                .to_string(),
+                                                delivery_evidence: delivery_evidence(&observation)
+                                                    .to_string(),
+                                                metadata: metadata_class(&observation).to_string(),
+                                            };
+                                            assert_eq!(
+                                                domain.iter().filter(|known| *known == &cell).count(),
+                                                1,
+                                                "schema-valid request did not classify into exactly one domain cell: {cell:?}"
+                                            );
+                                            for (dimension, label) in [
+                                                ("scope_state", cell.scope_state),
+                                                ("observation_class", cell.observation_class),
+                                                ("candidate", cell.candidate),
+                                                ("delivery_evidence", cell.delivery_evidence),
+                                                ("metadata", cell.metadata),
+                                            ] {
+                                                observed_classes
+                                                    .entry(dimension)
+                                                    .or_default()
+                                                    .insert(label);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let expected_classes = [
+        (
+            "scope_state",
+            values(&fixture.precondition_space.dimensions.scope_state),
+        ),
+        (
+            "observation_class",
+            values(&fixture.precondition_space.dimensions.observation_class),
+        ),
+        (
+            "candidate",
+            fixture
+                .precondition_space
+                .dimensions
+                .candidate_by_scope
+                .values()
+                .flatten()
+                .map(String::as_str)
+                .collect(),
+        ),
+        (
+            "delivery_evidence",
+            values(&fixture.precondition_space.dimensions.delivery_evidence),
+        ),
+        (
+            "metadata",
+            values(&fixture.precondition_space.dimensions.metadata),
+        ),
+    ];
+    for (dimension, expected) in expected_classes {
+        let observed = observed_classes
+            .get(dimension)
+            .expect("classifier dimension was exercised")
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            observed, expected,
+            "classifier grammar labels for {dimension}"
+        );
+    }
+}
+
+#[test]
+fn d5_redeem_vectors_agree_with_precedence_table() {
+    let (fixture, fixture_bytes) = load_fixture();
     assert_eq!(fixture.schema, "mc.d5.redeem-vectors.v1");
     assert!(fixture
         .encoding_rule
@@ -834,6 +1289,7 @@ fn d5_redeem_vectors_are_complete_and_coherent() {
             && evidence.lines == "1212-1238"
             && evidence.finding.contains("internally tagged")
     }));
+    assert_precondition_space(&fixture.precondition_space);
 
     assert_eq!(fixture.sealed_scope.receipt_id, RECEIPT_ID);
     assert_eq!(fixture.sealed_scope.recognition_token, SEALED_TOKEN);
@@ -878,6 +1334,7 @@ fn d5_redeem_vectors_are_complete_and_coherent() {
             "REDEEMED" | "UNRECOGNIZED" | "REFUSED" | "lineage_corrupt"
         ));
     }
+    assert_eq!(fixture.precedence_table.len(), 20);
 
     let mut vector_ids = BTreeSet::new();
     let mut positive_edge = None;
@@ -912,31 +1369,36 @@ fn d5_redeem_vectors_are_complete_and_coherent() {
         assert_eq!(predecessor_key, "session-predecessor-0001");
         assert_eq!(agent, "agent-main");
         assert_eq!(incarnation, 7);
-        assert_marker_and_digest_provenance(vector, &observation, &token_inputs);
+        assert_source_and_token_provenance(vector, &observation, &token_inputs);
 
-        let observation_class = observation_class(&observation, &fixture.sealed_scope);
-        let candidate_relation = candidate_relation(
-            vector.scope_state,
-            &observation,
-            candidate.as_ref(),
-            &fixture.sealed_scope,
-        );
+        let cell = PreconditionCell {
+            scope_state: vector.scope_state.wire_name().to_string(),
+            observation_class: observation_class(&observation, &fixture.sealed_scope).to_string(),
+            candidate: candidate_class(
+                vector.scope_state,
+                &observation,
+                candidate.as_ref(),
+                &fixture.sealed_scope,
+            )
+            .to_string(),
+            delivery_evidence: delivery_evidence(&observation).to_string(),
+            metadata: metadata_class(&observation).to_string(),
+        };
         let selected = fixture
             .precedence_table
             .iter()
-            .filter(|row| {
-                row_matches(
-                    row,
-                    vector.scope_state,
-                    observation_class,
-                    candidate_relation,
-                )
-            })
-            .min_by_key(|row| row.priority)
-            .unwrap_or_else(|| panic!("{} has no matching precedence row", vector.id));
+            .filter(|row| row_matches(row, &cell))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            selected.len(),
+            1,
+            "{} must have exactly one table-driven row for {cell:?}",
+            vector.id
+        );
+        let selected = selected[0];
         assert_eq!(
             selected.row_id, vector.precedence_row,
-            "{} precedence_row is not the table-driven winner",
+            "{} precedence_row",
             vector.id
         );
 
@@ -974,7 +1436,7 @@ fn d5_redeem_vectors_are_complete_and_coherent() {
             }
         }
     }
-    assert_eq!(fixture.vectors.len(), 20);
+    assert_eq!(fixture.vectors.len(), 34);
 
     let index: Value = serde_json::from_slice(
         &fs::read(fixture_dir().join("fixture-index-v1.json")).expect("read fixture index"),
