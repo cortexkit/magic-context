@@ -155,6 +155,10 @@ describe("Pi status dialog", () => {
 					"MODULE facade drain failed in mc-store /tmp/private",
 				lastTransformError: "MODULE facade drain failed",
 				historianFailureCount: 1,
+				// The golden pins every rendered input. Embedding state must not
+				// depend on whichever project config an earlier test file resolved
+				// for process.cwd(), which is what buildPiStatusDetail reads.
+				embedding: { state: "off", indexed: 0, total: 0 },
 			} satisfies StatusDialogDetail;
 			const summary = formatPiStatusSummary(statusFixture);
 			const diagnostics = formatPiStatusDiagnostics(statusFixture);
