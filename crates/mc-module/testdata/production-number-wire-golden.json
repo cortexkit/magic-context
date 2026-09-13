@@ -1,0 +1,10 @@
+{
+  "expected_sha256": "3798916a98b589b5b8cb72aaf5b1e6e8fd4840a176a92c9f401fc60d651869a6",
+  "expected_utf8": "{\"content\":[{\"kind\":{\"id\":\"call-number-wire\",\"input\":{\"beyond_js_safe_integer\":9007199254740993,\"beyond_u64\":1.8446744073709552e+19,\"decimal\":0.1,\"scientific_large\":1e+21,\"scientific_small\":0.00001,\"trailing_fraction\":1.5,\"whole_float\":100.0},\"name\":\"number_probe\",\"provider_executed\":false,\"type\":\"tool_call\"}}],\"meta\":{\"harness_id\":\"number-wire-golden\"},\"role\":\"assistant\"}",
+  "message_json": "{\"role\":\"assistant\",\"content\":[{\"kind\":{\"type\":\"tool_call\",\"id\":\"call-number-wire\",\"name\":\"number_probe\",\"input\":{\"scientific_small\":1e-5,\"trailing_fraction\":1.50,\"decimal\":0.1,\"whole_float\":100.0,\"scientific_large\":1e21,\"beyond_js_safe_integer\":9007199254740993,\"beyond_u64\":18446744073709551617},\"provider_executed\":false}}],\"meta\":{\"harness_id\":\"number-wire-golden\"}}",
+  "provenance": {
+    "note": "generated from the parent of 2b386c18 with the production serde_json feature graph",
+    "source_commit": "b82df651518b1bae1b12540df64489fff4540dad"
+  },
+  "schema": 1
+}

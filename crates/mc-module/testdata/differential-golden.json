@@ -2,8 +2,8 @@
   "schema": 1,
   "provenance": {
     "generator": "crates/mc-module/gen/gen-differential-golden.ts",
-    "generator_version": "dg-reference-v6",
-    "input_sha256": "65a3d84c36395679cc2aea4c65d17b37ba88e47b320eda3a0f11c04d9142accc"
+    "generator_version": "dg-reference-v7",
+    "input_sha256": "ce42629319d4b65864ff7e385a7c14c09ee087e7c8ec42883bd5f82a9fb967ca"
   },
   "cases": [
     {
@@ -645,6 +645,64 @@
             ],
             "meta": {
               "harness_id": "assistant-target"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "DG-9-float-tool-input-wire",
+      "family": "float-tool-input-wire",
+      "input": {
+        "session_id": "dg-float-tool-input",
+        "markers": [
+          "float-tool-input",
+          "number-wire"
+        ],
+        "messages": [
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "tool_call",
+                  "id": "call-float-wire",
+                  "name": "threshold_probe",
+                  "input": {
+                    "threshold": 0.1
+                  },
+                  "provider_executed": false
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "assistant-float-tool"
+            }
+          }
+        ]
+      },
+      "expected": {
+        "status": "ok",
+        "action": "passthrough",
+        "decision": "preserve-number-wire",
+        "wire": [
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "tool_call",
+                  "id": "call-float-wire",
+                  "name": "threshold_probe",
+                  "input": {
+                    "threshold": 0.1
+                  },
+                  "provider_executed": false
+                }
+              }
+            ],
+            "meta": {
+              "harness_id": "assistant-float-tool"
             }
           }
         ]

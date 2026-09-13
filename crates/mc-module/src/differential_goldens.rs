@@ -183,9 +183,25 @@ fn dg_goldens_match_ts_wire_surface_and_gate_labels() {
     let golden: Golden = serde_json::from_str(include_str!("../testdata/differential-golden.json"))
         .expect("parse differential golden");
     assert_eq!(golden.schema, 1);
-    assert_eq!(golden.provenance.generator_version, "dg-reference-v6");
+    assert_eq!(golden.provenance.generator_version, "dg-reference-v7");
     assert_eq!(golden.provenance.input_sha256.len(), 64);
-    assert_eq!(golden.cases.len(), 8);
+    assert_eq!(golden.cases.len(), 9);
+    assert!(
+        golden.cases.iter().any(|case| {
+            case.input["messages"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|message| message["content"].as_array().into_iter().flatten())
+                .any(|block| {
+                    block["kind"]["type"] == "tool_call"
+                        && block["kind"]["input"]
+                            .as_object()
+                            .is_some_and(|input| input.values().any(|value| value.is_f64()))
+                })
+        }),
+        "differential goldens must include a float-bearing tool input"
+    );
 
     for case in &golden.cases {
         let input_wire = case.input["messages"]
@@ -227,9 +243,26 @@ fn dg_golden_vacuity_guard_rejects_one_byte_fixture_perturbation_per_family() {
             }
         }
         if mutated_text.is_none() {
-            let bytes = serde_json::to_vec(&perturbed).expect("serialize fixture");
-            perturbed = Value::String(String::from_utf8_lossy(&bytes).to_string() + "x");
+            if let Some(value) = perturbed
+                .as_array_mut()
+                .and_then(|messages| messages.first_mut())
+                .and_then(|message| message.get_mut("content"))
+                .and_then(Value::as_array_mut)
+                .and_then(|parts| parts.first_mut())
+                .and_then(|part| part.get_mut("kind"))
+                .and_then(|kind| kind.get_mut("input"))
+                .and_then(Value::as_object_mut)
+                .and_then(|input| input.get_mut("threshold"))
+            {
+                *value = json!(0.2);
+                mutated_text = Some("float tool input".to_owned());
+            }
         }
+        assert!(
+            mutated_text.is_some(),
+            "{} has no supported one-byte-equivalent mutation",
+            case.id
+        );
         let perturbed_wire = rust_wire_for_case(
             case,
             perturbed
@@ -243,7 +276,7 @@ fn dg_golden_vacuity_guard_rejects_one_byte_fixture_perturbation_per_family() {
         );
         observed += 1;
     }
-    assert_eq!(observed, 8, "every DG family needs a vacuity mutation");
+    assert_eq!(observed, 9, "every DG family needs a vacuity mutation");
 }
 
 #[test]

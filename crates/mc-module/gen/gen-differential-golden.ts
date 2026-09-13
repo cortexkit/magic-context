@@ -8,7 +8,7 @@
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 
-const generatorVersion = "dg-reference-v6";
+const generatorVersion = "dg-reference-v7";
 const textMessage = (role: string, text: string, id?: string) => ({
   role,
   content: [{ kind: { type: "text", text } }],
@@ -18,6 +18,21 @@ const syntheticTextMessage = (role: string, text: string, id: string) => ({
   ...textMessage(role, text, id),
   meta: { harness_id: id, synthetic: true },
 });
+const floatToolMessage = {
+  role: "assistant",
+  content: [
+    {
+      kind: {
+        type: "tool_call",
+        id: "call-float-wire",
+        name: "threshold_probe",
+        input: { threshold: 0.1 },
+        provider_executed: false,
+      },
+    },
+  ],
+  meta: { harness_id: "assistant-float-tool" },
+} as const;
 const userTerminatedReference = (messages: readonly ReturnType<typeof textMessage>[]) => {
   const output = [...messages];
   const userIndex = output.findLastIndex((message) => message.role === "user");
@@ -202,6 +217,16 @@ const scenarios = [
     },
     output: { status: "ok", action: "passthrough", decision: "keep-count-replay-stable" },
     referenceWire: structuredClone(trailingBlankKeepThreeMessages),
+  },
+  {
+    id: "DG-9-float-tool-input-wire",
+    family: "float-tool-input-wire",
+    input: {
+      session_id: "dg-float-tool-input",
+      markers: ["float-tool-input", "number-wire"],
+      messages: [floatToolMessage],
+    },
+    output: { status: "ok", action: "passthrough", decision: "preserve-number-wire" },
   },
 ] as const;
 

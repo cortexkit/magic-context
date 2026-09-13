@@ -16960,6 +16960,41 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn production_number_wire_matches_pre_precision_feature_golden() {
+        #[derive(serde::Deserialize)]
+        struct NumberWireGolden {
+            schema: u32,
+            provenance: NumberWireProvenance,
+            message_json: String,
+            expected_utf8: String,
+            expected_sha256: String,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct NumberWireProvenance {
+            source_commit: String,
+        }
+
+        let golden: NumberWireGolden = serde_json::from_str(include_str!(
+            "../testdata/production-number-wire-golden.json"
+        ))
+        .expect("parse production number wire golden");
+        assert_eq!(golden.schema, 1);
+        assert_eq!(
+            golden.provenance.source_commit,
+            "b82df651518b1bae1b12540df64489fff4540dad"
+        );
+        let message: CkWireMessage =
+            serde_json::from_str(&golden.message_json).expect("parse golden served message");
+        let served = ServedMessage::from_message(message);
+        assert_eq!(served.canonical_bytes(), golden.expected_utf8.as_bytes());
+        assert_eq!(
+            format!("{:x}", Sha256::digest(served.canonical_bytes())),
+            golden.expected_sha256
+        );
+    }
+
+    #[test]
     fn canonical_message_serializer_matches_value_round_trip_for_golden_corpus() {
         let messages: Vec<CkWireMessage> =
             serde_json::from_str(include_str!("../testdata/ck_wire_golden.json")).unwrap();

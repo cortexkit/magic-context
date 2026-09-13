@@ -11,6 +11,8 @@ use sha2::{Digest, Sha256};
 const DB_SHA256: &str = "f589668287f41abaeb2a6526ee6d6f9d162e7ed80b1650f1ca5ec0a45984b8c0";
 const CAPTURE_SHA256: &str = "766c26e1fab1129e0866e275c22d79e111a4382140f4334095279c46f26f526b";
 const INDEX_SHA256: &str = "db1bfb2367cfaefcc9c047d439442ab2c1e3cfb8b4466a96c3ade218516ef000";
+const CANONICAL_VECTORS_SHA256: &str =
+    "8fc5b1b90997378941534bd5a0d88bebd6b10282f030ad25315612d77285f012";
 const DIGEST_PLACEHOLDER: &str = "<computed-by-slice-0>";
 const PROBES: [(u64, &str); 3] = [
     (
@@ -102,6 +104,24 @@ fn decode_base64(encoded: &str) -> Vec<u8> {
     output
 }
 
+fn canonical_json_number_bytes(lexeme: &str) -> Vec<u8> {
+    if lexeme.contains(['.', 'e', 'E']) {
+        let value = lexeme.parse::<f64>().expect("finite binary64 JSON number");
+        assert!(
+            value.is_finite(),
+            "canonical JSON forbids non-finite floats"
+        );
+        ryu_js::Buffer::new()
+            .format_finite(value)
+            .as_bytes()
+            .to_vec()
+    } else if lexeme == "-0" {
+        b"0".to_vec()
+    } else {
+        lexeme.as_bytes().to_vec()
+    }
+}
+
 fn canonical_json_bytes(value: &Value) -> Vec<u8> {
     fn write(value: &Value, output: &mut Vec<u8>) {
         match value {
@@ -109,19 +129,7 @@ fn canonical_json_bytes(value: &Value) -> Vec<u8> {
             Value::Bool(true) => output.extend_from_slice(b"true"),
             Value::Bool(false) => output.extend_from_slice(b"false"),
             Value::Number(number) => {
-                let lexeme = number.as_str();
-                if lexeme.contains(['.', 'e', 'E']) {
-                    let value = lexeme.parse::<f64>().expect("finite binary64 JSON number");
-                    assert!(
-                        value.is_finite(),
-                        "canonical JSON forbids non-finite floats"
-                    );
-                    output.extend_from_slice(ryu_js::Buffer::new().format_finite(value).as_bytes());
-                } else if lexeme == "-0" {
-                    output.push(b'0');
-                } else {
-                    output.extend_from_slice(lexeme.as_bytes());
-                }
+                output.extend_from_slice(&canonical_json_number_bytes(&number.to_string()));
             }
             Value::String(text) => output.extend_from_slice(
                 &serde_json::to_vec(text).expect("serialize canonical JSON string"),
@@ -234,8 +242,48 @@ fn block_identity(block: &Value) -> String {
 }
 
 fn canonical_raw_json_bytes(raw: &RawValue) -> Vec<u8> {
-    let value: Value = serde_json::from_str(raw.get()).expect("parse raw JSON value");
-    canonical_json_bytes(&value)
+    let source = raw.get().trim();
+    match source.as_bytes().first().copied() {
+        Some(b'{') => {
+            let fields = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(source)
+                .expect("parse raw JSON object");
+            let mut output = Vec::new();
+            output.push(b'{');
+            for (index, (key, value)) in fields.iter().enumerate() {
+                if index != 0 {
+                    output.push(b',');
+                }
+                output.extend_from_slice(
+                    &serde_json::to_vec(key).expect("serialize canonical JSON key"),
+                );
+                output.push(b':');
+                output.extend_from_slice(&canonical_raw_json_bytes(value));
+            }
+            output.push(b'}');
+            output
+        }
+        Some(b'[') => {
+            let items =
+                serde_json::from_str::<Vec<Box<RawValue>>>(source).expect("parse raw JSON array");
+            let mut output = Vec::new();
+            output.push(b'[');
+            for (index, item) in items.iter().enumerate() {
+                if index != 0 {
+                    output.push(b',');
+                }
+                output.extend_from_slice(&canonical_raw_json_bytes(item));
+            }
+            output.push(b']');
+            output
+        }
+        Some(b'"') => serde_json::to_vec(
+            &serde_json::from_str::<String>(source).expect("parse raw JSON string"),
+        )
+        .expect("serialize canonical JSON string"),
+        Some(b't' | b'f' | b'n') => source.as_bytes().to_vec(),
+        Some(_) => canonical_json_number_bytes(source),
+        None => panic!("raw JSON value cannot be empty"),
+    }
 }
 
 fn canonical_tool_result_content_bytes(
@@ -586,7 +634,19 @@ fn d5_fixture_index_pins_every_sibling_and_scans_for_secrets() {
 
 #[test]
 fn d5_fixture_canonical_json_matches_independent_vectors() {
-    let vectors = parse_json(&fixture_dir().join("canonical-json-vectors-v1.json"));
+    let vector_bytes = fs::read(fixture_dir().join("canonical-json-vectors-v1.json"))
+        .expect("read canonical JSON vectors");
+    assert_eq!(
+        sha256_hex(&vector_bytes),
+        CANONICAL_VECTORS_SHA256,
+        "canonical JSON vectors drift"
+    );
+    let raw_document = serde_json::from_slice::<BTreeMap<String, Box<RawValue>>>(&vector_bytes)
+        .expect("parse raw canonical JSON vector document");
+    let raw_vectors = serde_json::from_str::<Vec<Box<RawValue>>>(raw_document["vectors"].get())
+        .expect("parse raw canonical JSON vectors");
+    let vectors: Value =
+        serde_json::from_slice(&vector_bytes).expect("parse canonical JSON vector document");
     let vectors = object(&vectors);
     assert_eq!(number(&vectors["schema_version"]), 1);
     assert_eq!(
@@ -605,8 +665,11 @@ fn d5_fixture_canonical_json_matches_independent_vectors() {
     assert!(text(&number_reference["n2"]).contains("JSON.stringify"));
     let vector_values = array(&vectors["vectors"]);
     assert_eq!(vector_values.len(), 31);
-    for vector in vector_values {
+    assert_eq!(raw_vectors.len(), vector_values.len());
+    for (vector, raw_vector) in vector_values.iter().zip(raw_vectors) {
         let vector = object(vector);
+        let raw_fields = serde_json::from_str::<BTreeMap<String, Box<RawValue>>>(raw_vector.get())
+            .expect("parse raw canonical JSON vector");
         let name = text(&vector["name"]);
         let expected = text(&vector["expected_utf8"]).as_bytes();
         assert_eq!(
@@ -615,14 +678,14 @@ fn d5_fixture_canonical_json_matches_independent_vectors() {
             "independent vector digest {name}"
         );
         assert_eq!(
-            canonical_json_bytes(&vector["input"]),
+            canonical_raw_json_bytes(&raw_fields["input"]),
             expected,
             "canonical JSON vector {name}"
         );
-        let reparsed =
-            serde_json::from_slice::<Value>(expected).expect("parse canonical vector output");
+        let reparsed = serde_json::from_slice::<Box<RawValue>>(expected)
+            .expect("parse canonical vector output");
         assert_eq!(
-            canonical_json_bytes(&reparsed),
+            canonical_raw_json_bytes(&reparsed),
             expected,
             "canonical JSON vector output is idempotent {name}"
         );
