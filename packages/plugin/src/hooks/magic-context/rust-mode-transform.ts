@@ -17,6 +17,7 @@ import {
     resolveProjectIdentityForSession,
 } from "../../features/magic-context/memory/project-identity";
 import { getMemoryVerifications } from "../../features/magic-context/memory/storage-memory-verifications";
+import { getLastCompartmentEndMessage } from "../../features/magic-context/compartment-storage";
 import {
     modelKeyAcceptsImages,
     resolveMuralWire,
@@ -273,7 +274,9 @@ export interface RustModeModuleClient extends ModuleStateSyncClient {
         limit: number;
         live_only?: boolean;
         projectRoot?: string;
-    }): Promise<{ page: import("../../features/magic-context/context-authority").ChangefeedPage }>;
+    }): Promise<{
+        page: import("../../features/magic-context/context-authority").ChangefeedPage;
+    }>;
     deleteSession?(sessionId: string, projectRoot: string): Promise<void>;
     closeSession?(sessionId: string): void;
     getCompartmentsAfter?(
@@ -651,7 +654,14 @@ function emptyRustPassTimings(): RustPassTimings {
         wireBuild: 0,
         wireMessages: 0,
         transport: 0,
-        transportDetail: { lane: 0, route: 0, encode: 0, issue: 0, responseWait: 0, settle: 0 },
+        transportDetail: {
+            lane: 0,
+            route: 0,
+            encode: 0,
+            issue: 0,
+            responseWait: 0,
+            settle: 0,
+        },
         preflight: 0,
         todoVerdict: 0,
         todoProbe: 0,
@@ -1025,7 +1035,10 @@ function getSessionDirectory(
         } catch {
             // The launch directory is a safe non-fatal fallback for module routing.
         }
-        return { directory: deps.directory ?? process.cwd(), resolvedFromHost: false };
+        return {
+            directory: deps.directory ?? process.cwd(),
+            resolvedFromHost: false,
+        };
     });
 }
 
@@ -1572,6 +1585,7 @@ function buildTransformBody(args: {
         system_prompt_hash: args.systemPromptHash,
         upgrade_state: args.upgradeState,
         is_subagent: args.passInputs.is_subagent === true,
+        subagent_reconciliation: args.passInputs.subagent_reconciliation === true,
         messages: args.input,
         native_messages: args.nativeMessages,
         tool_input_key_orders: args.toolInputKeyOrders ?? toolInputKeyOrders(args.input),
@@ -1603,7 +1617,10 @@ function buildTransformBody(args: {
             ? { todo_tool_present: args.passInputs.todo_tool_present }
             : {}),
         ...(typeof args.passInputs.todo_verdict_probed === "boolean"
-            ? { todo_verdict_probed: args.passInputs.todo_verdict_probed, verdict_stale_ok: false }
+            ? {
+                  todo_verdict_probed: args.passInputs.todo_verdict_probed,
+                  verdict_stale_ok: false,
+              }
             : {}),
         prompt_surface_preset: args.passInputs.prompt_surface_preset ?? "full",
         prompt_surface_model_key: args.passInputs.prompt_surface_model_key,
@@ -1613,7 +1630,9 @@ function buildTransformBody(args: {
         mural: args.passInputs.mural,
         effective_execute_threshold: args.passInputs.effective_execute_threshold,
         ...(typeof args.passInputs.protected_tokens_effective === "number"
-            ? { protected_tokens_effective: args.passInputs.protected_tokens_effective }
+            ? {
+                  protected_tokens_effective: args.passInputs.protected_tokens_effective,
+              }
             : {}),
         auto_search_enabled: args.passInputs.auto_search_enabled === true,
         auto_search_score_threshold: args.passInputs.auto_search_score_threshold,
@@ -2145,7 +2164,9 @@ export function createRustModeTransform(
                             `proxy_bytes=${proxy?.bytes ?? "unavailable"} proxy_tokens=${proxyTokens} limit=${contextLimit}` +
                             (proxy?.aborted === true ? " early_abort=true" : ""),
                     );
-                    throw new RawFallbackContextLimitError(refusalTokens, contextLimit, { cause });
+                    throw new RawFallbackContextLimitError(refusalTokens, contextLimit, {
+                        cause,
+                    });
                 }
             }
             replaceMessagesInPlace(output, messages);
@@ -2450,6 +2471,12 @@ export function createRustModeTransform(
                 );
             }
             const effectiveFloor = protectionFloorResolution.floor;
+            const subagentReconciliationEnabled =
+                sessionMeta.isSubagent &&
+                deps.subagentReconciliation === true &&
+                deps.historianRunnable !== false;
+            const hasMirroredCompartmentCoverage =
+                sessionMeta.isSubagent && getLastCompartmentEndMessage(deps.db, sessionId) >= 0;
             const passInputs: Record<string, unknown> = {
                 now_ms: requestObservedAtMs,
                 model_key: modelKey,
@@ -2468,6 +2495,7 @@ export function createRustModeTransform(
                 caveman_min_chars: deps.cavemanTextCompression?.minChars ?? 500,
                 cache_ttl: sessionMeta.cacheTtl,
                 is_subagent: sessionMeta.isSubagent,
+                subagent_reconciliation: subagentReconciliationEnabled,
                 system_prompt_hash: sessionMeta.systemPromptHash ?? "",
                 upgrade_state: readUpgradeState(deps.db, sessionId),
                 tool_present: toolPresent,
@@ -2964,7 +2992,11 @@ export function createRustModeTransform(
                     }
                     if (paged && isModuleTransportGenerationChangedResult(moduleResponse)) {
                         return {
-                            restart: { reason: "reconnect", pages: pages.length, atPage: index },
+                            restart: {
+                                reason: "reconnect",
+                                pages: pages.length,
+                                atPage: index,
+                            },
                         };
                     }
                     if (paged && isTransformPageAttemptMismatch(moduleResponse)) {
@@ -3294,7 +3326,10 @@ export function createRustModeTransform(
                 sessionLog(sessionId, "deferred frozen-prefix divergence; replaying LKG");
             }
             const materializedBoundary = materializedCompactionBoundary(response);
-            let thinkingBindingRecovery: { flagTarget: string; messageId: string } | null = null;
+            let thinkingBindingRecovery: {
+                flagTarget: string;
+                messageId: string;
+            } | null = null;
             let frozenHealthyPassesAfterApply: number | null = null;
             let frozenReleaseReason: string | null = null;
             const applyStartedAt = performance.now();
@@ -3368,7 +3403,10 @@ export function createRustModeTransform(
                         projectPath: memoryProjectPath,
                         sessionDirectory: directory,
                         materializedBoundary,
-                        fullFeatureMode: !sessionMeta.isSubagent,
+                        fullFeatureMode:
+                            !sessionMeta.isSubagent ||
+                            subagentReconciliationEnabled ||
+                            hasMirroredCompartmentCoverage,
                         compactionOff: deps.compactionOff,
                         resolvedProviderID: model?.providerID,
                         thinkingBindingRecoveryEnabledForModel: isFable51ThinkingBindingModel(

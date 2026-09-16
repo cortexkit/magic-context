@@ -70,7 +70,12 @@ afterEach(() => {
     else process.env.XDG_DATA_HOME = originalXdgDataHome;
     for (const dir of tempDirs) {
         try {
-            rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+            rmSync(dir, {
+                recursive: true,
+                force: true,
+                maxRetries: 10,
+                retryDelay: 100,
+            });
         } catch {
             /* Ignore EBUSY on Windows */
         }
@@ -116,6 +121,7 @@ function buildHandler(opts?: {
     internalChildSessions?: Set<string>;
     experimentalCavemanTextCompression?: boolean;
     experimentalTemporalAwareness?: boolean;
+    subagentReconciliation?: boolean;
     language?: string;
     promptSurface?: PromptSurfaceConfig;
     promptSurfaceRuntime?: PromptSurfaceRuntime;
@@ -139,6 +145,7 @@ function buildHandler(opts?: {
         internalChildSessions: opts?.internalChildSessions,
         experimentalCavemanTextCompression: opts?.experimentalCavemanTextCompression,
         experimentalTemporalAwareness: opts?.experimentalTemporalAwareness,
+        subagentReconciliation: opts?.subagentReconciliation,
     });
 }
 
@@ -472,7 +479,10 @@ describe("single system-entry serialization (issue #311)", () => {
 
         const migratedSystem = [hostPrompt];
         await handler(
-            { sessionID: sessionId, model: { providerID: "provider", modelID: "model" } },
+            {
+                sessionID: sessionId,
+                model: { providerID: "provider", modelID: "model" },
+            },
             { system: migratedSystem },
         );
 
@@ -491,7 +501,10 @@ describe("single system-entry serialization (issue #311)", () => {
         pendingMaterializationSessions.clear();
         const stableSystem = [hostPrompt];
         await handler(
-            { sessionID: sessionId, model: { providerID: "provider", modelID: "model" } },
+            {
+                sessionID: sessionId,
+                model: { providerID: "provider", modelID: "model" },
+            },
             { system: stableSystem },
         );
         expect(stableSystem).toEqual(migratedSystem);
@@ -566,7 +579,9 @@ describe("system-prompt-hash skips OpenCode internal hidden agents (issue #52)",
         const sessionId = "ses-no-hash-update";
         const db = openDatabase();
         getOrCreateSessionMeta(db, sessionId);
-        updateSessionMeta(db, sessionId, { systemPromptHash: "main-agent-hash-abc123" });
+        updateSessionMeta(db, sessionId, {
+            systemPromptHash: "main-agent-hash-abc123",
+        });
 
         const { handler } = buildHandler();
         await handler({ sessionID: sessionId }, { system: [TITLE_PROMPT_HEAD] });
@@ -689,7 +704,9 @@ describe("system-prompt-hash skips Magic Context internal child agents", () => {
         const sessionId = "ses-mc-no-hash";
         const db = openDatabase();
         getOrCreateSessionMeta(db, sessionId);
-        updateSessionMeta(db, sessionId, { systemPromptHash: "main-agent-hash-xyz" });
+        updateSessionMeta(db, sessionId, {
+            systemPromptHash: "main-agent-hash-xyz",
+        });
         const { handler } = buildHandler();
         await handler({ sessionID: sessionId }, { system: [HISTORIAN_HEAD] });
         expect(getOrCreateSessionMeta(db, sessionId).systemPromptHash).toBe("main-agent-hash-xyz");
@@ -752,6 +769,23 @@ describe("system-prompt-hash subagent self-management (Unit B)", () => {
         expect(joined).not.toContain("ctx_memory");
     });
 
+    it("injects full history guidance for an opted-in ordinary subagent", async () => {
+        useTempDataHome("sph-subagent-reconciliation-");
+        const sessionId = "ses-subagent-reconciliation";
+        const db = openDatabase();
+        getOrCreateSessionMeta(db, sessionId);
+        updateSessionMeta(db, sessionId, { isSubagent: true });
+
+        const { handler } = buildHandler({ subagentReconciliation: true });
+        const system = ["You are a general-purpose coding subagent."];
+        await handler({ sessionID: sessionId }, { system });
+
+        const joined = system.join("\n");
+        expect(joined).toContain("long-term partner");
+        expect(joined).toContain("ctx_memory");
+        expect(joined).toContain("ctx_search");
+    });
+
     it("a PRIMARY (non-subagent) still gets the full long-term-partner block", async () => {
         useTempDataHome("sph-primary-full-");
         const sessionId = "ses-primary-full";
@@ -775,7 +809,9 @@ describe("system-prompt-hash subagent self-management (Unit B)", () => {
         const db = openDatabase();
         getOrCreateSessionMeta(db, sessionId);
 
-        const { handler } = buildHandler({ experimentalCavemanTextCompression: true });
+        const { handler } = buildHandler({
+            experimentalCavemanTextCompression: true,
+        });
         const system = ["You are the primary coding assistant."];
         await handler({ sessionID: sessionId }, { system });
 

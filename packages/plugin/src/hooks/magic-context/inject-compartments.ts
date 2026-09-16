@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { canRenderSessionHistory } from "../../features/magic-context/subagent-reconciliation";
 import {
     buildCompartmentBlock,
     type Compartment,
@@ -96,8 +97,17 @@ export interface PreparedCompartmentInjection {
  */
 const INJECTION_CACHE_MAX = 100;
 type InjectionCacheEntry =
-    | { db: Database; kind: "empty"; compartmentEndMessageId: string; renderedBytes: number }
-    | { db: Database; kind: "populated"; injection: PreparedCompartmentInjection };
+    | {
+          db: Database;
+          kind: "empty";
+          compartmentEndMessageId: string;
+          renderedBytes: number;
+      }
+    | {
+          db: Database;
+          kind: "populated";
+          injection: PreparedCompartmentInjection;
+      };
 
 const injectionCache = new BoundedSessionMap<InjectionCacheEntry>(INJECTION_CACHE_MAX);
 
@@ -409,7 +419,10 @@ export function prepareCompartmentInjection(
             .prepare(
                 "SELECT memory_block_cache, memory_block_count FROM session_meta WHERE session_id = ?",
             )
-            .get(sessionId) as { memory_block_cache: string; memory_block_count: number } | null;
+            .get(sessionId) as {
+            memory_block_cache: string;
+            memory_block_count: number;
+        } | null;
 
         if (cachedMemory?.memory_block_cache) {
             memoryBlock = cachedMemory.memory_block_cache;
@@ -838,7 +851,12 @@ export interface M0M1RenderOptions {
      * HARD fold from `muralEnabled` + the fold's model key (see resolveMuralWire),
      * so the injected data-url only swaps on a natural fold. Tests may still pass
      * an explicit `mural` to drive the render deterministically. */
-    mural?: { enabled: boolean; supportsVision: boolean; dataUrl?: string; contentHash?: string };
+    mural?: {
+        enabled: boolean;
+        supportsVision: boolean;
+        dataUrl?: string;
+        contentHash?: string;
+    };
     /** Mural feature switch (mural.enabled). When true
      * and the fold's model accepts images, materializeM0 resolves + renders the
      * deterministic mural on demand and folds its image into the m[0] baseline. */
@@ -860,6 +878,7 @@ export interface M0M1RenderOptions {
      * the additive knowledge blocks too.
      */
     compactionOff?: boolean;
+    subagentReconciliation?: boolean;
     /** Provider-side cache-eviction signals for HARD-bust detection. */
     hardSignals?: M0HardSignals;
     workspaceIdentitySet?: WorkspaceIdentitySet;
@@ -957,7 +976,10 @@ const M1_EMPTY_PLACEHOLDER =
     "<session-history-since>(no new content since last materialization)</session-history-since>";
 
 type ProjectDocsRender = { renderedBlock: string; canonicalHash: string };
-const EMPTY_PROJECT_DOCS: ProjectDocsRender = { renderedBlock: "", canonicalHash: "" };
+const EMPTY_PROJECT_DOCS: ProjectDocsRender = {
+    renderedBlock: "",
+    canonicalHash: "",
+};
 
 function readProjectDocsForM0(projectDirectory: string, injectDocs?: boolean): ProjectDocsRender {
     return projectDirectory && injectDocs !== false
@@ -1668,7 +1690,10 @@ export function mustMaterialize(args: {
                 )
                 .run(current.projectIdentity, args.sessionId);
         } else if (cachedProjectIdentity !== current.projectIdentity) {
-            return withToolSetHashComparison({ value: true, reason: "project_change" });
+            return withToolSetHashComparison({
+                value: true,
+                reason: "project_change",
+            });
         }
     }
 
@@ -1683,7 +1708,10 @@ export function mustMaterialize(args: {
         (args.state.cachedM0WorkspaceFingerprint ?? null) !== null
     ) {
         if ((args.state.cachedM0WorkspaceFingerprint ?? null) !== current.workspaceFingerprint) {
-            return withToolSetHashComparison({ value: true, reason: "project_memory_epoch" });
+            return withToolSetHashComparison({
+                value: true,
+                reason: "project_memory_epoch",
+            });
         }
     } else if (args.state.cachedM0ProjectMemoryEpoch !== current.projectMemoryEpoch) {
         return { value: true, reason: "project_memory_epoch" };
@@ -1711,7 +1739,10 @@ export function mustMaterialize(args: {
     // reads fresh docs whenever a natural HARD fold happens and stores that hash
     // with the bytes it actually rendered.
     if (args.state.cachedM0MaxMutationId !== current.maxMutationId) {
-        return withToolSetHashComparison({ value: true, reason: "max_mutation_id" });
+        return withToolSetHashComparison({
+            value: true,
+            reason: "max_mutation_id",
+        });
     }
     if (cachedUpgradeIdentity.upgradeState !== current.upgradeState) {
         return withToolSetHashComparison({ value: true, reason: "upgrade_state" });
@@ -2400,7 +2431,9 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             (current.projectIdentity ?? null) !== (snapshotMarkers.projectIdentity ?? null);
         if (stale) {
             options.db.exec("ROLLBACK");
-            throw new MaterializeContentionError({ reason: "snapshot changed before Phase 3" });
+            throw new MaterializeContentionError({
+                reason: "snapshot changed before Phase 3",
+            });
         }
 
         const m1Render = renderM1WithMetadata(
@@ -2488,7 +2521,14 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         throw error;
     }
 
-    return { m0Bytes, m0Text, m1Bytes, m1Text, snapshotMarkers, renderedMemoryIds };
+    return {
+        m0Bytes,
+        m0Text,
+        m1Bytes,
+        m1Text,
+        snapshotMarkers,
+        renderedMemoryIds,
+    };
 }
 
 export function materializeWithRetry(
@@ -3212,7 +3252,11 @@ export function prepareCachedM0M1Replay(
     const m0Bytes = toBuffer(row.cached_m0_bytes);
     const m1Text = toBuffer(row.cached_m1_bytes).toString("utf8");
     const mural = row.cached_m0_mural_data_url
-        ? { enabled: true, supportsVision: true, dataUrl: row.cached_m0_mural_data_url }
+        ? {
+              enabled: true,
+              supportsVision: true,
+              dataUrl: row.cached_m0_mural_data_url,
+          }
         : undefined;
     const m0Text = mural
         ? m0Bytes.toString("utf8")
@@ -3249,7 +3293,10 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
             trimToPreparedPrefix(options, prepared);
             options.messages.unshift(...structuredClone(head));
         }
-        return { ...prepared, prependedMessageCount: options.messages ? head.length : 0 };
+        return {
+            ...prepared,
+            prependedMessageCount: options.messages ? head.length : 0,
+        };
     }
     // Callers normally pass getOrCreateSessionMeta(), which already contains the
     // persisted mural payload. Keep compatibility with lean process-local states
@@ -3276,7 +3323,16 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         m0Bytes: options.state.cachedM0Bytes,
         m1Text: null,
     };
-    if (options.state.isSubagent && !options.compactionOff) return skipped;
+    if (
+        !options.compactionOff &&
+        !canRenderSessionHistory(
+            options.db,
+            options.sessionId,
+            options.state.isSubagent === true,
+            options.subagentReconciliation === true,
+        )
+    )
+        return skipped;
 
     const completePairAtEntry =
         options.state.cachedM0Bytes != null && options.state.cachedM1Bytes != null;

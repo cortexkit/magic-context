@@ -1,4 +1,6 @@
 import type { ProtectedTokensTierOverrides } from "../../config/project-security";
+import { isMagicContextInternalAgentName } from "../../agents/hidden-agent-registrations";
+import { canRenderSessionHistory } from "../../features/magic-context/subagent-reconciliation";
 import {
     type AuthorityModuleClient,
     checksumAuthoritySeedRows,
@@ -617,7 +619,10 @@ export interface TransformDeps {
     getHistorianChunkTokens?: () => number;
     historyBudgetPercentage?: number;
     executeThresholdPercentage?: number | { default: number; [modelKey: string]: number };
-    executeThresholdTokens?: { default?: number; [modelKey: string]: number | undefined };
+    executeThresholdTokens?: {
+        default?: number;
+        [modelKey: string]: number | undefined;
+    };
     historianTimeoutMs?: number;
     /** Active OpenCode historian entry, including its outbound request variant. */
     historianModel?: ModelInput;
@@ -627,6 +632,8 @@ export interface TransformDeps {
     fallbackModels?: readonly ModelInput[];
     /** False when historian.disable=true, blocking historian-backed child agents. */
     historianRunnable?: boolean;
+    /** Trusted user opt-in; child identity remains unchanged. */
+    subagentReconciliation?: boolean;
     /**
      * Compaction-off mode (issue #266), boot-resolved and process-stable.
      * When true the transform runs additive-only: m[0]/m[1] memory/docs
@@ -823,7 +830,11 @@ export function createTransform(deps: TransformDeps) {
         // the `magic-context-` title prefix. Returning here leaves messages
         // unmodified. (Worst case the very first pass races the session.created
         // event and runs reduced-mode once — harmless for these short sessions.)
-        if (deps.internalChildSessions?.has(sessionId)) {
+        if (
+            deps.internalChildSessions?.has(sessionId) ||
+            isMagicContextInternalAgentName(activeAgent)
+        ) {
+            deps.internalChildSessions?.add(sessionId);
             sessionLog(sessionId, "transform skipped (internal magic-context child session)");
             return;
         }
@@ -938,8 +949,15 @@ export function createTransform(deps: TransformDeps) {
         // sentinels, and synthetic injections can alter the live message graph.
         const trailingBlankSourceDecisions = snapshotTrailingBlankSourceDecisions(messages);
 
-        const reducedMode = sessionMeta.isSubagent;
-        const fullFeatureMode = !reducedMode;
+        const reconciliationEnabled =
+            !sessionMeta.isSubagent || deps.subagentReconciliation === true;
+        const fullFeatureMode = canRenderSessionHistory(
+            db,
+            sessionId,
+            sessionMeta.isSubagent,
+            reconciliationEnabled,
+        );
+        const reducedMode = !fullFeatureMode;
         // Compaction-off mode (issue #266) is a THIRD flag, orthogonal to the
         // subagent split above: every mutating gate below becomes
         // `existingGate && !compactionOff`, and the m[0]/m[1] injection gate
@@ -1025,7 +1043,7 @@ export function createTransform(deps: TransformDeps) {
             if (!sessionDirectoryResolvedFromHost) passOutcome.record("session-directory-fallback");
         }
         const compartmentDirectory = sessionDirectory;
-        const historianRunnable = deps.historianRunnable !== false;
+        const historianRunnable = deps.historianRunnable !== false && reconciliationEnabled;
         const canRunCompartments =
             fullFeatureMode &&
             !compactionOff &&
@@ -1162,7 +1180,11 @@ export function createTransform(deps: TransformDeps) {
                 // Do NOT clear historian failure state here — restart recovery uses it
                 deps.contextUsageMap.delete(sessionId);
                 // Update local sessionMeta copy so downstream checks don't use stale values
-                sessionMeta = { ...sessionMeta, lastContextPercentage: 0, lastInputTokens: 0 };
+                sessionMeta = {
+                    ...sessionMeta,
+                    lastContextPercentage: 0,
+                    lastInputTokens: 0,
+                };
             }
         }
 
@@ -1197,7 +1219,7 @@ export function createTransform(deps: TransformDeps) {
         // no-head escape notice. A persisted latch is cleared by the
         // off-transition, never consumed; overflow propagates to native
         // compaction instead.
-        if (fullFeatureMode && !compactionOff) {
+        if (reconciliationEnabled && !compactionOff) {
             try {
                 // Proactive arm for a shrinking model switch (large->small
                 // context). After switching to a smaller-context model, the
@@ -1588,7 +1610,7 @@ export function createTransform(deps: TransformDeps) {
         };
 
         if (
-            fullFeatureMode &&
+            reconciliationEnabled &&
             !compactionOff &&
             historianFailureState.failureCount > 0 &&
             emergencyUsagePercentageEarly >= 95 &&
@@ -1620,7 +1642,7 @@ export function createTransform(deps: TransformDeps) {
                 `EMERGENCY: historian recovery requested at ${emergencyPercentage}%, failures: ${historianFailureState.failureCount}`,
             );
         } else if (
-            fullFeatureMode &&
+            reconciliationEnabled &&
             !compactionOff &&
             isFirstTransformPassForSession &&
             historianFailureState.failureCount > 0 &&
@@ -1943,7 +1965,11 @@ export function createTransform(deps: TransformDeps) {
                 messageTagNumbers = result.messageTagNumbers;
                 batch = result.batch;
                 hasRecentReduceCall = result.hasRecentReduceCall;
-                observeCommitNudgeTransition(sessionId, result.hasRecentCommit, !fullFeatureMode);
+                observeCommitNudgeTransition(
+                    sessionId,
+                    result.hasRecentCommit,
+                    sessionMeta.isSubagent,
+                );
                 logTransformTiming(sessionId, "tagMessages", t0);
                 taggingSucceeded = true;
             } catch (error) {
@@ -2078,7 +2104,7 @@ export function createTransform(deps: TransformDeps) {
         // Reuse this pass's active tags; replay filters to targets.has itself.
         // Only message bytes have changed since that load: no await or tag
         // status/depth write intervenes, so the snapshot is still current.
-        if (!reducedMode && !compactionOff && deps.cavemanTextCompression?.enabled) {
+        if (!sessionMeta.isSubagent && !compactionOff && deps.cavemanTextCompression?.enabled) {
             const tCavemanReplay = performance.now();
             const replayedCaveman = replayCavemanCompression(sessionId, db, targets, activeTags);
             if (replayedCaveman > 0) {
@@ -2771,7 +2797,10 @@ export function resolveHistoryBudgetTokens(
         | { default: number; [modelKey: string]: number }
         | undefined,
     modelKey: string | undefined,
-    executeThresholdTokens?: { default?: number; [modelKey: string]: number | undefined },
+    executeThresholdTokens?: {
+        default?: number;
+        [modelKey: string]: number | undefined;
+    },
     resolvedContextLimit?: number,
 ): number | undefined {
     if (!historyBudgetPercentage) {

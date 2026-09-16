@@ -682,6 +682,10 @@ pub struct TransformRequest {
     /// Primary sessions compose the cache prefix; subagents retain only reduction plumbing.
     #[serde(default)]
     pub is_subagent: bool,
+    /// User-tier opt-in for reconciling ordinary subagent history. This deliberately does not
+    /// change the durable subagent identity used by policy and cost gates.
+    #[serde(default)]
+    pub subagent_reconciliation: bool,
     /// Deprecated count retained for older senders. It is parsed for compatibility and ignored.
     #[serde(default = "default_protected_tags")]
     pub protected_tags: usize,
@@ -954,6 +958,8 @@ struct TransformRequestWire {
     upgrade_state: String,
     #[serde(default)]
     is_subagent: bool,
+    #[serde(default)]
+    subagent_reconciliation: bool,
     #[serde(default, deserialize_with = "present_deprecated_value")]
     protected_tags: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1081,6 +1087,7 @@ impl<'de> Deserialize<'de> for TransformRequest {
             system_prompt_hash: wire.system_prompt_hash,
             upgrade_state: wire.upgrade_state,
             is_subagent: wire.is_subagent,
+            subagent_reconciliation: wire.subagent_reconciliation,
             protected_tags,
             protected_tags_present,
             protected_tokens_effective: wire.protected_tokens_effective,
@@ -2252,6 +2259,25 @@ fn response_marker_ttl(
         })
 }
 
+/// Reconciliation governs historian-derived prefix work, independently of the durable
+/// `is_subagent` identity. Existing compartments remain renderable when the opt-in turns off.
+fn reconciliation_enabled(req: &TransformRequest) -> bool {
+    !req.is_subagent || req.subagent_reconciliation
+}
+
+fn reconciliation_render_enabled(
+    req: &TransformRequest,
+    core: &CoreState,
+    meta: &ModuleMeta,
+) -> bool {
+    reconciliation_enabled(req)
+        || meta.coverage_ordinal.is_some()
+        || core
+            .frozen_units
+            .iter()
+            .any(|unit| matches!(unit.key.as_str(), "m0" | "m1"))
+}
+
 fn apply_once_with_estimator_and_projection(
     store: &McStore,
     req: &TransformRequest,
@@ -3304,7 +3330,7 @@ fn apply_once(
     if reusable_projection.is_some() && prefix_projection_differential_enabled() {
         assert_prefix_projection_equivalent(&initial_projection, &ingress_req.messages)?;
     }
-    if ingress_req.lineage_switched && ingress_req.is_subagent {
+    if ingress_req.lineage_switched && !reconciliation_enabled(ingress_req) {
         return Ok(lineage_protocol_passthrough(
             ingress_req,
             initial_projection,
@@ -3312,7 +3338,7 @@ fn apply_once(
     }
     let mut lineage_state = LineagePassState::default();
     let mut rebased_req = None;
-    if ingress_req.lineage_switched && !ingress_req.is_subagent {
+    if ingress_req.lineage_switched && reconciliation_enabled(ingress_req) {
         if ingress_req.descent_edge_id == 0
             || ingress_req.prior_conversation_key.is_empty()
             || ingress_req.constituents.len() > 5
@@ -3476,7 +3502,7 @@ fn apply_once(
     }
     let rewrite_temporal_marks = temporal_parity_detected;
     let transition_due = loaded.meta.initialized
-        && !req.is_subagent
+        && reconciliation_enabled(req)
         && !detected_transition_classes.is_subset(&consumed_transition_classes);
     timings.transition_detection = elapsed_ms(transition_detection_started_at);
     if let Some(base) = loaded.meta.ordinal_continuation_base {
@@ -3939,7 +3965,7 @@ fn apply_once(
     // replay pass. If a real gap exists, the conservative recut is already HARD and backfills the
     // floor atomically; an ordinary defer remains tokenizer-free until a natural HARD arrives.
     let fallback_tail_allowance = 0;
-    let mut divergence_candidate = if req.is_subagent {
+    let mut divergence_candidate = if !reconciliation_enabled(req) {
         None
     } else {
         detect_boundary_divergence_candidate(
@@ -3997,29 +4023,30 @@ fn apply_once(
     let publication_progress = !incoherent_prefix
         && boundary_divergence_observed_compartment_seq
             .is_some_and(|observed| observed < m1_signal.max_compartment_seq);
-    let mut boundary_divergence_pending_count = if req.is_subagent || divergence_inputs_moved {
-        loaded.meta.boundary_divergence_pending_count
-    } else if consumable_publication {
-        0
-    } else if active_legitimate_publication_window {
-        loaded.meta.boundary_divergence_pending_count
-    } else if divergence_candidate.is_some() {
-        if boundary_divergence_retry || compartment_revision_matches {
+    let mut boundary_divergence_pending_count =
+        if !reconciliation_enabled(req) || divergence_inputs_moved {
+            loaded.meta.boundary_divergence_pending_count
+        } else if consumable_publication {
             0
-        } else {
-            boundary_divergence_observed_compartment_seq = Some(m1_signal.max_compartment_seq);
-            let previous_count = if publication_progress {
+        } else if active_legitimate_publication_window {
+            loaded.meta.boundary_divergence_pending_count
+        } else if divergence_candidate.is_some() {
+            if boundary_divergence_retry || compartment_revision_matches {
                 0
             } else {
-                loaded.meta.boundary_divergence_pending_count
-            };
-            previous_count
-                .saturating_add(1)
-                .min(BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT)
-        }
-    } else {
-        0
-    };
+                boundary_divergence_observed_compartment_seq = Some(m1_signal.max_compartment_seq);
+                let previous_count = if publication_progress {
+                    0
+                } else {
+                    loaded.meta.boundary_divergence_pending_count
+                };
+                previous_count
+                    .saturating_add(1)
+                    .min(BOUNDARY_DIVERGENCE_PENDING_PASS_LIMIT)
+            }
+        } else {
+            0
+        };
     let boundary_divergence_recut = divergence_candidate.filter(|candidate| {
         candidate.class != BoundaryDivergenceClass::Consumable
             && (boundary_divergence_retry
@@ -4207,7 +4234,7 @@ fn apply_once(
         && loaded.meta.initialized;
     // Subagents execute a reductions-only branch, not the prefix plan. Inherited
     // HARD/reconcile advisories cannot price automatic reductions without a fold.
-    let prefix_materialization_enabled = !req.is_subagent;
+    let prefix_materialization_enabled = reconciliation_enabled(req);
     let force_band_active = usage_percentage
         >= scheduler::escalation_bands(ctx.execute_threshold_percentage)
             .force_materialize_percentage;
@@ -4264,7 +4291,7 @@ fn apply_once(
     // independently scheduled bust, but it never authorizes provider-visible bytes by itself.
     // Compute only the call-id transition here; the complete pair is built after classification.
     let todo_injection_pending = tail_reclaim_enabled
-        && !req.is_subagent
+        && reconciliation_enabled(req)
         && injection_pending_after_capture(
             &loaded.meta,
             &tail_for_selection,
@@ -4480,7 +4507,7 @@ fn apply_once(
         plan = PassPlan::Soft;
     }
     timings.decide += elapsed_ms(classify_started_at);
-    if req.is_subagent {
+    if !reconciliation_enabled(req) {
         plan = if matches!(scheduler_outcome.pass, scheduler::PassDecision::Defer) {
             PassPlan::Defer
         } else {
@@ -4611,7 +4638,7 @@ fn apply_once(
         plan,
         PassPlan::Hard | PassPlan::MigrateHard | PassPlan::Soft
     );
-    let is_bust_pass = !req.is_subagent && is_provider_prefix_mutation_pass;
+    let is_bust_pass = reconciliation_enabled(req) && is_provider_prefix_mutation_pass;
     if !lineage_anchor_failure {
         meta.protected_tokens_effective = floor_resolution.persisted;
         if meta.protected_tokens_effective != loaded.meta.protected_tokens_effective {
@@ -4723,7 +4750,7 @@ fn apply_once(
     let mut note_deliveries: Vec<NoteDelivery> = Vec::new();
     let mut committed_mural_hash = persisted_mural_hash;
 
-    if req.is_subagent {
+    if !reconciliation_enabled(req) {
         if !matches!(scheduler_outcome.pass, scheduler::PassDecision::Defer) {
             core.step(PassInput {
                 proposed: Some(mc_core::Action::Soft),
@@ -5681,7 +5708,7 @@ fn apply_once(
         &projection,
         req,
         (tagging_active || auto_search_active).then_some(&tag_overlay),
-        tail_reclaim_enabled && !req.is_subagent,
+        tail_reclaim_enabled && reconciliation_enabled(req),
         mutation_exempt_mid,
         &tag_numbers,
         meta.reasoning_cleared_through_tag
@@ -5706,7 +5733,7 @@ fn apply_once(
                 &projection,
                 req,
                 (tagging_active || auto_search_active).then_some(&tag_overlay),
-                tail_reclaim_enabled && !req.is_subagent,
+                tail_reclaim_enabled && reconciliation_enabled(req),
                 mutation_exempt_mid,
                 &tag_numbers,
                 meta.reasoning_cleared_through_tag
@@ -5747,7 +5774,7 @@ fn apply_once(
                     &projection,
                     req,
                     (tagging_active || auto_search_active).then_some(&tag_overlay),
-                    tail_reclaim_enabled && !req.is_subagent,
+                    tail_reclaim_enabled && reconciliation_enabled(req),
                     mutation_exempt_mid,
                     &tag_numbers,
                     meta.reasoning_cleared_through_tag
@@ -5773,7 +5800,7 @@ fn apply_once(
             &projection,
             req,
             (tagging_active || auto_search_active).then_some(&tag_overlay),
-            tail_reclaim_enabled && !req.is_subagent,
+            tail_reclaim_enabled && reconciliation_enabled(req),
             mutation_exempt_mid,
             &tag_numbers,
             meta.reasoning_cleared_through_tag
@@ -5800,7 +5827,7 @@ fn apply_once(
             &projection,
             req,
             (tagging_active || auto_search_active).then_some(&tag_overlay),
-            tail_reclaim_enabled && !req.is_subagent,
+            tail_reclaim_enabled && reconciliation_enabled(req),
             mutation_exempt_mid,
             &tag_numbers,
             meta.reasoning_cleared_through_tag
@@ -6558,6 +6585,9 @@ fn render_identity_base(req: &TransformRequest, prompt_surface_epoch: &str) -> S
     }
     if let Some(model) = req.model_key.as_deref().filter(|value| !value.is_empty()) {
         parts.push(format!("model:{model}"));
+    }
+    if req.subagent_reconciliation {
+        parts.push("subagent-reconciliation".to_string());
     }
     if prompt_surface_epoch.is_empty() && !req.system_prompt_hash.is_empty() {
         parts.push(format!("system:{}", req.system_prompt_hash));
@@ -12502,6 +12532,9 @@ fn message_output_identity(
         req.provider_id.as_deref().unwrap_or_default().as_bytes(),
     );
     digest_field(&mut hasher, &[req.is_subagent as u8]);
+    if req.subagent_reconciliation {
+        digest_field(&mut hasher, b"subagent_reconciliation");
+    }
     digest_field(&mut hasher, &[req.caveman_enabled as u8]);
     digest_field(&mut hasher, &[request_accepts_empty_content(req) as u8]);
     digest_field(&mut hasher, &[mutation_exempt as u8]);
@@ -13411,12 +13444,13 @@ fn build_output_with_tags_inner(
     } else {
         FrozenUnitLookup::Scan(&core.frozen_units)
     };
+    let render_reconciliation_enabled = reconciliation_render_enabled(req, core, meta);
     if use_frozen_unit_index {
         build_timings.frozen_unit_index = elapsed_ms(frozen_unit_index_started_at);
     }
     let mut prev_assistant = false;
 
-    if !req.is_subagent {
+    if render_reconciliation_enabled {
         if let Some(unit) = frozen_units.by_key("m0") {
             let mural = frozen_units.by_key(M0_MURAL_KEY);
             let key = "synthetic:m0".to_string();
@@ -13471,10 +13505,10 @@ fn build_output_with_tags_inner(
     } else {
         HashSet::new()
     };
-    let output_coverage = if req.is_subagent {
-        None
-    } else {
+    let output_coverage = if reconciliation_render_enabled(req, core, meta) {
         meta.coverage_ordinal
+    } else {
+        None
     };
     let split_coverage_invocation_mids = if renderer_transition_active {
         split_coverage_tool_arcs(projection, output_coverage)
@@ -15815,6 +15849,7 @@ pub(crate) mod tests {
             system_prompt_hash: String::new(),
             upgrade_state: String::new(),
             is_subagent: false,
+            subagent_reconciliation: false,
             protected_tags: 20,
             protected_tags_present: false,
             protected_tokens_effective: None,
@@ -15890,6 +15925,94 @@ pub(crate) mod tests {
         let absent = req("deprecated-count-wire-absent", "cfg", Vec::new());
         assert!(!absent.protected_tags_present);
         assert!(!claim_protected_tags_deprecation(&absent));
+    }
+
+    #[test]
+    fn subagent_reconciliation_wire_defaults_false_and_preserves_identity() {
+        let base = req("subagent-reconciliation-wire", "cfg", Vec::new());
+        let parsed: TransformRequest =
+            serde_json::from_value(serde_json::to_value(&base).unwrap()).unwrap();
+        assert!(!parsed.subagent_reconciliation);
+
+        let mut enabled = base.clone();
+        enabled.is_subagent = true;
+        enabled.subagent_reconciliation = true;
+        assert!(enabled.is_subagent);
+        assert!(reconciliation_enabled(&enabled));
+        assert_ne!(
+            render_identity_base(&base, ""),
+            render_identity_base(&enabled, ""),
+            "the opt-in must not alias a prior rendered prefix identity"
+        );
+    }
+
+    #[test]
+    fn disabled_subagent_renders_existing_compartment_prefix_without_new_reconciliation() {
+        let mut request = req("subagent-reconciliation-replay", "cfg", Vec::new());
+        request.is_subagent = true;
+        let mut core = CoreState::default();
+        core.frozen_units = vec![
+            synth_region("m0", "durable history".to_string()),
+            render_m1_placeholder(),
+        ];
+        let mut meta = ModuleMeta::default();
+        meta.coverage_ordinal = Some(4);
+
+        assert!(!reconciliation_enabled(&request));
+        assert!(reconciliation_render_enabled(&request, &core, &meta));
+    }
+
+    #[test]
+    fn opted_in_subagent_materializes_and_trims_durable_compartment_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let mut request = req(
+            "subagent-reconciliation-materialize",
+            "cfg",
+            vec![
+                item("covered", 1, "raw covered"),
+                item("tail", 2, "raw tail"),
+            ],
+        );
+        request.is_subagent = true;
+        request.subagent_reconciliation = true;
+        store
+            .replace_compartments(
+                &request.session_id,
+                &[comp(1, 1, 1, "covered", "durable summary")],
+            )
+            .unwrap();
+
+        let result =
+            transform(&store, &request, &pctx("git:proj", "/nonexistent-docs", 0)).unwrap();
+        assert_eq!(result.action, "HARD");
+        assert_eq!(result.coverage_ordinal, Some(1));
+        assert!(result
+            .messages()
+            .iter()
+            .any(|message| message.meta.synthetic));
+        assert!(!result
+            .messages()
+            .iter()
+            .any(|message| message.meta.harness_id.as_deref() == Some("covered")));
+        assert!(result
+            .messages()
+            .iter()
+            .any(|message| message.meta.harness_id.as_deref() == Some("tail")));
+
+        let mut disabled = request.clone();
+        disabled.subagent_reconciliation = false;
+        let replay =
+            transform(&store, &disabled, &pctx("git:proj", "/nonexistent-docs", 1)).unwrap();
+        assert_eq!(replay.coverage_ordinal, Some(1));
+        assert!(replay
+            .messages()
+            .iter()
+            .any(|message| message.meta.synthetic));
+        assert!(!replay
+            .messages()
+            .iter()
+            .any(|message| message.meta.harness_id.as_deref() == Some("covered")));
     }
 
     fn spine() -> Vec<ReductionDecision> {

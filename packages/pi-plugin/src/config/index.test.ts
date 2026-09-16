@@ -660,6 +660,7 @@ describe("loadPiConfig", () => {
 
 		expect(result.config.dreamer?.disable).toBe(true);
 		expect(result.config.historian).toEqual({
+			subagent_reconciliation: false,
 			two_pass: false,
 			disallowed_tools: [],
 		});

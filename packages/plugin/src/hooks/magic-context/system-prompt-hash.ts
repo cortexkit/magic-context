@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { buildMagicContextSection } from "../../agents/magic-context-prompt";
+import { canRenderSessionHistory } from "../../features/magic-context/subagent-reconciliation";
 import {
     type ContextDatabase,
     getOrCreateSessionMeta,
@@ -123,6 +124,7 @@ export function isMagicContextInternalAgent(systemPromptContent: string): boolea
  */
 export function createSystemPromptHashHandler(deps: {
     db: ContextDatabase;
+    subagentReconciliation?: boolean;
     dreamerEnabled: boolean;
     /** When false (`memory.enabled: false`), the `<project-memory>` block is
      *  never injected, so ctx_memory guidance is dropped from the prompt and the
@@ -264,6 +266,7 @@ export function createSystemPromptHashHandler(deps: {
             deps.internalChildSessions?.has(sessionId) ||
             isMagicContextInternalAgent(fullPromptForDetection)
         ) {
+            deps.internalChildSessions?.add(sessionId);
             sessionLog(
                 sessionId,
                 "system-prompt-hash skipped (Magic Context internal child: historian/dreamer/migration)",
@@ -315,6 +318,14 @@ export function createSystemPromptHashHandler(deps: {
             sessionLog(sessionId, "system-prompt-hash session meta load failed:", error);
         }
         const isSubagentSession = sessionMetaEarly?.isSubagent === true;
+        const reducedSubagent =
+            isSubagentSession &&
+            !canRenderSessionHistory(
+                deps.db,
+                sessionId,
+                true,
+                deps.subagentReconciliation === true,
+            );
         // A session whose spawn tools map filters ctx_reduce out (parent
         // allow-lists) must be treated like ctx_reduce-disabled: reduce
         // guidance for an uncallable tool is overhead + cargo-cult risk.
@@ -327,10 +338,10 @@ export function createSystemPromptHashHandler(deps: {
         // instead of flipping a persisted hash and busting the prompt cache.
         const availability = resolveCtxReduceAvailability(sessionId);
         const ctxReduceCallable = availability.callable;
-        const subagentReduceMode = isSubagentSession && ctxReduceCallable;
-        const effectiveCtxReduceEnabled = isSubagentSession ? false : ctxReduceCallable;
+        const subagentReduceMode = reducedSubagent && ctxReduceCallable;
+        const effectiveCtxReduceEnabled = reducedSubagent ? false : ctxReduceCallable;
         // A subagent without callable ctx_reduce gets no MC guidance.
-        const skipGuidanceForDisabledSubagent = isSubagentSession && !ctxReduceCallable;
+        const skipGuidanceForDisabledSubagent = reducedSubagent && !ctxReduceCallable;
         const inputModel = input.model;
         const liveModel =
             inputModel?.providerID && inputModel.modelID

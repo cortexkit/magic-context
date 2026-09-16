@@ -48,6 +48,18 @@ describe("MagicContextConfigSchema", () => {
             expect(result.pi).toBeUndefined();
             expect(result.mural).toEqual({ enabled: false });
         });
+
+        it("defaults historian subagent reconciliation off and accepts explicit user opt-in", () => {
+            expect(
+                MagicContextConfigSchema.parse({ historian: {} }).historian
+                    ?.subagent_reconciliation,
+            ).toBe(false);
+            expect(
+                MagicContextConfigSchema.parse({
+                    historian: { subagent_reconciliation: true },
+                }).historian?.subagent_reconciliation,
+            ).toBe(true);
+        });
     });
 
     describe("budget configuration", () => {
@@ -343,7 +355,10 @@ describe("MagicContextConfigSchema", () => {
                 { model: "openai/work-dreamer-fallback", thinking_level: "minimal" },
             ]);
             expect(result.profiles?.work?.historian?.omp?.fallback_models).toEqual([
-                { model: "opencode/work-historian-fallback", thinking_level: "inherit" },
+                {
+                    model: "opencode/work-historian-fallback",
+                    thinking_level: "inherit",
+                },
             ]);
             expect(result.profiles?.work?.dreamer?.omp?.thinking_level).toBe("inherit");
         });
@@ -576,8 +591,16 @@ describe("MagicContextConfigSchema", () => {
                         pi: { tasks: { verify: { variant: "high" } } },
                     },
                 },
-                { historian: { opencode: { fallback_models: "anthropic/claude-sonnet-4-6" } } },
-                { dreamer: { tasks: { verify: { model: "anthropic/claude-sonnet-4-6" } } } },
+                {
+                    historian: {
+                        opencode: { fallback_models: "anthropic/claude-sonnet-4-6" },
+                    },
+                },
+                {
+                    dreamer: {
+                        tasks: { verify: { model: "anthropic/claude-sonnet-4-6" } },
+                    },
+                },
             ];
 
             for (const config of invalidConfigs) {

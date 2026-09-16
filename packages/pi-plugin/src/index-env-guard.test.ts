@@ -8,6 +8,7 @@ import {
 
 import magicContextPiExtension, { __test } from "./index";
 import { MAGIC_CONTEXT_PI_SUBAGENT_ENV } from "./subagent-runner";
+import { fakeContext } from "./test-utils.test";
 
 const originalEnv = {
 	MAGIC_CONTEXT_PI_SUBAGENT: process.env.MAGIC_CONTEXT_PI_SUBAGENT,
@@ -34,17 +35,32 @@ function isolateXdgEnv() {
 function createCountingPi() {
 	const events: string[] = [];
 	const tools: string[] = [];
+	let activeTools: string[] = [];
 	const flags: string[] = [];
 	const commands: string[] = [];
 	const entryRenderers: string[] = [];
+	const handlers = new Map<
+		string,
+		Array<(event: unknown, ctx: unknown) => unknown>
+	>();
 	const pi = {
 		events: { on: mock(() => () => undefined) },
-		on: mock((event: string) => {
-			events.push(event);
-		}),
+		on: mock(
+			(event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
+				events.push(event);
+				const list = handlers.get(event) ?? [];
+				list.push(handler);
+				handlers.set(event, list);
+			},
+		),
 		registerTool: mock((tool: { name?: string }) => {
 			tools.push(tool.name ?? "<unnamed>");
+			activeTools.push(tool.name ?? "<unnamed>");
 		}),
+		getActiveTools: () => [...activeTools],
+		setActiveTools: (names: string[]) => {
+			activeTools = [...names];
+		},
 		registerFlag: mock((name: string) => {
 			flags.push(name);
 		}),
@@ -58,15 +74,24 @@ function createCountingPi() {
 		sendMessage: mock(() => undefined),
 		sendUserMessage: mock(() => undefined),
 	} as unknown as ExtensionAPI;
-	return { pi, events, tools, flags, commands, entryRenderers };
+	return {
+		pi,
+		events,
+		tools,
+		flags,
+		commands,
+		entryRenderers,
+		async emit(event: string, ctx: unknown) {
+			for (const handler of handlers.get(event) ?? []) await handler({}, ctx);
+		},
+	};
 }
 
 afterEach(() => {
 	restoreEnv();
 	for (const root of tempRoots.splice(0)) cleanupTestTempDir(root);
-	// Clear the process-global marker context so one test's full init does not
-	// leak into the next (the holder lives on globalThis, not module state).
-	__test.clearPiInProcessSubagentInitContext();
+	__test.clearPiChildClaims();
+	__test.clearPiStartupMaintenanceClaim();
 });
 
 describe("Pi full extension subagent env guard", () => {
@@ -91,16 +116,28 @@ describe("Pi full extension subagent env guard", () => {
 
 		await magicContextPiExtension(registrations.pi);
 
-		expect(registrations.events.length).toBeGreaterThan(0);
-		expect(registrations.tools.length).toBeGreaterThan(0);
-		expect(registrations.commands.length).toBeGreaterThan(0);
-		expect(registrations.entryRenderers).toEqual([
-			"magic-context-turn-refused",
-			"ctx-status",
-		]);
-		expect(registrations.events).toContain("before_agent_start");
-		expect(registrations.tools).toContain("ctx_search");
-		expect(registrations.commands).toContain("ctx-status");
+		expect(registrations.events).toEqual(["session_start"]);
+		expect(registrations.tools).toEqual([]);
+		const ctx = {
+			...fakeContext("ses-env-guard-primary", process.cwd(), [], []),
+			hasUI: false,
+			ui: { notify() {}, setStatus() {} },
+		};
+		await registrations.emit("session_start", ctx);
+		try {
+			expect(registrations.events.length).toBeGreaterThan(0);
+			expect(registrations.tools.length).toBeGreaterThan(0);
+			expect(registrations.commands.length).toBeGreaterThan(0);
+			expect(registrations.entryRenderers).toEqual([
+				"magic-context-turn-refused",
+				"ctx-status",
+			]);
+			expect(registrations.events).toContain("before_agent_start");
+			expect(registrations.tools).toContain("ctx_search");
+			expect(registrations.commands).toContain("ctx-status");
+		} finally {
+			await registrations.emit("session_shutdown", ctx);
+		}
 		// This path initializes and migrates a fresh SQLite database before registering
 		// the complete extension. In a 2-CPU Bun 1.3.14 Linux container it took
 		// 0.49-2.59s (0.38-0.74s for SQLite alone), while a loaded 2-core release runner

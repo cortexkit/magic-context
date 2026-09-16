@@ -105,7 +105,12 @@ afterEach(() => {
 
     for (const dir of tempDirs) {
         try {
-            rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+            rmSync(dir, {
+                recursive: true,
+                force: true,
+                maxRetries: 10,
+                retryDelay: 100,
+            });
         } catch {
             /* Ignore EBUSY on Windows */
         }
@@ -226,7 +231,11 @@ function createOpenCodeDbForHook(
                 sessionId,
                 timestamp,
                 timestamp,
-                JSON.stringify({ id: message.id, role: message.role, sessionID: sessionId }),
+                JSON.stringify({
+                    id: message.id,
+                    role: message.role,
+                    sessionID: sessionId,
+                }),
             );
             insertPart.run(
                 message.id,
@@ -257,7 +266,9 @@ describe("magic-context hook", () => {
         mkdirSync(join(projectDir, ".git"));
         __setProjectIdentityTestHooks({
             execFileSync: mock(() => {
-                const error = new Error("permission denied") as Error & { code?: string };
+                const error = new Error("permission denied") as Error & {
+                    code?: string;
+                };
                 error.code = "EACCES";
                 throw error;
             }) as unknown as typeof execFileSync,
@@ -326,7 +337,9 @@ describe("magic-context hook", () => {
         await hook.event!({
             event: {
                 type: "message.updated",
-                properties: { info: { id: "u-1", role: "user", sessionID: "ses-index" } },
+                properties: {
+                    info: { id: "u-1", role: "user", sessionID: "ses-index" },
+                },
             },
         });
         await hook.event!({
@@ -354,7 +367,11 @@ describe("magic-context hook", () => {
             event: {
                 type: "message.updated",
                 properties: {
-                    info: { id: "a-streaming", role: "assistant", sessionID: "ses-index" },
+                    info: {
+                        id: "a-streaming",
+                        role: "assistant",
+                        sessionID: "ses-index",
+                    },
                 },
             },
         });
@@ -383,6 +400,53 @@ describe("magic-context hook", () => {
         expect(typeof hook.event).toBe("function");
         expect(typeof hook["command.execute.before"]).toBe("function");
         expect(typeof hook["tool.execute.after"]).toBe("function");
+    });
+
+    it("threads historian.disable over child reconciliation while retaining stored child history", async () => {
+        process.env.XDG_DATA_HOME = makeTempDir("hook-disabled-child-reconciliation-");
+        const prompts = createPromptMocks();
+        const deps = createMockDeps(prompts);
+        deps.config = {
+            ...deps.config,
+            historian: { disable: true, subagent_reconciliation: true },
+        };
+        const hook = requireHook(createMagicContextHook(deps));
+        const db = openDatabase();
+        const sessionId = "ses-hook-disabled-child-reconciliation";
+        updateSessionMeta(db, sessionId, { isSubagent: true });
+        appendCompartments(db, sessionId, [
+            {
+                sequence: 0,
+                startMessage: 1,
+                endMessage: 1,
+                startMessageId: "covered-child",
+                endMessageId: "covered-child",
+                title: "Retained child history",
+                content: "stored child summary",
+            },
+        ]);
+        const messages = [
+            {
+                info: {
+                    id: "covered-child",
+                    role: "user",
+                    sessionID: sessionId,
+                },
+                parts: [{ type: "text", text: "covered child request" }],
+            },
+            {
+                info: { id: "child-tail", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "live child tail" }],
+            },
+        ];
+
+        await hook["experimental.chat.messages.transform"]!({}, { messages });
+
+        expect(JSON.stringify(messages)).toContain("Retained child history");
+        expect(JSON.stringify(messages)).not.toContain("covered child request");
+        expect(JSON.stringify(messages)).toContain("live child tail");
+        expect(prompts.createSession).not.toHaveBeenCalled();
+        expect(prompts.promptAsync).not.toHaveBeenCalled();
     });
 
     it("intercepts a Desktop slashless status command before an LLM completion", async () => {
@@ -432,7 +496,11 @@ describe("magic-context hook", () => {
 
         await expectSentinel(
             hook["command.execute.before"]!(
-                { command: "ctx-status", sessionID: "ses-native-status", arguments: "" },
+                {
+                    command: "ctx-status",
+                    sessionID: "ses-native-status",
+                    arguments: "",
+                },
                 { parts: [] },
             ),
             "__CONTEXT_MANAGEMENT_CTX-STATUS_HANDLED__",
@@ -636,7 +704,10 @@ describe("magic-context hook", () => {
         const promptMocks = createPromptMocks(false);
         const hook = requireHook(createMagicContextHook(createMockDeps(promptMocks)));
 
-        await hook["chat.message"]!({ sessionID: "ses-status-async", variant: "thinking" });
+        await hook["chat.message"]!({
+            sessionID: "ses-status-async",
+            variant: "thinking",
+        });
         await hook.event!({
             event: {
                 type: "message.updated",
@@ -670,7 +741,10 @@ describe("magic-context hook", () => {
         const callArg = promptMocks.promptAsync.mock.calls[0]?.[0] as {
             body?: Record<string, unknown>;
         };
-        expect(callArg.body?.model).toEqual({ providerID: "openai", modelID: "gpt-4o" });
+        expect(callArg.body?.model).toEqual({
+            providerID: "openai",
+            modelID: "gpt-4o",
+        });
         expect(callArg.body?.variant).toBe("thinking");
     });
 
@@ -1117,6 +1191,8 @@ it("the event hook flushes notices on session.idle, never on a terminal assistan
         }),
     ).toBe("queued");
     expect(promptMocks.prompt).not.toHaveBeenCalled();
-    await hook.event!({ event: { type: "session.idle", properties: { sessionID } } } as never);
+    await hook.event!({
+        event: { type: "session.idle", properties: { sessionID } },
+    } as never);
     expect(promptMocks.prompt).toHaveBeenCalledTimes(1);
 });

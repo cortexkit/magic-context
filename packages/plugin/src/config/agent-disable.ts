@@ -16,6 +16,12 @@ export function isHistorianRunnable(config: { historian?: { disable?: boolean } 
     return config.historian?.disable !== true;
 }
 
+export function isSubagentReconciliationEnabled(config: {
+    historian?: { subagent_reconciliation?: boolean } | null;
+}): boolean {
+    return config.historian?.subagent_reconciliation === true;
+}
+
 /**
  * The ONLY non-schema reader of the `compaction.enabled` config path.
  * Resolves the compaction-off mode gate from a parsed Magic Context config.

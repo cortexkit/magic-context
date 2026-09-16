@@ -223,7 +223,10 @@ function normalizeTrustedPercentageThresholds(value: unknown): PercentageThresho
         return { defaultValue: value.default, overrides };
     }
 
-    return { defaultValue: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE, overrides: new Map() };
+    return {
+        defaultValue: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
+        overrides: new Map(),
+    };
 }
 
 function normalizeTrustedTokenThresholds(value: unknown): TokenThresholdConfig {
@@ -554,6 +557,12 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
 
     const historian = projectRaw.historian;
     if (isPlainObject(historian)) {
+        if ("subagent_reconciliation" in historian) {
+            delete historian.subagent_reconciliation;
+            warnings.push(
+                "Ignoring historian.subagent_reconciliation from project config (security: only user config may enable autonomous subagent historian work).",
+            );
+        }
         const removed: string[] = [];
         for (const field of HISTORIAN_USER_ONLY_FIELDS) {
             if (field in historian) {

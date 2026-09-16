@@ -98,6 +98,53 @@ import {
 } from "./test-utils.test";
 import { createPiTranscript } from "./transcript-pi";
 
+describe("Pi explicit reduction tool availability", () => {
+	for (const [isSubagent, callable, compactionOff, visible] of [
+		[false, undefined, false, true],
+		[true, undefined, false, false],
+		[true, true, false, true],
+		[false, false, false, false],
+		[true, true, true, false],
+	] as const) {
+		it(`tags reflect availability without changing identity (child=${isSubagent}, callable=${callable}, off=${compactionOff})`, async () => {
+			const db = createTestDb();
+			const sessionId = `ses-availability-${isSubagent}-${callable}-${compactionOff}`;
+			const fake = createFakePi();
+			try {
+				updateSessionMeta(db, sessionId, { isSubagent });
+				registerPiContextHandler(fake.pi as never, {
+					db,
+					ctxReduceCallable: callable,
+					compactionOff,
+				});
+				const handler = fake.handlers.get("context") as (
+					event: unknown,
+					ctx: unknown,
+				) => Promise<{ messages: ReturnType<typeof userMessage>[] }>;
+				const messages = [
+					userMessage("ordinary message with a session-local tool"),
+				];
+				const result = await handler(
+					{ messages },
+					fakeContext(sessionId, process.cwd(), ["entry-1"], messages),
+				);
+				expect(result).toBeDefined();
+				expect(/§\d+§/.test(result.messages.map(textOf).join("\n"))).toBe(
+					visible,
+				);
+				expect(getOrCreateSessionMeta(db, sessionId).isSubagent).toBe(
+					isSubagent,
+				);
+				if (isSubagent)
+					expect(getPiChannel1Baseline(sessionId)).toBeUndefined();
+			} finally {
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
+	}
+});
+
 describe("Pi context project identity cache", () => {
 	it("serves byte-identical output with cached identity and one host-usage read per context", async () => {
 		const db = createTestDb();

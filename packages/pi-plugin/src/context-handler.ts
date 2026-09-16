@@ -1227,6 +1227,11 @@ export interface PiContextHandlerOptions {
 	resolveForProject?: (projectDir: string) => PiContextHandlerOptions;
 	/** Boot-resolved compaction-off flag. It remains fixed for this Pi process. */
 	compactionOff?: boolean;
+	isSubagentSession?: boolean;
+	/** Actual session-local tool availability; omitted preserves the legacy identity fallback. */
+	ctxReduceCallable?: boolean;
+	/** Refusal owns the turn if installation of this runtime did not finish. */
+	isRuntimeReady?: () => boolean;
 	/** Allow a session started exactly in the canonical home directory only when user-level configuration enables it. */
 	allowHomeProject?: boolean;
 	maybeAutoEmbedSession?: (
@@ -2302,6 +2307,7 @@ export function registerPiContextHandler(
 	});
 
 	registerPiGuardedContext(pi, async (event, ctx) => {
+		if (baseOptions.isRuntimeReady?.() === false) return;
 		const transformStartTime = performance.now();
 		let rawMessageCount = 0;
 		let rawFallbackLimit: number | undefined;
@@ -2346,6 +2352,9 @@ export function registerPiContextHandler(
 			// resolver is wired (tests) or the resolver returns nothing.
 			const options =
 				baseOptions.resolveForProject?.(projectDirectory) ?? baseOptions;
+			if (options.isSubagentSession) {
+				updateSessionMeta(options.db, sessionId, { isSubagent: true });
+			}
 			const schedulerConfig = options.scheduler ?? DEFAULT_SCHEDULER_CONFIG;
 			const scheduler = schedulerFor(options);
 			lkgCompactionOff = options.compactionOff === true;
@@ -3250,6 +3259,7 @@ export function registerPiContextHandler(
 				readBranchEntries: resolvePiReadBranchEntries(ctx),
 				isSubagent: sessionMeta.isSubagent,
 				compactionOff: options.compactionOff === true,
+				ctxReduceCallable: options.ctxReduceCallable,
 				injectionPassSnapshot: piM0M1PassSnapshot,
 			});
 			logTransformTiming(sessionId, "runPipeline", tRunPipeline);
@@ -4645,6 +4655,7 @@ interface RunPipelineArgs {
 		caveman?: { enabled: boolean; minChars: number };
 	};
 	isSubagent?: boolean;
+	ctxReduceCallable?: boolean;
 	/** Additive-only transform mode: no tags, drops, history trim, markers, or nudges. */
 	compactionOff?: boolean;
 	/** ceiling = contextLimit × executeThreshold% for the tiered emergency drop. */
@@ -5045,11 +5056,12 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const alreadyRanHeuristicsThisTurn =
 		currentTurnId !== null &&
 		lastHeuristicsTurnIdBySession.get(args.sessionId) === currentTurnId;
-	// Pi's primary process always registers ctx_reduce. Hidden/no-session child
-	// processes do not use this context handler; if a future path marks a session
-	// as subagent here, suppress visible tags and nudges so the prompt never points
-	// at a missing session-scoped tool.
-	const ctxReduceCallable = !args.sessionMeta.isSubagent;
+	// Tool availability is independent of child identity and reconciliation policy.
+	// Direct handler callers retain the legacy fallback when no runtime supplied it.
+	// This controls tag visibility only; primary-only nudge/heuristic gates stay intact.
+	const ctxReduceCallable =
+		!args.compactionOff &&
+		(args.ctxReduceCallable ?? !args.sessionMeta.isSubagent);
 	// Deferred publication signals may be consumed only on a pass that already
 	// has a genuine bust opportunity. Pi's historian is detached and signals via
 	// the deferred sets post-publish, so there is no inline await to special-case.

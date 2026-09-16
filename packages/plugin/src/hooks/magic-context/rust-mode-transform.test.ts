@@ -232,7 +232,11 @@ function makeDeps(db: ContextDatabase, moduleClient: RustModeModuleClient): Tran
         lastHeuristicsTurnId: new Map(),
         directory: "/tmp/project",
         projectPath: "/tmp/project",
-        memoryConfig: { enabled: false, injectionBudgetTokens: 1000, autoPromote: false },
+        memoryConfig: {
+            enabled: false,
+            injectionBudgetTokens: 1000,
+            autoPromote: false,
+        },
         liveModelBySession: new Map(),
         sessionDirectoryBySession: new Map(),
         transformMode: "rust",
@@ -273,7 +277,11 @@ function installAvailabilityDb(sessionId: string, firstUserTools?: Record<string
                 sessionId,
                 1,
                 1,
-                JSON.stringify({ id: "availability-user", role: "user", tools: firstUserTools }),
+                JSON.stringify({
+                    id: "availability-user",
+                    role: "user",
+                    tools: firstUserTools,
+                }),
             );
     }
     closeQuietly(opencodeDb);
@@ -352,7 +360,10 @@ describe("Rust mode authority adapter", () => {
             authoritySeed: async (args) => {
                 authorityRoots.push(String(args.projectRoot));
                 const rows = Array.isArray(args.rows) ? args.rows : [];
-                return { seeded: rows.length, module_row_ids: rows.map((_, index) => index + 1) };
+                return {
+                    seeded: rows.length,
+                    module_row_ids: rows.map((_, index) => index + 1),
+                };
             },
             mirrorPull: async (args) => {
                 authorityRoots.push(String(args.projectRoot));
@@ -508,7 +519,11 @@ describe("Rust mode authority adapter", () => {
                             kind: {
                                 type: "tool_call",
                                 name: "edit",
-                                input: { filePath: "edit.ts", oldString: "old", newString: "new" },
+                                input: {
+                                    filePath: "edit.ts",
+                                    oldString: "old",
+                                    newString: "new",
+                                },
                             },
                         },
                         {
@@ -553,7 +568,10 @@ describe("Rust mode authority adapter", () => {
 
     it("copies the profile-resolved historian chain onto the authority wire", () => {
         const historianModelChain = __rustModeTransformTest.resolvedHistorianModelChain({
-            historianModel: { model: "anthropic/profile-historian", qualifier: "high" },
+            historianModel: {
+                model: "anthropic/profile-historian",
+                qualifier: "high",
+            },
             fallbackModels: [
                 { model: "openai/profile-fallback", qualifier: "low" },
                 "anthropic/profile-historian",
@@ -590,13 +608,22 @@ describe("Rust mode authority adapter", () => {
             content_hash: resolved.contentHash,
         });
         expect(
-            __rustModeTransformTest.muralInputForWire({ ...resolved, enabled: false }),
+            __rustModeTransformTest.muralInputForWire({
+                ...resolved,
+                enabled: false,
+            }),
         ).toBeUndefined();
         expect(
-            __rustModeTransformTest.muralInputForWire({ ...resolved, supportsVision: false }),
+            __rustModeTransformTest.muralInputForWire({
+                ...resolved,
+                supportsVision: false,
+            }),
         ).toBeUndefined();
         expect(
-            __rustModeTransformTest.muralInputForWire({ ...resolved, dataUrl: undefined }),
+            __rustModeTransformTest.muralInputForWire({
+                ...resolved,
+                dataUrl: undefined,
+            }),
         ).toBeUndefined();
 
         const body = __rustModeTransformTest.buildTransformBody({
@@ -655,8 +682,78 @@ describe("Rust mode authority adapter", () => {
             modelKey: null,
             providerId: null,
         });
+
         expect(body.caveman_enabled).toBe(true);
         expect(body.caveman_min_chars).toBe(240);
+    });
+
+    it("forwards reconciliation separately from the durable subagent identity", () => {
+        const body = __rustModeTransformTest.buildTransformBody({
+            sessionId: "subagent-reconciliation-wire",
+            input: [],
+            nativeMessages: [],
+            passInputs: { is_subagent: true, subagent_reconciliation: true },
+            usage: {},
+            modelKey: null,
+            providerId: null,
+        });
+        expect(body.is_subagent).toBe(true);
+        expect(body.subagent_reconciliation).toBe(true);
+
+        const defaultBody = __rustModeTransformTest.buildTransformBody({
+            sessionId: "subagent-reconciliation-default-wire",
+            input: [],
+            nativeMessages: [],
+            passInputs: { is_subagent: true },
+            usage: {},
+            modelKey: null,
+            providerId: null,
+        });
+        expect(defaultBody.is_subagent).toBe(true);
+        expect(defaultBody.subagent_reconciliation).toBe(false);
+    });
+
+    it("sends disabled reconciliation to Rust while retaining the configured historian model chain", async () => {
+        const sessionId = "rust-disabled-child-reconciliation";
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        const requestBodies: Record<string, unknown>[] = [];
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method, body }) => {
+                if (method === "transform") {
+                    requestBodies.push(body as Record<string, unknown>);
+                    return {
+                        decision: "HARD",
+                        scheduler_decision: "execute",
+                        historian: {
+                            fired: false,
+                            no_fire: "subagent_reconciliation_disabled",
+                        },
+                        native_messages: makeMessages(sessionId),
+                    };
+                }
+                return { ok: true };
+            },
+        };
+        const deps = makeDeps(db, moduleClient);
+        deps.subagentReconciliation = true;
+        deps.historianRunnable = false;
+        deps.historianModel = { model: "anthropic/configured-historian" };
+        deps.fallbackModels = [{ model: "openai/configured-fallback" }];
+        const runner = createRustModeTransform(deps, { moduleClient });
+        const meta = makeMeta(db, sessionId);
+        meta.isSubagent = true;
+
+        await runner.run(sessionId, makeMessages(sessionId), { messages: [] }, meta);
+
+        expect(requestBodies).toHaveLength(1);
+        expect(requestBodies[0]?.is_subagent).toBe(true);
+        expect(requestBodies[0]?.subagent_reconciliation).toBe(false);
+        expect(requestBodies[0]?.historian_model_chain).toEqual([
+            "anthropic/configured-historian",
+            "openai/configured-fallback",
+        ]);
     });
 
     it("serves 2048-message SOFT+, SOFT and HARD native wires with the original SHA256", async () => {
@@ -681,7 +778,9 @@ describe("Rust mode authority adapter", () => {
                 call: async ({ method }) =>
                     method === "transform" ? { decision, native_messages: native } : { ok: true },
             };
-            const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+            const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+                moduleClient,
+            });
             const messages = makeMessages(sessionId);
             const output: { messages: unknown[] } = { messages: [...messages] };
             await transform.run(sessionId, messages, output, makeMeta(db, sessionId));
@@ -713,26 +812,46 @@ describe("Rust mode authority adapter", () => {
                     state: "idle",
                 },
                 served_from: "transform",
-                timings: { handler_total: 5, total: 4, native_cache_encoded_messages: 1 },
+                timings: {
+                    handler_total: 5,
+                    total: 4,
+                    native_cache_encoded_messages: 1,
+                },
             },
             {
                 decision: "SOFT+",
                 scheduler_decision: "defer",
                 scheduler_defer_reason: "scheduler_defer",
                 served_from: "lkg",
-                timings: { handler_total: 3, total: 2, native_cache_reused_messages: 1 },
+                timings: {
+                    handler_total: 3,
+                    total: 2,
+                    native_cache_reused_messages: 1,
+                },
             },
         ];
         const moduleClient: RustModeModuleClient = {
             call: async ({ method, onTimings }) => {
                 if (method !== "transform") return { ok: true };
-                onTimings?.({ lane: 1, route: 2, encode: 3, issue: 4, responseWait: 5, settle: 6 });
-                return { ...responses.shift(), native_messages: makeMessages(sessionId) };
+                onTimings?.({
+                    lane: 1,
+                    route: 2,
+                    encode: 3,
+                    issue: 4,
+                    responseWait: 5,
+                    settle: 6,
+                });
+                return {
+                    ...responses.shift(),
+                    native_messages: makeMessages(sessionId),
+                };
             },
         };
         const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
         try {
-            const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+            const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+                moduleClient,
+            });
             for (let index = 0; index < 2; index += 1) {
                 const messages = makeMessages(sessionId);
                 await transform.run(
@@ -867,7 +986,9 @@ describe("Rust mode authority adapter", () => {
                       }
                     : { ok: true },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const input = makeMessages(sessionId);
         const output = { messages: [...input] as unknown[] };
         const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
@@ -973,7 +1094,9 @@ describe("Rust mode authority adapter", () => {
                 };
             },
         };
-        const initial = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const initial = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const initialMeta = makeMeta(db, sessionId);
         initialMeta.isSubagent = true;
         const initialOutput = { messages: [...input] as unknown[] };
@@ -984,7 +1107,9 @@ describe("Rust mode authority adapter", () => {
 
         resetLkgSlotsForTest();
         registerLkgPersistence(createDbLkgPersistence(db));
-        const restarted = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const restarted = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const restartMeta = makeMeta(db, sessionId);
         restartMeta.isSubagent = true;
         for (let deferredPass = 1; deferredPass <= 3; deferredPass += 1) {
@@ -1055,7 +1180,9 @@ describe("Rust mode authority adapter", () => {
                 };
             },
         };
-        const initial = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const initial = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const initialOutput = { messages: [...input] as unknown[] };
         await initial.run(sessionId, input, initialOutput, makeMeta(db, sessionId));
         const stableSha = createHash("sha256")
@@ -1064,7 +1191,9 @@ describe("Rust mode authority adapter", () => {
 
         resetLkgSlotsForTest();
         registerLkgPersistence(createDbLkgPersistence(db));
-        const restarted = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const restarted = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const deferredOutput = { messages: [...input] as unknown[] };
         await restarted.run(sessionId, input, deferredOutput, makeMeta(db, sessionId));
         expect(
@@ -1118,7 +1247,9 @@ describe("Rust mode authority adapter", () => {
                 };
             },
         };
-        const runner = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const runner = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const served: string[] = [];
 
         for (let pass = 0; pass < 3; pass += 1) {
@@ -1227,7 +1358,9 @@ describe("Rust mode authority adapter", () => {
 
         await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
 
-        expect(transformBody?.usage).toMatchObject({ context_limit_tokens: 64_000 });
+        expect(transformBody?.usage).toMatchObject({
+            context_limit_tokens: 64_000,
+        });
         expect(transformBody?.emergency_recovery_armed).toBe(true);
     });
 
@@ -1241,7 +1374,10 @@ describe("Rust mode authority adapter", () => {
                 if (method !== "transform") return { ok: true };
                 transformBodies.push(body);
                 return transformBodies.length === 1
-                    ? { native_messages: makeMessages(sessionId), decision: "PASSTHROUGH" }
+                    ? {
+                          native_messages: makeMessages(sessionId),
+                          decision: "PASSTHROUGH",
+                      }
                     : {
                           native_messages: makeMessages(sessionId),
                           decision: "HARD",
@@ -1479,7 +1615,9 @@ describe("Rust mode authority adapter", () => {
                     : { ok: true };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const messages = makeMessages(sessionId);
         const output = { messages: messages as unknown[] };
 
@@ -1511,11 +1649,16 @@ describe("Rust mode authority adapter", () => {
                     return { ok: true };
                 }
                 return method === "transform"
-                    ? { decision: "PASSTHROUGH", native_messages: makeMessages(sessionId) }
+                    ? {
+                          decision: "PASSTHROUGH",
+                          native_messages: makeMessages(sessionId),
+                      }
                     : { ok: true };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const firstInput = makeMessages(sessionId);
 
         await transform.run(
@@ -1555,7 +1698,9 @@ describe("Rust mode authority adapter", () => {
                 return { decision: "SOFT+", native_messages: [] };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const output = { messages: messages as unknown[] };
 
         await transform.run(sessionId, messages, output, makeMeta(db, sessionId));
@@ -1596,7 +1741,13 @@ describe("Rust mode authority adapter", () => {
         const native = [
             {
                 info: { role: "user", sessionID: sessionId },
-                parts: [{ type: "text", text: "<project-docs>m0</project-docs>", synthetic: true }],
+                parts: [
+                    {
+                        type: "text",
+                        text: "<project-docs>m0</project-docs>",
+                        synthetic: true,
+                    },
+                ],
             },
             {
                 info: { id: "m1", role: "user", sessionID: sessionId },
@@ -1653,7 +1804,9 @@ describe("Rust mode authority adapter", () => {
                       }
                     : { ok: true },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const output = { messages: input as unknown[] };
 
         await transform.run(sessionId, input, output, makeMeta(db, sessionId));
@@ -1681,7 +1834,9 @@ describe("Rust mode authority adapter", () => {
                     : { ok: true };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const messages = makeMessages(sessionId);
         const output = { messages: messages as unknown[] };
 
@@ -1732,7 +1887,11 @@ describe("Rust mode authority adapter", () => {
         const enabledSession = `rust-auto-search-enabled-${Date.now()}`;
         sessions.push(enabledSession);
         installRawProvider(enabledSession);
-        deps.autoSearch = { enabled: true, scoreThreshold: 0.73, minPromptChars: 47 };
+        deps.autoSearch = {
+            enabled: true,
+            scoreThreshold: 0.73,
+            minPromptChars: 47,
+        };
         const enabledMessages = makeMessages(enabledSession);
         await transform.run(
             enabledSession,
@@ -1752,7 +1911,11 @@ describe("Rust mode authority adapter", () => {
         const disabledSession = `rust-auto-search-disabled-${Date.now()}`;
         sessions.push(disabledSession);
         installRawProvider(disabledSession);
-        deps.autoSearch = { enabled: false, scoreThreshold: 0.91, minPromptChars: 83 };
+        deps.autoSearch = {
+            enabled: false,
+            scoreThreshold: 0.91,
+            minPromptChars: 83,
+        };
         const disabledMessages = makeMessages(disabledSession);
         await transform.run(
             disabledSession,
@@ -1789,7 +1952,10 @@ describe("Rust mode authority adapter", () => {
         deps.variantBySession = new Map([[sessionId, "xhigh"]]);
         const transform = createRustModeTransform(deps, { moduleClient });
         const messages = makeMessages(sessionId);
-        messages[0].info.model = { providerID: "openai-codex", modelID: "gpt-6-astra" };
+        messages[0].info.model = {
+            providerID: "openai-codex",
+            modelID: "gpt-6-astra",
+        };
 
         await transform.run(
             sessionId,
@@ -1822,7 +1988,11 @@ describe("Rust mode authority adapter", () => {
                     : { ok: true },
         };
         const deps = makeDeps(db, moduleClient);
-        deps.memoryConfig = { enabled: true, injectionBudgetTokens: 1_000, autoPromote: false };
+        deps.memoryConfig = {
+            enabled: true,
+            injectionBudgetTokens: 1_000,
+            autoPromote: false,
+        };
         deps.sessionDirectoryBySession?.set(sessionId, "/stable/session-root");
         const transform = createRustModeTransform(deps, {
             moduleClient,
@@ -1909,7 +2079,9 @@ describe("Rust mode authority adapter", () => {
         expect(watermarkReads).toBe(readsAfterPrime);
         expect(stateSyncCalls).toBe(syncsAfterPrime);
 
-        updateSessionMeta(db, sessionId, { lastTodoState: '[{"content":"changed"}]' });
+        updateSessionMeta(db, sessionId, {
+            lastTodoState: '[{"content":"changed"}]',
+        });
         expect(await run()).toBe(firstSha);
         expect(watermarkReads).toBeGreaterThan(readsAfterPrime);
         expect(stateSyncCalls).toBeGreaterThan(syncsAfterPrime);
@@ -1966,7 +2138,10 @@ describe("Rust mode authority adapter", () => {
             .update(JSON.stringify(firstOutput.messages))
             .digest("hex");
         const repeatedMessages = makeMessages(sessionId);
-        repeatedMessages[0].info.model = { providerID: "anthropic", modelID: "opus" };
+        repeatedMessages[0].info.model = {
+            providerID: "anthropic",
+            modelID: "opus",
+        };
         const repeatedOutput = { messages: repeatedMessages as unknown[] };
         await transform.run(sessionId, repeatedMessages, repeatedOutput, makeMeta(db, sessionId));
 
@@ -2021,7 +2196,9 @@ describe("Rust mode authority adapter", () => {
                       }
                     : { ok: true },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const run = async () => {
             const messages = makeMessages(sessionId);
             await transform.run(sessionId, messages, { messages: [...messages] }, meta);
@@ -2046,14 +2223,18 @@ describe("Rust mode authority adapter", () => {
 
         await run();
         expect(
-            db.prepare("SELECT count FROM memory_manifest_updates").get() as { count: number },
+            db.prepare("SELECT count FROM memory_manifest_updates").get() as {
+                count: number;
+            },
         ).toEqual({ count: 1 });
 
         renderedMemoryIds = [memory.id + 1];
         await run();
         expect(getVisibleMemoryIds(db, sessionId)).toEqual(new Set([memory.id + 1]));
         expect(
-            db.prepare("SELECT count FROM memory_manifest_updates").get() as { count: number },
+            db.prepare("SELECT count FROM memory_manifest_updates").get() as {
+                count: number;
+            },
         ).toEqual({ count: 2 });
     });
 
@@ -2094,7 +2275,9 @@ describe("Rust mode authority adapter", () => {
         }
 
         const moduleClient: RustModeModuleClient = new ClassBackedModuleClient();
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const messages = makeMessages(sessionId);
         await transform.run(
             sessionId,
@@ -2127,7 +2310,9 @@ describe("Rust mode authority adapter", () => {
                 return { max_sequence: 0, compartments: [] };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const messages = makeMessages(sessionId);
         const run = transform.run(
             sessionId,
@@ -2182,7 +2367,9 @@ describe("Rust mode authority adapter", () => {
                 };
             },
         };
-        transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const messages = makeMessages(sessionId);
 
         await transform.run(
@@ -2230,7 +2417,9 @@ describe("Rust mode authority adapter", () => {
                 };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const run = async () => {
             const messages = makeMessages(sessionId);
             await transform.run(
@@ -2291,7 +2480,9 @@ describe("Rust mode authority adapter", () => {
                 };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const run = async () => {
             const messages = makeMessages(sessionId);
             await transform.run(
@@ -2610,7 +2801,9 @@ describe("Rust mode authority adapter", () => {
                     : { ok: true };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const messages: MessageLike[] = [
             {
                 info: { id: "m1", role: "assistant", sessionID: sessionId },
@@ -2645,7 +2838,9 @@ describe("Rust mode authority adapter", () => {
                     : { ok: true };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const messages = makeMessages(sessionId);
         messages[0]!.info.tools = { "*": false, read: true };
 
@@ -2684,7 +2879,9 @@ describe("Rust mode authority adapter", () => {
         const agents = mock(async () => ({
             data: [{ name: "build", permission: { todowrite: denied ? "deny" : "allow" } }],
         }));
-        const get = mock(async () => ({ data: { agent: "build", directory: "/tmp/project" } }));
+        const get = mock(async () => ({
+            data: { agent: "build", directory: "/tmp/project" },
+        }));
         deps.client = { app: { agents }, session: { get } } as never;
         deps.sessionDirectoryBySession!.set(sessionId, "/tmp/project");
         const transform = createRustModeTransform(deps, { moduleClient });
@@ -2770,7 +2967,9 @@ describe("Rust mode authority adapter", () => {
         deps.client = {
             app: { agents },
             session: {
-                get: async () => ({ data: { agent: "build", directory: "/tmp/project" } }),
+                get: async () => ({
+                    data: { agent: "build", directory: "/tmp/project" },
+                }),
             },
         } as never;
         const transform = createRustModeTransform(deps, { moduleClient });
@@ -2923,7 +3122,9 @@ describe("Rust mode authority adapter", () => {
                 return { decision: "SOFT+", native_messages: native };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const output = { messages: messages as unknown[] };
         await transform.run(sessionId, messages, output, makeMeta(db, sessionId));
 
@@ -2970,7 +3171,9 @@ describe("Rust mode authority adapter", () => {
                 return { decision: "SOFT+", native_messages: native };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const messages = makeMessages(sessionId);
         const output = { messages: messages as unknown[] };
 
@@ -3006,13 +3209,19 @@ describe("Rust mode authority adapter", () => {
                     );
                 }
                 return page.transform_page_complete === true
-                    ? { decision: "HARD", served_from: "transform", native_messages: native }
+                    ? {
+                          decision: "HARD",
+                          served_from: "transform",
+                          native_messages: native,
+                      }
                     : { staged: true };
             },
         };
         const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
         try {
-            const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+            const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+                moduleClient,
+            });
             const output = { messages: messages as unknown[] };
             await transform.run(sessionId, messages, output, makeMeta(db, sessionId));
 
@@ -3063,13 +3272,19 @@ describe("Rust mode authority adapter", () => {
                     };
                 }
                 return page.transform_page_complete === true
-                    ? { decision: "HARD", served_from: "transform", native_messages: native }
+                    ? {
+                          decision: "HARD",
+                          served_from: "transform",
+                          native_messages: native,
+                      }
                     : { staged: true };
             },
         };
         const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
         try {
-            const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+            const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+                moduleClient,
+            });
             const output = { messages: messages as unknown[] };
             await transform.run(sessionId, messages, output, makeMeta(db, sessionId));
 
@@ -3113,14 +3328,18 @@ describe("Rust mode authority adapter", () => {
                 const page = body as Record<string, unknown>;
                 transformCalls.push({ body: page, attemptClass, timeoutMs });
                 if (page.transform_page_complete === true) {
-                    throw Object.assign(new Error("cold execute deadline"), { code: "ETIMEDOUT" });
+                    throw Object.assign(new Error("cold execute deadline"), {
+                        code: "ETIMEDOUT",
+                    });
                 }
                 return { staged: true };
             },
         };
         const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
         try {
-            const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+            const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+                moduleClient,
+            });
             const output = { messages: [] as unknown[] };
             await transform.run(sessionId, messages, output, makeMeta(db, sessionId));
 
@@ -3175,7 +3394,9 @@ describe("Rust mode authority adapter", () => {
         };
         const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
         try {
-            const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+            const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+                moduleClient,
+            });
             const output = { messages: [] as unknown[] };
             await transform.run(sessionId, messages, output, makeMeta(db, sessionId));
 
@@ -3201,8 +3422,18 @@ describe("Rust mode authority adapter", () => {
         const sessionId = `rust-removal-reprime-${Date.now()}`;
         sessions.push(sessionId);
         const rows = [
-            { id: "m1", timeCreated: 1, contributesOrdinal: true, hasValidInfo: true },
-            { id: "m2", timeCreated: 2, contributesOrdinal: true, hasValidInfo: true },
+            {
+                id: "m1",
+                timeCreated: 1,
+                contributesOrdinal: true,
+                hasValidInfo: true,
+            },
+            {
+                id: "m2",
+                timeCreated: 2,
+                contributesOrdinal: true,
+                hasValidInfo: true,
+            },
         ];
         unregisters.push(
             setRawMessageProvider(sessionId, {
@@ -3229,7 +3460,9 @@ describe("Rust mode authority adapter", () => {
                     : { ok: true };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const messages = () =>
             rows.map((row) => ({
                 info: { id: row.id, role: "user", sessionID: sessionId },
@@ -3658,7 +3891,9 @@ describe("Rust mode authority adapter", () => {
                     : { ok: true };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const messages = rows.map((row) => ({
             info: { id: row.id, role: "user", sessionID: sessionId },
             parts: [{ type: "text", text: `message ${row.id}` }],
@@ -3729,7 +3964,9 @@ describe("Rust mode authority adapter", () => {
                 return { decision: "PASSTHROUGH", native_messages: [] };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const buildMessages = () =>
             rows.map((row, index) => ({
                 info: { id: row.id, role: "user", sessionID: sessionId },
@@ -3806,7 +4043,9 @@ describe("Rust mode authority adapter", () => {
                 };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const input = makeMessages(sessionId);
         await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
         expect(getSlot(sessionId)).toBeDefined();
@@ -3853,7 +4092,9 @@ describe("Rust mode authority adapter", () => {
                 };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const firstInput = makeMessages(sessionId);
         await transform.run(
             sessionId,
@@ -4007,7 +4248,9 @@ describe("Rust mode authority adapter", () => {
                 };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const firstInput = makeMessages(sessionId);
         await transform.run(
             sessionId,
@@ -4057,7 +4300,9 @@ describe("Rust mode authority adapter", () => {
                 };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const input = makeMessages(sessionId);
         const firstOutput = { messages: [...input] as unknown[] };
         await transform.run(sessionId, input, firstOutput, makeMeta(db, sessionId));
@@ -4094,7 +4339,9 @@ describe("Rust mode authority adapter", () => {
                 };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const input = makeMessages(sessionId);
         const firstOutput = { messages: [...input] as unknown[] };
         await transform.run(sessionId, input, firstOutput, makeMeta(db, sessionId));
@@ -4127,7 +4374,9 @@ describe("Rust mode authority adapter", () => {
 
         resetLkgSlotsForTest();
         registerLkgPersistence(createDbLkgPersistence(db));
-        const restarted = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const restarted = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const coldReplay = { messages: [...input] as unknown[] };
         await restarted.run(sessionId, input, coldReplay, makeMeta(db, sessionId));
         expect(JSON.stringify(coldReplay.messages)).toContain("module output 1");
@@ -4182,7 +4431,9 @@ describe("Rust mode authority adapter", () => {
         resetLkgSlotsForTest();
         registerLkgPersistence(createDbLkgPersistence(db));
         failTransform = true;
-        const restarted = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const restarted = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const restartOutput = { messages: [...input] as unknown[] };
         await restarted.run(sessionId, input, restartOutput, makeMeta(db, sessionId));
 
@@ -4308,7 +4559,10 @@ describe("Rust mode authority adapter", () => {
             makeMeta(db, sessionId),
         );
         const switchedInput = makeMessages(sessionId);
-        switchedInput[0]!.info.model = { providerID: "anthropic", modelID: "switched" };
+        switchedInput[0]!.info.model = {
+            providerID: "anthropic",
+            modelID: "switched",
+        };
         await transform.run(
             sessionId,
             switchedInput,
@@ -4380,7 +4634,9 @@ describe("Rust mode authority adapter", () => {
             throw new Error("module must not run after the preflight storage fault");
         });
         const moduleClient: RustModeModuleClient = { call: moduleCall };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const input = [
             {
                 info: {
@@ -4413,7 +4669,9 @@ describe("Rust mode authority adapter", () => {
                 throw new Error("module must not run after the preflight storage fault");
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const input = makeMessages(sessionId);
         const meta = makeMeta(db, sessionId);
         db.exec("DROP TABLE session_meta");
@@ -4652,7 +4910,10 @@ describe("Rust mode authority adapter", () => {
                 if (method === "transform") transformCalls += 1;
                 if (shouldFail) throw new Error("daemon unavailable");
                 return method === "transform"
-                    ? { decision: "SOFT+", native_messages: [{ role: "assistant", parts: [] }] }
+                    ? {
+                          decision: "SOFT+",
+                          native_messages: [{ role: "assistant", parts: [] }],
+                      }
                     : { ok: true };
             },
         };
@@ -5050,7 +5311,9 @@ describe("prepareRustMemoryAuthority mixed restore", () => {
         });
         const module: RustModeModuleClient = {
             call: async () => ({ ok: true }),
-            authorityStatus: async (args) => ({ authority: statuses.get(args.domain) ?? null }),
+            authorityStatus: async (args) => ({
+                authority: statuses.get(args.domain) ?? null,
+            }),
             authorityPrepare: async () => {
                 throw new Error("prepare should not run during DRAINING recovery");
             },
@@ -5435,7 +5698,9 @@ describe("prepareRustMemoryAuthority mixed restore", () => {
                 };
             },
         };
-        const transform = createRustModeTransformImpl(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransformImpl(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const input = makeMessages(sessionId);
         await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
 
@@ -5550,10 +5815,15 @@ describe("native output delta", () => {
                     };
                 }
                 if (request.tail_delta) return { status: "ok", served_from: "transform" };
-                return { decision: "SOFT+", native_messages: structuredClone(healedNative) };
+                return {
+                    decision: "SOFT+",
+                    native_messages: structuredClone(healedNative),
+                };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const initial = makeMessages(sessionId);
         await transform.run(
             sessionId,
@@ -5674,7 +5944,9 @@ describe("delta prefix-mutation guard", () => {
                 };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const buildMessages = (count: number, mutatePrefix = false): MessageLike[] =>
             rows.slice(0, count).map((row, index) => ({
                 info: { id: row.id, role: "user", sessionID: sessionId },
@@ -5765,7 +6037,9 @@ describe("delta prefix-mutation guard", () => {
                     : { ok: true };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const buildMessages = (query: string): MessageLike[] =>
             rows.map((row, index) => ({
                 info: { id: row.id, role: "assistant", sessionID: sessionId },
@@ -5950,7 +6224,9 @@ describe("delta prefix-mutation guard", () => {
                 };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
 
         await transform.run(
             sessionId,
@@ -6051,7 +6327,9 @@ describe("LKG durability across restarts", () => {
             sessionId,
             () => failTransform,
         );
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const input = makeRestartInput(sessionId);
         await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
         expect(getSlot(sessionId)).toBeDefined();
@@ -6104,7 +6382,9 @@ describe("LKG durability across restarts", () => {
                 };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
         try {
             const initial = { messages: [...input] as unknown[] };
@@ -6172,7 +6452,9 @@ describe("LKG durability across restarts", () => {
                 };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const initial = { messages: [...input] as unknown[] };
         await transform.run(sessionId, input, initial, makeMeta(db, sessionId));
         const fallback = { messages: [...input] as unknown[] };
@@ -6228,7 +6510,9 @@ describe("LKG durability across restarts", () => {
                 };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
         await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
 
@@ -6296,7 +6580,9 @@ describe("LKG durability across restarts", () => {
                 };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
 
         const initial = { messages: [...input] as unknown[] };
         await transform.run(sessionId, input, initial, makeMeta(db, sessionId));
@@ -6360,7 +6646,9 @@ describe("LKG durability across restarts", () => {
                 };
             },
         };
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
         const fallback = { messages: [...input] as unknown[] };
         await transform.run(sessionId, input, fallback, makeMeta(db, sessionId));
@@ -6386,7 +6674,9 @@ describe("LKG durability across restarts", () => {
         installRawProvider(sessionId);
         let failTransform = false;
         const { moduleClient } = makeRestartModuleClient(sessionId, () => failTransform);
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const input = makeRestartInput(sessionId);
         await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
         expect(durableSlotCount(db, sessionId)).toBe(1);
@@ -6428,7 +6718,9 @@ describe("LKG durability across restarts", () => {
         installRawProvider(sessionId);
         let failTransform = false;
         const { moduleClient } = makeRestartModuleClient(sessionId, () => failTransform);
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const input = makeRestartInput(sessionId);
         await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
         expect(durableSlotCount(db, sessionId)).toBe(1);
@@ -6469,7 +6761,9 @@ describe("LKG durability across restarts", () => {
         installRawProvider(sessionId);
         const failTransform = false;
         const { moduleClient } = makeRestartModuleClient(sessionId, () => failTransform);
-        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+            moduleClient,
+        });
         const input = makeRestartInput(sessionId);
         await transform.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
         expect(durableSlotCount(db, sessionId)).toBe(1);

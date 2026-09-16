@@ -94,6 +94,7 @@ interface MessageRemovedCleanupResult {
 }
 
 export interface EventHandlerDeps {
+    subagentReconciliation?: boolean;
     contextUsageMap: Map<string, ContextUsageEntry>;
     compactionHandler: ReturnType<typeof createCompactionHandler>;
     /**
@@ -112,7 +113,10 @@ export interface EventHandlerDeps {
     config: {
         clear_reasoning_age?: number;
         execute_threshold_percentage?: number | { default: number; [modelKey: string]: number };
-        execute_threshold_tokens?: { default?: number; [modelKey: string]: number | undefined };
+        execute_threshold_tokens?: {
+            default?: number;
+            [modelKey: string]: number | undefined;
+        };
         cache_ttl: CacheTtlConfig;
         commit_cluster_trigger?: { enabled: boolean; min_clusters: number };
     };
@@ -362,7 +366,11 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     resolveModelKey(errInfo.providerID, errInfo.modelID) ??
                     sessionMeta.lastObservedModelKey ??
                     undefined;
-                if (sessionMeta.isSubagent) {
+                if (
+                    sessionMeta.isSubagent &&
+                    (deps.subagentReconciliation !== true ||
+                        deps.internalChildSessions?.has(errInfo.sessionID))
+                ) {
                     // Subagents can't run historian, so we skip the recovery
                     // flag — but the reported limit is still useful data for
                     // pressure math (consumed by resolveContextLimit via
@@ -525,7 +533,11 @@ export function createEventHandler(deps: EventHandlerDeps) {
                         });
                         const overflowModelKey = resolveModelKey(info.providerID, info.modelID);
                         const metaForOverflow = getOrCreateSessionMeta(deps.db, info.sessionID);
-                        if (metaForOverflow.isSubagent) {
+                        if (
+                            metaForOverflow.isSubagent &&
+                            (deps.subagentReconciliation !== true ||
+                                deps.internalChildSessions?.has(info.sessionID))
+                        ) {
                             // Still record the detected limit (useful for
                             // pressure math), but don't arm recovery — see
                             // session.error path above.

@@ -9262,7 +9262,8 @@ impl McHandler {
                 .unwrap_or(Duration::ZERO)
         };
         let mut trigger_timings = HistorianTriggerTimings::default();
-        let diagnostics = if parsed.is_subagent {
+        let reconciliation_eligible = !parsed.is_subagent || parsed.subagent_reconciliation;
+        let diagnostics = if !reconciliation_eligible {
             historian_no_fire_diagnostics(NoFireDiagnosticsInput {
                 no_fire: "subagent_session".into(),
                 detail_kind: "subagent_session",
@@ -9408,7 +9409,8 @@ impl McHandler {
         // inline drive); if the floor moved past what this request's transform saw,
         // re-run once so the response carries the published fold instead of pre-fold
         // bytes.
-        if !parsed.is_subagent && result.scheduler_pass == scheduler::PassDecision::Emergency95 {
+        if reconciliation_eligible && result.scheduler_pass == scheduler::PassDecision::Emergency95
+        {
             let floor_advanced = store
                 .load(&parsed.session_id)
                 .map(|state| state.meta.publication_floor_ordinal != emergency_pre_floor)
@@ -29036,6 +29038,70 @@ mod tests {
             .unwrap_or_default()
             .contains('#'));
         assert!(m0_text(&second).contains("autonomous summary"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn opted_in_subagent_autonomous_cycle_fires_publishes_and_replays_when_disabled() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let messages = big_messages();
+        let mut enabled = request(messages.clone());
+        enabled["is_subagent"] = json!(true);
+        enabled["subagent_reconciliation"] = json!(true);
+
+        let first = call_transform_request(&handler, enabled.clone()).await;
+        assert_eq!(first["historian"]["fired"], true, "{first}");
+        wait_for_count(&producer.starts, 1).await;
+        wait_for_idle(&store).await;
+        assert_eq!(store.load_compartments("ses").unwrap().len(), 1);
+
+        let folded = call_transform_request(&handler, enabled.clone()).await;
+        assert_eq!(folded["action"], "HARD", "{folded}");
+        assert!(folded["ck_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["meta"]["synthetic"] == json!(true)));
+
+        let mut disabled = enabled;
+        disabled["subagent_reconciliation"] = json!(false);
+        let replay = call_transform_request(&handler, disabled).await;
+        assert_ne!(replay["historian"]["fired"], json!(true), "{replay}");
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            replay["coverage_ordinal"], folded["coverage_ordinal"],
+            "disabling scheduling must retain the published covered boundary"
+        );
+        assert_eq!(replay["ck_messages"], folded["ck_messages"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn historian_internal_namespace_stays_passthrough_when_reconciliation_is_enabled() {
+        let producer = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::clone(&producer), default_test_config());
+        let session = "mc-historian:project:worker:1";
+        handler.bind_route(8, binding(project.to_str().unwrap(), session));
+        let response = call_transform_request_on_channel(
+            &handler,
+            8,
+            json!({
+                "kind": "transform",
+                "v": 2,
+                "serializer_profile": "owned-llmrunner",
+                "session_id": session,
+                "render_config": "cfg0",
+                "is_subagent": true,
+                "subagent_reconciliation": true,
+                "usage": ModuleUsage { current_total_input_tokens: 95, context_limit_tokens: 100, ..ModuleUsage::default() },
+                "messages": [ck("internal", 1, "raw")],
+            }),
+        )
+        .await;
+        assert_eq!(response["action"], "PASSTHROUGH");
+        assert!(response.get("historian").is_none());
+        assert_eq!(producer.starts.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -93,6 +93,7 @@ The background agent that condenses old conversation into compact history.
 | `historian.prompt` | string | — | Additional system prompt text |
 | `historian.tools` | map<string, boolean> | — | Tool enable/disable overrides |
 | `historian.disable` | boolean | — | Disable this agent |
+| `historian.subagent_reconciliation` | boolean | `false` | User config only. Opt ordinary OpenCode and Pi child sessions into historian reconciliation/history rendering; Magic Context's own children remain excluded. Restart to apply. Disabling or removing the setting (including the historian block) stops new child reconciliation but retains stored summaries and covered-raw trimming. |
 | `historian.description` | string | — | Agent description |
 | `historian.mode` | `"subagent"` \\| `"primary"` \\| `"all"` | — | Agent mode (subagent, primary, or all) |
 | `historian.color` | string | — | Hex color for the agent (e.g. '#a1b2c3') |
@@ -122,6 +123,8 @@ The background agent that condenses old conversation into compact history.
 | `commit_cluster_trigger` | object | — | Commit-cluster trigger: fire historian when enough commit clusters accumulate in the unsummarized tail |
 | `commit_cluster_trigger.enabled` | boolean | `true` | Enable commit-cluster based historian triggering (default: true) |
 | `commit_cluster_trigger.min_clusters` | number (1–) | `3` | Minimum commit clusters required to trigger historian (min: 1, default: 3) |
+
+Pi's supported in-process child lifecycle captures the parent's resolved config/database and keeps session-local context state, without duplicating startup maintenance or Dreamer services. Child shutdown does not stop the parent's services. The opt-in preserves child identity and does not enable parent-only background features or promise unlimited recall.
 
 ## Memory & recall
 

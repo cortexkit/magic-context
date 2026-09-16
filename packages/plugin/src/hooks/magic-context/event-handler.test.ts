@@ -82,7 +82,12 @@ afterEach(() => {
 
     for (const dir of tempDirs) {
         try {
-            rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+            rmSync(dir, {
+                recursive: true,
+                force: true,
+                maxRetries: 10,
+                retryDelay: 100,
+            });
         } catch {
             /* Ignore EBUSY on Windows */
         }
@@ -543,7 +548,11 @@ describe("createEventHandler", () => {
             event: {
                 type: "session.created",
                 properties: {
-                    info: { id: "ses-task", parentID: "ses-parent", title: "Explore the codebase" },
+                    info: {
+                        id: "ses-task",
+                        parentID: "ses-parent",
+                        title: "Explore the codebase",
+                    },
                 },
             },
         });
@@ -552,7 +561,11 @@ describe("createEventHandler", () => {
             event: {
                 type: "session.created",
                 properties: {
-                    info: { id: "ses-root2", parentID: "", title: "magic-context-compartment" },
+                    info: {
+                        id: "ses-root2",
+                        parentID: "",
+                        title: "magic-context-compartment",
+                    },
                 },
             },
         });
@@ -898,7 +911,10 @@ describe("createEventHandler", () => {
         const contextUsageMap = new Map<string, { usage: ContextUsage; updatedAt: number }>([
             [
                 "ses-partial",
-                { usage: { percentage: 61, inputTokens: 122_000 }, updatedAt: preservedUpdatedAt },
+                {
+                    usage: { percentage: 61, inputTokens: 122_000 },
+                    updatedAt: preservedUpdatedAt,
+                },
             ],
         ]);
         const deps = createDeps(contextUsageMap);
@@ -953,7 +969,10 @@ describe("createEventHandler", () => {
         const contextUsageMap = new Map<string, { usage: ContextUsage; updatedAt: number }>([
             [
                 "ses-zero",
-                { usage: { percentage: 62, inputTokens: 124_000 }, updatedAt: Date.now() },
+                {
+                    usage: { percentage: 62, inputTokens: 124_000 },
+                    updatedAt: Date.now(),
+                },
             ],
         ]);
         const handler = createEventHandler(createDeps(contextUsageMap));
@@ -1073,7 +1092,10 @@ describe("createEventHandler", () => {
         const contextUsageMap = new Map<string, { usage: ContextUsage; updatedAt: number }>([
             [
                 "ses-clean",
-                { usage: { percentage: 70, inputTokens: 140_000 }, updatedAt: Date.now() },
+                {
+                    usage: { percentage: 70, inputTokens: 140_000 },
+                    updatedAt: Date.now(),
+                },
             ],
         ]);
         const deps = createDeps(contextUsageMap);
@@ -1084,7 +1106,10 @@ describe("createEventHandler", () => {
 
         insertTag(deps.db, "ses-clean", "m-1", "message", 100, 1);
         incrementCompressionDepth(deps.db, "ses-clean", 1, 3);
-        updateSessionMeta(deps.db, "ses-clean", { lastNudgeTokens: 20_000, isSubagent: true });
+        updateSessionMeta(deps.db, "ses-clean", {
+            lastNudgeTokens: 20_000,
+            isSubagent: true,
+        });
 
         await handler({
             event: {
@@ -1248,7 +1273,10 @@ describe("createEventHandler", () => {
         recordSessionProjectIdentity(deps.db, sessionId, projectPath);
         markSessionCleanupPending(deps.db, sessionId, true);
         const event = {
-            event: { type: "session.deleted", properties: { info: { id: sessionId } } },
+            event: {
+                type: "session.deleted",
+                properties: { info: { id: sessionId } },
+            },
         } as const;
 
         await createEventHandler({
@@ -1287,7 +1315,10 @@ describe("createEventHandler", () => {
         insertTag(deps.db, sessionId, "m-1", "message", 100, 1);
         recordSessionProjectIdentity(deps.db, sessionId, projectPath);
         const event = {
-            event: { type: "session.deleted", properties: { info: { id: sessionId } } },
+            event: {
+                type: "session.deleted",
+                properties: { info: { id: sessionId } },
+            },
         } as const;
         const failRustDelete = () =>
             createEventHandler({
@@ -1330,7 +1361,10 @@ describe("createEventHandler", () => {
             onSessionDeleted: mock(() => (calls++ === 0 ? first.promise : second.promise)),
         });
         const event = {
-            event: { type: "session.deleted", properties: { info: { id: sessionId } } },
+            event: {
+                type: "session.deleted",
+                properties: { info: { id: sessionId } },
+            },
         } as const;
 
         const firstDelivery = handler(event);
@@ -1369,7 +1403,10 @@ describe("createEventHandler", () => {
             magicContext: { event: magicEvent as never },
         });
         const event = {
-            event: { type: "session.deleted", properties: { info: { id: sessionId } } },
+            event: {
+                type: "session.deleted",
+                properties: { info: { id: sessionId } },
+            },
         } as const;
 
         const firstDelivery = eventBus(event as never);
@@ -1412,12 +1449,19 @@ describe("createEventHandler", () => {
             onSessionDeleted: mock(() => {}),
             rustSessionCleanup: false,
         })({
-            event: { type: "session.deleted", properties: { info: { id: sessionId } } },
+            event: {
+                type: "session.deleted",
+                properties: { info: { id: sessionId } },
+            },
         });
         expect(getTagsBySession(deps.db, sessionId)).toHaveLength(1);
 
         retryDelete.resolve();
-        await expect(retry).resolves.toEqual({ attempted: 1, cleared: 1, failedSessionIds: [] });
+        await expect(retry).resolves.toEqual({
+            attempted: 1,
+            cleared: 1,
+            failedSessionIds: [],
+        });
         expect(getTagsBySession(deps.db, sessionId)).toHaveLength(0);
     });
 
@@ -1493,7 +1537,9 @@ describe("createEventHandler", () => {
 
         insertTag(deps.db, "ses-watermark", "msg-keep:p0", "message", 32, 1);
         insertTag(deps.db, "ses-watermark", "msg-removed:p0", "message", 32, 5);
-        updateSessionMeta(deps.db, "ses-watermark", { clearedReasoningThroughTag: 7 });
+        updateSessionMeta(deps.db, "ses-watermark", {
+            clearedReasoningThroughTag: 7,
+        });
 
         await handler({
             event: {
@@ -1624,7 +1670,10 @@ describe("createEventHandler — compaction-off overflow gating (issue #266 S3)"
                 "SELECT needs_emergency_recovery, detected_context_limit FROM session_meta WHERE session_id = ?",
             )
             .get(sessionId) as
-            | { needs_emergency_recovery: number | null; detected_context_limit: number | null }
+            | {
+                  needs_emergency_recovery: number | null;
+                  detected_context_limit: number | null;
+              }
             | undefined;
         return {
             needsEmergencyRecovery: row?.needs_emergency_recovery ?? 0,
@@ -1647,6 +1696,43 @@ describe("createEventHandler — compaction-off overflow gating (issue #266 S3)"
         const state = readOverflowState("ses-on");
         expect(state.needsEmergencyRecovery).toBe(1);
         expect(state.detectedContextLimit).toBe(120000);
+    });
+
+    it("arms recovery only for an opted-in ordinary subagent, never an internal child", async () => {
+        useTempDataHome("context-event-subagent-reconciliation-overflow-");
+        const deps = {
+            ...createDeps(new Map()),
+            subagentReconciliation: true,
+            internalChildSessions: new Set(["ses-internal-child"]),
+        };
+        updateSessionMeta(deps.db, "ses-opted-in-child", { isSubagent: true });
+        updateSessionMeta(deps.db, "ses-disabled-child", { isSubagent: true });
+        updateSessionMeta(deps.db, "ses-internal-child", { isSubagent: true });
+        const enabled = createEventHandler(deps);
+        const disabled = createEventHandler({
+            ...deps,
+            subagentReconciliation: false,
+        });
+        for (const sessionID of ["ses-opted-in-child", "ses-internal-child"]) {
+            await enabled({
+                event: {
+                    type: "session.error",
+                    properties: { sessionID, error: OVERFLOW_ERROR },
+                },
+            });
+        }
+        await disabled({
+            event: {
+                type: "session.error",
+                properties: { sessionID: "ses-disabled-child", error: OVERFLOW_ERROR },
+            },
+        });
+
+        expect(readOverflowState("ses-opted-in-child").needsEmergencyRecovery).toBe(1);
+        expect(readOverflowState("ses-disabled-child").needsEmergencyRecovery).toBe(0);
+        expect(readOverflowState("ses-internal-child").needsEmergencyRecovery).toBe(0);
+        expect(readOverflowState("ses-disabled-child").detectedContextLimit).toBe(120000);
+        expect(readOverflowState("ses-internal-child").detectedContextLimit).toBe(120000);
     });
 
     it("uses model identity carried by session.error instead of a prior session model", async () => {
@@ -1708,7 +1794,10 @@ describe("createEventHandler — compaction-off overflow gating (issue #266 S3)"
         await handler({
             event: {
                 type: "session.error",
-                properties: { sessionID: "ses-session-error-report", error: OVERFLOW_ERROR },
+                properties: {
+                    sessionID: "ses-session-error-report",
+                    error: OVERFLOW_ERROR,
+                },
             },
         });
 
@@ -1783,7 +1872,10 @@ describe("createEventHandler — compaction-off overflow gating (issue #266 S3)"
         await handler({
             event: {
                 type: "session.error",
-                properties: { sessionID: "ses-non-overflow", error: "connection timed out" },
+                properties: {
+                    sessionID: "ses-non-overflow",
+                    error: "connection timed out",
+                },
             },
         });
 

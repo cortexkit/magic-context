@@ -277,6 +277,22 @@ The opt-in is deliberately narrow: Magic Context uses the deterministic `dir:<md
 
 This is also the recovery path for home memories created before the home-session gate: the identity is derived from the same canonical-path MD5 prefix, so setting the flag reconnects that existing `dir:` memory pool without a migration. If you leave the flag off after setup has disabled OpenCode native compaction (`compaction.auto=false`), home sessions have no context manager; either enable this flag or re-enable native compaction for those sessions.
 
+### `historian.subagent_reconciliation`
+
+Defaults to `false`. Set this boolean in **user config only** to enable automatic historian reconciliation and history rendering for ordinary child sessions in OpenCode and Pi. Keep the historian model configured for the active harness:
+
+```jsonc
+{
+  "historian": {
+    "subagent_reconciliation": true
+  }
+}
+```
+
+Restart the host after changing the setting. Setting it back to `false`, removing the flag, or removing the historian block stops new child reconciliation; stored child summaries still render and their covered raw messages remain trimmed. This does not enable parent-only background features or change a child's subagent identity. Magic Context's own historian and dreamer children remain excluded.
+
+Pi applies the opt-in to in-process children identified by the supported child-session lifecycle signal. Each child captures its parent's resolved config and database handle while keeping session-local context state; it does not duplicate startup maintenance or Dreamer services, and child shutdown does not shut down the parent's services. This is not arbitrary cross-process child detection or a guarantee of unlimited recall.
+
 ### `commit_cluster_trigger`
 
 A **commit cluster** is a distinct work phase where the agent made one or more git commits, separated from other commit clusters by meaningful user turns. For example, if the agent commits a fix, then the user asks a new question, and the agent commits another change — that's 2 commit clusters. This heuristic detects natural work-unit boundaries and fires historian to compartmentalize them, even when context pressure is low.

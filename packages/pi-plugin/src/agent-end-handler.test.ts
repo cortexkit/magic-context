@@ -44,24 +44,25 @@ function extractAgentEndHandlerBody(src: string): string {
 }
 
 function extractSessionShutdownHandlerBody(src: string): string {
-	const start = src.indexOf('pi.on("session_shutdown"');
-	if (start === -1) throw new Error("no session_shutdown handler in index.ts");
-	// session_shutdown handler is the last large block; find the
-	// matching brace by counting { / } from the start.
+	const marker = 'pi.on("session_shutdown", async (_event, ctx) => {';
+	const start = src.indexOf(marker);
+	if (start === -1)
+		throw new Error("no async session_shutdown drain handler in index.ts");
+	const bodyStart = start + marker.length - 1;
+	// Start at the callback body, rather than a preceding teardown registration.
+	// Count braces so nested timeout/error-handling blocks cannot terminate early.
 	let depth = 0;
-	let i = start;
-	let started = false;
+	let i = bodyStart;
 	while (i < src.length) {
 		const ch = src[i];
 		if (ch === "{") {
 			depth++;
-			started = true;
 		} else if (ch === "}") {
 			depth--;
-			if (started && depth === 0) {
-				// Look for trailing `);`
-				const tail = src.slice(i, i + 3);
-				if (tail.startsWith("})")) return src.slice(start, i + 3);
+			if (depth === 0) {
+				const tail = src.slice(i + 1, i + 4);
+				if (tail.startsWith(");")) return src.slice(start, i + 4);
+				throw new Error("session_shutdown callback did not end with });");
 			}
 		}
 		i++;

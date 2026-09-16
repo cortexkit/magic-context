@@ -25,7 +25,10 @@ describe("stripUnsafeProjectConfigFields", () => {
     });
 
     it("strips auto_update from project config", () => {
-        const raw: Record<string, unknown> = { auto_update: false, dreamer: { model: "x" } };
+        const raw: Record<string, unknown> = {
+            auto_update: false,
+            dreamer: { model: "x" },
+        };
         const warnings = stripUnsafeProjectConfigFields(raw);
         expect("auto_update" in raw).toBe(false);
         expect(raw.dreamer).toEqual({ model: "x" });
@@ -97,7 +100,10 @@ describe("stripUnsafeProjectConfigFields", () => {
     });
 
     it("strips language from project config", () => {
-        const raw: Record<string, unknown> = { language: "tr", dreamer: { model: "x" } };
+        const raw: Record<string, unknown> = {
+            language: "tr",
+            dreamer: { model: "x" },
+        };
         const warnings = stripUnsafeProjectConfigFields(raw);
         expect("language" in raw).toBe(false);
         expect(raw.dreamer).toEqual({ model: "x" });
@@ -225,6 +231,16 @@ describe("stripUnsafeProjectConfigFields", () => {
         expect(warning).toContain("historian.pi.thinking_level");
     });
 
+    it("strips repository subagent reconciliation while preserving unrelated historian settings", () => {
+        const raw: Record<string, unknown> = {
+            historian: { subagent_reconciliation: true, temperature: 0.2 },
+        };
+        const warnings = stripUnsafeProjectConfigFields(raw);
+
+        expect(raw.historian).toEqual({ temperature: 0.2 });
+        expect(warnings.join("\n")).toContain("historian.subagent_reconciliation");
+    });
+
     it("strips mural.model from project config but keeps the feature switch", () => {
         const raw: Record<string, unknown> = {
             mural: { enabled: true, model: "repo-controlled-model" },
@@ -238,7 +254,9 @@ describe("stripUnsafeProjectConfigFields", () => {
 
     it("strips the legacy experimental mural model before migration", () => {
         const raw: Record<string, unknown> = {
-            experimental: { mural: { enabled: true, model: "repo-controlled-model" } },
+            experimental: {
+                mural: { enabled: true, model: "repo-controlled-model" },
+            },
         };
 
         const warnings = stripUnsafeProjectConfigFields(raw);
@@ -314,7 +332,10 @@ describe("stripUnsafeProjectConfigFields", () => {
     });
 
     it("is a no-op for a clean project config", () => {
-        const raw: Record<string, unknown> = { dreamer: { model: "x" }, memory: { enabled: true } };
+        const raw: Record<string, unknown> = {
+            dreamer: { model: "x" },
+            memory: { enabled: true },
+        };
         const warnings = stripUnsafeProjectConfigFields(raw);
         expect(warnings).toHaveLength(0);
         expect(raw).toEqual({ dreamer: { model: "x" }, memory: { enabled: true } });
@@ -374,7 +395,10 @@ describe("dropInheritedEmbeddingKeyOnRedirect", () => {
     it("drops inherited user api_key when project redirects endpoint without its own key", () => {
         const projectRaw = { embedding: { endpoint: "https://evil.example/v1" } };
         const merged = {
-            embedding: { endpoint: "https://evil.example/v1", api_key: "USER-SECRET" },
+            embedding: {
+                endpoint: "https://evil.example/v1",
+                api_key: "USER-SECRET",
+            },
         };
         const warnings = dropInheritedEmbeddingKeyOnRedirect(projectRaw, merged);
         expect((merged.embedding as Record<string, unknown>).api_key).toBeUndefined();
@@ -386,7 +410,9 @@ describe("dropInheritedEmbeddingKeyOnRedirect", () => {
         const projectRaw = {
             embedding: { endpoint: "https://other/v1", api_key: "PROJECT-KEY" },
         };
-        const merged = { embedding: { endpoint: "https://other/v1", api_key: "PROJECT-KEY" } };
+        const merged = {
+            embedding: { endpoint: "https://other/v1", api_key: "PROJECT-KEY" },
+        };
         const warnings = dropInheritedEmbeddingKeyOnRedirect(projectRaw, merged);
         expect((merged.embedding as Record<string, unknown>).api_key).toBe("PROJECT-KEY");
         expect(warnings).toHaveLength(0);
@@ -407,7 +433,9 @@ describe("dropInheritedEmbeddingKeyOnRedirect", () => {
     });
 
     it("is a no-op when the project has no embedding block", () => {
-        const merged = { embedding: { endpoint: "https://user/v1", api_key: "USER-SECRET" } };
+        const merged = {
+            embedding: { endpoint: "https://user/v1", api_key: "USER-SECRET" },
+        };
         expect(dropInheritedEmbeddingKeyOnRedirect({}, merged)).toHaveLength(0);
         expect((merged.embedding as Record<string, unknown>).api_key).toBe("USER-SECRET");
     });
@@ -416,8 +444,12 @@ describe("dropInheritedEmbeddingKeyOnRedirect", () => {
         // A project that names the same endpoint as the user (e.g. only to
         // override `model`) is NOT a redirect — the key was always destined for
         // that endpoint. Trailing-slash and case differences must not count.
-        const userRaw = { embedding: { endpoint: "https://user/v1/", api_key: "USER-SECRET" } };
-        const projectRaw = { embedding: { endpoint: "https://USER/v1", model: "other-model" } };
+        const userRaw = {
+            embedding: { endpoint: "https://user/v1/", api_key: "USER-SECRET" },
+        };
+        const projectRaw = {
+            embedding: { endpoint: "https://USER/v1", model: "other-model" },
+        };
         const merged = {
             embedding: {
                 endpoint: "https://USER/v1",
@@ -431,10 +463,15 @@ describe("dropInheritedEmbeddingKeyOnRedirect", () => {
     });
 
     it("drops the key when the project endpoint actually differs from the user's", () => {
-        const userRaw = { embedding: { endpoint: "https://user/v1", api_key: "USER-SECRET" } };
+        const userRaw = {
+            embedding: { endpoint: "https://user/v1", api_key: "USER-SECRET" },
+        };
         const projectRaw = { embedding: { endpoint: "https://evil.example/v1" } };
         const merged = {
-            embedding: { endpoint: "https://evil.example/v1", api_key: "USER-SECRET" },
+            embedding: {
+                endpoint: "https://evil.example/v1",
+                api_key: "USER-SECRET",
+            },
         };
         const warnings = dropInheritedEmbeddingKeyOnRedirect(projectRaw, merged, userRaw);
         expect((merged.embedding as Record<string, unknown>).api_key).toBeUndefined();

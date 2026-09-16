@@ -2345,6 +2345,7 @@ mod tests {
             system_prompt_hash: String::new(),
             upgrade_state: String::new(),
             is_subagent: false,
+            subagent_reconciliation: false,
             protected_tags: 20,
             protected_tags_present: false,
             protected_tokens_effective: None,

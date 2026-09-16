@@ -55,6 +55,21 @@ function clampHiddenAgentStepLimit(value: unknown, cap: number): number {
  * diverge.
  */
 export const HIDDEN_AGENT_DESCRIPTION_MARKER = "Internal Magic Context";
+let internalAgentNames: ReadonlySet<string> | undefined;
+
+export function isMagicContextInternalAgentName(name: string | undefined): boolean {
+    if (!name) return false;
+    internalAgentNames ??= new Set(
+        buildHiddenAgentRegistrations({
+            dreamerPrompt: undefined,
+            historianPrompt: undefined,
+            historianEditorPrompt: undefined,
+            historianDisallowed: [],
+        }).map((agent) => agent.id),
+    );
+    return internalAgentNames.has(name);
+}
+
 const HIDDEN_AGENT_DESCRIPTION =
     "Internal Magic Context maintenance agent. Not for general tasks — do not select for user work.";
 

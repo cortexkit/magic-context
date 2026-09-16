@@ -533,7 +533,9 @@ const DEFAULT_TASK_SCHEDULES: Record<DreamTaskName, string> = {
 };
 
 function defaultTaskConfig(task: DreamTaskName): z.input<typeof DreamTaskConfigSchema> {
-    const base: z.input<typeof DreamTaskConfigSchema> = { schedule: DEFAULT_TASK_SCHEDULES[task] };
+    const base: z.input<typeof DreamTaskConfigSchema> = {
+        schedule: DEFAULT_TASK_SCHEDULES[task],
+    };
     if (task === "review-user-memories") base.promotion_threshold = 3;
     if (task === "promote-primers") base.promotion_threshold = 2;
     return base;
@@ -621,6 +623,12 @@ export const HistorianConfigSchema = AgentMetadataSchema.extend({
     opencode: OpenCodeHarnessBlockSchema.optional(),
     pi: PiHarnessBlockSchema.optional(),
     omp: OmpHarnessBlockSchema.optional(),
+    subagent_reconciliation: z
+        .boolean()
+        .default(false)
+        .describe(
+            "Enable automatic historian reconciliation and full history context for ordinary subagent sessions (user config only; default false). Magic Context's internal agents remain excluded. Disabling stops new historian runs but preserves existing session history. Changes take effect after restarting the host.",
+        ),
     two_pass: z
         .boolean()
         .default(false)
@@ -872,7 +880,10 @@ export interface MagicContextConfig {
     /** Absolute token thresholds per model. When set for a given model (or via `default`),
      *  this overrides `execute_threshold_percentage` for that model. Useful for hard caps
      *  matching provider input limits. Values above 90% × context_limit are clamped with a warning. */
-    execute_threshold_tokens?: { default?: number; [modelKey: string]: number | undefined };
+    execute_threshold_tokens?: {
+        default?: number;
+        [modelKey: string]: number | undefined;
+    };
     protected_tokens?: number;
     protected_tags?: number;
     clear_reasoning_age: number;
@@ -1109,7 +1120,9 @@ export const MagicContextConfigSchema = z
             .describe(
                 'How long Magic Context assumes the provider\'s cached prefix stays valid. This is MC\'s own deferral gate — it does not change the provider\'s actual cache lifetime. String (e.g. "5m", "1h", "30s") or per-model object ({ default: "5m", "model-id": "10m" }). Set to "never" to mean MC never assumes expiry (for lanes kept warm externally by a cache-keep tool) — disables the idle-TTL heuristic so MC never initiates a rebuild based on elapsed time. Provider-side extended TTL is a separate request-level concern (cache_control: { ttl } in the request body).',
             ),
-        prompt_surface: PromptSurfaceConfigSchema.default({ default: "full" }).describe(
+        prompt_surface: PromptSurfaceConfigSchema.default({
+            default: "full",
+        }).describe(
             "Prompt-surface presets: default is full; models use bare model IDs, provider/model, or provider/* routing keys. Guidance and tool-description overrides are user-level only. On OpenCode and Pi, per-model routing applies to the guidance block only: tool descriptions are registered once per process, so they follow the default preset (a v1 plugin-surface limitation; per-model tool descriptions are planned for the OpenCode v2 plugin API once the SDK stabilizes).",
         ),
         output_reserve: z
@@ -1141,7 +1154,9 @@ export const MagicContextConfigSchema = z
             .union([
                 z.number().min(20).max(90, EXECUTE_THRESHOLD_CAP_MESSAGE),
                 z
-                    .object({ default: z.number().min(20).max(90, EXECUTE_THRESHOLD_CAP_MESSAGE) })
+                    .object({
+                        default: z.number().min(20).max(90, EXECUTE_THRESHOLD_CAP_MESSAGE),
+                    })
                     .catchall(z.number().min(20).max(90, EXECUTE_THRESHOLD_CAP_MESSAGE)),
             ])
             .default(DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE)
@@ -1434,7 +1449,11 @@ export const MagicContextConfigSchema = z
                                 "Skip hint when user message is shorter than this (min: 5, max: 500, default: 20)",
                             ),
                     })
-                    .default({ enabled: true, score_threshold: 0.6, min_prompt_chars: 20 })
+                    .default({
+                        enabled: true,
+                        score_threshold: 0.6,
+                        min_prompt_chars: 20,
+                    })
                     .describe(
                         "Auto-search hint: transform-time ctx_search on each new user message; when the top hit clears the threshold, append a compact <ctx-search-hint> block of vague fragments to that user message. Does NOT inject full content. Graduated from experimental.auto_search; enabled by default (set enabled: false to opt out). Independent of memory.enabled.",
                     ),
@@ -1473,8 +1492,16 @@ export const MagicContextConfigSchema = z
                 injection_budget_tokens: 4000,
                 auto_promote: true,
                 retrieval_count_promotion_threshold: 3,
-                auto_search: { enabled: true, score_threshold: 0.6, min_prompt_chars: 20 },
-                git_commit_indexing: { enabled: false, since_days: 365, max_commits: 2000 },
+                auto_search: {
+                    enabled: true,
+                    score_threshold: 0.6,
+                    min_prompt_chars: 20,
+                },
+                git_commit_indexing: {
+                    enabled: false,
+                    since_days: 365,
+                    max_commits: 2000,
+                },
             })
             .describe("Cross-session memory configuration"),
     })

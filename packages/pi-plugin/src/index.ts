@@ -20,20 +20,23 @@
  *   Falls back to schema defaults when neither file exists.
  */
 
-import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import {
 	isCompactionEnabled,
 	isDreamerRunnable,
 } from "@magic-context/core/config/agent-disable";
 import { migrateMagicContextConfigLocations } from "@magic-context/core/config/migrate-config-location";
 import { getProtectedTokensTierOverrides } from "@magic-context/core/config/project-security";
-import type {
-	DreamerConfig,
-	HistorianConfig,
-	MagicContextConfig,
+import {
+	type DreamerConfig,
+	type HistorianConfig,
+	HistorianConfigSchema,
+	type MagicContextConfig,
 } from "@magic-context/core/config/schema/magic-context";
 import {
 	summarizeDreamSchedule,
@@ -49,6 +52,7 @@ import { detectOverflow } from "@magic-context/core/features/magic-context/overf
 import { runSessionProjectBackfill } from "@magic-context/core/features/magic-context/session-project-backfill";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import {
+	getCompartments,
 	getOrCreateSessionMeta,
 	getPendingPiCompactionMarkerState,
 	getSessionsWithPendingPiMarker,
@@ -204,70 +208,100 @@ const PI_HARNESS_KIND = PI_HARNESS_DETECTION.kind;
 const PREFIX = `[magic-context][${PI_HARNESS_KIND}]`;
 const PI_BOOT_DEADLINE_MS = 15_000;
 
-// ---------------------------------------------------------------------------
-// In-process child guard (issue #247)
-//
-// `@gotgenes/pi-subagents` runs child agent sessions IN-PROCESS inside the
-// parent Pi process. Each child inherits the parent's user packages, so Pi
-// re-imports and re-runs this extension factory for every child session. The
-// existing recursion guard (`MAGIC_CONTEXT_PI_SUBAGENT=1`) only covers
-// SPAWNED subprocess children because in-process children share the parent's
-// env without that variable. Without a process-wide signal, every in-process
-// child re-ran the full Magic Context init — opening the DB, wiring timers /
-// watchers / event handlers, and scheduling background session scans. Four
-// parallel children fanned out concurrent `SessionManager.listAll` scans over
-// ~392 JSONL sessions and crashed the parent with heap OOM.
-//
-// The marker below is a `Symbol.for` key on `globalThis` so it survives the
-// duplicate module instances Pi's jiti loader creates per session
-// (`moduleCache: false` resets module-level state on every re-import, but a
-// Symbol.for key is process-global). The `session-created` lifecycle event sets
-// it only in the child's async context; that child factory sees it and no-ops
-// with the SAME contract as a spawned subagent child — no watchers, no timers,
-// no background scans. The parent's already-registered extension instance keeps
-// serving its session, while independent same-process sessions initialize normally.
-//
-// Dispose / re-arm: `subagents:child:disposed` clears the child's marker after
-// its run. Since the marker is scoped with AsyncLocalStorage, a child cannot
-// suppress unrelated sessions hosted by pi-web.
-// ---------------------------------------------------------------------------
-const PI_CHILD_INIT_CONTEXT = Symbol.for("magic-context.pi.child-init-context");
+// Child creation is announced after factory loading but before session_start.
+// Claims survive jiti's per-session module copies; only exact session IDs admit
+// child runtimes, avoiding duplicate startup scans and async-context leakage.
+const PI_CHILD_CLAIMS = Symbol.for("magic-context.pi.child-claims");
 const SUBAGENT_CHILD_SESSION_CREATED = "subagents:child:session-created";
 const SUBAGENT_CHILD_DISPOSED = "subagents:child:disposed";
 const PI_STARTUP_MAINTENANCE_SCHEDULED = Symbol.for(
 	"magic-context.pi.startup-maintenance-scheduled",
 );
 
-function getPiChildInitContext(): AsyncLocalStorage<boolean> {
+type PiChildClaim = {
+	owner: symbol;
+	parentSessionId: string;
+	parentRuntime: { current?: PiReconciliationRuntime };
+	blocking: boolean;
+};
+type PiReconciliationRuntime = {
+	db: ContextDatabase;
+	config: MagicContextConfig;
+	registrationPromptSurface: ReturnType<
+		typeof loadPiConfig
+	>["registrationPromptSurface"];
+	configParseFailures: ReturnType<typeof loadPiConfig>["configParseFailures"];
+	cacheTtlConfigured: boolean;
+	hasDeprecatedProtectedTags: boolean;
+	warnings: string[];
+	loadedFromPaths: string[];
+};
+
+function getPiChildClaims(): Map<string, PiChildClaim> {
 	const globals = globalThis as Record<symbol, unknown>;
-	const existing = globals[PI_CHILD_INIT_CONTEXT];
-	if (existing instanceof AsyncLocalStorage) return existing;
-	const context = new AsyncLocalStorage<boolean>();
-	globals[PI_CHILD_INIT_CONTEXT] = context;
-	return context;
+	const existing = globals[PI_CHILD_CLAIMS];
+	if (existing instanceof Map) return existing as Map<string, PiChildClaim>;
+	const claims = new Map<string, PiChildClaim>();
+	globals[PI_CHILD_CLAIMS] = claims;
+	return claims;
 }
 
-function isPiInProcessSubagentInit(): boolean {
-	return getPiChildInitContext().getStore() === true;
+function clearPiChildClaims(): void {
+	getPiChildClaims().clear();
 }
 
-function clearPiInProcessSubagentInitContext(): void {
-	getPiChildInitContext().enterWith(false);
-}
-
-function registerPiSubagentInitContext(pi: ExtensionAPI): () => void {
-	const context = getPiChildInitContext();
-	// session-created fires after child creation has its own async branch but before
-	// bindExtensions(); marking on spawning would leak into the parent's call chain.
-	const unsubscribeCreated = pi.events.on(SUBAGENT_CHILD_SESSION_CREATED, () =>
-		context.enterWith(true),
-	);
-	const unsubscribeDisposed = pi.events.on(SUBAGENT_CHILD_DISPOSED, () =>
-		context.enterWith(false),
+function registerPiChildClaims(
+	pi: ExtensionAPI,
+	parentRuntime: { current?: PiReconciliationRuntime },
+	parentSessionId: string,
+	policy: { blocking: boolean },
+): () => void {
+	const claims = getPiChildClaims();
+	const owner = Symbol("pi-child-claim-owner");
+	const owned = new Set<string>();
+	let closed = false;
+	const unsubscribeDisposed = pi.events.on(SUBAGENT_CHILD_DISPOSED, (data) => {
+		const id = (data as { sessionId?: unknown } | null)?.sessionId;
+		if (typeof id !== "string" || !owned.delete(id)) return;
+		if (claims.get(id)?.owner === owner) claims.delete(id);
+		if (closed && owned.size === 0) unsubscribeDisposed();
+	});
+	const unsubscribeCreated = pi.events.on(
+		SUBAGENT_CHILD_SESSION_CREATED,
+		(data) => {
+			const event = data as {
+				sessionId?: unknown;
+				parentSessionId?: unknown;
+			} | null;
+			if (
+				!event ||
+				typeof event.sessionId !== "string" ||
+				!event.sessionId.trim()
+			)
+				return;
+			if (event.sessionId === parentSessionId) return;
+			if (
+				event.parentSessionId !== undefined &&
+				event.parentSessionId !== parentSessionId
+			)
+				return;
+			const prior = claims.get(event.sessionId);
+			if (prior && prior.parentSessionId !== parentSessionId) return;
+			owned.add(event.sessionId);
+			claims.set(event.sessionId, {
+				owner,
+				parentSessionId,
+				parentRuntime,
+				blocking: policy.blocking,
+			});
+		},
 	);
 	return () => {
+		closed = true;
 		unsubscribeCreated();
-		unsubscribeDisposed();
+		// Pending and active children still need their claims across parent reload.
+		// Retain only disposal cleanup until this owner's last child is released.
+		if (owned.size === 0) unsubscribeDisposed();
 	};
 }
 
@@ -532,7 +566,8 @@ export const __test = {
 	resetLoggedPiConfigDirs(): void {
 		loggedPiConfigDirs.clear();
 	},
-	clearPiInProcessSubagentInitContext,
+	clearPiChildClaims,
+	registerPiChildClaims,
 	claimPiStartupMaintenance,
 	clearPiStartupMaintenanceClaim,
 	formatProtectedTagsDeprecationNotice,
@@ -909,34 +944,79 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		);
 		return;
 	}
-	// In-process child guard (issue #247): `@gotgenes/pi-subagents` runs child
-	// agent sessions in the SAME process as the parent. They share the parent's
-	// env (so the spawned-child env guard above never fires) and re-trigger this
-	// factory for every child session. The lifecycle marker scopes the no-op to
-	// that child: no database, watchers, timers, or background scans. Independent
-	// same-process sessions remain unmarked and initialize normally.
-	if (isPiInProcessSubagentInit()) {
-		log(
-			`${PREFIX} in-process subagent child detected; skipping full extension registration`,
-		);
+	let activation: Promise<void> | undefined;
+	const policy = { blocking: true, ready: false };
+	pi.on("session_start", (_event, ctx) => {
+		// Pi iterates the live handler array. Handlers installed by activation
+		// participate in this same dispatch; never manually replay session_start.
+		activation ??= Promise.resolve()
+			.then(() => initializePiSession(pi, ctx, policy))
+			.catch((error) => {
+				// Pi swallows lifecycle exceptions. Install the refusal before returning
+				// control, rather than letting an unexpected boot error leave MC absent.
+				if (policy.blocking)
+					registerPiFailClosedSurface(pi, {
+						reason: {
+							kind: "storage_failure",
+							cause: `Pi activation failed: ${error instanceof Error ? error.message : String(error)}`,
+						},
+						tryReopen: async () => null,
+						onRecovered: () => {},
+					});
+				throw error;
+			});
+		return activation;
+	});
+}
+
+async function initializePiSession(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	policy: { blocking: boolean; ready: boolean },
+): Promise<void> {
+	const sessionId = resolveSessionId(ctx);
+	if (!sessionId)
+		throw new Error("Pi session_start did not supply a session id");
+	const claim = getPiChildClaims().get(sessionId);
+	if (claim) {
+		policy.blocking = claim.blocking;
+		const runtime = claim.parentRuntime.current;
+		if (!runtime) {
+			if (!policy.blocking) return;
+			throw new Error(
+				"Parent Magic Context runtime is unavailable; reload this child after the parent recovers",
+			);
+		}
+		await startPiChildRuntime(pi, runtime, sessionId, ctx.cwd, policy);
 		return;
 	}
-	const unregisterPiSubagentInitContext = registerPiSubagentInitContext(pi);
-	registerPiSubagentInitContextCleanup(pi, unregisterPiSubagentInitContext);
+	const parentRuntime: { current?: PiReconciliationRuntime } = {};
+	const unregisterChildClaims = registerPiChildClaims(
+		pi,
+		parentRuntime,
+		sessionId,
+		policy,
+	);
+	pi.on("session_shutdown", unregisterChildClaims);
 
 	// Flush before any filesystem or SQLite work. A boot lock that outlives the
 	// regular logger's batching interval must still leave a diagnostic breadcrumb.
-	log(`${PREFIX} boot: entering pid=${process.pid} dir=${process.cwd()}`);
+	log(`${PREFIX} boot: entering pid=${process.pid} dir=${ctx.cwd}`);
 	flushLogger();
 	beginBootQuietPeriod();
 
 	// Resolve the user-tier storage policy before opening the shared database.
 	// Project config cannot alter it, so every project in this process shares the
 	// operator's chosen owner-private or externally managed permission policy.
-	const bootProjectDir = process.cwd();
+	const bootProjectDir = ctx.cwd;
 	ensureConfigLocationsMigrated(bootProjectDir);
 	const bootConfig = loadPiConfig({ cwd: bootProjectDir });
+	policy.blocking =
+		bootConfig.config.enabled &&
+		bootConfig.config.fail_closed_blocking !== false &&
+		isCompactionEnabled(bootConfig.config);
 	if (!bootConfig.config.enabled) {
+		unregisterChildClaims();
 		info("plugin DISABLED via config (enabled: false) — skipping registration");
 		return;
 	}
@@ -997,7 +1077,36 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	>({
 		deadlineMs: PI_BOOT_DEADLINE_MS,
 		openStorage,
-		startRuntime: (db) => startPiMagicContextRuntime(pi, db, dbPath),
+		startRuntime: async (db) => {
+			if (getOrCreateSessionMeta(db, sessionId).isSubagent) {
+				unregisterChildClaims();
+				const loaded = loadPiConfig({ cwd: ctx.cwd });
+				parentRuntime.current = {
+					...loaded,
+					db,
+					hasDeprecatedProtectedTags:
+						loaded.hasDeprecatedProtectedTags ?? false,
+				};
+				await startPiChildRuntime(
+					pi,
+					parentRuntime.current,
+					sessionId,
+					ctx.cwd,
+					policy,
+				);
+				return;
+			}
+			await startPiMagicContextRuntime(
+				pi,
+				db,
+				dbPath,
+				undefined,
+				parentRuntime,
+				ctx.cwd,
+				policy,
+			);
+			policy.ready = true;
+		},
 		unavailableReason,
 		deadlineReason: {
 			kind: "storage_failure",
@@ -1043,6 +1152,53 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	if (bootResult.status !== "ready") return;
 }
 
+async function startPiChildRuntime(
+	pi: ExtensionAPI,
+	sharedRuntime: PiReconciliationRuntime,
+	sessionId: string,
+	cwd: string,
+	policy: { blocking: boolean; ready: boolean },
+): Promise<void> {
+	// Share storage, not a stale configuration snapshot after a parent reload.
+	const loaded = loadPiConfig({ cwd });
+	const runtime: PiReconciliationRuntime = {
+		...loaded,
+		db: sharedRuntime.db,
+		hasDeprecatedProtectedTags: loaded.hasDeprecatedProtectedTags ?? false,
+	};
+	policy.blocking =
+		runtime.config.enabled &&
+		runtime.config.fail_closed_blocking !== false &&
+		isCompactionEnabled(runtime.config);
+	updateSessionMeta(runtime.db, sessionId, { isSubagent: true });
+	if (!runtime.config.enabled) return;
+	const enabled = runtime.config.historian?.subagent_reconciliation === true;
+	if (!enabled && getCompartments(runtime.db, sessionId).length === 0) return;
+	const childRuntime = enabled
+		? runtime
+		: {
+				...runtime,
+				config: {
+					...runtime.config,
+					historian: HistorianConfigSchema.parse({
+						...runtime.config.historian,
+						subagent_reconciliation: false,
+						disable: true,
+					}),
+				},
+			};
+	await startPiMagicContextRuntime(
+		pi,
+		runtime.db,
+		"",
+		childRuntime,
+		undefined,
+		cwd,
+		policy,
+	);
+	policy.ready = true;
+}
+
 /**
  * Full Pi Magic Context registration after a successful storage open.
  * Extracted so a healed re-probe from the fail-closed surface can start the
@@ -1052,14 +1208,19 @@ async function startPiMagicContextRuntime(
 	pi: ExtensionAPI,
 	database: ContextDatabase,
 	dbPath: string,
+	childRuntime?: PiReconciliationRuntime,
+	parentRuntime?: { current?: PiReconciliationRuntime },
+	bootDirectory = process.cwd(),
+	activationState?: { ready: boolean },
 ): Promise<void> {
 	const db = database;
+	const isReconciledChild = childRuntime !== undefined;
 
 	// v22 deferred legacy-memory identity backfill. openDatabase() has already
 	// run migrations; the runner is fire-and-forget and logs failures without
 	// blocking Pi startup. Multiple independent AgentSessions share one process, so
 	// only the first full runtime schedules process-wide startup maintenance.
-	if (claimPiStartupMaintenance()) {
+	if (!isReconciledChild && claimPiStartupMaintenance()) {
 		scheduleAfterBootQuiet(() => {
 			runDeferredV22Backfill(db).catch((err) => {
 				warn(`[v22-backfill] background runner failed: ${err}`);
@@ -1118,11 +1279,13 @@ async function startPiMagicContextRuntime(
 	// identity/path resolution uses ctx.cwd per hook/command so session cwd
 	// switches follow the active project. Session starts invalidate their cwd's
 	// cached dependencies so changed project config is visible in the next session.
-	const projectDir = process.cwd();
+	const projectDir = bootDirectory;
 	const seenDreamerProjectIdentities = new Set<string>();
 	const dreamerRegistrationOwner = {};
 	const commandLifecycleController = new AbortController();
-	registerCtxStatusLifecycleSignal(pi, commandLifecycleController.signal);
+	if (!isReconciledChild) {
+		registerCtxStatusLifecycleSignal(pi, commandLifecycleController.signal);
+	}
 	let sessionShuttingDown = false;
 	// Step 5b: load the user's full magic-context.jsonc config. The loader
 	// reads the shared CortexKit project/user paths, validates them through the
@@ -1133,7 +1296,8 @@ async function startPiMagicContextRuntime(
 	// We surface warnings via the standard `warn()` channel so users see
 	// them in the magic-context log. Loading never throws — bad config
 	// gracefully degrades to defaults.
-	ensureConfigLocationsMigrated(projectDir);
+	if (!isReconciledChild) ensureConfigLocationsMigrated(projectDir);
+	const loadedConfig = childRuntime ?? loadPiConfig({ cwd: projectDir });
 	const {
 		config,
 		warnings,
@@ -1142,9 +1306,7 @@ async function startPiMagicContextRuntime(
 		configParseFailures,
 		cacheTtlConfigured,
 		hasDeprecatedProtectedTags,
-	} = loadPiConfig({
-		cwd: projectDir,
-	});
+	} = loadedConfig;
 	const promptSurfaceRuntime = createPromptSurfaceRuntime({
 		harness: PI_HARNESS_KIND,
 		directory: projectDir,
@@ -1163,8 +1325,8 @@ async function startPiMagicContextRuntime(
 	// Pi tools are registered once per process, so this mode is intentionally
 	// boot-resolved rather than following later /cd project config changes.
 	const compactionOff = !isCompactionEnabled(config);
-	setCtxReduceRegisteredGlobally(!compactionOff);
-	if (!compactionOff) {
+	if (!isReconciledChild) setCtxReduceRegisteredGlobally(!compactionOff);
+	if (!isReconciledChild && !compactionOff) {
 		try {
 			const pendingPiMarkerSessions = getSessionsWithPendingPiMarker(db);
 			for (const sid of pendingPiMarkerSessions) {
@@ -1183,30 +1345,34 @@ async function startPiMagicContextRuntime(
 	}
 	// The allowlist is user-tier only, so configure all child runners once at
 	// boot. Project config is stripped before this merged config is returned.
-	configurePiSubagentExtensions(config.pi?.subagent_extensions);
-	logPiConfigLoad({
-		dir: projectDir,
-		loadedFromPaths,
-		warnings,
-		dedupe: true,
-	});
+	if (!isReconciledChild)
+		configurePiSubagentExtensions(config.pi?.subagent_extensions);
+	if (!isReconciledChild)
+		logPiConfigLoad({
+			dir: projectDir,
+			loadedFromPaths,
+			warnings,
+			dedupe: true,
+		});
 
 	// Reapply boot-resolved storage and SQLite settings in case config changed
 	// between the initial open and runtime registration. cache_size / mmap_size
 	// take effect live; future opens in this process pick them up via
 	// setSqlitePragmaConfig.
-	setStoragePrivatePermissionEnforcement(
-		config.storage.enforce_private_permissions,
-	);
-	setSqlitePragmaConfig({
-		cacheSizeMb: config.sqlite.cache_size_mb,
-		mmapSizeMb: config.sqlite.mmap_size_mb,
-	});
-	applySqliteTuningPragmas(db);
+	if (!isReconciledChild)
+		setStoragePrivatePermissionEnforcement(
+			config.storage.enforce_private_permissions,
+		);
+	if (!isReconciledChild)
+		setSqlitePragmaConfig({
+			cacheSizeMb: config.sqlite.cache_size_mb,
+			mmapSizeMb: config.sqlite.mmap_size_mb,
+		});
+	if (!isReconciledChild) applySqliteTuningPragmas(db);
 
 	// Debug data-collection toggle: keep subagent child sessions instead of
 	// deleting on success (parity with the OpenCode plugin).
-	setKeepSubagents(config.keep_subagents === true);
+	if (!isReconciledChild) setKeepSubagents(config.keep_subagents === true);
 
 	// Top-level disable: when `enabled: false` is set in config, register
 	// nothing — same fail-closed posture the OpenCode plugin uses.
@@ -1214,11 +1380,25 @@ async function startPiMagicContextRuntime(
 		info("plugin DISABLED via config (enabled: false) — skipping registration");
 		return;
 	}
+	if (!isReconciledChild) {
+		parentRuntime!.current = {
+			db,
+			config,
+			registrationPromptSurface,
+			configParseFailures,
+			cacheTtlConfigured,
+			hasDeprecatedProtectedTags: hasDeprecatedProtectedTags ?? false,
+			warnings,
+			loadedFromPaths,
+		};
+	}
 
-	await ensureProjectRegisteredFromPiDirectory(projectDir, db);
-	info(
-		`registered embedding config for project ${projectIdentity ?? "(no project identity; cwd is $HOME)"}`,
-	);
+	if (!isReconciledChild) {
+		await ensureProjectRegisteredFromPiDirectory(projectDir, db);
+		info(
+			`registered embedding config for project ${projectIdentity ?? "(no project identity; cwd is $HOME)"}`,
+		);
+	}
 
 	type ResolvedPiProjectDeps = {
 		projectDir: string;
@@ -1275,27 +1455,31 @@ async function startPiMagicContextRuntime(
 		autoSearch: auto,
 		resolveForProject: resolveContextOptionsForProject,
 		compactionOff,
+		isSubagentSession: isReconciledChild,
+		ctxReduceCallable: !compactionOff,
 		allowHomeProject: cfg.allow_home_project,
-		maybeAutoEmbedSession: (sessionId, dir, identity) => {
-			maybeAutoEmbedPiSession(
-				{
-					db: database,
-					projectDir: dir,
-					projectIdentity: identity,
-					memoryEnabled: cfg.memory.enabled,
+		maybeAutoEmbedSession: isReconciledChild
+			? undefined
+			: (sessionId, dir, identity) => {
+					maybeAutoEmbedPiSession(
+						{
+							db: database,
+							projectDir: dir,
+							projectIdentity: identity,
+							memoryEnabled: cfg.memory.enabled,
+						},
+						sessionId,
+						dir,
+						identity,
+						(text) => {
+							sendCtxStatusMessage(pi, {
+								title: "/ctx-embed",
+								text,
+								level: "info",
+							});
+						},
+					);
 				},
-				sessionId,
-				dir,
-				identity,
-				(text) => {
-					sendCtxStatusMessage(pi, {
-						title: "/ctx-embed",
-						text,
-						level: "info",
-					});
-				},
-			);
-		},
 	});
 
 	function buildProjectDeps(
@@ -1319,7 +1503,9 @@ async function startPiMagicContextRuntime(
 				});
 			};
 		}
-		const auto = resolveAutoSearchFromConfig(cfg);
+		const auto = isReconciledChild
+			? { enabled: false, scoreThreshold: 0.55, minPromptChars: 20 }
+			: resolveAutoSearchFromConfig(cfg);
 		return {
 			projectDir: dir,
 			projectIdentity: identity,
@@ -1342,8 +1528,10 @@ async function startPiMagicContextRuntime(
 	): ResolvedPiProjectDeps {
 		const cached = projectDepsByDir.get(dir);
 		if (cached) return cached;
-		ensureConfigLocationsMigrated(dir);
-		const switchedLoad = loadPiConfig({ cwd: dir });
+		if (!isReconciledChild) ensureConfigLocationsMigrated(dir);
+		const switchedLoad = isReconciledChild
+			? loadedConfig
+			: loadPiConfig({ cwd: dir });
 		logPiConfigLoad({
 			dir,
 			loadedFromPaths: switchedLoad.loadedFromPaths,
@@ -1394,6 +1582,7 @@ async function startPiMagicContextRuntime(
 	function syncDreamerProjectRegistration(
 		current: ResolvedPiProjectDeps,
 	): void {
+		if (isReconciledChild) return;
 		if (sessionShuttingDown) return;
 		seenDreamerProjectIdentities.add(current.projectIdentity);
 		if (!current.dreamerConfig) {
@@ -1423,7 +1612,7 @@ async function startPiMagicContextRuntime(
 			onAdjunctsRefreshNeeded: signalPiSystemPromptRefreshForProject,
 		});
 	}
-	registerPiDroppedInputGuard(pi);
+	if (!isReconciledChild) registerPiDroppedInputGuard(pi);
 	const todowriteEnabled = bootProjectDeps.config.todowrite.enabled !== false;
 	const todowriteOverlayEnabled =
 		todowriteEnabled && bootProjectDeps.config.todowrite.overlay !== false;
@@ -1463,6 +1652,7 @@ async function startPiMagicContextRuntime(
 		resolveDreamerEnabled: (ctx) =>
 			resolveCurrentProjectDeps(ctx).dreamerEnabled,
 		todowriteEnabled,
+		todowriteCommandEnabled: !isReconciledChild,
 		compactionOff,
 		promptSurface: registrationPromptSurface,
 		promptSurfaceRuntime,
@@ -1501,6 +1691,9 @@ async function startPiMagicContextRuntime(
 		}
 
 		const sessionId = resolveSessionId(ctx);
+		if (isReconciledChild && sessionId) {
+			updateSessionMeta(db, sessionId, { isSubagent: true });
+		}
 		const model = ctx.model;
 		if (sessionId && model?.provider && model.id) {
 			seedSessionCacheTtlIfUnsynced({
@@ -1522,11 +1715,12 @@ async function startPiMagicContextRuntime(
 	if (todowriteEnabled) {
 		registerTodoStateLifecycle(pi, { readLastTodoState });
 	}
-	const todoOverlay = todowriteOverlayEnabled
-		? registerTodoOverlay(pi, {
-				readLastTodoState,
-			})
-		: undefined;
+	const todoOverlay =
+		!isReconciledChild && todowriteOverlayEnabled
+			? registerTodoOverlay(pi, {
+					readLastTodoState,
+				})
+			: undefined;
 	info(
 		todowriteOverlayEnabled
 			? "registered todowrite overlay"
@@ -1536,7 +1730,10 @@ async function startPiMagicContextRuntime(
 	// Register the per-LLM-call transform pipeline. Tags eligible message
 	// parts via the shared Tagger and applies queued drops from
 	// `pending_ops` so /ctx-flush and ctx_reduce work against Pi sessions.
-	registerPiContextHandler(pi, bootProjectDeps.contextOptions);
+	registerPiContextHandler(pi, {
+		...bootProjectDeps.contextOptions,
+		isRuntimeReady: () => activationState?.ready !== false,
+	});
 	info(
 		bootProjectDeps.historianConfig
 			? `registered historian trigger (model=${bootProjectDeps.historianConfig.model}, executeThreshold=${formatExecuteThresholdForLog(bootProjectDeps.historianConfig.executeThresholdPercentage)})`
@@ -1831,7 +2028,7 @@ async function startPiMagicContextRuntime(
 		// any failure is swallowed. Worst case is a duplicate notification
 		// the next time the user starts an interactive Pi session.
 		try {
-			if (ctx.hasUI && shouldShowAnnouncement()) {
+			if (!isReconciledChild && ctx.hasUI && shouldShowAnnouncement()) {
 				// URLs render as plain text. Modern terminals auto-detect and
 				// let users Cmd-click; older terminals require manual copy.
 				// We previously wrapped URLs in OSC 8 hyperlink escapes, but
@@ -1931,6 +2128,7 @@ async function startPiMagicContextRuntime(
 						typeof smForDrain.appendCompaction === "function" &&
 						typeof smForDrain.getBranch === "function";
 					if (
+						!isReconciledChild &&
 						!compactionOff &&
 						canDrain &&
 						getPendingPiCompactionMarkerState(db, sessionId)
@@ -2039,7 +2237,8 @@ async function startPiMagicContextRuntime(
 				includeGuidance: true,
 				protectedTags: effectiveConfig.protected_tags,
 				ctxReduceCallable: !compactionOff,
-				dreamerEnabled: effectiveProjectDeps.dreamerEnabled,
+				dreamerEnabled:
+					!isReconciledChild && effectiveProjectDeps.dreamerEnabled,
 				temporalAwarenessEnabled: effectiveConfig.temporal_awareness ?? false,
 				cavemanTextCompressionEnabled:
 					effectiveConfig.caveman_text_compression?.enabled === true,
@@ -2643,13 +2842,6 @@ async function startPiMagicContextRuntime(
 			// best-effort — Pi proceeds with the switch regardless
 		}
 	});
-}
-
-function registerPiSubagentInitContextCleanup(
-	pi: ExtensionAPI,
-	unsubscribe: () => void,
-): void {
-	pi.on("session_shutdown", unsubscribe);
 }
 
 /**

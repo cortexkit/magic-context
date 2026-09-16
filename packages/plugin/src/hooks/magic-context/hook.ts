@@ -2,6 +2,7 @@ import {
     isCompactionEnabled,
     isDreamerRunnable,
     isHistorianRunnable,
+    isSubagentReconciliationEnabled,
 } from "../../config/agent-disable";
 import type { ProtectedTokensTierOverrides } from "../../config/project-security";
 import {
@@ -112,7 +113,10 @@ import { createTextCompleteHandler } from "./text-complete";
 import { createTransform } from "./transform";
 import { type ManagedWrapupContext, runManagedWrapup } from "./wrapup-orchestrator";
 
-export type { CommandExecuteInput, CommandExecuteOutput } from "./command-handler";
+export type {
+    CommandExecuteInput,
+    CommandExecuteOutput,
+} from "./command-handler";
 
 import { checkCompactionMarkerConsistency } from "./compaction-marker-manager";
 import {
@@ -153,7 +157,10 @@ export interface MagicContextDeps {
         toast_duration_ms?: number;
         clear_reasoning_age?: number;
         execute_threshold_percentage?: number | { default: number; [modelKey: string]: number };
-        execute_threshold_tokens?: { default?: number; [modelKey: string]: number | undefined };
+        execute_threshold_tokens?: {
+            default?: number;
+            [modelKey: string]: number | undefined;
+        };
         cache_ttl: MagicContextConfig["cache_ttl"];
         cacheTtlConfigured?: boolean;
         configParseFailures?: ConfigParseFailure[];
@@ -298,7 +305,10 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             const migration = getMigrationOnOpenRefusal();
             const blockingProcesses =
                 migration?.blockingProcesses ??
-                migration?.serverPids.map((pid) => ({ kind: "process" as const, pid })) ??
+                migration?.serverPids.map((pid) => ({
+                    kind: "process" as const,
+                    pid,
+                })) ??
                 [];
             const fence = getSchemaFenceRejection();
             recordHookInitFailure({
@@ -566,13 +576,19 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         contextLimit: (() => {
             const model = resolveLiveModel(sessionId);
             return model
-                ? resolveContextLimit(model.providerID, model.modelID, { db, sessionID: sessionId })
+                ? resolveContextLimit(model.providerID, model.modelID, {
+                      db,
+                      sessionID: sessionId,
+                  })
                 : 128_000;
         })(),
         executeThresholdPercentage: (() => {
             const model = resolveLiveModel(sessionId);
             const contextLimit = model
-                ? resolveContextLimit(model.providerID, model.modelID, { db, sessionID: sessionId })
+                ? resolveContextLimit(model.providerID, model.modelID, {
+                      db,
+                      sessionID: sessionId,
+                  })
                 : 128_000;
             return resolveExecuteThresholdDetail(
                 deps.config.execute_threshold_percentage ?? 65,
@@ -1170,6 +1186,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         },
         projectPath,
         historianRunnable,
+        subagentReconciliation: isSubagentReconciliationEnabled(deps.config) && historianRunnable,
         compactionOff,
         experimentalUserMemories: userMemoryCollectionEnabled(dreamerConfig),
         experimentalTemporalAwareness: deps.config.temporal_awareness === true,
@@ -1209,6 +1226,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         onRustModeProjectPrepared: ensureModuleNoteEvaluationBridge,
     });
     const eventHandler = createEventHandler({
+        subagentReconciliation: isSubagentReconciliationEnabled(deps.config) && historianRunnable,
         contextUsageMap,
         compactionHandler: deps.compactionHandler,
         config: deps.config,
@@ -1478,6 +1496,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     });
 
     const systemPromptHash = createSystemPromptHashHandler({
+        subagentReconciliation: isSubagentReconciliationEnabled(deps.config) && historianRunnable,
         db,
         dreamerEnabled: dreamerRunnable,
         // Gates ctx_memory guidance out of the prompt when memory is off (the
@@ -1651,7 +1670,9 @@ export async function createMagicContextHookAsync(
     let database: Database | null;
     try {
         clearHookInitFailure();
-        database = await openDatabaseAsync({ onBootTimings: deps.onStorageBootTimings });
+        database = await openDatabaseAsync({
+            onBootTimings: deps.onStorageBootTimings,
+        });
     } catch (error) {
         const reason = getErrorMessage(error);
         log("[magic-context] hook failed to open storage; disabling feature:", error);

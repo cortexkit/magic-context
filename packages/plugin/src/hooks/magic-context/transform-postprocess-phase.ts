@@ -644,7 +644,10 @@ export function runRustModePostprocess(args: {
     }
 
     const recoveryMessageIds = new Set<string>();
-    let thinkingBindingRecovery: { flagTarget: string; messageId: string } | null = null;
+    let thinkingBindingRecovery: {
+        flagTarget: string;
+        messageId: string;
+    } | null = null;
     if (modelAcceptsEmptyContent(args.resolvedProviderID)) {
         try {
             for (const id of getMergedReasoningStrippedIds(args.db, args.sessionId)) {
@@ -1146,6 +1149,7 @@ export async function runPostTransformPhase(
     args: RunPostTransformPhaseArgs,
 ): Promise<PostTransformPhaseResult> {
     const compactionOff = args.compactionOff === true;
+    const primaryFeatureMode = args.fullFeatureMode && !args.sessionMeta.isSubagent;
     const trailingBlankSourceDecisions =
         args.trailingBlankSourceDecisions ?? snapshotTrailingBlankSourceDecisions(args.messages);
     // Capture before todo/history synthesis can add assistant messages. Reasoning replay skips a
@@ -1192,13 +1196,13 @@ export async function runPostTransformPhase(
     const executePressureEligible = args.schedulerDecision === "execute" || emergencyDropEligible;
     if (!executePressureEligible) {
         routinePressureAppliedBySession.delete(args.sessionId);
-    } else if (args.fullFeatureMode && alreadyRanThisTurn) {
+    } else if (primaryFeatureMode && alreadyRanThisTurn) {
         // The shared once-per-turn map proves an earlier pass in this pressure
         // episode already ran even when this process-local episode map is cold.
         routinePressureAppliedBySession.set(args.sessionId, true);
     }
     const routinePressureAlreadyApplied =
-        args.fullFeatureMode &&
+        primaryFeatureMode &&
         executePressureEligible &&
         routinePressureAppliedBySession.get(args.sessionId) === true;
     // Require five points below the force band so a batch-induced dip cannot
@@ -1282,6 +1286,7 @@ export async function runPostTransformPhase(
                 db: args.db,
                 sessionId: args.sessionId,
                 state: args.sessionMeta as M0M1State,
+                subagentReconciliation: args.fullFeatureMode,
                 projectPath: args.m0M1.projectPath,
                 projectDirectory: args.m0M1.projectDirectory,
                 injectDocs: args.m0M1.injectDocs,
@@ -1407,8 +1412,7 @@ export async function runPostTransformPhase(
             // for a subagent (no forceMaterialization) it's the only path that
             // fires the tiered drop even when the ordinary scheduler defers.
             emergencyDropEligible ||
-            (args.schedulerDecision === "execute" &&
-                (!alreadyRanThisTurn || !args.fullFeatureMode)));
+            (args.schedulerDecision === "execute" && (!alreadyRanThisTurn || !primaryFeatureMode)));
     // Every first-application lane and m[1] refresh uses this same permission.
     // It authorizes mutation; individual lanes may still find no eligible work.
     let isCacheBustingPass = !compactionOff && hasReclaimRide(rideSignals);
@@ -1442,7 +1446,7 @@ export async function runPostTransformPhase(
     const canUseEmptySentinels = modelAcceptsEmptyContent(args.resolvedProviderID);
     if (shouldRunHeuristics) {
         const subagentRerun =
-            !args.fullFeatureMode &&
+            !primaryFeatureMode &&
             alreadyRanThisTurn &&
             args.schedulerDecision === "execute" &&
             !isExplicitFlush &&
@@ -1471,7 +1475,7 @@ export async function runPostTransformPhase(
         alreadyRanThisTurn &&
         args.schedulerDecision === "execute" &&
         !materializationRequested &&
-        args.fullFeatureMode
+        primaryFeatureMode
     ) {
         sessionLog(
             args.sessionId,
@@ -1582,12 +1586,13 @@ export async function runPostTransformPhase(
             // the experimental flag is true. Caller (transform) wires both
             // conditions so this postprocess path doesn't need to re-check them.
             // Kept undefined otherwise so the heuristic pass skips entirely.
-            const cavemanConfig = args.cavemanTextCompression?.enabled
-                ? {
-                      enabled: true,
-                      minChars: args.cavemanTextCompression.minChars,
-                  }
-                : undefined;
+            const cavemanConfig =
+                primaryFeatureMode && args.cavemanTextCompression?.enabled
+                    ? {
+                          enabled: true,
+                          minChars: args.cavemanTextCompression.minChars,
+                      }
+                    : undefined;
             const heuristicTags = shouldApplyPendingOps
                 ? getActiveTagsBySession(args.db, args.sessionId)
                 : args.tags;
@@ -1615,7 +1620,7 @@ export async function runPostTransformPhase(
                 (emergencyDropEligible
                     ? args.contextUsage.percentage >= 95 ||
                       getEmergencyInputSample(args.db, args.sessionId) === 0
-                    : !args.fullFeatureMode || !routinePressureAlreadyApplied) ||
+                    : !primaryFeatureMode || !routinePressureAlreadyApplied) ||
                 materializationRequested ||
                 independentMutationBeforeHeuristics;
             // Pending ops run just before heuristics and can drop active tags.
@@ -1682,7 +1687,7 @@ export async function runPostTransformPhase(
                 };
                 routineCleanupApplied = true;
             }
-            if (routineCleanupApplied && args.fullFeatureMode && executePressureEligible) {
+            if (routineCleanupApplied && primaryFeatureMode && executePressureEligible) {
                 routinePressureAppliedBySession.set(args.sessionId, true);
             }
             logTransformTiming(
@@ -1780,7 +1785,9 @@ export async function runPostTransformPhase(
         // After a TTL-based scheduler execute, reset lastResponseTime so
         // subsequent transforms defer instead of re-executing every pass.
         if (args.schedulerDecision === "execute" && !materializationRequested) {
-            updateSessionMeta(args.db, args.sessionId, { lastResponseTime: Date.now() });
+            updateSessionMeta(args.db, args.sessionId, {
+                lastResponseTime: Date.now(),
+            });
         }
 
         // Consume only after the shared tool/text batch actually changed bytes.
@@ -1895,7 +1902,9 @@ export async function runPostTransformPhase(
     } catch (error) {
         args.passOutcome?.record("pending-operation-failure");
         sessionLog(args.sessionId, "transform failed applying pending operations:", error);
-        updateSessionMeta(args.db, args.sessionId, { lastTransformError: getErrorMessage(error) });
+        updateSessionMeta(args.db, args.sessionId, {
+            lastTransformError: getErrorMessage(error),
+        });
     }
 
     if (isCacheBustingPass) {
@@ -1988,6 +1997,7 @@ export async function runPostTransformPhase(
                 sessionId: args.sessionId,
                 messages: args.messages,
                 state: args.sessionMeta as M0M1State,
+                subagentReconciliation: args.fullFeatureMode,
                 projectPath: args.m0M1.projectPath,
                 projectDirectory: args.m0M1.projectDirectory,
                 injectDocs: args.m0M1.injectDocs,
@@ -2222,7 +2232,7 @@ export async function runPostTransformPhase(
     // Sticky-injection replay (§2.4): every pass replays every persisted anchor
     // so cached user-message bytes remain identical until that message leaves
     // the visible window. Prune happens later, only on cache-busting passes.
-    if (args.fullFeatureMode && !compactionOff && replaySnapshot) {
+    if (primaryFeatureMode && !compactionOff && replaySnapshot) {
         for (const anchor of replaySnapshot.noteNudgeAnchors) {
             appendReminderToUserMessageById(args.messages, anchor.messageId, anchor.text);
         }
@@ -2344,10 +2354,8 @@ export async function runPostTransformPhase(
     }
 
     const tNoteAndTodo = performance.now();
-    const noteReadStillVisible = args.fullFeatureMode
-        ? hasVisibleNoteReadCall(args.messages)
-        : false;
-    const deferredNoteText = args.fullFeatureMode
+    const noteReadStillVisible = primaryFeatureMode ? hasVisibleNoteReadCall(args.messages) : false;
+    const deferredNoteText = primaryFeatureMode
         ? peekNoteNudgeText(
               args.db,
               args.sessionId,
@@ -2375,7 +2383,7 @@ export async function runPostTransformPhase(
 
     // Todo state synthesis is deliberately isolated so its live permission
     // refresh and cache-boundary behavior can be tested independently.
-    if (args.fullFeatureMode && !compactionOff) {
+    if (primaryFeatureMode && !compactionOff) {
         prependedMessageCount += await applyTodoSynthesis({
             db: args.db,
             sessionId: args.sessionId,
@@ -2441,7 +2449,7 @@ export async function runPostTransformPhase(
     // in buildSidebarSnapshot (rpc-handlers.ts) when the TUI actually polls,
     // keeping the prompt path free of it.
 
-    if (args.fullFeatureMode && args.autoSearch?.enabled && args.projectPath) {
+    if (primaryFeatureMode && args.autoSearch?.enabled && args.projectPath) {
         // Resolve memory ids currently rendered in the <session-history>
         // block. The auto-search runner drops hint fragments for memories the
         // agent already sees in message[0] so the hint stays "vague recall"
@@ -2474,7 +2482,7 @@ export async function runPostTransformPhase(
         logTransformTiming(args.sessionId, "pp.autoSearchHint", tAutoSearch);
     }
 
-    if (args.fullFeatureMode && isCacheBustingPass) {
+    if (primaryFeatureMode && isCacheBustingPass) {
         const visibleIds = new Set<string>();
         for (const message of args.messages) {
             if (typeof message.info?.id === "string") {
@@ -2516,7 +2524,11 @@ export async function runPostTransformPhase(
         for (const message of reasoningCandidates) {
             const hasClearedReasoning = message.parts.some((part) => {
                 if (part === null || typeof part !== "object") return false;
-                const candidate = part as { type?: unknown; thinking?: unknown; text?: unknown };
+                const candidate = part as {
+                    type?: unknown;
+                    thinking?: unknown;
+                    text?: unknown;
+                };
                 if (candidate.type !== "reasoning" && candidate.type !== "thinking") return false;
                 return candidate.thinking === "[cleared]" || candidate.text === "[cleared]";
             });
@@ -2540,7 +2552,10 @@ export async function runPostTransformPhase(
     // and replay because Anthropic requires its signed blocks byte-identically.
     const mergedReasoningStrippedIds = new Set(replaySnapshot?.mergedReasoningStrippedIds ?? []);
     const thinkingBindingRecoveryMessageIds = new Set<string>();
-    let thinkingBindingRecovery: { flagTarget: string; messageId: string } | null = null;
+    let thinkingBindingRecovery: {
+        flagTarget: string;
+        messageId: string;
+    } | null = null;
     if (canUseEmptySentinels && !compactionOff) {
         try {
             for (const id of mergedReasoningStrippedIds) {
