@@ -260,10 +260,10 @@ describe("whitespace-only assistant tag transition", () => {
         ]);
     });
 
-    it("keeps leading whitespace before signed thinking byte-identical for both provider shapes", () => {
-        for (const providerID of ["anthropic", "github-copilot"]) {
+    it("keeps leading whitespace before signed thinking byte-identical for both capabilities", () => {
+        for (const acceptsEmptySentinels of [true, false] as const) {
             const db = openTestDb();
-            const sessionId = `ses-leading-whitespace-${providerID}`;
+            const sessionId = `ses-leading-whitespace-${acceptsEmptySentinels}`;
             const message = assistant(
                 "assistant-leading",
                 [
@@ -275,20 +275,20 @@ describe("whitespace-only assistant tag transition", () => {
             const before = JSON.stringify(message.parts);
 
             tagMessages(sessionId, [message], createTagger(), db);
-            stripDroppedPlaceholderMessages([message], providerID);
+            stripDroppedPlaceholderMessages([message], acceptsEmptySentinels);
 
             expect(JSON.stringify(message.parts)).toBe(before);
             expect(getTagsBySession(db, sessionId)).toEqual([]);
         }
     });
 
-    it("preserves provider-specific wholly blank assistant canonicalization", () => {
-        for (const [providerID, expected] of [
-            ["anthropic", ""],
-            ["github-copilot", "[dropped]"],
+    it("preserves capability-specific wholly blank assistant canonicalization", () => {
+        for (const [acceptsEmptySentinels, expected] of [
+            [true, ""],
+            [false, "[dropped]"],
         ] as const) {
             const db = openTestDb();
-            const sessionId = `ses-wholly-blank-${providerID}`;
+            const sessionId = `ses-wholly-blank-${acceptsEmptySentinels}`;
             const message = assistant(
                 "assistant-wholly-blank",
                 [{ type: "text", text: " \t" }],
@@ -296,7 +296,7 @@ describe("whitespace-only assistant tag transition", () => {
             );
 
             tagMessages(sessionId, [message], createTagger(), db);
-            stripDroppedPlaceholderMessages([message], providerID);
+            stripDroppedPlaceholderMessages([message], acceptsEmptySentinels);
 
             expect(message.parts).toEqual([{ type: "text", text: expected }]);
             expect(getTagsBySession(db, sessionId)).toEqual([]);

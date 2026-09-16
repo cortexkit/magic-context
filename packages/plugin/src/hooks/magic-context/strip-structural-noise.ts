@@ -26,7 +26,7 @@ function isStructuralNoisePart(part: unknown): boolean {
  * prefixes stay byte-stable while OpenCode filters the empty text parts before
  * the wire.
  *
- * Caller contract: run only when `modelAcceptsEmptyContent(providerID)` is true.
+ * Caller contract: run only when the pass's resolved `acceptsEmptySentinels` is true.
  * Non-Anthropic adapters can forward empty text parts as real wire content.
  *
  * Idempotent: sentinels are themselves recognized on subsequent passes and

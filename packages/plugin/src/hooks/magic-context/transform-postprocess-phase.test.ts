@@ -302,7 +302,7 @@ describe("postprocess replay snapshot", () => {
             await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, messages, {
                     db: spiedDb,
-                    resolvedProviderID: "anthropic",
+                    acceptsEmptySentinels: true,
                 }),
             );
             return messages;
@@ -570,7 +570,7 @@ describe("stripped placeholder replay across temporary marker windows", () => {
             await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, missingAssistantPass, {
                     schedulerDecision: missingPassDecision,
-                    resolvedProviderID: "anthropic",
+                    acceptsEmptySentinels: true,
                 }),
             );
             const foldWire = serializeAnthropicVisibleRoleGroups(missingAssistantPass);
@@ -593,7 +593,7 @@ describe("stripped placeholder replay across temporary marker windows", () => {
             await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, replayPass, {
                     schedulerDecision: replayPassDecision,
-                    resolvedProviderID: "anthropic",
+                    acceptsEmptySentinels: true,
                 }),
             );
 
@@ -621,7 +621,7 @@ describe("stripped placeholder replay across temporary marker windows", () => {
             basePostTransformArgs(db, sessionId, compactionOffMessages, {
                 compactionOff: true,
                 schedulerDecision: "execute",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
         expect(compactionOffMessages[0]?.parts).toEqual([
@@ -634,7 +634,7 @@ describe("stripped placeholder replay across temporary marker windows", () => {
             basePostTransformArgs(db, sessionId, resumedMessages, {
                 compactionOff: false,
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
         expect(resumedMessages[0]?.parts).toEqual([{ type: "text", text: "" }]);
@@ -663,7 +663,7 @@ describe("stripped placeholder replay across temporary marker windows", () => {
                 schedulerDecision: "execute",
                 pendingMaterializationSessions: new Set([sessionId]),
                 schedulerDeferReason: null,
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
                 hiddenMessagesAtCompactionSeam: hiddenAssistants,
             }),
         );
@@ -692,7 +692,7 @@ describe("stripped placeholder replay across temporary marker windows", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, replayMessages, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
 
@@ -2506,7 +2506,7 @@ describe("issue #386 sustained execute-pressure batching", () => {
             clearReasoningAge: 30,
             smartDrops: true,
             cavemanTextCompression: { enabled: true, minChars: 300 },
-            resolvedProviderID: "anthropic",
+            acceptsEmptySentinels: true,
             currentTurnId: turnId,
             lastHeuristicsTurnId,
         };
@@ -2583,7 +2583,7 @@ describe("issue #386 sustained execute-pressure batching", () => {
                     clearReasoningAge: 30,
                     smartDrops: true,
                     cavemanTextCompression: { enabled: true, minChars: 300 },
-                    resolvedProviderID: "anthropic",
+                    acceptsEmptySentinels: true,
                     currentTurnId: turnId,
                     lastHeuristicsTurnId,
                     tags: getActiveTagsBySession(db, sessionId),
@@ -3345,7 +3345,7 @@ describe("postprocess empty-sentinel provider gate", () => {
                 schedulerDecision: "execute",
                 contextUsage: { percentage: 60, inputTokens: 6000 },
                 currentTurnId: "turn-cleared",
-                resolvedProviderID: "github-copilot",
+                acceptsEmptySentinels: false,
             }),
         );
 
@@ -3372,7 +3372,7 @@ describe("postprocess empty-sentinel provider gate", () => {
                 schedulerDecision: "execute",
                 contextUsage: { percentage: 60, inputTokens: 6000 },
                 currentTurnId: "turn-clear-write",
-                resolvedProviderID: "github-copilot",
+                acceptsEmptySentinels: false,
                 clearReasoningAge: 1,
                 reasoningByMessage: new Map([[oldMsg, [oldThinking]]]) as never,
                 messageTagNumbers: new Map([
@@ -3408,7 +3408,7 @@ describe("postprocess empty-sentinel provider gate", () => {
                 pendingMaterializationSessions: new Set([sessionId]),
                 contextUsage: { percentage: 60, inputTokens: 6000 },
                 currentTurnId: "turn-clear-write-anthropic",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
                 clearReasoningAge: 1,
                 reasoningByMessage: new Map([[oldMsg, [oldThinking]]]) as never,
                 messageTagNumbers: new Map([
@@ -3449,7 +3449,7 @@ describe("postprocess empty-sentinel provider gate", () => {
             basePostTransformArgs(db, sessionId, messages, {
                 watermark: 1,
                 messageTagNumbers: new Map([[userMessage, 1]]),
-                resolvedProviderID: "github-copilot",
+                acceptsEmptySentinels: false,
             }),
         );
 
@@ -3485,7 +3485,7 @@ describe("postprocess empty-sentinel provider gate", () => {
             basePostTransformArgs(db, sessionId, messages, {
                 watermark: 1,
                 messageTagNumbers: new Map([[userMessage, 1]]),
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
                 schedulerDecision: "execute",
                 pendingMaterializationSessions: new Set([sessionId]),
                 contextUsage: { percentage: 60, inputTokens: 6000 },
@@ -3525,7 +3525,7 @@ describe("postprocess empty-sentinel provider gate", () => {
                 schedulerDecision: "defer",
                 watermark: 0,
                 messageTagNumbers: new Map([[userMessage, 1]]),
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
 
@@ -3555,7 +3555,7 @@ describe("postprocess empty-sentinel provider gate", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, messages, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "github-copilot",
+                acceptsEmptySentinels: false,
             }),
         );
 
@@ -3633,7 +3633,7 @@ describe("final message representation", () => {
                 schedulerDecision: "execute",
                 contextUsage: { percentage: 60, inputTokens: 6000 },
                 currentTurnId: "turn-late-clear",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
                 tags: getActiveTagsBySession(db, sessionId),
                 targets: foldTargets,
                 batch: foldBatch,
@@ -3691,7 +3691,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, deferMessages, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
                 tags: getActiveTagsBySession(db, sessionId),
                 targets: deferTargets,
                 batch: deferBatch,
@@ -3767,7 +3767,7 @@ describe("final message representation", () => {
                 schedulerDecision: "execute",
                 contextUsage: { percentage: 60, inputTokens: 6000 },
                 currentTurnId: "turn-preserve-reasoning",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
                 tags: getActiveTagsBySession(db, sessionId),
                 targets: foldTargets,
                 batch: foldBatch,
@@ -3800,7 +3800,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, deferMessages, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
                 tags: getActiveTagsBySession(db, sessionId),
                 targets: deferTargets,
                 batch: deferBatch,
@@ -3873,7 +3873,7 @@ describe("final message representation", () => {
                 schedulerDecision: "execute",
                 contextUsage: { percentage: 60, inputTokens: 6000 },
                 currentTurnId: "turn-final-adjacency",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
                 tags: getActiveTagsBySession(db, sessionId),
                 targets: foldTargets,
                 batch: foldBatch,
@@ -3902,7 +3902,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, deferMessages, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
                 tags: getActiveTagsBySession(db, sessionId),
                 targets: deferTargets,
                 batch: deferBatch,
@@ -3917,7 +3917,7 @@ describe("final message representation", () => {
         expect(foldWire).not.toContain("signature-invalid-after-merge");
 
         const beforeSecondFinalization = JSON.stringify(foldMessages);
-        expect(finalizeMessageRepresentation(foldMessages, "anthropic")).toEqual({
+        expect(finalizeMessageRepresentation(foldMessages, true)).toEqual({
             clearedParts: 0,
             mergedReasoningParts: 0,
         });
@@ -3941,7 +3941,7 @@ describe("final message representation", () => {
             },
         ] as unknown as MessageLike[]);
         const nonAnthropicBefore = JSON.stringify(nonAnthropicMessages);
-        expect(finalizeMessageRepresentation(nonAnthropicMessages, "github-copilot")).toEqual({
+        expect(finalizeMessageRepresentation(nonAnthropicMessages, false)).toEqual({
             clearedParts: 0,
             mergedReasoningParts: 0,
         });
@@ -3980,7 +3980,7 @@ describe("final message representation", () => {
         const recovery = await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, recoveryMessages, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
                 thinkingBindingRecoveryEnabledForModel: true,
             }),
         );
@@ -4012,7 +4012,7 @@ describe("final message representation", () => {
         const replay = await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, replayMessages, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
                 thinkingBindingRecoveryEnabledForModel: true,
             }),
         );
@@ -4050,7 +4050,7 @@ describe("final message representation", () => {
                 sessionId,
                 messages,
                 fullFeatureMode: true,
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
                 thinkingBindingRecoveryEnabledForModel: true,
                 tagger: createTagger(),
                 ctxReduceAvailability: { callable: true, frozen: true },
@@ -4124,7 +4124,7 @@ describe("final message representation", () => {
             sessionId,
             messages,
             fullFeatureMode: true,
-            resolvedProviderID: "anthropic",
+            acceptsEmptySentinels: true,
             trailingBlankSourceDecisions: new Map([
                 ["assistant-stripped", "strip"],
                 ["assistant-kept", "keep:2"],
@@ -4159,7 +4159,7 @@ describe("final message representation", () => {
         const result = await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, messages, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
 
@@ -4209,7 +4209,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, acceptedPass, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
         expect(JSON.stringify(acceptedTarget.parts)).toBe(acceptedBytes);
@@ -4221,7 +4221,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, transitionedDefer, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
         expect(JSON.stringify(deferTarget.parts)).toBe(acceptedBytes);
@@ -4234,7 +4234,7 @@ describe("final message representation", () => {
             basePostTransformArgs(db, sessionId, bustMessages, {
                 schedulerDecision: "execute",
                 pendingMaterializationSessions: new Set([sessionId]),
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
         const bustTarget = findMessage(bustMessages, "assistant-transitioned");
@@ -4253,7 +4253,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, replayMessages, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
         expect(serializeAnthropicWirePrefix(replayMessages)).toBe(
@@ -4301,7 +4301,7 @@ describe("final message representation", () => {
             basePostTransformArgs(db, sessionId, messages, {
                 schedulerDecision: "execute",
                 pendingMaterializationSessions: new Set([sessionId]),
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
                 trailingBlankSourceDecisions,
             }),
         );
@@ -4358,7 +4358,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, preBustDefer.messages, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
                 trailingBlankSourceDecisions: preBustDefer.trailingBlankSourceDecisions,
             }),
         );
@@ -4375,7 +4375,7 @@ describe("final message representation", () => {
                 basePostTransformArgs(db, sessionId, bust.messages, {
                     schedulerDecision: "execute",
                     pendingMaterializationSessions: new Set([sessionId]),
-                    resolvedProviderID: "anthropic",
+                    acceptsEmptySentinels: true,
                     trailingBlankSourceDecisions: bust.trailingBlankSourceDecisions,
                 }),
             );
@@ -4407,7 +4407,7 @@ describe("final message representation", () => {
             await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, replay.messages, {
                     schedulerDecision: "defer",
-                    resolvedProviderID: "anthropic",
+                    acceptsEmptySentinels: true,
                     trailingBlankSourceDecisions: replay.trailingBlankSourceDecisions,
                 }),
             );
@@ -4449,7 +4449,7 @@ describe("final message representation", () => {
             basePostTransformArgs(db, sessionId, markerAbsent.messages, {
                 schedulerDecision: "execute",
                 pendingMaterializationSessions: new Set([sessionId]),
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
                 trailingBlankSourceDecisions: markerAbsent.trailingBlankSourceDecisions,
             }),
         );
@@ -4459,7 +4459,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, defer.messages, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
                 trailingBlankSourceDecisions: defer.trailingBlankSourceDecisions,
             }),
         );
@@ -4475,7 +4475,7 @@ describe("final message representation", () => {
             basePostTransformArgs(db, sessionId, visibleBust.messages, {
                 schedulerDecision: "execute",
                 pendingMaterializationSessions: new Set([sessionId]),
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
                 trailingBlankSourceDecisions: visibleBust.trailingBlankSourceDecisions,
             }),
         );
@@ -4525,7 +4525,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, bust.messages, {
                 schedulerDecision: "execute",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
                 trailingBlankSourceDecisions: bust.trailingBlankSourceDecisions,
             }),
         );
@@ -4536,7 +4536,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, replay.messages, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
                 trailingBlankSourceDecisions: replay.trailingBlankSourceDecisions,
             }),
         );
@@ -4570,7 +4570,7 @@ describe("final message representation", () => {
             basePostTransformArgs(db, sessionId, messages, {
                 compactionOff: true,
                 schedulerDecision: "execute",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
 
@@ -4599,7 +4599,7 @@ describe("final message representation", () => {
         } as unknown as MessageLike;
 
         const messages = [older, newest];
-        finalizeMessageRepresentation(messages, "anthropic", {
+        finalizeMessageRepresentation(messages, true, {
             reasoningMutationExemptMessage: newest,
             trailingBlankDecisions: new Map([
                 ["assistant-older-whitespace", "strip"],
@@ -4644,7 +4644,7 @@ describe("final message representation", () => {
         } as unknown as MessageLike;
         const messages = [lone, adjacent, answered, newest];
 
-        finalizeMessageRepresentation(messages, "anthropic", {
+        finalizeMessageRepresentation(messages, true, {
             reasoningMutationExemptMessage: newest,
             trailingBlankDecisions: new Map([
                 ["assistant-lone-reasoning", "strip"],
@@ -4712,7 +4712,7 @@ describe("final message representation", () => {
             await runPostTransformPhase(
                 basePostTransformArgs(db, scenario.sessionId, firstMessages, {
                     schedulerDecision: "execute",
-                    resolvedProviderID: "anthropic",
+                    acceptsEmptySentinels: true,
                 }),
             );
             const firstBytes = JSON.stringify(firstMessages[0].parts);
@@ -4725,7 +4725,7 @@ describe("final message representation", () => {
             await runPostTransformPhase(
                 basePostTransformArgs(db, scenario.sessionId, replayMessages, {
                     schedulerDecision: "defer",
-                    resolvedProviderID: "anthropic",
+                    acceptsEmptySentinels: true,
                 }),
             );
             expect(JSON.stringify(replayMessages[0].parts)).toBe(firstBytes);
@@ -4755,7 +4755,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, deferMessages, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
         const deferBytes = JSON.stringify(findMessage(deferMessages, "assistant-late").parts);
@@ -4770,7 +4770,7 @@ describe("final message representation", () => {
             basePostTransformArgs(db, sessionId, bustMessages, {
                 schedulerDecision: "execute",
                 pendingMaterializationSessions: new Set([sessionId]),
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
         expect(getTrailingBlankDecisions(db, sessionId).get("assistant-late")).toBe("keep");
@@ -4785,7 +4785,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, replayMessages, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
         expect(JSON.stringify(findMessage(replayMessages, "assistant-late").parts)).toBe(bustBytes);
@@ -4858,7 +4858,7 @@ describe("final message representation", () => {
             const first = await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, firstMessages, {
                     schedulerDecision: "defer",
-                    resolvedProviderID: "anthropic",
+                    acceptsEmptySentinels: true,
                 }),
             );
             const firstBytes = JSON.stringify(firstMessages[0].parts);
@@ -4881,7 +4881,7 @@ describe("final message representation", () => {
             const replay = await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, replayMessages, {
                     schedulerDecision: "defer",
-                    resolvedProviderID: "anthropic",
+                    acceptsEmptySentinels: true,
                 }),
             );
 
@@ -4912,7 +4912,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, firstMessages, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
         const firstBytes = JSON.stringify(firstMessages[0].parts);
@@ -4925,7 +4925,7 @@ describe("final message representation", () => {
             const replay = await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, replayMessages, {
                     schedulerDecision: "defer",
-                    resolvedProviderID: "anthropic",
+                    acceptsEmptySentinels: true,
                 }),
             );
             expect(replay.bustedThisPass).toBe(false);
@@ -4958,7 +4958,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, first, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
         expect(getTrailingBlankDecisions(db, sessionId).get("assistant-target")).toBe("keep");
@@ -4967,7 +4967,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, recounted, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
         expect(getTrailingBlankDecisions(db, sessionId).get("assistant-target")).toBe("keep:3");
@@ -4977,7 +4977,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, demoted, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
         expect(getTrailingBlankDecisions(db, sessionId).get("assistant-target")).toBe("strip");
@@ -4986,7 +4986,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, replay, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
         expect(replay[0].parts).toEqual([{ type: "text", text: "answer" }]);
@@ -5019,7 +5019,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, messages, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
 
@@ -5072,7 +5072,7 @@ describe("final message representation", () => {
             await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, messages, {
                     schedulerDecision: "defer",
-                    resolvedProviderID: "anthropic",
+                    acceptsEmptySentinels: true,
                     trailingBlankSourceDecisions: sourceDecisions,
                 }),
             );
@@ -5143,7 +5143,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, messages, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
 
@@ -5210,7 +5210,7 @@ describe("final message representation", () => {
             const result = await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, messages, {
                     schedulerDecision: "defer",
-                    resolvedProviderID: "anthropic",
+                    acceptsEmptySentinels: true,
                 }),
             );
             expect(result.bustedThisPass).toBe(false);
@@ -5282,7 +5282,7 @@ describe("final message representation", () => {
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, messages, {
                 schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
 
@@ -5336,8 +5336,8 @@ describe("final message representation", () => {
         const targeted = cloneMessages(fixture);
         const targetedLateMutation = targeted.find((message) => message.info.id === "merged-b")!;
 
-        const oldResult = finalizeMessageRepresentation(fullWalk, "anthropic");
-        const targetedResult = finalizeMessageRepresentation(targeted, "anthropic", {
+        const oldResult = finalizeMessageRepresentation(fullWalk, true);
+        const targetedResult = finalizeMessageRepresentation(targeted, true, {
             prependedMessageCount: 2,
             reasoningMutatedMessages: [targetedLateMutation],
         });
@@ -5717,7 +5717,7 @@ describe("marker-drain reasoning representation", () => {
             basePostTransformArgs(db, sessionId, applying, {
                 ...first,
                 tagger,
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
                 deferredMaterializationSessions: new Set([sessionId]),
                 hiddenMessagesAtCompactionSeam: [applyingRaw[1]],
                 deferredHistoryWasPendingAtPassStart: true,
@@ -5764,7 +5764,7 @@ describe("marker-drain reasoning representation", () => {
             basePostTransformArgs(db, sessionId, deferred, {
                 ...second,
                 tagger: freshTagger,
-                resolvedProviderID: "anthropic",
+                acceptsEmptySentinels: true,
             }),
         );
         expect(JSON.stringify(deferred.find((m) => m.info.id === "error-assistant")!.parts)).toBe(
