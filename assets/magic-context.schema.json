@@ -962,6 +962,11 @@
           "additionalProperties": false,
           "description": "Strict OMP model-resolution block. It accepts no OpenCode vocabulary."
         },
+        "subagent_reconciliation": {
+          "default": false,
+          "description": "Enable automatic historian reconciliation and full history context for ordinary subagent sessions (user config only; default false). Magic Context's internal agents remain excluded. Disabling stops new historian runs but preserves existing session history. Changes take effect after restarting the host.",
+          "type": "boolean"
+        },
         "two_pass": {
           "default": false,
           "description": "Run a second editor pass over historian output to clean low-signal U: lines and cross-compartment duplicates. Adds ~1 extra API call and ~1.3x cost per historian run. Useful for models without extended thinking support. (default: false)",

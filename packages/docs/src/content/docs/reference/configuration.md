@@ -93,7 +93,6 @@ The background agent that condenses old conversation into compact history.
 | `historian.prompt` | string | — | Additional system prompt text |
 | `historian.tools` | map<string, boolean> | — | Tool enable/disable overrides |
 | `historian.disable` | boolean | — | Disable this agent |
-| `historian.subagent_reconciliation` | boolean | `false` | User config only. Opt ordinary OpenCode and Pi child sessions into historian reconciliation/history rendering; Magic Context's own children remain excluded. Restart to apply. Disabling or removing the setting (including the historian block) stops new child reconciliation but retains stored summaries and covered-raw trimming. |
 | `historian.description` | string | — | Agent description |
 | `historian.mode` | `"subagent"` \\| `"primary"` \\| `"all"` | — | Agent mode (subagent, primary, or all) |
 | `historian.color` | string | — | Hex color for the agent (e.g. '#a1b2c3') |
@@ -117,14 +116,13 @@ The background agent that condenses old conversation into compact history.
 | `historian.omp.model` | string \\| object | — | Primary OMP model entry. |
 | `historian.omp.fallback_models` | string \\| object[] | — | Ordered fallback OMP entries. |
 | `historian.omp.thinking_level` | `"off"` \\| `"minimal"` \\| `"low"` \\| `"medium"` \\| `"high"` \\| `"xhigh"` \\| `"max"` \\| `"inherit"` \\| `"auto"` | — | OMP thinking level for the primary entry when it declares none. Fallback entries declare thinking levels per-entry. |
+| `historian.subagent_reconciliation` | boolean | `false` | Enable automatic historian reconciliation and full history context for ordinary subagent sessions (user config only; default false). Magic Context's internal agents remain excluded. Disabling stops new historian runs but preserves existing session history. Changes take effect after restarting the host. |
 | `historian.two_pass` | boolean | `false` | Run a second editor pass over historian output to clean low-signal U: lines and cross-compartment duplicates. Adds ~1 extra API call and ~1.3x cost per historian run. Useful for models without extended thinking support. (default: false) |
 | `historian.disallowed_tools` | `"*"` \\| `"read"` \\| `"aft_outline"` \\| `"aft_zoom"` \\| `"aft_search"`[] | `[]` | OpenCode only. Tools to REMOVE from the historian's default allow-list [read, aft_outline, aft_zoom, aft_search]. Applies to both historian and historian-editor agents. Use ["*"] to strip all tool definitions from the model request — this prevents weak instruction-following models (e.g. mistral-small-latest) from entering tool-calling loops. Individual tool names remove just that tool. Note: a user-supplied historian.permission override can re-allow a tool that disallowed_tools removed — disallowed_tools sets the baseline, permission overrides take precedence. (default: []) |
 | `historian_timeout_ms` | number (60000–) | `600000` | Timeout for each historian prompt call in milliseconds (default: 600000) |
 | `commit_cluster_trigger` | object | — | Commit-cluster trigger: fire historian when enough commit clusters accumulate in the unsummarized tail |
 | `commit_cluster_trigger.enabled` | boolean | `true` | Enable commit-cluster based historian triggering (default: true) |
 | `commit_cluster_trigger.min_clusters` | number (1–) | `3` | Minimum commit clusters required to trigger historian (min: 1, default: 3) |
-
-Pi's supported in-process child lifecycle captures the parent's resolved config/database and keeps session-local context state, without duplicating startup maintenance or Dreamer services. Child shutdown does not stop the parent's services. The opt-in preserves child identity and does not enable parent-only background features or promise unlimited recall.
 
 ## Memory & recall
 
