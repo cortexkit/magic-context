@@ -44,6 +44,7 @@ import {
 import {
 	getEmergencyInputSample,
 	getOverflowState,
+	getPersistedNoteNudge,
 	recordDetectedContextLimit,
 	recordOverflowDetected,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
@@ -2128,6 +2129,45 @@ describe("registerPiContextHandler", () => {
 				'<instruction name="deferred_notes">',
 			);
 			expect(textOf(result.messages[0] as never)).toContain("1 deferred note");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("does not deliver historian-triggered note nudges to a child", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-child-note-nudge";
+		try {
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				isSubagentSession: true,
+				ctxReduceCallable: true,
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] }>;
+			addNote(db, "session", { sessionId, content: "Do not nudge the child." });
+			onNoteTrigger(db, sessionId, "historian_complete");
+			expect(getPersistedNoteNudge(db, sessionId).triggerPending).toBe(true);
+			for (const ordinal of [1, 2]) {
+				const message = userMessage(`child turn ${ordinal}`, ordinal);
+				const result = await handler(
+					{ messages: [message] as never[] },
+					fakeContext(
+						sessionId,
+						process.cwd(),
+						[`child-${ordinal}`],
+						[message],
+					) as never,
+				);
+				expect(
+					result.messages.map((item) => textOf(item)).join("\n"),
+				).not.toContain('<instruction name="deferred_notes">');
+			}
+			expect(getOrCreateSessionMeta(db, sessionId).isSubagent).toBe(true);
+			expect(getPersistedNoteNudge(db, sessionId).triggerPending).toBe(true);
 		} finally {
 			closeQuietly(db);
 		}

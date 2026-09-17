@@ -3363,7 +3363,7 @@ export function registerPiContextHandler(
 			})();
 			const tNoteNudges = performance.now();
 			try {
-				if (!options.compactionOff) {
+				if (!options.compactionOff && !sessionMeta.isSubagent) {
 					outputMessages = applyNoteNudges({
 						sessionId,
 						db: options.db,

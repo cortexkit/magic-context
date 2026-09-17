@@ -1380,8 +1380,8 @@ async function startPiMagicContextRuntime(
 		info("plugin DISABLED via config (enabled: false) — skipping registration");
 		return;
 	}
-	if (!isReconciledChild) {
-		parentRuntime!.current = {
+	if (!isReconciledChild && parentRuntime) {
+		parentRuntime.current = {
 			db,
 			config,
 			registrationPromptSurface,
@@ -2241,6 +2241,7 @@ async function startPiMagicContextRuntime(
 					!isReconciledChild && effectiveProjectDeps.dreamerEnabled,
 				temporalAwarenessEnabled: effectiveConfig.temporal_awareness ?? false,
 				cavemanTextCompressionEnabled:
+					!isReconciledChild &&
 					effectiveConfig.caveman_text_compression?.enabled === true,
 				language: effectiveConfig.language,
 				promptSurfacePreset: promptSurface.preset,

@@ -2269,9 +2269,11 @@ fn reconciliation_render_enabled(
     req: &TransformRequest,
     core: &CoreState,
     meta: &ModuleMeta,
+    has_published_compartments: bool,
 ) -> bool {
     reconciliation_enabled(req)
         || meta.coverage_ordinal.is_some()
+        || has_published_compartments
         || core
             .frozen_units
             .iter()
@@ -4507,8 +4509,20 @@ fn apply_once(
         plan = PassPlan::Soft;
     }
     timings.decide += elapsed_ms(classify_started_at);
+    let cold_published_compartments = !reconciliation_enabled(req)
+        && loaded.meta.coverage_ordinal.is_none()
+        && !loaded
+            .core
+            .frozen_units
+            .iter()
+            .any(|unit| matches!(unit.key.as_str(), "m0" | "m1"))
+        && !store
+            .load_compartment_boundaries(&req.session_id)?
+            .is_empty();
     if !reconciliation_enabled(req) {
-        plan = if matches!(scheduler_outcome.pass, scheduler::PassDecision::Defer) {
+        plan = if cold_published_compartments {
+            PassPlan::Hard
+        } else if matches!(scheduler_outcome.pass, scheduler::PassDecision::Defer) {
             PassPlan::Defer
         } else {
             PassPlan::Soft
@@ -4749,8 +4763,10 @@ fn apply_once(
     let mut commit_memory_revision = None;
     let mut note_deliveries: Vec<NoteDelivery> = Vec::new();
     let mut committed_mural_hash = persisted_mural_hash;
+    let render_reconciliation_enabled =
+        reconciliation_render_enabled(req, &core, &meta, cold_published_compartments);
 
-    if !reconciliation_enabled(req) {
+    if !render_reconciliation_enabled {
         if !matches!(scheduler_outcome.pass, scheduler::PassDecision::Defer) {
             core.step(PassInput {
                 proposed: Some(mc_core::Action::Soft),
@@ -13444,7 +13460,7 @@ fn build_output_with_tags_inner(
     } else {
         FrozenUnitLookup::Scan(&core.frozen_units)
     };
-    let render_reconciliation_enabled = reconciliation_render_enabled(req, core, meta);
+    let render_reconciliation_enabled = reconciliation_render_enabled(req, core, meta, false);
     if use_frozen_unit_index {
         build_timings.frozen_unit_index = elapsed_ms(frozen_unit_index_started_at);
     }
@@ -13505,7 +13521,7 @@ fn build_output_with_tags_inner(
     } else {
         HashSet::new()
     };
-    let output_coverage = if reconciliation_render_enabled(req, core, meta) {
+    let output_coverage = if reconciliation_render_enabled(req, core, meta, false) {
         meta.coverage_ordinal
     } else {
         None
@@ -15959,7 +15975,7 @@ pub(crate) mod tests {
         meta.coverage_ordinal = Some(4);
 
         assert!(!reconciliation_enabled(&request));
-        assert!(reconciliation_render_enabled(&request, &core, &meta));
+        assert!(reconciliation_render_enabled(&request, &core, &meta, false));
     }
 
     #[test]
@@ -16070,6 +16086,50 @@ pub(crate) mod tests {
             .messages()
             .iter()
             .any(|message| message.meta.harness_id.as_deref() == Some("tail")));
+        assert!(!reconciliation_enabled(&request));
+    }
+
+    #[test]
+    fn cold_opted_out_subagent_renders_published_compartment_without_prior_materialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_id = "subagent-cold-published-replay";
+        {
+            let store = store(dir.path());
+            store
+                .replace_compartments(session_id, &[comp(1, 1, 1, "covered", "published summary")])
+                .unwrap();
+        }
+
+        let store = store(dir.path());
+        let mut request = req(
+            session_id,
+            "cfg",
+            vec![
+                item("covered", 1, "raw covered"),
+                item("tail", 2, "raw live tail"),
+            ],
+        );
+        request.is_subagent = true;
+        request.subagent_reconciliation = false;
+
+        let replay =
+            transform(&store, &request, &pctx("git:proj", "/nonexistent-docs", 0)).unwrap();
+
+        assert!(replay.messages().iter().any(|message| {
+            message.message.meta.synthetic
+                && serde_json::to_string(&message.message)
+                    .unwrap()
+                    .contains("published summary")
+        }));
+        assert!(!replay
+            .messages()
+            .iter()
+            .any(|message| message.meta.harness_id.as_deref() == Some("covered")));
+        assert!(replay
+            .messages()
+            .iter()
+            .any(|message| message.meta.harness_id.as_deref() == Some("tail")));
+        assert!(request.is_subagent);
         assert!(!reconciliation_enabled(&request));
     }
 

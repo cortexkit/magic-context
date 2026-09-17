@@ -211,7 +211,10 @@ function writeChildConfig(
 	configHome: string,
 	historian: unknown,
 	compaction = true,
-	extraConfig: { fail_closed_blocking?: boolean } = {},
+	extraConfig: {
+		fail_closed_blocking?: boolean;
+		caveman_text_compression?: { enabled: boolean };
+	} = {},
 ) {
 	const configDir = join(configHome, "cortexkit");
 	mkdirSync(configDir, { recursive: true });
@@ -562,7 +565,6 @@ describe("Pi in-process child guard (#247)", () => {
 
 		const runtime = createCountingPi();
 		await magicContextPiExtension(runtime.pi);
-		const sessionId = "ses-command-lifecycle";
 		await runtime.emitPiEvent(
 			"session_start",
 			{},
@@ -762,10 +764,15 @@ describe("Pi in-process child guard (#247)", () => {
 	it("initializes an opted-in child with session-local historian context and tools", async () => {
 		const configHome = isolateXdgEnv();
 		delete process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV];
-		writeChildConfig(configHome, {
-			pi: { model: "test/historian" },
-			subagent_reconciliation: true,
-		});
+		writeChildConfig(
+			configHome,
+			{
+				pi: { model: "test/historian" },
+				subagent_reconciliation: true,
+			},
+			true,
+			{ caveman_text_compression: { enabled: true } },
+		);
 		const parent = createCountingPi();
 		const child = createCountingPi();
 		const parentId = "ses-optin-parent";
@@ -789,6 +796,19 @@ describe("Pi in-process child guard (#247)", () => {
 			true,
 		);
 		expect(__test.claimPiStartupMaintenance()).toBe(true);
+		const primaryPrompt = (await parent.emitPiEvent(
+			"before_agent_start",
+			{ systemPrompt: "Primary fixture" },
+			childContext(parentId),
+		)) as { systemPrompt: string };
+		const childPrompt = (await child.emitPiEvent(
+			"before_agent_start",
+			{ systemPrompt: "Child fixture" },
+			childContext(childId),
+		)) as { systemPrompt: string };
+		expect(primaryPrompt.systemPrompt).toContain("History compression is on");
+		expect(childPrompt.systemPrompt).toContain("ctx_reduce");
+		expect(childPrompt.systemPrompt).not.toContain("History compression is on");
 		parent.emitEvent("subagents:child:disposed", { sessionId: childId });
 		await child.emitPiEvent("session_shutdown", {}, childContext(childId));
 		await parent.emitPiEvent("session_shutdown", {}, childContext(parentId));
