@@ -1,5 +1,4 @@
 import { Buffer } from "node:buffer";
-import { canRenderSessionHistory } from "../../features/magic-context/subagent-reconciliation";
 import {
     buildCompartmentBlock,
     type Compartment,
@@ -32,6 +31,7 @@ import {
     persistCachedM0,
     readProjectDocsCanonical,
 } from "../../features/magic-context/storage";
+import { canRenderSessionHistory } from "../../features/magic-context/subagent-reconciliation";
 import {
     getActiveUserMemories,
     type UserMemory,

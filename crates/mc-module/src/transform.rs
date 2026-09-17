@@ -16015,6 +16015,64 @@ pub(crate) mod tests {
             .any(|message| message.meta.harness_id.as_deref() == Some("covered")));
     }
 
+    #[test]
+    fn cold_resumed_disabled_subagent_replays_durable_history_without_reconciliation() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_id = "subagent-cold-disabled-replay";
+        {
+            let store = store(dir.path());
+            let mut enabled = req(
+                session_id,
+                "cfg",
+                vec![
+                    item("covered", 1, "raw covered"),
+                    item("tail", 2, "raw live tail"),
+                ],
+            );
+            enabled.is_subagent = true;
+            enabled.subagent_reconciliation = true;
+            store
+                .replace_compartments(session_id, &[comp(1, 1, 1, "covered", "durable summary")])
+                .unwrap();
+            let materialized =
+                transform(&store, &enabled, &pctx("git:proj", "/nonexistent-docs", 0)).unwrap();
+            assert_eq!(materialized.coverage_ordinal, Some(1));
+        }
+
+        // Re-open the durable store to model a module/cache cold resume. The
+        // opt-in is now disabled, but the durable child identity and coverage
+        // must still render instead of falling back to primary reconciliation.
+        let store = store(dir.path());
+        let mut request = req(
+            session_id,
+            "cfg",
+            vec![
+                item("covered", 1, "raw covered"),
+                item("tail", 2, "raw live tail"),
+            ],
+        );
+        request.is_subagent = true;
+        request.subagent_reconciliation = false;
+
+        let replay =
+            transform(&store, &request, &pctx("git:proj", "/nonexistent-docs", 0)).unwrap();
+
+        assert_eq!(replay.coverage_ordinal, Some(1));
+        assert!(replay
+            .messages()
+            .iter()
+            .any(|message| message.meta.synthetic));
+        assert!(!replay
+            .messages()
+            .iter()
+            .any(|message| message.meta.harness_id.as_deref() == Some("covered")));
+        assert!(replay
+            .messages()
+            .iter()
+            .any(|message| message.meta.harness_id.as_deref() == Some("tail")));
+        assert!(!reconciliation_enabled(&request));
+    }
+
     fn spine() -> Vec<ReductionDecision> {
         Vec::new()
     }

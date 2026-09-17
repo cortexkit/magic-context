@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { buildMagicContextSection } from "../../agents/magic-context-prompt";
-import { canRenderSessionHistory } from "../../features/magic-context/subagent-reconciliation";
 import {
     type ContextDatabase,
     getOrCreateSessionMeta,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
+import { canRenderSessionHistory } from "../../features/magic-context/subagent-reconciliation";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";

@@ -1,6 +1,5 @@
-import type { ProtectedTokensTierOverrides } from "../../config/project-security";
 import { isMagicContextInternalAgentName } from "../../agents/hidden-agent-registrations";
-import { canRenderSessionHistory } from "../../features/magic-context/subagent-reconciliation";
+import type { ProtectedTokensTierOverrides } from "../../config/project-security";
 import {
     type AuthorityModuleClient,
     checksumAuthoritySeedRows,
@@ -49,6 +48,7 @@ import {
     resolveEpochFloorForPass,
 } from "../../features/magic-context/storage-meta-persisted";
 import { bumpProjectMemoryEpoch } from "../../features/magic-context/storage-project-state";
+import { canRenderSessionHistory } from "../../features/magic-context/subagent-reconciliation";
 import type { Tagger } from "../../features/magic-context/tagger";
 import {
     clearOpenCodePendingTransformDecision,
@@ -2383,7 +2383,8 @@ export function createTransform(deps: TransformDeps) {
             // never receive their own caveman compression because they have no
             // equivalent recovery path and their context is already curated by
             // the primary agent that spawned them.
-            cavemanTextCompression: !reducedMode ? deps.cavemanTextCompression : undefined,
+            cavemanTextCompression:
+                !sessionMeta.isSubagent && !reducedMode ? deps.cavemanTextCompression : undefined,
             smartDrops: deps.smartDrops === true,
             // Pass the single resolved provider through to postprocess so every
             // empty-sentinel gate and whole-message placeholder choice agrees for

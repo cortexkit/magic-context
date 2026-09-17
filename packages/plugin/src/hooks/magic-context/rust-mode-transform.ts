@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-
+import { getLastCompartmentEndMessage } from "../../features/magic-context/compartment-storage";
 import {
     type AuthorityDrainResponse,
     type AuthorityModuleClient,
@@ -17,7 +17,6 @@ import {
     resolveProjectIdentityForSession,
 } from "../../features/magic-context/memory/project-identity";
 import { getMemoryVerifications } from "../../features/magic-context/memory/storage-memory-verifications";
-import { getLastCompartmentEndMessage } from "../../features/magic-context/compartment-storage";
 import {
     modelKeyAcceptsImages,
     resolveMuralWire,
