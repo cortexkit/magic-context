@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { variantChangeBustsProviderCache } from "./sentinel";
+import {
+    replaySentinelByMessageIds,
+    variantChangeBustsProviderCache,
+    WHOLE_MESSAGE_PLACEHOLDER_TEXT,
+} from "./sentinel";
 
 describe("variantChangeBustsProviderCache", () => {
     test.each([
@@ -18,5 +22,35 @@ describe("variantChangeBustsProviderCache", () => {
         ["unknown identity remains non-busting", undefined, "gpt-6-astra", false],
     ] as const)("%s", (_label, providerID, modelID, expected) => {
         expect(variantChangeBustsProviderCache(providerID, modelID)).toBe(expected);
+    });
+});
+
+describe("replaySentinelByMessageIds", () => {
+    test("normalizes an old empty whole-message sentinel for a model that rejects empty content", () => {
+        const messages = [
+            {
+                info: { id: "assistant-1" },
+                parts: [{ type: "text", text: "" }],
+            },
+        ];
+
+        replaySentinelByMessageIds(messages, new Set(["assistant-1"]), false);
+
+        expect(messages[0]?.parts).toEqual([
+            { type: "text", text: WHOLE_MESSAGE_PLACEHOLDER_TEXT },
+        ]);
+    });
+
+    test("normalizes an old placeholder for an Anthropic-wire model", () => {
+        const messages = [
+            {
+                info: { id: "assistant-1" },
+                parts: [{ type: "text", text: WHOLE_MESSAGE_PLACEHOLDER_TEXT }],
+            },
+        ];
+
+        replaySentinelByMessageIds(messages, new Set(["assistant-1"]), true);
+
+        expect(messages[0]?.parts).toEqual([{ type: "text", text: "" }]);
     });
 });

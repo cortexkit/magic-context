@@ -906,3 +906,51 @@ it. Results carry `status=pending` so the caller can see the condition has not
 fired. The same reasoning covers restricted children that carry `ctx_search`
 (retrospective): notes are the same sensitivity class as project memories,
 which those children already search.
+
+## A55: the Anthropic-wire empty-sentinel capability is TS-mode only (Rust parity deferred)
+
+`modelAcceptsEmptyContent` resolves the empty-sentinel capability from the
+adapter OpenCode actually uses (`api.npm === "@ai-sdk/anthropic"`), so a custom
+provider fronting Claude — a Bedrock or Vertex gateway under any provider id —
+now gets the merged-reasoning strip that its wire requires. See
+`hooks/magic-context/anthropic-wire.ts`.
+
+The `mc-module` Rust transform decides the same fact from the provider id, in one
+shared predicate — `request_accepts_empty_content`
+(`crates/mc-module/src/transform.rs:13753`) — plus about eight inline
+`provider_id != Some("anthropic")` comparisons in the neighbouring trailing-blank,
+user-terminated-tail, and reasoning-cutoff lanes. Rust mode
+(`transform_mode: "rust"`) therefore stays canonical-Anthropic only, and
+`rust-mode-transform.ts` passes `modelAcceptsEmptyContent(providerID)` without a
+model id on purpose: widening the host lane alone would let the two lanes
+disagree about the served bytes, which is worse than the narrow gate.
+
+The parity work is smaller than the comparison count suggests. The module already
+folds this capability into its pass digest (`transform.rs:12229`), so it would
+handle a change correctly once the resolved boolean rides `TransformRequest`
+instead of being re-derived from `provider_id`.
+
+Pi is unaffected. Pi resolves its own capability from `ctx.model.provider` and
+never calls the OpenCode strip functions, so there is nothing to widen there
+until Pi exposes a comparable adapter fact.
+
+`resolveEmptySentinelCapability` resolves five states per pass. "Folds?" is whether
+a change of this component alone can materialize m[0]:
+
+| Pass state | Capability | Recorded as widened | Folds? |
+|---|---|---|---|
+| Registry resolved, canonical `anthropic` | on | no | never — component absent both sides |
+| Registry resolved, custom provider on `@ai-sdk/anthropic` | on | yes | once, when it first differs |
+| Registry resolved, any other adapter | off | no | never |
+| Registry unresolved, live model matches the cached m[0] model | carried forward | carried forward | never — nothing changed |
+| Registry unresolved, live model differs or is unobservable | off | no | never — `model_change` owns that fold |
+
+Two operational consequences. A gateway added to `opencode.json` mid-session needs
+an OpenCode restart, because the adapter snapshot is read once per process. And a
+failed lookup does not narrow a session that already served widened bytes: it keeps
+the carried answer until a retry succeeds, because narrowing would stop replaying
+persisted merged-reasoning strips and reinstate the 400.
+
+Closing the gap means carrying one resolved boolean in the transform request and
+replacing the module's provider comparisons with it, plus Rust-side coverage. Do
+not re-flag the TS/Rust asymmetry as a bug until that work is scheduled.
