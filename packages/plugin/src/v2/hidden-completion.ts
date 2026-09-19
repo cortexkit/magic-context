@@ -88,6 +88,8 @@ interface RunState {
     releaseRole: () => void;
     completion?: HiddenCompletion;
     failed: boolean;
+    /** A failure other than a settled provider error row (dispatch error, refusal, timeout, abort). */
+    unsettledFailure: boolean;
     retired: boolean;
 }
 
@@ -290,6 +292,17 @@ function meter(system: string, prompt: string, text: string) {
     };
 }
 
+/**
+ * The provider answered with an error (quota, rate limit, refused request) and the host persisted it
+ * as a settled assistant row. The child is safe to reuse: every hidden prompt replaces the child's
+ * whole context in the hidden-child hook, so the error row is never sent again.
+ */
+function settledProviderError(row: StoreRow<"assistant"> | undefined): boolean {
+    return row !== undefined && row.data.error !== undefined;
+}
+
+const PROVIDER_ERROR_PREFIX = "Hidden completion provider error: ";
+
 function successfulReusableAssistant(row: StoreRow<"assistant"> | undefined): boolean {
     return (
         row !== undefined &&
@@ -376,7 +389,7 @@ async function awaitAssistantRow(
         const row = withReader(openReader, (reader) => reader.latestAssistant(childID));
         if (row && row.seq > afterSeq) {
             if (row.data.error !== undefined) {
-                throw new Error(`Hidden completion provider error: ${errorText(row.data.error)}`);
+                throw new Error(`${PROVIDER_ERROR_PREFIX}${errorText(row.data.error)}`);
             }
             if (typeof row.data.finish === "string") return row;
         }
@@ -487,7 +500,7 @@ export async function createV2HiddenCompletionExecutor(
                     const latest = withReader(options.openReader, (reader) =>
                         reader.latestAssistant(activeID),
                     );
-                    if (!successfulReusableAssistant(latest)) {
+                    if (!successfulReusableAssistant(latest) && !settledProviderError(latest)) {
                         store.retire(active, "newest-assistant-not-reusable");
                         active = undefined;
                     }
@@ -527,6 +540,7 @@ export async function createV2HiddenCompletionExecutor(
                     child: active,
                     releaseRole,
                     failed: false,
+                    unsettledFailure: false,
                     retired: false,
                 };
                 runs.set(handle, run);
@@ -629,6 +643,9 @@ export async function createV2HiddenCompletionExecutor(
                 };
             } catch (error) {
                 run.failed = true;
+                if (!(error instanceof Error && error.message.startsWith(PROVIDER_ERROR_PREFIX))) {
+                    run.unsettledFailure = true;
+                }
                 if (request.signal?.aborted && !run.retired) {
                     await interruptAndRetire(run, "prompt-aborted");
                 } else if (
@@ -655,7 +672,13 @@ export async function createV2HiddenCompletionExecutor(
             const run = runs.get(handle);
             if (!run) return;
             try {
-                if (!run.completion && (run.failed || !settlement.promptSettled)) {
+                // A run that failed only on settled provider errors keeps its child: retiring it would
+                // create a new session per failed run (with a pool at its quota, one per historian
+                // trigger, indefinitely). The caller reports promptSettled=false after any failed
+                // attempt, so it cannot tell this case apart; the run's own record of every failure
+                // being a persisted provider error row (the child is idle) is what decides.
+                const reusable = run.failed && !run.unsettledFailure;
+                if (!run.completion && (run.failed || !settlement.promptSettled) && !reusable) {
                     retire(run, "hidden-run-failed");
                 }
             } finally {
