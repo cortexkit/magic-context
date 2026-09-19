@@ -674,8 +674,10 @@ export async function createV2HiddenCompletionExecutor(
             try {
                 // A run that failed only on settled provider errors keeps its child: retiring it would
                 // create a new session per failed run (with a pool at its quota, one per historian
-                // trigger, indefinitely).
-                const reusable = run.failed && !run.unsettledFailure && settlement.promptSettled;
+                // trigger, indefinitely). The caller reports promptSettled=false after any failed
+                // attempt, so it cannot tell this case apart; the run's own record of every failure
+                // being a persisted provider error row (the child is idle) is what decides.
+                const reusable = run.failed && !run.unsettledFailure;
                 if (!run.completion && (run.failed || !settlement.promptSettled) && !reusable) {
                     retire(run, "hidden-run-failed");
                 }

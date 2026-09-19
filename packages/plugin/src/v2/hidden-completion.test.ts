@@ -346,7 +346,8 @@ describe("OpenCode 2 hidden child completion", () => {
                 await expect(state.executor.attempt(handle, request("fallback"))).rejects.toThrow(
                     "Go usage limit exceeded",
                 );
-                await close(state.executor, handle, true);
+                // The historian caller reports promptSettled=false after any failed attempt.
+                await close(state.executor, handle, false);
             }
             state.setProviderError(undefined);
             const recovered = await state.executor.open(run);
@@ -373,7 +374,7 @@ describe("OpenCode 2 hidden child completion", () => {
             state.setProviderError({ message: "The usage limit has been reached" });
             const handle = await state.executor.open(run);
             await expect(state.executor.attempt(handle, request())).rejects.toThrow();
-            await close(state.executor, handle, true);
+            await close(state.executor, handle, false);
             state.setProviderError(undefined);
             const restarted = await state.create();
             const next = await restarted.open(run);
