@@ -32,6 +32,18 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
     const paired = new Set<Part>();
     const bridges = new Map<unknown, ToolBridge>();
     const originals = new Map<MessageLike, V2Message>();
+    // The pipeline does not preserve object identity: the drop and edit-marker paths swap a
+    // rewritten structuredClone into `parts`, and trailing-blank normalization replaces a
+    // message with a copy. commit() therefore also resolves a part's bridge by (message id,
+    // callID) and a message's host original by id. Scoped per message because two turns may
+    // reuse one callID; host tool-result carriers have no id, so they keep an object key.
+    const bridgesByMessageID = new Map<string, Map<string, ToolBridge>>();
+    const bridgesByCarrier = new Map<MessageLike, Map<string, ToolBridge>>();
+    const originalsByID = new Map<string, V2Message>();
+    const bridgesFor = (message: MessageLike) =>
+        typeof message.info.id === "string"
+            ? bridgesByMessageID.get(message.info.id)
+            : bridgesByCarrier.get(message);
     const nativeTool = (
         call: Part | undefined,
         result: { part: Part; message: V2Message } | undefined,
@@ -76,6 +88,15 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
             parts.push(part);
         }
         if (!parts.length && message.content.length) continue;
+        const byCallID = new Map<string, ToolBridge>();
+        for (const part of parts) {
+            const bridge = bridges.get(part);
+            if (bridge && typeof part.callID === "string") byCallID.set(part.callID, bridge);
+        }
+        if (typeof message.id === "string") {
+            bridgesByMessageID.set(message.id, byCallID);
+            originalsByID.set(message.id, message);
+        }
         const mapped: MessageLike = {
             info: {
                 id: message.id,
@@ -91,6 +112,7 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
             parts,
         };
         originals.set(mapped, message);
+        if (typeof message.id !== "string") bridgesByCarrier.set(mapped, byCallID);
         messages.push(mapped);
     }
     return {
@@ -99,13 +121,21 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
             let head = 0;
             const rendered: V2Message[] = [];
             for (const message of messages) {
-                const original = originals.get(message);
+                const original =
+                    originals.get(message) ??
+                    (typeof message.info.id === "string"
+                        ? originalsByID.get(message.info.id)
+                        : undefined);
                 const id = message.info.syntheticHead ? HEAD_IDS[head++] : original?.id;
                 const content: Part[] = [];
                 const following: V2Message[] = [];
                 for (const candidate of message.parts) {
                     const part = candidate as Part;
-                    const bridge = bridges.get(part);
+                    const bridge =
+                        bridges.get(part) ??
+                        (part.type === "tool" && typeof part.callID === "string"
+                            ? bridgesFor(message)?.get(part.callID)
+                            : undefined);
                     if (!bridge) {
                         const { synthetic: _synthetic, ...clean } = part;
                         content.push(clean);
