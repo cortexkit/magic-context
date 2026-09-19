@@ -1,4 +1,7 @@
-import { detectOpenCodeStoreGeneration } from "@magic-context/core/shared/opencode-db-path";
+import {
+    detectOpenCodeStoreGeneration,
+    type OpenCodeHostGeneration,
+} from "@magic-context/core/shared/opencode-db-path";
 import type { Database } from "@magic-context/core/shared/sqlite";
 
 interface BoundaryRow {
@@ -19,8 +22,12 @@ export interface DanglingCompartmentBoundary {
 export function listDanglingCompartmentBoundaries(
     contextDb: Pick<Database, "prepare">,
     openCodeDb: Pick<Database, "prepare">,
+    hostGeneration?: OpenCodeHostGeneration,
 ): DanglingCompartmentBoundary[] {
-    const generation = detectOpenCodeStoreGeneration(openCodeDb);
+    // The running host decides which table is live. A store OpenCode 2 migrated keeps its v1
+    // tables frozen at the migration point (detection still calls it v1), and a store an
+    // OpenCode 1.x host uses again after an upgrade keeps a frozen session_message.
+    const generation = hostGeneration ?? detectOpenCodeStoreGeneration(openCodeDb);
     if (generation === "unknown") {
         throw new Error("OpenCode session database has an unrecognized schema");
     }

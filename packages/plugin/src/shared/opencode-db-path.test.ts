@@ -253,6 +253,81 @@ describe("resolveOpenCodeDbPath", () => {
         }
     });
 
+    it("accepts a v1 store migrated to OpenCode 2 for v2 readers, and still for v1 readers", () => {
+        const { openCodeDir } = useDataHome();
+        const migratedPath = join(openCodeDir, "migrated-v2.db");
+        const migrated = new Database(migratedPath);
+        try {
+            // Captured from an OpenCode 2.0.7 store that the v2 host migrated from a 1.18.x
+            // store: it keeps the v1 `message`/`part` tables beside its own schema, so it
+            // carries BOTH generations. `session_v2` is written only by an OpenCode 2 host
+            // (the 1.18.31 binary never references it). Keep this table list as observed.
+            for (const table of [
+                "account",
+                "account_state",
+                "control_account",
+                "credential",
+                "event",
+                "event_sequence",
+                "instruction_blob",
+                "instruction_entry",
+                "instruction_state",
+                "kv",
+                "message",
+                "migration",
+                "part",
+                "permission",
+                "project",
+                "project_directory",
+                "session",
+                "session_inbox",
+                "session_message",
+                "session_pending",
+                "session_share",
+                "session_v2",
+                "todo",
+                "workspace",
+                "worktree",
+            ]) {
+                migrated.exec(`CREATE TABLE ${table}(id TEXT)`);
+            }
+            expect(() => assertOpenCodeStoreGeneration(migrated, "v2", migratedPath)).not.toThrow();
+            expect(() => assertOpenCodeStoreGeneration(migrated, "v1", migratedPath)).not.toThrow();
+        } finally {
+            migrated.close();
+        }
+    });
+
+    it("reads a fresh OpenCode 2 store as v2 only", () => {
+        const { openCodeDir } = useDataHome();
+        const freshV2Path = join(openCodeDir, "fresh-v2.db");
+        const freshV2 = new Database(freshV2Path);
+        try {
+            // Captured from a new OpenCode 2.0.7 data directory: no v1 message tables.
+            for (const table of [
+                "account",
+                "event",
+                "migration",
+                "permission",
+                "project",
+                "session_inbox",
+                "session_message",
+                "session_pending",
+                "session_v2",
+                "workspace",
+            ]) {
+                freshV2.exec(`CREATE TABLE ${table}(id TEXT)`);
+            }
+            expect(detectOpenCodeStoreGeneration(freshV2)).toBe("v2");
+            expect(() => assertOpenCodeStoreGeneration(freshV2, "v2", freshV2Path)).not.toThrow();
+            expect(() => assertOpenCodeStoreGeneration(freshV2, "v1", freshV2Path)).toThrow(
+                "expected v1, found v2",
+            );
+        } finally {
+            freshV2.close();
+        }
+    });
+
     it("treats a store with no schema yet as empty rather than as a conflicting host", () => {
         const { openCodeDir } = useDataHome();
         const freshPath = join(openCodeDir, "fresh.db");

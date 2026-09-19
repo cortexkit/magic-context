@@ -51,16 +51,43 @@ function v2Store(): Database {
     return db;
 }
 
+// A 1.18.x store that OpenCode 2 migrated: the v1 `message` table is kept but frozen at the
+// migration point (here holding only m1), while session_message holds every id the host serves.
+function migratedV2Store(): Database {
+    const db = v2Store();
+    db.exec(
+        "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL); CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL); CREATE TABLE session_v2 (id TEXT PRIMARY KEY);",
+    );
+    db.prepare("INSERT INTO message (id, session_id) VALUES ('m1', 'ses-live')").run();
+    return db;
+}
+
+// The reverse: OpenCode 2 touched this store (session_v2 exists, session_message frozen at m1),
+// then an OpenCode 1.x host kept writing to `message`.
+function downgradedV1Store(): Database {
+    const db = v1Store();
+    db.exec(
+        "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, seq INTEGER NOT NULL, data TEXT NOT NULL); CREATE TABLE session_v2 (id TEXT PRIMARY KEY);",
+    );
+    db.prepare(
+        "INSERT INTO session_message (id, session_id, type, seq, data) VALUES ('m1', 'ses-live', 'user', 0, '{}')",
+    ).run();
+    return db;
+}
+
 describe("doctor dangling compartment boundary check", () => {
-    for (const [name, makeStore] of [
-        ["v1", v1Store],
-        ["v2", v2Store],
+    for (const [name, makeStore, hostGeneration] of [
+        ["v1", v1Store, undefined],
+        ["v2", v2Store, undefined],
+        // Stores carrying both generations are read by the running host, not by detection.
+        ["migrated v2", migratedV2Store, "v2"],
+        ["downgraded v1", downgradedV1Store, "v1"],
     ] as const) {
         it(`lists missing start and end ids from the resolved ${name} store`, () => {
             const context = contextDatabase();
             const store = makeStore();
             try {
-                const dangling = listDanglingCompartmentBoundaries(context, store);
+                const dangling = listDanglingCompartmentBoundaries(context, store, hostGeneration);
                 expect(dangling).toEqual([
                     {
                         sessionId: "ses-live",

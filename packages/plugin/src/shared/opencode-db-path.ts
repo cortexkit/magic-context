@@ -214,7 +214,7 @@ function schemaTableNames(
 ): Set<string> {
     const rows = db
         .prepare(
-            `SELECT name FROM ${schema}.sqlite_master WHERE type = 'table' AND name IN ('message', 'part', 'session', 'project', 'session_message')`,
+            `SELECT name FROM ${schema}.sqlite_master WHERE type = 'table' AND name IN ('message', 'part', 'session', 'project', 'session_message', 'session_v2')`,
         )
         .all() as Array<{ name?: unknown }>;
     return new Set(rows.flatMap((row) => (typeof row.name === "string" ? [row.name] : [])));
@@ -240,6 +240,28 @@ export function detectOpenCodeStoreGeneration(
     return "unknown";
 }
 
+/**
+ * A store the OpenCode 2 host migrated from a v1 store keeps the v1 `message`/`part` tables
+ * beside its own schema, so it carries BOTH generations and `detectOpenCodeStoreGeneration`
+ * (which must keep calling a 1.18.x store v1) reports v1. `session_v2` is written only by an
+ * OpenCode 2 host (1.18.x never creates it), so a store with it and `session_message` is
+ * readable by v2 readers regardless of any v1 tables it also kept.
+ */
+function hasMigratedV2Schema(tables: Set<string>): boolean {
+    return tables.has("session_message") && tables.has("session_v2");
+}
+
+/** A native OpenCode 2 store, or a v1 store an OpenCode 2 host has migrated. */
+function isOpenCodeV2Store(
+    db: OpenCodeStoreSchemaDatabase,
+    schema: "main" | "oc_backfill" = "main",
+): boolean {
+    return (
+        detectOpenCodeStoreGeneration(db, schema) === "v2" ||
+        hasMigratedV2Schema(schemaTableNames(db, schema))
+    );
+}
+
 /** Refuse before a generation-specific query can read the other host's schema. */
 export function assertOpenCodeStoreGeneration(
     db: OpenCodeStoreSchemaDatabase,
@@ -249,6 +271,7 @@ export function assertOpenCodeStoreGeneration(
 ): void {
     const actual = detectOpenCodeStoreGeneration(db, schema);
     if (actual === expected) return;
+    if (expected === "v2" && isOpenCodeV2Store(db, schema)) return;
     // A store with none of these tables has no schema YET — a host that has not written its
     // first row, or a fresh data directory. That is "nothing to read", not a conflicting host,
     // and readers have always treated it as empty. Refusing here made every reader throw before

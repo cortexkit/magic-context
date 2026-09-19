@@ -838,7 +838,13 @@ export async function runDoctor(
                     readonly: true,
                     fileMustExist: true,
                 });
-                const dangling = listDanglingCompartmentBoundaries(contextDb, sessionDb);
+                // Only a parsed version identifies the host; Desktop installs report
+                // "unknown" (which maps to v1), so leave those to store detection.
+                const dangling = listDanglingCompartmentBoundaries(
+                    contextDb,
+                    sessionDb,
+                    /\d/.test(activeInstallation.version) ? hostGeneration : undefined,
+                );
                 if (dangling.length === 0) {
                     pass("Compartment boundary ids resolve in the OpenCode session store");
                 } else {
