@@ -116,6 +116,7 @@ async function setup(generation = "host-generation-1") {
     const requests: SessionContext[] = [];
     let nextID = 0;
     let failPrompt = false;
+    let providerError: unknown;
     let delayRowMs = 0;
     let omitUsage = false;
     let completion = "editor completion";
@@ -156,6 +157,14 @@ async function setup(generation = "host-generation-1") {
             hook.apply(draft);
             requests.push(structuredClone(draft));
             if (failPrompt) throw new Error("provider unavailable");
+            if (providerError !== undefined) {
+                rows.append(input.sessionID, "", {
+                    error: providerError,
+                    finish: "error",
+                    usage: false,
+                });
+                return;
+            }
             const write = () =>
                 rows.append(input.sessionID, completion, {
                     usage: !omitUsage,
@@ -196,6 +205,9 @@ async function setup(generation = "host-generation-1") {
         requests,
         setFailPrompt(value: boolean) {
             failPrompt = value;
+        },
+        setProviderError(value: unknown) {
+            providerError = value;
         },
         setDelayRow(value: number) {
             delayRowMs = value;
@@ -316,6 +328,59 @@ describe("OpenCode 2 hidden child completion", () => {
                 id: "child-1",
                 reason: "hidden-run-failed",
             });
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("keeps the child when a run fails only on settled provider errors", async () => {
+        const state = await setup();
+        try {
+            state.setProviderError({ message: "Go usage limit exceeded" });
+            for (let i = 0; i < 5; i++) {
+                const handle = await state.executor.open(run);
+                expect(handle.id).toBe("child-1");
+                await expect(state.executor.attempt(handle, request("cheap"))).rejects.toThrow(
+                    "Hidden completion provider error: ",
+                );
+                await expect(state.executor.attempt(handle, request("fallback"))).rejects.toThrow(
+                    "Go usage limit exceeded",
+                );
+                await close(state.executor, handle, true);
+            }
+            state.setProviderError(undefined);
+            const recovered = await state.executor.open(run);
+            expect(recovered.id).toBe("child-1");
+            await state.executor.attempt(recovered, request());
+            await close(state.executor, recovered, true);
+            expect(state.creates).toHaveLength(1);
+            const meta = JSON.parse(
+                (
+                    state.db
+                        .prepare("SELECT value FROM schema_migrations_meta WHERE key = ?")
+                        .get(hiddenChildrenMetaKey("/project")) as { value: string }
+                ).value,
+            );
+            expect(meta.retired_children).toHaveLength(0);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("a restarted executor reuses a child whose newest assistant is a settled provider error", async () => {
+        const state = await setup();
+        try {
+            state.setProviderError({ message: "The usage limit has been reached" });
+            const handle = await state.executor.open(run);
+            await expect(state.executor.attempt(handle, request())).rejects.toThrow();
+            await close(state.executor, handle, true);
+            state.setProviderError(undefined);
+            const restarted = await state.create();
+            const next = await restarted.open(run);
+            expect(next.id).toBe("child-1");
+            await restarted.attempt(next, request());
+            await close(restarted, next, true);
+            expect(state.creates).toHaveLength(1);
         } finally {
             state.db.close();
         }
