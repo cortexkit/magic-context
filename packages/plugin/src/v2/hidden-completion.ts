@@ -619,8 +619,8 @@ export async function createV2HiddenCompletionExecutor(
                         ? {
                               input: tokens.input,
                               output: tokens.output,
-                              cacheRead: tokens.cache.read,
-                              cacheWrite: tokens.cache.write,
+                              cacheRead: tokens.cache?.read ?? 0,
+                              cacheWrite: tokens.cache?.write ?? 0,
                           }
                         : meter(system, promptText(request), text ?? ""),
                     lengthCapped: ["length", "max_tokens"].includes(row.data.finish ?? ""),

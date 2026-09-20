@@ -3,10 +3,12 @@ import { buildDreamTaskRuntimeConfigs } from "../../features/magic-context/dream
 import { createDreamTaskExecutor } from "../../features/magic-context/dreamer/task-executor";
 import {
     CANONICAL_DREAM_TASKS,
+    DREAM_TASK_CAPABILITIES,
     type DreamTaskName,
     isCanonicalDreamTask,
 } from "../../features/magic-context/dreamer/task-registry";
 import {
+    type DreamTaskRuntimeConfig,
     type ManualRunResult,
     runManualDream,
 } from "../../features/magic-context/dreamer/task-scheduler";
@@ -23,6 +25,40 @@ export function resolveManualDreamTask(raw: unknown): { task?: DreamTaskName; er
         };
     }
     return { task: requested };
+}
+
+/**
+ * Split the configured tasks into what this host can actually run and what needs
+ * a tool loop it does not have. Without this split a v2 no-arg run reports every
+ * `requiresTools` task as a failure instead of an unsupported-on-this-host line.
+ */
+export function selectRunnableDreamTasks(args: {
+    tasks: readonly DreamTaskRuntimeConfig[];
+    toolsSupported: boolean;
+    requestedTask?: DreamTaskName;
+}): { runnable: DreamTaskRuntimeConfig[]; unsupported: DreamTaskName[] } {
+    const requiresTools = (task: DreamTaskName) => DREAM_TASK_CAPABILITIES[task].requiresTools;
+    if (args.toolsSupported) return { runnable: [...args.tasks], unsupported: [] };
+    if (args.requestedTask !== undefined) {
+        return requiresTools(args.requestedTask)
+            ? { runnable: [], unsupported: [args.requestedTask] }
+            : { runnable: [...args.tasks], unsupported: [] };
+    }
+    // A no-arg run only considers enabled tasks (schedule != ""), so only those
+    // are worth reporting as unsupported.
+    const unsupported = args.tasks
+        .filter((config) => config.schedule.trim() !== "" && requiresTools(config.task))
+        .map((config) => config.task);
+    return {
+        runnable: args.tasks.filter((config) => !requiresTools(config.task)),
+        unsupported,
+    };
+}
+
+export interface ManualDreamOutcome {
+    summary: ManualRunResult;
+    /** Selected tasks skipped because this host has no tool loop. */
+    unsupportedTasks: DreamTaskName[];
 }
 
 /**
@@ -44,24 +80,32 @@ export async function runManualDreamNow(args: {
     executor: HiddenCompletionExecutor;
     sessionId: string;
     task?: DreamTaskName;
-}): Promise<ManualRunResult> {
-    return runManualDream({
+}): Promise<ManualDreamOutcome> {
+    const tasks = buildDreamTaskRuntimeConfigs(
+        args.dreamer,
+        "opencode",
+        args.language,
+        args.mural?.model,
+    );
+    const executor = createDreamTaskExecutor({
+        hiddenCompletionExecutor: args.executor,
+        parentSessionId: args.sessionId,
+        sessionDirectory: args.directory,
+        openOpenCodeDb: () => null,
+        language: args.language,
+        mural: args.mural,
+    });
+    const selection = selectRunnableDreamTasks({
+        tasks,
+        toolsSupported: args.executor.capabilities.tools === true,
+        ...(args.task !== undefined ? { requestedTask: args.task } : {}),
+    });
+    const summary = await runManualDream({
         db: args.db,
         projectIdentity: args.projectIdentity,
-        tasks: buildDreamTaskRuntimeConfigs(
-            args.dreamer,
-            "opencode",
-            args.language,
-            args.mural?.model,
-        ),
-        executor: createDreamTaskExecutor({
-            hiddenCompletionExecutor: args.executor,
-            parentSessionId: args.sessionId,
-            sessionDirectory: args.directory,
-            openOpenCodeDb: () => null,
-            language: args.language,
-            mural: args.mural,
-        }),
+        tasks: selection.runnable,
+        executor,
         ...(args.task !== undefined ? { task: args.task } : {}),
     });
+    return { summary, unsupportedTasks: selection.unsupported };
 }

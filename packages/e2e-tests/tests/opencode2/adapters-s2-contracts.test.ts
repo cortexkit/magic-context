@@ -72,9 +72,19 @@ test("I14 sdk_renames: v2 supplies all four host seams, v1 defaults retain funct
 			join(root, "packages/plugin/src/v2", file),
 			"utf8",
 		);
-		expect(source).not.toMatch(/\.\s*(abort|delete|promptAsync)\s*\(/);
+		// Host session lifecycle calls are forbidden on the v2 lane. Anchoring on
+		// `session.` keeps Map/Set `.delete(` (e.g. measuredUsageBySession.delete)
+		// from tripping this guard.
+		expect(source).not.toMatch(/session\.(abort|delete|promptAsync)\s*\(/);
 		expect(source).not.toMatch(/import\s+(?!type\b).*from\s+["']@opencode\//);
-		expect(source).not.toMatch(/live-session-state/);
+		if (file === "hooks/context.ts") {
+			// The RPC-server fix builds a FRESH LiveSessionState (createLiveSessionState
+			// is a factory) for the shared RPC handlers while keeping the lane's own
+			// draft-authoritative maps; importing the v1 state module is deliberate here.
+			expect(source).toMatch(/createLiveSessionState\(\)/);
+		} else {
+			expect(source).not.toMatch(/live-session-state/);
+		}
 	}
 });
 

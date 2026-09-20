@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { summarizeManualDream } from "../../features/magic-context/dreamer/manual-summary";
-import { resolveManualDreamTask } from "./dream-manual";
+import type { DreamTaskRuntimeConfig } from "../../features/magic-context/dreamer/task-scheduler";
+import { resolveManualDreamTask, selectRunnableDreamTasks } from "./dream-manual";
 
 test("no argument runs every enabled task", () => {
     expect(resolveManualDreamTask(undefined)).toEqual({});
@@ -53,4 +54,32 @@ test("summarizes an idle run", () => {
         backlogAfter: {},
     });
     expect(message).toContain("No enabled dream tasks to run.");
+});
+
+test("selectRunnableDreamTasks reports requiresTools tasks as unsupported without a tool loop", () => {
+    const tasks = [
+        { task: "verify", schedule: "0 3 * * *" },
+        { task: "classify-memories", schedule: "0 3 * * *" },
+        { task: "curate", schedule: "" },
+    ] as DreamTaskRuntimeConfig[];
+    const selection = selectRunnableDreamTasks({ tasks, toolsSupported: false });
+    expect(selection.unsupported).toEqual(["verify"]);
+    // curate requires tools too, so it is dropped from the runnable set even
+    // though it is not enabled (schedule "").
+    expect(selection.runnable.map((config) => config.task)).toEqual(["classify-memories"]);
+});
+
+test("selectRunnableDreamTasks keeps every task when the host has a tool loop", () => {
+    const tasks = [{ task: "verify", schedule: "0 3 * * *" }] as DreamTaskRuntimeConfig[];
+    expect(selectRunnableDreamTasks({ tasks, toolsSupported: true })).toEqual({
+        runnable: tasks,
+        unsupported: [],
+    });
+});
+
+test("an explicitly requested tool-requiring task is reported unsupported, not run", () => {
+    const tasks = [{ task: "verify", schedule: "" }] as DreamTaskRuntimeConfig[];
+    expect(
+        selectRunnableDreamTasks({ tasks, toolsSupported: false, requestedTask: "verify" }),
+    ).toEqual({ runnable: [], unsupported: ["verify"] });
 });

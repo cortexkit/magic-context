@@ -312,6 +312,10 @@ export async function registerContext(context: V2Context) {
         } catch (error) {
             console.warn("[magic-context] v2 ctx_* tool registration skipped", error);
         }
+    } else if (registryEntries.length > 0) {
+        console.warn(
+            "[magic-context] v2 host exposes no tool.transform; ctx_* tools were not registered",
+        );
     }
     const read = (sessionID: string) => {
         const reader = new V2StoreReader(
@@ -334,7 +338,8 @@ export async function registerContext(context: V2Context) {
     type MeasuredUsage = {
         inputTokens: number;
         limit: number;
-        modelKey: string;
+        /** Absent when the store row carries no model metadata (legacy rows). */
+        modelKey?: string;
         completed?: number;
     };
     // Usage measured from the most recent assistant response, keyed by session so
@@ -349,7 +354,7 @@ export async function registerContext(context: V2Context) {
         lastContextPercentage: (value.inputTokens / value.limit) * 100,
         lastInputTokens: value.inputTokens,
         lastUsageContextLimit: value.limit,
-        lastObservedModelKey: value.modelKey,
+        ...(value.modelKey !== undefined ? { lastObservedModelKey: value.modelKey } : {}),
     });
     const refuseIfUnsafe = async (draft: SessionContext): Promise<boolean> => {
         let unsafe = false;
@@ -361,22 +366,22 @@ export async function registerContext(context: V2Context) {
                 gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
             );
             try {
-                const latest = reader
-                    .history(draft.sessionID)
-                    .filter((row) => row.type === "assistant")
-                    .at(-1);
+                const latest = reader.latestAssistant(draft.sessionID);
                 const tokens = latest?.data.tokens;
                 // Attribute the reading to the model that produced the response (the
-                // store row carries it) so a model switch cannot re-attribute the old
-                // response's tokens to the new model. Falls back to the draft model.
+                // store row carries it). A row without model metadata is
+                // indistinguishable from a model switch, so it records no model key
+                // and the post-pass re-apply is skipped for it.
                 const rowModel = latest?.data.model;
-                const measuredProviderID =
-                    typeof rowModel?.providerID === "string"
-                        ? rowModel.providerID
-                        : draft.model.providerID;
-                const measuredModelID =
-                    typeof rowModel?.id === "string" ? rowModel.id : draft.model.id;
-                const modelKey = `${measuredProviderID}/${measuredModelID}`;
+                const rowProviderID =
+                    typeof rowModel?.providerID === "string" ? rowModel.providerID : undefined;
+                const rowModelID = typeof rowModel?.id === "string" ? rowModel.id : undefined;
+                const measuredProviderID = rowProviderID ?? draft.model.providerID;
+                const measuredModelID = rowModelID ?? draft.model.id;
+                const modelKey =
+                    rowProviderID !== undefined && rowModelID !== undefined
+                        ? `${measuredProviderID}/${measuredModelID}`
+                        : undefined;
                 // Resolve the same output-reserved usable window every other consumer
                 // (sidebar, history budgets, geometry) divides by. Reading the raw
                 // catalog window here made the persisted percentage and the 95% check
@@ -674,7 +679,11 @@ export async function registerContext(context: V2Context) {
                 const measured = measuredUsageBySession.get(draft.sessionID);
                 measuredUsageBySession.delete(draft.sessionID);
                 const passModelKey = `${draft.model.providerID}/${draft.model.id}`;
-                if (measured && measured.modelKey === passModelKey) {
+                if (
+                    measured &&
+                    measured.modelKey !== undefined &&
+                    measured.modelKey === passModelKey
+                ) {
                     updateSessionMeta(db, draft.sessionID, usageMetaPatch(measured));
                 }
             }
@@ -778,11 +787,8 @@ export async function registerContext(context: V2Context) {
     rpcServer.handle("dream", async (params) => {
         const sessionId = String(params.sessionId ?? "");
         if (!sessionId) return { ok: false, error: "no session" };
-        const requested = resolveManualDreamTask(params.task);
-        if (requested.error) {
-            pushNotification("toast", { message: requested.error, variant: "warning" }, sessionId);
-            return { ok: false, error: requested.error };
-        }
+        // Availability first, matching the v1 command's messaging: with dreaming
+        // disabled, any argument reports "not configured" rather than task errors.
         if (!manualDreamer || !hiddenCompletionExecutor) {
             pushNotification(
                 "toast",
@@ -790,6 +796,11 @@ export async function registerContext(context: V2Context) {
                 sessionId,
             );
             return { ok: false, error: "dreamer unavailable" };
+        }
+        const requested = resolveManualDreamTask(params.task);
+        if (requested.error) {
+            pushNotification("toast", { message: requested.error, variant: "warning" }, sessionId);
+            return { ok: false, error: requested.error };
         }
         db ??= openDatabase();
         if (!db || !isDatabasePersisted(db)) {
@@ -805,14 +816,8 @@ export async function registerContext(context: V2Context) {
         }
         const runDb = db;
         const runExecutor = hiddenCompletionExecutor;
-        pushNotification(
-            "toast",
-            {
-                message: "Dream run started; the summary appears when it finishes.",
-                variant: "info",
-            },
-            sessionId,
-        );
+        // The TUI toasts on `{ok:true}`; only the completion dialog is pushed here
+        // so the command does not produce two "started" messages.
         void runManualDreamNow({
             db: runDb,
             dreamer: manualDreamer,
@@ -824,13 +829,21 @@ export async function registerContext(context: V2Context) {
             sessionId,
             ...(requested.task !== undefined ? { task: requested.task } : {}),
         })
-            .then((summary) => {
+            .then(({ summary, unsupportedTasks }) => {
+                const message = [
+                    summarizeManualDream(summary),
+                    unsupportedTasks.length > 0
+                        ? `Unsupported on this host (no tool loop): ${unsupportedTasks.join(", ")}`
+                        : undefined,
+                ]
+                    .filter((line) => line !== undefined)
+                    .join("\n\n");
                 pushNotification(
                     "action",
                     {
                         action: "show-result-dialog",
                         title: "Magic Context dream run",
-                        message: summarizeManualDream(summary),
+                        message,
                     },
                     sessionId,
                 );
