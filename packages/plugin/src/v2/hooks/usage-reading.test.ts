@@ -60,6 +60,29 @@ test("partial cache objects and missing token fields count as zero", () => {
     expect(reading?.inputTokens).toBe(5);
 });
 
+test("a switch to a smaller model still refuses on the new window", () => {
+    const reading = resolveUsageReading({
+        rowModel: { providerID: "p", id: "new" },
+        draftModel: { providerID: "p", id: "old" },
+        tokens: { input: 195_000, cache: { read: 0, write: 0 } },
+        limitFor,
+    });
+    expect(reading?.admissionLimit).toBe(200_000);
+    expect(reading!.inputTokens / reading!.admissionLimit).toBeGreaterThanOrEqual(0.95);
+});
+
+test("non-numeric token fields and a null completed value are treated as absent", () => {
+    const reading = resolveUsageReading({
+        rowModel: { providerID: "p", id: "old" },
+        draftModel: { providerID: "p", id: "old" },
+        tokens: { input: "nope", cache: { read: null, write: undefined } } as never,
+        completed: null as never,
+        limitFor,
+    });
+    expect(reading?.inputTokens).toBe(0);
+    expect(reading?.completed).toBeUndefined();
+});
+
 test("returns undefined without tokens or with a non-positive window", () => {
     expect(
         resolveUsageReading({

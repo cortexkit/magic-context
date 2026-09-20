@@ -612,17 +612,22 @@ export async function createV2HiddenCompletionExecutor(
                         ? request.body.system
                         : run.identity.system;
                 const tokens = row.data.tokens;
+                const tokenNumber = (value: unknown): number | undefined =>
+                    typeof value === "number" && Number.isFinite(value) ? value : undefined;
+                const reportedInput = tokenNumber(tokens?.input);
+                const reportedOutput = tokenNumber(tokens?.output);
                 run.completion = {
                     text,
                     reasoning: null,
-                    usage: tokens
-                        ? {
-                              input: tokens.input ?? 0,
-                              output: tokens.output ?? 0,
-                              cacheRead: tokens.cache?.read ?? 0,
-                              cacheWrite: tokens.cache?.write ?? 0,
-                          }
-                        : meter(system, promptText(request), text ?? ""),
+                    usage:
+                        reportedInput !== undefined || reportedOutput !== undefined
+                            ? {
+                                  input: reportedInput ?? 0,
+                                  output: reportedOutput ?? 0,
+                                  cacheRead: tokenNumber(tokens?.cache?.read) ?? 0,
+                                  cacheWrite: tokenNumber(tokens?.cache?.write) ?? 0,
+                              }
+                            : meter(system, promptText(request), text ?? ""),
                     lengthCapped: ["length", "max_tokens"].includes(row.data.finish ?? ""),
                     providerId: row.data.model?.providerID ?? requested.providerID,
                     modelId: row.data.model?.id ?? requested.modelID,

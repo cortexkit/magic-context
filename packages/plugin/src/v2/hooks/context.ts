@@ -351,6 +351,7 @@ export async function registerContext(context: V2Context) {
     // handler writes after the pass too, which is why its sidebar never shows the
     // reset.
     const measuredUsageBySession = new Map<string, MeasuredUsage>();
+    const tagger = createTagger();
     const usageMetaPatch = (value: MeasuredUsage) => ({
         ...(value.completed !== undefined ? { lastResponseTime: value.completed } : {}),
         lastContextPercentage: (value.inputTokens / value.limit) * 100,
@@ -360,7 +361,9 @@ export async function registerContext(context: V2Context) {
     });
     // The v1 lane clears per-session state on session.deleted; without this the
     // lane's maps grow for every session until plugin disposal.
+    const deletedSessions = new Set<string>();
     const clearSessionState = (sessionID: string) => {
+        deletedSessions.add(sessionID);
         liveModels.delete(sessionID);
         variants.delete(sessionID);
         agents.delete(sessionID);
@@ -370,6 +373,7 @@ export async function registerContext(context: V2Context) {
         pendingMaterializationSessions.delete(sessionID);
         lastHeuristicsTurnId.delete(sessionID);
         measuredUsageBySession.delete(sessionID);
+        tagger.cleanup(sessionID);
         rawProviders.get(sessionID)?.();
         rawProviders.delete(sessionID);
         clearSidebarSnapshotCache(sessionID);
@@ -526,6 +530,9 @@ export async function registerContext(context: V2Context) {
         });
     await context.session.hook("context", async (draft) => {
         if (hiddenChildHook.apply(draft)) return;
+        // A deletion that raced an in-flight pass must not let this pass re-register
+        // the cleared session's state (there is no second deletion event).
+        if (deletedSessions.has(draft.sessionID)) return;
         liveModels.set(draft.sessionID, {
             providerID: draft.model.providerID,
             modelID: draft.model.id,
@@ -602,7 +609,7 @@ export async function registerContext(context: V2Context) {
                 );
             transform ??= createTransform({
                 db,
-                tagger: createTagger(),
+                tagger,
                 scheduler: createScheduler({
                     executeThresholdPercentage: config.execute_threshold_percentage,
                 }),

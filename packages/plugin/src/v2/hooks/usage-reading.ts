@@ -34,13 +34,15 @@ export interface UsageReading {
 export function resolveUsageReading(input: UsageReadingInput): UsageReading | undefined {
     const { tokens } = input;
     if (!tokens) return undefined;
+    const numeric = (value: unknown): number =>
+        typeof value === "number" && Number.isFinite(value) ? value : 0;
     const rowProviderID =
         typeof input.rowModel?.providerID === "string" ? input.rowModel.providerID : undefined;
     const rowModelID = typeof input.rowModel?.id === "string" ? input.rowModel.id : undefined;
     const measuredProviderID = rowProviderID ?? input.draftModel.providerID;
     const measuredModelID = rowModelID ?? input.draftModel.id;
     const inputTokens =
-        (tokens.input ?? 0) + (tokens.cache?.read ?? 0) + (tokens.cache?.write ?? 0);
+        numeric(tokens.input) + numeric(tokens.cache?.read) + numeric(tokens.cache?.write);
     const limit = input.limitFor(measuredProviderID, measuredModelID);
     if (!Number.isFinite(limit) || limit <= 0) return undefined;
     const sameModel =
@@ -56,6 +58,8 @@ export function resolveUsageReading(input: UsageReadingInput): UsageReading | un
         ...(rowProviderID !== undefined && rowModelID !== undefined
             ? { modelKey: `${measuredProviderID}/${measuredModelID}` }
             : {}),
-        ...(input.completed !== undefined ? { completed: input.completed } : {}),
+        ...(typeof input.completed === "number" && Number.isFinite(input.completed)
+            ? { completed: input.completed }
+            : {}),
     };
 }

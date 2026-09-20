@@ -18,6 +18,7 @@ import {
 } from "./storage-task-schedule";
 import { evaluateTaskGate, getDreamTaskBacklogs } from "./task-gates";
 import {
+    CANONICAL_DREAM_TASKS,
     compareTaskOrder,
     type DreamTaskBacklog,
     type DreamTaskBacklogMap,
@@ -172,13 +173,12 @@ export function planDueTasks(
 ): DueTask[] {
     // GC retired task rows: improve, consolidate, and archive-stale were replaced
     // by verify/curate, while render-mural was removed when the scheduler switched
-    // to its deterministic task set. Since `tasks` contains the full canonical set,
-    // any stored row outside it is obsolete. Cheap and idempotent.
-    const pruned = pruneNonCanonicalTaskRows(
-        db,
-        projectIdentity,
-        tasks.map((t) => t.task),
-    );
+    // to its deterministic task set. Prune against the canonical set — NOT the
+    // passed task list: callers may filter that list for execution (e.g. a host
+    // without a tool loop), and a capability filter must never delete canonical
+    // schedule rows (last_run_at / next_due_at / watermarks) for the whole project.
+    // Cheap and idempotent.
+    const pruned = pruneNonCanonicalTaskRows(db, projectIdentity, CANONICAL_DREAM_TASKS);
     if (pruned > 0) {
         log(`[dreamer] pruned ${pruned} retired task row(s) for ${projectIdentity}`);
     }
