@@ -1,5 +1,7 @@
 import { jsx } from "@opentui/solid/jsx-runtime";
+import { COMPACTION_ENABLED_PATH } from "../../config/agent-disable";
 import type { SidebarSnapshot, StatusDetail } from "../../shared/rpc-types";
+import { compactionOffSidebarRows, nativeCompactionContextLabel } from "../../tui/compaction-off";
 import {
     closeRpc,
     getCompartmentCount,
@@ -25,8 +27,20 @@ function compactTokens(value: number): string {
     return String(value);
 }
 
-function sidebarText(snapshot: SidebarSnapshot | undefined): string {
+/** Exported for test access; mirrors the v1 sidebar's compaction-off rows. */
+export function sidebarText(snapshot: SidebarSnapshot | undefined): string {
     if (!snapshot) return "Magic Context · loading…";
+    if (snapshot.compaction_enabled === false) {
+        return [
+            "Magic Context",
+            nativeCompactionContextLabel(snapshot),
+            ...compactionOffSidebarRows(snapshot).map((row) => `${row.label} ${row.value}`),
+            ...(snapshot.readySmartNoteCount > 0
+                ? [`Smart Notes ${snapshot.readySmartNoteCount} ready`]
+                : []),
+            ...(snapshot.lastTransformError ? [`Warning: ${snapshot.lastTransformError}`] : []),
+        ].join("\n");
+    }
     const pressure =
         snapshot.contextLimit > 0
             ? `${snapshot.usagePercentage.toFixed(1)}% · ${compactTokens(snapshot.inputTokens)}/${compactTokens(snapshot.contextLimit)}`
@@ -41,12 +55,18 @@ function sidebarText(snapshot: SidebarSnapshot | undefined): string {
     ].join("\n");
 }
 
-function statusText(detail: StatusDetail): string {
+/** Exported for test access. */
+export function statusText(detail: StatusDetail): string {
     const context =
         detail.contextLimit > 0
             ? `${detail.usagePercentage.toFixed(1)}% (${compactTokens(detail.inputTokens)}/${compactTokens(detail.contextLimit)} tokens)`
             : `${compactTokens(detail.inputTokens)} tokens`;
     return [
+        ...(detail.compaction_enabled === false
+            ? [
+                  `Compaction: disabled (${COMPACTION_ENABLED_PATH}: false) — native compaction owns the context window.`,
+              ]
+            : []),
         `Context: ${context}`,
         `Historian: ${detail.historianRunning ? "running" : "idle"}`,
         `Compartments: ${detail.compartmentCount}`,

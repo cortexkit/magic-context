@@ -171,9 +171,14 @@ export function applyV2PromptSurfaceTools(
 export async function registerContext(context: V2Context) {
     const directory = context.location.directory;
     const config = loadPluginConfigDetailed(directory).config;
-    if (!config.enabled || !isCompactionEnabled(config)) return;
+    if (!config.enabled) return;
+    // Compaction-off mode: Magic Context still provides tools, memory/docs
+    // injection and the RPC surface, but every compaction-only path
+    // (host-checkpoint intercept, folds, historian, unsafe interrupts) stays
+    // out of the way so the host's native compaction owns the window.
+    const compactionEnabled = isCompactionEnabled(config);
     const conflicts = detectConflicts(directory, {
-        compactionEnabled: true,
+        compactionEnabled,
         hostGeneration: "v2",
     });
     if (conflicts.hasConflict) {
@@ -341,7 +346,8 @@ export async function registerContext(context: V2Context) {
                 const limit = limits.get(modelKey);
                 if (tokens && limit && Number.isFinite(limit) && limit > 0) {
                     const inputTokens = tokens.input + tokens.cache.read + tokens.cache.write;
-                    unsafe = inputTokens / limit >= 0.95;
+                    // Native compaction owns the window when MC compaction is off.
+                    unsafe = compactionEnabled && inputTokens / limit >= 0.95;
                     const completed = latest?.data.time?.completed;
                     if (typeof completed === "number")
                         updateSessionMeta(db, draft.sessionID, { lastResponseTime: completed });
@@ -356,7 +362,9 @@ export async function registerContext(context: V2Context) {
             }
         } catch (error) {
             console.warn("[magic-context] v2 refuseIfUnsafe", error);
-            unsafe = true;
+            // A storage failure in compaction-off mode must not abort the turn:
+            // there is no MC recovery path to run.
+            unsafe = compactionEnabled;
         }
         if (unsafe) await interruptBeforeProvider(context.session, draft.sessionID);
         return unsafe;
@@ -382,36 +390,40 @@ export async function registerContext(context: V2Context) {
             },
         }).m0Text;
     };
-    await context.session.hook("compaction", async (draft) => {
-        const reader = new V2StoreReader(
-            gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
-        );
-        try {
-            const rows = reader.history(draft.sessionID);
-            const ids = new Set(draft.messages.map((message) => message.id));
-            const watermark = Math.max(
-                -1,
-                ...rows.filter((row) => ids.has(row.id)).map((row) => row.seq),
+    if (compactionEnabled)
+        await context.session.hook("compaction", async (draft) => {
+            const reader = new V2StoreReader(
+                gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
             );
-            const running = rows
-                .filter((row) => row.type === "compaction" && row.data.status === "running")
-                .at(-1);
-            const fold = await folds.supply({
-                sessionID: draft.sessionID,
-                watermark,
-                runningCut: running?.seq,
-                materialize: () => materialize(draft),
-            });
-            draft.result = { summary: fold.submitted };
-        } catch (cause) {
-            await interruptBeforeProvider(context.session, draft.sessionID);
-            throw new V2ContextRefusal("Magic Context could not preserve the host checkpoint.", {
-                cause,
-            });
-        } finally {
-            reader.close();
-        }
-    });
+            try {
+                const rows = reader.history(draft.sessionID);
+                const ids = new Set(draft.messages.map((message) => message.id));
+                const watermark = Math.max(
+                    -1,
+                    ...rows.filter((row) => ids.has(row.id)).map((row) => row.seq),
+                );
+                const running = rows
+                    .filter((row) => row.type === "compaction" && row.data.status === "running")
+                    .at(-1);
+                const fold = await folds.supply({
+                    sessionID: draft.sessionID,
+                    watermark,
+                    runningCut: running?.seq,
+                    materialize: () => materialize(draft),
+                });
+                draft.result = { summary: fold.submitted };
+            } catch (cause) {
+                await interruptBeforeProvider(context.session, draft.sessionID);
+                throw new V2ContextRefusal(
+                    "Magic Context could not preserve the host checkpoint.",
+                    {
+                        cause,
+                    },
+                );
+            } finally {
+                reader.close();
+            }
+        });
     await context.session.hook("context", async (draft) => {
         if (hiddenChildHook.apply(draft)) return;
         liveModels.set(draft.sessionID, {
@@ -490,6 +502,7 @@ export async function registerContext(context: V2Context) {
                     executeThresholdPercentage: config.execute_threshold_percentage,
                 }),
                 contextUsageMap: usage,
+                compactionOff: !compactionEnabled,
                 protectedTokens: config.protected_tokens,
                 protectedTokenTierOverrides: getProtectedTokensTierOverrides(config),
                 executeThresholdPercentage: config.execute_threshold_percentage,
@@ -504,7 +517,9 @@ export async function registerContext(context: V2Context) {
                 projectPath: directory,
                 hiddenCompletionExecutor,
                 historianRunnable:
-                    hiddenCompletionExecutor !== undefined && config.historian?.disable !== true,
+                    compactionEnabled &&
+                    hiddenCompletionExecutor !== undefined &&
+                    config.historian?.disable !== true,
                 historianModel: historianModels.primary,
                 fallbackModels: historianModels.fallbacks,
                 historianTimeoutMs: config.historian_timeout_ms,
@@ -523,60 +538,64 @@ export async function registerContext(context: V2Context) {
                 if (message.id && (await isAdmittedSynthetic(context, draft.sessionID, message.id)))
                     admitted.add(message.id);
             }
-            const reader = new V2StoreReader(
-                gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
-            );
             let checkpoint: SessionContext["messages"][number] | undefined;
             let submitted: string | undefined;
-            try {
-                const cut = reader.latestCompaction(draft.sessionID);
-                const incoming = cut && draft.messages.find((message) => message.id === cut.id);
-                postFold = cut !== undefined;
-                if (cut && !incoming)
-                    throw new Error("The host checkpoint disappeared from the context draft");
-                if (cut && incoming) {
-                    const identity = await folds.observe({
-                        sessionID: draft.sessionID,
-                        cutSeq: cut.seq,
-                        summary: cut.data.summary ?? "",
-                        rendered: incoming,
-                        onHard: (reason) => {
-                            console.warn(
-                                `[magic-context] HARD reason=${reason} session=${draft.sessionID}`,
-                            );
-                            materialize(draft);
-                            pendingMaterializationSessions.add(draft.sessionID);
-                        },
-                    });
-                    checkpoint = structuredClone(identity.rendered ?? incoming);
-                    submitted = identity.rendered
-                        ? (identity.renderedSummary ?? identity.submitted)
-                        : (cut.data.summary ?? "");
-                    const all = reader.history(draft.sessionID);
-                    const boundaryID = (
-                        db
-                            .prepare(
-                                "SELECT cached_m0_last_baseline_end_message_id AS id FROM session_meta WHERE session_id = ?",
+            if (compactionEnabled) {
+                const reader = new V2StoreReader(
+                    gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
+                );
+                try {
+                    const cut = reader.latestCompaction(draft.sessionID);
+                    const incoming = cut && draft.messages.find((message) => message.id === cut.id);
+                    postFold = cut !== undefined;
+                    if (cut && !incoming)
+                        throw new Error("The host checkpoint disappeared from the context draft");
+                    if (cut && incoming) {
+                        const identity = await folds.observe({
+                            sessionID: draft.sessionID,
+                            cutSeq: cut.seq,
+                            summary: cut.data.summary ?? "",
+                            rendered: incoming,
+                            onHard: (reason) => {
+                                console.warn(
+                                    `[magic-context] HARD reason=${reason} session=${draft.sessionID}`,
+                                );
+                                materialize(draft);
+                                pendingMaterializationSessions.add(draft.sessionID);
+                            },
+                        });
+                        checkpoint = structuredClone(identity.rendered ?? incoming);
+                        submitted = identity.rendered
+                            ? (identity.renderedSummary ?? identity.submitted)
+                            : (cut.data.summary ?? "");
+                        const all = reader.history(draft.sessionID);
+                        const boundaryID = (
+                            db
+                                .prepare(
+                                    "SELECT cached_m0_last_baseline_end_message_id AS id FROM session_meta WHERE session_id = ?",
+                                )
+                                .get(draft.sessionID) as { id: string | null } | null
+                        )?.id;
+                        const boundary = all.find((row) => row.id === boundaryID)?.seq ?? -1;
+                        const present = new Set(draft.messages.map((message) => message.id));
+                        const restored = all
+                            .filter(
+                                (row) =>
+                                    row.seq > boundary &&
+                                    row.seq <= cut.seq &&
+                                    !present.has(row.id),
                             )
-                            .get(draft.sessionID) as { id: string | null } | null
-                    )?.id;
-                    const boundary = all.find((row) => row.id === boundaryID)?.seq ?? -1;
-                    const present = new Set(draft.messages.map((message) => message.id));
-                    const restored = all
-                        .filter(
-                            (row) =>
-                                row.seq > boundary && row.seq <= cut.seq && !present.has(row.id),
-                        )
-                        .flatMap((row) => restoreRow(row, draft.model));
-                    draft.messages.splice(
-                        0,
-                        draft.messages.length,
-                        ...restored,
-                        ...draft.messages.filter((message) => message !== incoming),
-                    );
+                            .flatMap((row) => restoreRow(row, draft.model));
+                        draft.messages.splice(
+                            0,
+                            draft.messages.length,
+                            ...restored,
+                            ...draft.messages.filter((message) => message !== incoming),
+                        );
+                    }
+                } finally {
+                    reader.close();
                 }
-            } finally {
-                reader.close();
             }
             const mapped = adaptPayload(draft, admitted);
             await transform({}, mapped);
