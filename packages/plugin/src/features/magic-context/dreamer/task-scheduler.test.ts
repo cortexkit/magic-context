@@ -171,6 +171,35 @@ describe("task-scheduler — planDueTasks", () => {
         expect(getTaskScheduleState(db, PROJECT, "curate")).not.toBeNull();
     });
 
+    it("prunes against the canonical set, not the caller's filtered list", () => {
+        db = freshDb();
+        // A canonical task the caller's execution list omits (e.g. a capability
+        // filter on a host without a tool loop) must keep its durable schedule row
+        // and cursors — a capability filter selects what to run, it must never
+        // define what is canonical.
+        writeTaskScheduleState(db, {
+            projectPath: PROJECT,
+            task: "map-memories",
+            lastRunAt: 1234,
+            nextDueAt: Date.now() + 60_000,
+            schedule: "0 3 * * *",
+            lastStatus: "completed",
+            lastError: null,
+            retryCount: 0,
+            lastCheckedCommit: "abc",
+            retrospectiveWatermarkMs: 99,
+        });
+        planDueTasks(
+            db,
+            PROJECT,
+            [cfg("verify", "0 3 * * *"), cfg("curate", "0 4 * * 0")],
+            Date.now(),
+        );
+        const preserved = getTaskScheduleState(db, PROJECT, "map-memories");
+        expect(preserved?.lastRunAt).toBe(1234);
+        expect(preserved?.retrospectiveWatermarkMs).toBe(99);
+    });
+
     it("deleteTaskScheduleRowsForProject removes ALL rows for an orphaned project only", () => {
         db = freshDb();
         const orphan = "dir:deadworktree";

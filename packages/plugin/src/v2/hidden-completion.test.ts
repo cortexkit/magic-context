@@ -67,6 +67,7 @@ class Rows {
             modelID?: string;
             usage?: boolean;
             cache?: boolean;
+            rawTokens?: boolean;
             error?: unknown;
             finish?: string;
         } = {},
@@ -84,12 +85,20 @@ class Rows {
                 ...(options.usage === false
                     ? {}
                     : {
-                          tokens: {
-                              input: 101,
-                              output: 11,
-                              reasoning: 3,
-                              ...(options.cache === false ? {} : { cache: { read: 7, write: 5 } }),
-                          },
+                          tokens: options.rawTokens
+                              ? ({
+                                    input: null,
+                                    output: "not-a-number",
+                                    reasoning: 3,
+                                } as never)
+                              : {
+                                    input: 101,
+                                    output: 11,
+                                    reasoning: 3,
+                                    ...(options.cache === false
+                                        ? {}
+                                        : { cache: { read: 7, write: 5 } }),
+                                },
                       }),
                 time: { created: Date.now(), completed: Date.now() },
             },
@@ -120,6 +129,7 @@ async function setup(generation = "host-generation-1") {
     let delayRowMs = 0;
     let omitUsage = false;
     let omitCache = false;
+    let rawTokens = false;
     let completion = "editor completion";
 
     const host: HiddenChildHost = {
@@ -162,6 +172,7 @@ async function setup(generation = "host-generation-1") {
                 rows.append(input.sessionID, completion, {
                     usage: !omitUsage,
                     cache: !omitCache,
+                    rawTokens,
                     modelID: child.model.id,
                 });
             if (delayRowMs > 0) setTimeout(write, delayRowMs);
@@ -208,6 +219,9 @@ async function setup(generation = "host-generation-1") {
         },
         setOmitCache(value: boolean) {
             omitCache = value;
+        },
+        setRawTokens(value: boolean) {
+            rawTokens = value;
         },
         setCompletion(value: string) {
             completion = value;
@@ -399,6 +413,21 @@ describe("OpenCode 2 hidden child completion", () => {
                 cacheRead: 0,
                 cacheWrite: 0,
             });
+            await close(state.executor, handle, true);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("falls back to the local meter when token fields are non-numeric", async () => {
+        const state = await setup();
+        try {
+            state.setRawTokens(true);
+            const handle = await state.executor.open(run);
+            await state.executor.attempt(handle, request());
+            const completion = await state.executor.collect(handle, 50);
+            expect(completion.usage.input).toBeGreaterThan(0);
+            expect(completion.usage.output).toBeGreaterThan(0);
             await close(state.executor, handle, true);
         } finally {
             state.db.close();

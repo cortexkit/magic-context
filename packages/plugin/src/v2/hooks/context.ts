@@ -353,7 +353,9 @@ export async function registerContext(context: V2Context) {
     const measuredUsageBySession = new Map<string, MeasuredUsage>();
     const tagger = createTagger();
     const usageMetaPatch = (value: MeasuredUsage) => ({
-        ...(value.completed !== undefined ? { lastResponseTime: value.completed } : {}),
+        ...(typeof value.completed === "number" && Number.isFinite(value.completed)
+            ? { lastResponseTime: value.completed }
+            : {}),
         lastContextPercentage: (value.inputTokens / value.limit) * 100,
         lastInputTokens: value.inputTokens,
         lastUsageContextLimit: value.limit,
@@ -364,6 +366,12 @@ export async function registerContext(context: V2Context) {
     const deletedSessions = new Set<string>();
     const clearSessionState = (sessionID: string) => {
         deletedSessions.add(sessionID);
+        // The tombstone only needs to outlive passes already in flight at deletion
+        // time; cap it so a long-lived process cannot grow it without bound.
+        if (deletedSessions.size > 1000) {
+            const oldest = deletedSessions.values().next().value;
+            if (oldest !== undefined) deletedSessions.delete(oldest);
+        }
         liveModels.delete(sessionID);
         variants.delete(sessionID);
         agents.delete(sessionID);
@@ -934,6 +942,7 @@ export async function registerContext(context: V2Context) {
             rpcServer.stop();
             sessionCleanupController.abort();
             await sessionCleanupDone;
+            deletedSessions.clear();
             await dreamTrigger?.dispose();
             for (const release of rawProviders.values()) release();
             rawProviders.clear();

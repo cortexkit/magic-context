@@ -619,6 +619,10 @@ export async function createV2HiddenCompletionExecutor(
                 run.completion = {
                     text,
                     reasoning: null,
+                    // A row with only one numeric side takes the provider branch and
+                    // floors the other side to 0 deliberately: these numbers feed
+                    // budget math, so never over-report a component the provider did
+                    // not send. The local meter is for rows with no numeric usage.
                     usage:
                         reportedInput !== undefined || reportedOutput !== undefined
                             ? {
