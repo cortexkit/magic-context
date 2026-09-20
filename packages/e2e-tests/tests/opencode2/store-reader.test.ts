@@ -116,6 +116,29 @@ test("session_message_reader seq pages idle boundaries and checkpoint window", (
 	expect(() => new V2StoreReader(join(root, "missing.db"))).toThrow();
 });
 
+test("latestAssistant selects the newest assistant row by seq and ignores other types", () => {
+	const { root } = isolation();
+	const path = join(root, "latest-assistant.db");
+	const writer = new Database(path);
+	writer.exec(
+		"CREATE TABLE session_message(id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, data TEXT)",
+	);
+	const insert = writer.prepare("INSERT INTO session_message VALUES (?, ?, ?, ?, ?)");
+	insert.run("m1", "ses-A", "assistant", 1, JSON.stringify({ model: { providerID: "p", id: "old" } }));
+	insert.run("m2", "ses-A", "user", 2, JSON.stringify({}));
+	insert.run("m3", "ses-B", "assistant", 3, JSON.stringify({ model: { providerID: "p", id: "other" } }));
+	insert.run("m4", "ses-A", "assistant", 4, JSON.stringify({ model: { providerID: "p", id: "new" } }));
+	const reader = new V2StoreReader(path);
+	try {
+		expect(reader.latestAssistant("ses-A")?.id).toBe("m4");
+		expect(reader.latestAssistant("ses-B")?.id).toBe("m3");
+		expect(reader.latestAssistant("ses-missing")).toBeUndefined();
+	} finally {
+		reader.close();
+		writer.close();
+	}
+});
+
 test("I11 v1/v2 readers feed the same transform core with pinned host differences", () => {
 	const { root } = isolation();
 	const sessionID = "ses-golden";

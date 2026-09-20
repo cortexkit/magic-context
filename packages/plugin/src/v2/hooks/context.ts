@@ -31,6 +31,7 @@ import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatt
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
 import { maybeSendUpgradeReminder } from "../../hooks/magic-context/upgrade-reminder";
 import { registerRpcHandlers } from "../../plugin/rpc-handlers";
+import { clearSidebarSnapshotCache } from "../../plugin/sidebar-snapshot-cache";
 import { createToolRegistry } from "../../plugin/tool-registry";
 import type { PluginContext } from "../../plugin/types";
 import { detectConflicts } from "../../shared/conflict-detector";
@@ -59,6 +60,7 @@ import { adaptPayload, HEAD_IDS } from "./payload";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { rawMessages } from "./store";
 import type { SessionContext, V2Context } from "./types";
+import { resolveUsageReading } from "./usage-reading";
 
 export function createHostSeams(
     context: V2Context,
@@ -356,6 +358,53 @@ export async function registerContext(context: V2Context) {
         lastUsageContextLimit: value.limit,
         ...(value.modelKey !== undefined ? { lastObservedModelKey: value.modelKey } : {}),
     });
+    // The v1 lane clears per-session state on session.deleted; without this the
+    // lane's maps grow for every session until plugin disposal.
+    const clearSessionState = (sessionID: string) => {
+        liveModels.delete(sessionID);
+        variants.delete(sessionID);
+        agents.delete(sessionID);
+        usage.delete(sessionID);
+        channel1.delete(sessionID);
+        historyRefreshSessions.delete(sessionID);
+        pendingMaterializationSessions.delete(sessionID);
+        lastHeuristicsTurnId.delete(sessionID);
+        measuredUsageBySession.delete(sessionID);
+        rawProviders.get(sessionID)?.();
+        rawProviders.delete(sessionID);
+        clearSidebarSnapshotCache(sessionID);
+    };
+    const sessionCleanupController = new AbortController();
+    const sessionCleanupDone = (async () => {
+        try {
+            for await (const value of context.event.subscribe({
+                signal: sessionCleanupController.signal,
+            })) {
+                if (sessionCleanupController.signal.aborted) break;
+                const event = value as {
+                    type?: string;
+                    data?: {
+                        sessionID?: unknown;
+                        sessionId?: unknown;
+                        info?: { id?: unknown };
+                    };
+                };
+                if (event.type !== "session.deleted") continue;
+                const sessionID = [
+                    event.data?.sessionID,
+                    event.data?.sessionId,
+                    event.data?.info?.id,
+                ].find(
+                    (candidate): candidate is string =>
+                        typeof candidate === "string" && candidate.length > 0,
+                );
+                if (sessionID) clearSessionState(sessionID);
+            }
+        } catch (error) {
+            if (!sessionCleanupController.signal.aborted)
+                console.warn("[magic-context] v2 session cleanup subscription failed", error);
+        }
+    })();
     const refuseIfUnsafe = async (draft: SessionContext): Promise<boolean> => {
         let unsafe = false;
         try {
@@ -367,49 +416,43 @@ export async function registerContext(context: V2Context) {
             );
             try {
                 const latest = reader.latestAssistant(draft.sessionID);
-                const tokens = latest?.data.tokens;
-                // Attribute the reading to the model that produced the response (the
-                // store row carries it). A row without model metadata is
-                // indistinguishable from a model switch, so it records no model key
-                // and the post-pass re-apply is skipped for it.
-                const rowModel = latest?.data.model;
-                const rowProviderID =
-                    typeof rowModel?.providerID === "string" ? rowModel.providerID : undefined;
-                const rowModelID = typeof rowModel?.id === "string" ? rowModel.id : undefined;
-                const measuredProviderID = rowProviderID ?? draft.model.providerID;
-                const measuredModelID = rowModelID ?? draft.model.id;
-                const modelKey =
-                    rowProviderID !== undefined && rowModelID !== undefined
-                        ? `${measuredProviderID}/${measuredModelID}`
-                        : undefined;
-                // Resolve the same output-reserved usable window every other consumer
-                // (sidebar, history budgets, geometry) divides by. Reading the raw
-                // catalog window here made the persisted percentage and the 95% check
-                // disagree with the same sidebar's denominator.
-                const limit = resolveContextLimit(measuredProviderID, measuredModelID, {
-                    db,
-                    sessionID: draft.sessionID,
+                const usageDb = db;
+                const reading = resolveUsageReading({
+                    rowModel: latest?.data.model,
+                    draftModel: { providerID: draft.model.providerID, id: draft.model.id },
+                    tokens: latest?.data.tokens,
+                    completed: latest?.data.time?.completed,
+                    limitFor: (providerID, modelID) =>
+                        resolveContextLimit(providerID, modelID, {
+                            db: usageDb,
+                            sessionID: draft.sessionID,
+                        }),
                 });
-                if (tokens && Number.isFinite(limit) && limit > 0) {
-                    const inputTokens =
-                        (tokens.input ?? 0) +
-                        (tokens.cache?.read ?? 0) +
-                        (tokens.cache?.write ?? 0);
-                    // Native compaction owns the window when MC compaction is off.
-                    unsafe = compactionEnabled && inputTokens / limit >= 0.95;
-                    const completed = latest?.data.time?.completed;
+                if (reading) {
+                    // Admission is measured against the OUTGOING model's window (see
+                    // resolveUsageReading): refusing on the previous model's ratio
+                    // after a switch would loop, because the refused turn never lets
+                    // the transform observe the switch. Native compaction owns the
+                    // window when MC compaction is off.
+                    unsafe =
+                        compactionEnabled && reading.inputTokens / reading.admissionLimit >= 0.95;
                     const measured: MeasuredUsage = {
-                        inputTokens,
-                        limit,
-                        modelKey,
-                        ...(typeof completed === "number" ? { completed } : {}),
+                        inputTokens: reading.inputTokens,
+                        limit: reading.limit,
+                        modelKey: reading.modelKey,
+                        ...(reading.completed !== undefined
+                            ? { completed: reading.completed }
+                            : {}),
                     };
                     measuredUsageBySession.set(draft.sessionID, measured);
                     // Early write covers the abort path (returned before the
                     // transform); the post-pass write below wins on normal turns.
-                    updateSessionMeta(db, draft.sessionID, usageMetaPatch(measured));
+                    updateSessionMeta(usageDb, draft.sessionID, usageMetaPatch(measured));
                     usage.set(draft.sessionID, {
-                        usage: { inputTokens, percentage: (inputTokens / limit) * 100 },
+                        usage: {
+                            inputTokens: reading.inputTokens,
+                            percentage: (reading.inputTokens / reading.limit) * 100,
+                        },
                         hasUsageTokens: true,
                         updatedAt: Date.now(),
                     });
@@ -830,8 +873,20 @@ export async function registerContext(context: V2Context) {
             ...(requested.task !== undefined ? { task: requested.task } : {}),
         })
             .then(({ summary, unsupportedTasks }) => {
+                // With nothing runnable and only an unsupported task requested, the
+                // summary's "No enabled dream tasks to run." would contradict the
+                // unsupported line — show just the unsupported line then.
+                const hasSummaryContent =
+                    summary.ran.length > 0 ||
+                    summary.failed.length > 0 ||
+                    summary.skippedNoWork.length > 0 ||
+                    summary.deferredBusy.length > 0 ||
+                    Object.keys(summary.backlogBefore ?? {}).length > 0 ||
+                    Object.keys(summary.backlogAfter ?? {}).length > 0;
                 const message = [
-                    summarizeManualDream(summary),
+                    hasSummaryContent || unsupportedTasks.length === 0
+                        ? summarizeManualDream(summary)
+                        : undefined,
                     unsupportedTasks.length > 0
                         ? `Unsupported on this host (no tool loop): ${unsupportedTasks.join(", ")}`
                         : undefined,
@@ -870,6 +925,8 @@ export async function registerContext(context: V2Context) {
         async dispose() {
             rpcStopped = true;
             rpcServer.stop();
+            sessionCleanupController.abort();
+            await sessionCleanupDone;
             await dreamTrigger?.dispose();
             for (const release of rawProviders.values()) release();
             rawProviders.clear();

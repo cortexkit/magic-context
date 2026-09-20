@@ -617,8 +617,8 @@ export async function createV2HiddenCompletionExecutor(
                     reasoning: null,
                     usage: tokens
                         ? {
-                              input: tokens.input,
-                              output: tokens.output,
+                              input: tokens.input ?? 0,
+                              output: tokens.output ?? 0,
                               cacheRead: tokens.cache?.read ?? 0,
                               cacheWrite: tokens.cache?.write ?? 0,
                           }

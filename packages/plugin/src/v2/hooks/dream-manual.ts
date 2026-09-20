@@ -40,9 +40,13 @@ export function selectRunnableDreamTasks(args: {
     const requiresTools = (task: DreamTaskName) => DREAM_TASK_CAPABILITIES[task].requiresTools;
     if (args.toolsSupported) return { runnable: [...args.tasks], unsupported: [] };
     if (args.requestedTask !== undefined) {
-        return requiresTools(args.requestedTask)
-            ? { runnable: [], unsupported: [args.requestedTask] }
-            : { runnable: [...args.tasks], unsupported: [] };
+        if (requiresTools(args.requestedTask)) {
+            return { runnable: [], unsupported: [args.requestedTask] };
+        }
+        return {
+            runnable: args.tasks.filter((config) => config.task === args.requestedTask),
+            unsupported: [],
+        };
     }
     // A no-arg run only considers enabled tasks (schedule != ""), so only those
     // are worth reporting as unsupported.

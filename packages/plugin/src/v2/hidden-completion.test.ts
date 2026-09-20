@@ -66,6 +66,7 @@ class Rows {
         options: {
             modelID?: string;
             usage?: boolean;
+            cache?: boolean;
             error?: unknown;
             finish?: string;
         } = {},
@@ -87,7 +88,7 @@ class Rows {
                               input: 101,
                               output: 11,
                               reasoning: 3,
-                              cache: { read: 7, write: 5 },
+                              ...(options.cache === false ? {} : { cache: { read: 7, write: 5 } }),
                           },
                       }),
                 time: { created: Date.now(), completed: Date.now() },
@@ -118,6 +119,7 @@ async function setup(generation = "host-generation-1") {
     let failPrompt = false;
     let delayRowMs = 0;
     let omitUsage = false;
+    let omitCache = false;
     let completion = "editor completion";
 
     const host: HiddenChildHost = {
@@ -159,6 +161,7 @@ async function setup(generation = "host-generation-1") {
             const write = () =>
                 rows.append(input.sessionID, completion, {
                     usage: !omitUsage,
+                    cache: !omitCache,
                     modelID: child.model.id,
                 });
             if (delayRowMs > 0) setTimeout(write, delayRowMs);
@@ -202,6 +205,9 @@ async function setup(generation = "host-generation-1") {
         },
         setOmitUsage(value: boolean) {
             omitUsage = value;
+        },
+        setOmitCache(value: boolean) {
+            omitCache = value;
         },
         setCompletion(value: string) {
             completion = value;
@@ -374,6 +380,25 @@ describe("OpenCode 2 hidden child completion", () => {
             const completion = await state.executor.collect(handle, 50);
             expect(completion.usage.input).toBeGreaterThan(0);
             expect(completion.usage.output).toBeGreaterThan(0);
+            await close(state.executor, handle, true);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("tolerates a completed row whose token cache counters are missing", async () => {
+        const state = await setup();
+        try {
+            state.setOmitCache(true);
+            const handle = await state.executor.open(run);
+            await state.executor.attempt(handle, request());
+            const completion = await state.executor.collect(handle, 50);
+            expect(completion.usage).toEqual({
+                input: 101,
+                output: 11,
+                cacheRead: 0,
+                cacheWrite: 0,
+            });
             await close(state.executor, handle, true);
         } finally {
             state.db.close();
