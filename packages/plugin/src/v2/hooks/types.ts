@@ -84,6 +84,21 @@ export interface V2Context {
     tool: {
         transform?(
             callback: (editor: {
+                add(tool: {
+                    name: string;
+                    description: string;
+                    input: unknown;
+                    options?: { codemode?: boolean };
+                    execute(
+                        input: unknown,
+                        context: {
+                            sessionID: string;
+                            agent: string;
+                            messageID: string;
+                            id: string;
+                        },
+                    ): Promise<{ content?: string; metadata?: Record<string, unknown> }>;
+                }): void;
                 update(id: string, update: (tool: { description: string }) => void): void;
             }) => void,
         ): Promise<unknown>;

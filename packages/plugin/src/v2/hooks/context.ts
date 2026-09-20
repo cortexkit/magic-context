@@ -1,3 +1,4 @@
+import { tool, type ToolDefinition, type ToolResult } from "@opencode-ai/plugin";
 import { loadPluginConfigDetailed } from "../../config";
 import { isCompactionEnabled } from "../../config/agent-disable";
 import { getProtectedTokensTierOverrides } from "../../config/project-security";
@@ -21,6 +22,8 @@ import { setRawMessageProvider } from "../../hooks/magic-context/read-session-ch
 import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatting";
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
 import { maybeSendUpgradeReminder } from "../../hooks/magic-context/upgrade-reminder";
+import { createToolRegistry } from "../../plugin/tool-registry";
+import type { PluginContext } from "../../plugin/types";
 import { detectConflicts } from "../../shared/conflict-detector";
 import { getDataDir } from "../../shared/data-path";
 import { resolveHistorianModel } from "../../shared/model-resolution";
@@ -114,6 +117,33 @@ export function catalogModels(listed: unknown): Array<{
         if (typeof contextLimit !== "number" || !Number.isFinite(contextLimit)) return [];
         return [{ id: model.id, providerID: model.providerID, limit: { context: contextLimit } }];
     });
+}
+
+/** Build the JSON Schema OpenCode 2 expects for a tool's `input` from its zod arg shape. */
+function toolArgsJsonSchema(args: ToolDefinition["args"]): Record<string, unknown> {
+    try {
+        const objectSchema = tool.schema.object(args);
+        const { $schema: _schema, ...rest } = tool.schema.toJSONSchema(objectSchema) as Record<
+            string,
+            unknown
+        >;
+        return rest;
+    } catch {
+        // A shape zod cannot render as JSON Schema must not take down plugin setup.
+        return { type: "object", properties: {}, additionalProperties: true };
+    }
+}
+
+/** Bridge a v1 `ToolResult` to the v2 `Tool.Result` shape (content/metadata). */
+function toV2ToolResult(result: ToolResult): {
+    content?: string;
+    metadata?: Record<string, unknown>;
+} {
+    if (typeof result === "string") return { content: result };
+    return {
+        content: result.output ?? "",
+        ...(result.metadata ? { metadata: result.metadata } : {}),
+    };
 }
 
 /** Rewrite Magic Context ctx_* tool descriptions for this draft's model. */
@@ -221,6 +251,47 @@ export async function registerContext(context: V2Context) {
             console.warn("[magic-context] v2 Channel 2 delivery deferred", error);
         }
     });
+    // OpenCode 2 has no v1 plugin lane, so the v1 server() path that built
+    // createToolRegistry never runs and the ctx_* tools are otherwise absent.
+    // Register them on the v2 tool domain here. They are added with
+    // codemode:false so they surface as direct tools, matching how the v1 lane
+    // exposed them.
+    const registry = createToolRegistry({
+        ctx: { directory } as PluginContext,
+        pluginConfig: config,
+        promptSurfaceRuntime,
+        registrationPromptSurface: config.prompt_surface,
+    });
+    const registryEntries = Object.entries(registry);
+    if (registryEntries.length > 0 && context.tool.transform) {
+        try {
+            await context.tool.transform((editor) => {
+                for (const [name, definition] of registryEntries) {
+                    editor.add({
+                        name,
+                        description: definition.description,
+                        input: toolArgsJsonSchema(definition.args),
+                        options: { codemode: false },
+                        execute: async (input, toolContext) => {
+                            const result = await definition.execute(input as never, {
+                                sessionID: toolContext.sessionID,
+                                messageID: toolContext.messageID,
+                                agent: toolContext.agent,
+                                directory,
+                                worktree: directory,
+                                abort: new AbortController().signal,
+                                metadata: () => {},
+                                ask: async () => {},
+                            });
+                            return toV2ToolResult(result);
+                        },
+                    });
+                }
+            });
+        } catch (error) {
+            console.warn("[magic-context] v2 ctx_* tool registration skipped", error);
+        }
+    }
     const read = (sessionID: string) => {
         const reader = new V2StoreReader(
             gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
