@@ -322,6 +322,20 @@ export async function registerContext(context: V2Context) {
         getCount: (sessionID: string) => read(sessionID).length,
     });
     let transform: ReturnType<typeof createTransform> | undefined;
+    // Usage measured from the most recent assistant response. The transform's
+    // first-pass reset zeroes the persisted usage fields mid-pass, so the same
+    // values are re-applied after the pass — the v1 lane's event handler writes
+    // after the pass too, which is why its sidebar never shows the reset.
+    let measuredUsage:
+        | { inputTokens: number; limit: number; modelKey: string; completed?: number }
+        | undefined;
+    const usageMetaPatch = (value: NonNullable<typeof measuredUsage>) => ({
+        ...(value.completed !== undefined ? { lastResponseTime: value.completed } : {}),
+        lastContextPercentage: (value.inputTokens / value.limit) * 100,
+        lastInputTokens: value.inputTokens,
+        lastUsageContextLimit: value.limit,
+        lastObservedModelKey: value.modelKey,
+    });
     const refuseIfUnsafe = async (draft: SessionContext): Promise<boolean> => {
         let unsafe = false;
         try {
@@ -350,16 +364,15 @@ export async function registerContext(context: V2Context) {
                     // Native compaction owns the window when MC compaction is off.
                     unsafe = compactionEnabled && inputTokens / limit >= 0.95;
                     const completed = latest?.data.time?.completed;
-                    // The v1 lane persists usage from its event handler; the v2 lane
-                    // has no event handler, so persist the same fields here or the
-                    // sidebar/status surface stays at the 0 defaults.
-                    updateSessionMeta(db, draft.sessionID, {
-                        ...(typeof completed === "number" ? { lastResponseTime: completed } : {}),
-                        lastContextPercentage: (inputTokens / limit) * 100,
-                        lastInputTokens: inputTokens,
-                        lastUsageContextLimit: limit,
-                        lastObservedModelKey: modelKey,
-                    });
+                    measuredUsage = {
+                        inputTokens,
+                        limit,
+                        modelKey,
+                        ...(typeof completed === "number" ? { completed } : {}),
+                    };
+                    // Early write covers the abort path (returned before the
+                    // transform); the post-pass write below wins on normal turns.
+                    updateSessionMeta(db, draft.sessionID, usageMetaPatch(measuredUsage));
                     usage.set(draft.sessionID, {
                         usage: { inputTokens, percentage: (inputTokens / limit) * 100 },
                         hasUsageTokens: true,
@@ -616,6 +629,12 @@ export async function registerContext(context: V2Context) {
                     draft.sessionID,
                     channel1.get(draft.sessionID),
                 );
+            }
+            // Re-apply the usage fields the transform's first-pass reset zeroed
+            // mid-pass (the v1 lane's event handler writes after the pass too, which
+            // is why its sidebar never shows the reset).
+            if (db && measuredUsage) {
+                updateSessionMeta(db, draft.sessionID, usageMetaPatch(measuredUsage));
             }
             if (checkpoint && submitted !== undefined) {
                 const head = draft.messages.find((message) => message.id === HEAD_IDS[0]);
