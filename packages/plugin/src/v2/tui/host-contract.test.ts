@@ -135,6 +135,7 @@ test("GA 2.0.5 resolves ./tui and executes the union setup contract", async () =
     expect(fixture.layers[0]!.commands.map((command) => command.slash.name)).toEqual([
         "ctx-status",
         "ctx-recomp",
+        "ctx-dream",
     ]);
     cleanup();
 });
@@ -159,7 +160,7 @@ test("GA 2.0.5 registers the keymap layer from the app slot when setup runs outs
     appClaim.render({});
     expect(
         fixture.layers.map((layer) => layer.commands.map((command) => command.slash.name)),
-    ).toEqual([["ctx-status", "ctx-recomp"]]);
+    ).toEqual([["ctx-status", "ctx-recomp", "ctx-dream"]]);
     // Repeated renders must not stack duplicate layers.
     appClaim.render({});
     expect(fixture.layers).toHaveLength(1);

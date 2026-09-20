@@ -246,6 +246,21 @@ export async function requestRecomp(sessionId: string): Promise<boolean> {
     }
 }
 
+/** Start a manual `/ctx-dream` run (optionally one named task) via RPC. The
+ *  server starts the pass in the background and pushes the summary when done. */
+export async function requestDream(sessionId: string, task?: string): Promise<boolean> {
+    if (!rpcClient) return false;
+    try {
+        const result = await rpcClient.call<{ ok: boolean }>("dream", {
+            sessionId,
+            ...(task ? { task } : {}),
+        });
+        return result.ok ?? false;
+    } catch {
+        return false;
+    }
+}
+
 /** Run `/ctx-session-upgrade` for the session (full recomp + once-per-project
  *  memory migration). Fired from the upgrade dialog's "Run upgrade now" action. */
 export async function requestUpgrade(sessionId: string): Promise<boolean> {

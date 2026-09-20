@@ -2,6 +2,7 @@ import { type ToolDefinition, type ToolResult, tool } from "@opencode-ai/plugin"
 import { loadPluginConfigDetailed } from "../../config";
 import { isCompactionEnabled } from "../../config/agent-disable";
 import { getProtectedTokensTierOverrides } from "../../config/project-security";
+import { summarizeManualDream } from "../../features/magic-context/dreamer/manual-summary";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { createScheduler } from "../../features/magic-context/scheduler";
 import {
@@ -31,6 +32,7 @@ import { createToolRegistry } from "../../plugin/tool-registry";
 import type { PluginContext } from "../../plugin/types";
 import { detectConflicts } from "../../shared/conflict-detector";
 import { getDataDir, getMagicContextStorageDir } from "../../shared/data-path";
+import { getErrorMessage } from "../../shared/error-message";
 import { resolveHistorianModel } from "../../shared/model-resolution";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import {
@@ -46,6 +48,7 @@ import { restoreRow } from "../fold/restore";
 import { createV2HiddenCompletionExecutor } from "../hidden-completion";
 import { gaDatabasePath, V2StoreReader } from "../store-reader";
 import { deliverPendingChannel2, isAdmittedSynthetic } from "./channel2";
+import { resolveManualDreamTask, runManualDreamNow } from "./dream-manual";
 import { startDreamTrigger } from "./dream-trigger";
 import { HiddenChildHook, registerHiddenChildAgents } from "./hidden-child";
 import { warmModelLimitCacheFromCatalog } from "./model-limit-cache";
@@ -707,6 +710,81 @@ export async function registerContext(context: V2Context) {
         liveSessionState: rpcLiveSessionState,
         rustModeModuleClient: undefined,
         storageDir,
+    });
+    // Manual /ctx-dream: the v1 lane runs it through its OpenCode command
+    // template; v2 has no command path, so the TUI's slash command reaches it
+    // here. A full dream pass outlives the RPC request timeout, so start it in
+    // the background and push the summary as a dialog notification when done.
+    const manualDreamer =
+        config.dreamer && config.dreamer.disable !== true ? config.dreamer : undefined;
+    rpcServer.handle("dream", async (params) => {
+        const sessionId = String(params.sessionId ?? "");
+        if (!sessionId) return { ok: false, error: "no session" };
+        const requested = resolveManualDreamTask(params.task);
+        if (requested.error) {
+            pushNotification("toast", { message: requested.error, variant: "warning" }, sessionId);
+            return { ok: false, error: requested.error };
+        }
+        if (!manualDreamer || !hiddenCompletionExecutor) {
+            pushNotification(
+                "toast",
+                { message: "Dreaming is not configured for this project.", variant: "warning" },
+                sessionId,
+            );
+            return { ok: false, error: "dreamer unavailable" };
+        }
+        db ??= openDatabase();
+        if (!db || !isDatabasePersisted(db)) {
+            pushNotification(
+                "toast",
+                {
+                    message: "Dreaming is unavailable: context storage is not durable.",
+                    variant: "error",
+                },
+                sessionId,
+            );
+            return { ok: false, error: "storage unavailable" };
+        }
+        const runDb = db;
+        const runExecutor = hiddenCompletionExecutor;
+        pushNotification(
+            "toast",
+            {
+                message: "Dream run started; the summary appears when it finishes.",
+                variant: "info",
+            },
+            sessionId,
+        );
+        void runManualDreamNow({
+            db: runDb,
+            dreamer: manualDreamer,
+            projectIdentity: resolveProjectIdentity(directory) ?? directory,
+            directory,
+            language: config.language,
+            mural: config.mural,
+            executor: runExecutor,
+            sessionId,
+            ...(requested.task !== undefined ? { task: requested.task } : {}),
+        })
+            .then((summary) => {
+                pushNotification(
+                    "action",
+                    {
+                        action: "show-result-dialog",
+                        title: "Magic Context dream run",
+                        message: summarizeManualDream(summary),
+                    },
+                    sessionId,
+                );
+            })
+            .catch((error) => {
+                pushNotification(
+                    "toast",
+                    { message: `Dream run failed: ${getErrorMessage(error)}`, variant: "error" },
+                    sessionId,
+                );
+            });
+        return { ok: true };
     });
     // start() is async but its Bun.serve + discovery-file prefix is synchronous;
     // run it in the next task so those filesystem calls stay outside the host's

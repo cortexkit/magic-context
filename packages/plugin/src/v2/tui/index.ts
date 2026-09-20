@@ -8,6 +8,7 @@ import {
     initRpcClient,
     loadSidebarSnapshot,
     loadStatusDetail,
+    requestDream,
     requestRecomp,
 } from "../../tui/data/context-db";
 import {
@@ -182,6 +183,22 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         return requested;
     };
 
+    const showDream = async (task?: string) => {
+        const target = currentSessionID(context);
+        if (!target) {
+            context.ui.toast.show({ message: "No active session", variant: "warning" });
+            return false;
+        }
+        const started = await requestDream(target, task);
+        context.ui.toast.show({
+            message: started
+                ? "Dream run started; the summary appears when it finishes"
+                : "Dream request failed",
+            variant: started ? "info" : "error",
+        });
+        return started;
+    };
+
     const unregisterSlot = context.ui.slot({
         append: "sidebar.content",
         render: ({ sessionID }) => {
@@ -190,12 +207,13 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         },
     });
 
-    // The keymap layer owns /ctx-status + /ctx-recomp. OpenCode 2 runs plugin
-    // setup() outside the TUI component tree, where context.keymap.layer()
-    // throws "Keymap.Provider is missing" (the provider is a Solid context).
-    // Try the direct call first (hosts that do run setup in-tree), then fall
-    // back to the app slot: its render executes inside the component tree, the
-    // same place the host's own built-in plugins register their layers.
+    // The keymap layer owns /ctx-status + /ctx-recomp + /ctx-dream. OpenCode 2
+    // runs plugin setup() outside the TUI component tree, where
+    // context.keymap.layer() throws "Keymap.Provider is missing" (the provider is
+    // a Solid context). Try the direct call first (hosts that do run setup
+    // in-tree), then fall back to the app slot: its render executes inside the
+    // component tree, the same place the host's own built-in plugins register
+    // their layers.
     const buildKeymapLayer = (): V2KeymapLayer => ({
         mode: "global",
         commands: [
@@ -217,6 +235,16 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
                 slash: { name: "ctx-recomp" },
                 run: async () => {
                     await showRecomp();
+                },
+            },
+            {
+                id: "magic-context.dream",
+                title: "Magic Context: Dream",
+                group: "Magic Context",
+                palette: true,
+                slash: { name: "ctx-dream", arguments: true },
+                run: async (input) => {
+                    await showDream(input?.trim() || undefined);
                 },
             },
         ],
@@ -249,7 +277,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
                 if (!registered && !keymapGapLogged) {
                     keymapGapLogged = true;
                     console.warn(
-                        "[magic-context] OpenCode 2 keymap.layer is unavailable; /ctx-status and /ctx-recomp were not registered",
+                        "[magic-context] OpenCode 2 keymap.layer is unavailable; /ctx-status, /ctx-recomp and /ctx-dream were not registered",
                     );
                 }
                 return null;

@@ -3,6 +3,7 @@ import { COMPACTION_ENABLED_PATH } from "../../config/agent-disable";
 import type { DreamerConfig, MagicContextConfig } from "../../config/schema/magic-context";
 import type { ResolvedTransformMode } from "../../config/transform-mode";
 import type { MagicContextBuiltinCommandName } from "../../features/builtin-commands/commands";
+import { summarizeManualDream } from "../../features/magic-context/dreamer/manual-summary";
 import { getDreamTaskBacklogs } from "../../features/magic-context/dreamer/task-gates";
 import {
     CANONICAL_DREAM_TASKS,
@@ -373,41 +374,6 @@ function readDreamTaskBacklogsSafely(
         // Command handling must remain available while an older/empty database is migrating.
         return {};
     }
-}
-
-function summarizeManualDream(s: ManualDreamSummary): string {
-    const lines: string[] = ["## /ctx-dream", ""];
-    if (s.ran.length > 0) lines.push(`Ran: ${s.ran.join(", ")}`);
-    if ((s.details?.length ?? 0) > 0) {
-        lines.push("Details:", ...(s.details ?? []).map((detail) => `- ${detail}`));
-    }
-    if (s.failed.length > 0) lines.push(`Failed: ${s.failed.join(", ")}`);
-    if ((s.failureDetails?.length ?? 0) > 0) {
-        lines.push("Failure details:", ...(s.failureDetails ?? []).map((detail) => `- ${detail}`));
-    }
-    if (s.skippedNoWork.length > 0) lines.push(`Skipped (no work): ${s.skippedNoWork.join(", ")}`);
-    if (s.deferredBusy.length > 0)
-        lines.push(
-            // "Busy" means the task's DOMAIN lease is held — usually a sibling
-            // task (e.g. a scheduled verify blocking a manual curate), not
-            // this task itself. Say so, or the message reads as a lie.
-            `Busy: ${s.deferredBusy.join(", ")} — another dream task holds this domain's lease; retry in a minute`,
-        );
-    if (Object.keys(s.backlogBefore ?? {}).length > 0) {
-        lines.push("", "Backlog at run start:", formatDreamTaskBacklogs(s.backlogBefore ?? {}));
-    }
-    if (Object.keys(s.backlogAfter ?? {}).length > 0) {
-        lines.push("", "Backlog at run end:", formatDreamTaskBacklogs(s.backlogAfter ?? {}));
-    }
-    if (
-        s.ran.length === 0 &&
-        s.failed.length === 0 &&
-        s.skippedNoWork.length === 0 &&
-        s.deferredBusy.length === 0
-    ) {
-        lines.push("No enabled dream tasks to run.");
-    }
-    return lines.join("\n");
 }
 
 async function executeDreaming(
