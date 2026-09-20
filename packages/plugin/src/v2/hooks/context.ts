@@ -497,6 +497,11 @@ export async function registerContext(context: V2Context) {
                 systemHash: foldDigest(JSON.stringify(draft.system)),
                 toolSetHash: "",
                 modelKey: `${draft.model.providerID}/${draft.model.id}`,
+                // Deliberately false: materializeM0 never reads `cacheExpired` —
+                // only mustMaterialize does, and that decision runs on the
+                // transform path with its own computed signals. This fold path
+                // renders fresh bytes unconditionally and uses only the
+                // system/model hashes for its markers.
                 cacheExpired: false,
                 lastResponseTime: state.lastResponseTime,
             },
