@@ -43,6 +43,7 @@ import {
     emptyWorkMetricsCarry,
     type WorkMetricsCarry,
 } from "../features/magic-context/work-metrics";
+import type { HiddenCompletionExecutor } from "../hooks/magic-context/compartment-runner-types";
 import { getEmbedDrainUiStatus } from "../hooks/magic-context/embed-session-state";
 import {
     resolveContextLimit,
@@ -1299,6 +1300,11 @@ export function registerRpcHandlers(
         client: unknown;
         liveSessionState: LiveSessionState;
         rustModeModuleClient?: RustModeModuleClient;
+        /**
+         * Hosts without an SDK client (OpenCode 2) hand the recomp/historian
+         * runner their own completion executor through this seam.
+         */
+        hiddenCompletionExecutor?: HiddenCompletionExecutor;
         storageDir?: string;
         getDebugMemoryHolders?: () => RuntimeDebugMemoryHolders | undefined;
     },
@@ -1437,6 +1443,7 @@ export function registerRpcHandlers(
         const historianModel = resolveHistorianModel(config, "opencode");
         return {
             client: args.client as ManagedRecompContext["client"],
+            hiddenCompletionExecutor: args.hiddenCompletionExecutor,
             db,
             liveSessionState,
             directory,
@@ -1448,7 +1455,10 @@ export function registerRpcHandlers(
             autoPromote: config.memory?.auto_promote ?? true,
             historianModel: historianModel.primary,
             fallbackModels: historianModel.fallbacks,
-            runMigration: config.memory?.enabled !== false && !!historianModel.primary?.model,
+            runMigration:
+                args.client !== undefined &&
+                config.memory?.enabled !== false &&
+                !!historianModel.primary?.model,
             userMemoriesEnabled: userMemoryCollectionEnabled(config.dreamer),
             historianTwoPass: config.historian?.two_pass === true,
             getNotificationParams,

@@ -3,6 +3,7 @@ import { loadPluginConfigDetailed } from "../../config";
 import { isCompactionEnabled } from "../../config/agent-disable";
 import { getProtectedTokensTierOverrides } from "../../config/project-security";
 import { summarizeManualDream } from "../../features/magic-context/dreamer/manual-summary";
+import { isFailClosedBlockingError } from "../../features/magic-context/fail-closed-block";
 import { resolveProjectIdentity } from "../../features/magic-context/memory/project-identity";
 import { createScheduler } from "../../features/magic-context/scheduler";
 import {
@@ -13,6 +14,8 @@ import {
 } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
 import { assertExecutableToolInput } from "../../hooks/magic-context/dropped-input-guard";
+import { EmergencyFailClosedError } from "../../hooks/magic-context/emergency-fail-closed";
+import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
 import {
     createChatMessageHook,
     createToolExecuteAfterHook,
@@ -51,7 +54,7 @@ import { deliverPendingChannel2, isAdmittedSynthetic } from "./channel2";
 import { resolveManualDreamTask, runManualDreamNow } from "./dream-manual";
 import { startDreamTrigger } from "./dream-trigger";
 import { HiddenChildHook, registerHiddenChildAgents } from "./hidden-child";
-import { warmModelLimitCacheFromCatalog } from "./model-limit-cache";
+import { modelLimitCacheWarm, warmModelLimitCacheFromCatalog } from "./model-limit-cache";
 import { adaptPayload, HEAD_IDS } from "./payload";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { rawMessages } from "./store";
@@ -192,8 +195,6 @@ export async function registerContext(context: V2Context) {
         return;
     }
     const folds = new FoldOwner(context.storage);
-    const limits = new Map<string, number>();
-    const queriedModels = new Set<string>();
     // Draft-authoritative model/variant/agent. Not the v1 event-driven map.
     const liveModels: NonNullable<TransformDeps["liveModelBySession"]> = new Map();
     const promptSurfaceRuntime = createPromptSurfaceRuntime({
@@ -292,6 +293,11 @@ export async function registerContext(context: V2Context) {
                                 sessionID: toolContext.sessionID,
                                 messageID: toolContext.messageID,
                                 agent: toolContext.agent,
+                                // The v2 Tool.Context carries no directory, so the
+                                // plugin's launch directory is the closest scope
+                                // available. A session launched from outside the
+                                // project can therefore resolve a different project
+                                // identity than its own cwd (v1 uses toolContext.directory).
                                 directory,
                                 worktree: directory,
                                 abort: new AbortController().signal,
@@ -325,14 +331,20 @@ export async function registerContext(context: V2Context) {
         getCount: (sessionID: string) => read(sessionID).length,
     });
     let transform: ReturnType<typeof createTransform> | undefined;
-    // Usage measured from the most recent assistant response. The transform's
-    // first-pass reset zeroes the persisted usage fields mid-pass, so the same
-    // values are re-applied after the pass — the v1 lane's event handler writes
-    // after the pass too, which is why its sidebar never shows the reset.
-    let measuredUsage:
-        | { inputTokens: number; limit: number; modelKey: string; completed?: number }
-        | undefined;
-    const usageMetaPatch = (value: NonNullable<typeof measuredUsage>) => ({
+    type MeasuredUsage = {
+        inputTokens: number;
+        limit: number;
+        modelKey: string;
+        completed?: number;
+    };
+    // Usage measured from the most recent assistant response, keyed by session so
+    // sibling sessions in the same project cannot overwrite each other's reading.
+    // The transform's first-pass reset zeroes the persisted usage fields mid-pass,
+    // so the same values are re-applied after the pass — the v1 lane's event
+    // handler writes after the pass too, which is why its sidebar never shows the
+    // reset.
+    const measuredUsageBySession = new Map<string, MeasuredUsage>();
+    const usageMetaPatch = (value: MeasuredUsage) => ({
         ...(value.completed !== undefined ? { lastResponseTime: value.completed } : {}),
         lastContextPercentage: (value.inputTokens / value.limit) * 100,
         lastInputTokens: value.inputTokens,
@@ -354,28 +366,43 @@ export async function registerContext(context: V2Context) {
                     .filter((row) => row.type === "assistant")
                     .at(-1);
                 const tokens = latest?.data.tokens;
-                const modelKey = `${draft.model.providerID}/${draft.model.id}`;
-                if (!queriedModels.has(modelKey)) {
-                    const catalog = await Promise.resolve(context.model.list());
-                    for (const model of catalogModels(catalog))
-                        limits.set(`${model.providerID}/${model.id}`, model.limit.context);
-                    queriedModels.add(modelKey);
-                }
-                const limit = limits.get(modelKey);
-                if (tokens && limit && Number.isFinite(limit) && limit > 0) {
-                    const inputTokens = tokens.input + tokens.cache.read + tokens.cache.write;
+                // Attribute the reading to the model that produced the response (the
+                // store row carries it) so a model switch cannot re-attribute the old
+                // response's tokens to the new model. Falls back to the draft model.
+                const rowModel = latest?.data.model;
+                const measuredProviderID =
+                    typeof rowModel?.providerID === "string"
+                        ? rowModel.providerID
+                        : draft.model.providerID;
+                const measuredModelID =
+                    typeof rowModel?.id === "string" ? rowModel.id : draft.model.id;
+                const modelKey = `${measuredProviderID}/${measuredModelID}`;
+                // Resolve the same output-reserved usable window every other consumer
+                // (sidebar, history budgets, geometry) divides by. Reading the raw
+                // catalog window here made the persisted percentage and the 95% check
+                // disagree with the same sidebar's denominator.
+                const limit = resolveContextLimit(measuredProviderID, measuredModelID, {
+                    db,
+                    sessionID: draft.sessionID,
+                });
+                if (tokens && Number.isFinite(limit) && limit > 0) {
+                    const inputTokens =
+                        (tokens.input ?? 0) +
+                        (tokens.cache?.read ?? 0) +
+                        (tokens.cache?.write ?? 0);
                     // Native compaction owns the window when MC compaction is off.
                     unsafe = compactionEnabled && inputTokens / limit >= 0.95;
                     const completed = latest?.data.time?.completed;
-                    measuredUsage = {
+                    const measured: MeasuredUsage = {
                         inputTokens,
                         limit,
                         modelKey,
                         ...(typeof completed === "number" ? { completed } : {}),
                     };
+                    measuredUsageBySession.set(draft.sessionID, measured);
                     // Early write covers the abort path (returned before the
                     // transform); the post-pass write below wins on normal turns.
-                    updateSessionMeta(db, draft.sessionID, usageMetaPatch(measuredUsage));
+                    updateSessionMeta(db, draft.sessionID, usageMetaPatch(measured));
                     usage.set(draft.sessionID, {
                         usage: { inputTokens, percentage: (inputTokens / limit) * 100 },
                         hasUsageTokens: true,
@@ -457,6 +484,11 @@ export async function registerContext(context: V2Context) {
         });
         variants.set(draft.sessionID, draft.model.variant);
         agents.set(draft.sessionID, draft.agent);
+        if (!modelLimitCacheWarm()) {
+            // The boot warm can fail while the host catalog is still starting up;
+            // retry once per pass until the shared cache actually holds entries.
+            void warmModelLimitCacheFromCatalog(context);
+        }
         applyV2PromptSurfaceTools(draft, promptSurfaceRuntime, config.prompt_surface);
         if (context.tool.transform) {
             const modelKey = `${draft.model.providerID}/${draft.model.id}`;
@@ -635,9 +667,16 @@ export async function registerContext(context: V2Context) {
             }
             // Re-apply the usage fields the transform's first-pass reset zeroed
             // mid-pass (the v1 lane's event handler writes after the pass too, which
-            // is why its sidebar never shows the reset).
-            if (db && measuredUsage) {
-                updateSessionMeta(db, draft.sessionID, usageMetaPatch(measuredUsage));
+            // is why its sidebar never shows the reset). Skip when the response came
+            // from another model: a model switch deliberately clears the stale
+            // per-model usage that the transform just reset.
+            if (db) {
+                const measured = measuredUsageBySession.get(draft.sessionID);
+                measuredUsageBySession.delete(draft.sessionID);
+                const passModelKey = `${draft.model.providerID}/${draft.model.id}`;
+                if (measured && measured.modelKey === passModelKey) {
+                    updateSessionMeta(db, draft.sessionID, usageMetaPatch(measured));
+                }
             }
             if (checkpoint && submitted !== undefined) {
                 const head = draft.messages.find((message) => message.id === HEAD_IDS[0]);
@@ -665,15 +704,32 @@ export async function registerContext(context: V2Context) {
             }
         } catch (error) {
             if (error instanceof V2ContextRefusal) throw error;
-            if (postFold) {
+            if (error instanceof EmergencyFailClosedError || isFailClosedBlockingError(error)) {
+                // Intentional loud aborts from the transform. The v2 lane has no SDK
+                // client to drive the emergency notification, but the turn must still
+                // be refused rather than sending the unmodified oversized prompt.
+                // Compaction-off is inert (native compaction owns the window),
+                // matching the v1 wrapper's behavior.
+                if (compactionEnabled) {
+                    await interruptBeforeProvider(context.session, draft.sessionID);
+                    throw new V2ContextRefusal("Magic Context refused to send an unsafe prompt.", {
+                        cause: error,
+                    });
+                }
+                console.warn(
+                    "[magic-context] compaction-off: fail-closed inert, passing through",
+                    error,
+                );
+            } else if (postFold) {
                 await interruptBeforeProvider(context.session, draft.sessionID);
                 throw new V2ContextRefusal(
                     "Magic Context could not restore the unarchived host history.",
                     { cause: error },
                 );
+            } else {
+                // Another plugin can poison the shared draft. Do not fail an otherwise viable turn.
+                console.warn("[magic-context] v2 context unavailable", error);
             }
-            // Another plugin can poison the shared draft. Do not fail an otherwise viable turn.
-            console.warn("[magic-context] v2 context unavailable", error);
         }
     });
     // The v1 lane warms MC's model-limit cache from its SDK client at boot; the
@@ -704,11 +760,13 @@ export async function registerContext(context: V2Context) {
     registerRpcHandlers(rpcServer, {
         directory,
         config,
-        // The v2 host context exposes no SDK client, so the recomp/upgrade
-        // notify paths stay inert; the read-only snapshot handlers need none.
+        // The v2 host context exposes no SDK client, so the notify paths stay
+        // inert; the recomp/historian runner reaches the lane's own completion
+        // executor through the shared seam instead.
         client: undefined,
         liveSessionState: rpcLiveSessionState,
         rustModeModuleClient: undefined,
+        hiddenCompletionExecutor,
         storageDir,
     });
     // Manual /ctx-dream: the v1 lane runs it through its OpenCode command

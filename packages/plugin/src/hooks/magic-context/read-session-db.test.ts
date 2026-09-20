@@ -607,6 +607,7 @@ function insertV2SessionMessages(
         model?: { providerID?: string; id?: string };
         agent?: string;
     }>,
+    options: { v2Marker?: boolean } = {},
 ): void {
     const dbPath = join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db");
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -632,7 +633,11 @@ function insertV2SessionMessages(
                 time_updated INTEGER NOT NULL,
                 data TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS session_v2 (
+                id TEXT PRIMARY KEY
+            );
         `);
+        if (options.v2Marker === false) db.exec("DROP TABLE IF EXISTS session_v2");
         const insert = db.prepare(
             `INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
              VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -720,6 +725,38 @@ describe("findLastAssistantModelFromOpenCodeDb", () => {
             },
         ]);
         insertV2SessionMessages([{ id: "sms_user", sessionId: "ses_A", type: "user", seq: 1 }]);
+        expect(findLastAssistantModelFromOpenCodeDb("ses_A")).toEqual({
+            providerID: "anthropic",
+            modelID: "claude-opus-4-7",
+        });
+    });
+
+    it("does not consult the v2 table on a 1.18 store that also ships session_message", () => {
+        useTempDataHome("read-session-db-v1-session-message-");
+        createOpenCodeDb([
+            {
+                id: "msg_live",
+                sessionId: "ses_A",
+                role: "assistant",
+                providerID: "anthropic",
+                modelID: "claude-opus-4-7",
+                timeCreated: 2000,
+            },
+        ]);
+        // 1.18 stores ship session_message but no session_v2 marker; a stale
+        // v2-shaped row must not win over the live v1 row.
+        insertV2SessionMessages(
+            [
+                {
+                    id: "sms_stale",
+                    sessionId: "ses_A",
+                    type: "assistant",
+                    seq: 9,
+                    model: { providerID: "stale", id: "stale-model" },
+                },
+            ],
+            { v2Marker: false },
+        );
         expect(findLastAssistantModelFromOpenCodeDb("ses_A")).toEqual({
             providerID: "anthropic",
             modelID: "claude-opus-4-7",

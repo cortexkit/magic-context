@@ -591,55 +591,82 @@ export function getMessageTimesFromOpenCodeDb(
     return result;
 }
 
+function isV2SessionMessageStore(db: Database): boolean {
+    try {
+        const names = new Set(
+            (
+                db
+                    .prepare(
+                        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('message', 'part', 'session_message', 'session_v2')",
+                    )
+                    .all() as Array<{ name?: unknown }>
+            ).flatMap((row) => (typeof row.name === "string" ? [row.name] : [])),
+        );
+        if (!names.has("session_message")) return false;
+        // session_v2 is written only by an OpenCode 2 host; a native v2 store has
+        // no v1 message tables at all. OpenCode 1.18 ships session_message beside
+        // message+part, so those tables must not be mistaken for a v2 store.
+        if (names.has("session_v2")) return true;
+        return !(names.has("message") && names.has("part"));
+    } catch {
+        return false;
+    }
+}
+
 export function findLastAssistantModelFromOpenCodeDb(
     sessionId: string,
 ): { providerID: string; modelID: string; agent?: string } | null {
     try {
         return withReadOnlySessionDb((db) => {
-            // A v2 host writes assistant models on `session_message`. On a migrated
-            // store the frozen v1 `message` table still exists but holds only
-            // pre-migration rows, so prefer the v2 table and fall back to v1 only
-            // when v2 has nothing for this session (a legacy session untouched
-            // since the migration).
-            const hasV2Messages = Boolean(
-                db
-                    .prepare(
-                        "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'session_message' LIMIT 1",
-                    )
-                    .get(),
-            );
-            const v2Row = hasV2Messages
-                ? (db
-                      .prepare(
-                          `SELECT json_extract(data, '$.model.providerID') as providerID,
-                                  json_extract(data, '$.model.id') as modelID,
-                                  json_extract(data, '$.agent') as agent
-                           FROM session_message
-                           WHERE session_id = ?
-                             AND type = 'assistant'
-                             AND json_extract(data, '$.model.providerID') IS NOT NULL
-                             AND json_extract(data, '$.model.id') IS NOT NULL
-                           ORDER BY seq DESC
-                           LIMIT 1`,
-                      )
-                      .get(sessionId) as (AssistantModelRow & { agent?: string | null }) | null)
-                : null;
-            const row =
-                v2Row ??
-                (db
-                    .prepare(
-                        `SELECT json_extract(data, '$.providerID') as providerID,
-                                json_extract(data, '$.modelID') as modelID,
-                                json_extract(data, '$.agent') as agent
-                         FROM message
-                         WHERE session_id = ?
-                           AND json_extract(data, '$.role') = 'assistant'
-                           AND json_extract(data, '$.providerID') IS NOT NULL
-                           AND json_extract(data, '$.modelID') IS NOT NULL
-                         ORDER BY time_created DESC
-                         LIMIT 1`,
-                    )
-                    .get(sessionId) as (AssistantModelRow & { agent?: string | null }) | null);
+            // An OpenCode 1.18 store also ships a `session_message` table (pinned in
+            // opencode-db-path tests), so its mere presence is NOT a v2 signal. Only
+            // an OpenCode 2 store (native, or a v1 store it migrated) is queried as
+            // v2; each query is individually guarded so a foreign shape falls through
+            // to the other generation instead of aborting the whole lookup.
+            const queryV2 = (): (AssistantModelRow & { agent?: string | null }) | null => {
+                try {
+                    return db
+                        .prepare(
+                            `SELECT json_extract(data, '$.model.providerID') as providerID,
+                                    json_extract(data, '$.model.id') as modelID,
+                                    json_extract(data, '$.agent') as agent
+                             FROM session_message
+                             WHERE session_id = ?
+                               AND type = 'assistant'
+                               AND json_extract(data, '$.model.providerID') IS NOT NULL
+                               AND json_extract(data, '$.model.id') IS NOT NULL
+                             ORDER BY seq DESC
+                             LIMIT 1`,
+                        )
+                        .get(sessionId) as (AssistantModelRow & { agent?: string | null }) | null;
+                } catch {
+                    return null;
+                }
+            };
+            const queryV1 = (): (AssistantModelRow & { agent?: string | null }) | null => {
+                try {
+                    return db
+                        .prepare(
+                            `SELECT json_extract(data, '$.providerID') as providerID,
+                                    json_extract(data, '$.modelID') as modelID,
+                                    json_extract(data, '$.agent') as agent
+                             FROM message
+                             WHERE session_id = ?
+                               AND json_extract(data, '$.role') = 'assistant'
+                               AND json_extract(data, '$.providerID') IS NOT NULL
+                               AND json_extract(data, '$.modelID') IS NOT NULL
+                             ORDER BY time_created DESC
+                             LIMIT 1`,
+                        )
+                        .get(sessionId) as (AssistantModelRow & { agent?: string | null }) | null;
+                } catch {
+                    return null;
+                }
+            };
+            // The frozen v1 `message` table on a migrated store holds only
+            // pre-migration rows, so a v2 store prefers its own table and falls back
+            // to v1 only for a legacy session untouched since the migration.
+            const row = (isV2SessionMessageStore(db) ? queryV2() : null) ?? queryV1();
             if (!row || typeof row.providerID !== "string" || typeof row.modelID !== "string") {
                 return null;
             }

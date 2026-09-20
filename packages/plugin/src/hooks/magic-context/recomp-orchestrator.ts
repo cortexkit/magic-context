@@ -21,7 +21,7 @@ import {
     executeContextRecompWithResult,
     type PartialRecompRange,
 } from "./compartment-runner";
-import type { RecompProgress } from "./compartment-runner-types";
+import type { HiddenCompletionExecutor, RecompProgress } from "./compartment-runner-types";
 import type { LiveSessionState } from "./live-session-state";
 import { dropSlot } from "./lkg-slot";
 import type { NotificationParams } from "./send-session-notification";
@@ -59,6 +59,11 @@ function resolveLiveModelKey(
  *  hook config. */
 export interface ManagedRecompContext {
     client: PluginContext["client"];
+    /**
+     * Executor seam for hosts without an SDK client (OpenCode 2): the recomp /
+     * historian runner uses it instead of building the v1 client-backed executor.
+     */
+    hiddenCompletionExecutor?: HiddenCompletionExecutor;
     db: Database;
     liveSessionState: LiveSessionState;
     /** Plugin-startup directory — last-resort fallback for session-dir resolution. */
@@ -234,6 +239,7 @@ export function setRecompTerminal(
 function buildRecompDeps(ctx: ManagedRecompContext, sessionId: string) {
     return {
         client: ctx.client,
+        hiddenCompletionExecutor: ctx.hiddenCompletionExecutor,
         db: ctx.db,
         sessionId,
         historianChunkTokens: ctx.historianChunkTokens,

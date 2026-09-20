@@ -1,10 +1,21 @@
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
-import { refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
+import { getModelsDevCacheState, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import type { V2Context } from "./types";
 
 /** Once-per-process latch: the model-limit cache is process-global. */
 let warmStarted = false;
+
+/** True once the shared cache holds model entries (persisted seed or fresh warm). */
+export function modelLimitCacheWarm(): boolean {
+    const state = getModelsDevCacheState();
+    return state.apiLoaded && state.apiCount > 0;
+}
+
+/** Test-only: clear the once-per-process latch. */
+export function resetModelLimitCacheWarmForTest(): void {
+    warmStarted = false;
+}
 
 /**
  * Build the `config.providers()` payload `refreshModelLimitsFromApi` consumes
@@ -44,7 +55,10 @@ export function catalogProvidersPayload(listed: unknown): Array<{
  * catalog the host itself uses, so feeding it through the shared refresh keeps
  * one source of truth and persists a last-known-good file for cold starts.
  */
-export async function warmModelLimitCacheFromCatalog(context: V2Context): Promise<void> {
+export async function warmModelLimitCacheFromCatalog(
+    context: V2Context,
+    options: { retries?: number; retryDelayMs?: number } = {},
+): Promise<void> {
     if (warmStarted) return;
     warmStarted = true;
     try {
@@ -60,9 +74,17 @@ export async function warmModelLimitCacheFromCatalog(context: V2Context): Promis
                     }),
                 },
             },
-            { retries: 3, retryDelayMs: 1000 },
+            {
+                retries: options.retries ?? 3,
+                retryDelayMs: options.retryDelayMs ?? 1000,
+            },
         );
     } catch (error) {
         sessionLog("global", `v2 model-limit cache warm failed: ${getErrorMessage(error)}`);
+    } finally {
+        // Latch only while the cache actually holds entries: a warm that failed
+        // because the host catalog was not ready yet must retry on a later turn
+        // (v2 has no after-auth re-warm like the v1 event handler).
+        if (!modelLimitCacheWarm()) warmStarted = false;
     }
 }
