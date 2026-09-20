@@ -13,7 +13,7 @@ import {
     startNotificationSocket,
     stopNotificationSocket,
 } from "../../tui/data/notification-socket";
-import type { V2SidebarState, V2TuiContext } from "./types";
+import type { V2KeymapLayer, V2SidebarState, V2TuiContext } from "./types";
 
 const SIDEBAR_REFRESH_MS = 1_000;
 const inflight = new Set<string>();
@@ -170,38 +170,71 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
         },
     });
 
-    try {
-        context.keymap.layer(() => ({
-            mode: "global",
-            commands: [
-                {
-                    id: "magic-context.status",
-                    title: "Magic Context: Status",
-                    group: "Magic Context",
-                    palette: true,
-                    slash: { name: "ctx-status", arguments: true },
-                    run: async (input) => {
-                        await showStatus(input?.trim().toLowerCase() === "diagnostics");
-                    },
+    // The keymap layer owns /ctx-status + /ctx-recomp. OpenCode 2 runs plugin
+    // setup() outside the TUI component tree, where context.keymap.layer()
+    // throws "Keymap.Provider is missing" (the provider is a Solid context).
+    // Try the direct call first (hosts that do run setup in-tree), then fall
+    // back to the app slot: its render executes inside the component tree, the
+    // same place the host's own built-in plugins register their layers.
+    const buildKeymapLayer = (): V2KeymapLayer => ({
+        mode: "global",
+        commands: [
+            {
+                id: "magic-context.status",
+                title: "Magic Context: Status",
+                group: "Magic Context",
+                palette: true,
+                slash: { name: "ctx-status", arguments: true },
+                run: async (input) => {
+                    await showStatus(input?.trim().toLowerCase() === "diagnostics");
                 },
-                {
-                    id: "magic-context.recomp",
-                    title: "Magic Context: Recomp",
-                    group: "Magic Context",
-                    palette: true,
-                    slash: { name: "ctx-recomp" },
-                    run: async () => {
-                        await showRecomp();
-                    },
+            },
+            {
+                id: "magic-context.recomp",
+                title: "Magic Context: Recomp",
+                group: "Magic Context",
+                palette: true,
+                slash: { name: "ctx-recomp" },
+                run: async () => {
+                    await showRecomp();
                 },
-            ],
-        }));
-    } catch (error) {
-        if (!(error instanceof Error) || error.message !== "Keymap.Provider is missing")
-            throw error;
-        console.warn(
-            "[magic-context] OpenCode 2.0.5 keymap.layer is unavailable during plugin setup; /ctx-status and /ctx-recomp were not registered",
-        );
+            },
+        ],
+    });
+    let keymapLayerRegistered = false;
+    let keymapGapLogged = false;
+    const registerKeymapLayer = (): boolean => {
+        if (keymapLayerRegistered) return true;
+        try {
+            context.keymap.layer(buildKeymapLayer);
+            keymapLayerRegistered = true;
+            return true;
+        } catch (error) {
+            if (!(error instanceof Error) || error.message !== "Keymap.Provider is missing")
+                throw error;
+            return false;
+        }
+    };
+    let unregisterKeymapSlot: (() => void) | undefined;
+    if (!registerKeymapLayer()) {
+        unregisterKeymapSlot = context.ui.slot({
+            append: "app",
+            render: () => {
+                let registered = false;
+                try {
+                    registered = registerKeymapLayer();
+                } catch (error) {
+                    console.warn("[magic-context] keymap.layer registration failed", error);
+                }
+                if (!registered && !keymapGapLogged) {
+                    keymapGapLogged = true;
+                    console.warn(
+                        "[magic-context] OpenCode 2 keymap.layer is unavailable; /ctx-status and /ctx-recomp were not registered",
+                    );
+                }
+                return null;
+            },
+        });
     }
 
     const stopListening = context.data.listen(({ details }) => {
@@ -255,6 +288,7 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
 
     return () => {
         unregisterSlot();
+        unregisterKeymapSlot?.();
         stopListening();
         stopNotificationSocket();
         closeRpc();

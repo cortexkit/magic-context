@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { Host } from "@opencode/plugin/host";
 import { setupWithJsx } from "./index";
-import type { V2SidebarState, V2TuiContext } from "./types";
+import type { V2SidebarState, V2SlotClaim, V2TuiContext } from "./types";
 
 const temporary: string[] = [];
 afterEach(() => {
@@ -13,7 +13,7 @@ afterEach(() => {
 });
 
 function v2Context() {
-    const claims: Array<{ render: (input: { sessionID: string }) => unknown }> = [];
+    const claims: V2SlotClaim[] = [];
     const layers: Array<ReturnType<Parameters<V2TuiContext["keymap"]["layer"]>[0]>> = [];
     const cleanups: Array<() => void> = [];
     const state: V2SidebarState = { snapshots: {} };
@@ -125,8 +125,10 @@ test("GA 2.0.5 resolves ./tui and executes the union setup contract", async () =
     expect(typeof loaded.default.setup).toBe("function");
     const fixture = v2Context();
     const cleanup = await setupWithJsx(fixture.context, (type, props) => ({ type, props }));
-    expect(fixture.claims).toHaveLength(1);
-    expect(fixture.claims[0]!.render({ sessionID: "ses-v2-tui" })).toEqual({
+    expect(fixture.claims.map((claim) => claim.append)).toEqual(["sidebar.content"]);
+    const sidebarClaim = fixture.claims[0]!;
+    if (sidebarClaim.append !== "sidebar.content") throw new Error("expected the sidebar claim");
+    expect(sidebarClaim.render({ sessionID: "ses-v2-tui" })).toEqual({
         type: "text",
         props: { children: expect.stringContaining("Magic Context") },
     });
@@ -137,17 +139,60 @@ test("GA 2.0.5 resolves ./tui and executes the union setup contract", async () =
     cleanup();
 });
 
-test("GA 2.0.5 records its unbound keymap.layer gap without losing the sidebar", async () => {
+test("GA 2.0.5 registers the keymap layer from the app slot when setup runs outside the provider", async () => {
+    const fixture = v2Context();
+    let providerAvailable = false;
+    Object.assign(fixture.context.keymap, {
+        layer: (input: () => unknown) => {
+            if (!providerAvailable) throw new Error("Keymap.Provider is missing");
+            fixture.layers.push(input() as never);
+        },
+    });
+    const cleanup = await setupWithJsx(fixture.context, (type, props) => ({ type, props }));
+    expect(fixture.claims.map((claim) => claim.append)).toEqual(["sidebar.content", "app"]);
+    expect(fixture.layers).toHaveLength(0);
+
+    // The app slot render executes inside the component tree, where the provider resolves.
+    providerAvailable = true;
+    const appClaim = fixture.claims.find((claim) => claim.append === "app");
+    if (appClaim?.append !== "app") throw new Error("expected the app slot claim");
+    appClaim.render({});
+    expect(
+        fixture.layers.map((layer) => layer.commands.map((command) => command.slash.name)),
+    ).toEqual([["ctx-status", "ctx-recomp"]]);
+    // Repeated renders must not stack duplicate layers.
+    appClaim.render({});
+    expect(fixture.layers).toHaveLength(1);
+    cleanup();
+});
+
+test("GA 2.0.5 keeps the sidebar when the app-slot keymap registration also fails", async () => {
     const fixture = v2Context();
     Object.assign(fixture.context.keymap, {
         layer: () => {
             throw new Error("Keymap.Provider is missing");
         },
     });
-    const cleanup = await setupWithJsx(fixture.context, (type, props) => ({ type, props }));
-    expect(fixture.claims).toHaveLength(1);
-    expect(fixture.layers).toHaveLength(0);
-    cleanup();
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+        warnings.push(args.map(String).join(" "));
+    };
+    try {
+        const cleanup = await setupWithJsx(fixture.context, (type, props) => ({ type, props }));
+        expect(fixture.claims.map((claim) => claim.append)).toEqual(["sidebar.content", "app"]);
+        const appClaim = fixture.claims.find((claim) => claim.append === "app");
+        if (appClaim?.append !== "app") throw new Error("expected the app slot claim");
+        appClaim.render({});
+        appClaim.render({});
+        expect(fixture.layers).toHaveLength(0);
+        expect(
+            warnings.filter((line) => line.includes("keymap.layer is unavailable")),
+        ).toHaveLength(1);
+        cleanup();
+    } finally {
+        console.warn = originalWarn;
+    }
 });
 
 test("OpenCode 1.18.30 TUI loader projection executes unchanged sidebar registration", async () => {
