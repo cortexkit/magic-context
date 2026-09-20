@@ -596,20 +596,50 @@ export function findLastAssistantModelFromOpenCodeDb(
 ): { providerID: string; modelID: string; agent?: string } | null {
     try {
         return withReadOnlySessionDb((db) => {
-            const row = db
-                .prepare(
-                    `SELECT json_extract(data, '$.providerID') as providerID,
-                            json_extract(data, '$.modelID') as modelID,
-                            json_extract(data, '$.agent') as agent
-                     FROM message
-                     WHERE session_id = ?
-                       AND json_extract(data, '$.role') = 'assistant'
-                       AND json_extract(data, '$.providerID') IS NOT NULL
-                       AND json_extract(data, '$.modelID') IS NOT NULL
-                     ORDER BY time_created DESC
-                     LIMIT 1`,
-                )
-                .get(sessionId) as (AssistantModelRow & { agent?: string | null }) | null;
+            // A v2 host writes assistant models on `session_message`. On a migrated
+            // store the frozen v1 `message` table still exists but holds only
+            // pre-migration rows, so prefer the v2 table and fall back to v1 only
+            // when v2 has nothing for this session (a legacy session untouched
+            // since the migration).
+            const hasV2Messages = Boolean(
+                db
+                    .prepare(
+                        "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'session_message' LIMIT 1",
+                    )
+                    .get(),
+            );
+            const v2Row = hasV2Messages
+                ? (db
+                      .prepare(
+                          `SELECT json_extract(data, '$.model.providerID') as providerID,
+                                  json_extract(data, '$.model.id') as modelID,
+                                  json_extract(data, '$.agent') as agent
+                           FROM session_message
+                           WHERE session_id = ?
+                             AND type = 'assistant'
+                             AND json_extract(data, '$.model.providerID') IS NOT NULL
+                             AND json_extract(data, '$.model.id') IS NOT NULL
+                           ORDER BY seq DESC
+                           LIMIT 1`,
+                      )
+                      .get(sessionId) as (AssistantModelRow & { agent?: string | null }) | null)
+                : null;
+            const row =
+                v2Row ??
+                (db
+                    .prepare(
+                        `SELECT json_extract(data, '$.providerID') as providerID,
+                                json_extract(data, '$.modelID') as modelID,
+                                json_extract(data, '$.agent') as agent
+                         FROM message
+                         WHERE session_id = ?
+                           AND json_extract(data, '$.role') = 'assistant'
+                           AND json_extract(data, '$.providerID') IS NOT NULL
+                           AND json_extract(data, '$.modelID') IS NOT NULL
+                         ORDER BY time_created DESC
+                         LIMIT 1`,
+                    )
+                    .get(sessionId) as (AssistantModelRow & { agent?: string | null }) | null);
             if (!row || typeof row.providerID !== "string" || typeof row.modelID !== "string") {
                 return null;
             }

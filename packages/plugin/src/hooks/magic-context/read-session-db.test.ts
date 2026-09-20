@@ -598,6 +598,57 @@ function createOpenCodeDb(rows: MessageRow[]): void {
     }
 }
 
+function insertV2SessionMessages(
+    rows: Array<{
+        id: string;
+        sessionId: string;
+        type: "user" | "assistant" | "compaction";
+        seq: number;
+        model?: { providerID?: string; id?: string };
+        agent?: string;
+    }>,
+): void {
+    const dbPath = join(process.env.XDG_DATA_HOME!, "opencode", "opencode.db");
+    mkdirSync(dirname(dbPath), { recursive: true });
+    const db = new Database(dbPath);
+    try {
+        db.exec(`
+            -- A migrated store keeps the v1 tables beside the v2 schema; the
+            -- read-only session DB guard classifies message+part as v1.
+            CREATE TABLE IF NOT EXISTS part (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS session_message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+        `);
+        const insert = db.prepare(
+            `INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        );
+        const now = Date.now();
+        for (const row of rows) {
+            const data: Record<string, unknown> = {};
+            if (row.model !== undefined) data.model = row.model;
+            if (row.agent !== undefined) data.agent = row.agent;
+            insert.run(row.id, row.sessionId, row.type, row.seq, now, now, JSON.stringify(data));
+        }
+    } finally {
+        closeQuietly(db);
+    }
+}
+
 describe("latestPersistedMessageForRecovery", () => {
     it("reports when the latest assistant child has completed", () => {
         useTempDataHome("read-session-db-recovery-completed-");
@@ -626,6 +677,55 @@ describe("latestPersistedMessageForRecovery", () => {
 });
 
 describe("findLastAssistantModelFromOpenCodeDb", () => {
+    it("prefers the v2 session_message table on a migrated store", () => {
+        useTempDataHome("read-session-db-v2-preference-");
+        createOpenCodeDb([
+            {
+                id: "msg_stale",
+                sessionId: "ses_A",
+                role: "assistant",
+                providerID: "anthropic",
+                modelID: "claude-sonnet-4.5",
+                timeCreated: 1000,
+            },
+        ]);
+        insertV2SessionMessages([
+            { id: "sms_user", sessionId: "ses_A", type: "user", seq: 1 },
+            {
+                id: "sms_asst",
+                sessionId: "ses_A",
+                type: "assistant",
+                seq: 2,
+                model: { providerID: "commandcode", id: "deepseek/deepseek-v4.1-flash" },
+                agent: "build",
+            },
+        ]);
+        expect(findLastAssistantModelFromOpenCodeDb("ses_A")).toEqual({
+            providerID: "commandcode",
+            modelID: "deepseek/deepseek-v4.1-flash",
+            agent: "build",
+        });
+    });
+
+    it("falls back to the v1 table when the v2 table has no assistant rows", () => {
+        useTempDataHome("read-session-db-v2-fallback-");
+        createOpenCodeDb([
+            {
+                id: "msg_legacy",
+                sessionId: "ses_A",
+                role: "assistant",
+                providerID: "anthropic",
+                modelID: "claude-opus-4-7",
+                timeCreated: 1000,
+            },
+        ]);
+        insertV2SessionMessages([{ id: "sms_user", sessionId: "ses_A", type: "user", seq: 1 }]);
+        expect(findLastAssistantModelFromOpenCodeDb("ses_A")).toEqual({
+            providerID: "anthropic",
+            modelID: "claude-opus-4-7",
+        });
+    });
+
     it("returns null for a session with no assistant messages", () => {
         useTempDataHome("read-session-db-no-assistant-");
         createOpenCodeDb([

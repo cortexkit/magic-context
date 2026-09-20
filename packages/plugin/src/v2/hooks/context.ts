@@ -48,6 +48,7 @@ import { gaDatabasePath, V2StoreReader } from "../store-reader";
 import { deliverPendingChannel2, isAdmittedSynthetic } from "./channel2";
 import { startDreamTrigger } from "./dream-trigger";
 import { HiddenChildHook, registerHiddenChildAgents } from "./hidden-child";
+import { warmModelLimitCacheFromCatalog } from "./model-limit-cache";
 import { adaptPayload, HEAD_IDS } from "./payload";
 import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { rawMessages } from "./store";
@@ -349,8 +350,16 @@ export async function registerContext(context: V2Context) {
                     // Native compaction owns the window when MC compaction is off.
                     unsafe = compactionEnabled && inputTokens / limit >= 0.95;
                     const completed = latest?.data.time?.completed;
-                    if (typeof completed === "number")
-                        updateSessionMeta(db, draft.sessionID, { lastResponseTime: completed });
+                    // The v1 lane persists usage from its event handler; the v2 lane
+                    // has no event handler, so persist the same fields here or the
+                    // sidebar/status surface stays at the 0 defaults.
+                    updateSessionMeta(db, draft.sessionID, {
+                        ...(typeof completed === "number" ? { lastResponseTime: completed } : {}),
+                        lastContextPercentage: (inputTokens / limit) * 100,
+                        lastInputTokens: inputTokens,
+                        lastUsageContextLimit: limit,
+                        lastObservedModelKey: modelKey,
+                    });
                     usage.set(draft.sessionID, {
                         usage: { inputTokens, percentage: (inputTokens / limit) * 100 },
                         hasUsageTokens: true,
@@ -645,6 +654,13 @@ export async function registerContext(context: V2Context) {
             console.warn("[magic-context] v2 context unavailable", error);
         }
     });
+    // The v1 lane warms MC's model-limit cache from its SDK client at boot; the
+    // v2 lane must seed it from the host catalog, or every limit resolved here
+    // falls back to the generic 200k default (sidebar denominator, history
+    // budgets and window geometry then disagree with the transform's own math).
+    setTimeout(() => {
+        void warmModelLimitCacheFromCatalog(context);
+    }, 0);
     // OpenCode 2 never runs the v1 server() lane, so the RPC server that the
     // terminal TUI's sidebar/status reads depend on would never start: the v2
     // TUI is a pure RPC client (no direct SQLite access), so without a listener
