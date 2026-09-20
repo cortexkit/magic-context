@@ -1,4 +1,4 @@
-import { tool, type ToolDefinition, type ToolResult } from "@opencode-ai/plugin";
+import { type ToolDefinition, type ToolResult, tool } from "@opencode-ai/plugin";
 import { loadPluginConfigDetailed } from "../../config";
 import { isCompactionEnabled } from "../../config/agent-disable";
 import { getProtectedTokensTierOverrides } from "../../config/project-security";
@@ -17,15 +17,20 @@ import {
     createToolExecuteAfterHook,
 } from "../../hooks/magic-context/hook-handlers";
 import { materializeM0 } from "../../hooks/magic-context/inject-compartments";
+import {
+    createLiveSessionState,
+    type LiveSessionState,
+} from "../../hooks/magic-context/live-session-state";
 import { resolveOpenCodeProtectedTailBoundary } from "../../hooks/magic-context/protected-tail-boundary";
 import { setRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
 import { preloadTokenizer } from "../../hooks/magic-context/read-session-formatting";
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
 import { maybeSendUpgradeReminder } from "../../hooks/magic-context/upgrade-reminder";
+import { registerRpcHandlers } from "../../plugin/rpc-handlers";
 import { createToolRegistry } from "../../plugin/tool-registry";
 import type { PluginContext } from "../../plugin/types";
 import { detectConflicts } from "../../shared/conflict-detector";
-import { getDataDir } from "../../shared/data-path";
+import { getDataDir, getMagicContextStorageDir } from "../../shared/data-path";
 import { resolveHistorianModel } from "../../shared/model-resolution";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import {
@@ -34,6 +39,7 @@ import {
     type PromptSurfaceRuntime,
 } from "../../shared/prompt-surface-runtime";
 import { pushNotification } from "../../shared/rpc-notifications";
+import { MagicContextRpcServer } from "../../shared/rpc-server";
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { FoldOwner, foldDigest } from "../fold/owner";
 import { restoreRow } from "../fold/restore";
@@ -620,8 +626,47 @@ export async function registerContext(context: V2Context) {
             console.warn("[magic-context] v2 context unavailable", error);
         }
     });
+    // OpenCode 2 never runs the v1 server() lane, so the RPC server that the
+    // terminal TUI's sidebar/status reads depend on would never start: the v2
+    // TUI is a pure RPC client (no direct SQLite access), so without a listener
+    // the sidebar renders zeros. Start the same surface here and hand it the v2
+    // lane's draft-authoritative live maps so the snapshot/status handlers
+    // resolve the session's active model, variant and agent.
+    const rpcLiveSessionState: LiveSessionState = {
+        ...createLiveSessionState(),
+        liveModelBySession: liveModels,
+        variantBySession: variants,
+        agentBySession: agents,
+        channel1StateBySession: channel1,
+        historyRefreshSessions,
+        pendingMaterializationSessions,
+    };
+    const storageDir = getMagicContextStorageDir();
+    const rpcServer = new MagicContextRpcServer(storageDir, directory);
+    let rpcStopped = false;
+    registerRpcHandlers(rpcServer, {
+        directory,
+        config,
+        // The v2 host context exposes no SDK client, so the recomp/upgrade
+        // notify paths stay inert; the read-only snapshot handlers need none.
+        client: undefined,
+        liveSessionState: rpcLiveSessionState,
+        rustModeModuleClient: undefined,
+        storageDir,
+    });
+    // start() is async but its Bun.serve + discovery-file prefix is synchronous;
+    // run it in the next task so those filesystem calls stay outside the host's
+    // deadline-bound plugin construction, matching the v1 lane.
+    setTimeout(() => {
+        if (rpcStopped) return;
+        void rpcServer
+            .start()
+            .catch((error) => console.warn("[magic-context] v2 RPC server failed to start", error));
+    }, 0);
     return {
         async dispose() {
+            rpcStopped = true;
+            rpcServer.stop();
             await dreamTrigger?.dispose();
             for (const release of rawProviders.values()) release();
             rawProviders.clear();
