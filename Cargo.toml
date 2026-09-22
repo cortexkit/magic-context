@@ -7,6 +7,11 @@ resolver = "2"
 members = ["crates/mc-core", "crates/mc-store", "crates/mc-module", "crates/mc-tokenizer"]
 exclude = ["packages/dashboard/src-tauri"]
 
+# The ck-mc daemon is the long-lived hot transform path; thin LTO trades a
+# slower release compile for faster runtime on every transform pass.
+[profile.release]
+lto = "thin"
+
 [workspace.dependencies]
 # CortexKit cache-stability core + storage substrate. Sibling path-deps for local
 # co-dev (not yet published); pin a published version at first release. magic-context
