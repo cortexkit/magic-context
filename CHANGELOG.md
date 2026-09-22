@@ -25,7 +25,15 @@ The prompt surface is now split cleanly between desk-oriented system guidance an
 
 ## Highlights by release line
 
-### 0.21.x (current)
+### 0.42.x (current)
+
+The most recent release line. Notable themes:
+
+- **0.42.6** — Prompt-surface split: desk-oriented system guidance vs tool/parameter contracts; dreamer bulk memory moved to `ctx_memory_list`.
+
+Older release lines are summarized below; full notes for every release live in GitHub Releases.
+
+### 0.21.x
 
 The most recent release line. Notable themes:
 
