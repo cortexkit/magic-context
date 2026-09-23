@@ -1160,7 +1160,7 @@ tesseract=5.3.3; docker/ocr/Dockerfile; upstream #4117
 </compartment>
 <facts>
 <CONFIG_VALUES>
-* `docker/ocr/Dockerfile` pins `tesseract-ocr=5.3.3` with apt version + SHA pin. Unpin only after upstream #4117 resolves.
+* `docker/ocr/Dockerfile` pinned `tesseract-ocr=5.3.3` with apt version + SHA pin. Unpin only after upstream #4117 resolves.
 </CONFIG_VALUES>
 <CONSTRAINTS>
 * Tesseract 5.3.4 regresses multi-column layout detection (column-detection heuristic in LSTM postprocessing changed). Single-column accuracy is unaffected.
