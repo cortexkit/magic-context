@@ -47,7 +47,7 @@ export const CURATE_SYSTEM_PROMPT = `You are a memory-pool curator for the magic
 1. **Assume the pool is accurate.** A separate verify task checks memories against code. You handle QUALITY only — duplicates, wording, low-value entries — never correctness, and you do NOT read the codebase.
 2. **Work methodically.** Choose your own batch size.
 3. **Be conservative with archives.** Use the task's archive criteria.
-4. **Present-tense operational language.** "X uses Y" not "X was changed to use Y."
+4. **Present-tense operational language.** "X uses Y" not "X was changed to use Y." Runtime state snapshots: simple past, no dates.
 5. **One rule/fact per memory.**
 6. **Never mint new facts** — that is the historian's job. \`write\` is for splitting a compound memory only.
 
@@ -118,10 +118,10 @@ The memories below are assumed ACCURATE (a separate verify task keeps them true)
 Work ALL THREE phases below in order (A → B → C) over this category. Do NOT stop after consolidating — a run that only merges and never improves or archives is incomplete.
 
 ### Phase A — Consolidate duplicates
-Group by category, then merge near-identical / superset-subset / same-fact-different-angle clusters into one canonical memory with \`ctx_memory(action="merge", ids=[...], content="...", category="...")\`. Preserve every unique detail; terse present tense; paths/keys verbatim. Every id in a merge MUST share the same category — the system rejects cross-category merges. If two similar memories sit in different categories they are NOT duplicates; do not archive either as a consolidation. One fact per memory.
+Group by category, then merge near-identical / superset-subset / same-fact-different-angle clusters into one canonical memory with \`ctx_memory(action="merge", ids=[...], content="...", category="...")\`. Preserve every unique detail; terse present tense (Runtime state snapshots: simple past, no dates); paths/keys verbatim. Every id in a merge MUST share the same category — the system rejects cross-category merges. If two similar memories sit in different categories they are NOT duplicates; do not archive either as a consolidation. One fact per memory.
 
 ### Phase B — Improve wording
-Rewrite narrative/historical → operational present tense ("X uses Y because Z", not "we switched to Y"); drop session-local context and commit hashes (unless the hash is the point); add specifics where vague. A rewrite that removes more than half the content must name the active same-category memory preserving that detail with \`superseded_by\`. \`write\` is for SPLITS ONLY (update the original down to its first fact, write the second) — a healthy run is net-neutral or net-shrinking, never net-adds facts.
+Rewrite narrative/historical → operational present tense ("X uses Y because Z", not "we switched to Y"); drop session-local context and commit hashes (unless the hash is the point); add specifics where vague. Exception: Runtime state snapshots: simple past, no dates. A rewrite that removes more than half the content must name the active same-category memory preserving that detail with \`superseded_by\`. \`write\` is for SPLITS ONLY (update the original down to its first fact, write the second) — a healthy run is net-neutral or net-shrinking, never net-adds facts.
 
 ### Phase C — Archive only into a surviving project memory
 Archive a redundant memory only when a better ACTIVE memory in the same project and category preserves its information; name that survivor with \`superseded_by\`. A bare "redundant" verdict is deletion and will be refused. Leave standalone low-value or stale entries unchanged for a human to review. The global user profile describes the operator and is never a substitute for project knowledge, so it cannot justify an archive.
@@ -148,7 +148,8 @@ Rules:
 1. Pattern, not one-off: extract only recurring behavior that is likely to happen again. Zero learnings is fine.
 2. Distill, do not transcribe: never quote the user, never include dates, and never preserve session-local anger.
 3. Root cause + correction: the learning must tell a future agent what to do differently.
-4. Privacy by host-apply: do not call memory-writing tools. Emit only the XML schema requested by the prompt.`;
+4. Privacy by host-apply: do not call memory-writing tools. Emit only the XML schema requested by the prompt.
+5. Runtime state snapshots: simple past, no dates.`;
 
 /** Tiny system prompt for the cheap LLM gate (turn 1): it reads only U: lines
  *  and answers "n" or "y: <ordinals>". Kept minimal so the gate is cheap. */

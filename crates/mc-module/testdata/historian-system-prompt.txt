@@ -406,6 +406,7 @@ Facts capture stable properties of the project that survive past any single comp
 - A fact is a stable invariant, default, or rule. If it mainly explains what happened, it belongs in a compartment, not a fact.
 - Keep only high-signal facts. Omit greetings, status, one-off sequencing, branch-local tactics, task-local cleanup notes.
 - Facts must be present tense and operational. Do not use chronology wording: initially, currently, previously, later, then, was implemented, used to.
+- Runtime state snapshots: simple past, no dates.
 - One fact bullet = exactly one rule/default/constraint/decision/name.
 - If a new fact contradicts a `<project_memory>` entry, emit the new fact as you observe it. **Do not write "X was Y but now Z" framing — the dreamer handles contradiction resolution.** Your job is to report what is true in this chunk; the dreamer reconciles.
 
