@@ -80,7 +80,7 @@ describe("migration v85: inert since v87 decides labels from host-store evidence
 
             expect(columnNames(db, "session_meta")).toContain("protected_tokens_effective");
             expect(columnNames(db, "session_meta")).toContain("harness");
-            expect(LATEST_SUPPORTED_VERSION).toBe(91);
+            expect(LATEST_SUPPORTED_VERSION).toBe(92);
             expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
             expect(
                 db

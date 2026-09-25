@@ -41,7 +41,7 @@ describe("migration v84: effective protected-token floor", () => {
 
             expect(columnNames(db, "session_meta")).toContain("protected_tokens_effective");
             expect(columnNames(db, "session_meta")).toContain("protected_tokens_pre_snapshot");
-            expect(LATEST_SUPPORTED_VERSION).toBe(91);
+            expect(LATEST_SUPPORTED_VERSION).toBe(92);
             expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
             expect(
                 SESSION_SCOPED_TABLES.filter(({ table }) => table === "session_meta"),
