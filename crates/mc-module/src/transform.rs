@@ -3983,6 +3983,14 @@ fn apply_once(
         lineage_anchor_mid,
     )?;
     timings.identity_enforce = elapsed_ms(identity_enforce_started_at);
+    // Decide once, from the identities recorded before this pass, whether units whose target
+    // message is missing from this request belong to messages the host has really deleted.
+    let absent_targets = absent_target_policy(
+        &loaded.meta,
+        &projection,
+        provisional_tail_mid,
+        lineage_anchor_mid,
+    );
     let mut pending_overlays = PendingOverlayDecisions::default();
     // When caveman tagging is requested, compute tag rows from the persisted tag order even if
     // the provider response has no visible §N§ tags. Creating these rows does not change rendered
@@ -5215,8 +5223,9 @@ fn apply_once(
                 }
 
                 // Keep reductions whose targets remain in the new tail; discard reductions covered
-                // by the new m0 summary or orphaned by a revert. Because apply_units cannot remove
-                // those obsolete units in place, rebuild the frozen unit set.
+                // by the new m0 summary or whose message the host deleted. A target merely missing
+                // from this request keeps its reduction (see `AbsentTargetPolicy`). Because
+                // apply_units cannot remove obsolete units in place, rebuild the frozen unit set.
                 let mut effective = effective_reductions(
                     &core,
                     &selected_reductions,
@@ -5237,16 +5246,23 @@ fn apply_once(
                         &req.session_id,
                     );
                 }
-                let survivors = surviving_red_units(&effective, &live, comp.coverage_ordinal);
-                let channel1_survivors =
-                    surviving_channel1_units(&core, &effective, &live, comp.coverage_ordinal);
-                let mut strip_survivors = surviving_strip_units(&core, req);
+                let survivors =
+                    surviving_red_units(&effective, &live, comp.coverage_ordinal, absent_targets);
+                let channel1_survivors = surviving_channel1_units(
+                    &core,
+                    &effective,
+                    &live,
+                    comp.coverage_ordinal,
+                    absent_targets,
+                );
+                let mut strip_survivors = surviving_strip_units(&core, req, absent_targets);
                 strip_survivors.extend(new_strip_units.clone());
                 let caveman_survivors = surviving_caveman_units(
                     &core,
                     &new_caveman_units,
                     &live,
                     comp.coverage_ordinal,
+                    absent_targets,
                 );
                 core.frozen_units.clear();
                 core.pending_changes.clear();
@@ -5484,16 +5500,27 @@ fn apply_once(
                             &req.session_id,
                         );
                     }
-                    let survivors = surviving_red_units(&effective, &live, comp.coverage_ordinal);
-                    let channel1_survivors =
-                        surviving_channel1_units(&core, &effective, &live, comp.coverage_ordinal);
-                    let mut strip_survivors = surviving_strip_units(&core, req);
+                    let survivors = surviving_red_units(
+                        &effective,
+                        &live,
+                        comp.coverage_ordinal,
+                        absent_targets,
+                    );
+                    let channel1_survivors = surviving_channel1_units(
+                        &core,
+                        &effective,
+                        &live,
+                        comp.coverage_ordinal,
+                        absent_targets,
+                    );
+                    let mut strip_survivors = surviving_strip_units(&core, req, absent_targets);
                     strip_survivors.extend(new_strip_units.clone());
                     let caveman_survivors = surviving_caveman_units(
                         &core,
                         &new_caveman_units,
                         &live,
                         comp.coverage_ordinal,
+                        absent_targets,
                     );
                     core.frozen_units.clear();
                     core.pending_changes.clear();
@@ -5789,7 +5816,13 @@ fn apply_once(
     }
     timings.todo = todo_ms;
 
-    prune_channel1_units(&mut core, &projection, meta.coverage_ordinal);
+    release_units_of_deleted_messages(&mut core, req, &projection, absent_targets);
+    prune_channel1_units(
+        &mut core,
+        &projection,
+        meta.coverage_ordinal,
+        absent_targets,
+    );
     let mut channel1_appends = channel1_append_rows(&core, &legacy_channel1_appends);
     let result_action = action_str(&plan, &core);
 
@@ -7513,7 +7546,12 @@ fn surviving_caveman_units(
     new_units: &[FrozenUnit],
     live: &[&FlatBlock],
     coverage: Option<u64>,
+    absent: AbsentTargetPolicy,
 ) -> Vec<FrozenUnit> {
+    let live_ord = live
+        .iter()
+        .map(|block| (block.id.as_str(), block.ordinal))
+        .collect::<HashMap<_, _>>();
     let live_tail = live
         .iter()
         .filter(|block| is_tail(block.ordinal, coverage))
@@ -7525,10 +7563,15 @@ fn surviving_caveman_units(
         .iter()
         .filter(|unit| unit.key.starts_with(CAV_KEY_PREFIX))
     {
+        // A stored unit whose text block is missing from this request stays unless the host
+        // deleted the message (see `AbsentTargetPolicy`).
         if unit
             .key
             .strip_prefix(CAV_KEY_PREFIX)
-            .is_some_and(|target| live_tail.contains(target))
+            .is_some_and(|target| match live_ord.get(target) {
+                Some(ordinal) => is_tail(*ordinal, coverage),
+                None => absent.keeps_absent(),
+            })
         {
             by_key.insert(unit.key.clone(), unit.clone());
         }
@@ -8229,35 +8272,92 @@ fn prune_covered_red_units(
         };
         match live_ord.get(target) {
             Some(&ord) => is_tail(ord, new_coverage),
-            // Target absent from the live array: leave it to the HARD-fold orphan GC,
-            // which sees the authoritative post-revert array.
+            // Target absent from the live array: a HARD rebuild releases it once the host
+            // has deleted the message (see `AbsentTargetPolicy`).
             None => true,
         }
     });
 }
 
+/// What a pass does with a frozen decision (reduction, caveman, channel-1 or per-target strip
+/// unit) whose target message is missing from the request.
+///
+/// A decision belongs to its message, not to one request. A request can leave a message out
+/// only for a while: a host undo or a retry of the last turn truncates the array, and a redo
+/// within the cache TTL sends the same messages back. Dropping the decision on that pass
+/// would serve the returning message raw although no pass priced the change, so the default
+/// is to keep it. The host has really deleted the message only when the transcript has moved
+/// on without it, which is what [`absent_target_policy`] detects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AbsentTargetPolicy {
+    /// Keep the decision; the message may come back with the same identity.
+    Retain,
+    /// The message is gone from the host's transcript; the decision can be released.
+    Release,
+}
+
+impl AbsentTargetPolicy {
+    fn keeps_absent(self) -> bool {
+        self == Self::Retain
+    }
+}
+
+/// Decide whether a message missing from this request has been deleted by the host.
+///
+/// Hosts only append to a transcript, and OpenCode deletes messages (OpenCode 1 revert
+/// clean-up, OpenCode 2 revert commit) only on the way to sending a new prompt; before that
+/// the reverted messages stay in what it sends. So a request that carries a message this session has never recorded, while
+/// an earlier message is missing, shows a transcript rewritten without that message. A
+/// request made only of recorded messages is a truncation (an undo, or a retry of the last
+/// turn) and may be followed by a redo that restores the rest.
+///
+/// "Recorded" means the message has an entry in the per-message identity map the transform
+/// persists on every committed pass. The lineage anchor and a still-streaming tail are never
+/// written to that map, so they do not count as new. A session with no recorded identities
+/// (never committed, or its identities cleared) releases, which is the behaviour this module
+/// had before identities were consulted.
+fn absent_target_policy(
+    loaded_meta: &ModuleMeta,
+    projection: &FlatProjection,
+    provisional_tail_mid: Option<&str>,
+    lineage_anchor_mid: Option<&str>,
+) -> AbsentTargetPolicy {
+    let carries_unrecorded_message = projection.identity_by_mid.keys().any(|mid| {
+        provisional_tail_mid != Some(mid.as_str())
+            && lineage_anchor_mid != Some(mid.as_str())
+            && !loaded_meta.block_identity_by_mid.contains_key(mid)
+    });
+    if carries_unrecorded_message {
+        AbsentTargetPolicy::Release
+    } else {
+        AbsentTargetPolicy::Retain
+    }
+}
+
 /// The `red:*` units that SURVIVE a HARD rebuild: a target that is COVERED (folded into
-/// m0) is dropped; a target in the new TAIL is kept; a target ABSENT from the live array
-/// (reverted away) is dropped as an orphan. So a unit survives iff its target is in the
-/// live array AND still in the tail after the fold.
+/// m0) is dropped; a target in the new TAIL is kept. A target ABSENT from the live array is
+/// kept unless `absent` says the host deleted it, because a request may leave a message out
+/// only until a redo sends it back (see [`AbsentTargetPolicy`]).
 fn surviving_red_units(
     effective: &BTreeMap<String, (String, String, String)>,
     live: &[&FlatBlock],
     new_coverage: Option<u64>,
+    absent: AbsentTargetPolicy,
 ) -> Vec<FrozenUnit> {
     let live_ord: BTreeMap<&str, u64> = live.iter().map(|i| (i.id(), i.ordinal())).collect();
     effective
         .iter()
-        .filter_map(
-            |(target, (kind, payload, reset_rule))| match live_ord.get(target.as_str()) {
-                Some(&ord) if is_tail(ord, new_coverage) => {
-                    let mut unit = red_unit(target, kind, payload);
-                    unit.reset_rule = reset_rule.clone();
-                    Some(unit)
-                }
-                _ => None,
-            },
-        )
+        .filter_map(|(target, (kind, payload, reset_rule))| {
+            let keep = match live_ord.get(target.as_str()) {
+                Some(&ord) => is_tail(ord, new_coverage),
+                None => absent.keeps_absent(),
+            };
+            keep.then(|| {
+                let mut unit = red_unit(target, kind, payload);
+                unit.reset_rule = reset_rule.clone();
+                unit
+            })
+        })
         .collect()
 }
 
@@ -8266,6 +8366,7 @@ fn surviving_channel1_units(
     effective_reductions: &BTreeMap<String, (String, String, String)>,
     live: &[&FlatBlock],
     new_coverage: Option<u64>,
+    absent: AbsentTargetPolicy,
 ) -> Vec<FrozenUnit> {
     let live_ord = live
         .iter()
@@ -8275,10 +8376,9 @@ fn surviving_channel1_units(
         .iter()
         .filter(|unit| unit.key.starts_with(CHANNEL1_KEY_PREFIX))
         .filter(|unit| !effective_reductions.contains_key(&unit.reset_rule))
-        .filter(|unit| {
-            live_ord
-                .get(unit.reset_rule.as_str())
-                .is_some_and(|ordinal| is_tail(*ordinal, new_coverage))
+        .filter(|unit| match live_ord.get(unit.reset_rule.as_str()) {
+            Some(ordinal) => is_tail(*ordinal, new_coverage),
+            None => absent.keeps_absent(),
         })
         .cloned()
         .collect()
@@ -10880,10 +10980,63 @@ fn channel1_append_rows(
     by_block.into_values().collect()
 }
 
+/// Drop the reduction, caveman and per-target strip decisions of messages the host has
+/// deleted (see `AbsentTargetPolicy`). This runs on every pass, defers included. A released
+/// unit's target is missing from this request, so removing it changes no served bytes; and a
+/// deletion is often first seen on a defer, after which later requests carry no new message
+/// that would let a HARD rebuild recognise it. Channel-1 units follow the same rule in
+/// `prune_channel1_units`.
+fn release_units_of_deleted_messages(
+    core: &mut CoreState,
+    req: &TransformRequest,
+    projection: &FlatProjection,
+    absent: AbsentTargetPolicy,
+) {
+    if absent.keeps_absent() {
+        return;
+    }
+    let live_block_ids = projection
+        .blocks
+        .iter()
+        .filter(|block| !block.synthetic)
+        .map(|block| block.id.as_str())
+        .collect::<HashSet<_>>();
+    let request_mids = req
+        .messages
+        .iter()
+        .map(|message| message.mid.as_str())
+        .collect::<HashSet<_>>();
+    let request_block_ids = req
+        .messages
+        .iter()
+        .flat_map(|message| {
+            (0..message.ck.content.len()).map(|index| format!("{}#{index}", message.mid))
+        })
+        .collect::<HashSet<_>>();
+    core.frozen_units.retain(|unit| {
+        if let Some(target) = unit
+            .key
+            .strip_prefix(RED_KEY_PREFIX)
+            .or_else(|| unit.key.strip_prefix(CAV_KEY_PREFIX))
+        {
+            return live_block_ids.contains(target);
+        }
+        if unit.key.starts_with("strip:") && !strip_unit_always_kept(&unit.key) {
+            // Same test as `surviving_strip_units`: the target may be a message id or a
+            // block id of any request message.
+            return per_target_strip_target(&unit.key).is_none_or(|target| {
+                request_mids.contains(target) || request_block_ids.contains(target)
+            });
+        }
+        true
+    });
+}
+
 fn prune_channel1_units(
     core: &mut CoreState,
     projection: &FlatProjection,
     coverage_ordinal: Option<u64>,
+    absent: AbsentTargetPolicy,
 ) {
     let live_ord = projection
         .blocks
@@ -10895,10 +11048,13 @@ fn prune_channel1_units(
         if !unit.key.starts_with(CHANNEL1_KEY_PREFIX) {
             return true;
         }
+        // A reminder whose block is missing from this request stays unless the host deleted
+        // the message (see `AbsentTargetPolicy`); this prune runs on every pass, defers included.
         !reduced.contains(&unit.reset_rule)
-            && live_ord
-                .get(unit.reset_rule.as_str())
-                .is_some_and(|ordinal| is_tail(*ordinal, coverage_ordinal))
+            && match live_ord.get(unit.reset_rule.as_str()) {
+                Some(ordinal) => is_tail(*ordinal, coverage_ordinal),
+                None => absent.keeps_absent(),
+            }
     });
 }
 
@@ -12634,7 +12790,35 @@ fn apply_surface_strips(
     }
 }
 
-fn surviving_strip_units(core: &CoreState, req: &TransformRequest) -> Vec<FrozenUnit> {
+/// Strip kinds a HARD rebuild keeps whatever the request carries.
+fn strip_unit_always_kept(key: &str) -> bool {
+    // A request may be a transient subset or revert. Keep reasoning applied-set message
+    // ids durable so their strip resumes deterministically if they return in a later
+    // full-array request.
+    key.starts_with("strip:merged_reasoning:")
+        || key.starts_with(SYSTEM_STRIP_BLOCK_PREFIX)
+        || key.starts_with("strip:reasoning_age:")
+        || key.starts_with("strip:reasoning_clear:")
+        || key.starts_with("strip:trailing_blank_keep:")
+        || key.starts_with("strip:trailing_blank_strip:")
+}
+
+/// The message id or block id a per-target strip unit applies to. Returns None for the
+/// always-kept strip kinds and for keys with no target.
+fn per_target_strip_target(key: &str) -> Option<&str> {
+    if strip_unit_always_kept(key) {
+        return None;
+    }
+    key.strip_prefix("strip:")
+        .and_then(|rest| rest.split_once(':'))
+        .map(|(_, target)| target)
+}
+
+fn surviving_strip_units(
+    core: &CoreState,
+    req: &TransformRequest,
+    absent: AbsentTargetPolicy,
+) -> Vec<FrozenUnit> {
     let live_mids: HashSet<&str> = req
         .messages
         .iter()
@@ -12651,22 +12835,14 @@ fn surviving_strip_units(core: &CoreState, req: &TransformRequest) -> Vec<Frozen
         .iter()
         .filter(|unit| unit.key.starts_with("strip:"))
         .filter(|unit| {
-            // A request may be a transient subset or revert. Keep reasoning applied-set message
-            // ids durable so their strip resumes deterministically if they return in a later
-            // full-array request.
-            unit.key.starts_with("strip:merged_reasoning:")
-                || unit.key.starts_with(SYSTEM_STRIP_BLOCK_PREFIX)
-                || unit.key.starts_with("strip:reasoning_age:")
-                || unit.key.starts_with("strip:reasoning_clear:")
-                || unit.key.starts_with("strip:trailing_blank_keep:")
-                || unit.key.starts_with("strip:trailing_blank_strip:")
-                || unit
-                    .key
-                    .strip_prefix("strip:")
-                    .and_then(|rest| rest.split_once(':'))
-                    .is_some_and(|(_, target)| {
-                        live_mids.contains(target) || live_block_ids.contains(target)
-                    })
+            // A per-target strip whose message is missing from this request stays unless
+            // the host deleted the message (see `AbsentTargetPolicy`).
+            strip_unit_always_kept(&unit.key)
+                || per_target_strip_target(&unit.key).is_some_and(|target| {
+                    live_mids.contains(target)
+                        || live_block_ids.contains(target)
+                        || absent.keeps_absent()
+                })
         })
         .cloned()
         .collect()
@@ -19816,15 +19992,11 @@ pub(crate) mod tests {
         assert_eq!(hard3.messages(), minting.messages());
     }
 
-    /// Re-gate reproduction: the HARD rebuild drops frozen reductions whose target is absent
-    /// from the live array (its orphan clean-up), while defers keep them. When an identical-bytes
-    /// marker HARD lands on a pass whose array temporarily lacks the reduced message (an undo
-    /// that is later redone), the frozen drop is lost, and the redone message is served raw on
-    /// a later defer although no pass priced that change. The control (the same undo and redo
-    /// with no marker HARD) keeps the dropped bytes. Ignored so the suite stays green; run it
-    /// with `--ignored` to see the divergence.
+    /// Re-gate: an identical-bytes marker HARD lands on a pass whose array temporarily lacks
+    /// the reduced message (an undo that is later redone). The HARD rebuild must keep the
+    /// frozen drop, so the redone message is served dropped exactly as before the undo. The
+    /// control (the same undo and redo with no marker HARD) keeps the dropped bytes too.
     #[test]
-    #[ignore = "re-gate reproduction: marker HARD orphan clean-up changes later defer bytes"]
     fn regate_marker_hard_during_undo_keeps_the_frozen_drop_for_the_redo() {
         let run_case = |marker_hard: bool| {
             let dir = tempfile::tempdir().unwrap();
@@ -19864,13 +20036,130 @@ pub(crate) mod tests {
                 redo.action,
                 redo.messages() == before.messages(),
             );
-            (undo_pass.action.clone(), red_after_undo, redo.messages() == before.messages())
+            (
+                undo_pass.action.clone(),
+                red_after_undo,
+                redo.messages() == before.messages(),
+            )
         };
         let control = run_case(false);
         assert!(control.1 && control.2, "control: {control:?}");
         let marker = run_case(true);
         assert_eq!(marker.0, "HARD");
-        assert!(marker.2, "marker HARD during undo: {marker:?}");
+        assert!(marker.1 && marker.2, "marker HARD during undo: {marker:?}");
+    }
+
+    /// Builds the session shared by the undo/redo tests: a covered anchor, then a tail whose
+    /// tool result `res-1` carries a frozen drop minted by a priced SOFT. Returns the full
+    /// request, the minting response, and the response of the defer right after it.
+    fn regate_undo_session(
+        s: &McStore,
+        session: &str,
+    ) -> (TransformRequest, TransformResponse, TransformResponse) {
+        s.replace_compartments(session, &[comp(1, 1, 1, "anchor", "first coverage")])
+            .unwrap();
+        let mut messages = vec![item("anchor", 1, "covered")];
+        run(s, &req(session, "cfg", messages.clone()), &spine());
+        messages.extend([
+            item("old-a", 2, "older prompt"),
+            assistant_tool_call("call-1", 3, "t1"),
+            tool_result("res-1", 4, "t1", &"OUTPUT ".repeat(400)),
+            item("next", 5, "next prompt"),
+        ]);
+        let full = req(session, "cfg", messages);
+        run(s, &full, &[]);
+        s.arm_soft_refresh(session).unwrap();
+        let minting = run(s, &full, &[reduce("res-1", "drop", "[dropped]")]);
+        assert_eq!(minting.action, "SOFT");
+        assert!(frozen_red_payload(&s.load(session).unwrap().core, "res-1#0").is_some());
+        let defer = run(s, &full, &[]);
+        (full, minting, defer)
+    }
+
+    fn served_sha(response: &TransformResponse) -> String {
+        let mut hasher = Sha256::new();
+        for message in response.messages() {
+            hasher.update(message.canonical_bytes());
+        }
+        format!("{:x}", hasher.finalize())
+    }
+
+    /// Control for the undo test: when the host really deletes the reduced message, the frozen
+    /// drop is released. The request that first leaves `res-1` out also carries a prompt this
+    /// session has never seen, which is how OpenCode sends the first request after it commits
+    /// a revert. Two orders are covered: the marker HARD lands on that first request, or a
+    /// defer sees the deletion first (it releases the decision without changing its served
+    /// bytes) and a marker HARD follows on the same array, which carries no new message.
+    #[test]
+    fn regate_host_deleted_message_releases_its_frozen_drop() {
+        for hard_on_first_request in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            let session = "regate-deleted";
+            let (full, _, _) = regate_undo_session(&s, session);
+            let mut rewritten = full.messages[..2].to_vec();
+            rewritten.push(item("fresh", 6, "a different prompt"));
+            if hard_on_first_request {
+                regate_mark_epoch_pending(&s, session);
+            }
+            let first = run(&s, &req(session, "cfg", rewritten.clone()), &[]);
+            if !hard_on_first_request {
+                assert_ne!(first.action, "HARD");
+                assert!(
+                    frozen_red_payload(&s.load(session).unwrap().core, "res-1#0").is_none(),
+                    "the defer that first sees the deletion releases the drop"
+                );
+                let replay = run(&s, &req(session, "cfg", rewritten.clone()), &[]);
+                assert_eq!(replay.messages(), first.messages());
+                regate_mark_epoch_pending(&s, session);
+                let hard = run(&s, &req(session, "cfg", rewritten.clone()), &[]);
+                assert_eq!(hard.action, "HARD");
+            } else {
+                assert_eq!(first.action, "HARD");
+            }
+            assert!(
+                frozen_red_payload(&s.load(session).unwrap().core, "res-1#0").is_none(),
+                "hard_on_first_request={hard_on_first_request}: a deleted message keeps no drop"
+            );
+        }
+    }
+
+    /// Byte identity around an undo and redo: the priced SOFT that mints the drop and the defer
+    /// after it serve the same bytes; a marker HARD during the undo serves what a defer on the
+    /// same truncated array serves; the redo serves the priced bytes again; and the defer after
+    /// the redo replays them.
+    #[test]
+    fn regate_priced_then_defer_sha_holds_across_marker_hard_undo_and_redo() {
+        let run_case = |marker_hard: bool| {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            let session = "regate-sha";
+            let (full, minting, defer) = regate_undo_session(&s, session);
+            let undone = req(session, "cfg", full.messages[..2].to_vec());
+            if marker_hard {
+                regate_mark_epoch_pending(&s, session);
+            }
+            let undo = run(&s, &undone, &[]);
+            let redo = run(&s, &full, &[]);
+            let replay = run(&s, &full, &[]);
+            (
+                undo.action.clone(),
+                [minting, defer, undo, redo, replay].map(|response| served_sha(&response)),
+            )
+        };
+        let (control_action, control) = run_case(false);
+        let (marker_action, marker) = run_case(true);
+        assert_ne!(control_action, "HARD");
+        assert_eq!(marker_action, "HARD");
+        let [minting, defer, undo, redo, replay] = &marker;
+        assert_eq!(defer, minting, "the defer after the priced pass");
+        assert_eq!(
+            undo, &control[2],
+            "the marker HARD serves the undo defer's bytes"
+        );
+        assert_eq!(redo, minting, "the redo serves the priced bytes");
+        assert_eq!(replay, minting, "the defer after the redo replays them");
+        assert_eq!(marker, control);
     }
     /// Re-gate: with a persisted floor snapshot, a changed configured floor waits for a bust.
     /// A store-marker HARD that keeps the provider cache now snapshots the floor. The served
