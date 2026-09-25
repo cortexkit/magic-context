@@ -175,7 +175,8 @@ function wireNeedsOlderRows(messages: MessageLike[], memo: Map<string, number>):
  * persisted, instead of reading the whole session from its first row.
  *
  * `persisted` is in the host store's own numbering (no continuation base); the memo is
- * filled in the caller's numbering, `canonicalBase` above it. The newest checkpoint is
+ * filled in the caller's numbering, which adds `canonicalBase` (the continuation base the
+ * caller already applies, 0 when none) to every host-store ordinal. The newest checkpoint is
  * trusted only when its anchor row still exists at exactly its recorded position and the
  * stored-row count still adds up; then the rows after it are read. While the wire names
  * older messages, the segment between the previous checkpoint and the current one is

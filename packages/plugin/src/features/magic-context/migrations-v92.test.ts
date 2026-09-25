@@ -108,7 +108,8 @@ describe("migration v92: persisted Rust ordinal checkpoints", () => {
             expect(savePersistedOrdinalCheckpoints(db, "ses-v91", CHECKPOINTS, 77)).toBe(true);
             expect(loadPersistedOrdinalCheckpoints(db, "ses-v91")).toEqual(CHECKPOINTS);
 
-            // Session deletion and the orphan sweep go through the session-scoped list.
+            // Session deletion and the orphan sweep delete from every table in
+            // SESSION_SCOPED_TABLES, which now includes the ordinal checkpoints.
             deleteSessionScopedRows(db, ["ses-v91"], undefined, {
                 rustModuleCleanupAcknowledged: true,
             });
