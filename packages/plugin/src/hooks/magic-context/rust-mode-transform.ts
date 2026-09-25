@@ -2930,6 +2930,7 @@ export function createRustModeTransform(
                 memoStoredCount: state.ordinalMemoStoredCount,
                 memoCanonicalCount: state.ordinalMemoCanonicalCount,
                 memoCheckpoints: state.ordinalMemoCheckpoints,
+                primeCanonicalBase: state.ordinalContinuationBase ?? 0,
                 verifyStore: state.ordinalMemoVerifyPending,
                 provisionalBase,
                 forceProbeForTests: options.disableHotPathIoCachesForTests,
@@ -2952,6 +2953,7 @@ export function createRustModeTransform(
                     memoStoredCount: state.ordinalMemoStoredCount,
                     memoCanonicalCount: state.ordinalMemoCanonicalCount,
                     memoCheckpoints: state.ordinalMemoCheckpoints,
+                primeCanonicalBase: state.ordinalContinuationBase ?? 0,
                     provisionalBase: state.ordinalContinuationBase ?? undefined,
                     forceProbeForTests: options.disableHotPathIoCachesForTests,
                 });
@@ -3438,6 +3440,7 @@ export function createRustModeTransform(
                         memoStoredCount: state.ordinalMemoStoredCount,
                         memoCanonicalCount: state.ordinalMemoCanonicalCount,
                         memoCheckpoints: state.ordinalMemoCheckpoints,
+                primeCanonicalBase: state.ordinalContinuationBase ?? 0,
                         provisionalBase: state.ordinalContinuationBase ?? undefined,
                         forceProbeForTests: options.disableHotPathIoCachesForTests,
                     });
@@ -3462,6 +3465,7 @@ export function createRustModeTransform(
                             memoStoredCount: state.ordinalMemoStoredCount,
                             memoCanonicalCount: state.ordinalMemoCanonicalCount,
                             memoCheckpoints: state.ordinalMemoCheckpoints,
+                primeCanonicalBase: state.ordinalContinuationBase ?? 0,
                             forceProbeForTests: options.disableHotPathIoCachesForTests,
                         });
                         recordOrdinalResolve(

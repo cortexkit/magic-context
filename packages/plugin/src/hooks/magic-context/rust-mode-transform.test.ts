@@ -3677,6 +3677,96 @@ describe("Rust mode authority adapter", () => {
         expect(transform.getState(sessionId).idOrdinalMemo).toEqual(new Map([["m1", 1]]));
     });
 
+    it("re-primes after a reset in the continuation numbering the module reported", async () => {
+        const sessionId = `rust-continuation-reprime-${Date.now()}`;
+        sessions.push(sessionId);
+        const rows = [
+            { id: "m1", timeCreated: 1, contributesOrdinal: true, hasValidInfo: true },
+            { id: "m2", timeCreated: 2, contributesOrdinal: true, hasValidInfo: true },
+            { id: "m3", timeCreated: 3, contributesOrdinal: true, hasValidInfo: true },
+        ];
+        unregisters.push(
+            setRawMessageProvider(sessionId, {
+                readMessages: () => rows,
+                readMessageOrdinalPage: (after, limit) =>
+                    rows
+                        .filter(
+                            (row) =>
+                                !after ||
+                                row.timeCreated > after.timeCreated ||
+                                (row.timeCreated === after.timeCreated && row.id > after.id),
+                        )
+                        .slice(0, limit),
+                getStoredMessageCount: () => rows.length,
+            }),
+        );
+        const db = makeDb();
+        // A continued (converted) session: the module numbers this host store's rows
+        // after the 10 messages the source session already had.
+        const sentOrdinals: Array<Array<[string, number]>> = [];
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method, body }) => {
+                if (method !== "transform") return { ok: true };
+                const wire = (body as { messages?: unknown[] }).messages ?? [];
+                sentOrdinals.push(
+                    wire.map((message) => {
+                        const record = message as { mid?: string; ordinal?: number };
+                        return [String(record.mid), Number(record.ordinal)];
+                    }),
+                );
+                return {
+                    decision: "PASSTHROUGH",
+                    native_messages: [],
+                    ordinal_continuation_base: 10,
+                };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const messages = () =>
+            rows.map((row) => ({
+                info: { id: row.id, role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: row.id }],
+            }));
+        const run = async () => {
+            const wire = messages();
+            await transform.run(sessionId, wire, { messages: [...wire] }, makeMeta(db, sessionId));
+        };
+        await run();
+        expect(transform.getState(sessionId).ordinalContinuationBase).toBe(10);
+        expect(transform.getState(sessionId).idOrdinalMemo).toEqual(
+            new Map([
+                ["m1", 11],
+                ["m2", 12],
+                ["m3", 13],
+            ]),
+        );
+
+        // Removing the last row drifts the store count below every page checkpoint, so
+        // the adapter clears the memo and re-reads the session from its first row.
+        rows.splice(2, 1);
+        transform.invalidateWireState(sessionId);
+        await run();
+
+        const state = transform.getState(sessionId);
+        expect(state.ordinalMemoResetCause).toBe("mismatch_mismatch");
+        expect(state.idOrdinalMemo).toEqual(
+            new Map([
+                ["m1", 11],
+                ["m2", 12],
+            ]),
+        );
+        expect(state.ordinalMemoCanonicalCount).toBe(12);
+        expect(sentOrdinals.at(-1)).toEqual([
+            ["m1", 11],
+            ["m2", 12],
+        ]);
+
+        // A later message keeps counting from the continued numbering, not from 3.
+        rows.push({ id: "m4", timeCreated: 4, contributesOrdinal: true, hasValidInfo: true });
+        await run();
+        expect(transform.getState(sessionId).idOrdinalMemo.get("m4")).toBe(13);
+    });
+
     it("clears Rust state, wire caches, and the transport route for a deleted session", async () => {
         const sessionId = `rust-clear-session-${Date.now()}`;
         sessions.push(sessionId);

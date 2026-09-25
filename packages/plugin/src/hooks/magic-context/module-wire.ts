@@ -133,6 +133,13 @@ export async function resolveOrdinalsForModule(args: {
     verifyStore?: boolean;
     /** Absolute ordinal immediately before a sliced unresolved tail. */
     provisionalBase?: number;
+    /**
+     * Ordinal the host store's first row follows. A converted or continued session is
+     * numbered after the messages of the session it continues, so a walk that restarts
+     * from the first stored row (cold prime, cleared memo, new module generation) must
+     * count from this base rather than from 0. Defaults to 0.
+     */
+    primeCanonicalBase?: number;
     /** Test-only seam that bypasses the memo to force an ordinal-page probe on every request. */
     forceProbeForTests?: boolean;
 }): Promise<
@@ -165,7 +172,10 @@ export async function resolveOrdinalsForModule(args: {
 
     let anchor = generationChanged ? null : (args.memoAnchor ?? null);
     let storedCount = generationChanged ? null : (args.memoStoredCount ?? null);
-    let canonicalCount = generationChanged ? 0 : (args.memoCanonicalCount ?? 0);
+    const primeCanonicalBase = Math.max(0, args.primeCanonicalBase ?? 0);
+    let canonicalCount = generationChanged
+        ? primeCanonicalBase
+        : (args.memoCanonicalCount ?? primeCanonicalBase);
     const stats: OrdinalResolveStats = { mode: "memo", rowsRead: 0, pages: 0, rewinds: 0 };
 
     const normalizations: ModuleNormalizationRecord[] = [];
@@ -201,7 +211,7 @@ export async function resolveOrdinalsForModule(args: {
             memo.clear();
             if (checkpoints) checkpoints.length = 0;
             anchor = null;
-            canonicalCount = 0;
+            canonicalCount = primeCanonicalBase;
         }
         stats.mode = priming ? "prime" : "incremental";
 
