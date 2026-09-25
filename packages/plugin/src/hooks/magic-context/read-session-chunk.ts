@@ -36,6 +36,7 @@ import {
     readRawSeedTailFromDb,
     readRawSessionMessageByIdFromDb,
     readRawSessionMessageIdOrdinalsFromDb,
+    readRawSessionMessageOrdinalAnchorRankFromDb,
     readRawSessionMessageOrdinalByIdFromDb,
     readRawSessionMessageOrdinalPageFromDb,
     readRawSessionMessagePageFromDb,
@@ -140,6 +141,13 @@ export interface RawMessageProvider {
     getMessageCount?: () => number;
     /** Stored row count including compaction summaries, used for ordinal drift detection. */
     getStoredMessageCount?: () => number;
+    /**
+     * Stored rows ordered at or before `anchor` (compaction summaries included), or null
+     * when no row with the anchor's id and creation time exists. Lets a persisted ordinal
+     * checkpoint be validated without walking the session; a provider without it simply
+     * never restores from persisted checkpoints.
+     */
+    readMessageOrdinalAnchorRank?: (anchor: RawMessageOrdinalAnchor) => number | null;
     /**
      * Id of the row a request carries in place of a stored compartment boundary.
      * Only hosts that store rows they never serve by id implement it; null means
@@ -584,6 +592,25 @@ export function readRawSessionMessageOrdinalPage(
     if (!openCodeDbExists()) return [];
     return withReadOnlySessionDb((db) =>
         readRawSessionMessageOrdinalPageFromDb(db, sessionId, after, limit),
+    );
+}
+
+/**
+ * Position of an ordinal anchor in the stored-row walk: how many stored rows sort at or
+ * before it, null when the anchor row is gone, or undefined when this store cannot
+ * answer without reading every row (a provider that lacks the lookup).
+ */
+export function readRawSessionMessageOrdinalAnchorRank(
+    sessionId: string,
+    anchor: RawMessageOrdinalAnchor,
+): number | null | undefined {
+    const provider = sessionProviders.get(sessionId);
+    if (provider?.readMessageOrdinalAnchorRank)
+        return provider.readMessageOrdinalAnchorRank(anchor);
+    if (provider) return undefined;
+    if (!openCodeDbExists()) return undefined;
+    return withReadOnlySessionDb((db) =>
+        readRawSessionMessageOrdinalAnchorRankFromDb(db, sessionId, anchor),
     );
 }
 

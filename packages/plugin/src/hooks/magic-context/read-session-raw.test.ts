@@ -8,7 +8,9 @@ import {
     RAW_MESSAGE_PARTS_BY_ID_SQL,
     readRawSessionMessageByIdFromDb,
     readRawSessionMessageIdOrdinalsFromDb,
+    readRawSessionMessageOrdinalAnchorRankFromDb,
     readRawSessionMessageOrdinalByIdFromDb,
+    readRawSessionMessageOrdinalPageFromDb,
     readRawSessionMessagePageFromDb,
     readRawSessionMessagesFromDb,
 } from "./read-session-raw";
@@ -189,6 +191,67 @@ describe("raw session message id ordinals", () => {
                 ["m-tool-result", 5],
             ]);
             expect(countRawSessionMessageOrdinalsFromDb(db, "session")).toBe(5);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+});
+
+describe("raw session ordinal anchor rank", () => {
+    it("counts stored rows through an anchor in walk order and reports a missing anchor", () => {
+        const db = new Database(":memory:");
+        try {
+            db.exec(`
+                CREATE TABLE message (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    time_created INTEGER NOT NULL,
+                    time_updated INTEGER NOT NULL,
+                    data TEXT NOT NULL
+                );
+                CREATE INDEX message_session_time_created_id_idx
+                    ON message(session_id, time_created, id);
+            `);
+            const insert = db.prepare(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+            );
+            // Two rows share a creation time, so the id breaks the tie as the page walk does.
+            insert.run("m-a", "ses", 10, 10, "{}");
+            insert.run("m-c", "ses", 20, 20, "{}");
+            insert.run("m-b", "ses", 20, 20, JSON.stringify({ summary: true, finish: "stop" }));
+            insert.run("m-d", "ses", 30, 30, "{}");
+            insert.run("other", "ses-other", 5, 5, "{}");
+
+            const walk = readRawSessionMessageOrdinalPageFromDb(db, "ses", null, 10);
+            walk.forEach((entry, index) => {
+                expect(
+                    readRawSessionMessageOrdinalAnchorRankFromDb(db, "ses", {
+                        timeCreated: entry.timeCreated,
+                        id: entry.id,
+                    }),
+                ).toBe(index + 1);
+            });
+            expect(walk.map((entry) => entry.id)).toEqual(["m-a", "m-b", "m-c", "m-d"]);
+            // A removed row, a row of another session, and a row whose creation time no
+            // longer matches are all missing anchors.
+            expect(
+                readRawSessionMessageOrdinalAnchorRankFromDb(db, "ses", {
+                    timeCreated: 25,
+                    id: "m-x",
+                }),
+            ).toBeNull();
+            expect(
+                readRawSessionMessageOrdinalAnchorRankFromDb(db, "ses", {
+                    timeCreated: 5,
+                    id: "other",
+                }),
+            ).toBeNull();
+            expect(
+                readRawSessionMessageOrdinalAnchorRankFromDb(db, "ses", {
+                    timeCreated: 21,
+                    id: "m-c",
+                }),
+            ).toBeNull();
         } finally {
             closeQuietly(db);
         }

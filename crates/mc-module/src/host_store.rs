@@ -62,7 +62,7 @@ pub const SINGLE_STORE_CAPABLE: bool = mc_store::SINGLE_STORE_CAPABLE;
 /// its own file: a database migrated past this number may be read but never written,
 /// because a newer migration may have changed a domain table in a way these writers do
 /// not know about.
-pub const BUILT_CONTEXT_FENCE_VERSION: i64 = 91;
+pub const BUILT_CONTEXT_FENCE_VERSION: i64 = 92;
 
 /// Versions at or above this number belong to downstream forks and are excluded when
 /// reading the persisted lane, matching the host's own fence arithmetic.

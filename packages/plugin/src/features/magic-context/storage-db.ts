@@ -104,7 +104,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastMigrationOnOpenRefusal = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 91;
+export const LATEST_SUPPORTED_VERSION = 92;
 
 /**
  * Every runtime backend receives the same finite wait before the first schema
@@ -1490,6 +1490,15 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       written_memory_id INTEGER NOT NULL DEFAULT 0,
       embedded_memory_id INTEGER NOT NULL DEFAULT 0,
       updated_at INTEGER NOT NULL DEFAULT 0
+    );
+
+    -- Sparse page checkpoints of the Rust adapter's host-store ordinal walk, so a
+    -- restarted process can rebuild its id-to-ordinal map without reading every
+    -- stored row. Validated against the host store on load. Migration v92.
+    CREATE TABLE IF NOT EXISTS rust_ordinal_checkpoints (
+      session_id TEXT PRIMARY KEY,
+      checkpoints_json TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS message_history_index (

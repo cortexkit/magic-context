@@ -1,6 +1,7 @@
 import * as crypto from "node:crypto";
 import {
     getRawSessionStoredMessageCount,
+    readRawSessionMessageOrdinalAnchorRank,
     readRawSessionMessageOrdinalPage,
 } from "./read-session-chunk";
 import {
@@ -90,8 +91,10 @@ export interface OrdinalResolveStats {
      * prime: read the whole session from the first row (cold or cleared mapping).
      * rewind: the incremental count did not add up, so the walk resumed from an earlier
      * checkpoint and re-read only the rows after it.
+     * restore: a cold start rebuilt the mapping from checkpoints persisted by an earlier
+     * process, reading only the rows after them.
      */
-    mode: "memo" | "incremental" | "prime" | "rewind";
+    mode: "memo" | "incremental" | "prime" | "rewind" | "restore";
     /** Host store rows returned by ordinal-page reads during this call. */
     rowsRead: number;
     pages: number;
@@ -103,6 +106,215 @@ function dropMemoEntriesAbove(memo: Map<string, number>, ordinal: number): void 
     for (const [messageId, value] of memo) {
         if (value > ordinal) memo.delete(messageId);
     }
+}
+
+type OrdinalEntry = ReturnType<typeof readRawSessionMessageOrdinalPage>[number];
+
+/**
+ * Read the stored rows after `from` in ordinal-walk order, one page at a time, counting
+ * rows and pages into `stats`. `maxRows` stops the walk early; without it the walk runs
+ * to the end of the session. Page ends are reported so callers can record checkpoints.
+ */
+async function readOrdinalEntriesAfter(
+    sessionId: string,
+    from: RawMessageOrdinalAnchor | null,
+    stats: OrdinalResolveStats,
+    maxRows?: number,
+): Promise<{
+    entries: OrdinalEntry[];
+    end: RawMessageOrdinalAnchor | null;
+    pageEnds: Array<{ anchor: RawMessageOrdinalAnchor; entryCount: number }>;
+}> {
+    const entries: OrdinalEntry[] = [];
+    const pageEnds: Array<{ anchor: RawMessageOrdinalAnchor; entryCount: number }> = [];
+    let pageAnchor = from;
+    while (maxRows === undefined || entries.length < maxRows) {
+        const limit =
+            maxRows === undefined
+                ? MODULE_ORDINAL_PAGE_SIZE
+                : Math.min(MODULE_ORDINAL_PAGE_SIZE, maxRows - entries.length);
+        const page = readRawSessionMessageOrdinalPage(sessionId, pageAnchor, limit);
+        stats.pages += 1;
+        stats.rowsRead += page.length;
+        if (page.length === 0) break;
+        entries.push(...page);
+        const last = page[page.length - 1];
+        pageAnchor = { timeCreated: last.timeCreated, id: last.id };
+        pageEnds.push({ anchor: pageAnchor, entryCount: entries.length });
+        if (page.length < limit) break;
+        await yieldToEventLoop();
+    }
+    return { entries, end: pageAnchor, pageEnds };
+}
+
+/**
+ * Whether the wire still names stored messages older than the mapped rows: a
+ * non-synthetic message the memo lacks that sits before one it has, or no mapped wire
+ * message at all. The resolver would reject either as unresolved, so a restore keeps
+ * reading older checkpoint segments until neither holds.
+ */
+function wireNeedsOlderRows(messages: MessageLike[], memo: Map<string, number>): boolean {
+    let sawMapped = false;
+    let sawUnmappedStored = false;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        if (isRawCompactionSummaryInfo(message.info)) continue;
+        const messageId = getMessageId(message);
+        if (messageId !== null && memo.has(messageId)) {
+            sawMapped = true;
+        } else if (!isSyntheticWireMessage(message)) {
+            if (sawMapped) return true;
+            sawUnmappedStored = true;
+        }
+    }
+    return !sawMapped && sawUnmappedStored;
+}
+
+/**
+ * Rebuild the ordinal memo on a cold start from page checkpoints an earlier process
+ * persisted, instead of reading the whole session from its first row.
+ *
+ * `persisted` is in the host store's own numbering (no continuation base); the memo is
+ * filled in the caller's numbering, `canonicalBase` above it. The newest checkpoint is
+ * trusted only when its anchor row still exists at exactly its recorded position and the
+ * stored-row count still adds up; then the rows after it are read. While the wire names
+ * older messages, the segment between the previous checkpoint and the current one is
+ * read too, and must end at the current anchor with the recorded row and ordinal counts.
+ * Any disagreement discards the persisted checkpoints: the result names the reason and
+ * the caller falls back to a full read. `memo` and `memoCheckpoints` are only written on
+ * success.
+ */
+export async function restoreOrdinalMemoFromCheckpoints(args: {
+    sessionId: string;
+    messages: MessageLike[];
+    persisted: readonly OrdinalMemoCheckpoint[];
+    canonicalBase: number;
+    memo: Map<string, number>;
+    memoCheckpoints: OrdinalMemoCheckpoint[];
+}): Promise<
+    | {
+          ok: true;
+          memoAnchor: RawMessageOrdinalAnchor;
+          memoStoredCount: number;
+          memoCanonicalCount: number;
+          stats: OrdinalResolveStats;
+      }
+    | { ok: false; reason: string; stats: OrdinalResolveStats }
+> {
+    const stats: OrdinalResolveStats = { mode: "restore", rowsRead: 0, pages: 0, rewinds: 0 };
+    const fail = (reason: string) => ({ ok: false as const, reason, stats });
+    const persisted = [...args.persisted].sort(
+        (left, right) => left.storedCount - right.storedCount,
+    );
+    if (persisted.length === 0) return fail("none");
+    for (let index = 0; index < persisted.length; index += 1) {
+        const checkpoint = persisted[index];
+        const previous = index > 0 ? persisted[index - 1] : null;
+        if (
+            checkpoint.canonicalCount > checkpoint.storedCount ||
+            (previous !== null &&
+                (checkpoint.storedCount <= previous.storedCount ||
+                    checkpoint.canonicalCount < previous.canonicalCount))
+        ) {
+            return fail("malformed");
+        }
+    }
+    const base = Math.max(0, args.canonicalBase);
+    const newest = persisted[persisted.length - 1];
+    const rank = readRawSessionMessageOrdinalAnchorRank(args.sessionId, newest.anchor);
+    if (rank === undefined) return fail("unsupported_store");
+    if (rank === null) return fail(`anchor_missing id=${newest.anchor.id}`);
+    if (rank !== newest.storedCount) {
+        return fail(
+            `anchor_moved id=${newest.anchor.id} expected_rank=${newest.storedCount} rank=${rank}`,
+        );
+    }
+
+    const tail = await readOrdinalEntriesAfter(args.sessionId, newest.anchor, stats);
+    const storedCount = getRawSessionStoredMessageCount(args.sessionId);
+    if (storedCount !== newest.storedCount + tail.entries.length) {
+        return fail(
+            `count_drift expected=${newest.storedCount + tail.entries.length} stored=${storedCount}`,
+        );
+    }
+
+    const memo = new Map<string, number>();
+    const tailCheckpoints: OrdinalMemoCheckpoint[] = [];
+    let canonicalCount = newest.canonicalCount;
+    let pageEndIndex = 0;
+    for (let entryIndex = 0; entryIndex < tail.entries.length; entryIndex += 1) {
+        const entry = tail.entries[entryIndex];
+        if (entry.contributesOrdinal) {
+            canonicalCount += 1;
+            memo.set(entry.id, canonicalCount + base);
+        }
+        const pageEnd = tail.pageEnds[pageEndIndex];
+        if (pageEnd !== undefined && pageEnd.entryCount === entryIndex + 1) {
+            tailCheckpoints.push({
+                anchor: pageEnd.anchor,
+                storedCount: newest.storedCount + pageEnd.entryCount,
+                canonicalCount: canonicalCount + base,
+            });
+            pageEndIndex += 1;
+        }
+    }
+
+    // Walk back one checkpoint segment at a time while the wire still names older rows.
+    // Each segment is checked against both of its checkpoints, so a revert or conversion
+    // inside it is caught rather than silently renumbered.
+    let upperIndex = persisted.length - 1;
+    while (upperIndex >= 0 && wireNeedsOlderRows(args.messages, memo)) {
+        const upper = persisted[upperIndex];
+        const lower = upperIndex > 0 ? persisted[upperIndex - 1] : null;
+        const expectedRows = upper.storedCount - (lower?.storedCount ?? 0);
+        stats.rewinds += 1;
+        const segment = await readOrdinalEntriesAfter(
+            args.sessionId,
+            lower?.anchor ?? null,
+            stats,
+            expectedRows,
+        );
+        const last = segment.entries.at(-1);
+        if (
+            segment.entries.length !== expectedRows ||
+            last === undefined ||
+            last.id !== upper.anchor.id ||
+            last.timeCreated !== upper.anchor.timeCreated
+        ) {
+            return fail(`segment_mismatch id=${upper.anchor.id}`);
+        }
+        let segmentCount = lower?.canonicalCount ?? 0;
+        for (const entry of segment.entries) {
+            if (!entry.contributesOrdinal) continue;
+            segmentCount += 1;
+            memo.set(entry.id, segmentCount + base);
+        }
+        if (segmentCount !== upper.canonicalCount) {
+            return fail(
+                `segment_ordinal_mismatch id=${upper.anchor.id} expected=${upper.canonicalCount} counted=${segmentCount}`,
+            );
+        }
+        upperIndex -= 1;
+    }
+
+    args.memo.clear();
+    for (const [messageId, ordinal] of memo) args.memo.set(messageId, ordinal);
+    args.memoCheckpoints.length = 0;
+    for (const checkpoint of persisted) {
+        args.memoCheckpoints.push({
+            anchor: { ...checkpoint.anchor },
+            storedCount: checkpoint.storedCount,
+            canonicalCount: checkpoint.canonicalCount + base,
+        });
+    }
+    args.memoCheckpoints.push(...tailCheckpoints);
+    return {
+        ok: true,
+        memoAnchor: tail.end ?? { ...newest.anchor },
+        memoStoredCount: storedCount,
+        memoCanonicalCount: canonicalCount + base,
+        stats,
+    };
 }
 
 /**
@@ -215,35 +427,8 @@ export async function resolveOrdinalsForModule(args: {
         }
         stats.mode = priming ? "prime" : "incremental";
 
-        type OrdinalEntry = ReturnType<typeof readRawSessionMessageOrdinalPage>[number];
-        const readAfter = async (
-            from: RawMessageOrdinalAnchor | null,
-        ): Promise<{
-            entries: OrdinalEntry[];
-            end: RawMessageOrdinalAnchor | null;
-            pageEnds: Array<{ anchor: RawMessageOrdinalAnchor; entryCount: number }>;
-        }> => {
-            const entries: OrdinalEntry[] = [];
-            const pageEnds: Array<{ anchor: RawMessageOrdinalAnchor; entryCount: number }> = [];
-            let pageAnchor = from;
-            while (true) {
-                const page = readRawSessionMessageOrdinalPage(
-                    args.sessionId,
-                    pageAnchor,
-                    MODULE_ORDINAL_PAGE_SIZE,
-                );
-                stats.pages += 1;
-                stats.rowsRead += page.length;
-                if (page.length === 0) break;
-                entries.push(...page);
-                const last = page[page.length - 1];
-                pageAnchor = { timeCreated: last.timeCreated, id: last.id };
-                pageEnds.push({ anchor: pageAnchor, entryCount: entries.length });
-                if (page.length < MODULE_ORDINAL_PAGE_SIZE) break;
-                await yieldToEventLoop();
-            }
-            return { entries, end: pageAnchor, pageEnds };
-        };
+        const readAfter = (from: RawMessageOrdinalAnchor | null) =>
+            readOrdinalEntriesAfter(args.sessionId, from, stats);
 
         const baseStoredCount = storedCount ?? 0;
         let read = await readAfter(anchor);

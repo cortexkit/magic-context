@@ -32,13 +32,17 @@ function columnNames(db: Database, table: string): string[] {
     );
 }
 
-/** A database exactly as v90 left it: every migration through v90, none of v91. */
+/**
+ * A database exactly as v90 left it: every migration through v90, none of v91 or the
+ * later ones (v92's table is dropped too, so the step re-runs the whole tail).
+ */
 function openAtV90(): Database {
     const db = new Database(":memory:");
     initializeDatabase(db);
     runMigrations(db);
     db.exec("DROP TABLE IF EXISTS memory_embedding_watermarks");
-    db.prepare("DELETE FROM schema_migrations WHERE version = 91").run();
+    db.exec("DROP TABLE IF EXISTS rust_ordinal_checkpoints");
+    db.prepare("DELETE FROM schema_migrations WHERE version >= 91").run();
     return db;
 }
 
@@ -49,7 +53,7 @@ describe("migration v91: module-written memory embedding watermark", () => {
             initializeDatabase(db);
             runMigrations(db);
 
-            expect(LATEST_SUPPORTED_VERSION).toBe(91);
+            expect(LATEST_SUPPORTED_VERSION).toBe(92);
             expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
             expect(
                 db
