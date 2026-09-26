@@ -224,6 +224,37 @@ export async function singleStoreGate(args: {
     } catch (error) {
         const tripwire = asSingleStoreTripwire(error);
         if (tripwire) return tripwire;
+        if (isUnknownModuleMethod(error)) {
+            // A module built before this route cannot check the marker table's schema
+            // and cannot leave marked projects out of its pages. With no marker row on
+            // the file there is nothing to leave out, so the mirror runs as it did
+            // before; with any marker row, serving it would copy a marked project back.
+            const all = readAllSingleStoreMarkers(args.db);
+            if (all.kind === "read" && all.rows.length === 0) return null;
+            return new SingleStoreTripwireError(
+                "the module predates mirror.marker_status and cannot leave single-store projects out of the mirror, and this context.db carries a marker",
+                { cause: error },
+            );
+        }
         throw error;
     }
+}
+
+/** Codes a module answers with when it does not know a request's method. */
+const UNKNOWN_METHOD_CODES = new Set(["unrecognized_request_shape", "unknown_method"]);
+
+/**
+ * True when `error`, or anything in its cause chain, is a module saying it does not
+ * know the method: the answer a module built before a route was added gives.
+ */
+export function isUnknownModuleMethod(error: unknown): boolean {
+    let current: unknown = error;
+    const seen = new Set<unknown>();
+    while (current && typeof current === "object" && !seen.has(current)) {
+        seen.add(current);
+        const code = (current as { code?: unknown }).code;
+        if (typeof code === "string" && UNKNOWN_METHOD_CODES.has(code)) return true;
+        current = (current as { cause?: unknown }).cause;
+    }
+    return false;
 }

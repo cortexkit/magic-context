@@ -4597,4 +4597,153 @@ mod tests {
             }
         }
     }
+
+    /// Measure what creating and dropping the per-transaction project-scope triggers, and
+    /// reading the single-store marker table, cost on a production-sized store.
+    ///
+    /// A measuring instrument, run by hand:
+    ///   cargo test -p mc-module --lib host_store::tests::b0_gate -- --ignored --nocapture
+    /// `B0_GATE_REAL_STORE` may name a scrubbed copy of a real context.db, already migrated
+    /// to MARKER_LANE_VERSION, to time the marker read against as well.
+    #[test]
+    #[ignore = "measurement instrument, not an assertion"]
+    fn b0_gate_measure_scope_trigger_and_marker_read_cost() {
+        fn percentile(samples: &mut [u128], pct: usize) -> u128 {
+            samples.sort_unstable();
+            samples[(samples.len() - 1) * pct / 100]
+        }
+        const ROUNDS: usize = 400;
+        for tags in [0, REALISTIC_TAGS] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = fixture_db(dir.path(), "context.db");
+            mark_managed(&path, "git:fixture");
+            seed_realistic_store(&path, tags);
+            let mut store = HostStore::open(&path).unwrap();
+
+            // Compare an empty transaction with one that only creates and drops the
+            // project-scope triggers: the difference is the fixed cost those triggers add
+            // to every privileged write, whatever its size.
+            let mut bare = Vec::with_capacity(ROUNDS);
+            let mut scoped = Vec::with_capacity(ROUNDS);
+            for _ in 0..ROUNDS {
+                let started = Instant::now();
+                let tx = store
+                    .conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .unwrap();
+                tx.commit().unwrap();
+                bare.push(started.elapsed().as_micros());
+
+                let started = Instant::now();
+                let tx = store
+                    .conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .unwrap();
+                install_scope_triggers(&tx, "git:fixture").unwrap();
+                drop_scope_triggers(&tx).unwrap();
+                tx.commit().unwrap();
+                scoped.push(started.elapsed().as_micros());
+            }
+            println!(
+                "b0_gate tags={tags} empty_tx_us p50/p99={}/{} scope_install_drop_tx_us p50/p99={}/{}",
+                percentile(&mut bare, 50),
+                percentile(&mut bare, 99),
+                percentile(&mut scoped, 50),
+                percentile(&mut scoped, 99)
+            );
+
+            // Real publish chunks, with the project-scope triggers active, at the default
+            // publish chunk size.
+            let mut chunk_us = Vec::new();
+            for round in 0..10 {
+                let outcome = store
+                    .publish_fold(&memories_only_publish(
+                        DEFAULT_PUBLISH_CHUNK_ROWS,
+                        &format!("gate{round}"),
+                    ))
+                    .unwrap();
+                chunk_us.push(outcome.max_chunk_duration_us() as u128);
+            }
+            println!(
+                "b0_gate tags={tags} publish_chunk_us(rows={DEFAULT_PUBLISH_CHUNK_ROWS}) p50/max={}/{} budget_us={PUBLISH_CHUNK_BUDGET_US}",
+                percentile(&mut chunk_us.clone(), 50),
+                percentile(&mut chunk_us, 100)
+            );
+
+            let mut marker = Vec::with_capacity(ROUNDS);
+            for _ in 0..ROUNDS {
+                let started = Instant::now();
+                read_marker_snapshot(&path).unwrap();
+                marker.push(started.elapsed().as_micros());
+            }
+            println!(
+                "b0_gate tags={tags} read_marker_snapshot_us p50/p99={}/{}",
+                percentile(&mut marker, 50),
+                percentile(&mut marker, 99)
+            );
+        }
+        if let Ok(real) = std::env::var("B0_GATE_REAL_STORE") {
+            let real = PathBuf::from(real);
+            let mut marker = Vec::with_capacity(ROUNDS);
+            for _ in 0..ROUNDS {
+                let started = Instant::now();
+                let snapshot = read_marker_snapshot(&real).unwrap();
+                assert!(
+                    !snapshot.below_lane,
+                    "the real-store copy must be at the lane"
+                );
+                marker.push(started.elapsed().as_micros());
+            }
+            println!(
+                "b0_gate real_store read_marker_snapshot_us p50/p99={}/{} bytes={}",
+                percentile(&mut marker, 50),
+                percentile(&mut marker, 99),
+                std::fs::metadata(&real).unwrap().len()
+            );
+        }
+    }
+
+    /// A write closure that panics mid-transaction, and one that fails after the
+    /// project-scope triggers are created, must leave no trigger on the connection, so a
+    /// later write for a different project on the same connection still commits.
+    #[test]
+    fn b0_gate_a_panicking_or_failing_scoped_write_leaks_no_trigger() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, mut store) = scope_fixture(dir.path());
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = run_scoped(&mut store, SCOPE_A, &["memories"], |tx| {
+                insert_scoped_row(tx, "memories", Some(SCOPE_A), "a-before-panic")?;
+                panic!("writer panicked with the scope triggers armed");
+            });
+        }));
+        assert!(panicked.is_err());
+        assert_eq!(temp_scope_objects(&store), Vec::<String>::new());
+        assert_eq!(
+            scoped_row_project(&path, "memories", "a-before-panic"),
+            None
+        );
+        assert_eq!(privilege_enabled(&path), 0);
+
+        let failed = run_scoped(&mut store, SCOPE_A, &["memories"], |tx| {
+            insert_scoped_row(tx, "memories", Some(SCOPE_A), "a-before-error")?;
+            tx.execute("SELECT * FROM no_such_table", [])?;
+            Ok(())
+        });
+        assert!(failed.is_err());
+        assert_ne!(failed.unwrap_err().code(), SCOPE_VIOLATION_CODE);
+        assert_eq!(temp_scope_objects(&store), Vec::<String>::new());
+
+        // The next transaction is declared for B and writes B: had A's triggers leaked,
+        // this in-scope write would abort (or the re-create would fail as a duplicate).
+        run_scoped(&mut store, SCOPE_B, &["memories"], |tx| {
+            insert_scoped_row(tx, "memories", Some(SCOPE_B), "b-after")?;
+            Ok(())
+        })
+        .expect("a later in-scope write on the same connection commits");
+        assert_eq!(
+            scoped_row_project(&path, "memories", "b-after"),
+            Some(Some(SCOPE_B.to_string()))
+        );
+    }
 }

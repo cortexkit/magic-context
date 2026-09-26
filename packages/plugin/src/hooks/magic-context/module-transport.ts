@@ -865,7 +865,16 @@ export class SubcModuleTransport {
             "mirror.marker_status",
             body,
         );
-        if (response.ok !== true) throw new Error("mirror.marker_status omitted ok");
+        if (response.ok !== true) {
+            // Keep the module's code, so a caller can tell a module that does not know
+            // this route (built before it) from any other failure.
+            const code = typeof response.code === "string" ? response.code : undefined;
+            const message =
+                typeof response.message === "string"
+                    ? response.message
+                    : "mirror.marker_status omitted ok";
+            throw Object.assign(new Error(message), code ? { code } : {});
+        }
         return {
             ok: true,
             marked: response.marked === true,

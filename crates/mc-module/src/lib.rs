@@ -9516,20 +9516,26 @@ impl McHandler {
     /// Read which projects are marked single-store, answering a refusal when `project`
     /// is one of them or when the marker cannot be trusted.
     ///
+    /// `project` is `None` for a caller that predates the marker (see
+    /// `handle_mirror_pull_value`); it is refused only when the marker cannot be read.
     /// An open failure (for example no `context.db` at all) is reported under
     /// `open_failure_code`, because it says nothing about any project's marker.
     fn single_store_markers_for(
         &self,
-        project: &str,
+        project: Option<&str>,
         open_failure_code: &str,
     ) -> Result<host_store::MarkerSnapshot, HandlerOutcome> {
-        match host_store::read_marker_snapshot(&self.context_db_path()) {
-            Ok(snapshot) if snapshot.is_marked(project) => Err(HandlerOutcome::Error {
+        let path = self.context_db_path();
+        match host_store::read_marker_snapshot(&path) {
+            Ok(snapshot) if project.is_some_and(|project| snapshot.is_marked(project)) => {
+                let project = project.unwrap_or_default();
+                Err(HandlerOutcome::Error {
                 code: host_store::SINGLE_STORE_TRIPWIRE_CODE.to_string(),
-                message: format!(
-                    "project {project} is marked single-store in context.db; the store.db mirror does not serve it"
-                ),
-            }),
+                    message: format!(
+                        "project {project} is marked single-store in context.db; the store.db mirror does not serve it"
+                    ),
+                })
+            }
             Ok(snapshot) => Ok(snapshot),
             Err(host_store::MarkerReadError::Open(error)) => Err(HandlerOutcome::Error {
                 code: open_failure_code.to_string(),
@@ -9552,11 +9558,14 @@ impl McHandler {
         let Some(project) = request.get("project").and_then(Value::as_str) else {
             return invalid_params_error("mirror.marker_status requires project");
         };
-        match self.single_store_markers_for(project, "mirror_pull_failed") {
+        match self.single_store_markers_for(Some(project), "mirror_pull_failed") {
+            // The path lets the host confirm that it and the module read the same file;
+            // the module resolves it from its own environment, not the host's.
             Ok(snapshot) => respond(json!({
                 "ok": true,
                 "marked": false,
                 "below_lane": snapshot.below_lane,
+                "context_db_path": self.context_db_path().display().to_string(),
             })),
             Err(outcome) => outcome,
         }
@@ -9569,9 +9578,11 @@ impl McHandler {
         let Some(domain) = request.get("domain").and_then(Value::as_str) else {
             return invalid_params_error("mirror.pull requires domain");
         };
-        let Some(project) = request.get("project").and_then(Value::as_str) else {
-            return invalid_params_error("mirror.pull requires project");
-        };
+        // A plugin built before the single-store marker sends no `project`. Such a plugin
+        // cannot open a context.db at the marker lane (its schema fence is lower), so it
+        // cannot be pulling for a marked project; it is served with the same exclusion
+        // every other page gets, rather than refused.
+        let project = request.get("project").and_then(Value::as_str);
         // Read before either pager: a marked project's pull is refused outright, and an
         // unmarked project's changefeed page leaves out every marked project's rows.
         let markers = match self.single_store_markers_for(project, "mirror_pull_failed") {
@@ -31557,26 +31568,104 @@ mod tests {
         }
 
         #[tokio::test(flavor = "current_thread")]
-        async fn a_pull_or_marker_status_without_a_project_is_invalid_params() {
+        async fn marker_status_without_a_project_is_invalid_params() {
             let fixture = fixture();
-            feed(
-                &fixture.store_db,
-                "memories",
-                "insert",
-                json!({ "project_path": B }),
-            );
-            for body in [
-                json!({ "domain": "memories", "cursor": 0 }),
-                json!({ "domain": "memories", "cursor": 0, "live_only": true }),
-            ] {
-                assert_eq!(
-                    error_code(pull(&fixture.handler, body).await),
-                    "invalid_params"
-                );
-            }
             assert_eq!(
                 error_code(marker_status(&fixture.handler, json!({})).await),
                 "invalid_params"
+            );
+        }
+
+        /// A plugin from before the marker sends `mirror.pull` with no `project`. It is
+        /// served, with marked projects' rows left out and the cursor and `has_more` taken
+        /// from the scanned window, exactly as a pull naming an unmarked project.
+        #[tokio::test(flavor = "current_thread")]
+        async fn a_pull_without_a_project_is_served_with_exclusion_only() {
+            let fixture = fixture();
+            feed(
+                &fixture.store_db,
+                "notes",
+                "insert",
+                json!({ "project_path": A }),
+            );
+            let window_end = feed(
+                &fixture.store_db,
+                "notes",
+                "insert",
+                json!({ "project_path": A }),
+            );
+            feed(
+                &fixture.store_db,
+                "notes",
+                "insert",
+                json!({ "project_path": B }),
+            );
+            let last = feed(
+                &fixture.store_db,
+                "notes",
+                "insert",
+                json!({ "project_path": C }),
+            );
+            mark(&fixture.context_db, A, "uuid");
+
+            let first = page(
+                pull(
+                    &fixture.handler,
+                    json!({ "domain": "notes", "cursor": 0, "limit": 2 }),
+                )
+                .await,
+            );
+            assert_eq!(first["rows"], json!([]));
+            assert_eq!(first["next_cursor"], json!(window_end));
+            assert_eq!(first["has_more"], json!(true));
+            let second = page(
+                pull(
+                    &fixture.handler,
+                    json!({ "domain": "notes", "cursor": window_end, "limit": 2 }),
+                )
+                .await,
+            );
+            assert_eq!(
+                row_projects(&second),
+                vec![Some(B.to_string()), Some(C.to_string())]
+            );
+            assert_eq!(second["next_cursor"], json!(last));
+
+            // The live snapshot is never filtered, with or without a project.
+            let live = pull(
+                &fixture.handler,
+                json!({ "domain": "memories", "cursor": 0, "live_only": true }),
+            )
+            .await;
+            assert!(matches!(live, HandlerOutcome::Response(_)), "{live:?}");
+
+            // An untrusted marker still refuses, since no exclusion can be computed.
+            Connection::open(&fixture.context_db)
+                .unwrap()
+                .execute_batch("DROP TABLE single_store_projects;")
+                .unwrap();
+            assert_eq!(
+                error_code(
+                    pull(
+                        &fixture.handler,
+                        json!({ "domain": "notes", "cursor": 0, "limit": 2 }),
+                    )
+                    .await
+                ),
+                "single_store_tripwire"
+            );
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn marker_status_reports_the_context_db_path_it_read() {
+            let fixture = fixture();
+            let status = match marker_status(&fixture.handler, json!({ "project": B })).await {
+                HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
+                other => panic!("expected ok, got {other:?}"),
+            };
+            assert_eq!(
+                status["context_db_path"],
+                json!(fixture.context_db.display().to_string())
             );
         }
 
@@ -31775,7 +31864,12 @@ mod tests {
             };
             assert_eq!(
                 status,
-                json!({ "ok": true, "marked": false, "below_lane": true })
+                json!({
+                    "ok": true,
+                    "marked": false,
+                    "below_lane": true,
+                    "context_db_path": fixture.context_db.display().to_string(),
+                })
             );
         }
 
@@ -31830,7 +31924,12 @@ mod tests {
             };
             assert_eq!(
                 status,
-                json!({ "ok": true, "marked": false, "below_lane": false })
+                json!({
+                    "ok": true,
+                    "marked": false,
+                    "below_lane": false,
+                    "context_db_path": fixture.context_db.display().to_string(),
+                })
             );
             assert_eq!(feed_count(&fixture.store_db), feed_before);
             assert_eq!(
