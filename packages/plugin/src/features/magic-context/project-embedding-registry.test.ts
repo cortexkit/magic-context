@@ -1565,7 +1565,10 @@ describe("project embedding registry", () => {
         ).toEqual({ count: 150 });
     });
 
-    it("does not backfill compartment chunks when memory is disabled", async () => {
+    // Issue 543: history embedding is not a memory feature. With memory off and
+    // a provider configured, the passive backfill still embeds compartments,
+    // but memory rows are never embedded.
+    it("backfills compartment chunks when memory is disabled but embeds no memories", async () => {
         _setTestProviderFactoryForProject(
             (config) =>
                 new FakeEmbeddingProvider(config.provider === "local" ? config.model : "off"),
@@ -1573,19 +1576,83 @@ describe("project embedding registry", () => {
         const db = useTempDb();
         seedCompartmentWithFts(db, "ses-memory-off");
         recordSessionProjectIdentity(db, "ses-memory-off", "git:off");
-        registerProjectEmbedding(
+        const snapshot = registerProjectEmbedding(
             db,
             "git:off",
             localConfig("model-a"),
             { memoryEnabled: false, gitCommitEnabled: false },
             "/tmp/off",
         );
+        insertMemory(db, {
+            projectPath: "git:off",
+            category: "CONSTRAINTS",
+            content: "A memory left over from before memory was turned off.",
+        });
+        expect(snapshot.enabled).toBe(false);
+        expect(snapshot.historyEnabled).toBe(true);
 
         const result = await sweepAllRegisteredProjects(db, 5);
-        expect(result.chunksEmbedded).toBe(0);
+        expect(result.chunksEmbedded).toBe(1);
+        expect(result.memoriesEmbedded).toBe(0);
         expect(
-            loadCompartmentChunkEmbeddingsForSearch(db, "ses-memory-off", "git:off", "chunk:model"),
-        ).toHaveLength(0);
+            loadCompartmentChunkEmbeddingsForSearch(
+                db,
+                "ses-memory-off",
+                "git:off",
+                currentChunkModelId("git:off"),
+            ),
+        ).toHaveLength(1);
+        expect(db.prepare("SELECT COUNT(*) AS count FROM memory_embeddings").get()).toEqual({
+            count: 0,
+        });
+        const coverage = getEmbeddingCoverageStatus(db, "git:off", "ses-memory-off");
+        expect(coverage.enabled).toBe(true);
+        expect(coverage.session).toEqual({ embedded: 1, total: 1 });
+        expect(coverage.memories).toEqual({ embedded: 0, total: 0, memoryEnabled: false });
+    });
+
+    it("embeds nothing when the embedding provider is off", async () => {
+        let providerCalls = 0;
+        _setTestProviderFactoryForProject((config) => {
+            providerCalls += 1;
+            return new FakeEmbeddingProvider(config.provider === "local" ? config.model : "off");
+        });
+        const db = useTempDb();
+        seedCompartmentWithFts(db, "ses-provider-off");
+        recordSessionProjectIdentity(db, "ses-provider-off", "git:provider-off");
+        const snapshot = registerProjectEmbedding(
+            db,
+            "git:provider-off",
+            { provider: "off" },
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/provider-off",
+        );
+        insertMemory(db, {
+            projectPath: "git:provider-off",
+            category: "CONSTRAINTS",
+            content: "A memory that must stay unembedded while the provider is off.",
+        });
+        expect(snapshot.enabled).toBe(false);
+        expect(snapshot.historyEnabled).toBe(false);
+
+        const result = await sweepAllRegisteredProjects(db, 5);
+        expect(result).toMatchObject({ chunksEmbedded: 0, memoriesEmbedded: 0 });
+        const outcome = await embedSessionCompartmentChunks(
+            db,
+            "git:provider-off",
+            "ses-provider-off",
+        );
+        expect(outcome.status).toBe("disabled");
+        expect(
+            db.prepare("SELECT COUNT(*) AS count FROM compartment_chunk_embeddings").get(),
+        ).toEqual({ count: 0 });
+        expect(db.prepare("SELECT COUNT(*) AS count FROM memory_embeddings").get()).toEqual({
+            count: 0,
+        });
+        expect(providerCalls).toBe(0);
+        expect(getEmbeddingCoverageStatus(db, "git:provider-off", "ses-provider-off").enabled).toBe(
+            false,
+        );
     });
 
     it("re-embeds chunks but preserves memory vectors when max_input_tokens changes", async () => {
@@ -1828,7 +1895,9 @@ describe("project embedding registry", () => {
         expect(Math.max(...callWindowCounts)).toBeLessThanOrEqual(16);
     });
 
-    it("embedSessionCompartmentChunks returns disabled when memory is off", async () => {
+    // Issue 543: the session drain (manual /ctx-embed and the automatic
+    // per-session trigger) embeds history with memory off.
+    it("embedSessionCompartmentChunks embeds history when memory is off", async () => {
         _setTestProviderFactoryForProject(
             (config) =>
                 new FakeEmbeddingProvider(config.provider === "local" ? config.model : "off"),
@@ -1844,8 +1913,8 @@ describe("project embedding registry", () => {
         );
 
         const outcome = await embedSessionCompartmentChunks(db, "git:embed-off", "ses-off");
-        expect(outcome.status).toBe("disabled");
-        expect(outcome.embedded).toBe(0);
+        expect(outcome.status).toBe("done");
+        expect(outcome.embedded).toBe(1);
     });
 
     it("embedSessionCompartmentChunks aborts cleanly on signal", async () => {

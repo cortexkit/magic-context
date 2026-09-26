@@ -570,7 +570,6 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     const embedHistoryDeps: EmbedHistoryDeps = {
         db,
         resolveDirectory: (sessionId) => sessionDirectoryBySession.get(sessionId) ?? deps.directory,
-        memoryEnabled: deps.config.memory?.enabled !== false,
         allowHomeProject: deps.config.allow_home_project,
         recompProgressBySession,
         onDirectoryResolved: maybeSendProjectIdentitySessionWarning,
@@ -604,7 +603,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     const maybeAutoEmbedSession = (sessionId: string): void => {
         if (autoEmbedAttemptedBySession.has(sessionId)) return;
         if (embedPauseBySession.has(sessionId)) return;
-        if (deps.config.memory?.enabled === false) return;
+        // No `memory.enabled` gate: history embedding runs whenever an embedding
+        // provider is configured and not `off` (checked via coverage below).
         autoEmbedAttemptedBySession.add(sessionId);
         const directory = sessionDirectoryBySession.get(sessionId) ?? deps.directory;
         void (async () => {

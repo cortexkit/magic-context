@@ -131,7 +131,6 @@ import {
 	registerCtxStatusEntryRenderer,
 	registerCtxStatusLifecycleSignal,
 	resolveSessionId,
-	sendCtxStatusMessage,
 } from "./commands/pi-command-utils";
 import { loadPiConfig, loadPiConfigDetailed } from "./config";
 import {
@@ -1357,24 +1356,18 @@ async function startPiMagicContextRuntime(
 		resolveForProject: resolveContextOptionsForProject,
 		compactionOff,
 		allowHomeProject: cfg.allow_home_project,
+		// Automatic history embedding: silent (no timeline messages) and not
+		// gated on `memory.enabled`; only the embedding provider decides.
 		maybeAutoEmbedSession: (sessionId, dir, identity) => {
 			maybeAutoEmbedPiSession(
 				{
 					db: database,
 					projectDir: dir,
 					projectIdentity: identity,
-					memoryEnabled: cfg.memory.enabled,
 				},
 				sessionId,
 				dir,
 				identity,
-				(text) => {
-					sendCtxStatusMessage(pi, {
-						title: "/ctx-embed",
-						text,
-						level: "info",
-					});
-				},
 			);
 		},
 	});
@@ -1847,9 +1840,6 @@ async function startPiMagicContextRuntime(
 		db,
 		projectDir,
 		projectIdentity,
-		memoryEnabled: bootProjectDeps.config.memory.enabled,
-		resolveMemoryEnabled: (ctx) =>
-			resolveCurrentProjectDeps(ctx).config.memory.enabled,
 		resolveProject: (ctx) => {
 			const current = resolveCurrentProjectDeps(ctx);
 			return {

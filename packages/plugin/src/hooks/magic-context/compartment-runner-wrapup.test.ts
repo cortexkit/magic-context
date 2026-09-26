@@ -605,6 +605,11 @@ describe("runCompartmentAgent wrapup controls", () => {
             } finally {
                 unregister();
             }
+            // History embedding runs even with memory off. It is
+            // fire-and-forget, so its "embeddings" stage log lands after the
+            // publish returns; one macrotask lets that background step finish
+            // (no provider is registered, so it does no embedding work).
+            await new Promise((resolve) => setTimeout(resolve, 0));
 
             const counters = getV2StoreReaderDebugCounters();
             expect(getCompartments(db, sessionId).at(-1)?.endMessage).toBe(9_950);

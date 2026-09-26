@@ -701,7 +701,7 @@ The local provider downloads model files from Hugging Face. Set the standard `HF
 
 When `provider: "off"`:
 
-- No embeddings are generated. `ctx_memory(write)` skips embedding inline and the background embedding sweep becomes a no-op.
+- No embeddings are generated, for memories or session history. `ctx_memory(write)` skips embedding inline and the background embedding sweep becomes a no-op.
 - `ctx_search` and memory injection fall back to FTS5 (BM25) ranking only. Keyword matches still work; semantic similarity does not.
 - Session-start memory injection still happens when `memory.enabled` is `true` — memories are ordered by utility tier plus `seen_count` rather than semantic similarity to the current turn.
 - Memories written while `off` is active will have no embedding row; if you later re-enable `"local"` or `"openai-compatible"`, the background sweep embeds them on the next 15-minute tick.
@@ -731,7 +731,7 @@ Cross-session memory settings. All memories are scoped to the current project (i
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | `boolean` | `true` | Enable cross-session memory. When `false`, the `ctx_memory` tool is hidden, no `<project-memory>` block is injected, and historian/recomp do not promote any session facts to project memories. The `ctx_search` tool stays available but its memory source returns no results. |
+| `enabled` | `boolean` | `true` | Enable cross-session memory. When `false`, the `ctx_memory` tool is hidden, no `<project-memory>` block is injected, and historian/recomp do not promote any session facts to project memories. The `ctx_search` tool stays available but its memory source returns no results, and no memory rows are embedded. Session history is still embedded automatically and silently for semantic `ctx_search` whenever an embedding provider is configured; set `embedding.provider: "off"` to stop all embedding. |
 | `injection_budget_tokens` | `number` (500–20000) | `4000` | Token budget for memory injection into `<session-history>`. |
 | `auto_promote` | `boolean` | `true` | Promote eligible session facts to project memories automatically after historian or `/ctx-recomp` runs. When `false`, historian and recomp do not write any new memories — agents can still create memories explicitly via `ctx_memory write`, and existing memories continue to be injected and searched normally. |
 | `retrieval_count_promotion_threshold` | `number` | `3` | Retrievals needed before a memory is auto-promoted to permanent. |

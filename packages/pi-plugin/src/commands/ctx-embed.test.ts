@@ -6,6 +6,7 @@ import type {
 	EmbeddingProvider,
 	EmbeddingPurpose,
 } from "@magic-context/core/features/magic-context/memory/embedding-provider";
+import { insertMemory } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import { backfillMessageFtsRowidMapBatch } from "@magic-context/core/features/magic-context/message-fts-rowid-map";
 import {
 	_resetProjectEmbeddingRegistryForTests,
@@ -187,7 +188,6 @@ describe("Pi /ctx-embed progress", () => {
 		const db = createTestDb();
 		const project = "pi-auto-embed-project";
 		const sessionId = "pi-auto-embed-session";
-		const notifications: string[] = [];
 		const waitUntil = async (predicate: () => boolean): Promise<void> => {
 			const deadline = Date.now() + 3_000;
 			while (!predicate() && Date.now() < deadline) {
@@ -204,10 +204,8 @@ describe("Pi /ctx-embed progress", () => {
 				sessionId,
 				"/tmp/pi-embed",
 				project,
-				(text) => notifications.push(text),
 			);
 			await waitUntil(() => !autoEmbedAttemptedBySession.has(sessionId));
-			expect(notifications).toEqual([]);
 
 			seedCompartments(db, sessionId, 1);
 			expect(getEmbeddingCoverageStatus(db, project, sessionId)).toMatchObject({
@@ -219,7 +217,6 @@ describe("Pi /ctx-embed progress", () => {
 				sessionId,
 				"/tmp/pi-embed",
 				project,
-				(text) => notifications.push(text),
 			);
 			await waitUntil(
 				() =>
@@ -227,17 +224,113 @@ describe("Pi /ctx-embed progress", () => {
 					getEmbeddingCoverageStatus(db, project, sessionId).session
 						.embedded === 1,
 			);
-			expect(notifications).toEqual([]);
 
 			maybeAutoEmbedPiSession(
 				{ db, projectDir: "/tmp/pi-embed", projectIdentity: project },
 				sessionId,
 				"/tmp/pi-embed",
 				project,
-				(text) => notifications.push(text),
 			);
 			await new Promise((resolve) => setTimeout(resolve, 20));
-			expect(notifications).toEqual([]);
+		} finally {
+			clearPiEmbedSessionState(sessionId);
+			closeQuietly(db);
+		}
+	});
+
+	// Issue 543: history embedding is not a memory feature. With memory off and
+	// a provider configured, the automatic drain embeds history, embeds no
+	// memory rows, and has no status channel to post into the timeline.
+	it("auto-embeds history silently when memory is disabled", async () => {
+		_setTestProviderFactoryForProject(() => new FakeEmbeddingProvider());
+		const db = createTestDb();
+		const project = "pi-auto-embed-memory-off";
+		const sessionId = "pi-auto-embed-memory-off-session";
+		try {
+			registerProjectEmbedding(
+				db,
+				project,
+				localConfig(),
+				{ memoryEnabled: false, gitCommitEnabled: false },
+				"/tmp/pi-embed",
+			);
+			recordSessionProjectIdentity(db, sessionId, project);
+			seedCompartments(db, sessionId, 2);
+			insertMemory(db, {
+				projectPath: project,
+				category: "CONSTRAINTS",
+				content: "A memory that must stay unembedded while memory is off.",
+			});
+
+			// The automatic entry point takes no status callback: silence is part
+			// of its signature, unlike the manual command's runEmbedDrain onStatus.
+			expect(maybeAutoEmbedPiSession.length).toBe(4);
+			maybeAutoEmbedPiSession(
+				{ db, projectDir: "/tmp/pi-embed", projectIdentity: project },
+				sessionId,
+				"/tmp/pi-embed",
+				project,
+			);
+			const deadline = Date.now() + 3_000;
+			while (
+				getEmbeddingCoverageStatus(db, project, sessionId).session.embedded <
+					2 &&
+				Date.now() < deadline
+			) {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+
+			expect(getEmbeddingCoverageStatus(db, project, sessionId)).toMatchObject({
+				enabled: true,
+				session: { total: 2, embedded: 2 },
+				memories: { embedded: 0, total: 0, memoryEnabled: false },
+			});
+			expect(
+				db.prepare("SELECT COUNT(*) AS count FROM memory_embeddings").get(),
+			).toEqual({ count: 0 });
+		} finally {
+			clearPiEmbedSessionState(sessionId);
+			closeQuietly(db);
+		}
+	});
+
+	it("auto-embeds nothing when the embedding provider is off", async () => {
+		let providerCreated = false;
+		_setTestProviderFactoryForProject(() => {
+			providerCreated = true;
+			return new FakeEmbeddingProvider();
+		});
+		const db = createTestDb();
+		const project = "pi-auto-embed-provider-off";
+		const sessionId = "pi-auto-embed-provider-off-session";
+		try {
+			registerProjectEmbedding(
+				db,
+				project,
+				{ provider: "off" },
+				{ memoryEnabled: true, gitCommitEnabled: false },
+				"/tmp/pi-embed",
+			);
+			recordSessionProjectIdentity(db, sessionId, project);
+			seedCompartments(db, sessionId, 2);
+
+			maybeAutoEmbedPiSession(
+				{ db, projectDir: "/tmp/pi-embed", projectIdentity: project },
+				sessionId,
+				"/tmp/pi-embed",
+				project,
+			);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+
+			expect(providerCreated).toBe(false);
+			expect(getEmbeddingCoverageStatus(db, project, sessionId).enabled).toBe(
+				false,
+			);
+			expect(
+				db
+					.prepare("SELECT COUNT(*) AS count FROM compartment_chunk_embeddings")
+					.get(),
+			).toEqual({ count: 0 });
 		} finally {
 			clearPiEmbedSessionState(sessionId);
 			closeQuietly(db);

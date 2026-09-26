@@ -145,8 +145,10 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
             await deps.ensureProjectRegistered?.(toolContext.directory, deps.db);
             const embeddingSnapshot = getProjectEmbeddingSnapshot(projectPath);
             const memoryEnabled = embeddingSnapshot?.features.memoryEnabled ?? deps.memoryEnabled;
+            // Query embedding serves history, memory and commit lanes alike, so it
+            // follows the provider alone; each lane applies its own feature gate.
             const embeddingEnabled = embeddingSnapshot
-                ? embeddingSnapshot.enabled || embeddingSnapshot.gitCommitEnabled
+                ? embeddingSnapshot.historyEnabled
                 : deps.embeddingEnabled;
             const gitCommitsEnabled =
                 embeddingSnapshot?.gitCommitEnabled ?? deps.gitCommitsEnabled ?? false;

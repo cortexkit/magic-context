@@ -1548,7 +1548,9 @@ describe("unifiedSearch", () => {
         );
     });
 
-    it("respects message watermark cutoff and memory.enabled for compartment chunks", async () => {
+    // Issue 543: semantic history search is not a memory feature, so memory off
+    // keeps the compartment lane; only turning embedding off removes it.
+    it("respects message watermark cutoff for compartment chunks and ignores memory.enabled", async () => {
         rawMessagesBySession.set("ses-cutoff", [
             { ordinal: 1, id: "u1", role: "user", parts: [{ type: "text", text: "first" }] },
             { ordinal: 2, id: "a2", role: "assistant", parts: [{ type: "text", text: "second" }] },
@@ -1577,10 +1579,32 @@ describe("unifiedSearch", () => {
             readMessages,
             embedQuery,
             isEmbeddingRuntimeEnabled,
+            chunkModelIdOverride: "mock:model",
             sources: ["message"],
             maxMessageOrdinal: 2,
         });
-        expect(memoryOffResults.some((result) => result.source === "compartment")).toBe(false);
+        expect(memoryOffResults.some((result) => result.source === "compartment")).toBe(true);
+        expect(embeddingQueries).toHaveLength(1);
+
+        embeddingQueries.length = 0;
+        const embeddingOffResults = await unifiedSearch(
+            db,
+            "ses-cutoff",
+            "/repo/cutoff",
+            "concept",
+            {
+                limit: 5,
+                memoryEnabled: true,
+                embeddingEnabled: false,
+                readMessages,
+                embedQuery,
+                isEmbeddingRuntimeEnabled,
+                chunkModelIdOverride: "mock:model",
+                sources: ["message"],
+                maxMessageOrdinal: 2,
+            },
+        );
+        expect(embeddingOffResults.some((result) => result.source === "compartment")).toBe(false);
         expect(embeddingQueries).toEqual([]);
     });
 });

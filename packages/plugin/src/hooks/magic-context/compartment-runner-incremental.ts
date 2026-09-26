@@ -892,14 +892,17 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         // wrote project memories (with embeddings) even for users who
         // explicitly disabled the memory feature in config.
         // Two distinct gates:
-        //  - embeddingActive: embeddings + project registration fire whenever the
-        //    memory FEATURE is enabled. They are the substrate for ctx_search +
-        //    future dreamer cross-linking and must NOT depend on auto_promote.
-        //  - promotionActive: writing facts as project memories additionally
-        //    requires auto_promote (a user who disabled auto-promotion still wants
-        //    search/embedding, just not auto-written memories).
-        const embeddingActive = !!promotionDirectory && deps.memoryEnabled !== false;
-        const promotionActive = embeddingActive && deps.autoPromote !== false;
+        //  - embeddingActive: project registration + history (compartment chunk)
+        //    embedding fire whenever the session has a project directory. History
+        //    embedding is the ctx_search substrate and depends only on the
+        //    embedding provider (checked inside the embed call), never on
+        //    `memory.enabled` or auto_promote.
+        //  - promotionActive: writing facts as project memories requires the
+        //    memory feature AND auto_promote (a user who disabled auto-promotion
+        //    still wants search/embedding, just not auto-written memories).
+        const embeddingActive = !!promotionDirectory;
+        const promotionActive =
+            embeddingActive && deps.memoryEnabled !== false && deps.autoPromote !== false;
         const promotionProjectIdentity = promotionDirectory
             ? resolveProjectIdentity(promotionDirectory)
             : "";

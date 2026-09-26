@@ -139,7 +139,12 @@ export interface ProjectEmbeddingRegistrationSnapshot {
     runtimeFingerprint: string;
     generation: number;
     features: EmbeddingFeatures;
+    /** Memory embeddings are on: a provider is configured and `memory.enabled`
+     *  is not false. Gates only memory rows, never session history. */
     enabled: boolean;
+    /** History (compartment chunk) embeddings are on. Needs only a provider
+     *  that is configured and not `off`; `memory.enabled` does not affect it. */
+    historyEnabled: boolean;
     gitCommitEnabled: boolean;
     modelId: string;
     chunkModelId: string;
@@ -796,8 +801,8 @@ function snapshotFor(
     registration: ProjectEmbeddingRegistration,
 ): ProjectEmbeddingRegistrationSnapshot {
     const providerIsOn = registration.providerIdentity !== OFF_PROVIDER_IDENTITY;
-    const enabled =
-        !registration.observationMode && providerIsOn && registration.features.memoryEnabled;
+    const historyEnabled = !registration.observationMode && providerIsOn;
+    const enabled = historyEnabled && registration.features.memoryEnabled;
     const gitCommitEnabled =
         !registration.observationMode && providerIsOn && registration.features.gitCommitEnabled;
     const configuredModel =
@@ -816,6 +821,7 @@ function snapshotFor(
         generation: registration.generation,
         features: { ...registration.features },
         enabled,
+        historyEnabled,
         gitCommitEnabled,
         modelId: registration.observationMode || !providerIsOn ? "off" : registration.modelId,
         chunkModelId:
@@ -932,10 +938,10 @@ function recordActiveEmbeddingIdentity(
             recordScopeActiveIdentity(db, projectIdentity, "commit", currentProviderIdentity, now);
         }
 
-        if (features.memoryEnabled) {
-            repairMisScopedCompartmentChunkEmbeddingsForProject(db, projectIdentity);
-            recordScopeActiveIdentity(db, projectIdentity, "chunk", currentChunkIdentity, now);
-        }
+        // History embeddings depend only on the provider, which the early
+        // return above already checked, so the chunk scope is always recorded.
+        repairMisScopedCompartmentChunkEmbeddingsForProject(db, projectIdentity);
+        recordScopeActiveIdentity(db, projectIdentity, "chunk", currentChunkIdentity, now);
         db.exec("COMMIT");
         logSlowWriteTransaction("embedding_identity_record", transactionStartedAt);
     } catch (error) {
@@ -1140,7 +1146,7 @@ export function sweepStaleEmbeddingIdentitiesForProject(
         },
         {
             scope: "chunk",
-            enabled: snapshot.enabled && snapshot.chunkModelId !== "off",
+            enabled: snapshot.historyEnabled && snapshot.chunkModelId !== "off",
             currentModelId: snapshot.chunkModelId,
         },
     ];
@@ -1347,6 +1353,7 @@ export function registerProjectShadowEmbedding(
         generation,
         features: { memoryEnabled: true, gitCommitEnabled: true },
         enabled: true,
+        historyEnabled: true,
         gitCommitEnabled: true,
         modelId: registration.modelId,
         chunkModelId: registration.chunkModelId,
@@ -1715,6 +1722,9 @@ function maybeArmShadowBackfill(
         const shadowModelId = shadowModelIdForScope(shadow, scope);
         const stallKey = `${projectIdentity}:${scope}`;
         if (primaryModelId === "off" || shadowModelId === "off") continue;
+        // Memory rows are embedded only while the memory feature is on; the
+        // shadow model must not embed them either.
+        if (scope === "memory" && !primary.features.memoryEnabled) continue;
         const batch = shadowBackfillCandidateBatch(
             db,
             projectIdentity,
@@ -2752,7 +2762,7 @@ async function embedCompartmentChunkBatch(
     batchSize: number,
 ): Promise<number> {
     const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
-    if (!snapshot?.enabled || snapshot.chunkModelId === "off") return 0;
+    if (!snapshot?.historyEnabled || snapshot.chunkModelId === "off") return 0;
 
     repairMisScopedCompartmentChunkEmbeddingsForProject(db, projectIdentity);
     const candidates = await loadUnembeddedCompartmentChunkCandidatesPolite(
@@ -2985,7 +2995,7 @@ async function drainCompartmentChunkBacklogForProject(
     deadline: number,
 ): Promise<number> {
     const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
-    if (!snapshot?.enabled) return 0;
+    if (!snapshot?.historyEnabled) return 0;
 
     const holderId = `chunk-embed-sweep-${randomUUID()}`;
     const lease = acquireGitSweepLease(db, projectIdentity, holderId, { ignoreCooldown: true });
@@ -3080,7 +3090,7 @@ export async function embedSessionCompartmentChunks(
     },
 ): Promise<SessionChunkBackfillOutcome> {
     const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
-    if (!snapshot?.enabled || snapshot.chunkModelId === "off") {
+    if (!snapshot?.historyEnabled || snapshot.chunkModelId === "off") {
         return { status: "disabled", embedded: 0, total: 0 };
     }
     // The session command path resolves this identity from the host session;
@@ -3258,8 +3268,9 @@ export interface EmbeddingCoverageStatus {
     synapseDescriptor?: SynapseLaneDescriptor;
     /** This session's compartment-chunk coverage. */
     session: { embedded: number; total: number };
-    /** Project-wide active-memory coverage. */
-    memories: { embedded: number; total: number };
+    /** Project-wide active-memory coverage. `memoryEnabled: false` means memory
+     *  is turned off, so no memory rows are embedded. */
+    memories: { embedded: number; total: number; memoryEnabled?: boolean };
     /** Project-wide git-commit coverage (only meaningful when gitEnabled). */
     commits: { embedded: number; total: number; gitEnabled: boolean };
     /** Durable write-side reasons for current shadow scopes that stopped without progress. */
@@ -3277,7 +3288,7 @@ export function getEmbeddingCoverageStatus(
     sessionId: string,
 ): EmbeddingCoverageStatus {
     const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
-    if (!snapshot?.enabled || snapshot.chunkModelId === "off") {
+    if (!snapshot?.historyEnabled || snapshot.chunkModelId === "off") {
         return {
             enabled: false,
             model: snapshot?.model ?? "off",
@@ -3298,7 +3309,11 @@ export function getEmbeddingCoverageStatus(
         snapshot.chunkModelId,
         getProjectEmbeddingMaxInputTokens(projectIdentity),
     );
-    const memories = getMemoryEmbedCoverage(db, projectIdentity, snapshot.modelId);
+    // With memory off, memory rows are never embedded, so their coverage is
+    // reported as off rather than as a backlog that will never drain.
+    const memories = snapshot.enabled
+        ? getMemoryEmbedCoverage(db, projectIdentity, snapshot.modelId)
+        : { embedded: 0, total: 0, memoryEnabled: false };
     const gitEnabled = snapshot.gitCommitEnabled;
     const commits = gitEnabled
         ? {

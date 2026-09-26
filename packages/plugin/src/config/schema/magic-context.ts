@@ -700,7 +700,7 @@ const BaseEmbeddingConfigSchema = z
             .enum(["local", "openai-compatible", "off", "synapse"])
             .default("local")
             .describe(
-                "Embedding provider. 'local' uses Xenova/all-MiniLM-L6-v2, 'openai-compatible' requires endpoint and model, 'synapse' uses the certified local Synapse lane with an explicit fallback provider, and 'off' disables embeddings.",
+                "Embedding provider. 'local' uses Xenova/all-MiniLM-L6-v2, 'openai-compatible' requires endpoint and model, 'synapse' uses the certified local Synapse lane with an explicit fallback provider, and 'off' disables embeddings. Session history is embedded for semantic ctx_search whenever the provider is not 'off', regardless of memory.enabled; memories are embedded only while memory.enabled is true.",
             ),
         fallback_provider: EmbeddingFallbackProviderSchema.optional().describe(
             "Fallback provider for the Synapse lane. Required when provider is 'synapse'; local, openai-compatible, and off are valid.",
@@ -1438,7 +1438,9 @@ export const MagicContextConfigSchema = z
                 enabled: z
                     .boolean()
                     .default(true)
-                    .describe("Enable cross-session memory (default: true)"),
+                    .describe(
+                        "Enable cross-session memory (default: true). Does not affect history embedding or semantic ctx_search over session history; set embedding.provider to 'off' to stop all embedding.",
+                    ),
                 injection_budget_tokens: z
                     .number()
                     .min(500)

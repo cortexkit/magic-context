@@ -605,6 +605,93 @@ describe("magic-context hook", () => {
         }
     });
 
+    // Issue 543: history embedding is not a memory feature. With memory off and a
+    // provider configured, the automatic drain still embeds history, posts
+    // nothing into the timeline, and leaves memory rows unembedded.
+    it("silently auto-embeds history compartments when memory is disabled", async () => {
+        process.env.XDG_DATA_HOME = makeTempDir("hook-auto-embed-memory-off-data-");
+        const projectDir = makeTempDir("hook-auto-embed-memory-off-project-");
+        mkdirSync(join(projectDir, ".cortexkit"));
+        writeFileSync(
+            join(projectDir, ".cortexkit", "magic-context.jsonc"),
+            JSON.stringify({
+                embedding: { provider: "local", model: "hook-fake-embedding-model" },
+                memory: { enabled: false },
+            }),
+        );
+        const provider = new HookFakeEmbeddingProvider();
+        _setTestProviderFactoryForProject(() => provider);
+        const prompts = createPromptMocks();
+        prompts.prompt = mock(() => {});
+        const deps = createMockDeps(prompts);
+        deps.directory = projectDir;
+        deps.config = {
+            ...deps.config,
+            memory: { enabled: false },
+        } as MagicContextDeps["config"];
+        const hook = requireHook(createMagicContextHook(deps));
+        const db = openDatabase();
+        const sessionId = "ses-hook-auto-embed-memory-off";
+        const projectIdentity = resolveProjectIdentity(projectDir);
+        recordSessionProjectIdentity(db, sessionId, projectIdentity);
+        for (let i = 1; i <= 3; i++) {
+            appendCompartments(db, sessionId, [
+                {
+                    sequence: i - 1,
+                    startMessage: i,
+                    endMessage: i,
+                    startMessageId: `u${i}`,
+                    endMessageId: `u${i}`,
+                    title: `Compartment ${i}`,
+                    content: `Content ${i}`,
+                    p1: `Content ${i}`,
+                },
+            ]);
+            db.prepare(
+                "INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content) VALUES (?, ?, ?, ?, ?)",
+            ).run(sessionId, i, `u${i}`, "user", `Source text ${i}`);
+        }
+        insertMemory(db, {
+            projectPath: projectIdentity,
+            category: "CONSTRAINTS",
+            content: "A memory that must stay unembedded while memory is off.",
+        });
+
+        try {
+            await hook["experimental.chat.messages.transform"]!(
+                {},
+                {
+                    messages: [
+                        {
+                            info: { id: "u1", role: "user", sessionID: sessionId },
+                            parts: [{ type: "text", text: "hello" }],
+                        },
+                    ] as never,
+                },
+            );
+            const deadline = Date.now() + 3_000;
+            const embedded = () =>
+                getEmbeddingCoverageStatus(db, projectIdentity, sessionId).session.embedded;
+            while (embedded() < 3 && Date.now() < deadline) {
+                await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            await new Promise((resolve) => setTimeout(resolve, 30));
+
+            expect(getEmbeddingCoverageStatus(db, projectIdentity, sessionId).session).toEqual({
+                total: 3,
+                embedded: 3,
+            });
+            expect(db.prepare("SELECT COUNT(*) AS count FROM memory_embeddings").get()).toEqual({
+                count: 0,
+            });
+            expect(prompts.prompt).not.toHaveBeenCalled();
+            expect(prompts.promptAsync).not.toHaveBeenCalled();
+            expect(prompts.showToast).not.toHaveBeenCalled();
+        } finally {
+            clearEmbedSessionState(sessionId);
+        }
+    });
+
     it("initializes the dream queue table during setup", () => {
         process.env.XDG_DATA_HOME = makeTempDir("hook-dream-queue-init-");
         requireHook(createMagicContextHook(createMockDeps()));

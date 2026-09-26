@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:te
 
 import { Database } from "../../../shared/sqlite";
 import { closeQuietly } from "../../../shared/sqlite-helpers";
+import { initializeDatabase } from "../storage-db";
 import { CATEGORY_DEFAULT_TTL } from "./constants";
 import type { EmbeddingProvider } from "./embedding-provider";
 import { computeNormalizedHash } from "./normalize-hash";
@@ -116,9 +117,15 @@ function makeMemoryDatabase(): Database {
     return database;
 }
 
-function registerTestEmbeddingProvider(database: Database): string {
+function registerTestEmbeddingProvider(_database: Database): string {
+    // Registration records embedding identities (history chunks are always
+    // tracked while a provider is on), which needs the full schema. The memory
+    // fixture above only creates memory tables, so register against a fully
+    // initialized throwaway database; the registry itself is process-global.
+    const registrationDb = new Database(":memory:");
+    initializeDatabase(registrationDb);
     return registerProjectEmbedding(
-        database,
+        registrationDb,
         TEST_PROJECT_PATH,
         { provider: "local", model: "mock:model" },
         { memoryEnabled: false, gitCommitEnabled: false },

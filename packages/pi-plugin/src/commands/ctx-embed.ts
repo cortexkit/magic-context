@@ -153,8 +153,6 @@ export function registerCtxEmbedCommand(
 		db: ContextDatabase;
 		projectDir: string;
 		projectIdentity: string;
-		memoryEnabled?: boolean;
-		resolveMemoryEnabled?: (ctx: { cwd: string }) => boolean | undefined;
 		resolveProject?: (ctx: { cwd: string }) => {
 			projectDir: string;
 			projectIdentity: string;
@@ -179,8 +177,6 @@ export function registerCtxEmbedCommand(
 				projectDir: deps.projectDir,
 				projectIdentity: deps.projectIdentity,
 			};
-			const memoryEnabled =
-				deps.resolveMemoryEnabled?.(ctx) ?? deps.memoryEnabled;
 			const sub = args.trim().toLowerCase();
 
 			if (sub === "pause") {
@@ -200,15 +196,8 @@ export function registerCtxEmbedCommand(
 				return;
 			}
 
-			if (memoryEnabled === false) {
-				sendStatus({
-					title: "/ctx-embed",
-					text: "## /ctx-embed\n\nMemory is disabled for this project, so there is no semantic embedding to backfill.",
-					level: "info",
-				});
-				return;
-			}
-
+			// History embedding does not depend on `memory.enabled`; with no
+			// provider the drain reports that there is nothing to embed.
 			await ensureProjectRegisteredFromPiDirectory(project.projectDir, deps.db);
 
 			if (sub === "start") {
@@ -253,22 +242,26 @@ export function registerCtxEmbedCommand(
 	});
 }
 
-/** Fire-and-forget auto-drain for the active Pi session (once per process). */
+/**
+ * Fire-and-forget auto-drain for the active Pi session (once per process).
+ *
+ * Runs whenever an embedding provider is configured and not `off`, whatever
+ * `memory.enabled` says. It is silent by construction: it takes no status
+ * callback and passes no `onStatus` to the drain, so nothing reaches the
+ * timeline. Only the manual `/ctx-embed` command reports progress.
+ */
 export function maybeAutoEmbedPiSession(
 	deps: {
 		db: ContextDatabase;
 		projectDir: string;
 		projectIdentity: string;
-		memoryEnabled?: boolean;
 	},
 	sessionId: string,
 	projectDir: string,
 	projectIdentity: string,
-	_notify: (text: string) => void,
 ): void {
 	if (autoEmbedAttemptedBySession.has(sessionId)) return;
 	if (embedPauseBySession.has(sessionId)) return;
-	if (deps.memoryEnabled === false) return;
 	autoEmbedAttemptedBySession.add(sessionId);
 	void (async () => {
 		// Latch discipline: early exits (nothing to embed yet, provider off)

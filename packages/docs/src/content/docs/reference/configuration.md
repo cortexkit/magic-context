@@ -137,7 +137,7 @@ Durable project memory, semantic search, and recall features. OpenAI-compatible 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `memory` | object | — | Cross-session memory configuration |
-| `memory.enabled` | boolean | `true` | Enable cross-session memory (default: true) |
+| `memory.enabled` | boolean | `true` | Enable cross-session memory (default: true). Does not affect history embedding or semantic ctx_search over session history; set embedding.provider to 'off' to stop all embedding. |
 | `memory.injection_budget_tokens` | number (500–20000) | `4000` | Token budget for memory injection on session start (min: 500, max: 20000, default: 4000) |
 | `memory.auto_promote` **Live** | boolean | `true` | Automatically promote eligible session facts into memory (default: true) |
 | `memory.retrieval_count_promotion_threshold` | number (1–) | `3` | retrieval_count threshold for promoting memory to permanent status (min: 1, default: 3) |
@@ -150,7 +150,7 @@ Durable project memory, semantic search, and recall features. OpenAI-compatible 
 | `memory.git_commit_indexing.since_days` **Live** | number (7–3650) | `365` | Days of HEAD history to index (min: 7, max: 3650, default: 365) |
 | `memory.git_commit_indexing.max_commits` **Live** | number (100–20000) | `2000` | Max commits kept per project; oldest evicted (min: 100, max: 20000, default: 2000) |
 | `embedding` | object | — | Embedding provider configuration |
-| `embedding.provider` | `"local"` \| `"openai-compatible"` \| `"off"` \| `"synapse"` | `"local"` | Embedding provider. 'local' uses Xenova/all-MiniLM-L6-v2, 'openai-compatible' requires endpoint and model, 'synapse' uses the certified local Synapse lane with an explicit fallback provider, and 'off' disables embeddings. |
+| `embedding.provider` | `"local"` \| `"openai-compatible"` \| `"off"` \| `"synapse"` | `"local"` | Embedding provider. 'local' uses Xenova/all-MiniLM-L6-v2, 'openai-compatible' requires endpoint and model, 'synapse' uses the certified local Synapse lane with an explicit fallback provider, and 'off' disables embeddings. Session history is embedded for semantic ctx_search whenever the provider is not 'off', regardless of memory.enabled; memories are embedded only while memory.enabled is true. |
 | `embedding.fallback_provider` | `"local"` \| `"openai-compatible"` \| `"off"` | — | Fallback provider for the Synapse lane. Required when provider is 'synapse'; local, openai-compatible, and off are valid. |
 | `embedding.model` | string | — | Embedding model name. Required for openai-compatible, ignored for local. |
 | `embedding.endpoint` | string | — | API endpoint URL. Required when provider is openai-compatible. |

@@ -311,8 +311,10 @@ export async function runAutoSearchHint(args: {
         }
         const embeddingSnapshot = getProjectEmbeddingSnapshot(options.projectPath);
         const memoryEnabled = embeddingSnapshot?.features.memoryEnabled ?? options.memoryEnabled;
+        // Query embedding follows the provider alone; each lane applies its own
+        // feature gate, and history search does not depend on `memory.enabled`.
         const embeddingEnabled = embeddingSnapshot
-            ? embeddingSnapshot.enabled || embeddingSnapshot.gitCommitEnabled
+            ? embeddingSnapshot.historyEnabled
             : options.embeddingEnabled;
         const gitCommitsEnabled =
             embeddingSnapshot?.gitCommitEnabled ?? options.gitCommitsEnabled ?? false;
