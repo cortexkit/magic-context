@@ -530,6 +530,8 @@ export interface SessionCacheStats {
   managed: boolean;
   is_subagent: boolean;
   title: string | null;
+  /** Set when this session's activity time cannot follow a running turn. */
+  activity_note?: string | null;
 }
 
 export interface ConfigFile {
