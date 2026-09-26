@@ -104,7 +104,17 @@ export function __resetSchemaFenceStateForTests(): void {
     lastMigrationOnOpenRefusal = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 91;
+export const LATEST_SUPPORTED_VERSION = 93;
+
+/**
+ * The schema fence as a literal the release build can find in its bundled chunks.
+ *
+ * `LATEST_MIGRATION_VERSION` is computed when the module loads, so a bundle carries no
+ * searchable copy of it. This hand-kept literal is pinned to that value by a unit test,
+ * and the dist check fails a build whose chunks carry any other number. It is written
+ * into the boot log so the bundler keeps it.
+ */
+export const SCHEMA_FENCE_SENTINEL = "magic-context-schema-fence=93";
 
 /**
  * Every runtime backend receives the same finite wait before the first schema
@@ -913,7 +923,9 @@ function finishDatabaseOpen(
     persistenceByDatabase.set(db, true);
     persistenceErrorByDatabase.delete(db);
     if (!explicitDbPath) {
-        log(formatSchemaFenceBootLog(getPersistedSchemaVersion(db), latestSupportedVersion));
+        log(
+            `${formatSchemaFenceBootLog(getPersistedSchemaVersion(db), latestSupportedVersion)} (${SCHEMA_FENCE_SENTINEL})`,
+        );
     }
     return db;
 }
@@ -1490,6 +1502,14 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       written_memory_id INTEGER NOT NULL DEFAULT 0,
       embedded_memory_id INTEGER NOT NULL DEFAULT 0,
       updated_at INTEGER NOT NULL DEFAULT 0
+    );
+
+    -- Projects whose memories and notes live only in this file. Migration v93.
+    CREATE TABLE IF NOT EXISTS single_store_projects (
+      project_path TEXT PRIMARY KEY,
+      context_store_uuid TEXT NOT NULL,
+      marked_at INTEGER NOT NULL,
+      marked_by_version TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS message_history_index (

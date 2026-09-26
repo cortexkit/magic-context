@@ -82,6 +82,7 @@ describe("TS authority flip-back", () => {
                     },
                 };
             },
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => ({
                 page: {
                     domain: args.domain,
@@ -138,6 +139,7 @@ describe("TS authority flip-back", () => {
                 else states.set(domain, "DRAINING");
                 return { authority: status(domain, states.get(domain) ?? "TS") };
             },
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => ({
                 page: {
                     domain: args.domain,

@@ -267,6 +267,9 @@ describe("magic-context hook", () => {
                 targeted = true;
                 return { row: null };
             },
+            async markerStatus() {
+                return { ok: true };
+            },
             async mirrorPull() {
                 drained = true;
                 await new Promise((resolve) => setTimeout(resolve, 2_200));

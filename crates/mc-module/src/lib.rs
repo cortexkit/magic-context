@@ -3648,6 +3648,28 @@ impl MemoryMirrorHealth {
 
 /// The module handler. Holds the single store handle (opened once in `on_hello_ack`)
 /// and the per-route session bindings (route channel → {project, session}).
+/// Drop the rows of marked single-store projects from a changefeed page.
+///
+/// The cursor and `has_more` stay those of the scanned window, not of the rows left
+/// over: the plugin keeps one cursor per domain for every project, so a window holding
+/// only marked rows must still advance past them, and must not read as the end of the
+/// feed while more rows follow. A row whose snapshot has no `project_path` is kept, since
+/// it names no marked project.
+fn exclude_marked_projects(
+    mut page: mc_store::ChangefeedPage,
+    markers: &host_store::MarkerSnapshot,
+) -> mc_store::ChangefeedPage {
+    if !markers.marked.is_empty() {
+        page.rows.retain(|row| {
+            row.full_row_snapshot
+                .get("project_path")
+                .and_then(Value::as_str)
+                .is_none_or(|project| !markers.is_marked(project))
+        });
+    }
+    page
+}
+
 pub struct McHandler {
     store: Arc<OnceLock<Arc<McStore>>>,
     log_directory: Option<PathBuf>,
@@ -3675,6 +3697,10 @@ pub struct McHandler {
     prompt_surface_epochs: Mutex<HashMap<String, PromptSurfaceSelection>>,
     #[cfg(test)]
     guidance_now_ms: Mutex<Option<i64>>,
+    /// Test-only replacement for [`host_store::resolve_context_db_path`], so a handler
+    /// test reads its own fixture without touching process environment.
+    #[cfg(test)]
+    context_db_path_override: Mutex<Option<PathBuf>>,
     #[cfg(test)]
     reduction_injection: Mutex<HashMap<String, Vec<ReductionDecision>>>,
     /// Test-only interleave seam: runs once between the request's transform and the
@@ -4305,6 +4331,8 @@ impl McHandler {
             #[cfg(test)]
             guidance_now_ms: Mutex::new(None),
             #[cfg(test)]
+            context_db_path_override: Mutex::new(None),
+            #[cfg(test)]
             reduction_injection: Mutex::new(HashMap::new()),
             #[cfg(test)]
             between_transform_and_prepare: Mutex::new(None),
@@ -4671,6 +4699,8 @@ impl McHandler {
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             guidance_now_ms: Mutex::new(None),
+            #[cfg(test)]
+            context_db_path_override: Mutex::new(None),
             reduction_injection: Mutex::new(HashMap::new()),
             between_transform_and_prepare: Mutex::new(None),
             transform_historian_followup_budget: Mutex::new(None),
@@ -9469,12 +9499,84 @@ impl McHandler {
         }
     }
 
+    /// The `context.db` the single-store marker is read from.
+    fn context_db_path(&self) -> PathBuf {
+        #[cfg(test)]
+        if let Some(path) = self
+            .context_db_path_override
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            return path;
+        }
+        host_store::resolve_context_db_path()
+    }
+
+    /// Read which projects are marked single-store, answering a refusal when `project`
+    /// is one of them or when the marker cannot be trusted.
+    ///
+    /// An open failure (for example no `context.db` at all) is reported under
+    /// `open_failure_code`, because it says nothing about any project's marker.
+    fn single_store_markers_for(
+        &self,
+        project: &str,
+        open_failure_code: &str,
+    ) -> Result<host_store::MarkerSnapshot, HandlerOutcome> {
+        match host_store::read_marker_snapshot(&self.context_db_path()) {
+            Ok(snapshot) if snapshot.is_marked(project) => Err(HandlerOutcome::Error {
+                code: host_store::SINGLE_STORE_TRIPWIRE_CODE.to_string(),
+                message: format!(
+                    "project {project} is marked single-store in context.db; the store.db mirror does not serve it"
+                ),
+            }),
+            Ok(snapshot) => Ok(snapshot),
+            Err(host_store::MarkerReadError::Open(error)) => Err(HandlerOutcome::Error {
+                code: open_failure_code.to_string(),
+                message: error.to_string(),
+            }),
+            Err(host_store::MarkerReadError::Untrusted(error)) => Err(HandlerOutcome::Error {
+                code: host_store::SINGLE_STORE_TRIPWIRE_CODE.to_string(),
+                message: format!(
+                    "{}: the single-store marker cannot be read, so no project on this context.db is served: {error}",
+                    error.code()
+                ),
+            }),
+        }
+    }
+
+    /// Answer whether `project` may use the store.db mirror, without touching either
+    /// database beyond the marker read. The plugin asks this before it starts a drain,
+    /// a reconcile reset or a pull, so a refusal lands before any of their writes.
+    fn handle_mirror_marker_status_value(&self, request: &Value) -> HandlerOutcome {
+        let Some(project) = request.get("project").and_then(Value::as_str) else {
+            return invalid_params_error("mirror.marker_status requires project");
+        };
+        match self.single_store_markers_for(project, "mirror_pull_failed") {
+            Ok(snapshot) => respond(json!({
+                "ok": true,
+                "marked": false,
+                "below_lane": snapshot.below_lane,
+            })),
+            Err(outcome) => outcome,
+        }
+    }
+
     fn handle_mirror_pull_value(&self, request: &Value) -> HandlerOutcome {
         let Some(store) = self.store.get() else {
             return self.store_refusal();
         };
         let Some(domain) = request.get("domain").and_then(Value::as_str) else {
             return invalid_params_error("mirror.pull requires domain");
+        };
+        let Some(project) = request.get("project").and_then(Value::as_str) else {
+            return invalid_params_error("mirror.pull requires project");
+        };
+        // Read before either pager: a marked project's pull is refused outright, and an
+        // unmarked project's changefeed page leaves out every marked project's rows.
+        let markers = match self.single_store_markers_for(project, "mirror_pull_failed") {
+            Ok(markers) => markers,
+            Err(outcome) => return outcome,
         };
         let cursor = request.get("cursor").and_then(Value::as_i64).unwrap_or(0);
         let limit = request.get("limit").and_then(Value::as_u64).unwrap_or(100) as usize;
@@ -9488,7 +9590,9 @@ impl McHandler {
             }
             store.pull_live_memory_snapshot(cursor, limit)
         } else {
-            store.pull_changefeed(domain, cursor, limit)
+            store
+                .pull_changefeed(domain, cursor, limit)
+                .map(|page| exclude_marked_projects(page, &markers))
         };
         match page {
             Ok(page) => {
@@ -14576,6 +14680,7 @@ impl McHandler {
                 | "authority.drain_flip"
                 | "authority.drain_finish" => self.handle_authority_drain_value(&request, method),
                 "mirror.pull" => self.handle_mirror_pull_value(&request),
+                "mirror.marker_status" => self.handle_mirror_marker_status_value(&request),
                 "mirror.memory" => self.handle_mirror_memory_value(&request),
                 "memory.identity.ack" => self.handle_memory_identity_ack_value(&request),
                 "guidance.get" => self.handle_guidance_value(channel, &request),
@@ -31180,6 +31285,567 @@ mod tests {
             tool_text(get),
             "Memory [ID: 1] in CONSTRAINTS (status: active): claude row"
         );
+    }
+
+    /// `mirror.pull` and `mirror.marker_status` against the single-store marker in
+    /// `context.db`.
+    mod single_store_marker_routes {
+        use super::*;
+        use rusqlite::{params, Connection};
+
+        const CONTEXT_SCHEMA: &str = include_str!("../tests/fixtures/context-db-schema.sql");
+        const A: &str = "git:project-a";
+        const B: &str = "git:project-b";
+        const C: &str = "git:project-c";
+
+        struct Fixture {
+            handler: McHandler,
+            store: Arc<McStore>,
+            _dir: tempfile::TempDir,
+            context_db: PathBuf,
+            store_db: PathBuf,
+        }
+
+        fn fixture() -> Fixture {
+            let (handler, store, dir, _project) =
+                handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+            let context_home = dir.path().join("context-home");
+            std::fs::create_dir_all(&context_home).unwrap();
+            let context_db = context_home.join("context.db");
+            Connection::open(&context_db)
+                .unwrap()
+                .execute_batch(CONTEXT_SCHEMA)
+                .unwrap();
+            *handler.context_db_path_override.lock().unwrap() = Some(context_db.clone());
+            let store_db =
+                match dev_descriptor_at(dir.path().join("data").to_str().unwrap()).backend {
+                    StorageBackend::Sqlite { path } => PathBuf::from(path),
+                    #[allow(unreachable_patterns)]
+                    _ => unreachable!("the dev descriptor is sqlite"),
+                };
+            Fixture {
+                handler,
+                store,
+                _dir: dir,
+                context_db,
+                store_db,
+            }
+        }
+
+        fn mark(context_db: &Path, project: &str, uuid: &str) {
+            Connection::open(context_db)
+                .unwrap()
+                .execute(
+                    "INSERT INTO single_store_projects
+                        (project_path, context_store_uuid, marked_at, marked_by_version)
+                     VALUES (?1, ?2, 1, 'fixture')",
+                    params![project, uuid],
+                )
+                .unwrap();
+        }
+
+        fn unmark(context_db: &Path, project: &str) {
+            Connection::open(context_db)
+                .unwrap()
+                .execute(
+                    "DELETE FROM single_store_projects WHERE project_path = ?1",
+                    params![project],
+                )
+                .unwrap();
+        }
+
+        /// Append one changefeed row directly, so a test controls exactly which project
+        /// each feed position belongs to.
+        fn feed(store_db: &Path, domain: &str, op: &str, snapshot: Value) -> i64 {
+            let conn = Connection::open(store_db).unwrap();
+            conn.execute(
+                "INSERT INTO mc_changefeed(domain, op, module_row_id, full_row_snapshot, content_hash)
+                 VALUES (?1, ?2, 1, ?3, NULL)",
+                params![domain, op, snapshot.to_string()],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        }
+
+        fn feed_count(store_db: &Path) -> i64 {
+            Connection::open(store_db)
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM mc_changefeed", [], |row| row.get(0))
+                .unwrap()
+        }
+
+        async fn pull(handler: &McHandler, body: Value) -> HandlerOutcome {
+            let mut request = json!({ "method": "mirror.pull" });
+            for (key, value) in body.as_object().unwrap() {
+                request[key] = value.clone();
+            }
+            handler.dispatch_value(7, request).await
+        }
+
+        async fn marker_status(handler: &McHandler, body: Value) -> HandlerOutcome {
+            let mut request = json!({ "method": "mirror.marker_status" });
+            for (key, value) in body.as_object().unwrap() {
+                request[key] = value.clone();
+            }
+            handler.dispatch_value(7, request).await
+        }
+
+        fn page(outcome: HandlerOutcome) -> Value {
+            match outcome {
+                HandlerOutcome::Response(bytes) => {
+                    let value: Value = serde_json::from_slice(&bytes).unwrap();
+                    value["page"].clone()
+                }
+                other => panic!("expected a served page, got {other:?}"),
+            }
+        }
+
+        fn row_projects(page: &Value) -> Vec<Option<String>> {
+            page["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| {
+                    row["full_row_snapshot"]["project_path"]
+                        .as_str()
+                        .map(str::to_string)
+                })
+                .collect()
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn a_pull_naming_a_marked_project_is_refused_as_a_tripwire_without_paging() {
+            let fixture = fixture();
+            feed(
+                &fixture.store_db,
+                "memories",
+                "insert",
+                json!({ "project_path": A }),
+            );
+            mark(&fixture.context_db, A, "uuid");
+            let before = feed_count(&fixture.store_db);
+            for body in [
+                json!({ "domain": "memories", "cursor": 0, "project": A }),
+                json!({ "domain": "notes", "cursor": 0, "project": A }),
+                json!({ "domain": "memories", "cursor": 0, "project": A, "live_only": true }),
+            ] {
+                let (code, message) = error_frame(pull(&fixture.handler, body).await);
+                assert_eq!(code, "single_store_tripwire");
+                assert!(message.contains(A), "{message}");
+            }
+            let (code, _) =
+                error_frame(marker_status(&fixture.handler, json!({ "project": A })).await);
+            assert_eq!(code, "single_store_tripwire");
+            assert_eq!(feed_count(&fixture.store_db), before);
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn an_unmarked_pull_leaves_out_marked_rows_and_keeps_everything_else() {
+            let fixture = fixture();
+            feed(
+                &fixture.store_db,
+                "memories",
+                "insert",
+                json!({ "project_path": A }),
+            );
+            feed(
+                &fixture.store_db,
+                "memories",
+                "insert",
+                json!({ "project_path": B }),
+            );
+            feed(
+                &fixture.store_db,
+                "memories",
+                "tombstone",
+                json!({ "project_path": A }),
+            );
+            feed(
+                &fixture.store_db,
+                "memories",
+                "tombstone",
+                json!({ "project_path": B }),
+            );
+            // A snapshot naming no project names no marked project, so it is emitted.
+            let projectless = feed(&fixture.store_db, "memories", "insert", json!({ "id": 9 }));
+            mark(&fixture.context_db, A, "uuid");
+
+            let served = page(
+                pull(
+                    &fixture.handler,
+                    json!({ "domain": "memories", "cursor": 0, "project": B }),
+                )
+                .await,
+            );
+            assert_eq!(
+                row_projects(&served),
+                vec![Some(B.to_string()), Some(B.to_string()), None]
+            );
+            let ops: Vec<&str> = served["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["op"].as_str().unwrap())
+                .collect();
+            assert_eq!(ops, vec!["insert", "tombstone", "insert"]);
+            assert_eq!(served["rows"][2]["feed_seq"], json!(projectless));
+            assert_eq!(served["next_cursor"], json!(projectless));
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn a_window_of_only_marked_rows_advances_the_cursor_and_reports_more() {
+            let fixture = fixture();
+            feed(
+                &fixture.store_db,
+                "notes",
+                "insert",
+                json!({ "project_path": A }),
+            );
+            let window_end = feed(
+                &fixture.store_db,
+                "notes",
+                "insert",
+                json!({ "project_path": A }),
+            );
+            feed(
+                &fixture.store_db,
+                "notes",
+                "insert",
+                json!({ "project_path": B }),
+            );
+            let last = feed(
+                &fixture.store_db,
+                "notes",
+                "insert",
+                json!({ "project_path": C }),
+            );
+            mark(&fixture.context_db, A, "uuid");
+
+            let first = page(
+                pull(
+                    &fixture.handler,
+                    json!({ "domain": "notes", "cursor": 0, "limit": 2, "project": B }),
+                )
+                .await,
+            );
+            assert_eq!(first["rows"], json!([]));
+            assert_eq!(first["next_cursor"], json!(window_end));
+            assert_eq!(first["has_more"], json!(true));
+
+            let second = page(
+                pull(
+                    &fixture.handler,
+                    json!({ "domain": "notes", "cursor": window_end, "limit": 2, "project": B }),
+                )
+                .await,
+            );
+            assert_eq!(
+                row_projects(&second),
+                vec![Some(B.to_string()), Some(C.to_string())]
+            );
+            assert_eq!(second["next_cursor"], json!(last));
+
+            let third = page(
+                pull(
+                    &fixture.handler,
+                    json!({ "domain": "notes", "cursor": last, "limit": 2, "project": B }),
+                )
+                .await,
+            );
+            assert_eq!(third["rows"], json!([]));
+            assert_eq!(third["has_more"], json!(false));
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn a_pull_or_marker_status_without_a_project_is_invalid_params() {
+            let fixture = fixture();
+            feed(
+                &fixture.store_db,
+                "memories",
+                "insert",
+                json!({ "project_path": B }),
+            );
+            for body in [
+                json!({ "domain": "memories", "cursor": 0 }),
+                json!({ "domain": "memories", "cursor": 0, "live_only": true }),
+            ] {
+                assert_eq!(
+                    error_code(pull(&fixture.handler, body).await),
+                    "invalid_params"
+                );
+            }
+            assert_eq!(
+                error_code(marker_status(&fixture.handler, json!({})).await),
+                "invalid_params"
+            );
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn a_live_snapshot_for_an_unmarked_project_is_served_unfiltered() {
+            let fixture = fixture();
+            for project in [A, B] {
+                fixture
+                    .store
+                    .insert_memory(mc_store::InsertMemoryInput {
+                        project_path: project,
+                        route_project_root: None,
+                        category: "CONSTRAINTS",
+                        content: &format!("live row for {project}"),
+                        source_session_id: None,
+                        source_type: Some("test"),
+                        importance: Some(50),
+                        expires_at: None,
+                        metadata_json: None,
+                        now_ms: 1,
+                    })
+                    .unwrap();
+            }
+            mark(&fixture.context_db, A, "uuid");
+            let served = page(
+                pull(
+                    &fixture.handler,
+                    json!({ "domain": "memories", "cursor": 0, "project": B, "live_only": true }),
+                )
+                .await,
+            );
+            // The live snapshot replaces the mirror's live rows box-wide, so leaving A's
+            // row out would delete it from the mirror.
+            assert_eq!(
+                row_projects(&served),
+                vec![Some(A.to_string()), Some(B.to_string())]
+            );
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn the_marker_is_read_on_every_call() {
+            let fixture = fixture();
+            feed(
+                &fixture.store_db,
+                "memories",
+                "insert",
+                json!({ "project_path": A }),
+            );
+            feed(
+                &fixture.store_db,
+                "memories",
+                "insert",
+                json!({ "project_path": B }),
+            );
+            let body_b = json!({ "domain": "memories", "cursor": 0, "project": B });
+            let body_a = json!({ "domain": "memories", "cursor": 0, "project": A });
+
+            assert_eq!(
+                row_projects(&page(pull(&fixture.handler, body_b.clone()).await)).len(),
+                2
+            );
+            mark(&fixture.context_db, A, "uuid");
+            assert_eq!(
+                error_code(pull(&fixture.handler, body_a.clone()).await),
+                "single_store_tripwire"
+            );
+            assert_eq!(
+                row_projects(&page(pull(&fixture.handler, body_b.clone()).await)),
+                vec![Some(B.to_string())]
+            );
+            unmark(&fixture.context_db, A);
+            assert_eq!(
+                row_projects(&page(pull(&fixture.handler, body_a).await)).len(),
+                2
+            );
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn an_untrusted_marker_refuses_every_project_and_names_the_cause() {
+            let body = json!({ "domain": "memories", "cursor": 0, "project": B });
+            for (alteration, cause) in [
+                // No schema_migrations table at all: the lane cannot be read.
+                (
+                    "DROP TABLE schema_migrations;",
+                    "single_store_fence_missing",
+                ),
+                (
+                    "DROP TABLE single_store_projects;",
+                    "single_store_table_missing",
+                ),
+                (
+                    "ALTER TABLE single_store_projects ADD COLUMN x TEXT;",
+                    "single_store_fingerprint_mismatch",
+                ),
+            ] {
+                let fixture = fixture();
+                feed(
+                    &fixture.store_db,
+                    "memories",
+                    "insert",
+                    json!({ "project_path": B }),
+                );
+                Connection::open(&fixture.context_db)
+                    .unwrap()
+                    .execute_batch(alteration)
+                    .unwrap();
+                let (code, message) = error_frame(pull(&fixture.handler, body.clone()).await);
+                assert_eq!(code, "single_store_tripwire", "{alteration}");
+                assert!(message.contains(cause), "{alteration}: {message}");
+                let (code, message) =
+                    error_frame(marker_status(&fixture.handler, json!({ "project": B })).await);
+                assert_eq!(code, "single_store_tripwire", "{alteration}");
+                assert!(message.contains(cause), "{alteration}: {message}");
+            }
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn a_changed_domain_table_does_not_refuse_the_marker_read() {
+            let fixture = fixture();
+            feed(
+                &fixture.store_db,
+                "memories",
+                "insert",
+                json!({ "project_path": B }),
+            );
+            Connection::open(&fixture.context_db)
+                .unwrap()
+                .execute_batch("ALTER TABLE session_facts ADD COLUMN speculative TEXT;")
+                .unwrap();
+            let served = page(
+                pull(
+                    &fixture.handler,
+                    json!({ "domain": "memories", "cursor": 0, "project": B }),
+                )
+                .await,
+            );
+            assert_eq!(row_projects(&served), vec![Some(B.to_string())]);
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn a_marker_row_from_another_file_still_marks_the_project() {
+            let fixture = fixture();
+            mark(&fixture.context_db, A, "some-other-context-store");
+            assert_eq!(
+                error_code(
+                    pull(
+                        &fixture.handler,
+                        json!({ "domain": "memories", "cursor": 0, "project": A }),
+                    )
+                    .await
+                ),
+                "single_store_tripwire"
+            );
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn a_file_below_the_marker_lane_is_served_unfiltered() {
+            let fixture = fixture();
+            feed(
+                &fixture.store_db,
+                "memories",
+                "insert",
+                json!({ "project_path": A }),
+            );
+            feed(
+                &fixture.store_db,
+                "memories",
+                "insert",
+                json!({ "project_path": B }),
+            );
+            Connection::open(&fixture.context_db)
+                .unwrap()
+                .execute(
+                    "DELETE FROM schema_migrations WHERE version >= ?1",
+                    params![host_store::MARKER_LANE_VERSION - 1],
+                )
+                .unwrap();
+            Connection::open(&fixture.context_db)
+                .unwrap()
+                .execute_batch("DROP TABLE single_store_projects;")
+                .unwrap();
+            let served = page(
+                pull(
+                    &fixture.handler,
+                    json!({ "domain": "memories", "cursor": 0, "project": A }),
+                )
+                .await,
+            );
+            assert_eq!(
+                row_projects(&served),
+                vec![Some(A.to_string()), Some(B.to_string())]
+            );
+            let status = match marker_status(&fixture.handler, json!({ "project": A })).await {
+                HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
+                other => panic!("expected ok, got {other:?}"),
+            };
+            assert_eq!(
+                status,
+                json!({ "ok": true, "marked": false, "below_lane": true })
+            );
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn an_absent_context_db_is_an_open_failure_and_creates_nothing() {
+            let fixture = fixture();
+            feed(
+                &fixture.store_db,
+                "memories",
+                "insert",
+                json!({ "project_path": B }),
+            );
+            let missing_home = fixture.context_db.parent().unwrap().join("missing");
+            std::fs::create_dir_all(&missing_home).unwrap();
+            let missing = missing_home.join("context.db");
+            *fixture.handler.context_db_path_override.lock().unwrap() = Some(missing.clone());
+            let before = feed_count(&fixture.store_db);
+
+            let (code, _) = error_frame(
+                pull(
+                    &fixture.handler,
+                    json!({ "domain": "memories", "cursor": 0, "project": B }),
+                )
+                .await,
+            );
+            assert_eq!(code, "mirror_pull_failed");
+            let (code, _) =
+                error_frame(marker_status(&fixture.handler, json!({ "project": B })).await);
+            assert_eq!(code, "mirror_pull_failed");
+            assert_eq!(
+                std::fs::read_dir(&missing_home).unwrap().count(),
+                0,
+                "no context.db, -wal or -shm may be created"
+            );
+            assert_eq!(feed_count(&fixture.store_db), before);
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        async fn marker_status_answers_ok_for_an_unmarked_project_and_writes_nothing() {
+            let fixture = fixture();
+            feed(
+                &fixture.store_db,
+                "memories",
+                "insert",
+                json!({ "project_path": B }),
+            );
+            let before = std::fs::read(&fixture.context_db).unwrap();
+            let feed_before = feed_count(&fixture.store_db);
+            let status = match marker_status(&fixture.handler, json!({ "project": B })).await {
+                HandlerOutcome::Response(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap(),
+                other => panic!("expected ok, got {other:?}"),
+            };
+            assert_eq!(
+                status,
+                json!({ "ok": true, "marked": false, "below_lane": false })
+            );
+            assert_eq!(feed_count(&fixture.store_db), feed_before);
+            assert_eq!(
+                Connection::open(&fixture.context_db)
+                    .unwrap()
+                    .query_row("SELECT COUNT(*) FROM single_store_projects", [], |row| row
+                        .get::<_, i64>(
+                        0
+                    ))
+                    .unwrap(),
+                0
+            );
+            // The main file's bytes are unchanged: the read wrote nothing to it.
+            assert_eq!(std::fs::read(&fixture.context_db).unwrap(), before);
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

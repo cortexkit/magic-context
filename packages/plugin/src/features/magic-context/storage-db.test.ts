@@ -22,6 +22,7 @@ import {
     __resetStoragePrivatePermissionEnforcementForTests,
     setStoragePrivatePermissionEnforcement,
 } from "../../shared/storage-permissions";
+import { MIGRATIONS } from "./migrations";
 import {
     __resetRpcDiscoveryFsForTests,
     __resetSchemaFenceStateForTests,
@@ -83,6 +84,17 @@ function seedPendingMigration(dataHome: string): string {
     closeQuietly(db);
     return dbPath;
 }
+
+/**
+ * The lane a database sits at once the latest migration's row is deleted: the version
+ * of the migration before it, which need not be LATEST_SUPPORTED_VERSION - 1 while a
+ * version number is reserved for a migration shipping from another branch.
+ */
+const PREVIOUS_MIGRATION_VERSION = Math.max(
+    ...MIGRATIONS.map((migration) => migration.version).filter(
+        (version) => version < LATEST_SUPPORTED_VERSION,
+    ),
+);
 
 function readPersistedVersion(dbPath: string): number {
     const db = new Database(dbPath);
@@ -664,7 +676,7 @@ describe("storage-db", () => {
                 expect(opened === null).toBe(scenario.blocksMigration);
                 expect(readPersistedVersion(dbPath)).toBe(
                     scenario.blocksMigration
-                        ? LATEST_SUPPORTED_VERSION - 1
+                        ? PREVIOUS_MIGRATION_VERSION
                         : LATEST_SUPPORTED_VERSION,
                 );
                 if (!scenario.blocksMigration && pid === process.pid) {
@@ -695,7 +707,7 @@ describe("storage-db", () => {
 
             expect(openDatabase()).toBeNull();
             expect(getMigrationOnOpenRefusal()).toEqual({
-                persistedVersion: LATEST_SUPPORTED_VERSION - 1,
+                persistedVersion: PREVIOUS_MIGRATION_VERSION,
                 supportedVersion: LATEST_SUPPORTED_VERSION,
                 serverPids: [41001],
                 blockingProcesses: [{ kind: "Pi", pid: 41001 }],
@@ -706,13 +718,13 @@ describe("storage-db", () => {
             expect(
                 formatLiveProcessMigrationRefusal(
                     dbPath,
-                    LATEST_SUPPORTED_VERSION - 1,
+                    PREVIOUS_MIGRATION_VERSION,
                     LATEST_SUPPORTED_VERSION,
                     [],
                     [41001],
                 ),
             ).toContain("confirmed Pi harness PID 41001");
-            expect(readPersistedVersion(dbPath)).toBe(LATEST_SUPPORTED_VERSION - 1);
+            expect(readPersistedVersion(dbPath)).toBe(PREVIOUS_MIGRATION_VERSION);
         });
 
         it("#when an unrelated Pi harness is live #then opens a fresh explicit-path database", () => {
@@ -848,14 +860,14 @@ describe("storage-db", () => {
             // insurance for files left by older or interrupted installations.
             expect(openDatabase()).toBeNull();
             expect(getMigrationOnOpenRefusal()).toEqual({
-                persistedVersion: LATEST_SUPPORTED_VERSION - 1,
+                persistedVersion: PREVIOUS_MIGRATION_VERSION,
                 supportedVersion: LATEST_SUPPORTED_VERSION,
                 serverPids: [],
                 blockingProcesses: [],
                 unreadableFile: portFile,
                 unreadableArm: "parse",
             });
-            expect(readPersistedVersion(dbPath)).toBe(LATEST_SUPPORTED_VERSION - 1);
+            expect(readPersistedVersion(dbPath)).toBe(PREVIOUS_MIGRATION_VERSION);
         });
 
         it("#when old malformed and pidless records are discovered #then deletes them and allows migration", () => {
@@ -906,7 +918,7 @@ describe("storage-db", () => {
             );
             expect(getMigrationOnOpenRefusal()?.unreadableArm).toBe("parse");
             for (const file of junk) expect(existsSync(file)).toBe(true);
-            expect(readPersistedVersion(dbPath)).toBe(LATEST_SUPPORTED_VERSION - 1);
+            expect(readPersistedVersion(dbPath)).toBe(PREVIOUS_MIGRATION_VERSION);
         });
 
         it("#when a port path cannot be read as a file #then refuses migration and names the io arm", () => {
@@ -921,7 +933,7 @@ describe("storage-db", () => {
                 unreadableFile,
                 unreadableArm: "io",
             });
-            expect(readPersistedVersion(dbPath)).toBe(LATEST_SUPPORTED_VERSION - 1);
+            expect(readPersistedVersion(dbPath)).toBe(PREVIOUS_MIGRATION_VERSION);
         });
 
         it("#when reading a port file returns EACCES #then refuses migration without deleting it", () => {
@@ -948,7 +960,7 @@ describe("storage-db", () => {
                 unreadableArm: "io",
             });
             expect(existsSync(unreadableFile)).toBe(true);
-            expect(readPersistedVersion(dbPath)).toBe(LATEST_SUPPORTED_VERSION - 1);
+            expect(readPersistedVersion(dbPath)).toBe(PREVIOUS_MIGRATION_VERSION);
         });
 
         it("#when stale junk cleanup returns EACCES #then refuses migration with the cleanup file named", () => {
@@ -977,7 +989,7 @@ describe("storage-db", () => {
                 unreadableArm: "io",
             });
             expect(existsSync(staleFile)).toBe(true);
-            expect(readPersistedVersion(dbPath)).toBe(LATEST_SUPPORTED_VERSION - 1);
+            expect(readPersistedVersion(dbPath)).toBe(PREVIOUS_MIGRATION_VERSION);
         });
 
         it("#when the RPC directory cannot be enumerated #then refuses migration", () => {
@@ -988,7 +1000,7 @@ describe("storage-db", () => {
 
             expect(openDatabase()).toBeNull();
             expect(getMigrationOnOpenRefusal()?.unreadableFile).toBe(rpcPath);
-            expect(readPersistedVersion(dbPath)).toBe(LATEST_SUPPORTED_VERSION - 1);
+            expect(readPersistedVersion(dbPath)).toBe(PREVIOUS_MIGRATION_VERSION);
         });
 
         it("#when an alive PID is reused by a newer process #then removes the record and allows migration", () => {
@@ -1023,7 +1035,7 @@ describe("storage-db", () => {
             const legacy = new Database(dbPath);
             legacy.exec(`
                 CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
-                INSERT INTO schema_migrations(version) VALUES (${LATEST_SUPPORTED_VERSION - 1});
+                INSERT INTO schema_migrations(version) VALUES (${PREVIOUS_MIGRATION_VERSION});
             `);
             legacy.close();
 
@@ -1053,7 +1065,7 @@ describe("storage-db", () => {
             });
             for (const junkFile of junkFiles) expect(existsSync(junkFile)).toBe(false);
             expect(existsSync(livePortFile)).toBe(true);
-            expect(readPersistedVersion(dbPath)).toBe(LATEST_SUPPORTED_VERSION - 1);
+            expect(readPersistedVersion(dbPath)).toBe(PREVIOUS_MIGRATION_VERSION);
         });
 
         it("#when a discovery record provides a process kind #then it takes precedence over command probes", () => {
@@ -1063,7 +1075,7 @@ describe("storage-db", () => {
             const legacy = new Database(dbPath);
             legacy.exec(`
                 CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
-                INSERT INTO schema_migrations(version) VALUES (${LATEST_SUPPORTED_VERSION - 1});
+                INSERT INTO schema_migrations(version) VALUES (${PREVIOUS_MIGRATION_VERSION});
                 INSERT INTO schema_migrations(version) VALUES (${FORK_MIGRATION_VERSION_FLOOR});
             `);
             legacy.close();
@@ -1094,7 +1106,7 @@ describe("storage-db", () => {
             const legacy = new Database(dbPath);
             legacy.exec(`
                 CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);
-                INSERT INTO schema_migrations(version) VALUES (${LATEST_SUPPORTED_VERSION - 1});
+                INSERT INTO schema_migrations(version) VALUES (${PREVIOUS_MIGRATION_VERSION});
                 INSERT INTO schema_migrations(version) VALUES (${FORK_MIGRATION_VERSION_FLOOR});
             `);
             legacy.close();
@@ -1132,7 +1144,7 @@ describe("storage-db", () => {
             for (const junkFile of junkFiles) expect(existsSync(junkFile)).toBe(false);
             expect(existsSync(livePortFile)).toBe(true);
             expect(getMigrationOnOpenRefusal()).toEqual({
-                persistedVersion: LATEST_SUPPORTED_VERSION - 1,
+                persistedVersion: PREVIOUS_MIGRATION_VERSION,
                 supportedVersion: LATEST_SUPPORTED_VERSION,
                 serverPids: [process.pid],
                 blockingProcesses: [{ kind: "process", pid: process.pid }],
@@ -1141,7 +1153,7 @@ describe("storage-db", () => {
                 { kind: "process", pid: process.pid },
             ]);
             const unchanged = new Database(dbPath);
-            expect(getPersistedSchemaVersion(unchanged)).toBe(LATEST_SUPPORTED_VERSION - 1);
+            expect(getPersistedSchemaVersion(unchanged)).toBe(PREVIOUS_MIGRATION_VERSION);
             expect(
                 unchanged
                     .prepare("SELECT 1 FROM schema_migrations WHERE version = ?")

@@ -114,13 +114,22 @@ async function archiveExpiredThroughModule(args: {
     }
 
     const mirrorPull = args.moduleRoute.moduleClient.mirrorPull;
+    const markerStatus = args.moduleRoute.moduleClient.markerStatus;
     const drained = await drainMirrorPages({
         db: args.db,
         module: {
             mirrorPull: (request) =>
                 mirrorPull({ ...request, projectRoot: args.moduleRoute.moduleProjectRoot }),
+            markerStatus: markerStatus
+                ? (request) =>
+                      markerStatus({
+                          ...request,
+                          projectRoot: args.moduleRoute.moduleProjectRoot,
+                      })
+                : undefined,
         },
         domain: "memories",
+        projectPath: args.projectIdentity,
         limit: 1_000,
     });
     if (!drained.complete) {

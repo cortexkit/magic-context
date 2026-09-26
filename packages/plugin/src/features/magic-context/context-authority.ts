@@ -3,6 +3,14 @@ import { log } from "../../shared/logger";
 import type { Database, Statement } from "../../shared/sqlite";
 import { withPrivilegedWriter } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
+import {
+    asSingleStoreTripwire,
+    readSingleStoreMarker,
+    refusalForMarkerRead,
+    type SingleStoreTripwireResult,
+    singleStoreGate,
+    singleStoreTripwireResult,
+} from "./single-store-marker";
 
 export const AUTHORITY_DOMAINS = ["memories", "notes"] as const;
 export type AuthorityDomain = (typeof AUTHORITY_DOMAINS)[number];
@@ -76,7 +84,10 @@ export interface AuthorityDrainContended {
     authority: AuthorityStatus | null;
 }
 
-export type AuthorityDrainResult = AuthorityStatus | AuthorityDrainContended;
+export type AuthorityDrainResult =
+    | AuthorityStatus
+    | AuthorityDrainContended
+    | SingleStoreTripwireResult;
 
 export interface AuthorityDrainResponse {
     authority?: AuthorityStatus;
@@ -102,8 +113,18 @@ export interface AuthorityModuleClient {
         cursor: number;
         limit: number;
         live_only?: boolean;
+        /**
+         * The resolver's project identity for the caller. The module refuses a pull
+         * for a single-store project and leaves those projects' rows out of the page.
+         */
+        project: string;
         projectRoot?: string;
     }): Promise<{ page: ChangefeedPage }>;
+    /** Read-only single-store marker and fence answer for one project. */
+    markerStatus?(args: {
+        project: string;
+        projectRoot?: string;
+    }): Promise<{ ok: boolean; marked?: boolean; below_lane?: boolean }>;
     mirrorMemory?(args: {
         module_row_id: number;
         projectRoot?: string;
@@ -363,6 +384,14 @@ export async function reconcileAuthorityProject(args: {
         if (!args.module.mirrorPull) {
             throw new Error(`authority reconciliation requires mirror.pull for ${domain}`);
         }
+        // The reset below deletes this project's mirror identities and rewinds the
+        // shared domain cursor. A single-store project must never reach it.
+        const refusal = await singleStoreGate({
+            db: args.db,
+            projectPath: args.projectPath,
+            module: args.module,
+        });
+        if (refusal) throw refusal;
         withPrivilegedWriter(args.db, () => {
             args.db
                 .transaction(() => {
@@ -390,11 +419,21 @@ export async function reconcileAuthorityProject(args: {
                 .immediate();
         });
         if (domain === "memories") {
-            await ensureLiveMemoryResnapshot({ db: args.db, module: args.module, limit: 1000 });
+            await ensureLiveMemoryResnapshot({
+                db: args.db,
+                module: args.module,
+                limit: 1000,
+                projectPath: args.projectPath,
+            });
         }
         for (;;) {
             const cursor = getMirrorCursor(args.db, domain);
-            const response = await args.module.mirrorPull({ domain, cursor, limit: 1000 });
+            const response = await pullMirrorPageOrTripwire(args.module, {
+                domain,
+                cursor,
+                limit: 1000,
+                project: args.projectPath,
+            });
             const next = applyMirrorPage({ db: args.db, page: response.page });
             if (!response.page.has_more || next === cursor) break;
         }
@@ -715,6 +754,26 @@ function authorityDrainErrorCode(error: unknown): string | null {
 
 const MAX_DRAIN_RECAPTURE_ATTEMPTS = 5;
 
+type MirrorPullRequest = Parameters<NonNullable<AuthorityModuleClient["mirrorPull"]>>[0];
+
+/**
+ * Pull one page, turning a module single-store refusal into a `SingleStoreTripwireError`
+ * so every caller sees the same coded rejection. Other failures pass through unchanged.
+ */
+async function pullMirrorPageOrTripwire(
+    module: Pick<AuthorityModuleClient, "mirrorPull">,
+    request: MirrorPullRequest,
+): Promise<{ page: ChangefeedPage }> {
+    if (!module.mirrorPull) {
+        throw new Error("memory mirror consumer requires the mirror.pull module route");
+    }
+    try {
+        return await module.mirrorPull(request);
+    } catch (error) {
+        throw asSingleStoreTripwire(error) ?? error;
+    }
+}
+
 export async function drainAuthority(args: {
     db: Database;
     projectPath: string;
@@ -729,6 +788,37 @@ export async function drainAuthority(args: {
     }
     if (!args.module.mirrorPull) {
         throw new Error("memory authority drain requires the mirror.pull module route");
+    }
+    // A single-store project's rows live only in context.db; draining it back from
+    // store.db would overwrite them. Refuse before the begin route moves any state.
+    const refusal = await singleStoreGate({
+        db: args.db,
+        projectPath: args.projectPath,
+        module: args.module,
+    });
+    if (refusal) return singleStoreTripwireResult();
+    try {
+        return await drainAuthorityAttempts(args);
+    } catch (error) {
+        // The module can still refuse at mirror.pull when the TypeScript side could not
+        // see why (a context.db with no migration lane at all). Report that as the same
+        // result rather than a rejection, so callers keep one refusal form.
+        if (asSingleStoreTripwire(error)) return singleStoreTripwireResult();
+        throw error;
+    }
+}
+
+async function drainAuthorityAttempts(args: {
+    db: Database;
+    projectPath: string;
+    domain: AuthorityDomain;
+    module: AuthorityModuleClient;
+    checksum: string | (() => string);
+    limit?: number;
+    onMarkerReleased?: () => void;
+}): Promise<AuthorityDrainResult> {
+    if (!args.module.authorityDrain || !args.module.mirrorPull) {
+        throw new Error("authority drain is unavailable on this module client");
     }
     const contextStoreUuid = ensureContextStoreUuid(args.db);
     const limit = Math.max(1, Math.min(args.limit ?? 100, 1000));
@@ -772,15 +862,21 @@ export async function drainAuthority(args: {
             // Recovery drains share the ordinary mirror feed. Restore the module's canonical
             // live identities before advancing its cursor, so replaying a tombstone cannot
             // delete an identity that has not yet been restored.
-            await ensureLiveMemoryResnapshot({ db: args.db, module: args.module, limit });
+            await ensureLiveMemoryResnapshot({
+                db: args.db,
+                module: args.module,
+                limit,
+                projectPath: args.projectPath,
+            });
         }
         const upperBound = status.captured_upper_bound ?? status.drain_cursor ?? 0;
         while (getMirrorCursor(args.db, args.domain) < upperBound) {
             const cursor = getMirrorCursor(args.db, args.domain);
-            const page = await args.module.mirrorPull({
+            const page = await pullMirrorPageOrTripwire(args.module, {
                 domain: args.domain,
                 cursor,
                 limit,
+                project: args.projectPath,
             });
             applyMirrorPage({ db: args.db, page: page.page });
             const next = getMirrorCursor(args.db, args.domain);
@@ -2404,12 +2500,22 @@ export function applyMirrorPage(args: { db: Database; page: ChangefeedPage }): n
     return nextCursor;
 }
 
-type MirrorPullModuleClient = Pick<AuthorityModuleClient, "mirrorPull" | "memoryIdentityAck">;
+type MirrorPullModuleClient = Pick<
+    AuthorityModuleClient,
+    "mirrorPull" | "memoryIdentityAck" | "markerStatus"
+>;
 
+/**
+ * `projectPath` only fills `mirror.pull`'s required `project` field. This function does
+ * not read the single-store marker: each caller has already refused a single-store
+ * project before calling it, because its first act can be a resnapshot claim that
+ * purges staging rows.
+ */
 export async function ensureLiveMemoryResnapshot(args: {
     db: Database;
     module: MirrorPullModuleClient;
     limit: number;
+    projectPath: string;
 }): Promise<void> {
     let adoptedWinner = false;
     let generation: string;
@@ -2500,11 +2606,12 @@ export async function ensureLiveMemoryResnapshot(args: {
 
     let cursor = 0;
     while (true) {
-        const response = await args.module.mirrorPull({
+        const response = await pullMirrorPageOrTripwire(args.module, {
             domain: "memories",
             cursor,
             limit: args.limit,
             live_only: true,
+            project: args.projectPath,
         });
         const page = response.page;
         if (page.domain !== "memories" || page.cursor !== cursor) {
@@ -2545,20 +2652,34 @@ async function pullAndApplyMirrorPageWithStatus(args: {
     db: Database;
     module: MirrorPullModuleClient;
     domain: AuthorityDomain;
+    projectPath: string;
     limit?: number;
 }): Promise<AppliedMirrorPage> {
     if (!args.module.mirrorPull) {
         throw new Error("memory mirror consumer requires the mirror.pull module route");
     }
+    // Refuse before the resnapshot below can claim a generation or purge staging rows.
+    const refusal = await singleStoreGate({
+        db: args.db,
+        projectPath: args.projectPath,
+        module: args.module,
+    });
+    if (refusal) throw refusal;
     const limit = Math.max(1, Math.min(args.limit ?? 100, 1000));
     if (args.domain === "memories") {
-        await ensureLiveMemoryResnapshot({ db: args.db, module: args.module, limit });
+        await ensureLiveMemoryResnapshot({
+            db: args.db,
+            module: args.module,
+            limit,
+            projectPath: args.projectPath,
+        });
     }
     const cursor = getMirrorCursor(args.db, args.domain);
-    const response = await args.module.mirrorPull({
+    const response = await pullMirrorPageOrTripwire(args.module, {
         domain: args.domain,
         cursor,
         limit,
+        project: args.projectPath,
     });
     const nextCursor = applyMirrorPage({ db: args.db, page: response.page });
     if (args.domain === "memories" && args.module.memoryIdentityAck) {
@@ -2596,6 +2717,7 @@ export async function pullAndApplyMirrorPage(args: {
     db: Database;
     module: MirrorPullModuleClient;
     domain: AuthorityDomain;
+    projectPath: string;
     limit?: number;
 }): Promise<number> {
     return (await pullAndApplyMirrorPageWithStatus(args)).cursor;
@@ -2618,6 +2740,8 @@ export async function drainMirrorPages(args: {
     db: Database;
     module: MirrorPullModuleClient;
     domain: AuthorityDomain;
+    /** The caller's project identity; a single-store project is refused. */
+    projectPath: string;
     limit?: number;
     pageBudget?: number;
 }): Promise<MirrorDrainResult> {
@@ -2650,33 +2774,52 @@ export interface MemoryMirrorDrainResult extends MirrorDrainResult {
     cuePoolVersion: number;
 }
 
-const mirrorFlights = new WeakMap<object, Promise<MemoryMirrorDrainResult>>();
+/** In-flight drains keyed by module client, then by database handle. */
+const mirrorFlights = new WeakMap<object, WeakMap<Database, Promise<MemoryMirrorDrainResult>>>();
 
 /**
  * The rust transform pass is the mirror cadence. Coalesce overlapping passes so a
  * slower pull can never race a second cursor application on the same connection.
  * One flight drains a bounded page batch; an incomplete result remains eligible on
  * the next transform pass.
+ *
+ * A flight is shared by every caller on the same client and database, whatever its
+ * project: a page applies every unmarked project's rows, so which caller started it
+ * does not change its work. A single-store caller is refused before it can join or
+ * start one.
  */
 export function pullMemoryMirrorOnce(args: {
     db: Database;
     module: MirrorPullModuleClient;
+    projectPath: string;
     limit?: number;
     pageBudget?: number;
 }): Promise<MemoryMirrorDrainResult> {
-    const existing = mirrorFlights.get(args.module);
+    const refusal = refusalForMarkerRead(
+        args.projectPath,
+        readSingleStoreMarker(args.db, args.projectPath),
+    );
+    if (refusal) return Promise.reject(refusal);
+    let flights = mirrorFlights.get(args.module);
+    if (!flights) {
+        flights = new WeakMap();
+        mirrorFlights.set(args.module, flights);
+    }
+    const existing = flights.get(args.db);
     if (existing) return existing;
+    const clientFlights = flights;
     const flight = drainMirrorPages({
         db: args.db,
         module: args.module,
         domain: "memories",
+        projectPath: args.projectPath,
         // A page is capped at 1,000 rows by both protocol peers. Using that cap keeps the
         // bounded transform ride-along at at most 20 requests for a 20,000-row backlog.
         limit: args.limit ?? 1000,
         pageBudget: args.pageBudget ?? TRANSFORM_MEMORY_MIRROR_PAGE_BUDGET,
     })
         .then((result) => ({ ...result, cuePoolVersion: result.cursor }))
-        .finally(() => mirrorFlights.delete(args.module));
-    mirrorFlights.set(args.module, flight);
+        .finally(() => clientFlights.delete(args.db));
+    clientFlights.set(args.db, flight);
     return flight;
 }

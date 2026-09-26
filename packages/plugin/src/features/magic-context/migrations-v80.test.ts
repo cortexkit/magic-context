@@ -48,7 +48,7 @@ describe("migration v80: observed tool-set comparison telemetry", () => {
                     )
                     .every(({ notnull }) => notnull === 0),
             ).toBe(true);
-            expect(LATEST_SUPPORTED_VERSION).toBe(91);
+            expect(LATEST_SUPPORTED_VERSION).toBe(93);
             expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
         } finally {
             closeQuietly(db);

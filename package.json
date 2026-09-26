@@ -23,7 +23,8 @@
     "lint:rust": "cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings",
     "fmt:rust": "cargo fmt",
     "check:all": "bun run test && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings",
-    "build:dists": "bun scripts/check-bun.mjs && bun run --cwd packages/plugin build && bun run --cwd packages/pi-plugin build && bun run dists:load-probe",
+    "build:dists": "bun scripts/check-bun.mjs && bun run --cwd packages/plugin build && bun run --cwd packages/pi-plugin build && bun run dists:load-probe && bun run dists:schema-fence",
+    "dists:schema-fence": "bun packages/plugin/scripts/check-dist-schema-fence.ts",
     "dists:load-probe": "bun -e \"await import('./packages/plugin/dist/index.js'); await import('./packages/pi-plugin/dist/index.js'); console.log('dists LOAD OK')\"",
     "audit:packed-packages": "bun scripts/audit-packed-packages.ts"
   },

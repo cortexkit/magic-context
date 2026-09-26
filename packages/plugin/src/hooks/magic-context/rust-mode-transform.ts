@@ -287,8 +287,15 @@ export interface RustModeModuleClient extends ModuleStateSyncClient {
         cursor: number;
         limit: number;
         live_only?: boolean;
+        /** The caller's project identity, forwarded to the module verbatim. */
+        project: string;
         projectRoot?: string;
     }): Promise<{ page: import("../../features/magic-context/context-authority").ChangefeedPage }>;
+    /** Read-only single-store marker and fence answer for one project. */
+    markerStatus?(args: {
+        project: string;
+        projectRoot?: string;
+    }): Promise<{ ok: boolean; marked?: boolean; below_lane?: boolean }>;
     mirrorMemory?(args: { module_row_id: number; projectRoot?: string }): Promise<{
         row: import("../../features/magic-context/context-authority").ChangefeedRow | null;
     }>;
@@ -1390,6 +1397,15 @@ async function prepareRustMemoryAuthority(args: {
                   return method.call(module, { ...request, projectRoot });
               }
             : undefined,
+        markerStatus: module.markerStatus
+            ? (request) => {
+                  const method = module.markerStatus;
+                  if (!method) {
+                      throw new MemoryAuthorityUnavailableError("mirror.marker_status unavailable");
+                  }
+                  return method.call(module, { ...request, projectRoot });
+              }
+            : undefined,
     };
     const contextStoreUuid = ensureContextStoreUuid(db);
     const domains = ["memories", "notes"] as const;
@@ -1428,14 +1444,18 @@ async function prepareRustMemoryAuthority(args: {
                             .filter(isRecord),
                     ),
             });
-            if (!("code" in drained)) break;
+            // A non-retryable refusal (a single-store project) will not change on a
+            // second attempt.
+            if (!("code" in drained) || drained.retryable === false) break;
         }
         if (!drained) {
             throw new MemoryAuthorityUnavailableError("authority drain did not return a result");
         }
         if ("code" in drained) {
             throw new MemoryAuthorityUnavailableError(
-                `${drained.code}; the next scheduled transform will resume the drain`,
+                drained.retryable === false
+                    ? `${drained.code}; this project's memories and notes are single-store, so the store.db drain is refused`
+                    : `${drained.code}; the next scheduled transform will resume the drain`,
             );
         }
         statuses.set(domain, null);
@@ -3980,6 +4000,7 @@ export function createRustModeTransform(
                             const mirrorDrain = await pullMemoryMirrorOnce({
                                 db: deps.db,
                                 module: options.moduleClient,
+                                projectPath: memoryProjectPath ?? projectRoot,
                             });
                             if (mirrorDrain.cuePoolVersion !== state.muralCuePoolVersion) {
                                 state.muralCuePoolVersion = mirrorDrain.cuePoolVersion;

@@ -31,10 +31,17 @@ export interface ModuleToolBackends {
      * that reaches Rust-mode preparation, not a one-shot at construction.
      */
     ensureNoteEvaluationBridge: (projectPath: string) => void;
-    /** Drain the module's note mirror into the host read model. */
-    syncNotes: () => Promise<void>;
-    /** Drain one mirror domain, optionally bounded to a page budget. */
-    syncDomain: (domain: "memories" | "notes", pageBudget?: number) => Promise<void>;
+    /**
+     * Drain the module's note mirror into the host read model on behalf of one
+     * project identity; a single-store project is refused.
+     */
+    syncNotes: (projectPath: string) => Promise<void>;
+    /** Drain one mirror domain for a project, optionally bounded to a page budget. */
+    syncDomain: (
+        projectPath: string,
+        domain: "memories" | "notes",
+        pageBudget?: number,
+    ) => Promise<void>;
 }
 
 /**
@@ -66,11 +73,22 @@ export function createModuleToolBackends(options: {
     const { db, moduleClient, directory, memorySyncRequestedSessions } = options;
     if (!moduleClient) return undefined;
 
-    const syncDomain = async (domain: "memories" | "notes", pageBudget?: number): Promise<void> => {
+    const syncDomain = async (
+        projectPath: string,
+        domain: "memories" | "notes",
+        pageBudget?: number,
+    ): Promise<void> => {
         if (!moduleClient.mirrorPull) return;
-        await drainMirrorPages({ db, module: moduleClient, domain, limit: 1000, pageBudget });
+        await drainMirrorPages({
+            db,
+            module: moduleClient,
+            domain,
+            projectPath,
+            limit: 1000,
+            pageBudget,
+        });
     };
-    const syncNotes = (): Promise<void> => syncDomain("notes");
+    const syncNotes = (projectPath: string): Promise<void> => syncDomain(projectPath, "notes");
     const syncMemoryIdentity = async (
         moduleProject: string,
         moduleRowId: number,
@@ -231,7 +249,7 @@ export function createModuleToolBackends(options: {
         if (!moduleClient.mirrorPull) return;
         if (getModuleNoteEvaluationBridge(bridgeProjectPath)) return;
         registerModuleNoteEvaluationBridge(bridgeProjectPath, {
-            sync: syncNotes,
+            sync: () => syncNotes(bridgeProjectPath),
             async evaluate({ contextNoteId, sessionId, verdict }): Promise<void> {
                 const identity = db
                     .prepare(
@@ -262,7 +280,7 @@ export function createModuleToolBackends(options: {
                         verdict,
                     },
                 });
-                await syncNotes();
+                await syncNotes(bridgeProjectPath);
             },
         });
     };

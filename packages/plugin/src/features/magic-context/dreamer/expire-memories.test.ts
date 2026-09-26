@@ -62,6 +62,7 @@ describe("archiveExpiredMemories", () => {
                 domain: "memories" | "notes";
                 cursor: number;
                 limit: number;
+                project: string;
                 projectRoot?: string;
             }) => ({
                 page: {
@@ -88,7 +89,7 @@ describe("archiveExpiredMemories", () => {
             }),
         );
         const moduleRoute: DreamerModuleRoute = {
-            moduleClient: { call, mirrorPull },
+            moduleClient: { call, mirrorPull, markerStatus: async () => ({ ok: true }) },
             moduleSessionId: project,
             moduleProjectRoot: project,
             moduleContextStoreUuid: contextStoreUuid,
@@ -130,6 +131,8 @@ describe("archiveExpiredMemories", () => {
             domain: "memories",
             cursor: 0,
             limit: 1_000,
+            // The dreamer's identity for the project reaches the module verbatim.
+            project,
             projectRoot: project,
         });
         expect(

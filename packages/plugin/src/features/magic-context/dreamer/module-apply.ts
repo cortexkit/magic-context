@@ -24,7 +24,8 @@ export class DreamerModuleFailureError extends Error {
     }
 }
 
-export type DreamerModuleClient = ClassifyModuleClient & Pick<AuthorityModuleClient, "mirrorPull">;
+export type DreamerModuleClient = ClassifyModuleClient &
+    Pick<AuthorityModuleClient, "mirrorPull" | "markerStatus">;
 
 export interface DreamerModuleRoute {
     moduleClient: DreamerModuleClient;

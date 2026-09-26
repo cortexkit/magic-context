@@ -438,6 +438,21 @@ function assertV88CoordinateArm(db: DatabaseType): void {
     ).toEqual({ generation: null });
 }
 
+function assertV93SingleStoreMarkerArm(db: DatabaseType): void {
+    // An upgraded install starts with no project marked: nothing in this release
+    // writes a marker, so the table must arrive empty with exactly its four columns.
+    expect(db.prepare("SELECT COUNT(*) AS count FROM single_store_projects").get()).toEqual({
+        count: 0,
+    });
+    expect(
+        (
+            db.prepare("PRAGMA table_info(single_store_projects)").all() as Array<{
+                name: string;
+            }>
+        ).map((column) => column.name),
+    ).toEqual(["project_path", "context_store_uuid", "marked_at", "marked_by_version"]);
+}
+
 function assertV91EmbeddingWatermarkArm(db: DatabaseType): void {
     // The mark starts empty on an upgraded install: no other writer has produced a
     // memory yet, so there is no backlog to claim. It must also accept a row — an
@@ -695,6 +710,11 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
             assertV91EmbeddingWatermarkArm(db);
             populateModuleOwnedRows(db, version, state);
             return;
+        case 93:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            assertV93SingleStoreMarkerArm(db);
+            populateModuleOwnedRows(db, version, state);
+            return;
         default:
             throw new Error(`populateForVersion has no arm for migration v${version}`);
     }
@@ -748,8 +768,15 @@ test("every migration lands on populated rows and v72+ stores stay armed", () =>
         initializeDatabase(db);
         installMigrationLedgerFromSource(db);
 
-        for (const [index, migration] of MIGRATIONS.entries()) {
-            expect(migration.version).toBe(index + 1);
+        // v92 is reserved for the ordinal-checkpoint migration that ships in the same
+        // release as v93 from another branch. Every other version must be contiguous;
+        // remove the reservation when v92 lands here.
+        const reservedVersions = new Set([92]);
+        let expectedVersion = 1;
+        for (const migration of MIGRATIONS) {
+            while (reservedVersions.has(expectedVersion)) expectedVersion += 1;
+            expect(migration.version).toBe(expectedVersion);
+            expectedVersion += 1;
             assertPopulatedRowsLanded(db, state);
             applyExactlyOneMigration(db, migration);
             populateForVersion(db, migration.version, state);

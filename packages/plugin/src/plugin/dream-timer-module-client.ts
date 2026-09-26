@@ -9,7 +9,7 @@ import type {
 import type { RustModeModuleClient } from "../hooks/magic-context/rust-mode-transform";
 
 export type DreamTimerModuleClient = ClassifyModuleClient &
-    Pick<AuthorityModuleClient, "mirrorPull"> & {
+    Pick<AuthorityModuleClient, "mirrorPull" | "markerStatus"> & {
         authorityStatus?: (args: {
             context_store_uuid: string;
             project: string;
@@ -43,6 +43,14 @@ export function createDreamTimerModuleClient(
                       throw new Error("Rust module mirror route became unavailable");
                   }
                   return moduleClient.mirrorPull(args);
+              }
+            : undefined,
+        markerStatus: moduleClient.markerStatus
+            ? (args) => {
+                  if (!moduleClient.markerStatus) {
+                      throw new Error("Rust module marker status route became unavailable");
+                  }
+                  return moduleClient.markerStatus(args);
               }
             : undefined,
     };

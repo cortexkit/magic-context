@@ -384,6 +384,7 @@ describe("Rust mode authority adapter", () => {
                 const rows = Array.isArray(args.rows) ? args.rows : [];
                 return { seeded: rows.length, module_row_ids: rows.map((_, index) => index + 1) };
             },
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => {
                 authorityRoots.push(String(args.projectRoot));
                 return {
@@ -2339,6 +2340,7 @@ describe("Rust mode authority adapter", () => {
                           native_messages: makeMessages(sessionId),
                       }
                     : { ok: true },
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => {
                 memoryPulls += 1;
                 projectionKeysDuringPull.push(
@@ -2390,6 +2392,7 @@ describe("Rust mode authority adapter", () => {
                           native_messages: makeMessages(sessionId),
                       }
                     : { ok: true },
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => {
                 memoryPulls += 1;
                 return {
@@ -2451,6 +2454,7 @@ describe("Rust mode authority adapter", () => {
                           native_messages: makeMessages(sessionId),
                       }
                     : { ok: true },
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => {
                 memoryPulls += 1;
                 return {
@@ -2506,6 +2510,7 @@ describe("Rust mode authority adapter", () => {
                           native_messages: makeMessages(sessionId),
                       }
                     : { ok: true },
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => {
                 if (failSecondPage && args.cursor === 1_000) {
                     failSecondPage = false;
@@ -2577,6 +2582,7 @@ describe("Rust mode authority adapter", () => {
                           native_messages: makeMessages(sessionId),
                       }
                     : { ok: true },
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => {
                 memoryPulls += 1;
                 return {
@@ -2638,6 +2644,7 @@ describe("Rust mode authority adapter", () => {
                           native_messages: makeMessages(sessionId),
                       }
                     : { ok: true },
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => {
                 mirrorPullCalls += 1;
                 await pullGate;
@@ -2698,6 +2705,7 @@ describe("Rust mode authority adapter", () => {
                     native_messages: makeMessages(sessionId),
                 };
             },
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => {
                 memoryPulls += 1;
                 const nextCursor = memoryPulls >= 2 ? 1 : memoryCursor;
@@ -3936,6 +3944,7 @@ describe("Rust mode authority adapter", () => {
                               native_messages: messages,
                           }
                         : { ok: true },
+                markerStatus: async () => ({ ok: true }),
                 mirrorPull: async (args) => {
                     memoryPulls += 1;
                     return {
@@ -5518,6 +5527,7 @@ describe("prepareRustMemoryAuthority mixed restore", () => {
                     },
                 };
             },
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => {
                 calls.push({ liveOnly: args.live_only, cursor: args.cursor });
                 return args.live_only
@@ -5693,6 +5703,7 @@ describe("prepareRustMemoryAuthority mixed restore", () => {
                     },
                 };
             },
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => {
                 authorityRoots.push(String(args.projectRoot));
                 return {
@@ -5811,6 +5822,7 @@ describe("prepareRustMemoryAuthority mixed restore", () => {
                 throw new Error("MODULE authority must not prepare from TS");
             },
             authoritySeed: async () => ({ seeded: 0 }),
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => ({
                 page: {
                     domain: args.domain,

@@ -195,8 +195,8 @@ export function compiledNoteModuleRowId(args: {
 export function createRustNoteBackend(deps: {
     db: Database;
     module: RustNoteModuleCaller;
-    /** Pull pending note changefeed pages into context.db. */
-    syncNotes: () => Promise<void>;
+    /** Pull pending note changefeed pages into context.db for a project identity. */
+    syncNotes: (projectPath: string) => Promise<void>;
 }): (request: RustNoteToolRequest) => Promise<unknown> {
     return async ({
         commandId,
@@ -217,7 +217,7 @@ export function createRustNoteBackend(deps: {
     }) => {
         // Pull first so identities for notes written moments ago are known and
         // the ids the module renders match what the reminder shows.
-        await deps.syncNotes();
+        await deps.syncNotes(memoryProject);
         const routes = routeHostNoteIds({
             db: deps.db,
             projectIdentity: memoryProject,
@@ -267,7 +267,7 @@ export function createRustNoteBackend(deps: {
         });
         // The module is authoritative, but context.db remains the local
         // read model for note nudges and dashboard/RPC consumers.
-        await deps.syncNotes();
+        await deps.syncNotes(memoryProject);
         const failed = moduleNoteResponseIsError(response);
         if (compileStatus && !failed) {
             const moduleRowId = compiledNoteModuleRowId({ action, response, moduleNoteIds });

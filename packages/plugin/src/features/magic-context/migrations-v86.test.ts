@@ -215,7 +215,7 @@ describe("migration v86: session-local tag versions", () => {
             db.prepare("INSERT INTO session_meta(session_id, counter) VALUES(?, 0)").run("ses-b");
 
             runMigrations(db);
-            expect(LATEST_SUPPORTED_VERSION).toBe(91);
+            expect(LATEST_SUPPORTED_VERSION).toBe(93);
             expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
             expect(tagsVersion(db, "ses-a")).toBe(0);
             expect(tagsVersion(db, "ses-b")).toBe(0);
