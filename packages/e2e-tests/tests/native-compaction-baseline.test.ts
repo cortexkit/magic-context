@@ -615,3 +615,65 @@ it(
     },
     420_000,
 );
+
+it(
+    "replays the restored turns byte-identically across a restart when the host changed them in between",
+    async () => {
+        const { sessionId } = await compactedSession();
+
+        h.mock.setDefault(smallUsage("after-compaction"));
+        const promptA = "store-change variant: first prompt after the native compaction";
+        await h.sendPrompt(sessionId, promptA);
+        const passA = requestContaining(promptA);
+        const request = compactionRequest(sessionId);
+        const boundary = readBaseline(sessionId).boundary;
+        const hidden = hiddenTurns(sessionId, boundary as string, request?.tailStartId as string);
+        expect(hidden.length).toBeGreaterThan(1);
+        const hiddenIds = userTurnLabels(sessionId)
+            .filter((entry) => hidden.includes(entry.label))
+            .map((entry) => entry.id);
+
+        // Edit the first hidden turn's text and delete the second hidden turn,
+        // through the host's own API, while the restored range is being served.
+        const store = openCodeStore();
+        const part = store
+            .prepare(
+                "SELECT id, data FROM part WHERE message_id = ? AND json_extract(data, '$.type') = 'text' ORDER BY id LIMIT 1",
+            )
+            .get(hiddenIds[0] as string) as { id: string; data: string };
+        store.close();
+        const edited = await fetch(
+            `${h.opencode.url}/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(hiddenIds[0] as string)}/part/${encodeURIComponent(part.id)}`,
+            {
+                method: "PATCH",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                    ...(JSON.parse(part.data) as Record<string, unknown>),
+                    id: part.id,
+                    sessionID: sessionId,
+                    messageID: hiddenIds[0],
+                    text: "EDITED-HIDDEN-TURN after it was served",
+                }),
+            },
+        );
+        expect(edited.ok).toBe(true);
+        const removed = await fetch(
+            `${h.opencode.url}/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(hiddenIds[1] as string)}`,
+            { method: "DELETE" },
+        );
+        expect(removed.ok).toBe(true);
+        await h.waitForMockQuiescence({ label: "quiet after the store change" });
+
+        await h.restart();
+        assertOpenDatabasesAreThrowaway();
+        const promptB = "store-change variant: first prompt after the restart";
+        await h.sendPrompt(sessionId, promptB);
+        const passB = requestContaining(promptB);
+        expect(findBusts([passA, passB])).toEqual([]);
+        expect(cachedPrefixSha(passB.body, passA.body)).toEqual(
+            cachedPrefixSha(passA.body, passA.body),
+        );
+        expect(JSON.stringify(passB.body)).not.toContain("EDITED-HIDDEN-TURN");
+    },
+    420_000,
+);
