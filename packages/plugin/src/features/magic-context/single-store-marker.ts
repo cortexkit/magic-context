@@ -187,10 +187,13 @@ export function refusalForMarkerRead(
 
 /** The one module route the marker gate uses: a read-only marker and fence answer. */
 export interface MarkerStatusModuleClient {
-    markerStatus?(args: {
-        project: string;
-        projectRoot?: string;
-    }): Promise<{ ok: boolean; marked?: boolean; below_lane?: boolean }>;
+    markerStatus?(args: { project: string; projectRoot?: string }): Promise<{
+        ok: boolean;
+        marked?: boolean;
+        below_lane?: boolean;
+        /** The context.db the module read, from its own environment. */
+        context_db_path?: string;
+    }>;
 }
 
 /**

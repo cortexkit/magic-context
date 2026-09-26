@@ -854,10 +854,12 @@ export class SubcModuleTransport {
         return { page: response.page as unknown as ChangefeedPage };
     }
 
-    async markerStatus(args: {
-        project: string;
-        projectRoot?: string;
-    }): Promise<{ ok: boolean; marked?: boolean; below_lane?: boolean }> {
+    async markerStatus(args: { project: string; projectRoot?: string }): Promise<{
+        ok: boolean;
+        marked?: boolean;
+        below_lane?: boolean;
+        context_db_path?: string;
+    }> {
         const { projectRoot, ...body } = args;
         const response = await this.singleStoreRequest(
             `mirror-marker:${args.project}`,
@@ -879,6 +881,9 @@ export class SubcModuleTransport {
             ok: true,
             marked: response.marked === true,
             below_lane: response.below_lane === true,
+            ...(typeof response.context_db_path === "string"
+                ? { context_db_path: response.context_db_path }
+                : {}),
         };
     }
 

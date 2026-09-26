@@ -12,7 +12,11 @@ import {
 import { SubcModuleTransport } from "@magic-context/core/hooks/magic-context/module-transport";
 import { Database } from "@magic-context/core/shared/sqlite";
 
-import { reportAuthorityMarkers, runDoctorDrainAuthority } from "./doctor-authority";
+import {
+    reportAuthorityMarkers,
+    reportModuleContextDbPath,
+    runDoctorDrainAuthority,
+} from "./doctor-authority";
 
 function writeSubcConfig(configHome: string, connectionFile: string): void {
     const configDir = join(configHome, "cortexkit");
@@ -322,6 +326,72 @@ describe("doctor per-project single-store report", () => {
         ]);
         expect(warn).toEqual([`  ${ids.c}: ${OUTSIDE_ROOT}`]);
         expect(fail).toEqual([]);
+    });
+});
+
+describe("doctor context.db path agreement with the module", () => {
+    async function check(answer: () => Promise<{ ok: boolean; context_db_path?: string }>) {
+        const info: string[] = [];
+        const warn: string[] = [];
+        await reportModuleContextDbPath({
+            hostPath: "/data/host/cortexkit/magic-context/context.db",
+            projectPath: "git:path-check",
+            projectRoot: "/work/path-check",
+            module: { markerStatus: answer },
+            info: (message) => info.push(message),
+            warn: (message) => warn.push(message),
+        });
+        return { info, warn };
+    }
+
+    it("says so when both read the same file", async () => {
+        const { info, warn } = await check(async () => ({
+            ok: true,
+            context_db_path: "/data/host/cortexkit/magic-context/../magic-context/context.db",
+        }));
+        expect(warn).toEqual([]);
+        expect(info).toEqual([
+            "  context.db path agrees with the module: /data/host/cortexkit/magic-context/context.db",
+        ]);
+    });
+
+    it("names both paths when they differ", async () => {
+        const { warn } = await check(async () => ({
+            ok: true,
+            context_db_path: "/Users/me/.local/share/cortexkit/magic-context/context.db",
+        }));
+        expect(warn).toHaveLength(1);
+        expect(warn[0]).toContain("context.db path mismatch");
+        expect(warn[0]).toContain("/data/host/cortexkit/magic-context/context.db");
+        expect(warn[0]).toContain("/Users/me/.local/share/cortexkit/magic-context/context.db");
+    });
+
+    it("names a module that cannot open its context.db", async () => {
+        const { warn } = await check(async () => {
+            throw Object.assign(
+                new Error("could not open /elsewhere/context.db for domain writes: unable to open"),
+                { code: "mirror_pull_failed" },
+            );
+        });
+        expect(warn).toHaveLength(1);
+        expect(warn[0]).toContain("module cannot open context.db");
+        expect(warn[0]).toContain("/elsewhere/context.db");
+    });
+
+    it("stays quiet on a tripwire and warns without a path from an older module or no module", async () => {
+        expect(
+            await check(async () => {
+                throw Object.assign(new Error("marked"), { code: "single_store_tripwire" });
+            }),
+        ).toEqual({ info: [], warn: [] });
+        const old = await check(async () => ({ ok: true }));
+        expect(old.warn).toEqual([
+            "  module context.db path not checked: this module build does not report it",
+        ]);
+        const unreachable = await check(async () => {
+            throw new Error("connect ENOENT");
+        });
+        expect(unreachable.warn).toEqual(["  module context.db path not checked: connect ENOENT"]);
     });
 });
 

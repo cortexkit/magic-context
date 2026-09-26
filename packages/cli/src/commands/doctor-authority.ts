@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { loadPluginConfig } from "@magic-context/core/config";
 import {
     AUTHORITY_DOMAINS,
@@ -238,6 +239,88 @@ export async function reportAuthorityMarkers(args: {
             );
         }
     }
+}
+
+/**
+ * Check that the module reads the same context.db as this host.
+ *
+ * The module resolves the file from its own environment (it is started by the subc
+ * daemon, not by the host), so a host run with MAGIC_CONTEXT_STORAGE_DIR, or with a
+ * different XDG_DATA_HOME, can point the two at different files. The module then
+ * refuses every mirror pull (`mirror_pull_failed`) for a file it cannot find, or reads
+ * another file's single-store marker. `mirror.marker_status` reports the path it read.
+ */
+export async function reportModuleContextDbPath(args: {
+    hostPath: string;
+    projectPath: string;
+    projectRoot: string;
+    module: Pick<AuthorityModuleClient, "markerStatus">;
+    info(message: string): void;
+    warn(message: string): void;
+}): Promise<void> {
+    if (!args.module.markerStatus) return;
+    let reported: string | undefined;
+    try {
+        const answer = await args.module.markerStatus({
+            project: args.projectPath,
+            projectRoot: args.projectRoot,
+        });
+        reported = answer.context_db_path;
+    } catch (error) {
+        const code =
+            error &&
+            typeof error === "object" &&
+            typeof (error as { code?: unknown }).code === "string"
+                ? (error as { code: string }).code
+                : undefined;
+        const message = error instanceof Error ? error.message : String(error);
+        if (code === "mirror_pull_failed") {
+            args.warn(
+                `  module cannot open context.db — its mirror pulls will fail; host reads ${args.hostPath}: ${message}`,
+            );
+        } else if (code !== SINGLE_STORE_TRIPWIRE) {
+            args.warn(`  module context.db path not checked: ${message}`);
+        }
+        return;
+    }
+    if (reported === undefined) {
+        args.warn("  module context.db path not checked: this module build does not report it");
+        return;
+    }
+    if (resolve(reported) === resolve(args.hostPath)) {
+        args.info(`  context.db path agrees with the module: ${args.hostPath}`);
+        return;
+    }
+    args.warn(
+        `  context.db path mismatch: host reads ${args.hostPath}, module reads ${reported} — set MAGIC_CONTEXT_STORAGE_DIR / XDG_DATA_HOME the same for both`,
+    );
+}
+
+/** Run {@link reportModuleContextDbPath} for the current directory when rust mode is on. */
+export async function checkModuleContextDbPathForCwd(args: {
+    hostPath: string;
+    info(message: string): void;
+    warn(message: string): void;
+}): Promise<void> {
+    const loaded = loadPluginConfig(process.cwd());
+    if (loaded.transform_mode !== "rust") return;
+    let projectPath = process.cwd();
+    try {
+        projectPath = resolveProjectIdentity(process.cwd());
+    } catch {
+        // An unresolved identity is never marked; the path check still applies.
+    }
+    const transport = new SubcModuleTransport(
+        loaded.subc?.connection_file ?? getDefaultSubcConnectionFile(),
+    );
+    await reportModuleContextDbPath({
+        hostPath: args.hostPath,
+        projectPath,
+        projectRoot: process.cwd(),
+        module: authorityClient(transport, process.cwd()),
+        info: args.info,
+        warn: args.warn,
+    });
 }
 
 export async function runDoctorDrainAuthority(

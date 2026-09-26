@@ -121,10 +121,13 @@ export interface AuthorityModuleClient {
         projectRoot?: string;
     }): Promise<{ page: ChangefeedPage }>;
     /** Read-only single-store marker and fence answer for one project. */
-    markerStatus?(args: {
-        project: string;
-        projectRoot?: string;
-    }): Promise<{ ok: boolean; marked?: boolean; below_lane?: boolean }>;
+    markerStatus?(args: { project: string; projectRoot?: string }): Promise<{
+        ok: boolean;
+        marked?: boolean;
+        below_lane?: boolean;
+        /** The context.db the module read, from its own environment. */
+        context_db_path?: string;
+    }>;
     mirrorMemory?(args: {
         module_row_id: number;
         projectRoot?: string;
