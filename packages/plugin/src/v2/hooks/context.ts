@@ -1017,6 +1017,7 @@ export async function registerContext(context: V2Context) {
                 tagger,
                 scheduler: createScheduler({
                     executeThresholdPercentage: config.execute_threshold_percentage,
+                    executeThresholdTokens: config.execute_threshold_tokens,
                 }),
                 contextUsageMap: usage,
                 compactionOff,
@@ -1035,6 +1036,7 @@ export async function registerContext(context: V2Context) {
                 protectedTokens: config.protected_tokens,
                 protectedTokenTierOverrides: getProtectedTokensTierOverrides(config),
                 executeThresholdPercentage: config.execute_threshold_percentage,
+                executeThresholdTokens: config.execute_threshold_tokens,
                 liveModelBySession: liveModels,
                 getToolSetHash: (sessionId) => {
                     const model = liveModels.get(sessionId);

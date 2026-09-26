@@ -94,6 +94,26 @@ describe("createScheduler", () => {
         ).toBe("execute");
     });
 
+    it("uses the absolute token threshold when configured", () => {
+        const scheduler = createScheduler({
+            executeThresholdPercentage: 65,
+            executeThresholdTokens: { default: 258_000 },
+        });
+        const sessionMeta = createSessionMeta({ lastResponseTime: BASE_TIME - 10_000 });
+
+        // 340,185 / 922,000 = 36.9%, below the percentage fallback but above 258k.
+        expect(
+            scheduler.shouldExecute(
+                sessionMeta,
+                { percentage: 36.9, inputTokens: 340_185 },
+                BASE_TIME,
+                undefined,
+                "openai/gpt-6-luna",
+                922_000,
+            ),
+        ).toBe("execute");
+    });
+
     it("falls back to 5m default when cacheTtl is invalid", () => {
         const scheduler = createScheduler({ executeThresholdPercentage: 65 });
         const sessionMeta = createSessionMeta({

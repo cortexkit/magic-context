@@ -15,9 +15,11 @@ import {
   dismissNote,
   formatDateTime,
   formatRelativeTime,
+  getContextTokenBreakdown,
   getProjects,
   getSessionDetail,
   getSessionMessages,
+  getSessionMeta,
   getSmartNotes,
   getSubagentInvocations,
   getSubagentTotalsBySubagent,
@@ -33,6 +35,7 @@ import type {
   SessionFact,
   SessionFilter,
   SessionMessageRow,
+  SessionMetaRow,
   SessionRow,
   SessionScanCondition,
 } from "../../lib/types";
@@ -180,7 +183,9 @@ function loadStoredValue(key: string): string {
 
 function loadHarnessFilter(): HarnessFilter {
   const stored = loadStoredValue(HARNESS_FILTER_KEY);
-  return stored === "opencode" || stored === "pi" || stored === "omp" ? stored : "all";
+  return stored === "opencode" || stored === "opencode2" || stored === "pi" || stored === "omp"
+    ? stored
+    : "all";
 }
 
 interface SessionViewerProps {
@@ -358,6 +363,51 @@ export default function SessionViewer(props: SessionViewerProps = {}) {
     },
   );
 
+  // The detail payload is intentionally loaded once because it includes the
+  // session's compartments, facts, notes, and token breakdown. The live token
+  // fields are much smaller and change while OpenCode is running, so refresh
+  // only those rows once per second instead of repeatedly reloading the full
+  // session history.
+  const [liveMeta, setLiveMeta] = createSignal<SessionMetaRow | null>(null);
+  const [liveTokenBreakdown, setLiveTokenBreakdown] =
+    createSignal<Awaited<ReturnType<typeof getContextTokenBreakdown>>>(null);
+
+  createEffect(() => {
+    const selected = selectedSession();
+    setLiveMeta(null);
+    setLiveTokenBreakdown(null);
+    if (!selected) return;
+
+    let stopped = false;
+    let inFlight = false;
+    const refreshLiveStats = async () => {
+      if (stopped || inFlight) return;
+      inFlight = true;
+      try {
+        const [meta, breakdown] = await Promise.all([
+          getSessionMeta(selected.sessionId),
+          getContextTokenBreakdown(selected.sessionId),
+        ]);
+        if (!stopped) {
+          setLiveMeta(meta);
+          setLiveTokenBreakdown(breakdown);
+        }
+      } catch {
+        // Keep the last successful values visible through transient SQLite/IPC
+        // contention while the next tick retries.
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void refreshLiveStats();
+    const timer = window.setInterval(() => void refreshLiveStats(), 1000);
+    onCleanup(() => {
+      stopped = true;
+      window.clearInterval(timer);
+    });
+  });
+
   // Lazy tab fetches. `messages` and `cache events` are each tens of
   // thousands of rows on long sessions and only useful when their tab is
   // open. We track "tab has been activated for the current selection" and
@@ -427,8 +477,8 @@ export default function SessionViewer(props: SessionViewerProps = {}) {
   const compartments = () => sessionDetail()?.compartments ?? [];
   const facts = () => sessionDetail()?.facts ?? [];
   const notes = () => sessionDetail()?.notes ?? [];
-  const meta = () => sessionDetail()?.meta ?? null;
-  const tokenBreakdown = () => sessionDetail()?.token_breakdown ?? null;
+  const meta = () => liveMeta() ?? sessionDetail()?.meta ?? null;
+  const tokenBreakdown = () => liveTokenBreakdown() ?? sessionDetail()?.token_breakdown ?? null;
   const historianInvocations = () =>
     (subagentInvocations() ?? []).filter(
       (row) =>
@@ -750,6 +800,7 @@ export default function SessionViewer(props: SessionViewerProps = {}) {
             options={[
               { value: "all", label: "Harness: All" },
               { value: "opencode", label: "OpenCode" },
+              { value: "opencode2", label: "OpenCode 2" },
               { value: "pi", label: "Pi" },
               { value: "omp", label: "OMP" },
             ]}
@@ -924,6 +975,13 @@ export default function SessionViewer(props: SessionViewerProps = {}) {
             onClick={() => setActiveTab("tokens")}
           >
             Meta
+            <Show when={meta()}>
+              {(current) => (
+                <span class="pill green" style={{ "font-size": "9px", "line-height": "1.3" }}>
+                  {current().last_input_tokens.toLocaleString()}
+                </span>
+              )}
+            </Show>
           </button>
         </div>
 
@@ -1759,7 +1817,15 @@ export default function SessionViewer(props: SessionViewerProps = {}) {
                       <td>{metaData().counter}</td>
                     </tr>
                     <tr>
-                      <td>Context %</td>
+                      <td>
+                        Context %{" "}
+                        <span
+                          class="pill green"
+                          style={{ "font-size": "9px", "line-height": "1.3" }}
+                        >
+                          LIVE
+                        </span>
+                      </td>
                       <td>{metaData().last_context_percentage.toFixed(1)}%</td>
                     </tr>
                     <tr>

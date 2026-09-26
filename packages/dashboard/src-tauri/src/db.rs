@@ -3052,15 +3052,35 @@ fn provider_model_label(provider: Option<&str>, model: Option<&str>) -> Option<S
         .map(|(provider, model)| format!("{provider}/{model}"))
 }
 
+/// OpenCode 2 keeps `session_v2.time_updated` frozen while a session is live
+/// (the same rule the plugin's v87 relabel works around), so the Cache tab's
+/// change gate must read the newest message activity instead — otherwise the
+/// tab stops streaming mid-turn and only refreshes once activity settles.
+const RECENT_OPENCODE2_CACHE_SESSIONS_SQL: &str = "SELECT s.id,
+       MAX(s.time_updated, COALESCE(m.newest, 0)) AS activity,
+       NULLIF(s.title, '')
+     FROM session_v2 s
+     LEFT JOIN (
+       SELECT session_id, MAX(time_updated) AS newest
+       FROM session_message
+       GROUP BY session_id
+     ) m ON m.session_id = s.id
+     WHERE s.time_archived IS NULL
+     ORDER BY activity DESC, s.id DESC
+     LIMIT ?1 OFFSET ?2";
+
 fn recent_opencode_cache_sessions_sql(generation: OpenCodeStoreGeneration) -> String {
-    format!(
-        "SELECT id, time_updated, NULLIF(title, '')
+    match generation {
+        OpenCodeStoreGeneration::V2 => RECENT_OPENCODE2_CACHE_SESSIONS_SQL.to_string(),
+        OpenCodeStoreGeneration::V1 => format!(
+            "SELECT id, time_updated, NULLIF(title, '')
      FROM {}
      WHERE time_archived IS NULL
      ORDER BY time_updated DESC, id DESC
      LIMIT ?1 OFFSET ?2",
-        opencode_session_table(generation)
-    )
+            opencode_session_table(generation)
+        ),
+    }
 }
 
 const RECENT_OPENCODE_SESSION_MESSAGES_SQL: &str = "SELECT data
@@ -7959,6 +7979,19 @@ mod cache_session_list_query_tests {
         assert!(sql.contains("limit ?1 offset ?2"));
         assert!(!sql.contains("message"));
         assert!(!sql.contains("json_extract"));
+    }
+
+    #[test]
+    fn opencode2_list_query_gates_on_newest_message_activity() {
+        let sql =
+            recent_opencode_cache_sessions_sql(OpenCodeStoreGeneration::V2).to_ascii_lowercase();
+        assert!(sql.contains("from session_v2 s"));
+        assert!(sql.contains("from session_message"));
+        assert!(sql.contains("max(time_updated)"));
+        assert!(sql.contains("order by activity desc"));
+        assert!(sql.contains("time_archived is null"));
+        assert!(sql.contains("limit ?1 offset ?2"));
+        assert!(sql.contains("max(s.time_updated"));
     }
 
     #[test]
