@@ -11,6 +11,7 @@ import {
     __resetMessageIndexAsyncForTests,
     isSessionReconciled,
 } from "../../features/magic-context/message-index-async";
+import { createScheduler } from "../../features/magic-context/scheduler";
 import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import {
     applyStrippedPlaceholderDelta,
@@ -61,6 +62,7 @@ import { describeContextLimitChange } from "./context-limit-resolution";
 import { createEventHandler } from "./event-handler";
 import { resolveContextLimit as resolveLimitForTest } from "./event-resolvers";
 import { __ignoredNotificationTest } from "./send-session-notification";
+import { loadContextUsage } from "./transform-context-state";
 
 // These alert-content units supply idle authorization independently of the harness event hook.
 beforeEach(() => __ignoredNotificationTest.setHoldDetector(() => false));
@@ -2053,5 +2055,168 @@ describe("createEventHandler — a turn's final step usage", () => {
         // time; an equal id is the same reading, not a stale one.
         await stepFinish("msg_0db8b8a8e001DuI1o7N2LSIrjL", 89_167, 169_811);
         expect(contextUsageMap.get("ses-final-step-inorder")?.usage.inputTokens).toBe(258_978);
+    });
+});
+
+describe("createEventHandler — usage is recorded before the model-limit refresh", () => {
+    const SESSION = "ses-record-before-refresh";
+
+    function usageEvent(id: string, input: number) {
+        return {
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        id,
+                        role: "assistant",
+                        finish: "tool-calls",
+                        sessionID: SESSION,
+                        providerID: "test-provider",
+                        modelID: "test-model",
+                        tokens: { input, cache: { read: 0, write: 0 } },
+                    },
+                },
+            },
+        };
+    }
+
+    // A providers client whose config.providers() call does not return until the
+    // gate opens, then reports `limit` for test-provider/test-model.
+    function stalledProvidersClient(gate: Promise<void>, limit: number) {
+        const calls = { count: 0 };
+        return {
+            calls,
+            client: {
+                config: {
+                    providers: async () => {
+                        calls.count += 1;
+                        await gate;
+                        return providersClient(limit).config.providers();
+                    },
+                },
+            },
+        };
+    }
+
+    it("makes an over-limit reading visible to the next transform while the refresh is stalled", async () => {
+        useTempDataHome("context-event-record-before-refresh-");
+        resetAuthRewarmLatchForTest();
+        await refreshModelLimitsFromApi(providersClient(30_000));
+        const contextUsageMap = new Map<string, ContextUsageCacheEntry>();
+        const deps: ReturnType<typeof createDeps> & { client: unknown } = {
+            ...createDeps(contextUsageMap),
+            client: providersClient(30_000),
+        };
+        const handler = createEventHandler(deps);
+        const scheduler = createScheduler({ executeThresholdPercentage: 65 });
+
+        // An in-limit reading first, handled to completion. It also spends the
+        // once-per-process auth re-warm, so the stall below is the over-limit
+        // refresh and nothing else.
+        await handler(usageEvent("msg_0001", 2_000));
+        const before = loadContextUsage(contextUsageMap, deps.db, SESSION);
+        expect(before.inputTokens).toBe(2_000);
+        expect(before.percentage).toBeLessThan(65);
+
+        const gate = deferred();
+        const stalled = stalledProvidersClient(gate.promise, 30_000);
+        deps.client = stalled.client;
+        // A reading three times the catalog limit. The handler is not awaited:
+        // OpenCode runs the next transform without waiting for it.
+        const pending = handler(usageEvent("msg_0002", 90_000));
+
+        // What the next transform reads for its pressure and scheduling, read
+        // before the handler has yielded even once.
+        const usage = loadContextUsage(contextUsageMap, deps.db, SESSION);
+        expect(usage.inputTokens).toBe(90_000);
+        expect(usage.percentage).toBeGreaterThanOrEqual(95);
+        const meta = getOrCreateSessionMeta(deps.db, SESSION);
+        expect(meta.lastInputTokens).toBe(90_000);
+        expect(scheduler.shouldExecute(meta, usage, meta.lastResponseTime, SESSION)).toBe(
+            "execute",
+        );
+
+        // The over-limit refresh did start and is still waiting on the gate.
+        await waitForTimers();
+        expect(stalled.calls.count).toBe(1);
+        expect(loadContextUsage(contextUsageMap, deps.db, SESSION).inputTokens).toBe(90_000);
+
+        gate.resolve();
+        await pending;
+        expect(loadContextUsage(contextUsageMap, deps.db, SESSION).inputTokens).toBe(90_000);
+    });
+
+    it("applies a limit the refresh changed by recording the reading again", async () => {
+        useTempDataHome("context-event-record-before-refresh-rerecord-");
+        resetAuthRewarmLatchForTest();
+        await refreshModelLimitsFromApi(providersClient(30_000));
+        const contextUsageMap = new Map<string, ContextUsageCacheEntry>();
+        const gate = deferred();
+        const stalled = stalledProvidersClient(gate.promise, 100_000);
+        const deps = { ...createDeps(contextUsageMap), client: stalled.client };
+        const handler = createEventHandler(deps);
+
+        const pending = handler(usageEvent("msg_0001", 90_000));
+        // Recorded against the stale 30k catalog: the accepted 90k is the limit.
+        expect(contextUsageMap.get(SESSION)?.usage.percentage).toBe(100);
+
+        gate.resolve();
+        await pending;
+        const expected =
+            (90_000 /
+                resolveLimitForTest("test-provider", "test-model", {
+                    db: deps.db,
+                    sessionID: SESSION,
+                })) *
+            100;
+        expect(expected).toBeLessThan(100);
+        expect(contextUsageMap.get(SESSION)?.usage.percentage).toBeCloseTo(expected, 10);
+        expect(getOrCreateSessionMeta(deps.db, SESSION).lastContextPercentage).toBeCloseTo(
+            expected,
+            10,
+        );
+    });
+
+    it("does not let a refresh re-record a reading that a newer step replaced", async () => {
+        useTempDataHome("context-event-record-before-refresh-newer-");
+        resetAuthRewarmLatchForTest();
+        await refreshModelLimitsFromApi(providersClient(30_000));
+        const contextUsageMap = new Map<string, ContextUsageCacheEntry>();
+        // Each step's refresh reports a larger catalog, so each handler would
+        // record its reading again when its refresh returns. The final step's
+        // refresh returns first, leaving the older step's refresh last.
+        const toolGate = deferred();
+        const finalGate = deferred();
+        const deps: ReturnType<typeof createDeps> & { client: unknown } = {
+            ...createDeps(contextUsageMap),
+            client: stalledProvidersClient(toolGate.promise, 100_000).client,
+        };
+        const handler = createEventHandler(deps);
+
+        const toolStep = handler(usageEvent("msg_0001", 90_000));
+        deps.client = stalledProvidersClient(finalGate.promise, 100_000).client;
+        const finalStep = handler(usageEvent("msg_0002", 95_000));
+        expect(contextUsageMap.get(SESSION)?.usage.inputTokens).toBe(95_000);
+
+        finalGate.resolve();
+        await finalStep;
+        expect(contextUsageMap.get(SESSION)?.usage.inputTokens).toBe(95_000);
+        toolGate.resolve();
+        await toolStep;
+        expect(contextUsageMap.get(SESSION)?.usage.inputTokens).toBe(95_000);
+        expect(getOrCreateSessionMeta(deps.db, SESSION).lastInputTokens).toBe(95_000);
+    });
+
+    it("keeps the newer reading when an older step's event is delivered after it", async () => {
+        useTempDataHome("context-event-record-before-refresh-out-of-order-");
+        resetAuthRewarmLatchForTest();
+        const contextUsageMap = new Map<string, ContextUsageCacheEntry>();
+        const deps = createDeps(contextUsageMap);
+        const handler = createEventHandler(deps);
+
+        await handler(usageEvent("msg_0002", 95_000));
+        await handler(usageEvent("msg_0001", 90_000));
+        expect(contextUsageMap.get(SESSION)?.usage.inputTokens).toBe(95_000);
+        expect(getOrCreateSessionMeta(deps.db, SESSION).lastInputTokens).toBe(95_000);
     });
 });

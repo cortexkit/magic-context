@@ -771,6 +771,9 @@ export async function persistPiPressureFromMessageEnd(args: {
 		requestAccepted ? undefined : trustedAbsoluteWall,
 	);
 
+	// Sent only after the reading is stored below, so a slow notification
+	// cannot hold the reading back from the next context pass.
+	let cacheAlert: string | undefined;
 	if (pressure) {
 		notePiUsageReadingUsed(args.sessionId);
 		const provenSafeInputTokens = requestSucceeded
@@ -799,9 +802,7 @@ export async function persistPiPressureFromMessageEnd(args: {
 				activeModel.provider && activeModel.id
 					? `${activeModel.provider}/${activeModel.id}`
 					: "the active model";
-			await args.notifyIssue?.(
-				`⚠️ Magic Context: Pi reports a context limit of ${formatTokens(reportedContextLimit)} tokens for ${modelLabel}, but this session has sent ${formatTokens(provenSafeInputTokens)} tokens successfully. Magic Context will keep using the larger proven value for its pressure math. If Pi's model metadata is wrong for your provider, set contextWindow for that model in Pi's model configuration.`,
-			);
+			cacheAlert = `⚠️ Magic Context: Pi reports a context limit of ${formatTokens(reportedContextLimit)} tokens for ${modelLabel}, but this session has sent ${formatTokens(provenSafeInputTokens)} tokens successfully. Magic Context will keep using the larger proven value for its pressure math. If Pi's model metadata is wrong for your provider, set contextWindow for that model in Pi's model configuration.`;
 		}
 		updates.lastContextPercentage = percentage;
 		updates.lastInputTokens = pressure.inputTokens;
@@ -838,6 +839,9 @@ export async function persistPiPressureFromMessageEnd(args: {
 	}
 
 	updateSessionMeta(args.db, args.sessionId, updates);
+	if (cacheAlert !== undefined) {
+		await args.notifyIssue?.(cacheAlert);
+	}
 }
 
 /** Plugin version from package.json. */

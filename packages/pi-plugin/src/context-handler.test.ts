@@ -2651,6 +2651,49 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
+	it("stores an over-limit reading before the cache alert is delivered", async () => {
+		const db = createTestDb();
+		try {
+			const { persistPiPressureFromMessageEnd } = await import("./index");
+			updateSessionMeta(db, "ses-pi-record-before-alert", {
+				observedSafeInputTokens: 25_000,
+				lastInputTokens: 2_000,
+			});
+			// A notification that does not return until the test lets it.
+			let releaseNotify!: () => void;
+			const notifyGate = new Promise<void>((resolve) => {
+				releaseNotify = resolve;
+			});
+			const notify = mock(() => notifyGate);
+
+			const pending = persistPiPressureFromMessageEnd({
+				db,
+				sessionId: "ses-pi-record-before-alert",
+				message: assistantMessage("done", 1, {
+					provider: "test-provider",
+					model: "test-model",
+					usage: { input: 90_000, cacheRead: 0, cacheWrite: 0 },
+				}),
+				piContextWindow: 30_000,
+				piContextWindowSource: "catalog",
+				notifyIssue: notify,
+			});
+
+			// The alert is out and has not returned, yet the next context pass
+			// already reads the over-limit reading.
+			expect(notify).toHaveBeenCalledTimes(1);
+			const meta = getOrCreateSessionMeta(db, "ses-pi-record-before-alert");
+			expect(meta.lastInputTokens).toBe(90_000);
+			expect(meta.lastContextPercentage).toBe(100);
+			expect(meta.cacheAlertSent).toBe(true);
+
+			releaseNotify();
+			await pending;
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("uses the live model key for scheduler execute_threshold_percentage resolution", async () => {
 		const db = createTestDb();
 		try {
