@@ -51,7 +51,11 @@ import {
 import type { ContextUsage } from "../../features/magic-context/types";
 import { getWindowReportsPath } from "../../features/magic-context/window-report-ledger";
 import { createEventHandler as createPluginEventHandler } from "../../plugin/event";
-import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
+import {
+    clearModelsDevCache,
+    refreshModelLimitsFromApi,
+    resetAuthRewarmLatchForTest,
+} from "../../shared/models-dev-cache";
 import { clearWindowOverlayCacheForTest, setWindowOverlayPath } from "../../shared/window-geometry";
 import { describeContextLimitChange } from "./context-limit-resolution";
 import { createEventHandler } from "./event-handler";
@@ -1966,5 +1970,88 @@ describe("describeContextLimitChange", () => {
         expect(describeContextLimitChange(base, { ...base, limit: 200_000 })).toBe(
             "context limit 196608 → 200000 (no input changed)",
         );
+    });
+});
+
+describe("createEventHandler — a turn's final step usage", () => {
+    it("keeps the final step's usage when the previous step's event finishes after it", async () => {
+        useTempDataHome("context-event-final-step-order-");
+        resetAuthRewarmLatchForTest();
+        // The first usage event of a process re-warms the model-limit cache over
+        // the SDK before it records anything. Hold that round trip open so the
+        // turn's next step completes while the previous step's event still waits,
+        // which is how two steps of one tool turn can finish out of order.
+        const providersGate = deferred();
+        const contextUsageMap = new Map<string, ContextUsageCacheEntry>();
+        const deps = {
+            ...createDeps(contextUsageMap),
+            client: {
+                config: {
+                    providers: async () => {
+                        await providersGate.promise;
+                        return { data: { providers: [] } };
+                    },
+                },
+            },
+        };
+        const handler = createEventHandler(deps);
+        const stepFinish = (id: string, finish: string, input: number, read: number) =>
+            handler({
+                event: {
+                    type: "message.updated",
+                    properties: {
+                        info: {
+                            id,
+                            role: "assistant",
+                            finish,
+                            sessionID: "ses-final-step",
+                            providerID: "test-provider",
+                            modelID: "test-model",
+                            tokens: { input, cache: { read, write: 0 } },
+                        },
+                    },
+                },
+            });
+
+        // A real report's numbers: the tool step's prompt was 2,398 + 165,393 and
+        // the final step's, after a large tool output, 89,167 + 169,811.
+        const toolStep = stepFinish("msg_0db8b3b020011tBWUisW3XqpeZ", "tool-calls", 2_398, 165_393);
+        await waitForTimers();
+        await stepFinish("msg_0db8b8a8e001DuI1o7N2LSIrjL", "stop", 89_167, 169_811);
+        providersGate.resolve();
+        await toolStep;
+
+        expect(contextUsageMap.get("ses-final-step")?.usage.inputTokens).toBe(258_978);
+        expect(getOrCreateSessionMeta(deps.db, "ses-final-step").lastInputTokens).toBe(258_978);
+    });
+
+    it("still records a later step whose event arrives after an earlier one", async () => {
+        useTempDataHome("context-event-final-step-inorder-");
+        resetAuthRewarmLatchForTest();
+        const contextUsageMap = new Map<string, ContextUsageCacheEntry>();
+        const deps = createDeps(contextUsageMap);
+        const handler = createEventHandler(deps);
+        const stepFinish = (id: string, input: number, read: number) =>
+            handler({
+                event: {
+                    type: "message.updated",
+                    properties: {
+                        info: {
+                            id,
+                            role: "assistant",
+                            finish: "stop",
+                            sessionID: "ses-final-step-inorder",
+                            tokens: { input, cache: { read, write: 0 } },
+                        },
+                    },
+                },
+            });
+
+        await stepFinish("msg_0db8b3b020011tBWUisW3XqpeZ", 2_398, 165_393);
+        await stepFinish("msg_0db8b8a8e001DuI1o7N2LSIrjL", 89_167, 169_811);
+        // The same message publishes again when OpenCode stamps its completion
+        // time; an equal id is the same reading, not a stale one.
+        await stepFinish("msg_0db8b8a8e001DuI1o7N2LSIrjL", 89_167, 169_811);
+        expect(contextUsageMap.get("ses-final-step-inorder")?.usage.inputTokens).toBe(258_978);
     });
 });

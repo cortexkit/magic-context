@@ -62,6 +62,7 @@ import { createEventHandler } from "./plugin/event";
 import { createSessionHooksAsync } from "./plugin/hooks/create-session-hooks";
 import { isDisposedInstanceDirectory } from "./plugin/instance-disposal";
 import { createMessagesTransformHandler } from "./plugin/messages-transform";
+import { disableNativeAutoCompaction } from "./plugin/native-compaction-guard";
 import { isDebugRpcEnabled, registerRpcHandlers } from "./plugin/rpc-handlers";
 import { createToolRegistry } from "./plugin/tool-registry";
 import { claimConfigParseFailuresOnce } from "./shared/config-diagnostics";
@@ -940,6 +941,11 @@ const server: Plugin = async (ctx) => {
                 // agents the runtime won't service is pure UX confusion.
                 if (pluginConfig.enabled !== true) {
                     return;
+                }
+                // In compaction-off mode native compaction is the user's chosen
+                // window manager, so it is left alone.
+                if (isCompactionEnabled(pluginConfig)) {
+                    disableNativeAutoCompaction(config);
                 }
                 config.permission = {
                     ...(config.permission ?? {}),

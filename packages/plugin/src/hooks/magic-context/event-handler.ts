@@ -272,6 +272,13 @@ function cleanupRemovedMessageState(
 }
 
 export function createEventHandler(deps: EventHandlerDeps) {
+    // The newest assistant message whose usage reached the pressure state, per
+    // session. OpenCode delivers events to plugins without waiting for the
+    // previous handler, and this handler can await an SDK round trip before it
+    // records usage, so the event for one step of a tool turn can finish after
+    // the event for the next step. OpenCode message ids ascend, so an older id
+    // arriving late must not overwrite the newer step's prompt size.
+    const newestUsageMessageIdBySession = new Map<string, string>();
     return async (input: { event: { type: string; properties?: unknown } }): Promise<void> => {
         evictExpiredUsageEntries(deps.contextUsageMap);
         observeOpenCodeTurnEvent(input.event.type, input.event.properties);
@@ -786,6 +793,26 @@ export function createEventHandler(deps: EventHandlerDeps) {
                         }
                     }
 
+                    // Checked after the last await above, so the check and the
+                    // write below cannot be split by another event's handler.
+                    const newestMessageId = newestUsageMessageIdBySession.get(info.sessionID);
+                    if (
+                        info.messageID !== undefined &&
+                        newestMessageId !== undefined &&
+                        info.messageID < newestMessageId
+                    ) {
+                        sessionLog(
+                            info.sessionID,
+                            `event message.updated: usage ${pressureInputTokens} from ${info.messageID} arrived after newer message ${newestMessageId}; keeping the newer reading`,
+                        );
+                        // Nothing is written: the newer event already recorded
+                        // its usage and a later response time.
+                        return;
+                    }
+                    if (info.messageID !== undefined) {
+                        newestUsageMessageIdBySession.set(info.sessionID, info.messageID);
+                    }
+
                     if (successfulUsageProof) {
                         contextLimit = Math.max(contextLimit, provenSafeInputTokens);
                     }
@@ -1029,6 +1056,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
             resetDegradedCacheCount(sessionId);
             deps.onSessionCacheInvalidated?.(sessionId);
             deps.contextUsageMap.delete(sessionId);
+            newestUsageMessageIdBySession.delete(sessionId);
             deps.tagger.cleanup(sessionId);
             clearTransformDecisionSession(sessionId);
             clearMessageTokensCache(sessionId);

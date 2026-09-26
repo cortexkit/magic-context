@@ -96,6 +96,36 @@
             ]
         },
         {
+            "path": "tests/final-step-usage.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "OpenCode 1 publishes one message.updated per step of a tool turn; the scenario checks that the final step's usage reaches the pressure state, which only the OpenCode 1 event shape exercises",
+            "contract_refs": [
+                "TS-HARNESS"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
+            "path": "tests/native-autocompact-off.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "OpenCode 1's own auto-compaction must not run in a Magic Context session whose config never mentions compaction; native compaction and its config layers exist only on OpenCode 1",
+            "contract_refs": [
+                "TS-HARNESS"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
             "path": "tests/ctx-reduce-permission-deny.test.ts",
             "tier": "ts-only",
             "invocation": {
