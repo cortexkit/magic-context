@@ -180,8 +180,10 @@ export function createCtxSearchTool(
 			const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
 			const memoryEnabled =
 				snapshot?.features.memoryEnabled ?? deps.memoryEnabled;
+			// Query embedding follows the provider alone; each lane applies its
+			// own feature gate, and history search ignores `memory.enabled`.
 			const embeddingEnabled = snapshot
-				? snapshot.enabled || snapshot.gitCommitEnabled
+				? snapshot.historyEnabled
 				: deps.embeddingEnabled;
 			const gitCommitsEnabled =
 				snapshot?.gitCommitEnabled ?? deps.gitCommitsEnabled ?? false;

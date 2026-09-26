@@ -382,9 +382,9 @@ export async function runAutoSearchHintForPi(args: {
 	try {
 		const snapshot = getProjectEmbeddingSnapshot(options.projectPath);
 		const memoryEnabled = snapshot?.features.memoryEnabled ?? true;
-		const embeddingEnabled = snapshot
-			? snapshot.enabled || snapshot.gitCommitEnabled
-			: true;
+		// Query embedding follows the provider alone; each lane applies its own
+		// feature gate, and history search does not depend on `memory.enabled`.
+		const embeddingEnabled = snapshot ? snapshot.historyEnabled : true;
 		const gitCommitsEnabled = snapshot?.gitCommitEnabled ?? false;
 		const searchOptions: UnifiedSearchOptions = {
 			limit: 10,

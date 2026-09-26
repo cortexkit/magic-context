@@ -1326,12 +1326,10 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			const skipUnanchoredPromotion =
 				discardedLast || weakLookaheadFinalCompartment;
 
-			// Two distinct gates (parity with OpenCode): embeddingActive = memory
-			// feature on (drives registration + embedding, the ctx_search / dreamer
-			// linking substrate); promotionActive additionally requires auto_promote
-			// (drives writing facts as memories).
-			const embeddingActive = memoryEnabled !== false;
-			const promotionActive = embeddingActive && autoPromote !== false;
+			// Writing facts as memories requires the memory feature AND auto_promote
+			// (parity with OpenCode). History embedding below is NOT gated here: it
+			// depends only on the embedding provider, which the embed call checks.
+			const promotionActive = memoryEnabled !== false && autoPromote !== false;
 
 			// Events: stored, NOT rendered. Best-effort. discard-last: drop events
 			// anchored to the discarded provisional compartment.
@@ -1597,8 +1595,9 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 			}
 
 			// Raw chunk embeddings: the ctx_search semantic substrate over session
-			// history. Fire-and-forget, best-effort, memory-gated.
-			if (embeddingActive) {
+			// history. Fire-and-forget, best-effort, gated only by the embedding
+			// provider (`memory.enabled` does not affect it).
+			if (newCompartments.length > 0) {
 				const chunksToEmbed = newCompartments
 					.map((c, i) => ({
 						id: persistedIds[i],

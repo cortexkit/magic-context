@@ -2257,7 +2257,7 @@
       "properties": {
         "provider": {
           "default": "local",
-          "description": "Embedding provider. 'local' uses Xenova/all-MiniLM-L6-v2, 'openai-compatible' requires endpoint and model, 'synapse' uses the certified local Synapse lane with an explicit fallback provider, and 'off' disables embeddings.",
+          "description": "Embedding provider. 'local' uses Xenova/all-MiniLM-L6-v2, 'openai-compatible' requires endpoint and model, 'synapse' uses the certified local Synapse lane with an explicit fallback provider, and 'off' disables embeddings. Session history is embedded for semantic ctx_search whenever the provider is not 'off', regardless of memory.enabled; memories are embedded only while memory.enabled is true.",
           "type": "string",
           "enum": [
             "local",
@@ -2497,7 +2497,7 @@
       "properties": {
         "enabled": {
           "default": true,
-          "description": "Enable cross-session memory (default: true)",
+          "description": "Enable cross-session memory (default: true). Does not affect history embedding or semantic ctx_search over session history; set embedding.provider to 'off' to stop all embedding.",
           "type": "boolean"
         },
         "injection_budget_tokens": {

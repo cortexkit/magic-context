@@ -24,7 +24,6 @@ export interface EmbedHistoryDeps {
     db: Database;
     /** Resolve the session's own directory (falls back to the plugin directory). */
     resolveDirectory: (sessionId: string) => string;
-    memoryEnabled: boolean;
     allowHomeProject?: boolean;
     /** Progress entries the sidebar and /ctx-status read. */
     recompProgressBySession: Map<string, RecompProgress>;
@@ -38,9 +37,8 @@ export async function runEmbedHistoryDrain(
     sessionId: string,
     options?: { signal?: AbortSignal; silent?: boolean },
 ): Promise<string> {
-    if (!deps.memoryEnabled) {
-        return "Memory is disabled for this project, so there is no semantic embedding to backfill.";
-    }
+    // History embedding does not depend on `memory.enabled`; with no provider
+    // the drain itself reports that there is nothing to embed.
     const directory = deps.resolveDirectory(sessionId);
     // Idempotent start: if a drain is already running for this session, don't
     // abort it and re-acquire — that races the just-released lease and returns

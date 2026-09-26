@@ -1722,7 +1722,6 @@ export function registerRpcHandlers(
             resolveDirectory: (id) =>
                 liveSessionState.sessionDirectoryBySession.get(id) ??
                 String(params.directory ?? directory),
-            memoryEnabled: config.memory?.enabled !== false,
             allowHomeProject: config.allow_home_project,
             recompProgressBySession: liveSessionState.recompProgressBySession,
         };

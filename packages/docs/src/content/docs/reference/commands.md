@@ -81,7 +81,7 @@ Uses historian-model tokens; full recomp on long sessions can take a long time.
 - `/ctx-embed start` — embed all of this session's still-missing history compartments in one pass (idempotent and resumable; retries transient provider failures and skips past ones it can't embed).
 - `/ctx-embed pause` — pause an in-progress run.
 
-Magic Context also auto-embeds the active session's missing compartments in the background, so you usually only need this to check status or to drive a backfill manually. Requires an embedding provider (or the built-in local model) and `memory.enabled`.
+Magic Context also auto-embeds the active session's missing compartments in the background, so you usually only need this to check status or to drive a backfill manually. Requires an embedding provider (or the built-in local model) that is not `off`; it does not depend on `memory.enabled`. The background auto-embed is silent: it posts nothing into the timeline.
 
 **When to use it.** After changing your embedding model (which re-embeds under the new model), or to check whether `/ctx-search` semantic recall covers this session's older history.
 

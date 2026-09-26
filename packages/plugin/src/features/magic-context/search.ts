@@ -1973,7 +1973,9 @@ export async function unifiedSearch(
     }
     const runPrimers = activeSources.has("primer") && memoryFeatureEnabled;
     const runNotes = activeSources.has("note");
-    const runCompartmentChunks = runMessages && memoryFeatureEnabled && embeddingEnabled;
+    // Semantic history search is not a memory feature: it runs whenever
+    // embedding is on, whatever `memory.enabled` says.
+    const runCompartmentChunks = runMessages && embeddingEnabled;
 
     // Embed the query ONCE at the top — both memory and git-commit searches
     // need the same vector. Previously each search called `embedQuery`
