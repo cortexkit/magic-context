@@ -50,6 +50,7 @@ import { hasTrustedAbsoluteWall } from "../../shared/window-geometry";
 import { maybeDeliverChannel2 } from "./channel2-delivery";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
 import { noteContextLimitResolution, provenFloorForModel } from "./context-limit-resolution";
+import { readHostCompactionGapBoundary } from "./host-compaction-gap";
 import {
     getMessageRemovedInfo,
     getMessageUpdatedAssistantInfo,
@@ -105,6 +106,13 @@ export interface EventHandlerDeps {
      * the off-transition clears any persisted intent.
      */
     compactionOff?: boolean;
+    /**
+     * The TypeScript transform restores the rows a native compaction hides (OpenCode
+     * 1, TypeScript mode). The Rust module handles a native compaction its own way.
+     */
+    hostCompactionGapRestore?: boolean;
+    /** The historian can run for this process's sessions. */
+    historianRunnable?: boolean;
     /** The host-side recovery arm is TS-only until the module protocol carries this flag. */
     thinkingBindingRecoveryEnabled?: boolean;
     onSessionCacheInvalidated?: (sessionId: string) => void;
@@ -981,10 +989,44 @@ export function createEventHandler(deps: EventHandlerDeps) {
             }
 
             dropSlot(sessionId, "session.compacted");
+            // The transform restores the rows this compaction hid when the session
+            // has a compartment boundary to restore from: those rows and the
+            // retained tail stay on the wire, so their tags keep their drops.
+            let restoresHiddenRows = false;
             try {
-                deps.compactionHandler.onCompacted(sessionId, deps.db);
+                restoresHiddenRows =
+                    deps.hostCompactionGapRestore === true &&
+                    !deps.compactionOff &&
+                    !deps.internalChildSessions?.has(sessionId) &&
+                    !getOrCreateSessionMeta(deps.db, sessionId).isSubagent &&
+                    readHostCompactionGapBoundary(deps.db, sessionId) !== null;
+            } catch (error) {
+                sessionLog(sessionId, "event session.compacted boundary read failed:", error);
+            }
+            try {
+                deps.compactionHandler.onCompacted(sessionId, deps.db, {
+                    keepTagState: restoresHiddenRows,
+                });
             } catch (error) {
                 sessionLog(sessionId, "event session.compacted handling failed:", error);
+            }
+            // Until the historian covers the restored rows they are served raw, so
+            // start it on the next pass instead of waiting for its usual trigger.
+            // This only sets the flag the compartment phase starts a run from (or
+            // clears when nothing is eligible); it busts nothing, and what the run
+            // publishes lands on the next pass that rebuilds the prefix.
+            if (restoresHiddenRows && deps.historianRunnable === true) {
+                try {
+                    if (!getOrCreateSessionMeta(deps.db, sessionId).compartmentInProgress) {
+                        updateSessionMeta(deps.db, sessionId, { compartmentInProgress: true });
+                        sessionLog(
+                            sessionId,
+                            "event session.compacted: historian marked due to cover the rows the compaction hid",
+                        );
+                    }
+                } catch (error) {
+                    sessionLog(sessionId, "event session.compacted historian mark failed:", error);
+                }
             }
             // Native compaction may have deleted the boundary message — remove our marker
             // to avoid stale/orphaned rows. The next historian run will re-inject if needed.

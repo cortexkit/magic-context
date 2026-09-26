@@ -111,6 +111,11 @@ import {
 } from "./final-wire-token-estimate";
 import type { LiveModelBySession } from "./hook-handlers";
 import {
+    hostCompactionGapBudgetTokens,
+    readHostCompactionGapBoundary,
+    restoreHostCompactionGap,
+} from "./host-compaction-gap";
+import {
     capturePrefixTrimSourceOrder,
     findHostCompactionWindow,
     type HostCompactionWindow,
@@ -132,7 +137,11 @@ import {
     recordHighPressureNoEligibleHead,
     resolveOpenCodeProtectedTailBoundary,
 } from "./protected-tail-boundary";
-import { readRawSessionMessages } from "./read-session-chunk";
+import {
+    compareRawSessionMessageOrder,
+    readHostSessionMessageRange,
+    readRawSessionMessages,
+} from "./read-session-chunk";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { extractInMemoryMessageViews } from "./read-session-raw";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
@@ -1670,9 +1679,6 @@ export function createTransform(deps: TransformDeps) {
         //
         const historyRefreshExplicitBeforePrepare = deps.historyRefreshSessions.has(sessionId);
         const deferredHistoryWasPendingAtPassStart = deferredHistoryRefreshSessions.has(sessionId);
-        const prefixTrimSourceOrder = deferredHistoryWasPendingAtPassStart
-            ? capturePrefixTrimSourceOrder(messages)
-            : undefined;
         const earlyActiveRunBlocksMaterialization =
             (getActiveCompartmentRun(sessionId) !== undefined ||
                 sessionMeta.compartmentInProgress) &&
@@ -1687,6 +1693,59 @@ export function createTransform(deps: TransformDeps) {
         const consumingDeferredEarly =
             canConsumeDeferredEarly && deferredHistoryWasPendingAtPassStart;
         const isCacheBusting = historyRefreshExplicitBeforePrepare || consumingDeferredEarly;
+
+        // After a native `/compact` the host no longer loads the rows between Magic
+        // Context's last rendered compartment and the host's retained tail. Put them
+        // back before anything below reads or tags the messages, so they take every
+        // lane a loaded row takes. Runs before the prefix-trim source order is
+        // captured, which must list the restored rows too.
+        if (hostCompaction && fullFeatureMode && !compactionOff) {
+            try {
+                const gap = restoreHostCompactionGap({
+                    sessionId,
+                    messages,
+                    window: hostCompaction,
+                    boundaryId: readHostCompactionGapBoundary(db, sessionId),
+                    // The passes already known to rebuild the cached prefix; only
+                    // these may read the range again when kept rows answer it.
+                    refreshAllowed:
+                        schedulerDecision === "execute" ||
+                        isCacheBusting ||
+                        contextUsageEarly.percentage >= forceMaterializationPercentage ||
+                        deps.pendingMaterializationSessions.has(sessionId),
+                    budgetTokens: hostCompactionGapBudgetTokens(
+                        resolvedContextLimit,
+                        resolveExecuteThreshold(
+                            deps.executeThresholdPercentage ?? 65,
+                            currentModelKeyForBoundary,
+                            65,
+                            {
+                                tokensConfig: deps.executeThresholdTokens,
+                                contextLimit: resolvedContextLimit,
+                            },
+                        ),
+                    ),
+                    readRange: (afterId, beforeId, maxRows) =>
+                        readHostSessionMessageRange(sessionId, afterId, beforeId, maxRows),
+                    compareOrder: (left, right) =>
+                        compareRawSessionMessageOrder(sessionId, left, right),
+                });
+                if (gap.status === "restored") {
+                    // The trailing-blank snapshot above was taken from the host's
+                    // input; the restored rows are host-shaped input too.
+                    for (const [id, decision] of snapshotTrailingBlankSourceDecisions(
+                        gap.restored,
+                    )) {
+                        trailingBlankSourceDecisions.set(id, decision);
+                    }
+                }
+            } catch (error) {
+                sessionLog(sessionId, "host compaction gap: restore failed:", error);
+            }
+        }
+        const prefixTrimSourceOrder = deferredHistoryWasPendingAtPassStart
+            ? capturePrefixTrimSourceOrder(messages)
+            : undefined;
         const notificationParams = runNotificationParams(sessionId) ?? {};
         const boundaryContextLimit =
             resolvedContextLimit && resolvedContextLimit > 0
