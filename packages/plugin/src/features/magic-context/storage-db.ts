@@ -107,6 +107,16 @@ export function __resetSchemaFenceStateForTests(): void {
 export const LATEST_SUPPORTED_VERSION = 93;
 
 /**
+ * The schema fence as a literal the release build can find in its bundled chunks.
+ *
+ * `LATEST_MIGRATION_VERSION` is computed when the module loads, so a bundle carries no
+ * searchable copy of it. This hand-kept literal is pinned to that value by a unit test,
+ * and the dist check fails a build whose chunks carry any other number. It is written
+ * into the boot log so the bundler keeps it.
+ */
+export const SCHEMA_FENCE_SENTINEL = "magic-context-schema-fence=93";
+
+/**
  * Every runtime backend receives the same finite wait before the first schema
  * read. Five seconds preserves the established contention tolerance while
  * remaining well inside the server-wide 15 second boot budget.
@@ -913,7 +923,9 @@ function finishDatabaseOpen(
     persistenceByDatabase.set(db, true);
     persistenceErrorByDatabase.delete(db);
     if (!explicitDbPath) {
-        log(formatSchemaFenceBootLog(getPersistedSchemaVersion(db), latestSupportedVersion));
+        log(
+            `${formatSchemaFenceBootLog(getPersistedSchemaVersion(db), latestSupportedVersion)} (${SCHEMA_FENCE_SENTINEL})`,
+        );
     }
     return db;
 }

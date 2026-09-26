@@ -2,7 +2,11 @@
 
 import { describe, expect, it } from "bun:test";
 import { FORK_MIGRATION_VERSION_FLOOR, LATEST_MIGRATION_VERSION, MIGRATIONS } from "./migrations";
-import { formatSchemaFenceBootLog, LATEST_SUPPORTED_VERSION } from "./storage-db";
+import {
+    formatSchemaFenceBootLog,
+    LATEST_SUPPORTED_VERSION,
+    SCHEMA_FENCE_SENTINEL,
+} from "./storage-db";
 
 // Guards the #1 bug class the project already hit during v2 work: adding a
 // migration but forgetting to bump LATEST_SUPPORTED_VERSION (the schema-fence
@@ -12,6 +16,12 @@ import { formatSchemaFenceBootLog, LATEST_SUPPORTED_VERSION } from "./storage-db
 describe("schema version fence", () => {
     it("LATEST_SUPPORTED_VERSION equals the highest migration version", () => {
         expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
+    });
+
+    it("the built-chunk sentinel names the highest migration version", () => {
+        expect(SCHEMA_FENCE_SENTINEL).toBe(
+            `magic-context-schema-fence=${LATEST_MIGRATION_VERSION}`,
+        );
     });
 
     it("keeps every upstream migration below the downstream floor", () => {

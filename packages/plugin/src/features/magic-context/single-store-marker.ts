@@ -144,6 +144,28 @@ export function readSingleStoreMarker(db: Database, projectPath: string): Single
     }
 }
 
+export type SingleStoreMarkerTableRead =
+    | { kind: "below_lane"; lane: number }
+    | { kind: "read"; rows: SingleStoreMarkerRow[] }
+    | { kind: "unreadable"; error: unknown };
+
+/** Read every marker row, for reports. Never throws: a failed read is `unreadable`. */
+export function readAllSingleStoreMarkers(db: Database): SingleStoreMarkerTableRead {
+    try {
+        const lane = readMarkerLane(db);
+        if (lane < MARKER_LANE_VERSION) return { kind: "below_lane", lane };
+        const rows = db
+            .prepare(
+                `SELECT project_path, context_store_uuid, marked_at, marked_by_version
+                   FROM ${MARKER_TABLE} ORDER BY project_path`,
+            )
+            .all() as SingleStoreMarkerRow[];
+        return { kind: "read", rows };
+    } catch (error) {
+        return { kind: "unreadable", error };
+    }
+}
+
 /** The refusal a local marker read already justifies, or null when it does not. */
 export function refusalForMarkerRead(
     projectPath: string,
