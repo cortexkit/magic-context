@@ -44,6 +44,20 @@ fetch_installer() {
 retry "installer fetch" fetch_installer
 
 version="${OPENCODE_VERSION:-1.18.31}"
+if [ "$version" = latest ]; then
+    # Resolve the release tag through GitHub's redirect, not its rate-limited API.
+    resolve_latest_version() {
+        local latest_url
+        latest_url="$(curl -fsSL --connect-timeout 15 --max-time 120 -o /dev/null -w '%{url_effective}' https://github.com/anomalyco/opencode/releases/latest)" || return 1
+        version="${latest_url##*/}"
+        version="${version#v}"
+        if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]; then
+            echo "install-opencode: could not resolve latest release version from $latest_url" >&2
+            return 1
+        fi
+    }
+    retry "latest version lookup" resolve_latest_version
+fi
 echo "install-opencode: installing opencode v${version}"
 
 run_installer() { bash "$installer" --version "$version"; }
