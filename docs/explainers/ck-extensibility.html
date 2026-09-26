@@ -3,31 +3,32 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CK session extensibility: an explainer</title>
+<title>CK session extensibility: an explainer (design r3.1)</title>
 <style>
 :root {
   --bg: #fbfbf9; --fg: #1d1f21; --muted: #5d6166; --border: #cfd3d7;
   --box: #ffffff; --box2: #eef3f8; --accent: #2458a6; --accent2: #8a4b00;
   --ok: #1f7a3a; --work: #8a6d00; --gap: #a3262a; --note: #fff7e0; --notebd: #e0c060;
-  --code: #f1f2f4; --ill: #6b3fa0;
+  --code: #f1f2f4; --ill: #6b3fa0; --dim: #e4e6e9; --bp: #c0392b;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #16181b; --fg: #e3e5e8; --muted: #9aa0a8; --border: #3a3f46;
     --box: #1f2226; --box2: #1d2733; --accent: #7fb0ff; --accent2: #f0a860;
     --ok: #6fcf8a; --work: #e2c35a; --gap: #ff7b7f; --note: #2b2616; --notebd: #7a6420;
-    --code: #23262b; --ill: #c9a2ff;
+    --code: #23262b; --ill: #c9a2ff; --dim: #2a2d31; --bp: #ff8a7a;
   }
 }
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
 body { margin: 0; background: var(--bg); color: var(--fg);
   font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
-.layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); max-width: 1320px; margin: 0 auto; }
+.layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); max-width: 1320px; margin: 0 auto; }
 nav.toc { position: sticky; top: 0; align-self: start; height: 100vh; overflow-y: auto;
   padding: 24px 16px; border-right: 1px solid var(--border); font-size: 14px; }
-nav.toc h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; }
-nav.toc ol { padding-left: 18px; margin: 0; }
+nav.toc h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px;
+  border: 0; padding: 0; }
+nav.toc ol { padding-left: 20px; margin: 0; }
 nav.toc li { margin: 4px 0; }
 nav.toc a { color: var(--fg); text-decoration: none; }
 nav.toc a:hover { color: var(--accent); text-decoration: underline; }
@@ -35,13 +36,10 @@ main { padding: 24px 40px 80px; min-width: 0; }
 h1 { font-size: 30px; line-height: 1.2; margin: 8px 0 4px; }
 h2 { font-size: 23px; margin: 48px 0 12px; padding-top: 8px; border-top: 1px solid var(--border); }
 h3 { font-size: 18px; margin: 28px 0 8px; }
-p, li { max-width: 78ch; }
+p, li { max-width: 80ch; }
 a { color: var(--accent); }
 code { font: 13.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--code);
   padding: 1px 4px; border-radius: 3px; }
-pre { background: var(--code); padding: 12px 14px; border-radius: 6px; overflow-x: auto;
-  font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; border: 1px solid var(--border); }
-pre code { background: none; padding: 0; }
 table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14.5px; }
 th, td { border: 1px solid var(--border); padding: 6px 8px; vertical-align: top; text-align: left; }
 th { background: var(--box2); }
@@ -51,34 +49,57 @@ th { background: var(--box2); }
   color: var(--ill); border: 1px solid var(--ill); border-radius: 3px; padding: 0 5px; margin-right: 4px; }
 .callout { background: var(--note); border: 1px solid var(--notebd); border-left-width: 4px; padding: 10px 14px;
   border-radius: 4px; margin: 14px 0; max-width: 90ch; }
-.callout.gapnote::before { content: "Gap found while explaining — "; font-weight: 600; }
-.callout.ruling::before { content: "Owner ruling — "; font-weight: 600; }
-.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 14px; }
+.callout.pending::before { content: "Pending the operator's ruling — "; font-weight: 600; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
 .card { background: var(--box); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; }
 .card h3 { margin-top: 0; font-size: 16px; }
 .card p, .card li { font-size: 14.5px; }
-.v-ok { color: var(--ok); font-weight: 600; } .v-work { color: var(--work); font-weight: 600; } .v-gap { color: var(--gap); font-weight: 600; }
 figure { margin: 16px 0; }
 figcaption { color: var(--muted); font-size: 13.5px; margin-top: 6px; max-width: 90ch; }
+/* Flow diagrams drawn with HTML boxes rather than SVG, so they wrap on narrow screens. */
+.flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 6px; margin: 14px 0; }
+.flow .st { flex: 1 1 150px; background: var(--box); border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px; font-size: 14px; }
+.flow .st b { display: block; margin-bottom: 2px; }
+.flow .st.hl { border: 2px solid var(--accent); }
+.flow .ar { align-self: center; color: var(--accent); font-size: 20px; font-weight: 600; }
+/* UI mock-ups: sketches of what a screen could show, not a specified layout. */
+.mock { display: inline-block; vertical-align: top; width: 340px; max-width: 100%; margin: 8px 12px 8px 0;
+  background: var(--box); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; font-size: 14px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+.mock .bar { font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-bottom: 8px; }
+.mock .chip { display: inline-block; border-radius: 12px; padding: 2px 10px; font-size: 13px; background: var(--box2);
+  border: 1px solid var(--border); }
+.mock .chip.warn { border-color: var(--notebd); background: var(--note); }
+.mock .chip.err { border-color: var(--gap); color: var(--gap); }
+.mock .btn { display: inline-block; border: 1px solid var(--accent); color: var(--accent); border-radius: 5px;
+  padding: 1px 10px; margin: 6px 6px 0 0; font-size: 13px; }
+.mock .btn.pri { background: var(--accent); color: var(--bg); }
+.mock .step { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
 svg { width: 100%; height: auto; display: block; }
 svg .bx { fill: var(--box); stroke: var(--border); stroke-width: 1.2; }
 svg .bx2 { fill: var(--box2); stroke: var(--border); stroke-width: 1.2; }
-svg .hl { fill: none; stroke: var(--accent); stroke-width: 1.6; }
+svg .dim { fill: var(--dim); stroke: var(--border); stroke-width: 1; stroke-dasharray: 3 3; }
+svg .hl { fill: none; stroke: var(--accent); stroke-width: 1.8; }
 svg .t { fill: var(--fg); font: 13px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
 svg .ts { fill: var(--muted); font: 11.5px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
 svg .th { fill: var(--fg); font: 600 14px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
 svg .tm { fill: var(--fg); font: 11.5px ui-monospace, Menlo, Consolas, monospace; }
+svg .tbp { fill: var(--bp); font: 600 11.5px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
 svg .ln { stroke: var(--accent); stroke-width: 1.6; fill: none; }
 svg .ln2 { stroke: var(--accent2); stroke-width: 1.6; fill: none; stroke-dasharray: 5 4; }
+svg .lnm { stroke: var(--muted); stroke-width: 1.2; fill: none; stroke-dasharray: 3 3; }
 svg .ah { fill: var(--accent); } svg .ah2 { fill: var(--accent2); }
-svg .dot { fill: var(--accent); } svg .axis { stroke: var(--muted); stroke-width: 2; }
+svg .bp { fill: var(--bp); }
+svg .axis { stroke: var(--muted); stroke-width: 2; }
+svg .dot { fill: var(--accent); }
 @media (max-width: 900px) {
   .layout { grid-template-columns: 1fr; }
   nav.toc { position: sticky; height: auto; max-height: 40vh; border-right: 0; border-bottom: 1px solid var(--border);
     background: var(--bg); z-index: 2; }
   main { padding: 16px; }
 }
-@media print { nav.toc { display: none; } .layout { display: block; } h2 { break-before: auto; } figure, table { break-inside: avoid; } }
+@media print { nav.toc { display: none; } .layout { display: block; } figure, table, .mock { break-inside: avoid; } }
 </style>
 </head>
 <body>
@@ -86,633 +107,643 @@ svg .dot { fill: var(--accent); } svg .axis { stroke: var(--muted); stroke-width
 <nav class="toc" aria-label="Contents">
   <h2>Contents</h2>
   <ol>
-    <li><a href="#picture">The one-page picture</a></li>
-    <li><a href="#concepts">Concepts</a></li>
-    <li><a href="#life">The life of a session</a></li>
-    <li><a href="#rules">Rules and why they exist</a></li>
-    <li><a href="#examples">Worked examples</a></li>
-    <li><a href="#coverage">What it doesn't cover</a></li>
-    <li><a href="#questions">Open questions</a></li>
-    <li><a href="#staging">Build staging</a></li>
-    <li><a href="#gaps">Gaps found while explaining</a></li>
+    <li><a href="#roles">The roles</a></li>
+    <li><a href="#launch">Launch</a></li>
+    <li><a href="#step">One model step</a></li>
+    <li><a href="#cm">The CompactionMessage picture</a></li>
+    <li><a href="#hooks">The four hooks</a></li>
+    <li><a href="#changes">Changes while running</a></li>
+    <li><a href="#waitrefuse">WAIT and REFUSE</a></li>
+    <li><a href="#resume">Resume</a></li>
+    <li><a href="#thalamus">Thalamus and other runners</a></li>
+    <li><a href="#tools">Tool calls and notices</a></li>
+    <li><a href="#stages">Build stages</a></li>
+    <li><a href="#open">Open items</a></li>
+    <li><a href="#where">Where this is specified</a></li>
   </ol>
-  <h2 style="margin-top:20px">Sources</h2>
-  <p style="font-size:12.5px" class="sub"><b>D</b> design doc <code>ck-extensibility-design.md</code> (DRAFT r2 + R7–R9, §10 AFT)<br>
-  <b>C</b> coverage report <code>docs/reports/ck-extensibility-plugin-coverage.md</code><br>
-  <b>S</b> landscape survey <code>extension-landscape-survey.md</code><br>
-  <b>PH</b> Broca <code>plugin-hooks-engine-design.md</code><br>
-  <b>OR</b> owner ruling relayed with this task (2026-09-26)</p>
+  <h2 style="margin-top:20px">Source</h2>
+  <p style="font-size:12.5px" class="sub">Design <code>ck-extensibility-design-r3.md</code>, draft r3.1 (2026-09-26). Citations like <span class="cite">[§5.2]</span> point at its sections.</p>
 </nav>
 <main>
 
-<h1>CK session extensibility: modules, presets and delivery</h1>
-<p class="sub">An explainer of design DRAFT r2 (with §6.2 R7–R9 and the §10 AFT presets), for the approve-or-revise decision. Nothing described here is built <span class="cite">[D header]</span>. Every claim cites its source; anything marked <span class="ill">illustrative</span> is an example written for this page, not taken from the sources. Where the sources left something unclear, a yellow “Gap found while explaining” box says so instead of filling it in; all of them are collected in <a href="#gaps">§9</a>.</p>
+<h1>CK session extensibility: providers, preflight and a runner that freezes</h1>
+<p class="sub">An explainer of design draft r3.1, for the operator. Nothing described here is built yet. Each section cites the design section it summarises; where this page simplifies, the cited section has the full rule. Anything marked <span class="ill">illustrative</span> is a sketch made for this page (screen wording, example layouts), not something the design specifies.</p>
+
+<p><b>The question it answers:</b> how modules such as AFT and Magic Context contribute to a model session that a CortexKit runner executes, under two constraints <span class="cite">[§1]</span>:</p>
+<ul>
+  <li>the runner knows nothing about personas, session kinds or any module's internals;</li>
+  <li>the prompt cache is never broken by accident.</li>
+</ul>
 
 <!-- ============================================================ -->
-<h2 id="picture">1. The one-page picture</h2>
+<h2 id="roles">1. The roles</h2>
+<p>Five principles carry the design <span class="cite">[§2]</span>:</p>
+<ol>
+  <li><b>The caller decides, the runner executes, providers supply.</b></li>
+  <li><b>Broca never sees a persona, a session class or a turn's origin.</b> It gets a flat manifest of providers and what they contribute.</li>
+  <li><b>The prefix is frozen.</b> System text and tools are resolved once and replayed byte for byte. They change only through an explicit change applied under a declared policy.</li>
+  <li><b>Every module output that affects bytes is written when it's produced.</b> Resume replays the record and never asks a module to produce it again.</li>
+  <li><b>Each provider keeps itself coherent.</b> It returns a finished, self-consistent contribution. The engine doesn't compose, filter or repair it.</li>
+</ol>
 
-<h3>The problem</h3>
-<p>On 2026-09-25 Magic Context was run inside Broca masons. The work MC's OpenCode plugin does on its own (serve the <code>ctx_*</code> tools, write the guidance, reshape history) had no owner in Broca, so it leaked across three parties one chat-negotiated patch at a time <span class="cite">[D §2]</span>:</p>
-<ul>
-  <li>a <code>tool_present</code> flag so the transform knew whether its tools existed;</li>
-  <li>Prefrontal fetching MC's guidance text with <code>guidance.get</code>;</li>
-  <li>identity fields, cache-marker restore and field aliases.</li>
-</ul>
-<p>The landscape shows the same shape everywhere <span class="cite">[D §2, S §8–§10]</span>: every host lets plugins add tools, guidance and transforms, but none separates <em>appending</em> from <em>rewriting history</em> (OpenCode #43507: a plugin using the supported hook silently killed cache reads), none lets a caller pick a <em>bundle across plugins</em> per session (plugins get an agent id and sniff), and none sandboxes plugin code. Each host also needs its own plugin rewrite, because what a session gets is decided inside each plugin, per host (MC's OpenCode and Pi plugins each infer “main vs subagent” themselves) <span class="cite">[D §9]</span>.</p>
-<p>Meanwhile providers now allow mid-conversation system messages that add operator text and add, remove or redefine tools at the end of history without touching the cached prefix, so the design must not assume guidance and tools change only on a full rebuild <span class="cite">[D §2]</span>.</p>
+<div class="cards">
+<div class="card"><h3>Prefrontal: the caller</h3>
+<p>Owns the persona. Decides what a session gets, runs preflight, checks the persona's requirements, sends Broca the session manifest, and later decides when a change is applied. Desktop and phone talk to Prefrontal, never to Broca directly <span class="cite">[§2, §4, §11.3]</span>.</p></div>
+<div class="card"><h3>Broca: the runner</h3>
+<p>Runs the session from the manifest it was given, freezes it, writes everything byte-affecting to its WAL, places cache breakpoints, and applies changes when told. Thalamus is a second runner on the same interface <span class="cite">[§1, §2, §7, §12.1]</span>.</p></div>
+<div class="card"><h3>Providers: the modules</h3>
+<p>A module may play several of the four kinds below. It declares them in its <code>provides</code> list, which Prefrontal reads from the catalog without calling anything <span class="cite">[§3, §4.2]</span>.</p></div>
+</div>
 
-<h3>The model in one diagram</h3>
+<table>
+<tr><th>Kind</th><th>Supplies</th><th>Example</th><th>Declared as</th></tr>
+<tr><td>ToolProvider</td><td>tool definitions; executes the calls</td><td>AFT; Magic Context's <code>ctx_*</code> tools</td><td><code>ck.provider.tool/v1</code></td></tr>
+<tr><td>SystemPromptProvider</td><td>system text</td><td>Magic Context's desk guidance (full or light); Prefrontal's own persona and role text</td><td><code>ck.provider.system-prompt/v1</code></td></tr>
+<tr><td>CompactionProvider</td><td>the shape of the history sent to the model</td><td>Magic Context; a classic summarise-and-continue engine</td><td><code>ck.provider.compaction/v1</code></td></tr>
+<tr><td>StepTransformProvider</td><td>write-time changes to the newest message</td><td>Magic Context's tags, reminders and per-turn recall</td><td><code>ck.provider.step-transform/v1</code></td></tr>
+</table>
+<p>A session has <b>at most one</b> CompactionProvider. Without one, history is sent as written, and a request that no longer fits the window fails with the model provider's own overflow error <span class="cite">[§3]</span>.</p>
+
 <figure>
-<svg viewBox="0 0 1000 560" role="img" aria-label="Core model: modules declare presets, Prefrontal's table picks presets and a reduction owner per session class, the engine admits and freezes a digest-stamped record and delivers per provider capability; history transforms preserve sent spans.">
+<svg viewBox="0 0 1000 470" role="img" aria-label="Who talks to whom: Desktop and phone talk to Prefrontal; Prefrontal preflights providers and sends the session manifest to Broca; Broca calls providers for tools, compaction and hooks, and sends requests to the model provider; providers send notices to Broca and an optional change hint to Prefrontal.">
   <defs>
     <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
     <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah2" d="M0,0 L10,5 L0,10 z"/></marker>
   </defs>
-  <!-- modules -->
-  <rect class="bx2" x="10" y="20" width="220" height="330" rx="8"/>
-  <text class="th" x="24" y="44">1 · Modules declare presets</text>
-  <rect class="bx" x="24" y="58" width="192" height="70" rx="6"/>
-  <text class="t" x="34" y="78">Magic Context (subc module)</text>
-  <text class="tm" x="34" y="97">main-full · main-light</text>
-  <text class="ts" x="34" y="114">subagent-full / -light / -readonly</text>
-  <rect class="bx" x="24" y="138" width="192" height="70" rx="6"/>
-  <text class="t" x="34" y="158">AFT (subc module)</text>
-  <text class="tm" x="34" y="177">interactive · delegated</text>
-  <text class="tm" x="34" y="194">auxiliary · oneshot</text>
-  <rect class="bx" x="24" y="218" width="192" height="62" rx="6"/>
-  <text class="t" x="34" y="238">Declarative file</text>
-  <text class="ts" x="34" y="256">installed with ck extension add,</text>
-  <text class="ts" x="34" y="271">digest pinned, no process</text>
-  <text class="ts" x="24" y="302">served by extension.describe →</text>
-  <text class="tm" x="24" y="318">ck.session-extension/v1</text>
-  <text class="ts" x="24" y="336">(never the HELLO manifest, R9)</text>
-
-  <!-- prefrontal -->
-  <rect class="bx2" x="260" y="20" width="250" height="330" rx="8"/>
-  <text class="th" x="274" y="44">2 · Prefrontal composition table</text>
-  <text class="ts" x="274" y="64">one row per session class</text>
-  <rect class="bx" x="274" y="74" width="222" height="160" rx="6"/>
-  <text class="tm" x="284" y="94">class: head | worker | reader |</text>
-  <text class="tm" x="284" y="110">       panel | aggregator | oneshot</text>
-  <text class="t" x="284" y="132">→ persona role</text>
-  <text class="t" x="284" y="150">→ [module:preset], ≤1 per module</text>
-  <text class="t" x="284" y="168">→ reduction owner (exactly one)</text>
-  <text class="t" x="284" y="186">→ history pipeline (ordered)</text>
-  <text class="t" x="284" y="204">→ class profile (remove-only)</text>
-  <text class="t" x="284" y="222">→ operator-text grants</text>
-  <text class="ts" x="274" y="256">per-project override names installed</text>
-  <text class="ts" x="274" y="271">presets, never supplies one</text>
-  <text class="ts" x="274" y="296">applied after presets (R8):</text>
-  <text class="ts" x="274" y="311">trust bound · user disabled_tools ·</text>
-  <text class="ts" x="274" y="326">host capabilities</text>
-
-  <!-- engine -->
-  <rect class="bx2" x="540" y="20" width="450" height="330" rx="8"/>
-  <text class="th" x="554" y="44">3 · Engine (Broca): admit, freeze, deliver</text>
-  <rect class="bx" x="554" y="58" width="200" height="118" rx="6"/>
-  <text class="t" x="564" y="78">Admission (before RunStarted)</text>
-  <text class="ts" x="564" y="97">resolve each preset's bytes</text>
-  <text class="ts" x="564" y="113">refuse by name: unknown, collision,</text>
-  <text class="ts" x="564" y="129">double slot, required tool filtered,</text>
-  <text class="ts" x="564" y="145">dangling reference (R7), no grant,</text>
-  <text class="ts" x="564" y="161">part this host can't deliver</text>
-  <rect class="bx" x="776" y="58" width="200" height="118" rx="6"/>
-  <rect class="hl" x="776" y="58" width="200" height="118" rx="6"/>
-  <text class="t" x="786" y="78">Composition record (frozen)</text>
-  <text class="tm" x="786" y="97">{class, persona role,</text>
-  <text class="tm" x="786" y="112"> [(module, preset, iface,</text>
-  <text class="tm" x="786" y="127">   contribution digest)],</text>
-  <text class="tm" x="786" y="142"> reduction owner, pipeline,</text>
-  <text class="tm" x="786" y="157"> system-text order}</text>
-  <text class="ts" x="786" y="192">one digest over resolved bytes</text>
-  <text class="ts" x="786" y="207">= the class 1 epoch for the prefix</text>
-  <rect class="bx" x="554" y="222" width="422" height="116" rx="6"/>
-  <text class="t" x="564" y="242">Delivery from four frozen capabilities (per episode)</text>
-  <text class="ts" x="564" y="261">persistent · turn-scoped · tools by reference · tools by definition</text>
-  <text class="tm" x="564" y="283">operator_message</text><text class="ts" x="690" y="283">granted static text or tool deltas</text>
-  <text class="tm" x="564" y="302">provider_notice</text><text class="ts" x="690" y="302">async result; user-role, never operator</text>
-  <text class="tm" x="564" y="321">fold / rebuild</text><text class="ts" x="690" y="321">capability missing, or order would change</text>
-
-  <!-- arrows top -->
-  <line class="ln" x1="230" y1="180" x2="258" y2="180" marker-end="url(#a1)"/>
-  <line class="ln" x1="510" y1="120" x2="552" y2="120" marker-end="url(#a1)"/>
-  <line class="ln" x1="754" y1="117" x2="774" y2="117" marker-end="url(#a1)"/>
-  <line class="ln" x1="960" y1="176" x2="960" y2="220" marker-end="url(#a1)"/>
-  <text class="ts" x="514" y="110">class +</text>
-  <text class="ts" x="514" y="140">[(m,p)]</text>
-
-  <!-- history -->
-  <rect class="bx2" x="10" y="380" width="640" height="165" rx="8"/>
-  <text class="th" x="24" y="404">4 · History operations preserve what was sent</text>
-  <rect class="bx" x="24" y="418" width="170" height="68" rx="6"/>
-  <text class="t" x="34" y="438">pipeline stage(s)</text>
-  <text class="ts" x="34" y="456">e.g. redaction; v1 ships none</text>
-  <rect class="bx" x="220" y="418" width="190" height="68" rx="6"/>
-  <rect class="hl" x="220" y="418" width="190" height="68" rx="6"/>
-  <text class="t" x="230" y="438">reduction owner (exclusive)</text>
-  <text class="ts" x="230" y="456">MC transform | host compaction</text>
-  <text class="ts" x="230" y="472">| none</text>
-  <rect class="bx" x="436" y="418" width="200" height="68" rx="6"/>
-  <text class="t" x="446" y="438">protected-span check</text>
-  <text class="ts" x="446" y="456">every sent operator_message and</text>
-  <text class="ts" x="446" y="472">provider_notice byte-identical, in order</text>
-  <line class="ln" x1="194" y1="452" x2="218" y2="452" marker-end="url(#a1)"/>
-  <line class="ln" x1="410" y1="452" x2="434" y2="452" marker-end="url(#a1)"/>
-  <text class="ts" x="24" y="512">violation → typed error, step fails (like TransformUnavailable today)</text>
-  <text class="ts" x="24" y="530">resume: re-render digest compared to recorded request_body_sha256; mismatch logged and priced as a rebuild</text>
-
-  <!-- wire -->
-  <rect class="bx" x="690" y="400" width="300" height="120" rx="8"/>
-  <rect class="hl" x="690" y="400" width="300" height="120" rx="8"/>
-  <text class="th" x="704" y="424">Provider request</text>
-  <text class="tm" x="704" y="446">system: persona → modules → host notes</text>
-  <text class="tm" x="704" y="464">tools:  host-audience fields stripped</text>
-  <text class="tm" x="704" y="482">messages: frozen prefix ++ appended</text>
-  <text class="tm" x="704" y="500">          records ++ current turn</text>
-  <line class="ln" x1="876" y1="338" x2="876" y2="398" marker-end="url(#a1)"/>
-  <line class="ln" x1="650" y1="460" x2="688" y2="460" marker-end="url(#a1)"/>
+  <!-- Desktop / phone -->
+  <rect class="bx" x="20" y="14" width="250" height="52" rx="6"/>
+  <text class="t" x="34" y="36">Desktop · phone · board</text>
+  <text class="ts" x="34" y="54">shows pending changes, Apply Now</text>
+  <line class="ln" x1="145" y1="66" x2="145" y2="176" marker-end="url(#a1)"/>
+  <!-- Prefrontal -->
+  <rect class="bx2" x="20" y="178" width="250" height="170" rx="8"/>
+  <text class="th" x="34" y="202">Prefrontal (caller)</text>
+  <text class="ts" x="34" y="222">owns personas</text>
+  <text class="ts" x="34" y="239">runs preflight, caches manifests</text>
+  <text class="ts" x="34" y="256">checks required tools</text>
+  <text class="ts" x="34" y="273">builds the session manifest</text>
+  <text class="ts" x="34" y="290">picks a policy for each change</text>
+  <text class="ts" x="34" y="307">shows WAIT status and refusals</text>
+  <text class="ts" x="34" y="324">is itself the first system-prompt</text>
+  <text class="ts" x="34" y="338">provider (persona and role text)</text>
+  <!-- Broca -->
+  <rect class="bx2" x="380" y="178" width="250" height="170" rx="8"/>
+  <text class="th" x="394" y="202">Broca (runner)</text>
+  <text class="ts" x="394" y="222">freezes the manifest on RunStarted</text>
+  <text class="ts" x="394" y="239">writes every byte-affecting output</text>
+  <text class="ts" x="394" y="256">to its WAL</text>
+  <text class="ts" x="394" y="273">checks CompactionMessages</text>
+  <text class="ts" x="394" y="290">places cache breakpoints</text>
+  <text class="ts" x="394" y="307">applies changes under a policy</text>
+  <text class="ts" x="394" y="324">never sees personas or classes</text>
+  <!-- Model -->
+  <rect class="bx" x="380" y="400" width="250" height="52" rx="6"/>
+  <text class="t" x="394" y="422">Model provider</text>
+  <text class="ts" x="394" y="440">Anthropic, OpenAI, …</text>
+  <line class="ln" x1="505" y1="348" x2="505" y2="398" marker-end="url(#a1)"/>
+  <text class="ts" x="512" y="378">requests</text>
+  <!-- Providers -->
+  <rect class="bx2" x="740" y="14" width="245" height="440" rx="8"/>
+  <text class="th" x="754" y="38">Provider modules</text>
+  <text class="ts" x="754" y="56">e.g. AFT, Magic Context</text>
+  <rect class="bx" x="754" y="70" width="217" height="78" rx="6"/>
+  <text class="t" x="764" y="90">ToolProvider</text>
+  <text class="ts" x="764" y="108">tool definitions, executes calls</text>
+  <rect class="bx" x="754" y="158" width="217" height="78" rx="6"/>
+  <text class="t" x="764" y="178">SystemPromptProvider</text>
+  <text class="ts" x="764" y="196">operator-chosen system text</text>
+  <rect class="bx" x="754" y="246" width="217" height="78" rx="6"/>
+  <text class="t" x="764" y="266">CompactionProvider (≤ 1)</text>
+  <text class="ts" x="764" y="284">shape of history, per step</text>
+  <rect class="bx" x="754" y="334" width="217" height="78" rx="6"/>
+  <text class="t" x="764" y="354">StepTransformProvider</text>
+  <text class="ts" x="764" y="372">four write-time hooks</text>
+  <!-- Prefrontal -> Broca -->
+  <line class="ln" x1="270" y1="222" x2="378" y2="222" marker-end="url(#a1)"/>
+  <text class="ts" x="276" y="214">session manifest</text>
+  <text class="ts" x="276" y="240">new manifest</text>
+  <text class="ts" x="276" y="254">+ policy</text>
+  <text class="ts" x="276" y="268">flush_prefix</text>
+  <!-- Broca -> Prefrontal -->
+  <line class="ln" x1="378" y1="300" x2="272" y2="300" marker-end="url(#a1)"/>
+  <text class="ts" x="276" y="292">session status,</text>
+  <text class="ts" x="276" y="318">terminal result</text>
+  <!-- Prefrontal -> providers: preflight -->
+  <polyline class="ln" points="220,178 220,112 738,112" marker-end="url(#a1)"/>
+  <text class="ts" x="290" y="104">preflight(cwd, params) on the pure service route → manifest</text>
+  <!-- providers -> Prefrontal: hint -->
+  <polyline class="ln2" points="738,140 180,140 180,176" marker-end="url(#a2)"/>
+  <text class="ts" x="290" y="156">ck.ext.changed hint (optional, needs a NATS bus)</text>
+  <!-- Broca -> providers -->
+  <line class="ln" x1="630" y1="230" x2="738" y2="230" marker-end="url(#a1)"/>
+  <text class="ts" x="636" y="206">tool calls,</text>
+  <text class="ts" x="636" y="220">per-step call, hooks</text>
+  <!-- providers -> Broca -->
+  <line class="ln" x1="738" y1="290" x2="632" y2="290" marker-end="url(#a1)"/>
+  <text class="ts" x="636" y="308">provider_notice,</text>
+  <text class="ts" x="636" y="322">compaction.ready,</text>
+  <text class="ts" x="636" y="336">session.read</text>
 </svg>
-<figcaption>Figure 1. Modules declare presets (§5); Prefrontal's table maps session class to presets and one reduction owner (§6); the engine admits, freezes a digest-stamped composition record, and delivers each contribution through the provider's frozen capabilities (§7.2, §7.5); history operations must leave every sent span intact (§6.6, §7.7). Sources: D §4–§7.</figcaption>
+<figcaption>Figure 1. Who talks to whom. Prefrontal talks to providers only to preflight them (and hears their optional change hint); once a session runs, Broca calls the providers it was given. Only Prefrontal talks to Broca about what a session gets <span class="cite">[§2, §4, §5, §6, §10, §11]</span>.</figcaption>
 </figure>
 
-<p>Eight principles carry the model <span class="cite">[D §3]</span>: one owner per session concern; consistent by construction (callers pick presets, never flags); modules say <em>what</em>, the host decides <em>how</em>; anything byte-affecting is frozen or written down; append is not rewrite; authority follows authorship; refuse by name, never degrade silently; hot path = data, cold path = code.</p>
-
-<div class="callout gapnote">Principle 5 says “History rewrite is one exclusive, privileged slot” <span class="cite">[D §3]</span>. r2 then split history operations into one exclusive <em>reduction owner</em> plus an ordered <em>pipeline</em> of preserving stages <span class="cite">[D §6.6, answering outside review #10]</span>. This page follows §6.6: only reduction is exclusive. The principle's wording predates that split.</div>
-
 <!-- ============================================================ -->
-<h2 id="concepts">2. Concepts</h2>
-<div class="cards">
+<h2 id="launch">2. Launch</h2>
 
-<div class="card"><h3>Module</h3>
-<p>A running subc module, or an installed declarative extension file. A running module advertises <code>capabilities.provides: ["ck.session-extension/v1"]</code>, so one <code>catalog.list</code> read finds every extension module, and serves its presets from <code>extension.describe</code> on its existing <code>ManagementSurface</code> <span class="cite">[D §4, §5.2]</span>.</p>
-<pre><code>extension.describe →
-{ "interface": "ck.session-extension/v1",
-  "presets": [ ... ] }</code></pre>
-<p class="sub">No new manifest role: <code>ProviderRole</code> is closed for subc v1 and an unknown tag fails HELLO decode, so a new role would need a two-phase fleet rollout per schema change <span class="cite">[D §5.1]</span>.</p></div>
-
-<div class="card"><h3>Preset</h3>
-<p>A named, versioned bundle of one module's contributions. No parameters: a variant is another preset (<code>main-full</code>, <code>main-light</code>). It declares <code>requires_tools</code>, <code>replaces_slots</code>, and its transform mode and interface if it reduces history <span class="cite">[D §4, R1, R3]</span>.</p>
-<pre><code><span class="ill">illustrative syntax</span>
-{ "name": "subagent-readonly",
-  "tools": ["ctx_expand", "ctx_search"],
-  "system_text": "&lt;read-only guidance, static&gt;",
-  "requires_tools": ["ctx_expand", "ctx_search"],
-  "replaces_slots": [] }</code></pre>
-<p class="sub">The design names the fields but gives no concrete schema; “this room owns the schema” <span class="cite">[D §5.2]</span>.</p></div>
-
-<div class="card"><h3>Contribution kinds</h3>
-<ul>
-<li><b>Tools</b>: schemas plus the module that executes them; may replace a host built-in slot.</li>
-<li><b>System text</b>: module-written guidance, operator authority (needs a grant).</li>
-<li><b>Reminders</b>: short module-written text meant for one turn.</li>
-<li><b>Reduction owner</b>: the one component reducing history.</li>
-<li><b>History pipeline stage</b>: other history operations, which must preserve sent spans.</li>
-<li><b>Provider notices</b>: async results between turns; never operator authority.</li>
-</ul><p class="cite">[D §4]</p></div>
-
-<div class="card"><h3>Session class</h3>
-<p>A closed vocabulary owned by Prefrontal: <code>head</code>, <code>worker</code>, <code>reader</code>, <code>panel</code>, <code>aggregator</code>, <code>oneshot</code>. Delivered to every module at admission, so no module sniffs env vars or agent names. Modules never map themselves to classes; a persona declares which class it runs as <span class="cite">[D §4, §6.1, R2]</span>.</p>
-<pre><code><span class="ill">illustrative</span>
-persona "explore" runs as: reader
-→ table row "reader" decides the rest</code></pre></div>
-
-<div class="card"><h3>Composition table</h3>
-<p>Lives in Prefrontal core; replaces today's three unconnected places (persona role base, <code>agent.role_tool_permissions</code>, per-project substrate). Each row: persona role, ordered presets (≤1 per module), reduction owner, history pipeline, class profile (a remove-only tool filter), operator-text grants. Overridable per project; a project names installed presets and never supplies one <span class="cite">[D §4, §6, §6.1]</span>.</p>
-<pre><code><span class="ill">illustrative row</span>
-reader → role: explore
-         presets: [mc:subagent-readonly, aft:delegated]
-         reduction: mc   pipeline: []
-         profile: −sidekick −athena −work
-         grants: mc (static text)</code></pre></div>
-
-<div class="card"><h3>Composition record</h3>
-<p>What one session actually got, frozen at admission: <code>{class, persona role, [(module, preset, interface, contribution digest)], reduction owner, history pipeline, system-text order}</code>. One digest over the <em>resolved bytes</em> (text and schemas as served), not names and versions, so a same-version restart with different text still changes it. That digest is the class 1 epoch for the whole prefix; the session inspector shows the record <span class="cite">[D §7.2 step 4, R4]</span>. Also frozen with it: user config such as <code>disabled_tools</code> (R8), the host adapter's declared tool additions (R7), and per-tool contract revisions (§7.2 step 6).</p></div>
-
-<div class="card"><h3>Reduction owner and preserving chain</h3>
-<p>Context reduction is exclusive per session: MC's transform, host compaction, or none. Other history operations (redaction) form an ordered pipeline around it and must preserve every span already sent. v1 ships the reducer only, but the record models a chain with one reducer, so adding a stage later is a new row, not a schema change <span class="cite">[D §6.6, §7.7]</span>. Where a need can be met at write time, plugin-hooks class 4 (“decorate once and persist”) is preferred <span class="cite">[D §7.7, PH]</span>.</p></div>
-
-<div class="card"><h3><code>operator_message</code></h3>
-<p>A new WAL record: <code>{module, epoch, scope: persistent | turn, text_digest, blocks: [text | tool_addition | tool_removal]}</code>. Built only from granted static text, as the delta between frozen epochs. Written at the next legal position: after a user turn or tool results, never first, never between <code>tool_use</code> and <code>tool_result</code> <span class="cite">[D §7.4]</span>.</p>
-<pre><code><span class="ill">illustrative</span>
-{ "module": "mc", "epoch": "e2", "scope": "persistent",
-  "text_digest": "sha256:…",
-  "blocks": [{"text": "&lt;added paragraph&gt;"}] }</code></pre></div>
-
-<div class="card"><h3><code>provider_notice</code></h3>
-<p><code>{provider, notice_id, task_id, payload}</code> for async results (AFT background tasks, MC Channel 2 wakes). <code>notice_id</code> is per event: stable across retries, distinct across events; idempotency on <code>(provider, session, notice_id)</code>. The provider holds it until the host acks the fsync. One engine-wide size cap: oversized is refused with a typed error, never truncated. Renders as a marked user-role block on every family <span class="cite">[D §7.4]</span>.</p>
-<pre><code>notice_id: task:&lt;task_id&gt;:exit
-notice_id: task:&lt;task_id&gt;:match:&lt;byte offset&gt;</code></pre><p class="cite">[D §10 AFT]</p></div>
-
-<div class="card"><h3>Host-only arguments</h3>
-<p>A property for the host, not the model, carries <code>"x-ck-audience": "host"</code> in its JSON schema (AFT's <code>shell</code>, <code>foreground_orchestrate</code>; AFT renames <code>x-aft-consumer-only</code>). The composer strips every such path, including nested, <code>$ref</code> targets and <code>required</code> entries. Dispatch rejects a model call containing one <em>before</em> host values are merged; the provider also rejects them on any route whose caller hasn't declared it supplies them <span class="cite">[D §5.4, §7.6]</span>.</p>
-<pre><code><span class="ill">illustrative</span>
-"shell": { "type": "string",
-           "x-ck-audience": "host" }</code></pre></div>
-
-<div class="card"><h3>Declarative file extensions</h3>
-<p>A file in the same preset schema: system text, MCP tool sources, replaced slots. No process; applied as class 1 data. Counts only after an explicit user-level install (<code>ck extension add</code> or setup) that pins its digest; never discovered by scanning; mismatched bytes refused by name, never reloaded. A project may <em>name</em> installed extensions, never <em>supply</em> one: cloning a hostile repo must not install operator text <span class="cite">[D §5.3]</span>.</p>
-<p>The §10 “third-party persona (declarative file)” example is, in the design's own terms, a declarative <b>preset</b> carrying static system text only, pinned by digest and given an operator-text grant <span class="cite">[D §10, OR]</span>. Personas themselves belong to the caller (Prefrontal's persona catalog), not to extensions <span class="cite">[OR]</span>.</p></div>
-
-<div class="card"><h3>Trust tiers</h3>
-<ul>
-<li><b>Operator text</b> is granted per module and preset in the table, separate from discovery, and must be byte-identical to the bytes pinned at grant time <span class="cite">[§6.3, §7.3]</span>.</li>
-<li><b>Untrusted carrier</b>: per-session values (repo name, count, recalled note) at user authority.</li>
-<li><b>Modules</b>: first-party full replies; third-party the restricted tier by default (text-only replies, project-root restriction, bash only after a host grant), no operator-text grant unless given; declarative: no code at all <span class="cite">[D §8]</span>.</li>
-</ul>
-<table><tr><th>Content</th><th>Authority</th></tr>
-<tr><td>persona role, granted static guidance</td><td>operator</td></tr>
-<tr><td>module reminders</td><td>operator, one turn</td></tr>
-<tr><td>per-session values</td><td>user (carrier)</td></tr>
-<tr><td>tool results, notices, recalled memory</td><td>untrusted</td></tr></table>
-<p class="cite">[D §8 table]</p></div>
+<div class="flow" role="img" aria-label="Launch flow: persona, preflight, persona check, session manifest, frozen on RunStarted.">
+  <div class="st"><b>1 · Persona</b>params per provider, required tools, strict or lenient</div>
+  <div class="ar">→</div>
+  <div class="st"><b>2 · Preflight</b><code>preflight(cwd, params)</code> on each provider's pure service route; trust from the route</div>
+  <div class="ar">→</div>
+  <div class="st"><b>3 · Persona check</b>in Prefrontal; strict persona missing a tool is refused before any worktree exists</div>
+  <div class="ar">→</div>
+  <div class="st"><b>4 · Session manifest</b>Prefrontal sends Broca the providers, their params and manifests</div>
+  <div class="ar">→</div>
+  <div class="st hl"><b>5 · Frozen</b>Broca freezes it on <code>RunStarted</code></div>
 </div>
 
-<div class="callout gapnote">§8 says module tiers follow “AFT's existing split” (text-only replies, project-root restriction, bash after a host grant). Those are restrictions on what AFT's <em>tools</em> do for a low-trust caller. The design doesn't say what the restricted tier means for a third-party module's <em>own process</em> (pi-subagents, for example, spawns child processes; the coverage report maps it to “restricted tier” without saying what's restricted <span class="cite">[C PI-1]</span>). Isolation today comes from modules being separate processes behind subc <span class="cite">[D §8]</span>.</div>
+<h3>2.1 The persona and its params</h3>
+<p>The persona belongs to Prefrontal. It decides which tools the session needs, how strict it is about them, and which params to ask each provider for. CK defines a small shared vocabulary; a provider may add axes of its own. A value a provider doesn't know is refused at preflight, never guessed <span class="cite">[§4.1]</span>.</p>
+<table>
+<tr><th>Param</th><th>Values</th></tr>
+<tr><td><code>behavior</code></td><td><code>autonomous</code> | <code>interactive</code></td></tr>
+<tr><td><code>scope</code></td><td><code>read</code> | <code>readwrite</code> | <code>all</code> (every tool provider serves <code>all</code>)</td></tr>
+<tr><td><code>tool_descs</code></td><td><code>concise</code> | <code>full</code></td></tr>
+<tr><td><code>exclude</code></td><td>tool names</td></tr>
+</table>
+<p class="sub">The final list is still open (design §16.3).</p>
+
+<h3>2.2 Preflight</h3>
+<p><code>preflight(cwd, params)</code> returns a <b>manifest</b>: the exact tool definitions and system text the provider would put on the wire, a digest for each item, and one digest over the whole manifest <span class="cite">[§4.2]</span>.</p>
+<ul>
+  <li><b>Pure.</b> It binds nothing, starts no watcher, builds no index and writes nothing, so Prefrontal can run it while planning, before it creates a worktree or spends a model call.</li>
+  <li><b>Its own route.</b> It's served as an <code>internal_service</code> target <code>{module_id, service_id: "preflight"}</code>. The module ignores the bound root there; <code>cwd</code> travels as the call argument. There is one long-lived preflight route per (provider, trust value), never one per candidate worktree. After launch, the session uses the normal bound route.</li>
+  <li><b>Trust comes from the route, never from a param.</b> Prefrontal stamps a <code>trust</code> fact when it opens a provider route; the daemon relays it, and it's frozen for the life of the route. Providers that narrow on trust are listed in the daemon's <code>admission_facts_targets</code>. For preflight on the shared service route, a trust claim may instead travel with the call; the provider accepts it <b>only</b> when the route's daemon-stamped principal is <code>Reserved{prefrontal-core}</code>, and otherwise treats the call as untrusted. An untrusted route narrows what the provider returns.</li>
+  <li><b>Each provider resolves its own configuration</b> (user, project and harness tiers) with its own merge rules. There is no second merger.</li>
+  <li><b>Coherent.</b> Everything the returned tools and text refer to is in the manifest. With <code>bash_status</code> disabled, AFT returns a foreground-only <code>bash</code> whose replies never hand back a task.</li>
+  <li><b>Deterministic.</b> Same inputs, same bytes: stable key order, no timestamps, counters or random ids. The digests depend on it.</li>
+  <li><b>Bytes only.</b> Settings that don't change bytes (watch timeouts, size caps) aren't in the manifest; they travel with each tool call.</li>
+  <li><b>Bounded by the caller.</b> Prefrontal caches manifests by (module, cwd, params, trust), gives each preflight a short deadline, and on a timeout keeps the last good manifest and retries later. A turn is never delayed by preflight.</li>
+</ul>
+
+<h3>2.3 System text is operator authority</h3>
+<p>A SystemPromptProvider is one the operator chose to install. Its text may vary with params and user-level configuration, but it <b>never includes content supplied by a project</b>: a cloned repository must not be able to inject text into the system prompt. A project-level setting may only choose among texts the provider ships. Per-project and per-session content (project docs, memories, counts) goes into user-role content produced by the compaction provider <span class="cite">[§4.3]</span>. Who carries project docs is still open; see <a href="#open">section 12 of this page</a>.</p>
+
+<h3>2.4 The persona check and the session manifest</h3>
+<p>Each role declares, per provider, its params, its required tools (by model-facing name) and whether it's strict or lenient. If a required tool is missing, a <b>strict</b> persona fails with a typed launch refusal naming the tool, before any worktree exists; a <b>lenient</b> one runs without it <span class="cite">[§4.4]</span>.</p>
+<p>Prefrontal then sends Broca the session manifest <span class="cite">[§4.5]</span>:</p>
+<ul>
+  <li>the tool providers, each with its params and manifest;</li>
+  <li>the system-prompt providers in order (order is precedence), with Prefrontal first: its persona and role text is preflighted and digested like any other, and a persona catalog update is a change like any other (<a href="#changes">section 6 of this page</a>);</li>
+  <li>the compaction provider, or none;</li>
+  <li>the step-transform providers, in order.</li>
+</ul>
+<p>Broca freezes it on <code>RunStarted</code>.</p>
+
+<h3>2.5 Compaction setup</h3>
+<p>If there is a compaction provider, Broca calls its setup once when the session starts. It returns <span class="cite">[§5.1]</span>:</p>
+<ul>
+  <li><b>The initial CompactionMessage</b>, so the session starts with its head in place. For Magic Context this inserts m0 and m1 before the first user message: an empty range replaced by <code>[m0, m1]</code>.</li>
+  <li><b>Message stability</b>: a rank for each of the provider's own messages, higher meaning it changes less often. Magic Context's main sessions declare <code>{m[0]: 2, m[1]: 1}</code>; a subagent session has no m0 or m1 and declares nothing. The indexes refer to the provider's output, not to positions on the wire.</li>
+</ul>
 
 <!-- ============================================================ -->
-<h2 id="life">3. The life of a session</h2>
-<p>One <code>head</code> session, <span class="ill">illustrative</span> but built only from mechanisms the design names. Table row: <code>[mc:main-full, aft:interactive]</code>, reduction owner MC's transform, empty pipeline, on an Anthropic model with mid-conversation system messages.</p>
+<h2 id="step">3. One model step</h2>
+<p>On every model step, Broca sends the compaction provider a status and waits for one of four answers <span class="cite">[§5.2]</span>.</p>
 
 <figure>
-<svg viewBox="0 0 1000 250" role="img" aria-label="Timeline of seven steps from launch to resume after restart.">
-  <line class="axis" x1="40" y1="70" x2="960" y2="70"/>
-  <g>
-    <circle class="dot" cx="60" cy="70" r="9"/><text class="th" x="56" y="75" style="fill:var(--bg)">1</text>
-    <text class="t" x="60" y="104" text-anchor="middle">Launch</text>
-    <text class="ts" x="60" y="122" text-anchor="middle">class + row</text>
-    <circle class="dot" cx="205" cy="70" r="9"/><text class="th" x="201" y="75" style="fill:var(--bg)">2</text>
-    <text class="t" x="205" y="104" text-anchor="middle">Admission</text>
-    <text class="ts" x="205" y="122" text-anchor="middle">refuse or freeze</text>
-    <circle class="dot" cx="350" cy="70" r="9"/><text class="th" x="346" y="75" style="fill:var(--bg)">3</text>
-    <text class="t" x="350" y="104" text-anchor="middle">First send</text>
-    <text class="ts" x="350" y="122" text-anchor="middle">prefix cached</text>
-    <circle class="dot" cx="495" cy="70" r="9"/><text class="th" x="491" y="75" style="fill:var(--bg)">4</text>
-    <text class="t" x="495" y="104" text-anchor="middle">Background notice</text>
-    <text class="ts" x="495" y="122" text-anchor="middle">provider_notice</text>
-    <circle class="dot" cx="640" cy="70" r="9"/><text class="th" x="636" y="75" style="fill:var(--bg)">5</text>
-    <text class="t" x="640" y="104" text-anchor="middle">MC reduction</text>
-    <text class="ts" x="640" y="122" text-anchor="middle">spans checked</text>
-    <circle class="dot" cx="785" cy="70" r="9"/><text class="th" x="781" y="75" style="fill:var(--bg)">6</text>
-    <text class="t" x="785" y="104" text-anchor="middle">Upgrade activates</text>
-    <text class="ts" x="785" y="122" text-anchor="middle">at run boundary</text>
-    <circle class="dot" cx="930" cy="70" r="9"/><text class="th" x="926" y="75" style="fill:var(--bg)">7</text>
-    <text class="t" x="930" y="104" text-anchor="middle">Resume</text>
-    <text class="ts" x="930" y="122" text-anchor="middle">replay, no describe</text>
-  </g>
-  <defs><marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker></defs>
-  <text class="ts" x="40" y="30">frozen record e1</text>
-  <line class="ln" x1="140" y1="26" x2="690" y2="26" marker-end="url(#a4)"/>
-  <text class="ts" x="700" y="30">step 6 writes epoch e2 to the WAL</text>
-  <rect class="bx2" x="40" y="150" width="920" height="92" rx="6"/>
-  <text class="t" x="54" y="172">What goes on the wire at each send</text>
-  <text class="tm" x="54" y="194">[system e1][tools e1][history …][notice]  ← appended after the cached prefix (step 4)</text>
-  <text class="tm" x="54" y="214">[system e1][tools e1][history …][operator_message e2]  ← append form, only if precedence-safe</text>
-  <text class="ts" x="54" y="230">In step 6 of this example MC isn't the last module, so it takes the other path: one ordered rebuild of the system text.</text>
+<svg viewBox="0 0 1000 300" role="img" aria-label="Timeline of one model step: Broca sends status, the compaction provider answers NOOP, CompactionMessage, WAIT or REFUSE, Broca checks and records, places breakpoints and sends the request.">
+  <defs>
+    <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <text class="th" x="10" y="40">Broca</text>
+  <text class="th" x="10" y="148">Compaction</text>
+  <text class="th" x="10" y="166">provider</text>
+  <text class="th" x="10" y="262">Model</text>
+  <line class="lnm" x1="110" y1="36" x2="990" y2="36"/>
+  <line class="lnm" x1="110" y1="152" x2="990" y2="152"/>
+  <line class="lnm" x1="110" y1="258" x2="990" y2="258"/>
+  <!-- status -->
+  <circle class="dot" cx="140" cy="36" r="6"/>
+  <text class="ts" x="118" y="22">step begins</text>
+  <line class="ln" x1="140" y1="42" x2="200" y2="146" marker-end="url(#a3)"/>
+  <text class="t" x="176" y="84">status</text>
+  <!-- answer -->
+  <rect class="bx" x="205" y="118" width="250" height="68" rx="6"/>
+  <text class="t" x="215" y="138">answer, one of:</text>
+  <text class="tm" x="215" y="156">NOOP · CompactionMessage</text>
+  <text class="tm" x="215" y="174">WAIT · REFUSE</text>
+  <line class="ln" x1="330" y1="118" x2="380" y2="42" marker-end="url(#a3)"/>
+  <text class="ts" x="362" y="94">budget ≈ 2 s</text>
+  <text class="ts" x="362" y="108">(NOOP / CM)</text>
+  <!-- broca actions -->
+  <rect class="bx2" x="385" y="10" width="170" height="54" rx="6"/>
+  <text class="t" x="395" y="30">check + record</text>
+  <text class="ts" x="395" y="48">a CompactionMessage only</text>
+  <line class="ln" x1="555" y1="36" x2="583" y2="36" marker-end="url(#a3)"/>
+  <rect class="bx2" x="585" y="10" width="170" height="54" rx="6"/>
+  <text class="t" x="595" y="30">place breakpoints</text>
+  <text class="ts" x="595" y="48">tail, m0, m1, …</text>
+  <line class="ln" x1="755" y1="36" x2="783" y2="36" marker-end="url(#a3)"/>
+  <rect class="bx2" x="785" y="10" width="140" height="54" rx="6"/>
+  <text class="t" x="795" y="30">send request</text>
+  <text class="ts" x="795" y="48">view + raw tail</text>
+  <line class="ln" x1="855" y1="64" x2="855" y2="250" marker-end="url(#a3)"/>
+  <text class="ts" x="862" y="214">request</text>
+  <!-- WAIT / REFUSE branches -->
+  <rect class="bx" x="500" y="100" width="150" height="72" rx="6"/>
+  <text class="t" x="510" y="120">WAIT</text>
+  <text class="ts" x="510" y="138">hold; ask again on</text>
+  <text class="ts" x="510" y="154">ready or bound_ms</text>
+  <rect class="bx" x="665" y="100" width="150" height="72" rx="6"/>
+  <text class="t" x="675" y="120">REFUSE</text>
+  <text class="ts" x="675" y="138">nothing sent; run</text>
+  <text class="ts" x="675" y="154">ends CompactionRefused</text>
+  <text class="ts" x="500" y="196">WAIT and REFUSE: no send (section 7)</text>
 </svg>
-<figcaption>Figure 2. Seven steps. The cached prefix changes only at a declared epoch change (step 6) or a reduction the reducer itself decides (step 5). Sources: D §6.5, §7.1–§7.7.</figcaption>
+<figcaption>Figure 2. One model step, left to right. NOOP and CompactionMessage lead to a send; WAIT holds the step; REFUSE ends the run without a send <span class="cite">[§5.2–§5.5, §7]</span>.</figcaption>
+</figure>
+
+<h3>3.1 What the status carries</h3>
+<ul>
+  <li>the step id, and whether the step is a new user turn or a tool step;</li>
+  <li>the model and variant, and the resolved context window and output limit;</li>
+  <li>the previous response's usage (input, cache read, cache write, output), its real completion time and finish reason;</li>
+  <li>the previous attempt's provider error, if any (an overflow, for example);</li>
+  <li>Broca's <b>estimate</b> of the request about to go out, labelled as an estimate (Broca has no tokenizer for most model families), plus the previous step's measured input;</li>
+  <li><code>prefix_rebuilding</code> with its reason (flush, manifest change, model switch, expired cache), set when this step's prefix is being rebuilt anyway;</li>
+  <li>the id of the newest message written and of the last CompactionMessage applied;</li>
+  <li>the current time.</li>
+</ul>
+
+<h3>3.2 The four answers</h3>
+<table>
+<tr><th style="width:22%">Answer</th><th style="width:30%">Meaning</th><th>What Broca does</th></tr>
+<tr><td><code>NOOP</code></td><td>Nothing changes. No bust.</td><td>Sends with the CompactionMessage already in force (if any) and the raw tail.</td></tr>
+<tr><td><code>CompactionMessage</code></td><td><code>{range: {from, to}, replacement: [messages], bust: soft | hard}</code>. An unlabelled one counts as <code>hard</code>.</td><td>Runs the structural checks (<a href="#cm">section 4 of this page</a>). If they pass, it writes the message to the WAL and sends with it; it stays in force until another replaces it. If they fail, it refuses the message, records that, and proceeds with the previous CompactionMessage.</td></tr>
+<tr><td><code>WAIT</code></td><td><code>{reason, bound_ms}</code>: hold this step while the provider compacts.</td><td>Sends nothing to the model, enters the recorded <code>compaction_wait</code> state, publishes a status, and asks again when the provider says it's ready or <code>bound_ms</code> runs out (<a href="#waitrefuse">section 7 of this page</a>).</td></tr>
+<tr><td><code>REFUSE</code></td><td><code>{code, reason, retryable}</code>: fail this step.</td><td>Sends nothing and ends the run with the terminal reason <code>CompactionRefused{provider, code, reason}</code> (<a href="#waitrefuse">section 7 of this page</a>).</td></tr>
+<tr><td><i>no answer in time</i></td><td>The call has a budget of about 2 s for <code>NOOP</code> and <code>CompactionMessage</code>.</td><td>Proceeds with the last recorded CompactionMessage, which is always a valid state, and records the timeout.</td></tr>
+</table>
+<p>A pending change waiting for a bust (<a href="#changes">section 6 of this page</a>) is applied at the step whose CompactionMessage carries the matching label <span class="cite">[§11.2]</span>.</p>
+
+<!-- ============================================================ -->
+<h2 id="cm">4. The CompactionMessage picture</h2>
+<p>A CompactionMessage names a range of the transcript by Broca's durable message ids (never array indexes) and gives the messages that stand in for it <span class="cite">[§5.3]</span>:</p>
+<ul>
+  <li><code>from</code> is the <b>marker</b>. Messages before it aren't sent.</li>
+  <li><code>to</code> is exclusive: the start of the provider's <b>protected tail</b>. Messages from <code>to</code> onward go out raw. <code>to</code> may not separate a tool call from its result.</li>
+  <li>The <b>replacement</b> stands in for the range. For Magic Context it's <code>[m0, m1, reshaped messages from the range]</code>. It's the provider's finished output, so the step-transform hooks don't run over it.</li>
+  <li>It always describes the <b>whole working range</b>, never a delta. <code>ctx_reduce</code> only queues drops; they land on the provider's next pass as a new replacement with the marker unchanged.</li>
+</ul>
+
+<figure>
+<svg viewBox="0 0 1000 420" role="img" aria-label="Message strip: the transcript with the marker and the protected tail; the wire request with the prefix, the replacement starting with m0 and m1, the raw tail, and cache breakpoints for four slots and for two slots.">
+  <defs>
+    <marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <!-- transcript -->
+  <text class="th" x="10" y="24">Transcript (Broca's WAL)</text>
+  <rect class="dim" x="10" y="36" width="200" height="40" rx="4"/>
+  <text class="ts" x="20" y="61">older messages, not sent</text>
+  <rect class="bx" x="214" y="36" width="440" height="40" rx="4"/>
+  <text class="t" x="224" y="61">working range: from the marker up to, not including, to</text>
+  <rect class="bx2" x="658" y="36" width="332" height="40" rx="4"/>
+  <text class="t" x="668" y="61">protected tail: to → the newest message</text>
+  <line class="axis" x1="214" y1="30" x2="214" y2="84"/>
+  <text class="tm" x="190" y="98">from = marker</text>
+  <line class="axis" x1="656" y1="30" x2="656" y2="84"/>
+  <text class="tm" x="626" y="98">to (exclusive)</text>
+  <!-- mapping -->
+  <line class="lnm" x1="214" y1="104" x2="170" y2="180"/>
+  <line class="lnm" x1="654" y1="104" x2="610" y2="180"/>
+  <line class="lnm" x1="658" y1="104" x2="672" y2="180"/>
+  <line class="lnm" x1="990" y1="104" x2="990" y2="180"/>
+  <text class="ts" x="330" y="138">replaced by the provider's replacement</text>
+  <text class="ts" x="760" y="138">sent as written (raw)</text>
+  <!-- wire -->
+  <text class="th" x="10" y="176">Request on the wire</text>
+  <rect class="bx2" x="10" y="186" width="150" height="44" rx="4"/>
+  <text class="t" x="20" y="206">prefix</text>
+  <text class="ts" x="20" y="222">system text + tools</text>
+  <rect class="bx" x="170" y="186" width="70" height="44" rx="4"/>
+  <rect class="hl" x="170" y="186" width="70" height="44" rx="4"/>
+  <text class="th" x="194" y="213">m0</text>
+  <rect class="bx" x="244" y="186" width="70" height="44" rx="4"/>
+  <rect class="hl" x="244" y="186" width="70" height="44" rx="4"/>
+  <text class="th" x="268" y="213">m1</text>
+  <rect class="bx" x="318" y="186" width="220" height="44" rx="4"/>
+  <text class="t" x="328" y="206">reshaped messages</text>
+  <text class="ts" x="328" y="222">from the range</text>
+  <rect class="bx2" x="542" y="186" width="68" height="44" rx="4"/>
+  <text class="ts" x="548" y="206">system</text>
+  <text class="ts" x="548" y="222">appends</text>
+  <rect class="bx" x="672" y="186" width="318" height="44" rx="4"/>
+  <text class="t" x="682" y="206">raw protected tail</text>
+  <text class="ts" x="682" y="222">… user · assistant · tool result</text>
+  <text class="ts" x="170" y="248">replacement = [m0, m1, reshaped …]</text>
+  <!-- breakpoints 4 slots -->
+  <text class="th" x="10" y="292">4 slots</text>
+  <text class="ts" x="10" y="308">(Anthropic)</text>
+  <polygon class="bp" points="154,276 166,276 160,288"/>
+  <text class="tbp" x="118" y="306">end of system</text>
+  <text class="ts" x="118" y="320">or a bridge</text>
+  <polygon class="bp" points="234,276 246,276 240,288"/>
+  <text class="tbp" x="222" y="306">m0</text>
+  <polygon class="bp" points="308,276 320,276 314,288"/>
+  <text class="tbp" x="300" y="306">m1</text>
+  <polygon class="bp" points="982,276 994,276 988,288"/>
+  <text class="tbp" x="954" y="306">tail</text>
+  <!-- breakpoints 2 slots -->
+  <text class="th" x="10" y="362">2 slots</text>
+  <polygon class="bp" points="234,346 246,346 240,358"/>
+  <text class="tbp" x="222" y="376">m0</text>
+  <polygon class="bp" points="982,346 994,346 988,358"/>
+  <text class="tbp" x="954" y="376">tail</text>
+  <text class="ts" x="360" y="376">nothing on m1 or the end of system: no slot left</text>
+  <text class="ts" x="10" y="408">▼ = a cache breakpoint, placed at the end of the marked item. Families with implicit caching ignore all of this.</text>
+</svg>
+<figcaption>Figure 3. The working range (marker to <code>to</code>) goes out as the replacement, headed by m0 and m1; the protected tail goes out raw. Breakpoints: the tail always, then the provider's declared messages most stable first (m0 rank 2, then m1 rank 1), then the end of system only if a slot remains, since m0's cache entry already includes the system text. The lookback bridge (a step more than 20 blocks past the previous boundary) and the standby-model bridge borrow the lowest-priority slot <span class="cite">[§5.1, §5.3, §7]</span>.</figcaption>
+</figure>
+
+<h3>4.1 Checks before sending</h3>
+<p>Broca verifies every CompactionMessage before it sends it <span class="cite">[§5.3]</span>:</p>
+<ul>
+  <li>roles follow the model family's rules;</li>
+  <li>every tool call is paired with its result, checked across the replacement and the raw tail together;</li>
+  <li>no tool-call id appears that isn't in the range;</li>
+  <li>kept signed thinking is byte-identical.</li>
+</ul>
+<p>A view that fails is refused and recorded, and Broca proceeds with the previous CompactionMessage.</p>
+<p><b>System appends are never compacted.</b> When a range covers a mid-conversation system message (a change applied by append, <a href="#changes">section 6 of this page</a>), Broca re-emits each one byte for byte, in order, right after the replacement: that's the “system appends” box in Figure 3. Editing or removing a sent system message would invalidate the cache from that point (and, on Fable 5.1 and Opus 5.5, the thinking in every later assistant turn), so a replacement that would drop one is refused like a structural failure.</p>
+<p><b>Written to the WAL.</b> Every CompactionMessage is a record, and resume replays the latest one. If the provider is down, Broca keeps serving the last recorded compaction plus the raw tail; the remaining risk is overflow, which Broca detects from usage.</p>
+
+<!-- ============================================================ -->
+<h2 id="hooks">5. The four hooks on a turn</h2>
+<p>Step-transform providers change messages <b>when they are written</b>, not every time history is sent <span class="cite">[§6.1]</span>.</p>
+
+<figure>
+<svg viewBox="0 0 1000 250" role="img" aria-label="Turn timeline: a user message passes PreUser, the model answers, PostAssistant runs, then for each tool call PreTool, the tool, and PostTool. Each hook's output is written in the same WAL frame as its subject record.">
+  <defs>
+    <marker id="a6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <line class="axis" x1="20" y1="80" x2="980" y2="80"/>
+  <polygon class="ah" points="980,74 992,80 980,86"/>
+  <text class="ts" x="20" y="24">time →</text>
+  <!-- events -->
+  <rect class="bx" x="20" y="36" width="110" height="34" rx="4"/><text class="t" x="30" y="58">user message</text>
+  <rect class="bx2" x="140" y="36" width="90" height="34" rx="4"/><rect class="hl" x="140" y="36" width="90" height="34" rx="4"/><text class="th" x="152" y="58">PreUser</text>
+  <rect class="bx" x="240" y="36" width="140" height="34" rx="4"/><text class="t" x="250" y="58">model step</text>
+  <rect class="bx2" x="390" y="36" width="120" height="34" rx="4"/><rect class="hl" x="390" y="36" width="120" height="34" rx="4"/><text class="th" x="400" y="58">PostAssistant</text>
+  <rect class="bx2" x="540" y="36" width="90" height="34" rx="4"/><rect class="hl" x="540" y="36" width="90" height="34" rx="4"/><text class="th" x="552" y="58">PreTool</text>
+  <rect class="bx" x="640" y="36" width="110" height="34" rx="4"/><text class="t" x="650" y="58">tool executes</text>
+  <rect class="bx2" x="760" y="36" width="90" height="34" rx="4"/><rect class="hl" x="760" y="36" width="90" height="34" rx="4"/><text class="th" x="770" y="58">PostTool</text>
+  <text class="ts" x="860" y="58">next step …</text>
+  <text class="ts" x="640" y="100">for each tool call ↺</text>
+  <!-- WAL frames -->
+  <text class="th" x="20" y="166">Same WAL</text>
+  <text class="th" x="20" y="184">frame as:</text>
+  <rect class="bx" x="120" y="152" width="150" height="54" rx="4"/>
+  <text class="tm" x="128" y="172">RunStarted</text>
+  <text class="ts" x="128" y="190">or the notice record</text>
+  <rect class="bx" x="370" y="152" width="160" height="54" rx="4"/>
+  <text class="tm" x="378" y="172">ModelStepFinished</text>
+  <text class="ts" x="378" y="190">original, final, notes</text>
+  <rect class="bx" x="520" y="214" width="170" height="30" rx="4"/>
+  <text class="tm" x="528" y="234">ToolDispatchIntent</text>
+  <rect class="bx" x="740" y="152" width="130" height="54" rx="4"/>
+  <text class="tm" x="748" y="172">ToolResult</text>
+  <text class="ts" x="748" y="190">final result</text>
+  <line class="ln" x1="185" y1="70" x2="195" y2="150" marker-end="url(#a6)"/>
+  <line class="ln" x1="450" y1="70" x2="450" y2="150" marker-end="url(#a6)"/>
+  <line class="ln" x1="585" y1="70" x2="600" y2="212" marker-end="url(#a6)"/>
+  <line class="ln" x1="805" y1="70" x2="805" y2="150" marker-end="url(#a6)"/>
+</svg>
+<figcaption>Figure 4. Each hook runs <em>before</em> its subject is written, and its output lands in the same WAL frame. A hook record written after its subject would reopen a window where the subject is on disk and the hook output isn't <span class="cite">[§6.1, §6.2]</span>. A <code>provider_notice</code> passes through PreUser like a user message <span class="cite">[§10]</span>.</figcaption>
 </figure>
 
 <table>
-<tr><th>#</th><th>What happens</th><th>What's frozen</th><th>On the wire</th><th>Why the cache survives</th></tr>
-<tr><td>1<br>Launch</td><td>Prefrontal resolves the session class (<code>head</code>, from the persona's declared class) and its row: <code>[(mc, main-full), (aft, interactive)]</code>, reduction owner, pipeline <span class="cite">[D §6.1, §7.2 step 1]</span>.</td><td>Nothing yet.</td><td>Nothing.</td><td>n/a</td></tr>
-<tr><td>2<br>Admission</td><td>Broca resolves each preset through <code>extension.describe</code> (interface <code>ck.session-extension/v1</code>) and checks: unknown preset or kind, name collision, double slot claim, required tool filtered, transform interface no longer served, part this host can't deliver, operator text without a grant; and reference closure over the final set (presets + adapter additions, then trust, then user removals) <span class="cite">[D §7.2 step 3, R7]</span>. Any failure refuses <em>before</em> <code>RunStarted</code>, by name.</td><td>The composition record and its digest (class 1 epoch e1); four delivery capabilities for this episode; each tool provider's contract revision; <code>disabled_tools</code> <span class="cite">[D §7.2, §7.5, R8]</span>.</td><td>Nothing.</td><td>n/a</td></tr>
-<tr><td>3<br>First send</td><td>System text in fixed order: persona role → module text in table order → host notes. Tools as the model-facing projection (host-audience paths stripped). Per-session values go in the untrusted carrier, never inside operator text <span class="cite">[D §6.4, §5.4, §7.3]</span>.</td><td>The request digest (<code>request_body_sha256</code>) is recorded per attempt <span class="cite">[D §7.7]</span>.</td><td>The full request.</td><td>The prefix is built only from frozen, static bytes; nothing per session is interpolated into it, so the next send renders the same prefix.</td></tr>
-<tr><td>4<br>Background notice</td><td>An AFT background command exits. AFT sends <code>provider_notice{provider: aft, notice_id: task:&lt;id&gt;:exit, …}</code> and holds it until Broca acks the fsync. Broca appends it at the next legal position (never between <code>tool_use</code> and <code>tool_result</code>), or immediately if idle. A crash re-delivers it; the same <code>notice_id</code> makes the retry idempotent <span class="cite">[D §7.4, §10]</span>.</td><td>The notice is written to the WAL at a fixed position (“written down when delivered”, §7.1).</td><td>A marked user-role block after the existing history.</td><td>It is an append after the cached prefix; nothing earlier changes.</td></tr>
-<tr><td>5<br>MC reduction</td><td>MC's transform, the exclusive reduction owner, reshapes history. The engine then checks every sent <code>operator_message</code> and <code>provider_notice</code> is byte-identical and in order, and the current turn is intact; a violation fails the step with a typed error <span class="cite">[D §7.7]</span>. Recalled memories and compartments stay in the transform's user-role rows <span class="cite">[D §7.7, §10]</span>.</td><td>The transform's own frozen replay, keyed on (session, input fingerprint, render config) <span class="cite">[D §7.7, run.rs:2050]</span>.</td><td>The transformed view.</td><td>The design doesn't change how a reduction itself affects the cache; that remains the reducer's decision. What it adds: between reductions, frozen replay makes the view render identically, and protected spans can't be edited silently.</td></tr>
-<tr><td>6<br>Upgrade activates</td><td>MC ships a release whose <code>main-full</code> text adds a paragraph. The session keeps e1 until Prefrontal activates the new composition at a run boundary (a turn start, for a head; never mid-task for a worker). That send's admission freezes e2 and writes the epoch change to the WAL <span class="cite">[D §6.5, §7.2 step 5]</span>. Dispatch keeps carrying each tool's pinned contract revision <span class="cite">[D §7.2 step 6]</span>.</td><td>Record e2 and its digest.</td><td>In this row MC is not the last module (AFT follows it), so the change is one ordered rebuild of the system text at that send. An appended persistent <code>operator_message</code> is allowed only for an addition from the text that is last in precedence, host notes included, or for a turn reminder <span class="cite">[D §6.4, §7.5]</span>.</td><td>The append goes after the prefix. A rebuild costs one declared cache bust, never a silent one.</td></tr>
-<tr><td>7<br>Resume after restart</td><td>Broca replays the frozen record and never calls <code>extension.describe</code>. Notices and operator messages come from the WAL. The transform is re-invoked, and its frozen replay should reproduce the view; Broca compares the re-rendered request digest with the recorded one <span class="cite">[D §7.1, §7.2 step 5, §7.7]</span>. A reader that finds a must-understand record it doesn't know refuses to resume the lineage, by name <span class="cite">[D §7.4]</span>.</td><td>Nothing new.</td><td>A byte-identical request.</td><td>Byte identity is the invariant (§7.1). A digest mismatch is logged and priced as a rebuild. Limit: the step that crashed may have no attempt record (no own fsync), so its resume is compared against nothing <span class="cite">[D §7.7]</span>.</td></tr>
+<tr><th style="width:16%">Hook</th><th style="width:44%">May change</th><th>Typical use</th></tr>
+<tr><td>PreUser</td><td>the user message or notice</td><td>tags, recall appended as a block, reminder wrapping</td></tr>
+<tr><td>PostAssistant</td><td>the text of existing text blocks only; never blocks, tool calls, thinking or signatures</td><td>tags, trailing-blank cleanup</td></tr>
+<tr><td>PreTool</td><td>what executes: pass, a rewritten input, or a refusal whose text becomes the tool result. The recorded assistant message keeps what the model produced.</td><td>the dropped-input guard</td></tr>
+<tr><td>PostTool</td><td>the tool result</td><td>a tag prefix, the Channel 1 reminder, a size cap</td></tr>
 </table>
 
-<div class="callout gapnote"><b>Who triggers step 6.</b> The design says “Prefrontal decides when a session activates” <span class="cite">[D §6.5]</span>. Broca's plugin-hooks doc says “activation IS the module flipping its declared epoch for a session”, with no push RPC <span class="cite">[PH, “Class-1 epoch activation”]</span>. The coverage report raises the same conflict as Q1. This page follows the design and flags it.</div>
-<div class="callout"><b>Ordinary later sends (between steps 3 and 6).</b> A send that activates nothing reuses the frozen record and makes no <code>extension.describe</code> call: “An existing session keeps its pinned record until an activation at a run boundary … Nothing activates implicitly on the next send” <span class="cite">[D §6.5]</span>; “A session keeps its frozen record until a send's admission activates a new one” <span class="cite">[D §7.2 step 5]</span>. So a module that is down doesn't block an ordinary send, because its contributions are frozen; a call to one of its tools still fails at dispatch with the usual tool error. <code>describe</code> is called only at first admission and at an activation Prefrontal chose. This matches plugin-hooks' “absent supplier proceeds on the lineage's frozen artifacts” <span class="cite">[PH]</span>.<br><b>Assumption</b> (not stated in the design): if the module is down <em>at an activation</em>, the activation doesn't happen, the session stays on its current record, and Prefrontal can retry at the next boundary.</div>
+<div class="cards">
+<div class="card"><h3>One frame</h3>
+<p>PreUser before <code>RunStarted</code> or the notice record; PostAssistant before <code>ModelStepFinished</code>; PreTool before <code>ToolDispatchIntent</code> (which records the input that will actually run, so at-most-once execution holds); PostTool before <code>ToolResult</code> <span class="cite">[§6.2]</span>.</p></div>
+<div class="card"><h3>Attribution</h3>
+<p>Broca stores the <b>original</b> and the <b>final</b> value in full, plus one entry per stage: <code>{module, note, digest of its output}</code>. The note is short and written by the module (“prefixed tag”). A UI diffs original against final itself and lists the notes; the protocol has no diff format <span class="cite">[§6.2]</span>.</p></div>
+<div class="card"><h3><code>result_integrity: append_only</code></h3>
+<p>A tool may declare it. PostTool may then prepend or append blocks but never change existing lines. AFT's <code>read</code> needs this, because a later <code>edit</code> addresses its hashline tags. Broca rejects and records a hook output that breaks the declaration <span class="cite">[§6.2]</span>.</p></div>
+<div class="card"><h3>Order, budget, failure</h3>
+<p>Several providers on one hook run in manifest order, each getting the previous one's output. Each declares a per-hook time budget, capped engine-wide. A hook that fails or times out passes the message through unchanged, and Broca records that <span class="cite">[§6.2]</span>.</p></div>
+<div class="card"><h3>PostAssistant and the display</h3>
+<p>The display lane has already streamed the original text; subscribers get the final version on the control lane. Editing text next to signed thinking is accepted by Anthropic today; a live test in the build still confirms it <span class="cite">[§6.2]</span>.</p></div>
+<div class="card"><h3>Reading history</h3>
+<p>Providers see new messages through the hooks. <code>session.read(from, to)</code> returns any range with each message's raw and final form (after a restart, for the provider's own history work, to recover originals). Providers tell wakes from nudges themselves; Broca doesn't classify turns <span class="cite">[§6.2]</span>.</p></div>
+</div>
 
 <!-- ============================================================ -->
-<h2 id="rules">4. The rules and why they exist</h2>
-<p>“Cost” is quoted where the design states it. Where it doesn't, the cost shown is <b>derived</b>, meaning read off the mechanism by this page, and marked so.</p>
+<h2 id="changes">6. Changes while a session runs</h2>
+<p>The prefix is frozen, so a changed configuration never leaks in by itself. Detection and application are separate steps <span class="cite">[§11]</span>.</p>
 
-<h3>4.1 Consistency rules R1–R9 <span class="cite">[D §6.2]</span></h3>
-<table>
-<tr><th style="width:24%">Rule</th><th style="width:42%">Failure it prevents</th><th>What it costs</th></tr>
-<tr><td><b>R1</b> Presets are named bundles of contributions, no parameters; a variant is another preset.</td><td>Callers combining flags into inconsistent bundles (principle 2: “the caller picks presets; it never combines flags”). The 2026-09-25 Broca run is the example: a <code>tool_present</code> flag patched between three parties <span class="cite">[D §2, §3]</span>.</td><td><i>Derived:</i> the preset count grows with variants (MC declares five, AFT four) <span class="cite">[D §10]</span>.</td></tr>
-<tr><td><b>R2</b> Session class is a closed vocabulary owned by Prefrontal, delivered at admission.</td><td>Modules sniffing context from env vars or agent names <span class="cite">[D §6.1]</span>. Seen in AFT's per-class description variants chosen by env-var sniffing, and in MC's plugins inferring main vs subagent <span class="cite">[D §9, §10]</span>.</td><td><i>Derived:</i> a new kind of session needs a Prefrontal vocabulary change, not a module change.</td></tr>
-<tr><td><b>R3</b> A preset declares <code>requires_tools</code> and <code>replaces_slots</code>. The class profile only removes tools. Removing a required tool refuses composition; the fix is a different preset, not harder filtering.</td><td>A preset whose behaviour depends on a tool the class took away; MC's #519 permission probing and <code>tool_present</code>. Under R3, “a class whose profile denies <code>ctx_reduce</code> gets <code>subagent-readonly</code>” <span class="cite">[D §6.2, §10]</span>.</td><td><i>Derived:</i> modules must ship a preset per restriction level, and the table author must pick them.</td></tr>
-<tr><td><b>R4</b> One composition record per session, frozen at admission, one digest over the resolved bytes; shown in the session inspector.</td><td>“What did this session get” needing more than one read; a same-version restart with different text going unnoticed (the digest covers bytes, not names and versions) <span class="cite">[D R4, §7.2 step 4]</span>.</td><td>Any byte change in any contribution is a new epoch, and so a declared change at the next activation <span class="cite">[D §7.2 step 5]</span>.</td></tr>
-<tr><td><b>R5</b> No module fetches another module's text; <code>guidance.get</code> goes away.</td><td>The 2026-09-25 incident: Prefrontal fetching MC's guidance <span class="cite">[D §2]</span>. Principle 1: nobody re-derives or second-guesses a module's contributions.</td><td><i>Derived:</i> Prefrontal can't tailor MC's text; per-class text must be MC presets.</td></tr>
-<tr><td><b>R6</b> One table serves every host; a part a host can't deliver is refused for that host by name.</td><td>A preset meaning different bundles on different hosts, and silent drops (principle 7). MC's OpenCode and Pi plugins stop inferring main vs subagent and read the preset from the record <span class="cite">[D §9]</span>.</td><td>Each host lowers the record through its own mechanisms; OpenCode has no mid-conversation operator messages, so every change folds at the next rebuild <span class="cite">[D §9]</span>.</td></tr>
-<tr><td><b>R7</b> The tool set is closed under reference. Each tool declares static <code>references</code>; checked when the declaration is read and again at admission over the final set (presets + adapter additions, then trust, then user removals). The adapter's additions are written into the record.</td><td>Observed 2026-09-26: AFT's flat catalog offered <code>bash</code>, whose reply names <code>bash_status</code>, without <code>bash_status</code>, so a Broca worker's follow-up call was refused <span class="cite">[D R7]</span>. A user removal can break closure too (disable <code>bash_status</code>, keep <code>bash</code>).</td><td>Every tool must list references; each module keeps a test that rendered replies name only declared references; a preset needing an adapter-only tool is refused on Broca <span class="cite">[D R7]</span>.</td></tr>
-<tr><td><b>R8</b> Never part of a preset: trust (applied after, as a bound), user config (remove-only, frozen at admission), host capabilities (declared by the host; a preset states requirements and admission refuses or takes the table's fallback).</td><td>A preset restoring a tool that trust removed <span class="cite">[§7.3]</span>; config changes mutating live sessions; presets probing their host. Example: AFT's <code>bash.subagent_background</code> config only made sense per session kind, so it moves into the preset <span class="cite">[D §10]</span>.</td><td>A config change “reaches new sessions only” <span class="cite">[D R8]</span>.</td></tr>
-<tr><td><b>R9</b> Presets come from the module's <code>ck.session-extension/v1</code> query, never the HELLO manifest. A session with no record (hand-run CLI) gets the module's declared default preset, recorded as such; modules should default to their most restrictive preset.</td><td>Growing the closed manifest role set (§5.1). An unrecorded caller getting primary-only behaviour <span class="cite">[D R9]</span>.</td><td><i>Derived:</i> hand-run sessions get restrictive behaviour unless given a record. AFT maps the no-record default to <code>oneshot</code> <span class="cite">[D §10]</span>.</td></tr>
-<tr><td><b>Exclusive slots</b>: context management, each replaced built-in, tool names. Double claims refused; collisions never renamed or ordered.</td><td>Load-order conflicts the survey found in every host (plugins mutating one shared object; order between hooks mattering) <span class="cite">[D §2, S §8]</span>.</td><td><i>Derived:</i> two plugins that both replace <code>bash</code> can't share a session.</td></tr>
-<tr><td><b>Core class-profile rules</b>: e.g. <code>reader</code> never gets <code>sidekick</code>, <code>athena</code>, <code>work</code>.</td><td>Observed 2026-09-25: a read-only explore worker given those tools delegated its question straight back into <code>sidekick</code> <span class="cite">[D §6.2]</span>.</td><td>Rules no module can know live in core, not in presets.</td></tr>
-<tr><td><b>§6.3</b> Operator text is a grant in the table, per module and preset, and must be static (byte-identical to the pinned bytes).</td><td>Outside review #2: a module's own declaration proves who sent the bytes, not where the text came from <span class="cite">[D §6.3]</span>.</td><td>Per-session values lose operator authority and travel in the untrusted carrier; MC's date line and counts move out of the guidance <span class="cite">[D §10]</span>.</td></tr>
-<tr><td><b>§6.4</b> Fixed order persona → modules → host notes; append only when precedence can't change (last module's addition, turn reminder).</td><td>Outside review #5: later operator text overrides earlier text, so an arbitrary append would reorder authority. “Removing a sentence from a preset really removes it” <span class="cite">[D §6.4]</span>.</td><td>A change from any module other than the last is an ordered rebuild at the next run boundary <span class="cite">[D §6.4]</span>. Host notes count as later text, since an append after them would outrank them and so “change precedence” (the rule's stated purpose). In practice, when host notes are present every module change is a rebuild and only turn-scoped reminders can be appended.</td></tr>
-<tr><td><b>§6.5</b> Upgrades activate once, at a run boundary; workers finish on the record they started with.</td><td>Outside review #4: conflicting upgrade lifetimes <span class="cite">[D table, §6.5]</span>.</td><td>A long-running worker keeps old behaviour until it finishes; modules must serve old contract revisions meanwhile (§7.7).</td></tr>
-</table>
+<div class="flow" role="img" aria-label="Change flow: a watched config changes, the provider may publish a hint, Prefrontal re-runs preflight, compares the digest, and sends Broca a new manifest with a policy; Broca applies it at the policy's moment and records manifest_applied.">
+  <div class="st"><b>Config changes</b>a file the provider watches</div>
+  <div class="ar">→</div>
+  <div class="st"><b>Hint (optional)</b><code>ck.ext.changed.&lt;module_id&gt;</code> on NATS, where a bus exists</div>
+  <div class="ar">→</div>
+  <div class="st"><b>Re-preflight</b>on the hint, and at every turn start and task start</div>
+  <div class="ar">→</div>
+  <div class="st"><b>Digest compare</b>top-level digest equal: nothing to do</div>
+  <div class="ar">→</div>
+  <div class="st"><b>New manifest + policy</b>sent to Broca, pending</div>
+  <div class="ar">→</div>
+  <div class="st hl"><b>Applied</b>at the policy's moment; <code>manifest_applied</code> written</div>
+</div>
 
-<div class="callout gapnote"><b>Host notes after module text</b> (clarification for r3). §6.4 puts host notes <em>after</em> module text, then allows an append for “an addition from the last module in the order”. Read against its own purpose (“allowed only when it can't change precedence”), the rule must mean the last text in precedence order, host notes included; this page presents it that way. §6.4 should say “last in precedence, including host notes”.</div>
-<div class="callout gapnote"><b>§7.2's refusal list is incomplete.</b> Step 3 lists seven refusals, but R7 (dangling reference, including after user removals) and R8 (unmet host capability without a fallback) also refuse at admission. Figure 1 and step 2 above include them.</div>
-
-<h3>4.2 Engine invariants <span class="cite">[D §7]</span></h3>
-<table>
-<tr><th style="width:24%">Invariant</th><th style="width:42%">Failure it prevents</th><th>What it costs</th></tr>
-<tr><td><b>§7.1</b> A resumed run renders byte-identical requests and never consults a module. Everything byte-affecting is frozen at admission or written down when delivered; the transform is the one live seam.</td><td>Resumed sessions rendering differently from what was sent (cache loss, changed behaviour). Same as plugin-hooks' two-armed drift rule: “RESUME reads artifacts from the WAL … mismatch impossible by construction” <span class="cite">[PH]</span>.</td><td>All contribution bytes live in the WAL/RunConfig.</td></tr>
-<tr><td><b>§7.2 step 6</b> Tool contract pinning: dispatch carries the pinned revision; the provider serves it or refuses by name.</td><td>“A frozen schema answered by code whose arguments changed underneath it” <span class="cite">[D §7.2]</span>.</td><td>Providers track contract revisions.</td></tr>
-<tr><td><b>§7.3</b> Operator text is static and granted; type separation proves only the path; recalled content, tool output and notices never become <code>operator_message</code>.</td><td>Outside review #2; principle 6: authority follows authorship.</td><td>Memory plugins can't put recall in the system prompt (engram does today; mapped (a) in the coverage report) <span class="cite">[C PI-8]</span>.</td></tr>
-<tr><td><b>§7.4</b> Must-understand flag. Release N (readers) refuses a lineage with an unknown flagged record; release N+1 writes <code>operator_message</code>/<code>provider_notice</code>; <code>place-release</code> refuses rollback below N. Readers must be <em>deployed and verified</em> first.</td><td>Outside review #1: under Broca v0.3.120's skip-unknown rule, a rollback would silently undo a tool removal or drop an acknowledged notice.</td><td>Two releases, the first verified running before the second ships; a rollback floor.</td></tr>
-<tr><td><b>§7.4</b> Notice identity is a per-event <code>notice_id</code>; hold until fsync ack; one size cap, refuse not truncate.</td><td>Outside review #8: one task (a watch) emits several events, so task id isn't identity. A truncated notice “reads as the whole output”.</td><td>Providers hold notices until acked; an oversized result becomes a short pointer notice. AFT moves its ack key to <code>notice_id</code> <span class="cite">[D §10]</span>.</td></tr>
-<tr><td><b>§7.5</b> Four capabilities frozen per episode (persistent text, turn text, tool change by reference, by definition); fallback chosen per contribution; resume never re-decides.</td><td>Outside review #7: provider support isn't one capability (definition changes are Claude-API-only; Bedrock and Google Cloud support reference changes; scoped messages need their own header).</td><td>Missing capability → fold into the system prompt or <code>tools</code> at that send (one rebuild).</td></tr>
-<tr><td><b>§7.5</b> Lowering folds the <em>effective</em> state: expired turn messages dropped (expiry is in the WAL), active reminders via the class 2 tail, superseded text not carried; rendering operator text as user text is refused.</td><td>Outside review #6: lowering resurrecting expired reminders; silent authority downgrade.</td><td>“One cache bust” on a model switch or unsupported family <span class="cite">[D §7.5]</span>.</td></tr>
-<tr><td><b>§7.5</b> Effective tool set = frozen tools + recorded changes; dispatch, policy and permission use it; at least one non-deferred tool stays in <code>tools</code>.</td><td>Policy checks against a tool list the model no longer sees; Anthropic's requirement.</td><td>—</td></tr>
-<tr><td><b>§7.6</b> Host-only arguments rejected before merge; provider also rejects them from undeclared callers.</td><td>Outside review #9, and how a Broca model got <code>shell: "powershell"</code> through AFT's subc surface <span class="cite">[D §7.6]</span>.</td><td>Both engine and provider implement a check.</td></tr>
-<tr><td><b>§7.7</b> Protected spans; deterministic or detected; interface pinning with <code>overlap: safe</code> blue/green; per-episode version stamp.</td><td>Outside review #3: an append-only WAL isn't an immutable transcript once a transform runs. OpenCode #43507 is the landscape's version <span class="cite">[S §8]</span>.</td><td>A module that changes its transform contract serves both versions until old sessions finish. Storing every step's view was rejected on cost; the crashed step may go unchecked <span class="cite">[D §7.7]</span>.</td></tr>
-<tr><td><b>§7.8</b> Class 1 changes only at run boundaries; no module code on the step path; notices are the one mid-run arrival, as data.</td><td>plugin-hooks: “Community code never touches the fsync barrier path” <span class="cite">[PH]</span>.</td><td>Computed per-call interception and decoration are excluded (coverage G5) <span class="cite">[C §5]</span>.</td></tr>
-</table>
-
-<div class="callout gapnote"><b>Turn reminders: three statements that don't compose.</b>
+<h3>6.1 Detection</h3>
 <ul>
-<li>§10 says MC's “nudges become turn-scoped reminders”, which §7.5 delivers as an operator-authority <code>operator_message</code>.</li>
-<li>§6.3 says operator text must be static, but MC's nudges carry per-session numbers (hygiene percentage, counts).</li>
-<li>§7.8 says in-run nudges are “class 2 data the engine applies”, but what decides an MC nudge is runtime pressure state that only the transform holds.</li>
+  <li><b>Watch set.</b> Providers watch the global configuration plus the configuration of every root that has a live route now (the daemon answers <code>supervisor.live_roots</code>). A missing file is watched through its nearest existing parent. Roots that were only preflighted aren't watched; turn-start re-preflight covers them <span class="cite">[§11.1]</span>.</li>
+  <li><b>The hint.</b> The provider publishes <code>{scope, generation, boot_id}</code>, with no content. The module id comes from the bus credential, never the payload, so one provider can't send hints in another's name. <code>scope</code> is the entorhinal project id, never a path.</li>
+  <li><b>Correctness never depends on the bus.</b> A public install may have none; Prefrontal re-preflights at every turn start and task start anyway, so a missed hint only delays detection.</li>
 </ul>
-What exists today: MC's transform, the one live seam (§7.1), runs on every provider request, decides the nudges, and emits them as frozen units in the user-role tail, minted only on a pass that is already busting and replayed byte-identically afterwards <span class="cite">[design authors, task Q&amp;A]</span>. The decision is in <a href="#questions">§7</a>, row 14. Separately, §7.5's “re-sent verbatim after it clears” is undefined; the MC author doesn't know what it means either, so it is an open question for BROCA, who wrote §7.5.</div>
-<div class="callout gapnote"><b>“Tool added that was declared up front → tool change by reference.”</b> §7.5 delivers such a tool by reference, which implies tools declared but not loaded. §12 says deferred tools (<code>defer_loading</code>) are not in v1. It's unclear whether reference delivery is v1 behaviour (and for which tools) or a v2 row.</div>
+
+<h3>6.2 The four policies</h3>
+<p>If the top-level digest differs, Prefrontal sends Broca the new manifest with one policy. The choice is Prefrontal's, per class: masons and readers default to <code>next_prefix_rebuild</code> (short-lived, never worth a bust); heads default to <code>next_soft_bust</code>, with the pending change shown on the board and phone <span class="cite">[§11.2]</span>.</p>
+<table>
+<tr><th style="width:26%">Policy</th><th>Applied when</th></tr>
+<tr><td><code>immediately</code></td><td>the next step, including a tool step; the prefix is rebuilt</td></tr>
+<tr><td><code>next_soft_bust</code></td><td>the next CompactionMessage labelled <code>soft</code> or <code>hard</code></td></tr>
+<tr><td><code>next_hard_bust</code></td><td>the next CompactionMessage labelled <code>hard</code></td></tr>
+<tr><td><code>next_prefix_rebuild</code></td><td>the next step whose prefix is dead anyway (an expired cache, a model switch)</td></tr>
+</table>
+<ul>
+  <li><b>What changed</b> Broca works out from the per-item digests. It appends where the model family allows and rebuilds otherwise. An appended system message goes only right after a user turn (tool results count) and before an assistant turn, never between a tool call and its result, and it carries only operator text, never recall or tool output.</li>
+  <li><b>Recorded</b> as <code>manifest_applied{digest, policy, step}</code>. On resume, the drift guard compares against the latest applied manifest, not the one the session started with.</li>
+  <li><b>A change that never finds its moment</b> stays pending. Prefrontal can show it and flush.</li>
+  <li><b>Disabled tools</b> take effect at once: until the change is applied, the provider refuses calls to a tool the user just disabled, with a clear reason. The policy only decides when the model stops seeing it <span class="cite">[§11.4]</span>.</li>
+</ul>
+
+<h3>6.3 Flush and Apply Now</h3>
+<p><code>session.flush_prefix</code> drops the frozen prefix and applies any pending manifest on the next step, whatever the policy. Apply Now is a Prefrontal op that calls it; Desktop and phone go through Prefrontal and never talk to Broca directly <span class="cite">[§11.3]</span>.</p>
+<div>
+  <div class="mock"><div class="bar"><span class="ill">illustrative</span> Desktop · session header</div>
+    <div class="step">1 · a change is pending</div>
+    <span class="chip warn">Toolset changed, applies on next bust</span><br>
+    <span class="btn">Apply Now</span></div>
+  <div class="mock"><div class="bar"><span class="ill">illustrative</span> Desktop · confirm</div>
+    <div class="step">2 · warning</div>
+    The prompt cache will be rebuilt on the next step.<br>
+    <span class="btn">Cancel</span><span class="btn pri">Continue</span></div>
+  <div class="mock"><div class="bar"><span class="ill">illustrative</span> behind the button</div>
+    <div class="step">3 · what happens</div>
+    Prefrontal calls <code>session.flush_prefix</code>; Broca applies the pending manifest on the next step and writes <code>manifest_applied</code>.</div>
+</div>
 
 <!-- ============================================================ -->
-<h2 id="examples">5. Worked examples</h2>
-<p>The design specifies fields, not a wire schema, so every JSON block below uses <span class="ill">illustrative syntax</span>. The <em>contents</em> (names, tools, fields, values) come from the cited sources.</p>
-
-<h3>5.1 Magic Context <span class="cite">[D §10]</span></h3>
-<table>
-<tr><th>Preset</th><th>Tools</th><th>System text</th><th>Transform mode</th></tr>
-<tr><td><code>main-full</code> / <code>main-light</code></td><td><code>ctx_reduce</code>, <code>ctx_expand</code>, <code>ctx_search</code>, <code>ctx_memory</code>, <code>ctx_note</code></td><td>desk guidance (full / light)</td><td>main: history, m[0]/m[1], nudges</td></tr>
-<tr><td><code>subagent-full</code> / <code>subagent-light</code></td><td><code>ctx_reduce</code>, <code>ctx_expand</code>, <code>ctx_search</code></td><td>subagent desk guidance</td><td>subagent: tags and drops, no history</td></tr>
-<tr><td><code>subagent-readonly</code></td><td><code>ctx_expand</code>, <code>ctx_search</code></td><td>read-only guidance</td><td>no tagging, no reduce nudges</td></tr>
-</table>
-<pre><code><span class="ill">illustrative syntax</span>
-{ "interface": "ck.session-extension/v1",
-  "default_preset": "subagent-readonly",      // illustrative: R9 asks for the most restrictive; the design doesn't name MC's
-  "presets": [
-    { "name": "main-full",
-      "tools": ["ctx_reduce","ctx_expand","ctx_search","ctx_memory","ctx_note"],
-      "system_text": "&lt;desk guidance, full: static bytes, no date line or counts&gt;",
-      "reminders": "&lt;nudge texts, turn-scoped&gt;",
-      "requires_tools": ["ctx_reduce","ctx_expand","ctx_search"],   // illustrative choice
-      "replaces_slots": [],
-      "transform": { "role": "reduction_owner", "mode": "main", "interface": "&lt;pinned version&gt;" },
-      "notices": "channel-2 wakes as provider_notice" },
-    { "name": "subagent-readonly",
-      "tools": ["ctx_expand","ctx_search"],
-      "system_text": "&lt;read-only guidance&gt;",
-      "transform": { "role": "reduction_owner", "mode": "subagent-readonly" } }
-    // main-light, subagent-full, subagent-light alike
-  ] }</code></pre>
-<ul>
-<li>Per-session values (the date line, counts) move to the untrusted carrier or the transform's rows; memories and history stay in the transform's user-role rows <span class="cite">[D §10]</span>.</li>
-<li>“Nudges become turn-scoped reminders where the family supports them” <span class="cite">[D §10]</span> conflicts with §6.3 and §7.8 (see the box in <a href="#rules">§4.2</a>). Today the transform emits them as user-role tail content; whether that stays is open (<a href="#questions">§7</a> row 14).</li>
-<li><code>tool_present</code>, Prefrontal's <code>guidance.get</code> and #519 permission probing disappear: a class whose profile denies <code>ctx_reduce</code> gets <code>subagent-readonly</code> <span class="cite">[D §10]</span>.</li>
-<li>The transform must preserve sent <code>operator_message</code> and <code>provider_notice</code> spans. It already preserves signed thinking and replays frozen decisions, so this adds record kinds to what it protects <span class="cite">[D §10]</span>.</li>
-<li>Stage 5 keys MC's transform on the preset and deletes <code>tool_present</code> <span class="cite">[D §13]</span>.</li>
-</ul>
-
-<h3>5.2 AFT <span class="cite">[D §10]</span></h3>
-<table>
-<tr><th>Preset</th><th>Classes (as the table would pick)</th><th>What differs</th></tr>
-<tr><td><code>interactive</code></td><td><code>head</code></td><td>30 s default watch, PTY and background allowed, interactive approval, eager startup, “end your turn, the reminder wakes you” wording</td></tr>
-<tr><td><code>delegated</code></td><td><code>worker</code>, <code>reader</code>, <code>panel</code>, <code>aggregator</code></td><td>watch defaults to the cap, worker steer text, no PTY, approval by host policy</td></tr>
-<tr><td><code>auxiliary</code></td><td>named directly for short-lived helpers (MC's Pi historian)</td><td><code>delegated</code> plus lazy startup: no warmup, ONNX Runtime or language-server installs</td></tr>
-<tr><td><code>oneshot</code></td><td><code>oneshot</code>, and the no-record default (R9)</td><td>forced foreground, no PTY or background wording</td></tr>
-</table>
-<pre><code><span class="ill">illustrative syntax</span>
-{ "name": "delegated",
-  "role": "…",
-  "tools": ["bash","bash_status","bash_kill","bash_write", "read","edit","write","grep","glob","apply_patch", "…"],
-  "bash":  { "background": true, "pty": false, "promote_note": "…" },   // background value illustrative
-  "watch": { "default_timeout": "cap" },
-  "descriptions": "delegated",          // variant key
-  "workflow_hints": "…", "approval": "host-policy",
-  "startup": "eager", "completion_delivery": "provider_notice",        // values illustrative
-  "replaces_slots": ["read","edit","write","bash","grep","glob","apply_patch"],  // assumed on all four presets
-  "references": { "bash": ["bash_status","bash_kill","bash_write"] } }  // R7
-
-bash.parameters.shell = { "type": "string", "x-ck-audience": "host" }</code></pre>
-<ul>
-<li>Every preset containing <code>bash</code> also contains <code>bash_status</code>, <code>bash_kill</code>, <code>bash_write</code> (R7). The flat catalog Broca sees today has no preset and goes away.</li>
-<li>Outside presets (R8): anything keyed on bind trust; host capabilities (PowerShell present, a UI able to confirm, TUI vs desktop); user config (<code>disabled_tools</code>, <code>bash.*</code> limits, <code>github.*</code>, <code>sandbox</code>, <code>lsp.*</code>). <code>bash.subagent_background</code> moves into the preset's <code>bash.background</code>.</li>
-<li>Background completions: <code>provider_notice</code> with <code>notice_id</code> <code>task:&lt;task_id&gt;:exit</code> or <code>task:&lt;task_id&gt;:match:&lt;byte offset&gt;</code>; offsets are exact and monotonic per task, so a re-delivery repeats the id and a new match gets a new one.</li>
-<li>AFT rejects host-audience arguments on a route whose caller hasn't declared that it supplies them (§7.6).</li>
-</ul>
-<div class="callout gapnote"><b>Which AFT presets are “edit presets”?</b> §10 says “Edit presets declare <code>replaces_slots: [read, edit, write, bash, grep, glob, apply_patch]</code>”, but AFT's table has four presets by session kind and no edit axis. The line is left over from an earlier example (<code>mason-tools</code> / <code>reader-tools</code>) that the four session-kind presets replaced <span class="cite">[design authors, task Q&amp;A]</span>.<br><b>Assumption</b> used here: all four presets declare those slots, because AFT replaces the host's file and shell tools in every session kind today; <code>reader</code> loses edit and write through the class profile filter (R3), not an edit-axis preset, which is why AFT's inventory maps <code>reader</code> onto <code>delegated</code>.<br>Open for AFT: (1) does a slot stay “replaced” when the profile removes the replacing tool (does the host's <code>edit</code> stay hidden for <code>reader</code>)? (2) does AFT want separate read-only presets instead of profile filtering?</div>
-<div class="callout gapnote"><b>The “Classes” column.</b> §6.1 says “modules never map themselves to classes … the table picks”. AFT's table lists classes per preset, and R9 asks modules to declare “their most restrictive class” as the default. This page reads the column as the table rows the AFT team expects, and R9's “class” as “preset”.</div>
-
-<h3>5.3 Third-party, Covered: <code>@ff-labs/pi-fff</code> <span class="cite">[C PI-6]</span></h3>
-<p>Native fuzzy file and content search tools that can replace Pi's <code>grep</code>/<code>find</code>. Verdict: <span class="v-ok">Covered</span> (G1 for the in-session switch only).</p>
-<pre><code><span class="ill">illustrative declaration</span>, a running module (native Rust core, frecency database)
-{ "interface": "ck.session-extension/v1",
-  "default_preset": "tools-only",
-  "presets": [
-    { "name": "tools-only",                 // fff tools alongside the built-ins
-      "tools": ["fff_grep","fff_find"],      // tool names illustrative
-      "replaces_slots": [] },
-    { "name": "override",                   // replaces the host's grep and find
-      "tools": ["grep","find"],
-      "replaces_slots": ["grep","glob"] } ] }
-
-<span class="ill">illustrative</span> per-project table override:  worker → [..., fff:override]</code></pre>
-<table>
-<tr><th>Capability</th><th>CK mechanism</th><th>Status</th></tr>
-<tr><td>fff tools alongside built-ins</td><td>a preset with tools</td><td class="v-ok">Covered</td></tr>
-<tr><td><code>override</code> mode replacing <code>grep</code>/<code>find</code></td><td><code>replaces_slots: [grep, glob/find]</code> (§6.2 exclusive slots)</td><td class="v-ok">Covered</td></tr>
-<tr><td>Mode chosen per project</td><td>composition-table override per project (§6.1)</td><td class="v-ok">Covered</td></tr>
-<tr><td><code>/fff-mode</code> switch mid-session</td><td>none (G1)</td><td class="v-gap">Gap (b), minor</td></tr>
-<tr><td><code>@</code>-mention autocomplete, status, flags</td><td>out of scope</td><td>(c)</td></tr>
-</table>
-<p class="sub">No system text, so no operator-text grant is needed. As a third-party module it runs in the restricted tier by default <span class="cite">[D §8]</span>.</p>
-
-<h3>5.4 Third-party, Covered with work: <code>opencode-mem</code> <span class="cite">[C OC-10]</span></h3>
-<p>Local vector memory with automatic recall and capture, plus a web UI. Verdict: <span class="v-work">Covered with work</span> (G2). “Recall is the plugin's core, so G2 decides whether it's writable.”</p>
-<pre><code><span class="ill">illustrative declaration</span>
-{ "interface": "ck.session-extension/v1",
-  "default_preset": "memory",
-  "presets": [
-    { "name": "memory",
-      "tools": ["memory"],        // modes: add, search, profile, list, forget, export, import
-      "replaces_slots": [],
-      // --- not expressible in r2 ---
-      // "context": per-run recall at user authority, persisted      → needs G2
-      // "observe": session.idle / compaction with message content   → needs Q5
-      // "route":   the session's resolved model for its own calls   → needs Q6
-    } ] }</code></pre>
-<table>
-<tr><th>Capability</th><th>CK mechanism</th><th>Status</th></tr>
-<tr><td><code>memory</code> tool</td><td>preset tool</td><td class="v-ok">Covered</td></tr>
-<tr><td>Automatic recall into the user turn every prompt</td><td>class 2 request decoration, with open authority and persistence (G2)</td><td class="v-work">Covered with work</td></tr>
-<tr><td>Automatic capture on idle and compaction</td><td>class 5 observe; needs message content in the stream (Q5)</td><td class="v-work">Covered with work</td></tr>
-<tr><td>Using the session's model for its own LLM calls</td><td>route context, which the CK design doesn't expose to modules (Q6)</td><td class="v-work">Covered with work</td></tr>
-<tr><td>Web UI</td><td>out of scope</td><td>(c)</td></tr>
-</table>
-<p><b>What's missing.</b> Today the plugin prepends a synthetic text part to the user message, so recall is persisted <span class="cite">[C OC-10]</span>. The design's only per-run code seam with request bytes is class 2 tail decoration, which §7.5 calls “never persisted” and §8 gives no authority row. So recall would vanish from history after one run and cost cache on every later request <span class="cite">[C OC-4, G2]</span>. The report's smallest addition (G2): a per-run <em>context contribution</em> returned at admission, written once into the WAL as a user-role block (the <code>provider_notice</code> shape, right after the user turn), untrusted authority, plus a §8 row.</p>
-
-<!-- ============================================================ -->
-<h2 id="coverage">6. What it doesn't cover</h2>
-<p>The coverage report tested r2 against the 20 most-adopted OpenCode and Pi plugins (ranked by √(weekly downloads × stars); read 2026-09-26). A verdict is for the plugin's <em>model-facing core</em>; commands and UI are (c) and don't set it alone <span class="cite">[C §1–§2]</span>.</p>
-
-<h3>6.1 Summary table <span class="cite">[C §4]</span></h3>
-<table>
-<tr><th>Host</th><th>#</th><th>Plugin</th><th>Verdict</th><th>Gaps</th></tr>
-<tr><td>OC</td><td>1</td><td>ponytail</td><td class="v-work">Covered with work</td><td>G1, G9; commands (c)</td></tr>
-<tr><td>OC</td><td>2</td><td>oh-my-openagent</td><td class="v-gap">Gap</td><td>G1, G4, G5 (a), G6, G7*, G8; routing (c)</td></tr>
-<tr><td>OC</td><td>3</td><td>oh-my-opencode-slim</td><td class="v-gap">Gap</td><td>G1, G4, G5 (a), G7*, G8; routing (c)</td></tr>
-<tr><td>OC</td><td>4</td><td>@openviking/opencode-plugin</td><td class="v-work">Covered with work</td><td>G2, Q4, Q5</td></tr>
-<tr><td>OC</td><td>5</td><td>@tarquinen/opencode-dcp</td><td class="v-work">Covered with work</td><td>Q3, G10, §12 ask-user; commands (c)</td></tr>
-<tr><td>OC</td><td>6</td><td>opencode-models-discovery</td><td class="v-gap">Gap (c)</td><td>providers</td></tr>
-<tr><td>OC</td><td>7</td><td>@plannotator/opencode</td><td class="v-gap">Gap</td><td>G1; §12 ask-user; host-text rewrite (a)</td></tr>
-<tr><td>OC</td><td>8</td><td>opencode-antigravity-auth</td><td class="v-gap">Gap (c)</td><td>auth and transport; Q7</td></tr>
-<tr><td>OC</td><td>9</td><td>opencode-gemini-auth</td><td class="v-gap">Gap (c)</td><td>auth</td></tr>
-<tr><td>OC</td><td>10</td><td>opencode-mem</td><td class="v-work">Covered with work</td><td>G2, Q5, Q6; web UI (c)</td></tr>
-<tr><td>Pi</td><td>1</td><td>pi-subagents</td><td class="v-work">Covered with work</td><td>G4, §12 deferred tools</td></tr>
-<tr><td>Pi</td><td>2</td><td>context-mode</td><td class="v-work">Covered with work</td><td>G2, G6, Q4, Q5</td></tr>
-<tr><td>Pi</td><td>3</td><td>pi-mcp-adapter</td><td class="v-work">Covered with work</td><td>§12 ask-user, §12 deferred tools; OAuth and UI (c)</td></tr>
-<tr><td>Pi</td><td>4</td><td>@plannotator/pi-extension</td><td class="v-gap">Gap</td><td>G1, G4; §12 ask-user</td></tr>
-<tr><td>Pi</td><td>5</td><td>pi-web-access</td><td class="v-work">Covered with work</td><td>G4; curator UI (c)</td></tr>
-<tr><td>Pi</td><td>6</td><td>@ff-labs/pi-fff</td><td class="v-ok">Covered</td><td>G1 (minor); autocomplete (c)</td></tr>
-<tr><td>Pi</td><td>7</td><td>rpiv-ask-user-question</td><td class="v-work">Covered with work</td><td>§12 ask-user</td></tr>
-<tr><td>Pi</td><td>8</td><td>gentle-engram</td><td class="v-work">Covered with work</td><td>G6, Q5; system-prompt recall (a)</td></tr>
-<tr><td>Pi</td><td>9</td><td>rpiv-todo</td><td class="v-ok">Covered</td><td>Q8; UI (c)</td></tr>
-<tr><td>Pi</td><td>10</td><td>billion-context</td><td class="v-work">Covered with work</td><td>Q3; fetch interposer (a)</td></tr>
-</table>
-<p><b>Counts:</b> Covered 2, Covered with work 11, Gap 7. Of the 7 Gaps, 3 are (c) (auth and providers) and 4 are (b): G1 in all four, G4 in three, G7 and G8 in two <span class="cite">[C §4]</span>. 18 of the 20 use commands, UI, flags, toasts or shortcuts.</p>
-<p class="sub">* G7 is reclassified by owner ruling (below). The report's verdicts for oh-my-openagent and oh-my-opencode-slim stay <b>Gap</b> without it: both also carry G1, G4 and G8 <span class="cite">[C §4]</span>.</p>
-
-<h3>6.2 Gaps by kind</h3>
-<p>Tags from the report: <b>(a)</b> deliberate exclusion the design justifies; <b>(b)</b> omission to add; <b>(c)</b> out of scope for a session-extension design <span class="cite">[C §2]</span>.</p>
-
-<h4>(a) Deliberate exclusions</h4>
-<table>
-<tr><th>Gap</th><th>What</th><th>Why excluded / sanctioned alternative</th></tr>
-<tr><td>G5</td><td>Computed per-call interception and decoration: path-exists checks, loop detection, running a binary after an edit, injecting files keyed on the path just read (omo, slim).</td><td>Needs code on the step path, which §7.8 and plugin-hooks rule out (“No arbitrary computed class-3 rewrites in v1”; WASM deferred). Workaround the report asks §6.2 to state: own the tool slot (<code>replaces_slots</code>) and do the work inside the tool <span class="cite">[C §5]</span>.</td></tr>
-<tr><td>—</td><td>Rewriting another party's text: plannotator rewriting the host's plan-mode reminder; omo and plannotator overriding built-in tool descriptions.</td><td>Principle 1, R5, protected spans. Sanctioned path: <code>replaces_slots</code> for <code>plan_exit</code>/<code>todowrite</code> <span class="cite">[C OC-2, OC-7]</span>.</td></tr>
-<tr><td>—</td><td>Recalled content appended to the system prompt (engram).</td><td>Recalled content is never operator authority (§7.3, §8); it moves to a user-role carrier <span class="cite">[C PI-8]</span>.</td></tr>
-<tr><td>—</td><td>Transport interposers rewriting wire bytes (billion-context's patched <code>fetch</code>); user's Claude Code shell hooks per tool call (omo).</td><td>Rewrites bytes after the composition digest and span checks; arbitrary class 3/4 code <span class="cite">[C OC-2, PI-10]</span>.</td></tr>
-<tr><td>—</td><td>History rewriting by a non-owner (guidance plugins).</td><td>One reduction owner per session (§6.6) <span class="cite">[C OC-2]</span>.</td></tr>
-</table>
-
-<h4>(b) Omissions, with the report's smallest addition</h4>
-<table>
-<tr><th>Gap</th><th>Who needs it</th><th>Smallest addition <span class="cite">[C §5]</span></th></tr>
-<tr><td><b>G1</b> Switching preset mid-session on request</td><td>ponytail, plannotator ×2, fff, omo, slim (6 of 20)</td><td>Let a table row name, per module, alternate presets allowed for the class. Add a “switch to preset X” request a user command or the module (in a tool reply) can raise; Prefrontal validates it against the row; it activates at the next run boundary through §6.5/§7.5. Keeps R1 and R3; no new delivery path.</td></tr>
-<tr><td><b>G2</b> Per-run context at user authority</td><td>OpenViking, opencode-mem, context-mode, engram</td><td>A per-run context contribution returned at admission, written once into the WAL as a user-role block (the <code>provider_notice</code> shape, right after the user turn), untrusted authority; add the §8 row.</td></tr>
-<tr><td><b>G4</b> Starting a run and continuing</td><td>omo, slim, plannotator Pi, pi-web-access, pi-subagents</td><td>A <code>wake</code> field on <code>provider_notice</code>, whose effect is a class-profile decision in Prefrontal (e.g. heads may be woken, workers only between tasks), recorded in the WAL. A stop hook returning “continue” is the same thing with another trigger.</td></tr>
-<tr><td><b>G6</b> Contributing to or after a reduction you don't own</td><td>omo, context-mode, engram, OpenViking</td><td>Add the reduction boundary to the class 5 observe stream, and state that a <code>provider_notice</code> sent in response is placed after the boundary.</td></tr>
-<tr><td><b>G8</b> Rewriting the current user turn (low)</td><td>slim (image stripping), omo (keywords)</td><td>A write-time input stage (like class 4, decorate once and persist) applied to the user turn before it's first written.</td></tr>
-<tr><td><b>G9</b> Skills</td><td>ponytail, omo, superpowers</td><td>Let a declarative file carry named text resources, served through one host read path, with the catalog as ordinary static system text.</td></tr>
-<tr><td><b>G10</b> Assistant-output cleanup before persistence (low)</td><td>DCP</td><td>The same write-time class, applied to assistant text.</td></tr>
-</table>
-
-<h4>(c) Out of scope</h4>
-<ul>
-<li><b>Providers, models and auth</b>: opencode-models-discovery, antigravity-auth, gemini-auth are only this; omo, slim, opencode-mem also touch model parameters (Q6) <span class="cite">[C §5, D §11]</span>.</li>
-<li><b>Commands and UI</b>: 18 of 20. Defensible for v1; the data suggests commands matter mainly as <em>triggers</em> (switch mode, decompress, submit), which G1 and G4 would cover without a UI contribution kind <span class="cite">[C §5]</span>.</li>
-<li><b>G7, modules or extensions shipping personas or agents</b> (omo and slim agent rosters). The report tags this (b), proposing that a declarative file carry a persona <span class="cite">[C §5]</span>.</li>
-</ul>
-<div class="callout ruling">G7 is <b>not a gap</b>. Personas are the caller's job: in CortexKit that's Prefrontal's persona catalog, never a module or a declarative extension. It is out of scope for the extension design. The report's proposed addition (a persona in a declarative file) is therefore not taken <span class="cite">[OR]</span>.</div>
-
-<h4>Also open in §12, heavily used</h4>
-<ul>
-<li><b>Asking the user</b>: needed by 5 of 20 (rpiv-ask-user-question, plannotator ×2, pi-mcp-adapter, DCP), plus slim's <code>wait-for-user</code>. “The most-used capability the design leaves open.”</li>
-<li><b>Deferred tools</b>: pi-subagents and pi-mcp-adapter reveal tools at runtime.</li>
-</ul>
-
-<h3>6.3 The report's top three recommendations for r3 <span class="cite">[C §6]</span></h3>
+<h2 id="waitrefuse">7. WAIT and REFUSE: what the user sees</h2>
+<div class="cards">
+<div class="card"><h3>WAIT</h3>
 <ol>
-<li><b>Add G1</b>, a preset switch on request, activated at the next run boundary. The most common Gap (6 of 20); fits existing machinery (table alternates, §6.5 activation, §7.5 delivery). Resolve Q1 at the same time.</li>
-<li><b>Settle §12 “Asking the user” and G4</b> (start a run and continue) as host services with WAL records. Ask-user in 5 plugins, wake or continue in 5.</li>
-<li><b>Specify G2</b> (per-run user-authority context) <b>and Q4</b> (the class 3 rule vocabulary). Memory plugins are the largest category in both lists; without G2 they misuse operator text (engram) or vanish from history after one run. Q4 decides whether guard plugins are declarative data or excluded code.</li>
-</ol>
+  <li>Broca holds the step, sends nothing to the model, and records the <code>compaction_wait</code> state.</li>
+  <li>It asks again on <code>compaction.ready(session)</code> from the provider (the normal path: Magic Context's historian finishes, or a classic summary returns) or when <code>bound_ms</code> runs out.</li>
+  <li>The provider may answer WAIT again, but an engine-wide cap limits the total wait per step.</li>
+  <li>At the cap, Broca decides from its own numbers: if the request is estimated to fit the resolved window with the last recorded compaction, it sends; if not, the step ends as a refusal with code <code>compaction_wait_exceeded</code>. It never sends a request it knows will overflow.</li>
+  <li>A WAIT cut by a daemon stop is sealed Interrupted like any run and continues only when the caller resends.</li>
+</ol><p class="cite">[§5.4]</p></div>
+<div class="card"><h3>REFUSE</h3>
+<ol>
+  <li>Broca doesn't send. It ends the run with <code>CompactionRefused{provider, code, reason}</code>, written to the WAL. Nothing is added to the model's history.</li>
+  <li>Prefrontal gets it as the run's terminal result, like any other. <code>reason</code> is user-facing text and Prefrontal shows it.</li>
+  <li>Retryability maps onto the existing transient or permanent classes. Transient: retrying automatically makes sense (the historian was only busy). Permanent: the user has to act (switch to a larger model, fix the configuration).</li>
+  <li>The session stays usable; the next send asks the provider again. A refusal on a tool step keeps the tool results already written.</li>
+</ol><p class="cite">[§5.5]</p></div>
+</div>
+<div>
+  <div class="mock"><div class="bar"><span class="ill">illustrative</span> while WAIT holds the step</div>
+    <span class="chip">⏳ waiting on compaction: &lt;reason&gt;</span><br>
+    <span class="sub" style="font-size:13px">New messages you send are queued.</span><br>
+    <span class="btn">Cancel step</span></div>
+  <div class="mock"><div class="bar"><span class="ill">illustrative</span> after REFUSE, transient</div>
+    <span class="chip err">Run stopped by Magic Context</span><br>
+    &lt;reason text from the provider&gt;<br>
+    <span class="sub" style="font-size:13px">Prefrontal may retry automatically.</span><br></div>
+  <div class="mock"><div class="bar"><span class="ill">illustrative</span> after REFUSE, permanent</div>
+    <span class="chip err">Run stopped by Magic Context</span><br>
+    &lt;reason text, e.g. switch to a larger model&gt;<br>
+    <span class="sub" style="font-size:13px">The session stays usable once you act.</span></div>
+</div>
+<p class="sub">The status text “waiting on compaction: &lt;reason&gt;” is Broca's session status; Prefrontal decides how to show it. Showing the refusal doesn't depend on the separate user-notice channel, which is still open <span class="cite">[§5.4, §5.5, §16.2]</span>.</p>
 
 <!-- ============================================================ -->
-<h2 id="questions">7. Open questions, as decisions</h2>
-<p>The design's §12 and the report's Q1–Q10, deduplicated. G1, G2 and G4 are decisions too; they're in <a href="#coverage">§6.2</a>.</p>
-<table>
-<tr><th>#</th><th>Decision</th><th>Source</th></tr>
-<tr><td>1</td><td><b>Ask-user host call.</b> Put a first-class “ask the user for permission / an answer” surface into the v1 contract, or leave it for later? (AFT reaches it through service discovery on OpenCode 2 today; 5 of 20 plugins need it; rpiv needs a question schema the host renders.)</td><td>D §12; C §5, PI-7</td></tr>
-<tr><td>2</td><td><b>Commands and UI.</b> Make commands and UI (status lines, footers, dialogs) a v2 contribution kind, or cover their trigger role through G1/G4 and keep UI out?</td><td>D §11, §12; C §5</td></tr>
-<tr><td>3</td><td><b>Deferred tools.</b> Keep <code>defer_loading</code> out of v1 (only keeping one non-deferred tool), or add §7.5's “reveal a deferred tool” row now?</td><td>D §12; C PI-1, PI-3</td></tr>
-<tr><td>4</td><td><b>Who activates (Q1).</b> Prefrontal decides activation (§6.5), or the module flips its declared epoch (plugin-hooks)? And can a module change its contribution for one session, or only for all sessions through a new <code>extension.describe</code> reply?</td><td>C Q1</td></tr>
-<tr><td>5</td><td><b>Table order vs append (Q2).</b> Order the table so modules whose text changes most sit last (cheap appends), or accept an ordered rebuild for every change from any other module?</td><td>C Q2</td></tr>
-<tr><td>6</td><td><b>Third-party reducers (Q3).</b> Allow a third-party module as reduction owner, and specify the transform interface (request/response shape, replay key) it must serve? Blocks DCP and billion-context.</td><td>C Q3</td></tr>
-<tr><td>7</td><td><b>Class 3 vocabulary (Q4).</b> Specify argument regex, cwd-relative path globs, deny with a custom reason, rewrite templates; and let a rule set belong to a preset so it switches with G1?</td><td>C Q4</td></tr>
-<tr><td>8</td><td><b>Observe stream (Q5).</b> Carry message content (prompt text, tool args and results) and reduction/compaction events in class 5, and expose it to restricted-tier third parties?</td><td>C Q5</td></tr>
-<tr><td>9</td><td><b>Generation parameters and route context (Q6).</b> May a preset declare reasoning effort or temperature, or are those persona/route only? May a module read the resolved model at admission?</td><td>C Q6</td></tr>
-<tr><td>10</td><td><b>Provider modules and system text (Q7).</b> Put wire-level system text rewrites by provider modules inside the record digest and §8 trust rules, or declare them explicitly outside (one line in §11)?</td><td>C Q7, OC-8</td></tr>
-<tr><td>11</td><td><b>Fork and branch (Q8).</b> What does a module receive when a session forks or a lineage branches, so it can keep per-branch state?</td><td>C Q8</td></tr>
-<tr><td>12</td><td><b>Reactive notices (Q9).</b> Does §7.8 forbid a module computing a <code>provider_notice</code> in reaction to an observed tool result (a reminder after the third identical read)?</td><td>C Q9</td></tr>
-<tr><td>13</td><td><b>References to built-ins (Q10).</b> Do R7 references cover host built-ins named in guidance, and does a reference into a replaced slot resolve to the replacement?</td><td>C Q10</td></tr>
-<tr><td>14</td><td><b>MC's in-run nudges.</b> (a) They stay transform-emitted, user-role content, and §10's “turn-scoped reminders” line is corrected. Recommended by MC, a design author: the transform is the only seam that sees pressure, it's already cache-safe, and it needs no operator grant for interpolated numbers. (b) They become operator-authority reminders; the design must then say who triggers them and how the numbers get out of operator text.</td><td>D §6.3, §7.8, §10; task Q&amp;A</td></tr>
-<tr><td>15</td><td><b>Turn-reminder lifetime (for BROCA).</b> Define §7.5's “re-sent verbatim after it clears”.</td><td>D §7.5</td></tr>
-<tr><td>16</td><td><b>Replaced slots under a profile filter (for AFT).</b> Does a slot stay replaced when the class profile removes the replacing tool? Does AFT want separate read-only presets instead?</td><td>D §10; task Q&amp;A</td></tr>
-<tr><td>17</td><td><b>Activation with the module down.</b> Confirm: the activation doesn't happen, the session keeps its record, and Prefrontal retries at the next boundary.</td><td>D §6.5, §7.2</td></tr>
-</table>
+<h2 id="resume">8. Resume: replay only</h2>
+<div class="flow" role="img" aria-label="Resume: read the frozen manifest and the WAL, replay every record, send a byte-identical request, with no provider calls.">
+  <div class="st"><b>Frozen manifest</b>plus every <code>manifest_applied</code></div>
+  <div class="ar">+</div>
+  <div class="st"><b>The WAL</b>every CompactionMessage, every hook output, any pending WAIT</div>
+  <div class="ar">→</div>
+  <div class="st hl"><b>Replay</b>no provider is called to produce anything again</div>
+</div>
+<ul>
+  <li>Resume replays the frozen manifest and the WAL; nothing is re-derived from a module <span class="cite">[§8]</span>.</li>
+  <li>The drift guard compares against the latest applied manifest <span class="cite">[§11.2]</span>.</li>
+  <li>A WAL reader that meets a record kind or value it doesn't understand refuses rather than skipping it. That must-understand gate ships, confirmed on the running Broca image, before anything writes the new records; after the first one is written, rolling Broca back below the gate is blocked <span class="cite">[§13]</span>.</li>
+</ul>
 
 <!-- ============================================================ -->
-<h2 id="staging">8. Build staging <span class="cite">[D §13]</span></h2>
-<p>Each stage is gated; nothing is built before approval. Gates for every stage: render goldens byte-identical with nothing configured; resume and materialized-resume suites green; the crash-cut harness unmodified and passing; for MC, pure replay identical on every lane.</p>
+<h2 id="thalamus">9. Thalamus and other runners</h2>
+<p>Thalamus is the runner for Claude Code sessions and uses <b>the same provider interface</b>. What differs is the runner: Claude Code owns its transcript and resends the whole message list on every request. So Thalamus keeps what Broca's WAL keeps (the hook outputs and the latest CompactionMessage), keyed by message identity using the <code>ccm-N</code> digest ids already agreed with THALAMUS, and applies them to each request. Claude Code's <code>session.compact</code> hook makes the marker real in Claude Code's own transcript. Magic Context's Claude Code-specific transform lane collapses into this interface <span class="cite">[§12.1]</span>.</p>
 <figure>
-<svg viewBox="0 0 1000 250" role="img" aria-label="Eight build stages with the reader gate first and stages 3 and 4 independent.">
-  <defs><marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker></defs>
-  <rect class="bx" x="10"  y="50" width="112" height="70" rx="6"/><text class="th" x="20" y="72">1 Reader gate</text><text class="ts" x="20" y="90">must-understand,</text><text class="ts" x="20" y="105">rollback floor</text>
-  <rect class="bx" x="134" y="50" width="112" height="70" rx="6"/><text class="th" x="144" y="72">2 Schema</text><text class="ts" x="144" y="90">table, record,</text><text class="ts" x="144" y="105">refusals (dormant)</text>
-  <rect class="bx" x="258" y="22" width="112" height="52" rx="6"/><text class="th" x="268" y="44">3 Notice</text><text class="ts" x="268" y="62">provider_notice</text>
-  <rect class="bx" x="258" y="96" width="112" height="52" rx="6"/><text class="th" x="268" y="118">4 Op. message</text><text class="ts" x="268" y="136">operator_message</text>
-  <rect class="bx" x="382" y="50" width="112" height="70" rx="6"/><text class="th" x="392" y="72">5 History ops</text><text class="ts" x="392" y="90">spans, digest,</text><text class="ts" x="392" y="105">tool_present gone</text>
-  <rect class="bx" x="506" y="50" width="112" height="70" rx="6"/><text class="th" x="516" y="72">6 Dispatch</text><text class="ts" x="516" y="90">host-only args,</text><text class="ts" x="516" y="105">contract revision</text>
-  <rect class="bx" x="630" y="50" width="112" height="70" rx="6"/><text class="th" x="640" y="72">7 Parity</text><text class="ts" x="640" y="90">OC and Pi read</text><text class="ts" x="640" y="105">the record</text>
-  <rect class="bx" x="754" y="50" width="112" height="70" rx="6"/><text class="th" x="764" y="72">8 Declarative</text><text class="ts" x="764" y="90">ck extension add,</text><text class="ts" x="764" y="105">pins, selection</text>
-  <path class="ln" d="M66,50 V10 H314 V20" marker-end="url(#a3)"/>
-  <path class="ln" d="M66,120 V172 H314 V150" marker-end="url(#a3)"/>
-  <text class="ts" x="76" y="190">stage 1 must be deployed and verified before 3 or 4 writes</text>
-  <text class="ts" x="382" y="160">3 and 4 independent; AFT and MC adopt 3 first</text>
-  <text class="ts" x="10" y="228">Arrows show only the dependencies the design states (§7.4, §13 stage 3). The rest is the design's numbering; it doesn't say whether later stages are strictly ordered.</text>
+<svg viewBox="0 0 1000 150" role="img" aria-label="Same providers, two runners: Broca records in its WAL, Thalamus records by message identity and applies to each Claude Code request.">
+  <rect class="bx2" x="370" y="10" width="260" height="44" rx="6"/>
+  <text class="th" x="384" y="37">Same four provider kinds</text>
+  <rect class="bx" x="60" y="92" width="360" height="50" rx="6"/>
+  <text class="t" x="74" y="112">Broca</text>
+  <text class="ts" x="74" y="130">owns the transcript; hook outputs and CMs in its WAL</text>
+  <rect class="bx" x="580" y="92" width="380" height="50" rx="6"/>
+  <text class="t" x="594" y="112">Thalamus (Claude Code sessions)</text>
+  <text class="ts" x="594" y="130">keeps the same record by message identity (ccm-N)</text>
+  <line class="ln" x1="450" y1="54" x2="260" y2="90"/>
+  <line class="ln" x1="550" y1="54" x2="760" y2="90"/>
 </svg>
-<figcaption>Figure 3. Build order and the dependencies the design states explicitly.</figcaption>
 </figure>
+<p>Adapters for OpenCode and Pi are possible on the same interface, keeping the record by message identity as Thalamus does, but they aren't in scope for the first build <span class="cite">[§12.2]</span>.</p>
 <table>
-<tr><th>Stage</th><th>What gets built</th><th>What it unlocks</th></tr>
-<tr><td>1</td><td>Must-understand reader gate (release N) and the <code>place-release</code> rollback floor, deployed and verified.</td><td>Safe to ship any writer of the two new record kinds; rollback can no longer silently drop them <span class="cite">[§7.4]</span>.</td></tr>
-<tr><td>2</td><td><code>ck.session-extension/v1</code>; <code>extension.describe</code> on MC and AFT; table and operator-text grants in Prefrontal; composition record and admission refusals on Broca, dormant with no extensions. Goldens byte-identical; a byte pin committed before the field exists.</td><td>Presets, the frozen record and refusal by name exist, without changing any request bytes.</td></tr>
-<tr><td>3</td><td><code>provider_notice</code>: record, hold until fsync ack, idempotent re-delivery on <code>notice_id</code>, size cap, crash-cut gates. Independent of stage 4.</td><td>AFT background completions and MC Channel 2 wakes become durable notices; AFT moves its ack key to <code>notice_id</code> <span class="cite">[§10]</span>.</td></tr>
-<tr><td>4</td><td><code>operator_message</code>: per-capability delivery, precedence-safe append, effective-state lowering, effective-tool-set fold.</td><td>Guidance and tool changes land without a full prefix rebuild where the provider supports it.</td></tr>
-<tr><td>5</td><td>History operations: protected-span checks, digest comparison on resume, transform request carrying <code>{preset, version}</code>, interface pinning, per-episode version stamp. MC's transform keyed on the preset; <code>tool_present</code> deleted.</td><td>The 2026-09-25 patchwork goes away; transform upgrades are safe for pinned sessions.</td></tr>
-<tr><td>6</td><td>Dispatch: host-only argument rejection; tool contract revision carried into dispatch.</td><td>Closes the <code>shell: "powershell"</code> path; frozen schemas can't meet changed code.</td></tr>
-<tr><td>7</td><td>Parity: the OpenCode and Pi plugins read the composition record (R6).</td><td>One preset means the same bundle on every host; plugins stop inferring main vs subagent.</td></tr>
-<tr><td>8</td><td>Declarative extensions: <code>ck extension add</code>, digest pinning, project selection.</td><td>Outside developers can ship static presets (system text, MCP tool sources, replaced slots) with no code.</td></tr>
+<tr><th>Interface</th><th>OpenCode seam</th></tr>
+<tr><td>PreUser</td><td><code>chat.message</code></td></tr>
+<tr><td>PreTool</td><td><code>tool.execute.before</code></td></tr>
+<tr><td>PostTool</td><td><code>tool.execute.after</code></td></tr>
+<tr><td>PostAssistant</td><td>the text-completion hook (OpenCode 1 only)</td></tr>
+<tr><td>CompactionMessage</td><td>applied in <code>messages.transform</code></td></tr>
 </table>
-<p class="sub">“What it unlocks” is read from the stage contents and the sections they implement; the design lists stages, not unlocks.</p>
-<div class="callout gapnote"><b>Two stagings.</b> plugin-hooks has its own commit staging (types and RunConfig freeze plumbing; admission hook caller for classes 1/2; declarative class 3; class 4 decoration). The design's §13 doesn't say how the two interleave, e.g. whether §13 stage 2 is plugin-hooks stage 1–2 or separate work.</div>
 
 <!-- ============================================================ -->
-<h2 id="gaps">9. Gaps found while explaining</h2>
-<p>Places where the sources are ambiguous, contradict each other, or don't give the reason for a rule. None were filled in; the text above follows the design and flags each one.</p>
-<ol id="gaplist">
-<li><b>Activation authority.</b> D §6.5 “Prefrontal decides when a session activates” vs PH “activation IS the module flipping its declared epoch”. Already the report's Q1.</li>
-<li><b>Discovery path.</b> PH says the engine discovers plugin modules “from the catalog's hooks manifest section — SUBC's lane defines that section”. D §5.1–§5.2 says no new manifest roles: discovery is <code>capabilities.provides</code> plus <code>extension.describe</code>. Not stated whether the hooks manifest section is superseded or still carries class 3/4 artifacts.</li>
-<li><b>Ordinary later sends</b> (clarification for r3). It follows from D §6.5 and §7.2 step 5 that a non-activating send reuses the frozen record and never calls <code>extension.describe</code>, but no sentence says so explicitly.</li>
-<li><b>Activation with a module down</b> (clarification for r3). Unstated; this page assumes the activation is skipped and retried at the next boundary.</li>
-<li><b>Host notes vs last-module append</b> (clarification for r3). D §6.4 should say “last in precedence, including host notes”; this page presents it that way.</li>
-<li><b>Reference delivery vs deferred tools.</b> D §7.5 “tool added that was declared up front → tool change by reference” vs D §12 “Deferred tools … not in v1”.</li>
-<li><b>MC nudges: contradiction.</b> D §10 (nudges become operator-authority turn reminders) vs §6.3 (operator text static; nudges carry numbers) vs §7.8 (in-run nudges are class 2 data, but only the transform sees pressure). Decision in §7 row 14.</li>
-<li><b>“Re-sent verbatim after it clears”</b> (D §7.5) is undefined. Question for BROCA.</li>
-<li><b>AFT “edit presets”.</b> D §10's line is left over from an earlier example. This page assumes all four presets replace the slots and <code>reader</code> is narrowed by the profile. Questions for AFT in §7 row 16.</li>
-<li><b>Modules and classes.</b> D §6.1 “modules never map themselves to classes” vs AFT's table “Classes” column and R9's “declare their most restrictive class”.</li>
-<li><b>Principle 5 wording.</b> “History rewrite is one exclusive, privileged slot” predates r2's reduction-owner-plus-pipeline split (D §6.6).</li>
-<li><b>Restricted tier for module code.</b> D §8 applies AFT's tool-level trust split to “module code”; what it restricts for a third-party module's own process is unstated.</li>
-<li><b>Incomplete refusal list.</b> D §7.2 step 3 omits R7 closure and R8 host-capability refusals.</li>
-<li><b>Two build stagings.</b> D §13 vs PH commit staging; interleaving unstated.</li>
-<li><b>Costs.</b> The design seldom states a rule's cost; most costs in §4 are marked <i>derived</i>.</li>
-<li><b>Reductions and the cache.</b> The design doesn't state the cache effect of a reduction itself (step 5 above); it only guarantees protected spans and replay determinism.</li>
-<li><b>Class 2 tail decoration has no authority row in D §8.</b> Already the report's G2.</li>
-<li><b>“Third-party persona” naming (owner ruling).</b> D §10's “third-party persona (declarative file)” is really a declarative preset carrying static system text; personas are Prefrontal's. The heading uses a word the design reserves for the caller.</li>
-<li><b>G7 reclassified (owner ruling).</b> The report tags G7 as (b) and counts it in its §4 totals; per owner ruling it is out of scope. The report itself is unchanged.</li>
+<h2 id="tools">10. Tool calls and notices, briefly</h2>
+<div class="cards">
+<div class="card"><h3>Tool calls</h3>
+<ul>
+<li>Each call carries the params the provider was preflighted with, so behaviour matches the frozen description.</li>
+<li>Each call also carries a digest of the <b>input schema</b> it was described with, plus a semantics version. Description text isn't pinned. A provider refuses only when it can no longer honour that schema, with <code>tool_revision_mismatch</code>, which SDKs treat as terminal.</li>
+<li>A setting that changes description bytes stays frozen until a change is applied; meanwhile the provider refuses by name any call the current config forbids.</li>
+<li>Host-only arguments are rejected in calls from the model.</li>
+</ul><p class="cite">[§9]</p></div>
+<div class="card"><h3><code>provider_notice</code></h3>
+<ul>
+<li>Asynchronous events: AFT's finished background task, Magic Context's idle nudge. Sent with a per-event id.</li>
+<li>Written as a user-role message tagged with its provenance, at the next legal position, never between a tool call and its result. It goes through PreUser and can later be compacted.</li>
+<li>One engine-wide size cap; an oversized notice is refused back to the provider, never truncated.</li>
+<li>Whether an idle session wakes for a notice is Prefrontal's decision.</li>
+</ul><p class="cite">[§10]</p></div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="stages">11. Build stages</h2>
+<table>
+<tr><th style="width:5%">#</th><th style="width:30%">Stage</th><th>Contents</th></tr>
+<tr><td>1</td><td>Broca reader gate</td><td>The must-understand reader gate with the <code>requires</code> list, deployed and confirmed on the running image.</td></tr>
+<tr><td>2</td><td>Preflight and a frozen manifest</td><td>Tools and system text only: the preflight service targets, discovery, trust facts (a restart window for <code>admission_facts_targets</code>), pinned schema revisions. AFT's and Magic Context's tools run on Broca without compaction.</td></tr>
+<tr><td>3</td><td>Step-transform hooks</td><td>Written in one frame with their subject, with attribution and result integrity. Tags and reminders move into these hooks.</td></tr>
+<tr><td>4</td><td>The compaction provider</td><td>Setup, the per-step call with all four answers, the structural checks, the WAL records, cache-breakpoint placement, and the live signed-thinking test.</td></tr>
+<tr><td>5</td><td>Mid-episode manifest application</td><td><code>manifest_applied</code>, the drift guard, and crash-cut coverage on both sides of an apply. The largest engine change in the design.</td></tr>
+<tr><td>6</td><td>Change detection, policies, flush</td><td>Plus the bus hint where a bus exists.</td></tr>
+<tr><td>7</td><td>Thalamus</td><td>On the same interface.</td></tr>
+</table>
+<p class="cite">[§15, §11.2]</p>
+
+<!-- ============================================================ -->
+<h2 id="open">12. Open items</h2>
+<div class="callout pending"><b>Who carries project docs.</b> System text may not include project content (design §4.3), yet heads get ARCHITECTURE.md and STRUCTURE.md there today. A session without a compaction provider needs a carrier; ALF proposes a frozen user-role block written with the first user turn (a PreUser output from Prefrontal). Magic Context's m0 also carries the docs today, so a head with both would get them twice. Exactly one of the two must own them <span class="cite">[§16.1]</span>.</div>
+<ol start="2">
+  <li><b>A notice channel to the user, not the model,</b> for Magic Context's toasts and status notices. Deliberately later, as a separate design.</li>
+  <li><b>The final list for the shared param vocabulary.</b></li>
+  <li><b>The schema of the trust fact,</b> defined in the provider interface; the daemon relays it opaquely.</li>
+  <li><b>The per-family table</b> of append-only tool and system changes, from BROCA's renderers, and how Broca records the capability per session.</li>
+  <li><b>The engine-wide caps,</b> published as readable numbers: total WAIT per step, hook budgets, the notice size cap.</li>
+  <li><b>Magic Context's in-memory state between passes:</b> persisted, or served by one long-lived instance. Magic Context's own concern, not part of the protocol.</li>
 </ol>
+<p class="cite">[§16]</p>
+
+<!-- ============================================================ -->
+<h2 id="where">13. Where this is specified</h2>
+<p>All in <code>.cortexkit/alfonso/plans/ck-extensibility-design-r3.md</code> (draft r3.1):</p>
+<ul>
+  <li>Constraints and principles: §1, §2</li>
+  <li>Provider kinds: §3</li>
+  <li>Params, preflight, trust, system text authority, persona check, session manifest: §4.1–§4.5</li>
+  <li>Compaction setup, the per-step call, CompactionMessage, WAIT, REFUSE: §5.1–§5.5</li>
+  <li>Step-transform hooks and their rules: §6.1, §6.2</li>
+  <li>Cache breakpoints: §7</li>
+  <li>Resume: §8</li>
+  <li>Tool calls: §9</li>
+  <li><code>provider_notice</code>: §10</li>
+  <li>Changes while running (detection, policies, flush, disabled tools): §11.1–§11.4</li>
+  <li>Thalamus, OpenCode and Pi: §12.1, §12.2</li>
+  <li>Invariants kept, including the must-understand gate: §13</li>
+  <li>Build stages: §15</li>
+  <li>Open items: §16</li>
+</ul>
 
 </main>
 </div>
