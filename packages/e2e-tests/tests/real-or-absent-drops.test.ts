@@ -40,10 +40,16 @@ const LOW = {
     output_tokens: 10,
     cache_creation_input_tokens: 0,
 };
-// 97.5% of the 20k window: the pass after this response is a forced (>=95%) bust,
-// which is where queued drops apply even inside the protected window.
+// 98% of the usable limit: the pass after this response is a forced (>=95%) bust,
+// which is where queued drops apply even inside the protected window. Magic
+// Context reserves part of the 20k model window for output, so the usable limit
+// it resolves is 15,000, and pressure is measured against that. The reading
+// must stay at or under 15,000: a larger one makes the usage event first ask
+// the host for fresh model limits, and on OpenCode 1.18.31 and later the next
+// step's transform runs before that round trip ends, so it still sees the
+// previous low reading and defers instead of busting.
 const HIGH = {
-    input_tokens: 19_500,
+    input_tokens: 14_700,
     output_tokens: 10,
     cache_creation_input_tokens: 0,
 };

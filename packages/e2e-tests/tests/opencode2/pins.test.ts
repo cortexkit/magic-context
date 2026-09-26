@@ -17,6 +17,10 @@ test("v1_untouched and captured fixture bytes remain sha256 pinned", () => {
 			// measuring tool definitions under the "default" agent key when
 			// OpenCode 1 omits the agent (6a7158a407, "preserve LKG after host
 			// adds empty summaries"); that is a deliberate v1 change, not v2 leakage.
+			// It was re-minted once more when the v1 `config` hook began turning
+			// off OpenCode 1's automatic compaction while Magic Context manages
+			// compaction (8487f845c5, "keep the final step's usage and stop native
+			// auto-compaction under Magic Context"); also a deliberate v1 change.
 			bytes = bytes
 				.replace('import { setup } from "./v2/server";\n', "")
 				.replace("PluginModule & { setup: typeof setup }", "PluginModule")
