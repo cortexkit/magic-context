@@ -836,6 +836,33 @@ describe("mirror pull paths single-store tripwire", () => {
         }
     });
 
+    test("a marker answer of ok with marked: true is a refusal, not permission", async () => {
+        const db = freshDb();
+        try {
+            setCursor(db, "notes", 3);
+            const fake = fakeModule();
+            fake.module.markerStatus = async () => ({ ok: true, marked: true });
+            expectTripwireError(
+                await rejection(
+                    drainMirrorPages({ db, module: fake.module, domain: "notes", projectPath: B }),
+                ),
+            );
+            expect(
+                await drainAuthority({
+                    db,
+                    projectPath: B,
+                    domain: "notes",
+                    module: fake.module,
+                    checksum: "x",
+                }),
+            ).toEqual(TRIPWIRE_RESULT);
+            expect(fake.counts.mirrorPull + fake.counts.begin).toBe(0);
+            expect(getMirrorCursor(db, "notes")).toBe(3);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
     test("ensureLiveMemoryResnapshot itself reads no marker and asks nothing", async () => {
         const db = freshDb();
         try {

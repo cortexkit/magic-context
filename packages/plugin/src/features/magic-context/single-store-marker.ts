@@ -222,7 +222,14 @@ export async function singleStoreGate(args: {
         );
     }
     try {
-        await args.module.markerStatus({ project: args.projectPath });
+        const answer = await args.module.markerStatus({ project: args.projectPath });
+        // The module refuses a marked project today, but an answer that says `marked`
+        // must never be read as permission.
+        if (answer.marked === true) {
+            return new SingleStoreTripwireError(
+                `the module reports project ${args.projectPath} as marked single-store`,
+            );
+        }
         return null;
     } catch (error) {
         const tripwire = asSingleStoreTripwire(error);
