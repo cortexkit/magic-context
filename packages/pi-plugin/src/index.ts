@@ -802,8 +802,7 @@ export async function persistPiPressureFromMessageEnd(args: {
 				activeModel.provider && activeModel.id
 					? `${activeModel.provider}/${activeModel.id}`
 					: "the active model";
-			cacheAlert =
-				`⚠️ Magic Context: Pi reports a context limit of ${formatTokens(reportedContextLimit)} tokens for ${modelLabel}, but this session has sent ${formatTokens(provenSafeInputTokens)} tokens successfully. Magic Context will keep using the larger proven value for its pressure math. If Pi's model metadata is wrong for your provider, set contextWindow for that model in Pi's model configuration.`;
+			cacheAlert = `⚠️ Magic Context: Pi reports a context limit of ${formatTokens(reportedContextLimit)} tokens for ${modelLabel}, but this session has sent ${formatTokens(provenSafeInputTokens)} tokens successfully. Magic Context will keep using the larger proven value for its pressure math. If Pi's model metadata is wrong for your provider, set contextWindow for that model in Pi's model configuration.`;
 		}
 		updates.lastContextPercentage = percentage;
 		updates.lastInputTokens = pressure.inputTokens;

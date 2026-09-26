@@ -7,11 +7,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { recordMessageFtsRowid } from "../../features/magic-context/message-fts-rowid-map";
-import { createScheduler } from "../../features/magic-context/scheduler";
 import {
     __resetMessageIndexAsyncForTests,
     isSessionReconciled,
 } from "../../features/magic-context/message-index-async";
+import { createScheduler } from "../../features/magic-context/scheduler";
 import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import {
     applyStrippedPlaceholderDelta,
@@ -61,8 +61,8 @@ import { clearWindowOverlayCacheForTest, setWindowOverlayPath } from "../../shar
 import { describeContextLimitChange } from "./context-limit-resolution";
 import { createEventHandler } from "./event-handler";
 import { resolveContextLimit as resolveLimitForTest } from "./event-resolvers";
-import { loadContextUsage } from "./transform-context-state";
 import { __ignoredNotificationTest } from "./send-session-notification";
+import { loadContextUsage } from "./transform-context-state";
 
 // These alert-content units supply idle authorization independently of the harness event hook.
 beforeEach(() => __ignoredNotificationTest.setHoldDetector(() => false));
@@ -2162,10 +2162,13 @@ describe("createEventHandler — usage is recorded before the model-limit refres
 
         gate.resolve();
         await pending;
-        const expected = (90_000 / resolveLimitForTest("test-provider", "test-model", {
-            db: deps.db,
-            sessionID: SESSION,
-        })) * 100;
+        const expected =
+            (90_000 /
+                resolveLimitForTest("test-provider", "test-model", {
+                    db: deps.db,
+                    sessionID: SESSION,
+                })) *
+            100;
         expect(expected).toBeLessThan(100);
         expect(contextUsageMap.get(SESSION)?.usage.percentage).toBeCloseTo(expected, 10);
         expect(getOrCreateSessionMeta(deps.db, SESSION).lastContextPercentage).toBeCloseTo(

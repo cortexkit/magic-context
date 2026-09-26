@@ -338,6 +338,21 @@
             ]
         },
         {
+            "path": "tests/over-limit-usage-next-pass.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "OpenCode 1.18.31 and later run the next step's transform without waiting for the plugin's message.updated handler; the scenario checks that an over-limit step's usage reaches the pass serving its tool result, which only the OpenCode 1 event delivery exercises",
+            "contract_refs": [
+                "TS-HARNESS"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
             "path": "tests/drops.test.ts",
             "tier": "ts-only",
             "invocation": {
