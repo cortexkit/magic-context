@@ -11,22 +11,13 @@ import {
     clearHistorianFailureState,
     clearPendingCompactionMarkerStateIf,
     clearSession,
-    deleteIndexedMessage,
-    deleteTagsByMessageId,
     getHistorianFailureState,
-    getMaxTagNumberBySession,
     getOrCreateSessionMeta,
     getOverflowState,
     getPendingCompactionMarkerState,
-    getPersistedNoteNudge,
-    getPersistedReasoningWatermark,
     markSessionCleanupPending,
     recordDetectedContextLimit,
     recordOverflowDetected,
-    removeAutoSearchHintDecisionByMessageId,
-    removeNoteNudgeAnchorByMessageId,
-    removeStrippedPlaceholderId,
-    setPersistedReasoningWatermark,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import {
@@ -65,8 +56,12 @@ import {
     resolveModelKey,
     resolveSessionId,
 } from "./event-resolvers";
+import {
+    holdHostCompactionGapRow,
+    markHostCompactionTagsKept,
+    resolveHostCompactionGapLowerBound,
+} from "./host-compaction-gap";
 import { dropSlot } from "./lkg-slot";
-import { clearNoteNudgeTriggerOnly } from "./note-nudger";
 import { readRawSessionMessages } from "./read-session-chunk";
 import {
     clearTrackedOpenCodeSession,
@@ -74,6 +69,7 @@ import {
     observeOpenCodeTurnEvent,
 } from "./read-session-db";
 import { invalidateTrueRawTokenCache } from "./read-session-true-raw-tokens";
+import { cleanupRemovedMessageState } from "./removed-message-cleanup";
 import { type NotificationParams, sendStatusNotification } from "./send-session-notification";
 import { clearMessageTokensCache } from "./transform";
 import { resetDegradedCacheCount } from "./transform-postprocess-phase";
@@ -91,10 +87,6 @@ interface ContextUsageEntry {
     hasUsageTokens?: boolean;
 }
 
-interface MessageRemovedCleanupResult {
-    clearedNoteNudge: boolean;
-}
-
 export interface EventHandlerDeps {
     contextUsageMap: Map<string, ContextUsageEntry>;
     compactionHandler: ReturnType<typeof createCompactionHandler>;
@@ -105,6 +97,13 @@ export interface EventHandlerDeps {
      * the off-transition clears any persisted intent.
      */
     compactionOff?: boolean;
+    /**
+     * The TypeScript transform restores the rows a native compaction hides (OpenCode
+     * 1, TypeScript mode). The Rust module handles a native compaction its own way.
+     */
+    hostCompactionGapRestore?: boolean;
+    /** The historian can run for this process's sessions. */
+    historianRunnable?: boolean;
     /** The host-side recovery arm is TS-only until the module protocol carries this flag. */
     thinkingBindingRecoveryEnabled?: boolean;
     onSessionCacheInvalidated?: (sessionId: string) => void;
@@ -189,86 +188,24 @@ async function deliverChannel2IfPending(deps: EventHandlerDeps, sessionId: strin
     }
 }
 
-function cleanupRemovedMessageState(
-    deps: EventHandlerDeps,
-    sessionId: string,
-    messageId: string,
-): MessageRemovedCleanupResult {
-    return deps.db
-        .transaction(() => {
-            const removedTagNumbers = deleteTagsByMessageId(deps.db, sessionId, messageId);
-            sessionLog(
-                sessionId,
-                `event message.removed: deleted ${removedTagNumbers.length} tag(s) for message ${messageId}`,
-            );
-
-            const strippedPlaceholderRemoved = removeStrippedPlaceholderId(
-                deps.db,
-                sessionId,
-                messageId,
-            );
-            sessionLog(
-                sessionId,
-                strippedPlaceholderRemoved
-                    ? `event message.removed: removed ${messageId} from stripped placeholder ids`
-                    : `event message.removed: stripped placeholder ids unchanged for ${messageId}`,
-            );
-
-            const removedNoteNudgeAnchor = removeNoteNudgeAnchorByMessageId(
-                deps.db,
-                sessionId,
-                messageId,
-            );
-            const removedAutoSearchDecision = removeAutoSearchHintDecisionByMessageId(
-                deps.db,
-                sessionId,
-                messageId,
-            );
-            const persistedNoteNudge = getPersistedNoteNudge(deps.db, sessionId);
-            const clearedNoteNudgeTrigger = persistedNoteNudge.triggerMessageId === messageId;
-            if (clearedNoteNudgeTrigger) {
-                clearNoteNudgeTriggerOnly(deps.db, sessionId);
-            }
-            const clearedNoteNudge = removedNoteNudgeAnchor || clearedNoteNudgeTrigger;
-            sessionLog(
-                sessionId,
-                clearedNoteNudge
-                    ? `event message.removed: pruned note nudge state for ${messageId}`
-                    : `event message.removed: note nudge state unchanged for ${messageId}`,
-            );
-            sessionLog(
-                sessionId,
-                removedAutoSearchDecision
-                    ? `event message.removed: pruned auto-search decision for ${messageId}`
-                    : `event message.removed: auto-search decision unchanged for ${messageId}`,
-            );
-
-            const currentWatermark = getPersistedReasoningWatermark(deps.db, sessionId);
-            const maxRemainingTag = getMaxTagNumberBySession(deps.db, sessionId);
-            if (currentWatermark > maxRemainingTag) {
-                setPersistedReasoningWatermark(deps.db, sessionId, maxRemainingTag);
-                sessionLog(
-                    sessionId,
-                    `event message.removed: reset reasoning watermark ${currentWatermark}→${maxRemainingTag}`,
-                );
-            } else {
-                sessionLog(
-                    sessionId,
-                    `event message.removed: reasoning watermark unchanged at ${currentWatermark} (max tag ${maxRemainingTag})`,
-                );
-            }
-
-            const removedIndexedMessages = deleteIndexedMessage(deps.db, sessionId, messageId);
-            sessionLog(
-                sessionId,
-                `event message.removed: deleted ${removedIndexedMessages} indexed message row(s) for ${messageId}`,
-            );
-
-            return {
-                clearedNoteNudge,
-            };
-        })
-        .immediate();
+/** The stored row a message or part update names, for the events that change one. */
+function changedStoredRow(
+    type: string,
+    properties: unknown,
+): { sessionId: string; messageId: string } | null {
+    if (typeof properties !== "object" || properties === null) return null;
+    const record = properties as Record<string, unknown>;
+    const pick = (source: unknown, idKey: string) => {
+        if (typeof source !== "object" || source === null) return null;
+        const value = source as Record<string, unknown>;
+        return typeof value.sessionID === "string" && typeof value[idKey] === "string"
+            ? { sessionId: value.sessionID, messageId: value[idKey] as string }
+            : null;
+    };
+    if (type === "message.updated") return pick(record.info, "id");
+    if (type === "message.part.updated") return pick(record.part, "messageID");
+    if (type === "message.part.removed") return pick(record, "messageID");
+    return null;
 }
 
 export function createEventHandler(deps: EventHandlerDeps) {
@@ -284,6 +221,29 @@ export function createEventHandler(deps: EventHandlerDeps) {
         observeOpenCodeTurnEvent(input.event.type, input.event.properties);
 
         const properties = getSessionProperties(input.event.properties);
+
+        // The host changed a stored row: when it is served in a range restored after
+        // a native compaction, record its served bytes so a restarted process
+        // replays them too (see holdHostCompactionGapRow).
+        if (deps.hostCompactionGapRestore === true) {
+            const changed = changedStoredRow(input.event.type, input.event.properties);
+            if (changed) {
+                try {
+                    holdHostCompactionGapRow(
+                        deps.db,
+                        changed.sessionId,
+                        changed.messageId,
+                        "changed",
+                    );
+                } catch (error) {
+                    sessionLog(
+                        changed.sessionId,
+                        "host compaction gap: recording a changed row failed:",
+                        error,
+                    );
+                }
+            }
+        }
 
         if (input.event.type === "session.created") {
             const info = getSessionCreatedInfo(input.event.properties);
@@ -931,7 +891,20 @@ export function createEventHandler(deps: EventHandlerDeps) {
             );
 
             try {
-                cleanupRemovedMessageState(deps, info.sessionID, info.messageID);
+                // A row served in a range restored after a native compaction keeps
+                // its tags and anchors until a busting pass takes it out of the
+                // range: that range replays the row byte for byte until then.
+                const heldInRestoredRange =
+                    deps.hostCompactionGapRestore === true &&
+                    holdHostCompactionGapRow(deps.db, info.sessionID, info.messageID, "removed");
+                if (heldInRestoredRange) {
+                    sessionLog(
+                        info.sessionID,
+                        `event message.removed: ${info.messageID} is served in a restored range; its state is kept until a cache-busting pass drops it`,
+                    );
+                } else {
+                    cleanupRemovedMessageState(deps.db, info.sessionID, info.messageID);
+                }
                 scheduleClearAndReindex(deps.db, info.sessionID, readRawSessionMessages);
 
                 deps.tagger.cleanup(info.sessionID);
@@ -981,10 +954,47 @@ export function createEventHandler(deps: EventHandlerDeps) {
             }
 
             dropSlot(sessionId, "session.compacted");
+            // The transform restores the rows this compaction hid when it can resolve
+            // where they start: those rows and the retained tail then stay on the
+            // wire, so their tags keep their drops.
+            let restoresHiddenRows = false;
             try {
-                deps.compactionHandler.onCompacted(sessionId, deps.db);
+                restoresHiddenRows =
+                    deps.hostCompactionGapRestore === true &&
+                    !deps.compactionOff &&
+                    !deps.internalChildSessions?.has(sessionId) &&
+                    !getOrCreateSessionMeta(deps.db, sessionId).isSubagent &&
+                    resolveHostCompactionGapLowerBound(deps.db, sessionId) !== null;
+            } catch (error) {
+                sessionLog(sessionId, "event session.compacted boundary read failed:", error);
+            }
+            try {
+                deps.compactionHandler.onCompacted(sessionId, deps.db, {
+                    keepTagState: restoresHiddenRows,
+                });
+                // The next pass settles the kept statuses: kept when it restores the
+                // rows, retired as before when it cannot.
+                if (restoresHiddenRows) markHostCompactionTagsKept(deps.db, sessionId);
             } catch (error) {
                 sessionLog(sessionId, "event session.compacted handling failed:", error);
+            }
+            // Until the historian covers the restored rows they are served raw, so
+            // start it on the next pass instead of waiting for its usual trigger.
+            // This only sets the flag the compartment phase starts a run from (or
+            // clears when nothing is eligible); it busts nothing, and what the run
+            // publishes lands on the next pass that rebuilds the prefix.
+            if (restoresHiddenRows && deps.historianRunnable === true) {
+                try {
+                    if (!getOrCreateSessionMeta(deps.db, sessionId).compartmentInProgress) {
+                        updateSessionMeta(deps.db, sessionId, { compartmentInProgress: true });
+                        sessionLog(
+                            sessionId,
+                            "event session.compacted: historian marked due to cover the rows the compaction hid",
+                        );
+                    }
+                } catch (error) {
+                    sessionLog(sessionId, "event session.compacted historian mark failed:", error);
+                }
             }
             // Native compaction may have deleted the boundary message — remove our marker
             // to avoid stale/orphaned rows. The next historian run will re-inject if needed.

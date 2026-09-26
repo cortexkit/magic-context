@@ -111,6 +111,12 @@ import {
 } from "./final-wire-token-estimate";
 import type { LiveModelBySession } from "./hook-handlers";
 import {
+    hostCompactionGapBudgetTokens,
+    resolveHostCompactionGapLowerBound,
+    restoreHostCompactionGap,
+    settleHostCompactionTags,
+} from "./host-compaction-gap";
+import {
     capturePrefixTrimSourceOrder,
     findHostCompactionWindow,
     type HostCompactionWindow,
@@ -132,9 +138,15 @@ import {
     recordHighPressureNoEligibleHead,
     resolveOpenCodeProtectedTailBoundary,
 } from "./protected-tail-boundary";
-import { readRawSessionMessages } from "./read-session-chunk";
+import {
+    compareRawSessionMessageOrder,
+    readHostSessionMessageRange,
+    readHostSessionMessagesById,
+    readRawSessionMessages,
+} from "./read-session-chunk";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { extractInMemoryMessageViews } from "./read-session-raw";
+import { cleanupRemovedMessageState } from "./removed-message-cleanup";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendStatusNotification } from "./send-session-notification";
 import { modelAcceptsEmptyContent } from "./sentinel";
@@ -1671,9 +1683,6 @@ export function createTransform(deps: TransformDeps) {
         //
         const historyRefreshExplicitBeforePrepare = deps.historyRefreshSessions.has(sessionId);
         const deferredHistoryWasPendingAtPassStart = deferredHistoryRefreshSessions.has(sessionId);
-        const prefixTrimSourceOrder = deferredHistoryWasPendingAtPassStart
-            ? capturePrefixTrimSourceOrder(messages)
-            : undefined;
         const earlyActiveRunBlocksMaterialization =
             (getActiveCompartmentRun(sessionId) !== undefined ||
                 sessionMeta.compartmentInProgress) &&
@@ -1688,6 +1697,73 @@ export function createTransform(deps: TransformDeps) {
         const consumingDeferredEarly =
             canConsumeDeferredEarly && deferredHistoryWasPendingAtPassStart;
         const isCacheBusting = historyRefreshExplicitBeforePrepare || consumingDeferredEarly;
+
+        // After a native `/compact` the host no longer loads the rows between Magic
+        // Context's last rendered compartment and the host's retained tail. Put them
+        // back before anything below reads or tags the messages, so they take every
+        // lane a loaded row takes. Runs before the prefix-trim source order is
+        // captured, which must list the restored rows too.
+        if (hostCompaction && fullFeatureMode && !compactionOff) {
+            try {
+                const gap = restoreHostCompactionGap({
+                    db,
+                    sessionId,
+                    messages,
+                    window: hostCompaction,
+                    lower: resolveHostCompactionGapLowerBound(db, sessionId),
+                    // Only a pass already known, this early, to rebuild the cached
+                    // prefix may read the range from the store again: one that
+                    // renders newly published history into m[1]. An execute pass is
+                    // not enough on its own; with nothing to apply it changes no byte.
+                    refreshAllowed: consumingDeferredEarly,
+                    budgetTokens: hostCompactionGapBudgetTokens(
+                        resolvedContextLimit,
+                        resolveExecuteThreshold(
+                            deps.executeThresholdPercentage ?? 65,
+                            currentModelKeyForBoundary,
+                            65,
+                            {
+                                tokensConfig: deps.executeThresholdTokens,
+                                contextLimit: resolvedContextLimit,
+                            },
+                        ),
+                    ),
+                    readRange: (afterId, beforeId, maxRows) =>
+                        readHostSessionMessageRange(sessionId, afterId, beforeId, maxRows),
+                    readById: (ids) => readHostSessionMessagesById(sessionId, ids),
+                    compareOrder: (left, right) =>
+                        compareRawSessionMessageOrder(sessionId, left, right),
+                });
+                // Rows the host removed while they were served kept their state
+                // until now, when this pass stopped serving them.
+                for (const messageId of gap.rowsLeftRange) {
+                    cleanupRemovedMessageState(db, sessionId, messageId);
+                }
+                if (gap.rowsLeftRange.length > 0) deps.tagger.cleanup(sessionId);
+                const settled = settleHostCompactionTags(db, sessionId, gap);
+                if (settled === "retired") {
+                    deps.tagger.cleanup(sessionId);
+                    sessionLog(
+                        sessionId,
+                        "host compaction gap: not restored, so the tags kept at the compaction are retired as a native compaction always retired them",
+                    );
+                }
+                if (gap.status === "restored") {
+                    // The trailing-blank snapshot above was taken from the host's
+                    // input; the restored rows are host-shaped input too.
+                    for (const [id, decision] of snapshotTrailingBlankSourceDecisions(
+                        gap.restored,
+                    )) {
+                        trailingBlankSourceDecisions.set(id, decision);
+                    }
+                }
+            } catch (error) {
+                sessionLog(sessionId, "host compaction gap: restore failed:", error);
+            }
+        }
+        const prefixTrimSourceOrder = deferredHistoryWasPendingAtPassStart
+            ? capturePrefixTrimSourceOrder(messages)
+            : undefined;
         const notificationParams = runNotificationParams(sessionId) ?? {};
         const boundaryContextLimit =
             resolvedContextLimit && resolvedContextLimit > 0

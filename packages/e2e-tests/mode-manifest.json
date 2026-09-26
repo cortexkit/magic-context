@@ -459,6 +459,21 @@
             ]
         },
         {
+            "path": "tests/native-compaction-gap-adversarial.test.ts",
+            "tier": "ts-only",
+            "invocation": {
+                "ts": true,
+                "rust": false
+            },
+            "rationale": "rows restored after a native OpenCode 1 /compact replay byte-identically when the host deletes or edits them and across a restart; the restore is a TypeScript-transform lane that Rust mode does not run",
+            "contract_refs": [
+                "TS-HARNESS"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
             "path": "tests/notice-loop-race.test.ts",
             "tier": "ts-only",
             "invocation": {
