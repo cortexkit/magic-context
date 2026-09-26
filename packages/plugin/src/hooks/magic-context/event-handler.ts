@@ -274,10 +274,10 @@ function cleanupRemovedMessageState(
 export function createEventHandler(deps: EventHandlerDeps) {
     // The newest assistant message whose usage reached the pressure state, per
     // session. OpenCode delivers events to plugins without waiting for the
-    // previous handler, and this handler can await an SDK round trip before it
-    // records usage, so the event for one step of a tool turn can finish after
-    // the event for the next step. OpenCode message ids ascend, so an older id
-    // arriving late must not overwrite the newer step's prompt size.
+    // previous handler, so the event for one step of a tool turn can reach
+    // this handler after the event for the next step. OpenCode message ids
+    // ascend, so an older id arriving late must not overwrite the newer step's
+    // prompt size.
     const newestUsageMessageIdBySession = new Map<string, string>();
     return async (input: { event: { type: string; properties?: unknown } }): Promise<void> => {
         evictExpiredUsageEntries(deps.contextUsageMap);
@@ -687,18 +687,11 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 } else {
                     usageAboveWallLogSeen.delete(aboveWallLogKey);
                 }
+                // Set when this reading needs a model-limit refresh. It runs only
+                // after the reading is recorded (see below).
+                let refreshLimitsAfterRecording: (() => Promise<void>) | undefined;
                 if (hasUsageTokens) {
                     const pressureInputTokens = totalInputTokens;
-                    // Auth is provably live now (a request returned usage), so
-                    // re-warm the model-limit cache once per process to overwrite
-                    // any stale pre-auth limit (e.g. gpt-5.5 cached at the raw
-                    // 922k before the OAuth 272k downshift applied, #179). No-op
-                    // after the first successful warm.
-                    if (deps.client) {
-                        await refreshModelLimitsAfterAuthOnce(
-                            deps.client as Parameters<typeof refreshModelLimitsAfterAuthOnce>[0],
-                        );
-                    }
                     const requestSucceeded = !messageHadOverflowError;
                     const successfulUsageProof = requestSucceeded && !aboveTrustedWall;
                     // A limit learned from an earlier overflow error is stale
@@ -724,10 +717,6 @@ export function createEventHandler(deps: EventHandlerDeps) {
                         }
                     }
 
-                    let contextLimit = resolveContextLimit(info.providerID, info.modelID, {
-                        db: deps.db,
-                        sessionID: info.sessionID,
-                    });
                     const sessionMeta = getOrCreateSessionMeta(deps.db, info.sessionID);
                     // A proven floor belongs to the model whose accepted request
                     // proved it, the same rule resolveContextLimit applies. Carrying
@@ -741,60 +730,26 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     const provenSafeInputTokens = successfulUsageProof
                         ? Math.max(observedSafeInputTokens, pressureInputTokens)
                         : observedSafeInputTokens;
-                    let catalogLimit =
+                    const readCatalogLimit = () =>
                         info.providerID && info.modelID
                             ? getSdkContextLimit(info.providerID, info.modelID)
                             : undefined;
+                    const resolvePressure = () => {
+                        const resolvedLimit = resolveContextLimit(info.providerID, info.modelID, {
+                            db: deps.db,
+                            sessionID: info.sessionID,
+                        });
+                        const contextLimit = successfulUsageProof
+                            ? Math.max(resolvedLimit, provenSafeInputTokens)
+                            : resolvedLimit;
+                        return {
+                            contextLimit,
+                            catalogLimit: readCatalogLimit(),
+                            percentage:
+                                contextLimit > 0 ? (pressureInputTokens / contextLimit) * 100 : 0,
+                        };
+                    };
 
-                    if (
-                        successfulUsageProof &&
-                        catalogLimit !== undefined &&
-                        catalogLimit < provenSafeInputTokens
-                    ) {
-                        const oldLimit = catalogLimit;
-                        if (deps.client) {
-                            await refreshModelLimitsFromApi(
-                                deps.client as Parameters<typeof refreshModelLimitsFromApi>[0],
-                            );
-                            catalogLimit =
-                                info.providerID && info.modelID
-                                    ? getSdkContextLimit(info.providerID, info.modelID)
-                                    : undefined;
-                            contextLimit = resolveContextLimit(info.providerID, info.modelID, {
-                                db: deps.db,
-                                sessionID: info.sessionID,
-                            });
-                            if (
-                                catalogLimit !== undefined &&
-                                catalogLimit >= provenSafeInputTokens
-                            ) {
-                                sessionLog(
-                                    info.sessionID,
-                                    `models-dev-cache: regression recovered for ${info.providerID}/${info.modelID} via refresh (was=${oldLimit}, now=${catalogLimit})`,
-                                );
-                            }
-                        }
-
-                        if (
-                            catalogLimit !== undefined &&
-                            catalogLimit < provenSafeInputTokens &&
-                            !sessionMeta.cacheAlertSent
-                        ) {
-                            const delivery = await sendStatusNotification(
-                                deps.client,
-                                info.sessionID,
-                                `⚠️ Magic Context: OpenCode's catalog reports a context limit of ${formatTokens(catalogLimit)} tokens for ${info.providerID}/${info.modelID}, but this session has sent ${formatTokens(provenSafeInputTokens)} tokens successfully. Magic Context will keep using the larger proven value for its pressure math. If the catalog is wrong for your provider, set provider.<provider-id>.models.<model-id>.limit.context in opencode.json.`,
-                                deps.getNotificationParams?.(info.sessionID) ?? {},
-                            );
-                            // Retry only if the RPC notification could not be enqueued.
-                            if (delivery === "sent") {
-                                updates.cacheAlertSent = true;
-                            }
-                        }
-                    }
-
-                    // Checked after the last await above, so the check and the
-                    // write below cannot be split by another event's handler.
                     const newestMessageId = newestUsageMessageIdBySession.get(info.sessionID);
                     if (
                         info.messageID !== undefined &&
@@ -813,39 +768,58 @@ export function createEventHandler(deps: EventHandlerDeps) {
                         newestUsageMessageIdBySession.set(info.sessionID, info.messageID);
                     }
 
-                    if (successfulUsageProof) {
-                        contextLimit = Math.max(contextLimit, provenSafeInputTokens);
-                    }
-                    noteContextLimitResolution(info.sessionID, {
-                        modelKey: modelKey ?? null,
-                        limit: contextLimit,
-                        catalog: catalogLimit ?? null,
-                        detected: getOverflowState(deps.db, info.sessionID, modelKey)
-                            .detectedContextLimit,
-                        provenFloor: successfulUsageProof
-                            ? provenSafeInputTokens
-                            : observedSafeInputTokens,
-                    });
-                    const percentage =
-                        contextLimit > 0 ? (pressureInputTokens / contextLimit) * 100 : 0;
-                    sessionLog(
-                        info.sessionID,
-                        `event message.updated: totalInputTokens=${pressureInputTokens} contextLimit=${contextLimit} percentage=${percentage.toFixed(1)}%`,
-                    );
+                    const recordPressure = (pressure: ReturnType<typeof resolvePressure>) => {
+                        noteContextLimitResolution(info.sessionID, {
+                            modelKey: modelKey ?? null,
+                            limit: pressure.contextLimit,
+                            catalog: pressure.catalogLimit ?? null,
+                            detected: getOverflowState(deps.db, info.sessionID, modelKey)
+                                .detectedContextLimit,
+                            provenFloor: successfulUsageProof
+                                ? provenSafeInputTokens
+                                : observedSafeInputTokens,
+                        });
+                        sessionLog(
+                            info.sessionID,
+                            `event message.updated: totalInputTokens=${pressureInputTokens} contextLimit=${pressure.contextLimit} percentage=${pressure.percentage.toFixed(1)}%`,
+                        );
+                        const entry = {
+                            usage: {
+                                percentage: pressure.percentage,
+                                inputTokens: pressureInputTokens,
+                            },
+                            updatedAt: now,
+                            lastResponseTime: now,
+                            hasUsageTokens: true,
+                        };
+                        deps.contextUsageMap.set(info.sessionID, entry);
 
-                    deps.contextUsageMap.set(info.sessionID, {
-                        usage: {
-                            percentage,
-                            inputTokens: pressureInputTokens,
-                        },
-                        updatedAt: now,
-                        lastResponseTime: now,
-                        hasUsageTokens: true,
-                    });
+                        const historianFailureState = getHistorianFailureState(
+                            deps.db,
+                            info.sessionID,
+                        );
+                        if (historianFailureState.failureCount > 0 && pressure.percentage < 90) {
+                            clearHistorianFailureState(deps.db, info.sessionID);
+                            sessionLog(
+                                info.sessionID,
+                                `event message.updated: cleared historian failure state at ${pressure.percentage.toFixed(1)}%`,
+                            );
+                        }
+                        return entry;
+                    };
 
-                    updates.lastContextPercentage = percentage;
+                    // The reading is recorded before anything is awaited.
+                    // OpenCode does not wait for this handler before it runs the
+                    // next transform, so a reading recorded after a network
+                    // round trip can miss the pass it describes. That pass is
+                    // the one that must see an over-limit reading to force
+                    // compaction.
+                    const recorded = resolvePressure();
+                    const recordedEntry = recordPressure(recorded);
+
+                    updates.lastContextPercentage = recorded.percentage;
                     updates.lastInputTokens = pressureInputTokens;
-                    updates.lastUsageContextLimit = contextLimit;
+                    updates.lastUsageContextLimit = recorded.contextLimit;
                     updates.lastObservedModelKey = modelKey ?? null;
                     // Stored together with the model key above, so a switch to a
                     // model with no proof of its own stores no floor for it.
@@ -853,14 +827,84 @@ export function createEventHandler(deps: EventHandlerDeps) {
                         ? provenSafeInputTokens
                         : observedSafeInputTokens;
 
-                    const historianFailureState = getHistorianFailureState(deps.db, info.sessionID);
-                    if (historianFailureState.failureCount > 0 && percentage < 90) {
-                        clearHistorianFailureState(deps.db, info.sessionID);
-                        sessionLog(
-                            info.sessionID,
-                            `event message.updated: cleared historian failure state at ${percentage.toFixed(1)}%`,
-                        );
-                    }
+                    // The model-limit refresh runs after the reading is recorded.
+                    // A limit it changes is applied by recording this reading
+                    // again, and only while it is still the session's latest
+                    // reading. A transform pass reads its usage and its model
+                    // limits together, with nothing awaited in between, so every
+                    // pass sees either the reading before the refresh or the one
+                    // after it, never a mix of the two.
+                    refreshLimitsAfterRecording = async () => {
+                        // Auth is provably live now (a request returned usage), so
+                        // re-warm the model-limit cache once per process to
+                        // overwrite any stale pre-auth limit (e.g. gpt-5.5 cached
+                        // at the raw 922k before the OAuth 272k downshift applied,
+                        // #179). No-op after the first successful warm.
+                        if (deps.client) {
+                            await refreshModelLimitsAfterAuthOnce(
+                                deps.client as Parameters<
+                                    typeof refreshModelLimitsAfterAuthOnce
+                                >[0],
+                            );
+                        }
+                        let catalogLimit = readCatalogLimit();
+                        const catalogBelowProof =
+                            successfulUsageProof &&
+                            catalogLimit !== undefined &&
+                            catalogLimit < provenSafeInputTokens;
+                        if (catalogBelowProof && deps.client) {
+                            const oldLimit = catalogLimit;
+                            await refreshModelLimitsFromApi(
+                                deps.client as Parameters<typeof refreshModelLimitsFromApi>[0],
+                            );
+                            catalogLimit = readCatalogLimit();
+                            if (
+                                catalogLimit !== undefined &&
+                                catalogLimit >= provenSafeInputTokens
+                            ) {
+                                sessionLog(
+                                    info.sessionID,
+                                    `models-dev-cache: regression recovered for ${info.providerID}/${info.modelID} via refresh (was=${oldLimit}, now=${catalogLimit})`,
+                                );
+                            }
+                        }
+
+                        const refreshedUpdates: Partial<SessionMeta> = {};
+                        // A newer reading, or a transform that cleared this one,
+                        // replaces the map entry; either way this reading is no
+                        // longer the one to update.
+                        if (
+                            catalogLimit !== recorded.catalogLimit &&
+                            deps.contextUsageMap.get(info.sessionID) === recordedEntry
+                        ) {
+                            const refreshed = resolvePressure();
+                            recordPressure(refreshed);
+                            refreshedUpdates.lastContextPercentage = refreshed.percentage;
+                            refreshedUpdates.lastUsageContextLimit = refreshed.contextLimit;
+                        }
+
+                        if (
+                            catalogBelowProof &&
+                            catalogLimit !== undefined &&
+                            catalogLimit < provenSafeInputTokens &&
+                            !sessionMeta.cacheAlertSent
+                        ) {
+                            const delivery = await sendStatusNotification(
+                                deps.client,
+                                info.sessionID,
+                                `⚠️ Magic Context: OpenCode's catalog reports a context limit of ${formatTokens(catalogLimit)} tokens for ${info.providerID}/${info.modelID}, but this session has sent ${formatTokens(provenSafeInputTokens)} tokens successfully. Magic Context will keep using the larger proven value for its pressure math. If the catalog is wrong for your provider, set provider.<provider-id>.models.<model-id>.limit.context in opencode.json.`,
+                                deps.getNotificationParams?.(info.sessionID) ?? {},
+                            );
+                            // Retry only if the RPC notification could not be enqueued.
+                            if (delivery === "sent") {
+                                refreshedUpdates.cacheAlertSent = true;
+                            }
+                        }
+
+                        if (Object.keys(refreshedUpdates).length > 0) {
+                            updateSessionMeta(deps.db, info.sessionID, refreshedUpdates);
+                        }
+                    };
 
                     // NOTE: the historian trigger decision used to run here on
                     // every message.updated event — but this handler has no
@@ -876,6 +920,9 @@ export function createEventHandler(deps: EventHandlerDeps) {
                 }
 
                 updateSessionMeta(deps.db, info.sessionID, updates);
+                if (refreshLimitsAfterRecording) {
+                    await refreshLimitsAfterRecording();
+                }
             } catch (error) {
                 sessionLog(info.sessionID, "event message.updated persistence failed:", error);
             }
