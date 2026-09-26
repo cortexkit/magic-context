@@ -311,7 +311,8 @@ export function restoreHostCompactionGap(
             kept = read;
             source = "store";
         } else if (previous && read.status === "fallback" && read.reason === "read-failed") {
-            // A pass that cannot read the store keeps serving what it served last.
+            // A failed store read must not change what this pass serves: replay the
+            // rows the previous pass served for the same compaction.
             kept = previous;
         } else {
             return read;
@@ -327,7 +328,8 @@ export function restoreHostCompactionGap(
     }
 
     const restored = kept.rows.flatMap((row) => (row.message ? [row.message] : []));
-    // The transform edits the messages it is handed, so every pass gets its own copy.
+    // The transform edits the messages it is handed in place, so every pass gets its
+    // own copy and the kept rows stay as they were first read.
     const copies = structuredClone(restored);
     messages.splice(requestIndex, 1);
     const tailIndex = messages.findIndex((message) => message.info.id === tailStartId);

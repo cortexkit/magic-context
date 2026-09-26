@@ -391,7 +391,8 @@ describe("the restored range across passes", () => {
 
         expect(JSON.stringify(pass(db).messages)).toBe(served);
 
-        // The change lands on a pass that already rebuilds the cached prefix.
+        // The removed rows drop out of the served range only on a pass that already
+        // rebuilds the cached prefix, and stay out on the passes after it.
         const busting = pass(db, { refreshAllowed: true });
         expect(ids(busting.messages)).toEqual(["sum", "u2", "a2", "u4", "a4", "u5"]);
         expect(JSON.stringify(pass(db).messages)).toBe(JSON.stringify(busting.messages));
@@ -414,7 +415,9 @@ describe("the restored range across passes", () => {
 
     it("keeps serving the rows it served when a defer pass's boundary is not among them", () => {
         const first = JSON.stringify(pass(db, { boundaryId: "a2" }).messages);
-        // The boundary moved back (history was rebuilt): only a busting pass reads again.
+        // The stored boundary moved back to a1, before every served row (as after a
+        // history rebuild). A defer pass keeps serving the rows it served; only a
+        // cache-busting pass reads the store again.
         expect(JSON.stringify(pass(db, { boundaryId: "a1" }).messages)).toBe(first);
         expect(ids(pass(db, { boundaryId: "a1", refreshAllowed: true }).messages)).toEqual([
             "sum",

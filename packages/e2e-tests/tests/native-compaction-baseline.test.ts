@@ -532,8 +532,8 @@ it(
         expect(foldsSinceCompaction[0]).toContain("reason=host_compaction");
         expect(readSystemHash(sessionId)).toBe(hashBeforeCompaction);
 
-        // The defer pass after it keeps the cached prefix byte-identical, restored
-        // turns included.
+        // The defer pass after the first post-compaction pass keeps the cached prefix
+        // byte-identical, restored turns included.
         const passB = requestContaining(secondPrompt);
         expect(findBusts([passA, passB])).toEqual([]);
         expect(cachedPrefixSha(passB.body, passA.body)).toEqual(
@@ -569,7 +569,8 @@ it(
             if (hidden.every((label) => !latest.includes(label))) break;
         }
         for (const label of hidden) expect(latest).not.toContain(label);
-        // The compartment published over them is rendered with the rest of the history.
+        // The compartment published over the hidden turns is rendered with the rest of
+        // the history.
         const sentinels = (body: string) => body.split(HISTORY_SENTINEL).length - 1;
         expect(sentinels(latest)).toBeGreaterThan(sentinels(first));
 

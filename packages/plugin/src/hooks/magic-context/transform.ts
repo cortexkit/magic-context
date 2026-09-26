@@ -1706,8 +1706,9 @@ export function createTransform(deps: TransformDeps) {
                     messages,
                     window: hostCompaction,
                     boundaryId: readHostCompactionGapBoundary(db, sessionId),
-                    // The passes already known to rebuild the cached prefix; only
-                    // these may read the range again when kept rows answer it.
+                    // Passes already known, this early, to rebuild the cached
+                    // prefix. Only these read the range from the store again when
+                    // the rows served on an earlier pass could answer it.
                     refreshAllowed:
                         schedulerDecision === "execute" ||
                         isCacheBusting ||
