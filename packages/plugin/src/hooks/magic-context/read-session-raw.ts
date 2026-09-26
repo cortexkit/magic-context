@@ -757,7 +757,9 @@ export function readHostMessageRangeFromDb(
     beforeId: string,
     maxRows: number,
 ): HostMessageRangeRead {
-    const anchor = db.prepare("SELECT time_created, id FROM message WHERE id = ? AND session_id = ?");
+    const anchor = db.prepare(
+        "SELECT time_created, id FROM message WHERE id = ? AND session_id = ?",
+    );
     const after = anchor.get(afterId, sessionId);
     if (!isAnchorRow(after)) return { status: "missing-bound", missing: "after" };
     const before = anchor.get(beforeId, sessionId);

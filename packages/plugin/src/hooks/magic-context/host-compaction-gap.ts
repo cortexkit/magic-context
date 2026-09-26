@@ -94,11 +94,7 @@ export interface RestoreHostCompactionGapArgs {
     refreshAllowed: boolean;
     /** Most tokens the restored rows may carry; a larger range is not served. */
     budgetTokens: number;
-    readRange: (
-        afterId: string,
-        beforeId: string,
-        maxRows: number,
-    ) => HostMessageRangeRead | null;
+    readRange: (afterId: string, beforeId: string, maxRows: number) => HostMessageRangeRead | null;
     /** Stored order of two rows: negative when `left` comes first, null when unknown. */
     compareOrder: (left: string, right: string) => number | null;
 }

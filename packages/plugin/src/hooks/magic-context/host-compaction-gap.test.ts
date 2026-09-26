@@ -56,7 +56,9 @@ function createStore(): Database {
         });
     };
     const user = (id: string, text: string) =>
-        add(id, { role: "user", agent: "build", time: { created: clock } }, [{ type: "text", text }]);
+        add(id, { role: "user", agent: "build", time: { created: clock } }, [
+            { type: "text", text },
+        ]);
     const assistant = (id: string, parentID: string, text: string) =>
         add(
             id,

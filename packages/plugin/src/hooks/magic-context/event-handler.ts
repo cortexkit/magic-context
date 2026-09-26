@@ -50,7 +50,6 @@ import { hasTrustedAbsoluteWall } from "../../shared/window-geometry";
 import { maybeDeliverChannel2 } from "./channel2-delivery";
 import { removeCompactionMarkerForSession } from "./compaction-marker-manager";
 import { noteContextLimitResolution, provenFloorForModel } from "./context-limit-resolution";
-import { readHostCompactionGapBoundary } from "./host-compaction-gap";
 import {
     getMessageRemovedInfo,
     getMessageUpdatedAssistantInfo,
@@ -66,6 +65,7 @@ import {
     resolveModelKey,
     resolveSessionId,
 } from "./event-resolvers";
+import { readHostCompactionGapBoundary } from "./host-compaction-gap";
 import { dropSlot } from "./lkg-slot";
 import { clearNoteNudgeTriggerOnly } from "./note-nudger";
 import { readRawSessionMessages } from "./read-session-chunk";
