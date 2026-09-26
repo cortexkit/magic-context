@@ -1306,6 +1306,10 @@ pub struct SessionCacheStats {
     pub managed: bool,
     pub is_subagent: bool,
     pub title: Option<String>,
+    /// Set when this session's `last_activity_ms` cannot follow a turn in
+    /// progress; the Cache tab shows it so a list that stops moving mid-turn
+    /// is explained rather than silent.
+    pub activity_note: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -3052,15 +3056,82 @@ fn provider_model_label(provider: Option<&str>, model: Option<&str>) -> Option<S
         .map(|(provider, model)| format!("{provider}/{model}"))
 }
 
-fn recent_opencode_cache_sessions_sql(generation: OpenCodeStoreGeneration) -> String {
-    format!(
-        "SELECT id, time_updated, NULLIF(title, '')
-     FROM {}
+/// How the Cache tab list dates an OpenCode session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenCodeCacheActivity {
+    /// The session row's own `time_updated`. Right for OpenCode 1, whose host
+    /// bumps it on every message write.
+    SessionRow,
+    /// The later of `session_v2.time_updated` and the session's newest
+    /// message row's `time_updated`. OpenCode 2 sets `session_v2.time_updated`
+    /// when a prompt is sent and leaves it there for the whole turn, while the
+    /// newest `session_message` row (highest `seq`) is rewritten as each step
+    /// streams in. Keying on the session row alone froze the Cache tab until
+    /// the next prompt.
+    NewestMessage,
+}
+
+/// Shown on the Cache tab when an OpenCode 2 store's `session_message` table
+/// has no `time_updated` column, so the list falls back to the session row's
+/// time and cannot see a turn in progress.
+const OPENCODE2_ACTIVITY_FALLBACK_NOTE: &str = "This OpenCode 2 database's session_message table has no time_updated column, so OpenCode 2 sessions refresh here only when a new prompt starts, not while a turn is running.";
+
+fn opencode_cache_activity(
+    conn: &Connection,
+    generation: OpenCodeStoreGeneration,
+) -> OpenCodeCacheActivity {
+    if generation == OpenCodeStoreGeneration::V1 {
+        return OpenCodeCacheActivity::SessionRow;
+    }
+    // Every OpenCode 2 release from 2.0.3 on creates the column, but a store
+    // this reader does not recognise must still list its sessions rather than
+    // fail the prepare, which would empty the tab.
+    let has_message_time_updated = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_message') WHERE name = 'time_updated')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
+    if has_message_time_updated {
+        OpenCodeCacheActivity::NewestMessage
+    } else {
+        OpenCodeCacheActivity::SessionRow
+    }
+}
+
+fn recent_opencode_cache_sessions_sql(
+    generation: OpenCodeStoreGeneration,
+    activity: OpenCodeCacheActivity,
+) -> String {
+    let table = opencode_session_table(generation);
+    match activity {
+        OpenCodeCacheActivity::SessionRow => format!(
+            "SELECT id, time_updated, NULLIF(title, '')
+     FROM {table}
      WHERE time_archived IS NULL
      ORDER BY time_updated DESC, id DESC
-     LIMIT ?1 OFFSET ?2",
-        opencode_session_table(generation)
-    )
+     LIMIT ?1 OFFSET ?2"
+        ),
+        // One seek on the (session_id, seq) unique index per unarchived
+        // session, never a scan or GROUP BY over every message row: this runs
+        // on every one-second Cache tab poll. The session row's own time stays
+        // in the MAX so a session with no messages yet still has a time.
+        OpenCodeCacheActivity::NewestMessage => format!(
+            "SELECT s.id,
+            MAX(s.time_updated, COALESCE((
+                SELECT m.time_updated FROM session_message m
+                WHERE m.session_id = s.id
+                ORDER BY m.seq DESC
+                LIMIT 1
+            ), 0)) AS activity,
+            NULLIF(s.title, '')
+     FROM {table} s
+     WHERE s.time_archived IS NULL
+     ORDER BY activity DESC, s.id DESC
+     LIMIT ?1 OFFSET ?2"
+        ),
+    }
 }
 
 const RECENT_OPENCODE_SESSION_MESSAGES_SQL: &str = "SELECT data
@@ -3097,17 +3168,21 @@ fn opencode_cache_presence() -> &'static RwLock<OpenCodeCachePresenceCache> {
     OPENCODE_CACHE_PRESENCE.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
+/// The recent OpenCode sessions for the Cache tab, plus a note to show when
+/// OpenCode 2 sessions can only be dated by their session row (see
+/// `OPENCODE2_ACTIVITY_FALLBACK_NOTE`).
 fn load_recent_opencode_cache_sessions(
     limit: usize,
     hidden_subagent_ids: &HashSet<String>,
-) -> Vec<CacheSessionListEntry> {
+) -> (Vec<CacheSessionListEntry>, Option<&'static str>) {
     let Some(path) = resolve_opencode_db_path() else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     let Ok((conn, generation)) = open_opencode_readonly(&path) else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
-    if let Ok(mut cache) = opencode_cache_presence().write() {
+    let note = opencode_cache_activity_note(&conn, generation);
+    let sessions = if let Ok(mut cache) = opencode_cache_presence().write() {
         load_recent_opencode_cache_sessions_with_cache(
             &conn,
             generation,
@@ -3117,7 +3192,17 @@ fn load_recent_opencode_cache_sessions(
         )
     } else {
         load_recent_opencode_cache_sessions_from_conn(&conn, generation, limit, hidden_subagent_ids)
-    }
+    };
+    (sessions, note)
+}
+
+fn opencode_cache_activity_note(
+    conn: &Connection,
+    generation: OpenCodeStoreGeneration,
+) -> Option<&'static str> {
+    (generation == OpenCodeStoreGeneration::V2
+        && opencode_cache_activity(conn, generation) == OpenCodeCacheActivity::SessionRow)
+        .then_some(OPENCODE2_ACTIVITY_FALLBACK_NOTE)
 }
 
 fn load_recent_opencode_cache_sessions_from_conn(
@@ -3154,7 +3239,9 @@ fn load_recent_opencode_cache_sessions_with_cache(
         .saturating_mul(5)
         .clamp(256, ABSOLUTE_MAX_SCANNED_SESSIONS);
     let batch_size = limit.saturating_mul(4).clamp(1, max_scanned_sessions);
-    let Ok(mut candidates_stmt) = conn.prepare(&recent_opencode_cache_sessions_sql(generation))
+    let activity = opencode_cache_activity(conn, generation);
+    let Ok(mut candidates_stmt) =
+        conn.prepare(&recent_opencode_cache_sessions_sql(generation, activity))
     else {
         return Vec::new();
     };
@@ -3475,51 +3562,62 @@ pub fn get_session_cache_stats_from_db(
         .collect();
     let includes_harness = |harness| harness_filter.map_or(true, |filter| filter == harness);
 
-    let (mut sessions, pi_sessions, omp_sessions, claude_sessions, codex_sessions) =
-        std::thread::scope(|scope| {
-            let opencode = scope.spawn(|| {
-                if includes_harness(Harness::Opencode) {
-                    load_recent_opencode_cache_sessions(limit, &hidden_opencode_ids)
-                } else {
-                    Vec::new()
-                }
-            });
-            let pi = scope.spawn(|| {
-                if includes_harness(Harness::Pi) {
-                    pi_sessions::scan_pi_cache_session_dir()
-                } else {
-                    Vec::new()
-                }
-            });
-            let omp = scope.spawn(|| {
-                if includes_harness(Harness::Omp) {
-                    pi_sessions::scan_omp_cache_session_dir()
-                } else {
-                    Vec::new()
-                }
-            });
-            let claude = scope.spawn(|| {
-                if includes_harness(Harness::ClaudeCode) {
-                    external_cache_sessions::scan_claude_code_session_dir()
-                } else {
-                    Vec::new()
-                }
-            });
-            let codex = scope.spawn(|| {
-                if includes_harness(Harness::Codex) {
-                    external_cache_sessions::scan_codex_session_dir()
-                } else {
-                    Vec::new()
-                }
-            });
-            (
-                opencode.join().unwrap_or_default(),
-                pi.join().unwrap_or_default(),
-                omp.join().unwrap_or_default(),
-                claude.join().unwrap_or_default(),
-                codex.join().unwrap_or_default(),
-            )
+    let (
+        (mut sessions, opencode_activity_note),
+        pi_sessions,
+        omp_sessions,
+        claude_sessions,
+        codex_sessions,
+    ) = std::thread::scope(|scope| {
+        let opencode = scope.spawn(|| {
+            // One OpenCode database serves both harness filters: the
+            // store's generation decides whether its rows are OpenCode or
+            // OpenCode 2, so rows of the other generation are dropped here.
+            if includes_harness(Harness::Opencode) || includes_harness(Harness::Opencode2) {
+                let (mut rows, note) =
+                    load_recent_opencode_cache_sessions(limit, &hidden_opencode_ids);
+                rows.retain(|row| includes_harness(row.harness));
+                (rows, note)
+            } else {
+                (Vec::new(), None)
+            }
         });
+        let pi = scope.spawn(|| {
+            if includes_harness(Harness::Pi) {
+                pi_sessions::scan_pi_cache_session_dir()
+            } else {
+                Vec::new()
+            }
+        });
+        let omp = scope.spawn(|| {
+            if includes_harness(Harness::Omp) {
+                pi_sessions::scan_omp_cache_session_dir()
+            } else {
+                Vec::new()
+            }
+        });
+        let claude = scope.spawn(|| {
+            if includes_harness(Harness::ClaudeCode) {
+                external_cache_sessions::scan_claude_code_session_dir()
+            } else {
+                Vec::new()
+            }
+        });
+        let codex = scope.spawn(|| {
+            if includes_harness(Harness::Codex) {
+                external_cache_sessions::scan_codex_session_dir()
+            } else {
+                Vec::new()
+            }
+        });
+        (
+            opencode.join().unwrap_or_default(),
+            pi.join().unwrap_or_default(),
+            omp.join().unwrap_or_default(),
+            claude.join().unwrap_or_default(),
+            codex.join().unwrap_or_default(),
+        )
+    });
     if includes_harness(Harness::Broca) {
         sessions.extend(load_broca_cache_sessions(limit));
     }
@@ -3607,6 +3705,10 @@ pub fn get_session_cache_stats_from_db(
                 managed: is_managed_cache_session(row.harness, &key.1, &detected_managed),
                 is_subagent: subagent_flags.get(&key).copied().unwrap_or(false),
                 title: row.title,
+                activity_note: (row.harness == Harness::Opencode2)
+                    .then_some(opencode_activity_note)
+                    .flatten()
+                    .map(str::to_owned),
             }
         })
         .collect()
@@ -7946,14 +8048,18 @@ mod cache_session_list_query_tests {
 
     #[test]
     fn opencode_list_query_reads_only_paged_session_metadata() {
-        let sql =
-            recent_opencode_cache_sessions_sql(OpenCodeStoreGeneration::V1).to_ascii_lowercase();
+        let sql = recent_opencode_cache_sessions_sql(
+            OpenCodeStoreGeneration::V1,
+            OpenCodeCacheActivity::SessionRow,
+        )
+        .to_ascii_lowercase();
         assert!(sql.contains("from session"));
-        assert!(
-            recent_opencode_cache_sessions_sql(OpenCodeStoreGeneration::V2)
-                .to_ascii_lowercase()
-                .contains("from session_v2")
-        );
+        assert!(recent_opencode_cache_sessions_sql(
+            OpenCodeStoreGeneration::V2,
+            OpenCodeCacheActivity::SessionRow,
+        )
+        .to_ascii_lowercase()
+        .contains("from session_v2"));
         assert!(sql.contains("time_archived is null"));
         assert!(sql.contains("order by time_updated desc"));
         assert!(sql.contains("limit ?1 offset ?2"));
@@ -8044,6 +8150,277 @@ mod cache_session_list_query_tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "primary");
     }
+
+    /// The two tables the Cache tab list reads, exactly as a real OpenCode
+    /// 2.0.15 host created them (read back from `sqlite_master` of a store the
+    /// pinned CLI wrote), with the indexes it put on `session_message`.
+    const OPENCODE2_0_15_SCHEMA: &str = "
+        CREATE TABLE `session_v2` (
+          `id` text PRIMARY KEY,
+          `project_id` text NOT NULL,
+          `workspace_id` text,
+          `parent_id` text,
+          `fork_session_id` text,
+          `fork_boundary` text,
+          `slug` text NOT NULL,
+          `directory` text NOT NULL,
+          `path` text,
+          `title` text,
+          `version` text NOT NULL,
+          `share_url` text,
+          `summary_additions` integer,
+          `summary_deletions` integer,
+          `summary_files` integer,
+          `summary_diffs` text,
+          `metadata` text,
+          `cost` real DEFAULT 0 NOT NULL,
+          `tokens_input` integer DEFAULT 0 NOT NULL,
+          `tokens_output` integer DEFAULT 0 NOT NULL,
+          `tokens_reasoning` integer DEFAULT 0 NOT NULL,
+          `tokens_cache_read` integer DEFAULT 0 NOT NULL,
+          `tokens_cache_write` integer DEFAULT 0 NOT NULL,
+          `revert` text,
+          `permission` text,
+          `agent` text,
+          `model` text,
+          `time_created` integer NOT NULL,
+          `time_updated` integer NOT NULL,
+          `time_idle` integer,
+          `time_viewed` integer,
+          `idle_outcome` text,
+          `time_compacting` integer,
+          `time_archived` integer,
+          `time_suspended` integer,
+          `resume_attempts` integer DEFAULT 0 NOT NULL
+        );
+        CREATE TABLE `session_message` (
+          `id` text PRIMARY KEY,
+          `session_id` text NOT NULL,
+          `type` text NOT NULL,
+          `seq` integer NOT NULL,
+          `time_created` integer NOT NULL,
+          `time_updated` integer NOT NULL,
+          `data` text NOT NULL,
+          CONSTRAINT `fk_session_message_session_id_session_v2_id_fk` FOREIGN KEY (`session_id`) REFERENCES `session_v2`(`id`) ON DELETE CASCADE
+        );
+        CREATE UNIQUE INDEX `session_message_session_seq_idx` ON `session_message` (`session_id`,`seq`);
+        CREATE INDEX `session_message_session_type_seq_idx` ON `session_message` (`session_id`,`type`,`seq`);
+        CREATE INDEX `session_message_session_time_created_id_idx` ON `session_message` (`session_id`,`time_created`,`id`);
+        CREATE INDEX `session_message_time_created_idx` ON `session_message` (`time_created`);
+    ";
+
+    fn opencode2_db() -> Connection {
+        let conn = Connection::open_in_memory().expect("open OpenCode 2 DB");
+        conn.execute_batch(OPENCODE2_0_15_SCHEMA)
+            .expect("create OpenCode 2.0.15 schema");
+        conn
+    }
+
+    fn insert_v2_session(conn: &Connection, id: &str, updated: i64) {
+        conn.execute(
+            "INSERT INTO session_v2 (id, project_id, slug, directory, version, time_created, time_updated)
+             VALUES (?1, 'project', ?1, '/work', '2.0.15', 1, ?2)",
+            params![id, updated],
+        )
+        .expect("insert session_v2");
+    }
+
+    /// An assistant row whose tokens make it a cache event; `updated` is the
+    /// row's `time_updated`, which the host rewrites as the step streams in.
+    fn insert_v2_assistant(
+        conn: &Connection,
+        session_id: &str,
+        seq: i64,
+        created: i64,
+        updated: i64,
+    ) {
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
+             VALUES (?1, ?2, 'assistant', ?3, ?4, ?5, ?6)",
+            params![
+                format!("{session_id}-{seq}"),
+                session_id,
+                seq,
+                created,
+                updated,
+                serde_json::json!({ "tokens": { "input": 10, "output": 5 } }).to_string(),
+            ],
+        )
+        .expect("insert session_message");
+    }
+
+    // Timeline observed on a real OpenCode 2.0.15 host during a multi-step
+    // turn: session_v2.time_updated stayed at the prompt time while each
+    // step's assistant row, the newest by seq, kept being rewritten.
+    #[test]
+    fn opencode2_list_dates_a_live_turn_by_its_newest_message_row() {
+        let conn = opencode2_db();
+        insert_v2_session(&conn, "live", 1_000);
+        insert_v2_assistant(&conn, "live", 6, 1_100, 2_500);
+        insert_v2_assistant(&conn, "live", 14, 2_600, 5_000);
+        insert_v2_session(&conn, "idle", 3_000);
+        insert_v2_assistant(&conn, "idle", 4, 2_900, 3_000);
+        // No message yet: the session row's own time still dates it.
+        insert_v2_session(&conn, "fresh", 4_000);
+
+        assert_eq!(
+            opencode_cache_activity(&conn, OpenCodeStoreGeneration::V2),
+            OpenCodeCacheActivity::NewestMessage
+        );
+        assert_eq!(
+            opencode_cache_activity_note(&conn, OpenCodeStoreGeneration::V2),
+            None
+        );
+
+        let sessions = load_recent_opencode_cache_sessions_from_conn(
+            &conn,
+            OpenCodeStoreGeneration::V2,
+            10,
+            &HashSet::new(),
+        );
+        let listed: Vec<(&str, i64)> = sessions
+            .iter()
+            .map(|row| (row.session_id.as_str(), row.last_activity_ms))
+            .collect();
+        assert_eq!(listed, vec![("live", 5_000), ("idle", 3_000)]);
+        assert!(sessions.iter().all(|row| row.harness == Harness::Opencode2));
+    }
+
+    // Every poll runs this query, so it must reach each session's newest row
+    // through the (session_id, seq) index instead of reading every message.
+    #[test]
+    fn opencode2_list_query_seeks_the_session_seq_index() {
+        let conn = opencode2_db();
+        let sql = recent_opencode_cache_sessions_sql(
+            OpenCodeStoreGeneration::V2,
+            OpenCodeCacheActivity::NewestMessage,
+        );
+        let mut stmt = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("plan the OpenCode 2 list query");
+        let plan: Vec<String> = stmt
+            .query_map(params![10_i64, 0_i64], |row| row.get::<_, String>(3))
+            .expect("read the plan")
+            .flatten()
+            .collect();
+        let message_steps: Vec<&String> = plan
+            .iter()
+            .filter(|step| {
+                step.contains(" m ") || step.ends_with(" m") || step.contains("session_message")
+            })
+            .collect();
+        assert!(
+            !message_steps.is_empty()
+                && message_steps.iter().all(|step| {
+                    step.starts_with("SEARCH") && step.contains("session_message_session_seq_idx")
+                }),
+            "session_message must only be reached by an index seek: {plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|step| step.contains("GROUP BY")),
+            "the list query must not group message rows: {plan:?}"
+        );
+    }
+
+    // A store whose session_message has no time_updated column still lists
+    // its sessions by the session row's time, and says why they stay still.
+    #[test]
+    fn opencode2_store_without_message_time_updated_lists_sessions_and_notes_it() {
+        let conn = Connection::open_in_memory().expect("open OpenCode 2 DB");
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                time_updated INTEGER NOT NULL,
+                time_archived INTEGER
+            );
+            CREATE TABLE session_message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                time_created INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            INSERT INTO session_v2 VALUES ('ses', NULL, 1000, NULL);
+            INSERT INTO session_message VALUES ('m1', 'ses', 'assistant', 1, 900, '{\"tokens\":{}}');",
+        )
+        .expect("create OpenCode 2 store without message time_updated");
+
+        assert_eq!(
+            opencode_cache_activity(&conn, OpenCodeStoreGeneration::V2),
+            OpenCodeCacheActivity::SessionRow
+        );
+        assert_eq!(
+            opencode_cache_activity_note(&conn, OpenCodeStoreGeneration::V2),
+            Some(OPENCODE2_ACTIVITY_FALLBACK_NOTE)
+        );
+        let sessions = load_recent_opencode_cache_sessions_from_conn(
+            &conn,
+            OpenCodeStoreGeneration::V2,
+            10,
+            &HashSet::new(),
+        );
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "ses");
+        assert_eq!(sessions[0].last_activity_ms, 1000);
+    }
+
+    // Measures the list query on a synthetic store with the real 2.0.15
+    // schema. Run with:
+    // cargo test --lib opencode2_list_query_benchmark -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn opencode2_list_query_benchmark() {
+        for (sessions, per_session) in [(3_000_i64, 100_i64), (10_000, 100)] {
+            let conn = opencode2_db();
+            conn.execute_batch("BEGIN").unwrap();
+            {
+                let mut session = conn
+                    .prepare(
+                        "INSERT INTO session_v2 (id, project_id, slug, directory, version, time_created, time_updated)
+                         VALUES (?1, 'p', ?1, '/w', '2.0.15', 1, ?2)",
+                    )
+                    .unwrap();
+                let mut message = conn
+                    .prepare(
+                        "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
+                         VALUES (?1, ?2, 'assistant', ?3, ?4, ?4, '{\"tokens\":{}}')",
+                    )
+                    .unwrap();
+                for s in 0..sessions {
+                    let id = format!("ses-{s:06}");
+                    session.execute(params![id, s * 1_000]).unwrap();
+                    for seq in 0..per_session {
+                        message
+                            .execute(params![format!("{id}-{seq}"), id, seq, s * 1_000 + seq])
+                            .unwrap();
+                    }
+                }
+            }
+            conn.execute_batch("COMMIT; ANALYZE;").unwrap();
+            let sql = recent_opencode_cache_sessions_sql(
+                OpenCodeStoreGeneration::V2,
+                OpenCodeCacheActivity::NewestMessage,
+            );
+            let mut stmt = conn.prepare(&sql).unwrap();
+            let runs = 20;
+            let start = std::time::Instant::now();
+            for _ in 0..runs {
+                let rows: Vec<String> = stmt
+                    .query_map(params![200_i64, 0_i64], |row| row.get(0))
+                    .unwrap()
+                    .flatten()
+                    .collect();
+                assert_eq!(rows.len(), 200);
+            }
+            let per_poll = start.elapsed().as_secs_f64() * 1_000.0 / f64::from(runs);
+            println!(
+                "{sessions} sessions, {} messages: {per_poll:.2} ms per list query",
+                sessions * per_session
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -8130,6 +8507,69 @@ mod opencode_parent_id_subagent_hide_tests {
         assert!(
             !ids.contains(&"ses-child"),
             "child with parent_id and no session_meta row must still be hidden: {ids:?}",
+        );
+    }
+
+    // The Cache tab's "OpenCode 2" filter must list an OpenCode 2 store's
+    // sessions, and the "OpenCode" filter must not list them.
+    #[test]
+    fn opencode2_harness_filter_lists_opencode2_store_sessions() {
+        let mut env = crate::test_env::EnvGuard::new();
+        let root = tempfile::tempdir().unwrap();
+        let storage = root.path().join("mc");
+        fs::create_dir_all(&storage).unwrap();
+        Connection::open(storage.join("context.db"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE session_meta (
+                    session_id TEXT PRIMARY KEY,
+                    harness TEXT NOT NULL DEFAULT 'opencode',
+                    is_subagent INTEGER DEFAULT 0
+                );",
+            )
+            .unwrap();
+        let opencode_db = root.path().join("opencode.db");
+        let oc = Connection::open(&opencode_db).unwrap();
+        oc.execute_batch(
+            "CREATE TABLE session_v2 (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                parent_id TEXT,
+                time_updated INTEGER NOT NULL,
+                time_archived INTEGER
+            );
+            CREATE TABLE session_message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX session_message_session_seq_idx ON session_message (session_id, seq);
+            INSERT INTO session_v2 VALUES ('ses-v2', 'v2 session', NULL, 100, NULL);
+            INSERT INTO session_message VALUES
+                ('m1', 'ses-v2', 'assistant', 1, 110, 400, '{\"tokens\":{\"input\":10}}');",
+        )
+        .unwrap();
+
+        env.set("MAGIC_CONTEXT_STORAGE_DIR", &storage);
+        env.set("XDG_DATA_HOME", root.path());
+        env.set("OPENCODE_DB", &opencode_db);
+
+        let stats = get_session_cache_stats_from_db(10, true, false, Some(Harness::Opencode2));
+        let listed: Vec<(Harness, &str, i64)> = stats
+            .iter()
+            .map(|row| (row.harness, row.session_id.as_str(), row.last_activity_ms))
+            .collect();
+        assert_eq!(listed, vec![(Harness::Opencode2, "ses-v2", 400)]);
+        assert_eq!(stats[0].activity_note, None);
+
+        let v1_only = get_session_cache_stats_from_db(10, true, false, Some(Harness::Opencode));
+        assert!(
+            v1_only.iter().all(|row| row.harness != Harness::Opencode2),
+            "the OpenCode filter must not list OpenCode 2 sessions: {v1_only:?}"
         );
     }
 }

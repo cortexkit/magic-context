@@ -64,6 +64,14 @@ export function cacheRatioTitle(event: Pick<DbCacheEvent, "aggregate" | "cold_st
   return "Cache retention vs the previous step's expected prefix";
 }
 
+/**
+ * The note to show above the session cards when some listed sessions cannot be
+ * updated while a turn runs (the backend explains why on each such row).
+ */
+export function cacheActivityNote(sessions: SessionCacheStats[]): string | null {
+  return sessions.find((row) => row.activity_note)?.activity_note ?? null;
+}
+
 export function cacheSessionTitle(row: SessionCacheStats): string {
   return row.title || truncate(row.session_id, 16);
 }
@@ -280,6 +288,9 @@ export default function CacheDiagnostics() {
   const [windowsVersion, setWindowsVersion] = createSignal(0);
   const bumpWindows = () => setWindowsVersion((v) => v + 1);
   const [sessionNames, setSessionNames] = createSignal<Record<string, string>>({});
+  const [activityNote, setActivityNote] = createSignal<string | null>(
+    cacheActivityNote(cachedSessions),
+  );
   const [loading, setLoading] = createSignal(cachedWindows.size === 0);
   const [paused, setPaused] = createSignal(false);
   const [selectedSession, setSelectedSession] = createSignal<SelectedSession | null>(
@@ -378,6 +389,7 @@ export default function CacheDiagnostics() {
       if (s.title) names[key] = s.title;
     }
     setSessionNames(names);
+    setActivityNote(cacheActivityNote(sessions));
   };
 
   // The recent sessions we keep windows for: top-N by activity, non-subagent
@@ -821,6 +833,13 @@ export default function CacheDiagnostics() {
 
       {/* Session cards */}
       <div style={{ padding: "0 20px 12px" }}>
+        <Show when={activityNote()}>
+          {(note) => (
+            <div style={{ "font-size": "11px", color: "var(--amber)", "margin-bottom": "8px" }}>
+              {note()}
+            </div>
+          )}
+        </Show>
         <Show when={filteredStats().length > 0}>
           <div
             style={{ "font-size": "11px", color: "var(--text-secondary)", "margin-bottom": "8px" }}

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { DbCacheEvent, SessionCacheStats } from "../../lib/types";
 import {
+  cacheActivityNote,
   cacheCardCountLabel,
   cacheCardSummary,
   cacheCardTitle,
@@ -31,6 +32,22 @@ const brocaRow: SessionCacheStats = {
   is_subagent: false,
   title: "mc-historian:one",
 };
+
+describe("cacheActivityNote", () => {
+  test("is null when every session can follow a running turn", () => {
+    expect(cacheActivityNote([brocaRow, { ...brocaRow, activity_note: null }])).toBeNull();
+  });
+
+  test("surfaces the backend's note when a session cannot", () => {
+    const note = "OpenCode 2 sessions refresh only when a new prompt starts";
+    expect(
+      cacheActivityNote([
+        brocaRow,
+        { ...brocaRow, harness: "opencode2", session_id: "ses", activity_note: note },
+      ]),
+    ).toBe(note);
+  });
+});
 
 function event(partial: Partial<DbCacheEvent>): DbCacheEvent {
   return {
