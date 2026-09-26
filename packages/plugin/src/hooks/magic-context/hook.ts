@@ -840,6 +840,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         config: deps.config,
         compactionOff,
         thinkingBindingRecoveryEnabled: deps.config.transform_mode !== "rust",
+        hostCompactionGapRestore: deps.config.transform_mode !== "rust",
+        historianRunnable,
         tagger: deps.tagger,
         db,
         client: deps.client,

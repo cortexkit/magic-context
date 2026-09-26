@@ -3,8 +3,10 @@
 import { afterAll, beforeAll, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
+import { buildSegments, findBusts } from "../src/cache-analysis";
 import { TestHarness } from "../src/harness";
 import { buildMockHistorianPayload, findHistorianOrdinalRange } from "../src/mock-historian";
 
@@ -20,6 +22,12 @@ import { buildMockHistorianPayload, findHistorianOrdinalRange } from "../src/moc
  * On OpenCode 1.18 the compaction request also runs this session's system-prompt
  * hook with the compaction agent's prompt, so a system-hash fold usually lands on
  * the same pass. The host-compaction trigger does not depend on that.
+ *
+ * The turns between Magic Context's boundary and the host's retained tail are in no
+ * compartment and no longer loaded by the host. Magic Context reads them back from
+ * the host's store and serves them raw, in place of the compaction request, until
+ * the historian covers them; the restored range replays byte-identically on the
+ * passes after it, across a restart too.
  */
 
 const HISTORIAN_SYSTEM_MARKER = "the hippocampus of a long-running coding agent";
@@ -136,6 +144,7 @@ function hostSummaryRow(
     }
 }
 
+
 function pluginLog(): string {
     return readFileSync(join(h.dataDir, "cortexkit", "magic-context-e2e.log"), "utf8");
 }
@@ -164,94 +173,281 @@ function assertOpenDatabasesAreThrowaway(): void {
         .filter((path) => /opencode|cortexkit|magic-context|context\.db/.test(path));
     expect(databases.some((path) => path.endsWith("opencode.db"))).toBe(true);
     expect(databases.some((path) => path.endsWith("context.db"))).toBe(true);
-    const outside = databases.filter((path) => !realpathSync(path).startsWith(dataDir));
+    // The macOS network stack keeps its own URL cache per executable name
+    // (~/Library/Caches/opencode/Cache.db). It is neither an OpenCode nor a Magic
+    // Context store, and the child's environment cannot move it.
+    const outside = databases.filter(
+        (path) =>
+            !realpathSync(path).startsWith(dataDir) &&
+            !/\/Library\/Caches\/opencode\/Cache\.db(-wal|-shm)?$/.test(path),
+    );
     expect(outside).toEqual([]);
 }
 
-it(
-    "re-anchors the baseline once on the first pass after /compact",
-    async () => {
-        h.mock.reset();
-        h.mock.addMatcher((body) => {
-            if (!isHistorianRequest(body)) return null;
-            const range = findHistorianOrdinalRange(body);
-            const text = range
-                ? buildMockHistorianPayload({
-                      start: range.start,
-                      end: range.end,
-                      title: "native compaction chunk",
-                      body: `${HISTORY_SENTINEL}: the early turns of this session.`,
-                  })
-                : "<output><compartments></compartments><facts></facts><unprocessed_from>1</unprocessed_from></output>";
-            return {
-                text,
-                usage: {
-                    input_tokens: 500,
-                    output_tokens: 200,
-                    cache_creation_input_tokens: 500,
-                    cache_read_input_tokens: 0,
-                },
-            };
-        });
-        h.mock.setDefault({
-            text: "fill",
-            usage: {
-                input_tokens: 1_000,
-                output_tokens: 20,
-                cache_creation_input_tokens: 1_000,
-                cache_read_input_tokens: 0,
-            },
-        });
+function openCodeStore(): Database {
+    return new Database(join(h.dataDir, "opencode", "opencode.db"), { readonly: true });
+}
 
-        const sessionId = await h.createSession();
-        for (let i = 1; i <= 10; i++) {
-            await h.sendPrompt(
-                sessionId,
-                `turn ${i}: meaningful prompt carrying durable signal for chunk ${i}. ${h.ballast(3_000)}`,
-            );
-        }
-        assertOpenDatabasesAreThrowaway();
+/** The newest native compaction request of a session and the retained tail it names. */
+function compactionRequest(sessionId: string): { id: string; tailStartId: string } | null {
+    const db = openCodeStore();
+    try {
+        const row = db
+            .prepare(
+                `SELECT message_id AS id, json_extract(data, '$.tail_start_id') AS tail FROM part
+                  WHERE session_id = ? AND json_extract(data, '$.type') = 'compaction'
+                  ORDER BY time_created DESC, id DESC LIMIT 1`,
+            )
+            .get(sessionId) as { id: string; tail: string | null } | null;
+        return row && typeof row.tail === "string" ? { id: row.id, tailStartId: row.tail } : null;
+    } finally {
+        db.close();
+    }
+}
 
-        // Cross the execute threshold so the historian runs and later passes
-        // fold its compartment into the served history.
-        h.mock.setDefault(bigUsage("big"));
-        await h.sendPrompt(sessionId, "turn 11: trigger turn with real content.");
-        await h.sendPrompt(sessionId, "turn 12: post-trigger follow-up.");
-        await h.waitFor(
-            () => {
-                const row = h
-                    .contextDb()
-                    .prepare(
-                        "SELECT (SELECT COUNT(*) FROM compartments WHERE session_id = ?) AS c, compartment_in_progress AS busy FROM session_meta WHERE session_id = ?",
-                    )
-                    .get(sessionId, sessionId) as { c: number; busy: number } | null;
-                return (row?.c ?? 0) >= 1 && row?.busy === 0;
-            },
-            { timeoutMs: 60_000, label: "compartment published" },
-        );
-
-        // Keep executing until the served request carries the compartment and
-        // the baseline records the boundary it covers.
-        for (let turn = 13; turn <= 20; turn++) {
-            await h.sendPrompt(sessionId, `turn ${turn}: executing follow-up.`);
-            const served = mainRequestBodies().at(-1) ?? "";
-            if (served.includes(HISTORY_SENTINEL) && readBaseline(sessionId).boundary !== null) {
-                break;
+/** Each user row's `turn N:` label, in stored order, with its row id. */
+function userTurnLabels(sessionId: string): Array<{ id: string; label: string }> {
+    const db = openCodeStore();
+    try {
+        const rows = db
+            .prepare(
+                `SELECT m.id AS id, p.data AS part FROM message m
+                   JOIN part p ON p.message_id = m.id
+                  WHERE m.session_id = ? AND json_extract(m.data, '$.role') = 'user'
+                    AND json_extract(p.data, '$.type') = 'text'
+                  ORDER BY m.time_created ASC, m.id ASC, p.id ASC`,
+            )
+            .all(sessionId) as Array<{ id: string; part: string }>;
+        const labels: Array<{ id: string; label: string }> = [];
+        for (const row of rows) {
+            const text = (JSON.parse(row.part) as { text?: string }).text ?? "";
+            const label = /^turn \d+:/.exec(text)?.[0];
+            if (label && !labels.some((entry) => entry.id === row.id)) {
+                labels.push({ id: row.id, label });
             }
         }
-        const beforeCompaction = readBaseline(sessionId);
-        expect(beforeCompaction.hasM0).toBe(true);
-        expect(beforeCompaction.boundary).not.toBeNull();
-        expect(mainRequestBodies().at(-1)).toContain(HISTORY_SENTINEL);
+        return labels;
+    } finally {
+        db.close();
+    }
+}
 
-        // Native compaction. The mock answers the summary request.
-        h.mock.setDefault(smallUsage(HOST_SUMMARY_SENTINEL));
-        await h.waitForMockQuiescence({ label: "quiet before compaction" });
-        const hashBeforeCompaction = readSystemHash(sessionId);
-        expect(hashBeforeCompaction).not.toBe("");
-        const logOffsetBeforeCompaction = pluginLog().length;
-        await h.compactSession(sessionId);
-        await h.waitForMockQuiescence({ label: "quiet after compaction" });
+/**
+ * The turns a compaction hid: user turns strictly after `boundaryId` and strictly
+ * before the retained tail's first row.
+ */
+function hiddenTurns(sessionId: string, boundaryId: string, tailStartId: string): string[] {
+    const labels = userTurnLabels(sessionId);
+    const ids = labels.map((entry) => entry.id);
+    const all = ((): string[] => {
+        const db = openCodeStore();
+        try {
+            return (
+                db
+                    .prepare(
+                        "SELECT id FROM message WHERE session_id = ? ORDER BY time_created ASC, id ASC",
+                    )
+                    .all(sessionId) as Array<{ id: string }>
+            ).map((row) => row.id);
+        } finally {
+            db.close();
+        }
+    })();
+    const lower = all.indexOf(boundaryId);
+    const upper = all.indexOf(tailStartId);
+    expect(lower).toBeGreaterThan(-1);
+    expect(upper).toBeGreaterThan(-1);
+    return labels
+        .filter((entry) => {
+            const at = all.indexOf(entry.id);
+            return at > lower && at < upper && ids.includes(entry.id);
+        })
+        .map((entry) => entry.label);
+}
+
+function labelFor(sessionId: string, messageId: string): string {
+    const label = userTurnLabels(sessionId).find((entry) => entry.id === messageId)?.label;
+    expect(label).toBeDefined();
+    return label as string;
+}
+
+function mainRequests(): Array<{ body: Record<string, unknown> }> {
+    return h.requests().filter((request) => !isHistorianRequest(request.body));
+}
+
+function requestContaining(text: string): { body: Record<string, unknown> } {
+    const request = mainRequests().find((candidate) => JSON.stringify(candidate.body).includes(text));
+    expect(request).toBeDefined();
+    return request as { body: Record<string, unknown> };
+}
+
+/**
+ * sha256 over a request's cacheable prefix: every wire segment (system blocks, then
+ * messages, `cache_control` markers and the billing nonce normalised out) up to and
+ * including the last cache breakpoint of `reference`.
+ */
+function cachedPrefixSha(
+    body: Record<string, unknown>,
+    reference: Record<string, unknown>,
+): { sha: string; segments: number } {
+    const referenceSegments = buildSegments(reference);
+    let last = -1;
+    referenceSegments.forEach((segment, index) => {
+        if (segment.breakpoint) last = index;
+    });
+    expect(last).toBeGreaterThan(0);
+    const segments = buildSegments(body).slice(0, last + 1);
+    const hash = createHash("sha256");
+    for (const segment of segments) hash.update(`${segment.id}:${segment.hash}\n`);
+    return { sha: hash.digest("hex"), segments: segments.length };
+}
+
+/**
+ * The provider content blocks from the one carrying `fromLabel` up to (not including)
+ * the message carrying `toLabel`, with `cache_control` markers removed. Blocks, not
+ * messages: the provider merges adjacent user messages, so the history head can share
+ * a message with the first restored turn.
+ */
+function wireSlice(body: Record<string, unknown>, fromLabel: string, toLabel: string): string[] {
+    const blocks: string[] = [];
+    let started = false;
+    for (const message of Array.isArray(body.messages) ? body.messages : []) {
+        const { role, content } = message as { role: string; content: unknown };
+        const parts = Array.isArray(content) ? content : [{ type: "text", text: content }];
+        const serialized = parts.map((part) =>
+            JSON.stringify(part, (key, value) => (key === "cache_control" ? undefined : value)),
+        );
+        if (started && serialized.some((part) => part.includes(toLabel))) return blocks;
+        for (const part of serialized) {
+            if (!started && part.includes(fromLabel)) started = true;
+            if (started) blocks.push(`${role}:${part}`);
+        }
+    }
+    expect({ fromLabel, toLabel, closed: false }).toEqual({ fromLabel, toLabel, closed: true });
+    return blocks;
+}
+
+/** Every label present in `served`, in the given order. */
+function expectInOrder(served: string, labels: string[]): void {
+    let cursor = -1;
+    for (const label of labels) {
+        const at = served.indexOf(label, cursor + 1);
+        expect({ label, found: at > cursor }).toEqual({ label, found: true });
+        cursor = at;
+    }
+}
+
+function installMocks(): void {
+    h.mock.reset();
+    h.mock.addMatcher((body) => {
+        if (!isHistorianRequest(body)) return null;
+        const range = findHistorianOrdinalRange(body);
+        const text = range
+            ? buildMockHistorianPayload({
+                  start: range.start,
+                  end: range.end,
+                  title: "native compaction chunk",
+                  body: `${HISTORY_SENTINEL}: the early turns of this session.`,
+              })
+            : "<output><compartments></compartments><facts></facts><unprocessed_from>1</unprocessed_from></output>";
+        return {
+            text,
+            usage: {
+                input_tokens: 500,
+                output_tokens: 200,
+                cache_creation_input_tokens: 500,
+                cache_read_input_tokens: 0,
+            },
+        };
+    });
+    h.mock.setDefault({
+        text: "fill",
+        usage: {
+            input_tokens: 1_000,
+            output_tokens: 20,
+            cache_creation_input_tokens: 1_000,
+            cache_read_input_tokens: 0,
+        },
+    });
+}
+
+function compartmentsSettled(sessionId: string, atLeast: number): boolean {
+    const row = h
+        .contextDb()
+        .prepare(
+            "SELECT (SELECT COUNT(*) FROM compartments WHERE session_id = ?) AS c, compartment_in_progress AS busy FROM session_meta WHERE session_id = ?",
+        )
+        .get(sessionId, sessionId) as { c: number; busy: number } | null;
+    return (row?.c ?? 0) >= atLeast && row?.busy === 0;
+}
+
+function compartmentCount(sessionId: string): number {
+    const row = h
+        .contextDb()
+        .prepare("SELECT COUNT(*) AS c FROM compartments WHERE session_id = ?")
+        .get(sessionId) as { c: number } | null;
+    return row?.c ?? 0;
+}
+
+/**
+ * Build a session whose history the historian has summarised and whose served
+ * request carries that history, then run OpenCode's own `/compact` on it.
+ */
+async function compactedSession(): Promise<{
+    sessionId: string;
+    hashBeforeCompaction: string;
+    logOffsetBeforeCompaction: number;
+}> {
+    installMocks();
+    const sessionId = await h.createSession();
+    for (let i = 1; i <= 10; i++) {
+        await h.sendPrompt(
+            sessionId,
+            `turn ${i}: meaningful prompt carrying durable signal for chunk ${i}. ${h.ballast(3_000)}`,
+        );
+    }
+    assertOpenDatabasesAreThrowaway();
+
+    // Cross the execute threshold so the historian runs and later passes
+    // fold its compartment into the served history.
+    h.mock.setDefault(bigUsage("big"));
+    await h.sendPrompt(sessionId, "turn 11: trigger turn with real content.");
+    await h.sendPrompt(sessionId, "turn 12: post-trigger follow-up.");
+    await h.waitFor(() => compartmentsSettled(sessionId, 1), {
+        timeoutMs: 60_000,
+        label: "compartment published",
+    });
+
+    // Keep executing until the served request carries the compartment and
+    // the baseline records the boundary it covers.
+    for (let turn = 13; turn <= 20; turn++) {
+        await h.sendPrompt(sessionId, `turn ${turn}: executing follow-up.`);
+        const served = mainRequestBodies().at(-1) ?? "";
+        if (served.includes(HISTORY_SENTINEL) && readBaseline(sessionId).boundary !== null) {
+            break;
+        }
+    }
+    const beforeCompaction = readBaseline(sessionId);
+    expect(beforeCompaction.hasM0).toBe(true);
+    expect(beforeCompaction.boundary).not.toBeNull();
+    expect(mainRequestBodies().at(-1)).toContain(HISTORY_SENTINEL);
+
+    // Native compaction. The mock answers the summary request.
+    h.mock.setDefault(smallUsage(HOST_SUMMARY_SENTINEL));
+    await h.waitForMockQuiescence({ label: "quiet before compaction" });
+    const hashBeforeCompaction = readSystemHash(sessionId);
+    expect(hashBeforeCompaction).not.toBe("");
+    const logOffsetBeforeCompaction = pluginLog().length;
+    await h.compactSession(sessionId);
+    await h.waitForMockQuiescence({ label: "quiet after compaction" });
+    return { sessionId, hashBeforeCompaction, logOffsetBeforeCompaction };
+}
+
+it(
+    "re-anchors the baseline once and restores the hidden turns on the first pass after /compact",
+    async () => {
+        const { sessionId, hashBeforeCompaction, logOffsetBeforeCompaction } =
+            await compactedSession();
 
         // Building the compaction request runs this session's system-prompt hook with
         // the compaction agent's prompt. That prompt must not become the session's
@@ -267,9 +463,8 @@ it(
 
         h.mock.setDefault(smallUsage("after-compaction"));
         await h.sendPrompt(sessionId, AFTER_COMPACTION_PROMPT);
-        const served = mainRequestBodies().filter((body) => body.includes(AFTER_COMPACTION_PROMPT));
-        expect(served.length).toBeGreaterThan(0);
-        const first = served[0] as string;
+        const passA = requestContaining(AFTER_COMPACTION_PROMPT);
+        const first = JSON.stringify(passA.body);
 
         // The first pass after the compaction folded: the cached baseline is newer
         // than the host summary, and its boundary is the latest compartment end.
@@ -294,8 +489,31 @@ it(
             `native host compaction heads the window (request ${summary?.parentId}, summary ${summary?.id},`,
         );
 
+        // The turns between the Magic Context boundary and the host's retained tail
+        // are served raw, in stored order, after the history head and before the
+        // retained turn; the compaction request (which only asks for a summary) is not.
+        const request = compactionRequest(sessionId);
+        expect(request).not.toBeNull();
+        expect(request?.id).toBe(summary?.parentId);
+        const hidden = hiddenTurns(sessionId, after.boundary as string, request?.tailStartId as string);
+        expect(hidden.length).toBeGreaterThan(0);
+        const retained = labelFor(sessionId, request?.tailStartId as string);
+        expectInOrder(first, [HISTORY_SENTINEL, ...hidden, retained, AFTER_COMPACTION_PROMPT]);
+        // The restored turns go on the wire exactly as the host served them before
+        // the compaction: same messages, same bytes (cache markers aside).
+        const beforeCompactionRequest = mainRequests()
+            .filter((candidate) => !JSON.stringify(candidate.body).includes("context summarization agent"))
+            .filter((candidate) => JSON.stringify(candidate.body).includes(retained))
+            .find((candidate) => !JSON.stringify(candidate.body).includes(AFTER_COMPACTION_PROMPT));
+        expect(beforeCompactionRequest).toBeDefined();
+        expect(wireSlice(passA.body, hidden[0] as string, retained)).toEqual(
+            wireSlice(beforeCompactionRequest?.body ?? {}, hidden[0] as string, retained),
+        );
+        expect(first).not.toContain("What did we do so far?");
+
         // Exactly one fold after the compaction: the next pass replays it.
-        await h.sendPrompt(sessionId, "second prompt after the native compaction");
+        const secondPrompt = "second prompt after the native compaction";
+        await h.sendPrompt(sessionId, secondPrompt);
         const lines = pluginLog().split("\n");
         const compactedAt = lines.findIndex((line) => line.includes("compaction-marker: removed on session cleanup"));
         expect(compactedAt).toBeGreaterThan(-1);
@@ -314,7 +532,86 @@ it(
         expect(foldsSinceCompaction[0]).toContain("reason=host_compaction");
         expect(readSystemHash(sessionId)).toBe(hashBeforeCompaction);
 
+        // The defer pass after the first post-compaction pass keeps the cached prefix
+        // byte-identical, restored turns included.
+        const passB = requestContaining(secondPrompt);
+        expect(findBusts([passA, passB])).toEqual([]);
+        expect(cachedPrefixSha(passB.body, passA.body)).toEqual(
+            cachedPrefixSha(passA.body, passA.body),
+        );
+        expectInOrder(JSON.stringify(passB.body), [HISTORY_SENTINEL, ...hidden, retained]);
+
+        // The compaction marked the historian due for the rows it hid.
+        expect(pluginLog().slice(logOffsetBeforeCompaction)).toContain(
+            "historian marked due to cover the rows the compaction hid",
+        );
+
+        // Once the historian publishes over the hidden turns, a pass that rebuilds the
+        // prefix serves them as history and no longer raw. Newer turns push the hidden
+        // ones out of the protected tail; executing passes let the historian run and
+        // then fold what it published.
+        const compartmentsBefore = compartmentCount(sessionId);
+        h.mock.setDefault(bigUsage("big"));
+        for (let turn = 1; turn <= 6; turn++) {
+            await h.sendPrompt(
+                sessionId,
+                `catch-up ${turn}: newer work after the compaction. ${h.ballast(3_000)}`,
+            );
+        }
+        await h.waitFor(() => compartmentsSettled(sessionId, compartmentsBefore + 1), {
+            timeoutMs: 90_000,
+            label: "compartment published over the hidden turns",
+        });
+        let latest = "";
+        for (let turn = 1; turn <= 4; turn++) {
+            await h.sendPrompt(sessionId, `settle ${turn}: executing follow-up.`);
+            latest = mainRequestBodies().at(-1) ?? "";
+            if (hidden.every((label) => !latest.includes(label))) break;
+        }
+        for (const label of hidden) expect(latest).not.toContain(label);
+        // The compartment published over the hidden turns is rendered with the rest of
+        // the history.
+        const sentinels = (body: string) => body.split(HISTORY_SENTINEL).length - 1;
+        expect(sentinels(latest)).toBeGreaterThan(sentinels(first));
+
         assertOpenDatabasesAreThrowaway();
     },
-    240_000,
+    420_000,
+);
+
+it(
+    "replays the restored turns byte-identically across a restart after the first pass",
+    async () => {
+        const { sessionId } = await compactedSession();
+
+        h.mock.setDefault(smallUsage("after-compaction"));
+        const promptA = "restart variant: first prompt after the native compaction";
+        await h.sendPrompt(sessionId, promptA);
+        const passA = requestContaining(promptA);
+        const request = compactionRequest(sessionId);
+        const boundary = readBaseline(sessionId).boundary;
+        expect(request).not.toBeNull();
+        expect(boundary).not.toBeNull();
+        const hidden = hiddenTurns(sessionId, boundary as string, request?.tailStartId as string);
+        expect(hidden.length).toBeGreaterThan(0);
+        expectInOrder(JSON.stringify(passA.body), [
+            HISTORY_SENTINEL,
+            ...hidden,
+            labelFor(sessionId, request?.tailStartId as string),
+            promptA,
+        ]);
+
+        // A new process has none of the previous one's kept rows; it rebuilds the
+        // range from the persisted boundary and the compaction request alone.
+        await h.restart();
+        assertOpenDatabasesAreThrowaway();
+        const promptB = "restart variant: second prompt after the restart";
+        await h.sendPrompt(sessionId, promptB);
+        const passB = requestContaining(promptB);
+        expect(findBusts([passA, passB])).toEqual([]);
+        expect(cachedPrefixSha(passB.body, passA.body)).toEqual(
+            cachedPrefixSha(passA.body, passA.body),
+        );
+    },
+    420_000,
 );

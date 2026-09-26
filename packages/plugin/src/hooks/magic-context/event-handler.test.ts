@@ -6,6 +6,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { createCompactionHandler } from "../../features/magic-context/compaction";
 import { recordMessageFtsRowid } from "../../features/magic-context/message-fts-rowid-map";
 import {
     __resetMessageIndexAsyncForTests,
@@ -1129,13 +1130,52 @@ describe("createEventHandler", () => {
             },
         });
 
-        expect(onCompacted).toHaveBeenCalledWith("ses-clean", expect.anything());
+        expect(onCompacted).toHaveBeenCalledWith("ses-clean", expect.anything(), {
+            keepTagState: false,
+        });
         expect(contextUsageMap.has("ses-clean")).toBe(false);
         expect(taggerCleanup).toHaveBeenCalledWith("ses-clean");
         expect(onSessionDeleted).toHaveBeenCalledWith("ses-clean");
         expect(getTagsBySession(openDatabase(), "ses-clean")).toHaveLength(0);
         expect(getMaxCompressionDepth(openDatabase(), "ses-clean")).toBe(0);
         expect(getOrCreateSessionMeta(openDatabase(), "ses-clean").isSubagent).toBe(false);
+    });
+
+    it("keeps tag state and marks the historian due when a native compaction's hidden rows are restored", async () => {
+        useTempDataHome("context-event-compacted-restore-");
+        const deps = {
+            ...createDeps(new Map()),
+            compactionHandler: createCompactionHandler(),
+            hostCompactionGapRestore: true,
+            historianRunnable: true,
+        };
+        const handler = createEventHandler(deps);
+        insertTag(deps.db, "ses-restore", "m-1", "message", 100, 1);
+        insertTag(deps.db, "ses-plain", "m-1", "message", 100, 1);
+        getOrCreateSessionMeta(deps.db, "ses-restore");
+        getOrCreateSessionMeta(deps.db, "ses-plain");
+        deps.db
+            .prepare(
+                "UPDATE session_meta SET cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
+            )
+            .run("m-boundary", "ses-restore");
+
+        for (const sessionID of ["ses-restore", "ses-plain"]) {
+            await handler({ event: { type: "session.compacted", properties: { sessionID } } });
+        }
+
+        // With a boundary to restore from, the rows after it stay on the wire, so
+        // their tags keep replaying and the historian is started to cover them.
+        expect(getTagsBySession(deps.db, "ses-restore").map((tag) => tag.status)).toEqual([
+            "active",
+        ]);
+        expect(getOrCreateSessionMeta(deps.db, "ses-restore").compartmentInProgress).toBe(true);
+        // Without one nothing is restored: the tags are retired as before and the
+        // historian is left to its usual trigger.
+        expect(getTagsBySession(deps.db, "ses-plain").map((tag) => tag.status)).toEqual([
+            "compacted",
+        ]);
+        expect(getOrCreateSessionMeta(deps.db, "ses-plain").compartmentInProgress).toBe(false);
     });
 
     it("retries a failed deleted-session cleanup from its durable marker", async () => {

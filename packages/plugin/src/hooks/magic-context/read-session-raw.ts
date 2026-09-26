@@ -727,6 +727,114 @@ export function readRawSessionMessageByIdFromDb(
     };
 }
 
+/** One stored row rebuilt in the shape OpenCode 1 hands the messages transform. */
+export interface HostShapedMessage {
+    info: Record<string, unknown>;
+    parts: Record<string, unknown>[];
+}
+
+export type HostMessageRangeRead =
+    | { status: "ok"; messages: HostShapedMessage[] }
+    /** One of the two bound rows is not in the store for this session. */
+    | { status: "missing-bound"; missing: "after" | "before" }
+    /** More than `maxRows` rows lie between the bounds; nothing was decoded. */
+    | { status: "too-many-rows"; rows: number };
+
+/**
+ * Read the rows strictly between two stored messages, in stored order, and rebuild
+ * each one the way OpenCode 1 loads it: the message JSON with its row id and session
+ * id added, and each part's JSON with its part id, session id and message id added,
+ * parts in id order. An `after` bound that sorts at or past `before` is an empty
+ * range, not an error.
+ *
+ * One indexed range read on (session, time_created, id), capped at `maxRows + 1`
+ * rows so an unexpectedly long range is refused before any part is read.
+ */
+export function readHostMessageRangeFromDb(
+    db: Database,
+    sessionId: string,
+    afterId: string,
+    beforeId: string,
+    maxRows: number,
+): HostMessageRangeRead {
+    const anchor = db.prepare(
+        "SELECT time_created, id FROM message WHERE id = ? AND session_id = ?",
+    );
+    const after = anchor.get(afterId, sessionId);
+    if (!isAnchorRow(after)) return { status: "missing-bound", missing: "after" };
+    const before = anchor.get(beforeId, sessionId);
+    if (!isAnchorRow(before)) return { status: "missing-bound", missing: "before" };
+    const afterSortsFirst =
+        after.time_created < before.time_created ||
+        (after.time_created === before.time_created && after.id < before.id);
+    if (!afterSortsFirst) return { status: "ok", messages: [] };
+
+    const limit = Math.max(0, Math.floor(maxRows));
+    const messageRows = db
+        .prepare(
+            `SELECT id, session_id, data FROM message
+             WHERE session_id = ?
+               AND (time_created, id) > (?, ?)
+               AND (time_created, id) < (?, ?)
+             ORDER BY time_created ASC, id ASC
+             LIMIT ?`,
+        )
+        .all(
+            sessionId,
+            after.time_created,
+            after.id,
+            before.time_created,
+            before.id,
+            limit + 1,
+        ) as Array<{ id: unknown; session_id: unknown; data: unknown }>;
+    if (messageRows.length > limit) return { status: "too-many-rows", rows: messageRows.length };
+
+    const partsByMessageId = new Map<string, Record<string, unknown>[]>();
+    const ids = messageRows.flatMap((row) => (typeof row.id === "string" ? [row.id] : []));
+    const CHUNK = 800;
+    for (let i = 0; i < ids.length; i += CHUNK) {
+        const slice = ids.slice(i, i + CHUNK);
+        const placeholders = slice.map(() => "?").join(",");
+        const partRows = db
+            .prepare(
+                `SELECT id, session_id, message_id, data FROM part
+                 WHERE +session_id = ? AND likelihood(message_id IN (${placeholders}), 0.000001)
+                 ORDER BY message_id ASC, id ASC`,
+            )
+            .all(sessionId, ...slice) as Array<{
+            id: unknown;
+            session_id: unknown;
+            message_id: unknown;
+            data: unknown;
+        }>;
+        for (const part of partRows) {
+            if (typeof part.message_id !== "string" || typeof part.data !== "string") continue;
+            const data = parseJsonRecord(part.data);
+            if (!data) continue;
+            const list = partsByMessageId.get(part.message_id) ?? [];
+            list.push({
+                ...data,
+                id: part.id,
+                sessionID: part.session_id,
+                messageID: part.message_id,
+            });
+            partsByMessageId.set(part.message_id, list);
+        }
+    }
+
+    const messages: HostShapedMessage[] = [];
+    for (const row of messageRows) {
+        if (typeof row.id !== "string" || typeof row.data !== "string") continue;
+        const info = parseJsonRecord(row.data);
+        if (!info) continue;
+        messages.push({
+            info: { ...info, id: row.id, sessionID: row.session_id },
+            parts: partsByMessageId.get(row.id) ?? [],
+        });
+    }
+    return { status: "ok", messages };
+}
+
 /** Read the canonical servable tail and its parts in one query, including its boundary row. */
 export function readRawSeedTailFromDb(
     db: Database,

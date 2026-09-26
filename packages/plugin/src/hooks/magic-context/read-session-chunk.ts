@@ -29,10 +29,12 @@ import {
 import {
     countRawSessionMessageOrdinalsFromDb,
     countStoredRawSessionMessagesFromDb,
+    type HostMessageRangeRead,
     type RawMessage,
     type RawMessageOrdinalAnchor,
     type RawMessageOrdinalEntry,
     type RawMessageParts,
+    readHostMessageRangeFromDb,
     readRawSeedTailFromDb,
     readRawSessionMessageByIdFromDb,
     readRawSessionMessageIdOrdinalsFromDb,
@@ -732,6 +734,25 @@ export function compareRawSessionMessageOrder(
         }
         return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
     });
+}
+
+/**
+ * Read OpenCode 1's stored rows strictly between two messages, rebuilt in the shape
+ * the host serves them (see `readHostMessageRangeFromDb`). Null when this session's
+ * raw history comes from a registered provider (another host) or OpenCode's store
+ * is absent: only OpenCode 1's own store holds rows in the host's message shape.
+ */
+export function readHostSessionMessageRange(
+    sessionId: string,
+    afterId: string,
+    beforeId: string,
+    maxRows: number,
+): HostMessageRangeRead | null {
+    if (sessionProviders.has(sessionId)) return null;
+    if (!openCodeDbExists()) return null;
+    return withReadOnlySessionDb((db) =>
+        readHostMessageRangeFromDb(db, sessionId, afterId, beforeId, maxRows),
+    );
 }
 
 export function readRawSessionMessageById(sessionId: string, messageId: string): RawMessage | null {
