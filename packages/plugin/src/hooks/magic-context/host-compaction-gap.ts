@@ -148,12 +148,14 @@ export function readCompactionTailStartId(request: MessageLike): string | null {
 
 /**
  * Rows of the range that are never served: an older compaction pair left inside
- * the range by an earlier `/compact`. Its request only asks for a summary, and
- * summary rows are stripped from every pass anyway.
+ * the range by an earlier `/compact`. Its request carries nothing but the compaction
+ * part (it only asks for a summary), and summary rows are stripped from every pass
+ * anyway. A real user turn that also carries a compaction part (Magic Context's own
+ * marker is written onto one) is served as stored.
  */
 function isServedRangeRow(message: HostShapedMessage): boolean {
     if (message.info.summary === true) return false;
-    return !message.parts.some((part) => part.type === "compaction");
+    return !(message.parts.length > 0 && message.parts.every((part) => part.type === "compaction"));
 }
 
 function logOnce(sessionId: string, key: string, text: string): void {

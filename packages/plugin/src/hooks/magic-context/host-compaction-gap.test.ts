@@ -290,6 +290,42 @@ describe("restoring the rows a native compaction hid", () => {
         ).toBe(false);
     });
 
+    it("leaves an older compaction pair inside the range off the wire, but serves a turn that carries a compaction part", () => {
+        const insert = db.prepare(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?)",
+        );
+        const insertPart = db.prepare(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?, ?, ?, ?, ?, ?)",
+        );
+        insert.run("old-req", SESSION, 32, 32, JSON.stringify({ role: "user" }));
+        insertPart.run(
+            "p-old-req",
+            "old-req",
+            SESSION,
+            32,
+            32,
+            '{"type":"compaction","auto":false}',
+        );
+        insert.run(
+            "old-sum",
+            SESSION,
+            34,
+            34,
+            JSON.stringify({
+                role: "assistant",
+                parentID: "old-req",
+                summary: true,
+                finish: "stop",
+            }),
+        );
+        insertPart.run("p-old-sum", "old-sum", SESSION, 34, 34, '{"type":"text","text":"old"}');
+        insertPart.run("p-u3-9", "u3", SESSION, 50, 50, '{"type":"compaction","auto":true}');
+
+        const { messages } = pass(db);
+        expect(ids(messages)).toEqual(["sum", "u2", "a2", "u3", "a3", "u4", "a4", "u5"]);
+        expect((messages[3] as MessageLike).parts).toHaveLength(2);
+    });
+
     it("falls back to the host's messages when the request names no retained tail", () => {
         const messages = hostWindow(db);
         const request = messages[0] as MessageLike;
