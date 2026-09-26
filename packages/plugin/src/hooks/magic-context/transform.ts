@@ -412,6 +412,14 @@ function authorityModuleForProject(
         },
         authorityDrain: (request) => authorityDrain.call(module, { ...request, projectRoot }),
         mirrorPull: (request) => mirrorPull.call(module, { ...request, projectRoot }),
+        markerStatus: module.markerStatus
+            ? (request) => {
+                  if (!module.markerStatus) {
+                      throw new Error("the module does not expose mirror.marker_status");
+                  }
+                  return module.markerStatus({ ...request, projectRoot });
+              }
+            : undefined,
     };
 }
 
@@ -487,7 +495,9 @@ export async function recoverTsAuthorityProject(args: {
                     return checksumAuthoritySeedRows(rows);
                 },
             });
-            if (!("code" in drained)) break;
+            // A non-retryable refusal (a single-store project) will not change on a
+            // second attempt.
+            if (!("code" in drained) || drained.retryable === false) break;
         }
         if (!drained || "code" in drained) return "retryable";
         drainedDomain = true;

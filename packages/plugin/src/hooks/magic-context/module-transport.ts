@@ -19,6 +19,7 @@ import type {
     ChangefeedPage,
     ChangefeedRow,
 } from "../../features/magic-context/context-authority";
+import { asSingleStoreTripwire } from "../../features/magic-context/single-store-marker";
 import { getDataDir } from "../../shared/data-path";
 import { getHarness } from "../../shared/harness";
 import { isRecord } from "../../shared/record-type-guard";
@@ -482,6 +483,7 @@ export class SubcModuleTransport {
             | "authority.drain_flip"
             | "authority.drain_finish"
             | "mirror.pull"
+            | "mirror.marker_status"
             | "mirror.memory"
             | "memory.identity.ack"
             | "ctx_note"
@@ -728,6 +730,7 @@ export class SubcModuleTransport {
             | "authority.drain_verify"
             | "authority.drain_finish"
             | "mirror.pull"
+            | "mirror.marker_status"
             | "mirror.memory"
             | "memory.identity.ack",
         body: Record<string, unknown>,
@@ -836,10 +839,12 @@ export class SubcModuleTransport {
         cursor: number;
         limit: number;
         live_only?: boolean;
+        project: string;
         projectRoot?: string;
     }): Promise<{ page: ChangefeedPage }> {
+        // `project` travels in the body verbatim; only the routing root is stripped.
         const { projectRoot, ...body } = args;
-        const response = await this.authorityRequest(
+        const response = await this.singleStoreRequest(
             `mirror:${args.domain}`,
             projectRoot ?? this.bindRootForAuthority(),
             "mirror.pull",
@@ -847,6 +852,49 @@ export class SubcModuleTransport {
         );
         if (!isRecord(response.page)) throw new Error("mirror.pull omitted page");
         return { page: response.page as unknown as ChangefeedPage };
+    }
+
+    async markerStatus(args: {
+        project: string;
+        projectRoot?: string;
+    }): Promise<{ ok: boolean; marked?: boolean; below_lane?: boolean }> {
+        const { projectRoot, ...body } = args;
+        const response = await this.singleStoreRequest(
+            `mirror-marker:${args.project}`,
+            projectRoot ?? this.bindRootForAuthority(),
+            "mirror.marker_status",
+            body,
+        );
+        if (response.ok !== true) throw new Error("mirror.marker_status omitted ok");
+        return {
+            ok: true,
+            marked: response.marked === true,
+            below_lane: response.below_lane === true,
+        };
+    }
+
+    /**
+     * An authority request whose module refusal may be a single-store tripwire. The
+     * refusal is surfaced as a `SingleStoreTripwireError`, whether it arrives as a
+     * rejected call or as a response record carrying the code.
+     */
+    private async singleStoreRequest(
+        sessionId: string,
+        projectRoot: string,
+        method: "mirror.pull" | "mirror.marker_status",
+        body: Record<string, unknown>,
+    ): Promise<Record<string, unknown>> {
+        let response: Record<string, unknown>;
+        try {
+            response = await this.authorityRequest(sessionId, projectRoot, method, body);
+        } catch (error) {
+            throw asSingleStoreTripwire(error) ?? error;
+        }
+        const refusal =
+            asSingleStoreTripwire(response) ??
+            (isRecord(response.error) ? asSingleStoreTripwire(response.error) : null);
+        if (refusal) throw refusal;
+        return response;
     }
 
     async mirrorMemory(args: {

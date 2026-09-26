@@ -58,6 +58,7 @@ describe("v2 transform-mode resolution", () => {
             "authoritySeed",
             "authorityDrain",
             "mirrorPull",
+            "markerStatus",
             "mirrorMemory",
             "memoryIdentityAck",
             "getCompartmentsAfter",

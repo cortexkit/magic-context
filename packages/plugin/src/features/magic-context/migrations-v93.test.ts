@@ -7,7 +7,11 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import { getMemoriesByProject, insertMemory } from "./memory/storage-memory";
 import { LATEST_MIGRATION_VERSION, MIGRATIONS, runMigrations } from "./migrations";
 import { MARKER_LANE_VERSION, MARKER_TABLE } from "./single-store-marker";
-import { getPersistedSchemaVersion, initializeDatabase, LATEST_SUPPORTED_VERSION } from "./storage-db";
+import {
+    getPersistedSchemaVersion,
+    initializeDatabase,
+    LATEST_SUPPORTED_VERSION,
+} from "./storage-db";
 
 /**
  * v93 adds the per-project single-store marker table.
@@ -135,9 +139,9 @@ describe("migration v93: per-project single-store marker table", () => {
             expect(getMemoriesByProject(db, "git:p").map((row) => [row.id, row.content])).toEqual([
                 [memory.id, "kept across the step"],
             ]);
-            expect(
-                db.prepare("SELECT project_path FROM authority_managed").all(),
-            ).toEqual([{ project_path: "git:p" }]);
+            expect(db.prepare("SELECT project_path FROM authority_managed").all()).toEqual([
+                { project_path: "git:p" },
+            ]);
             expect(
                 db
                     .prepare(
@@ -166,9 +170,9 @@ describe("migration v93: per-project single-store marker table", () => {
             ).run();
             db.prepare("DELETE FROM schema_migrations WHERE version = 93").run();
             runMigrations(db);
-            expect(db.prepare(`SELECT project_path, marked_by_version FROM ${MARKER_TABLE}`).all()).toEqual([
-                { project_path: "git:p", marked_by_version: "fixture" },
-            ]);
+            expect(
+                db.prepare(`SELECT project_path, marked_by_version FROM ${MARKER_TABLE}`).all(),
+            ).toEqual([{ project_path: "git:p", marked_by_version: "fixture" }]);
         } finally {
             closeQuietly(db);
         }

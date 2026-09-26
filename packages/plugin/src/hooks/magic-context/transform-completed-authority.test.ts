@@ -31,6 +31,7 @@ for (const mode of ["TS", "unowned", "concurrent"] as const) {
             authorityDrain: async () => {
                 throw new Error("completed handoff must not drain again");
             },
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async () => {
                 throw new Error("completed handoff must not mirror again");
             },
@@ -92,6 +93,7 @@ test("TypeScript recovery keeps a mismatched completed handoff retryable and fen
         authorityDrain: async () => {
             throw new Error("must not drain");
         },
+        markerStatus: async () => ({ ok: true }),
         mirrorPull: async () => {
             throw new Error("must not mirror");
         },
@@ -137,6 +139,7 @@ for (const mode of ["failed-status", "preparing-notes"] as const) {
             authorityDrain: async () => {
                 throw new Error("must not drain a preparing domain");
             },
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async () => {
                 throw new Error("must not pull a preparing domain");
             },
@@ -214,6 +217,7 @@ test("drain completion racing with completed-handoff recovery invalidates once",
                 },
             };
         },
+        markerStatus: async () => ({ ok: true }),
         mirrorPull: async () => {
             throw new Error("empty notes drain must not pull");
         },

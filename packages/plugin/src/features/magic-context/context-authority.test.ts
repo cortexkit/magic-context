@@ -142,6 +142,7 @@ function protocol(seedCalls: { bytes: number[] }): AuthorityModuleClient {
             seedCalls.bytes.push(new TextEncoder().encode(JSON.stringify(args.rows)).byteLength);
             return { seeded: Array.isArray(args.rows) ? args.rows.length : 0, module_row_ids: [] };
         },
+        markerStatus: async () => ({ ok: true }),
         mirrorPull: async (args) => ({
             page: {
                 domain: args.domain,
@@ -219,6 +220,7 @@ describe("memory authority protocol", () => {
                     },
                 };
             },
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => ({
                 page: {
                     domain: args.domain,
@@ -517,6 +519,7 @@ describe("memory authority protocol", () => {
                     },
                 };
             },
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => ({
                 page: {
                     domain: "notes",
@@ -1688,6 +1691,7 @@ describe("memory authority protocol", () => {
                     return moduleId;
                 }),
             }),
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => {
                 if (args.live_only) {
                     return {
@@ -2333,6 +2337,7 @@ describe("memory authority protocol", () => {
             const module: AuthorityModuleClient = {
                 authorityStatus: async () => ({ authority: null }),
                 authorityPrepare: async () => ({ authority: authority("PREPARING", 1) }),
+                markerStatus: async () => ({ ok: true }),
                 mirrorPull: async (args) => {
                     calls.push(args);
                     if (args.live_only) {
@@ -2411,6 +2416,7 @@ describe("memory authority protocol", () => {
         const module: AuthorityModuleClient = {
             authorityStatus: async () => ({ authority: null }),
             authorityPrepare: async () => ({ authority: authority("PREPARING", 1) }),
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => {
                 calls.push(args.live_only === true);
                 if (args.live_only) {
@@ -2515,6 +2521,7 @@ describe("memory authority protocol", () => {
                     authority: { ...authority(state, 3), domain: args.domain },
                 }),
                 authorityPrepare: async () => ({ authority: authority("MODULE", 3) }),
+                markerStatus: async () => ({ ok: true }),
                 mirrorPull: async (args) => {
                     calls.push({ live_only: args.live_only, cursor: args.cursor });
                     return args.live_only
@@ -2619,6 +2626,7 @@ describe("memory authority protocol", () => {
         const module: AuthorityModuleClient = {
             authorityStatus: async () => ({ authority: null }),
             authorityPrepare: async () => ({ authority: authority("MODULE", 1) }),
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => {
                 calls += 1;
                 expect(args.limit).toBe(1);
@@ -2706,6 +2714,7 @@ describe("memory authority protocol", () => {
             const moduleA: AuthorityModuleClient = {
                 authorityStatus: async () => ({ authority: null }),
                 authorityPrepare: async () => ({ authority: authority("MODULE", 1) }),
+                markerStatus: async () => ({ ok: true }),
                 mirrorPull: async (args) => {
                     if (args.cursor === 0) {
                         return {
@@ -2734,6 +2743,7 @@ describe("memory authority protocol", () => {
             const moduleB: AuthorityModuleClient = {
                 authorityStatus: async () => ({ authority: null }),
                 authorityPrepare: async () => ({ authority: authority("MODULE", 1) }),
+                markerStatus: async () => ({ ok: true }),
                 mirrorPull: async () => ({
                     page: {
                         domain: "memories",
@@ -2811,6 +2821,7 @@ describe("memory authority protocol", () => {
             const pullModule: AuthorityModuleClient = {
                 authorityStatus: async () => ({ authority: null }),
                 authorityPrepare: async () => ({ authority: authority("MODULE", 1) }),
+                markerStatus: async () => ({ ok: true }),
                 mirrorPull: async (args) => {
                     if (!args.live_only) {
                         return {
@@ -2856,6 +2867,7 @@ describe("memory authority protocol", () => {
                     },
                 }),
                 authorityPrepare: async () => ({ authority: authority("MODULE", 3) }),
+                markerStatus: async () => ({ ok: true }),
                 mirrorPull: async (args) => ({
                     page: args.live_only
                         ? {
@@ -2930,6 +2942,7 @@ describe("memory authority protocol", () => {
                 authority: { ...authority(state, 2), domain: args.domain },
             }),
             authorityPrepare: async () => ({ authority: authority("MODULE", 2) }),
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => ({
                 page: {
                     domain: "memories",
@@ -3007,6 +3020,7 @@ describe("memory authority protocol", () => {
                 authority: { ...authority(state, 2), domain: args.domain },
             }),
             authorityPrepare: async () => ({ authority: authority("MODULE", 2) }),
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => ({
                 page: {
                     domain: args.domain,
@@ -3089,6 +3103,7 @@ describe("memory authority protocol", () => {
             }),
             authorityPrepare: async () => ({ authority: authority("MODULE", generation) }),
             authoritySeed: async () => ({ seeded: 0 }),
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async () => ({
                 page: { domain: "memories", cursor: 0, next_cursor: 0, has_more: false, rows: [] },
             }),
@@ -3346,6 +3361,7 @@ describe("memory authority protocol", () => {
                     },
                 };
             },
+            markerStatus: async () => ({ ok: true }),
             mirrorPull: async (args) => ({
                 page: {
                     domain: args.domain,

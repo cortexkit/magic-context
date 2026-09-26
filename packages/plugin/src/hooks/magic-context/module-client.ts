@@ -33,6 +33,7 @@ export function createSubcModuleClient(options: {
         authoritySeed: (args) => transport.authoritySeed(args),
         authorityDrain: (args) => transport.authorityDrain(args),
         mirrorPull: (args) => transport.mirrorPull(args),
+        markerStatus: (args) => transport.markerStatus(args),
         mirrorMemory: (args) => transport.mirrorMemory(args),
         memoryIdentityAck: (args) => transport.memoryIdentityAck(args),
         getCompartmentsAfter: async (sessionId, afterSequence) => {
