@@ -722,14 +722,15 @@ export interface TransformDeps {
     historianRunnable?: boolean;
     /**
      * Which side runs the historian completion in Rust transform mode
-     * (`historian.runner`). Absent means the default, which keeps the completion
-     * in the Broca module and leaves this process's pull loop unbuilt.
+     * (`historian.runner`). Absent means the harness default, which for OpenCode 1
+     * and OpenCode 2 is the host: the module queues the completion and this
+     * process's pull loop runs it. Only "broca" leaves the pull loop unbuilt.
      */
     historianRunner?: "broca" | "host";
     /**
      * Operator kill switch for this process's historian pull loop
      * (`historian.host_runner.enabled`). Absent means enabled; it only matters
-     * when `historianRunner` is "host".
+     * when `historianRunner` is not "broca".
      */
     historianHostRunnerEnabled?: boolean;
     /**

@@ -256,6 +256,11 @@ function makeDeps(db: ContextDatabase, moduleClient: RustModeModuleClient): Tran
         transformMode: "rust",
         rustModeModuleClient: moduleClient,
         rustModeAllowAuthorityProtocolBypassForTests: true,
+        // These fixtures assert the exact module calls a pass makes for the
+        // authority protocol. Naming Broca keeps the historian pull loop, which an
+        // unset runner builds on OpenCode, out of those call lists; the loop has
+        // its own wiring tests.
+        historianRunner: "broca",
     };
 }
 

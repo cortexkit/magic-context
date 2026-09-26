@@ -1,5 +1,5 @@
 import { formatCacheTtlDisplay } from "./cache-ttl-display";
-import type { StatusDetail } from "./rpc-types";
+import type { RunnerStatus, StatusDetail } from "./rpc-types";
 import { renderUserFacingFailure, type UserFacingFailureKey } from "./user-facing-codes";
 
 export type StatusCompressionState = "off" | "compressing" | "ready" | "waiting";
@@ -32,6 +32,8 @@ export interface UserStatusSummary {
         detail: string;
     };
     compactionMarker?: StatusDetail["compactionMarker"];
+    historianRunner?: RunnerStatus;
+    dreamerRunner?: RunnerStatus;
     warnings: UserFacingFailureKey[];
     hiddenVariantWarnings?: string[];
 }
@@ -96,6 +98,8 @@ export function statusSummaryFromDetail(detail: StatusDetail): UserStatusSummary
             total: 0,
         },
         historianRefusal: detail.historianRefusal,
+        historianRunner: detail.historianRunner,
+        dreamerRunner: detail.dreamerRunner,
         compactionMarker: detail.compactionMarker,
         warnings: [...new Set(warnings)],
         hiddenVariantWarnings: detail.hiddenVariantWarnings ?? [],
@@ -120,6 +124,20 @@ function compressionText(summary: UserStatusSummary): string {
         case "waiting":
             return "Waiting for enough conversation history";
     }
+}
+
+/**
+ * `host (default for harness opencode)` or `broca (configured)`, plus a note when
+ * no completion has run yet in the module's current process and the value is
+ * only what the session's route resolves to.
+ */
+export function runnerText(status: RunnerStatus): string {
+    const why =
+        status.source === "configured"
+            ? "configured"
+            : `default for harness ${status.harness || "unknown"}`;
+    const observed = status.observed === "last_completion" ? "" : " · no completion yet";
+    return `${status.runner} (${why})${observed}`;
 }
 
 function reclaimableText(summary: UserStatusSummary): string {
@@ -170,6 +188,12 @@ export function renderUserStatusSummary(
         ],
         ["Search indexing", embeddingText(summary)],
     ];
+    if (summary.historianRunner) {
+        values.push(["Historian runner", runnerText(summary.historianRunner)]);
+    }
+    if (summary.dreamerRunner) {
+        values.push(["Dreamer runner", runnerText(summary.dreamerRunner)]);
+    }
     if (summary.historianRefusal) {
         values.push([
             "Historian refusal",

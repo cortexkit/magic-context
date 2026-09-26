@@ -15,10 +15,11 @@ import type { MessageLike } from "./transform-operations";
 /**
  * Where the pull loop meets a transform pass.
  *
- * The load-bearing claim here is the acceptance bar for this slice: with the
- * default runner NOTHING new runs. A loop that polled on every pass regardless of
- * the runner would be a per-pass module round trip that no configuration asked
- * for, and it would not show up in any output-shape comparison.
+ * This transform serves only OpenCode 1 and OpenCode 2, whose runner is the host
+ * when the user names none, so an unset runner polls. An explicit "broca" is the
+ * one setting under which NOTHING new runs: a loop that polled there would be a
+ * per-pass module round trip that no configuration asked for, and it would not
+ * show up in any output-shape comparison.
  */
 
 const project = process.cwd();
@@ -52,10 +53,12 @@ function createFixture(
         },
     ];
     const methods: string[] = [];
+    const bodies: Array<{ method: string; body: unknown }> = [];
     let rowVersion = 0;
     const moduleClient: RustModeModuleClient = {
-        call: async ({ method }) => {
+        call: async ({ method, body }) => {
             methods.push(method);
+            bodies.push({ method, body });
             if (method === "historian.pending") return { ok: true, runs: [] };
             if (method !== "transform") return { ok: true };
             return {
@@ -96,6 +99,7 @@ function createFixture(
     });
     return {
         methods,
+        bodies,
         async run() {
             const input = structuredClone(messages);
             await transform.run(
@@ -117,12 +121,40 @@ function createFixture(
     };
 }
 
-test("the default runner never reaches the claim lane", async () => {
-    const fixture = createFixture("wiring-default", undefined);
+test("an explicit broca runner never reaches the claim lane", async () => {
+    const fixture = createFixture("wiring-broca", "broca");
     try {
         await fixture.run();
         await fixture.run();
         expect(fixture.methods.filter((method) => method.startsWith("historian."))).toEqual([]);
+    } finally {
+        await fixture.dispose();
+    }
+});
+
+test("an unset runner polls the claim lane, because OpenCode's default is the host", async () => {
+    const fixture = createFixture("wiring-default", undefined);
+    try {
+        await fixture.run();
+        await fixture.run();
+        expect(fixture.methods.filter((method) => method.startsWith("historian."))).toEqual([
+            "historian.pending",
+            "historian.pending",
+        ]);
+    } finally {
+        await fixture.dispose();
+    }
+});
+
+test("every claim-lane request names its op in the body the module dispatches on", async () => {
+    const fixture = createFixture("wiring-body", "host");
+    try {
+        await fixture.run();
+        const lane = fixture.bodies.filter(({ method }) => method.startsWith("historian."));
+        expect(lane.length).toBeGreaterThan(0);
+        for (const { method, body } of lane) {
+            expect(body).toMatchObject({ method, v: 1 });
+        }
     } finally {
         await fixture.dispose();
     }

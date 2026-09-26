@@ -419,7 +419,17 @@ export interface HermeticSubcOptions {
     startProducer?: boolean;
     /** Environment supplied only to the hermetic module process. */
     moduleEnv?: Record<string, string>;
+    /**
+     * The completion runner the module's user tier names for the historian and the
+     * dreamer. Default "broca": this stack registers a Broca producer, and the
+     * scenarios built on it exercise the Broca lane, so they name it explicitly now
+     * that an unconfigured OpenCode request defaults to the host runner. `null`
+     * writes no runner, so the module decides per request from the harness.
+     */
+    historianRunner?: HermeticHistorianRunner;
 }
+
+export type HermeticHistorianRunner = "broca" | "host" | null;
 
 /**
  * A running hermetic daemon + module pair. `connectionFile` is the path the
@@ -440,6 +450,7 @@ export class HermeticSubcStack {
     private readonly pidFilePath: string;
     private readonly startTimeoutMs: number;
     private readonly startProducer: boolean;
+    private readonly historianRunner: HermeticHistorianRunner;
     /** Mutable so a restart can arm or disarm module-only settings between passes. */
     private readonly moduleEnv: Record<string, string>;
     private pidFileCreatedAtMs = 0;
@@ -459,6 +470,7 @@ export class HermeticSubcStack {
         this.ckSubcBin = opts.ckSubcBin;
         this.startTimeoutMs = opts.startTimeoutMs;
         this.startProducer = opts.startProducer;
+        this.historianRunner = opts.historianRunner;
         this.moduleEnv = opts.moduleEnv;
         // The plugin's Rust client reads exactly this path (getDefaultConnectionFile
         // in module-transport.ts). The daemon derives the same run directory from its
@@ -482,6 +494,7 @@ export class HermeticSubcStack {
             startTimeoutMs: opts.startTimeoutMs ?? 60_000,
             startProducer: opts.startProducer ?? true,
             moduleEnv: opts.moduleEnv ?? {},
+            historianRunner: opts.historianRunner === undefined ? "broca" : opts.historianRunner,
         });
         try {
             await stack.boot();
@@ -550,6 +563,7 @@ export class HermeticSubcStack {
         // before the independent Broca producer joins the daemon. The producer is
         // still ready before the harness returns, so no historian request can race
         // boot and the module's initial route is not starved by daemon startup.
+        this.writeModuleConfig({});
         await this.spawnModule();
         await this.waitForModuleRegistration();
         if (this.startProducer) {
@@ -575,6 +589,31 @@ export class HermeticSubcStack {
                 `hermetic subc: no daemon log (subc*.log) was created under the hermetic data home: ${this.daemonLogDir}`,
             );
         }
+    }
+
+    /** The module's hermetic user-tier config file (its XDG_CONFIG_HOME). */
+    get moduleConfigPath(): string {
+        return join(this.dataDir, "module-config", "cortexkit", "magic-context.jsonc");
+    }
+
+    /**
+     * Replace the module's user-tier config. The runner this stack was started with
+     * is added unless `config.historian.runner` names one, so a scenario that writes
+     * its own module settings stays on the lane it was built for. The module rereads
+     * this file on each request, but the manifest's routes are fixed at boot, so a
+     * runner change also needs `restartModule()`.
+     */
+    writeModuleConfig(config: Record<string, unknown>): void {
+        const historian =
+            config.historian && typeof config.historian === "object"
+                ? (config.historian as Record<string, unknown>)
+                : {};
+        const pinned =
+            this.historianRunner !== null && historian.runner === undefined
+                ? { ...config, historian: { ...historian, runner: this.historianRunner } }
+                : config;
+        mkdirSync(dirname(this.moduleConfigPath), { recursive: true });
+        writeFileSync(this.moduleConfigPath, JSON.stringify(pinned, null, 2));
     }
 
     private async spawnProducer(): Promise<void> {
@@ -827,10 +866,12 @@ export class HermeticSubcStack {
         sessionId: string,
         projectRoot: string,
         request: Record<string, unknown>,
+        /** Harness name the route binds with; the module's runner default follows it. */
+        harness = "opencode",
     ): Promise<Record<string, unknown>> {
         const identity: BindIdentity = {
             project_root: resolve(projectRoot),
-            harness: "opencode",
+            harness,
             session: sessionId,
         };
         let client = this.statusClient;

@@ -592,6 +592,17 @@ export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknow
         }
     }
 
+    // `dreamer.runner` chooses which process and which provider account runs the
+    // module-routed dreamer completions, for the same reason `historian.runner`
+    // is user-level only.
+    const dreamer = projectRaw.dreamer;
+    if (isPlainObject(dreamer) && "runner" in dreamer) {
+        delete dreamer.runner;
+        warnings.push(
+            "Ignoring dreamer.runner from project config (security: which process and provider account run dreamer completions is a user-level setting).",
+        );
+    }
+
     const mural = projectRaw.mural;
     if (isPlainObject(mural) && "model" in mural) {
         delete mural.model;

@@ -1792,11 +1792,13 @@ export function createRustModeTransform(
         options.rawFallbackEstimatorForTests ?? estimateFinalWireInputTokens;
     const timeoutMs = Math.max(1, options.moduleTimeoutMs ?? RUST_SEND_TIMEOUT_MS);
 
-    // The pull loop only exists when the user put this process in the lane. Under
-    // the default runner nothing is ever queued for a claimant, so building the
-    // loop would only add a module round trip per pass to ask a question whose
-    // answer is always "nothing".
-    const hostRunnerWanted = deps.historianRunner === "host";
+    // This transform runs only for OpenCode 1 and OpenCode 2 in Rust mode, and for
+    // those harnesses the module's runner, when the user names none, is the host:
+    // it queues each fold for a claimant in this process. So the pull loop is built
+    // unless the user explicitly sent the historian to Broca, where nothing is ever
+    // queued and the loop would only add a module round trip per pass to ask a
+    // question whose answer is always "nothing".
+    const hostRunnerWanted = deps.historianRunner !== "broca";
     let hostRunner: HistorianHostRunnerSeam | undefined | null =
         options.historianHostRunnerForTests ?? (hostRunnerWanted ? null : undefined);
     const resolveHostRunner = (): HistorianHostRunnerSeam | undefined => {
@@ -1808,7 +1810,12 @@ export function createRustModeTransform(
                         method: args.method,
                         sessionId: args.sessionId,
                         projectRoot: options.projectRoot ?? deps.directory ?? process.cwd(),
-                        body: args.body,
+                        // The transport sends `body` as the whole request; `method`
+                        // above only selects its lane and timeout. The module
+                        // dispatches on the body's own `method`, so it has to be in
+                        // the body too, or every claim-lane op is refused as an
+                        // unknown request.
+                        body: { ...args.body, method: args.method },
                     }),
                 db: deps.db,
                 client: deps.client,

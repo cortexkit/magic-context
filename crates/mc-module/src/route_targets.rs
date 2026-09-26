@@ -8,6 +8,7 @@ use subc_protocol::manifest::{
 };
 use subc_protocol::RouteTarget;
 
+use crate::config::ConfiguredRunners;
 use crate::historian_runner::HistorianRunnerKind;
 
 pub const DEFAULT_THALAMUS_MODULE_ID: &str = "thalamus";
@@ -45,6 +46,20 @@ impl RouteTargetConfig {
         match runner {
             HistorianRunnerKind::Broca => Self::default(),
             HistorianRunnerKind::Host => Self::host_runner(),
+        }
+    }
+
+    /// The route selection the user tier's runner settings imply for the whole
+    /// process. A role left unconfigured is decided per request by the harness, and
+    /// a Claude Code request with nothing configured goes to Broca, so the Broca
+    /// route stays declared unless every role that uses it is configured to the host
+    /// runner.
+    pub fn for_configured_runners(runners: ConfiguredRunners) -> Self {
+        let host = Some(HistorianRunnerKind::Host);
+        if runners.historian == host && runners.dreamer == host {
+            Self::host_runner()
+        } else {
+            Self::default()
         }
     }
 
@@ -206,6 +221,66 @@ mod tests {
         let broca = RouteTargetConfig::for_historian_runner(HistorianRunnerKind::Broca);
         assert_eq!(broca, RouteTargetConfig::default());
         assert_eq!(self_signals(&broca).len(), 2);
+    }
+
+    /// Drift guard for the per-harness default: the manifest is built once per
+    /// process, before any request says which harness it comes from. With nothing
+    /// configured a Claude Code request still routes to Broca, so the Broca edge and
+    /// its quota signals stay declared. Only a configuration that sends every role
+    /// to the host drops them, and a configuration that keeps either role on Broca
+    /// keeps them.
+    #[test]
+    fn the_broca_edge_is_dropped_only_when_every_role_is_configured_to_the_host() {
+        use HistorianRunnerKind::{Broca, Host};
+        let cases = [
+            (None, None, true),
+            (Some(Host), None, true),
+            (None, Some(Host), true),
+            (Some(Host), Some(Broca), true),
+            (Some(Broca), Some(Host), true),
+            (Some(Broca), Some(Broca), true),
+            (Some(Host), Some(Host), false),
+        ];
+        for (historian, dreamer, keeps_broca) in cases {
+            let config =
+                RouteTargetConfig::for_configured_runners(ConfiguredRunners { historian, dreamer });
+            let label = format!("historian={historian:?} dreamer={dreamer:?}");
+            assert_eq!(
+                route_targets(&config).contains(&DEFAULT_RUNNER_MODULE_ID.to_string()),
+                keeps_broca,
+                "{label}"
+            );
+            assert_eq!(
+                self_signals(&config).len(),
+                if keeps_broca { 2 } else { 0 },
+                "{label}"
+            );
+        }
+    }
+
+    /// The end-to-end form of the same guard: a user config file on disk, read the
+    /// way `main` reads it, produces the manifest edges the test above expects.
+    #[test]
+    fn the_manifest_edges_follow_the_user_config_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("magic-context.jsonc");
+        let edges = |path: &Path| {
+            route_targets(&RouteTargetConfig::for_configured_runners(
+                crate::config::user_configured_runners_at(path),
+            ))
+        };
+        assert!(
+            edges(&path).contains(&DEFAULT_RUNNER_MODULE_ID.to_string()),
+            "no config: Claude Code still needs Broca"
+        );
+        fs::write(&path, r#"{ "historian": { "runner": "host" } }"#).expect("write");
+        assert_eq!(edges(&path), vec!["thalamus".to_string()]);
+        fs::write(
+            &path,
+            r#"{ "historian": { "runner": "host" }, "dreamer": { "runner": "broca" } }"#,
+        )
+        .expect("write");
+        assert!(edges(&path).contains(&DEFAULT_RUNNER_MODULE_ID.to_string()));
     }
 
     #[test]

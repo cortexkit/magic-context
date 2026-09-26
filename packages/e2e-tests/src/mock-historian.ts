@@ -74,6 +74,36 @@ export function findHistorianOrdinalRange(
     return null;
 }
 
+/**
+ * {@link findHistorianOrdinalRange} for a request in any provider shape.
+ *
+ * The Anthropic lanes carry the prompt in `messages[].content[].text`; the
+ * OpenCode 2 lane's mock speaks the OpenAI Responses API, which nests it
+ * differently under `input`. This walks every string in the body and reads the
+ * first one that carries a `<new_messages>` block, so one matcher answers the
+ * historian on either lane.
+ */
+export function historianRangeInRequest(body: Record<string, unknown>): HistorianOrdinalRange | null {
+    const texts: string[] = [];
+    const visit = (value: unknown): void => {
+        if (typeof value === "string") {
+            if (value.includes("<new_messages>")) texts.push(value);
+        } else if (Array.isArray(value)) {
+            for (const item of value) visit(item);
+        } else if (value && typeof value === "object") {
+            for (const item of Object.values(value)) visit(item);
+        }
+    };
+    visit(body.messages ?? body.input ?? []);
+    for (const text of texts) {
+        const range = findHistorianOrdinalRange({
+            messages: [{ content: [{ type: "text", text }] }],
+        });
+        if (range) return range;
+    }
+    return null;
+}
+
 export interface MockHistorianPayloadOptions {
     /** First raw ordinal the compartment covers (`<compartment start="...">`). */
     start: number;

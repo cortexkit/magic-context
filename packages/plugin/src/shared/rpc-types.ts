@@ -174,6 +174,19 @@ export interface MemoryImportanceHistogram {
     };
 }
 
+/**
+ * Which side ran (or would run) a Rust-mode completion, and why: `configured`
+ * when the user set the runner, `default_for_harness` when the harness chose it.
+ * `observed` is `last_completion` for a completion that actually ran in the
+ * module's current process, `resolved_for_route` when none has yet.
+ */
+export interface RunnerStatus {
+    runner: "host" | "broca";
+    source: "configured" | "default_for_harness";
+    harness: string;
+    observed: "last_completion" | "resolved_for_route";
+}
+
 export interface StatusDetail extends SidebarSnapshot {
     /** OpenCode 2 hidden-run model variants dropped because the host catalog did not declare them. */
     hiddenVariantWarnings?: string[];
@@ -183,6 +196,10 @@ export interface StatusDetail extends SidebarSnapshot {
         canonicalCause: RunnerRefusalCanonicalCause;
         detail: string;
     };
+    /** Which runner the Rust historian used for this session, and why. Rust mode only. */
+    historianRunner?: RunnerStatus;
+    /** Which runner the Rust module's dreamer completions resolve to, and why. Rust mode only. */
+    dreamerRunner?: RunnerStatus;
     /** ACTIVE-memory importance distribution; unclassified is a subset of total. */
     memoryImportanceHistogram: MemoryImportanceHistogram;
     /**

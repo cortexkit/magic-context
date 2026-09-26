@@ -37,11 +37,13 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     };
     tracing::info!("mc-module: logger initialized");
     let connection_file = parse_subc_arg(std::env::args_os().skip(1))?;
-    // `historian.runner` is user-tier only, so one resolution covers every project
-    // this process serves. The manifest's routes and self-signals follow it: a host
-    // runner opens no Broca route and so declares none.
+    // The runner settings are user-tier only, so one resolution covers every project
+    // this process serves. The manifest's routes and self-signals follow it: when
+    // every role is configured to the host runner no Broca route is opened and none
+    // is declared. An unconfigured role is decided per request by the harness, and a
+    // Claude Code request then still goes to Broca, so the route stays declared.
     let route_targets =
-        RouteTargetConfig::for_historian_runner(mc_module::config::user_historian_runner());
+        RouteTargetConfig::for_configured_runners(mc_module::config::user_configured_runners());
     subc_client_rs::serve_with(
         &connection_file,
         manifest_with_route_targets(&module_id, &route_targets),

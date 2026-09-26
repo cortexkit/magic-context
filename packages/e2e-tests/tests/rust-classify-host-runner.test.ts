@@ -11,9 +11,11 @@
  * prompt, the host runs the completion on its own carrier, and the module checks
  * and records the text the host sends back under the same command id.
  *
- * This drives classify through the real module once under the default runner (the
- * module runs it) and once after restarting the module with the host runner
- * configured in its user tier, where the test stands in for the host's carrier.
+ * This drives classify through the real module under the Broca runner the stack
+ * names (the module runs it), after restarting the module with the host runner
+ * configured in its user tier, and after restarting it with no runner configured,
+ * where an OpenCode 1 or OpenCode 2 route gets the host runner by default. On the
+ * host paths the test stands in for the host's carrier.
  */
 
 import { Database } from "bun:sqlite";
@@ -236,6 +238,68 @@ describe.skipIf(!rustPrereqs.ok)(
 				},
 				...(hostCompletion ? { host_completion: hostCompletion } : {}),
 			});
+
+		it("runs classify on the host by default for OpenCode 1 and OpenCode 2 routes", async () => {
+			// No runner in the module's user tier at all: the route's harness decides.
+			writeFileSync(h.subc.moduleConfigPath, "{}");
+			await h.subc.restartModule();
+			const producerRunsBefore = h.subc.producerRequestCount();
+
+			const manifest = `<classify>\n${items
+				.map(
+					(item) =>
+						`<memory id="${item.memory_id}" importance="55" scope="project" shareable="false"/>`,
+				)
+				.join("\n")}\n</classify>`;
+			for (const harness of ["opencode", "opencode2"]) {
+				const commandId = `classify:lane:default:${harness}:${Date.now()}`;
+				const request = (hostCompletion?: Record<string, unknown>) =>
+					h.subc.moduleRequest(
+						sessionId,
+						h.env.workdir,
+						{
+							method: "dreamer.run_task",
+							task: "classify",
+							command_id: commandId,
+							authority_generation: authorityGeneration,
+							model_chain: ["mock-anthropic/mock-sonnet"],
+							payload: {
+								prompt_body: classifyPrompt(projectIdentity, items, false),
+								items,
+							},
+							...(hostCompletion ? { host_completion: hostCompletion } : {}),
+						},
+						harness,
+					);
+				const asked = (await request()) as { ok?: boolean; code?: string };
+				// Broca is registered and reachable here, so this answer is the default
+				// choosing the host, not a fallback from a missing route.
+				expect(asked.ok).toBe(false);
+				expect(asked.code).toBe("host_completion_required");
+				const after = (await request({
+					text: manifest,
+					model: "mock-anthropic/mock-sonnet",
+				})) as { ok?: boolean; diagnostics?: { runner?: string } };
+				expect(after.ok).toBe(true);
+				expect(after.diagnostics?.runner).toBe("host");
+
+				const status = (await h.subc.moduleRequest(
+					sessionId,
+					h.env.workdir,
+					{ method: "session.status" },
+					harness,
+				)) as { dreamer?: { runner?: Record<string, unknown> } };
+				console.log(`dreamer runner on ${harness}: ${JSON.stringify(status.dreamer)}`);
+				expect(status.dreamer?.runner).toEqual({
+					runner: "host",
+					source: "default_for_harness",
+					harness,
+					observed: "last_completion",
+				});
+			}
+			// Nothing went to Broca on either harness.
+			expect(h.subc.producerRequestCount()).toBe(producerRunsBefore);
+		}, 300_000);
 
 		it("still classifies after the module restarts with historian.runner = host", async () => {
 			const before = (await runTask(false, ["mock-anthropic/mock-sonnet"])) as {

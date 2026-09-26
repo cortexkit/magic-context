@@ -46,6 +46,7 @@ pub mod prompt_surface;
 pub mod protection_window;
 mod retained_size;
 pub mod route_targets;
+pub mod runner_choices;
 pub mod scheduler;
 pub mod selection;
 pub mod session_resolver;
@@ -3659,6 +3660,9 @@ pub struct McHandler {
     /// Runs queued for a claimant that a firing task in this process is still
     /// waiting on. Empty under the in-module runner.
     host_runs: Arc<HostRunLedger>,
+    /// Which runner each session's most recent historian and dreamer completion
+    /// used in this process, and why. Read by the status and health surfaces.
+    runner_choices: Arc<Mutex<runner_choices::RunnerChoiceLog>>,
     #[cfg(test)]
     fixed_config: Option<McModuleConfig>,
     reattaching_sessions: Arc<Mutex<HashSet<String>>>,
@@ -4286,6 +4290,7 @@ impl McHandler {
             config: Mutex::new(ConfigCache::default()),
             historian_runner_refusals: Arc::new(HistorianRunnerRefusalCache::default()),
             host_runs: Arc::new(HostRunLedger::new()),
+            runner_choices: Arc::new(Mutex::new(runner_choices::RunnerChoiceLog::default())),
             #[cfg(test)]
             fixed_config: None,
             reattaching_sessions: Arc::new(Mutex::new(HashSet::new())),
@@ -4600,7 +4605,8 @@ impl McHandler {
             McModuleConfig {
                 cache_ttl_by_model: std::collections::BTreeMap::new(),
                 historian_temperature: None,
-                historian_runner: crate::historian_runner::HistorianRunnerKind::default(),
+                historian_runner: None,
+                dreamer_runner: None,
                 language: None,
                 execute_threshold_percentage: 65.0,
                 execute_threshold_user_config: None,
@@ -4655,6 +4661,7 @@ impl McHandler {
             config: Mutex::new(ConfigCache::default()),
             historian_runner_refusals: Arc::new(HistorianRunnerRefusalCache::default()),
             host_runs: Arc::new(HostRunLedger::new()),
+            runner_choices: Arc::new(Mutex::new(runner_choices::RunnerChoiceLog::default())),
             fixed_config: Some(config),
             reattaching_sessions: Arc::new(Mutex::new(HashSet::new())),
             live_historian_sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -5352,6 +5359,48 @@ impl McHandler {
             "stalled": mirror.stalled,
             "code": mirror.stalled.then_some(MEMORY_MIRROR_STALLED_CODE),
         })
+    }
+
+    /// Resolve the historian runner for a firing, record it for the status and
+    /// health surfaces, and return the runner the firing must use.
+    fn record_historian_runner(
+        &self,
+        session_id: &str,
+        config: &McModuleConfig,
+        harness: &str,
+    ) -> HistorianRunnerKind {
+        let resolved = config.historian_runner_for(harness);
+        self.runner_choices
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .record(
+                runner_choices::RunnerRole::Historian,
+                session_id,
+                runner_choices::RunnerChoice::new(resolved, harness),
+            );
+        resolved.kind
+    }
+
+    /// Add which runner each recent session used, and why, to the health report
+    /// that `ck health` renders. Only a short in-memory lock is taken.
+    fn augment_runner_choice_health(&self, mut report: HealthReport) -> HealthReport {
+        let (rows, summary) = {
+            let log = self
+                .runner_choices
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (log.health_rows(), log.health_summary())
+        };
+        if let Some(metrics) = report.metrics.as_mut().and_then(Value::as_object_mut) {
+            metrics.insert("runner_choices".to_string(), Value::Array(rows));
+        }
+        if let Some(summary) = summary {
+            report.detail = Some(match report.detail {
+                Some(detail) => format!("{detail}; {summary}"),
+                None => summary,
+            });
+        }
+        report
     }
 
     fn augment_memory_mirror_health(&self, mut report: HealthReport, now: u64) -> HealthReport {
@@ -6531,7 +6580,7 @@ impl McHandler {
                 project_root: binding.project_root.clone(),
                 project_slug,
                 firing,
-                runner: cfg.historian_runner,
+                runner: self.record_historian_runner(&parsed.session_id, &cfg, &binding.harness),
                 host_runs: Arc::clone(&self.host_runs),
                 model_chain_generation,
                 runner_refusal_cache: Arc::clone(&self.historian_runner_refusals),
@@ -6684,7 +6733,11 @@ impl McHandler {
             project_root: binding.project_root.clone(),
             project_slug,
             firing,
-            runner: binding.config.historian_runner,
+            runner: self.record_historian_runner(
+                &parsed.session_id,
+                &binding.config,
+                &binding.harness,
+            ),
             host_runs: Arc::clone(&self.host_runs),
             model_chain_generation,
             runner_refusal_cache: Arc::clone(&self.historian_runner_refusals),
@@ -8305,6 +8358,30 @@ impl McHandler {
                 }
             }
         };
+        // Which runner this session's completions used and why. A session with no
+        // completion in this process yet reports what its route resolves to now.
+        let (historian_runner_status, dreamer_runner_status) = {
+            let config = self.effective_config(&binding.project_root);
+            let log = self
+                .runner_choices
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let status = |role, resolved| match log.get(role, &session_id) {
+                Some(choice) => choice.to_value("last_completion"),
+                None => runner_choices::RunnerChoice::new(resolved, &binding.harness)
+                    .to_value("resolved_for_route"),
+            };
+            (
+                status(
+                    runner_choices::RunnerRole::Historian,
+                    config.historian_runner_for(&binding.harness),
+                ),
+                status(
+                    runner_choices::RunnerRole::Dreamer,
+                    config.dreamer_runner_for(&binding.harness),
+                ),
+            )
+        };
         let mut response = json!({
             "ok": true,
             "summary": summary,
@@ -8335,6 +8412,10 @@ impl McHandler {
                     .and_then(historian::runner_refusal_stage_from_detail)
                     .map(|stage| stage.canonical_cause()),
                 "recent_decisions": &loaded.meta.historian.recent_decisions,
+                "runner": historian_runner_status,
+            },
+            "dreamer": {
+                "runner": dreamer_runner_status,
             },
             // Keep the current-pass attribution separate from the explicitly historical
             // `last_divergence` field so stable status reads cannot imply a fresh bust.
@@ -10577,7 +10658,8 @@ impl McHandler {
         let serve_then_fold = result.scheduler_pass == scheduler::PassDecision::Emergency95
             && self
                 .effective_config(&binding.project_root)
-                .historian_runner
+                .historian_runner_for(&binding.harness)
+                .kind
                 == HistorianRunnerKind::Host;
         let diagnostics = if parsed.is_subagent {
             historian_no_fire_diagnostics(NoFireDiagnosticsInput {
@@ -12211,19 +12293,26 @@ impl McHandler {
         // completion itself, and the host sends the text back on a second request.
         // Nothing is recorded in the command ledger, so that second request under
         // the same command id is not answered from a replay of this one.
-        if host_completion.is_none()
-            && self
-                .effective_config(&binding.project_root)
-                .historian_runner
-                == HistorianRunnerKind::Host
-        {
+        let dreamer_runner = self
+            .effective_config(&binding.project_root)
+            .dreamer_runner_for(&binding.harness);
+        self.runner_choices
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .record(
+                runner_choices::RunnerRole::Dreamer,
+                &ledger_session,
+                runner_choices::RunnerChoice::new(dreamer_runner, &binding.harness),
+            );
+        if host_completion.is_none() && dreamer_runner.kind == HistorianRunnerKind::Host {
             tracing::info!(
-                "mc-module: classify runner=host: the host runs the completion for command {command_id}"
+                "mc-module: classify runner=host ({}): the host runs the completion for command {command_id}",
+                dreamer_runner.source.describe()
             );
             return respond(json!({
                 "ok": false,
                 "code": HOST_COMPLETION_REQUIRED,
-                "message": "historian.runner is host: run the classify completion on the host and resend it as host_completion",
+                "message": "the dreamer runner is host: run the classify completion on the host and resend it as host_completion",
                 "system_prompt": classify_system_prompt.as_ref(),
                 "max_output_tokens": CLASSIFY_MAX_OUTPUT_TOKENS,
                 "temperature": CLASSIFY_TEMPERATURE,
@@ -14490,7 +14579,9 @@ impl ModuleHandler for McHandler {
         } else if let Some(failed) = self.store_open.failed_report() {
             failed
         } else {
-            self.augment_memory_mirror_health(DISPATCH_HEALTH.report(now), now)
+            self.augment_runner_choice_health(
+                self.augment_memory_mirror_health(DISPATCH_HEALTH.report(now), now),
+            )
         };
         with_pinned_epochs_health(report)
     }
@@ -19325,6 +19416,8 @@ mod tests {
     mod gate_a1_b0_baseline_probe;
     mod gate_a2;
     mod gate_b1_off;
+    // The per-harness default runner, driven through real passes.
+    mod default_runner;
 
     #[test]
     fn search_date_bounds_are_utc_inclusive_and_reject_invalid_values() {
@@ -21766,7 +21859,8 @@ mod tests {
         McModuleConfig {
             cache_ttl_by_model: std::collections::BTreeMap::new(),
             historian_temperature: None,
-            historian_runner: crate::historian_runner::HistorianRunnerKind::default(),
+            historian_runner: None,
+            dreamer_runner: None,
             language: None,
             execute_threshold_percentage: 65.0,
             execute_threshold_user_config: None,
@@ -32159,7 +32253,7 @@ mod tests {
     async fn classify_under_the_host_runner_runs_on_the_host_and_never_on_a_module_route() {
         let producer = Arc::new(ProducerState::default());
         let mut config = default_test_config();
-        config.historian_runner = HistorianRunnerKind::Host;
+        config.historian_runner = Some(HistorianRunnerKind::Host);
         let (handler, store, _dir, project) = handler_with_store(Arc::clone(&producer), config);
         let route_root = project.to_str().unwrap();
         handler.bind_route(7, binding(route_root, "ses"));
@@ -37132,7 +37226,7 @@ mod tests {
         let (broca_dropped, broca_messages, broca_bytes) = served_census(&broca);
 
         let mut host_config = default_test_config();
-        host_config.historian_runner = HistorianRunnerKind::Host;
+        host_config.historian_runner = Some(HistorianRunnerKind::Host);
         let host_producer = Arc::new(ProducerState::default());
         let (host_handler, host_store, _host_dir, host_project) =
             handler_with_store(Arc::clone(&host_producer), host_config);

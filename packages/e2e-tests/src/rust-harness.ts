@@ -35,6 +35,7 @@ import {
 import {
     buildHermeticBinaries,
     detectRustModePrereqs,
+    type HermeticHistorianRunner,
     HermeticSubcStack,
     type RustModePrereqs,
 } from "./rust-runner/hermetic-subc";
@@ -74,6 +75,13 @@ export interface RustTestHarnessOptions {
     driveFaultBinary?: boolean;
     /** Module-only environment, for scenario-specific logging or fault controls. */
     moduleEnv?: Record<string, string>;
+    /**
+     * The historian/dreamer runner named in BOTH user tiers (the module's and the
+     * plugin's). Default "broca", which keeps every scenario written against the
+     * Broca producer on that lane now that an unconfigured OpenCode request
+     * defaults to the host runner. `null` names none, so the harness default applies.
+     */
+    historianRunner?: HermeticHistorianRunner;
 }
 
 export interface SdkClient {
@@ -162,6 +170,7 @@ export class RustTestHarness {
     private readonly providerAPI: "@ai-sdk/anthropic" | "@ai-sdk/openai";
     private readonly modelID: string;
     private readonly historianProducerAvailable: boolean;
+    private readonly historianRunner: HermeticHistorianRunner;
     private readonly trailingBlankReplayRows = new Map<string, TrailingBlankReplayRows>();
 
     private constructor(args: {
@@ -178,6 +187,7 @@ export class RustTestHarness {
         providerAPI: "@ai-sdk/anthropic" | "@ai-sdk/openai";
         modelID: string;
         historianProducerAvailable: boolean;
+        historianRunner: HermeticHistorianRunner;
     }) {
         this.mock = args.mock;
         this.mockBaseURL = args.mockBaseURL;
@@ -192,6 +202,7 @@ export class RustTestHarness {
         this.providerAPI = args.providerAPI;
         this.modelID = args.modelID;
         this.historianProducerAvailable = args.historianProducerAvailable;
+        this.historianRunner = args.historianRunner;
     }
 
     /**
@@ -245,6 +256,7 @@ export class RustTestHarness {
             ckSubcBin,
             startProducer: options.startHistorianProducer ?? true,
             moduleEnv: options.moduleEnv ?? {},
+            historianRunner: RustTestHarness.runnerOption(options),
         });
         if (options.seedModuleStorePath) {
             const deadline = Date.now() + 65_000;
@@ -301,7 +313,12 @@ export class RustTestHarness {
             providerAPI: options.providerAPI ?? "@ai-sdk/anthropic",
             modelID: options.modelID ?? "mock-sonnet",
             historianProducerAvailable: options.startHistorianProducer ?? true,
+            historianRunner: RustTestHarness.runnerOption(options),
         });
+    }
+
+    private static runnerOption(options: RustTestHarnessOptions): HermeticHistorianRunner {
+        return options.historianRunner === undefined ? "broca" : options.historianRunner;
     }
 
     private static spawnServe(args: {
@@ -322,12 +339,15 @@ export class RustTestHarness {
             existingEnv: args.env,
             modelContextLimit: args.options.modelContextLimit,
             openCodeConfigExtra: args.options.openCodeConfigExtra,
-            magicContextConfig: {
-                ...(args.options.startHistorianProducer ?? true
-                    ? { historian: { opencode: { model: `${providerID}/${modelID}` } } }
-                    : {}),
-                ...(args.options.magicContextConfig ?? {}),
-            },
+            magicContextConfig: RustTestHarness.pinPluginRunner(
+                {
+                    ...(args.options.startHistorianProducer ?? true
+                        ? { historian: { opencode: { model: `${providerID}/${modelID}` } } }
+                        : {}),
+                    ...(args.options.magicContextConfig ?? {}),
+                },
+                RustTestHarness.runnerOption(args.options),
+            ),
             // The connection_file value is only used to flip `userTierHasSubc`
             // true (the resolver gate). The actual transport still reads the
             // DEFAULT connection path — which this same file happens to be.
@@ -337,6 +357,23 @@ export class RustTestHarness {
             },
             extraEnv: { MAGIC_CONTEXT_LOG_PATH: args.logPath },
         });
+    }
+
+    /**
+     * Name the runner in the plugin's user tier too, so the plugin's pull loop and
+     * the module agree on the lane. A scenario that names its own runner keeps it.
+     */
+    private static pinPluginRunner(
+        config: Record<string, unknown>,
+        runner: HermeticHistorianRunner,
+    ): Record<string, unknown> {
+        if (runner === null) return config;
+        const historian =
+            config.historian && typeof config.historian === "object"
+                ? (config.historian as Record<string, unknown>)
+                : {};
+        if (historian.runner !== undefined) return config;
+        return { ...config, historian: { ...historian, runner } };
     }
 
     get opencode(): SpawnedOpencode {
@@ -372,6 +409,7 @@ export class RustTestHarness {
                 modelContextLimit: this.modelContextLimit,
                 magicContextConfig: opts.magicContextConfig,
                 startHistorianProducer: this.historianProducerAvailable,
+                historianRunner: this.historianRunner,
                 providerID: this.providerID,
                 providerAPI: this.providerAPI,
                 modelID: this.modelID,

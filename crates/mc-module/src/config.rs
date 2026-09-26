@@ -14,7 +14,7 @@ use std::time::SystemTime;
 
 use serde_json::Value;
 
-use crate::historian_runner::HistorianRunnerKind;
+use crate::historian_runner::{resolve_runner, HistorianRunnerKind, ResolvedRunner};
 use crate::scheduler::{self, ExecuteThresholdConfig};
 
 /// Default execute threshold percentage (65.0). The Rust module reads config without the
@@ -86,10 +86,17 @@ pub struct McModuleConfig {
     // module refuses a request that carries none rather than guessing from disk.
     /// Optional trusted user-configured sampling temperature for historian requests.
     pub historian_temperature: Option<f64>,
-    /// Which side runs the historian's completion. USER-tier only, for the same
-    /// reason the model is: it decides whose provider account and whose process
-    /// pays for the call, so a cloned repository must not be able to redirect it.
-    pub historian_runner: HistorianRunnerKind,
+    /// Which side runs the historian's completion, when the user tier names one.
+    /// USER-tier only, for the same reason the model is: it decides whose provider
+    /// account and whose process pays for the call, so a cloned repository must not
+    /// be able to redirect it. `None` means the harness that sent the request decides
+    /// (see [`McModuleConfig::historian_runner_for`]).
+    pub historian_runner: Option<HistorianRunnerKind>,
+    /// Which side runs the module-routed dreamer completions (classify), when the
+    /// user tier names one. USER-tier only, like `historian_runner`. `None` falls
+    /// back to `historian_runner`, so an install that already set only the
+    /// historian runner keeps its dreamer completions where they were.
+    pub dreamer_runner: Option<HistorianRunnerKind>,
     /// Trusted user-configured language for hidden-agent prose. Project config is deliberately
     /// excluded because the language directive becomes provider-visible prompt text.
     pub language: Option<String>,
@@ -146,7 +153,8 @@ impl Default for McModuleConfig {
     fn default() -> Self {
         Self {
             historian_temperature: None,
-            historian_runner: HistorianRunnerKind::default(),
+            historian_runner: None,
+            dreamer_runner: None,
             language: None,
             execute_threshold_percentage: DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
             execute_threshold_user_config: None,
@@ -358,23 +366,55 @@ impl ConfigCache {
     }
 }
 
-/// The historian runner the user tier selects.
-///
-/// `historian.runner` is read from the user tier only, so the answer is the same for
-/// every project this process serves. That is what lets the boot manifest declare
-/// its routes from it: a host runner opens no Broca route, so neither the route nor
-/// the provider-quota self-signals that ride it are declared.
-pub fn user_historian_runner() -> HistorianRunnerKind {
-    user_historian_runner_at(&user_config_path())
+impl McModuleConfig {
+    /// The runner the historian uses for a request from `harness`: the user-tier
+    /// `historian.runner` when set, otherwise the harness default.
+    pub fn historian_runner_for(&self, harness: &str) -> ResolvedRunner {
+        resolve_runner(self.historian_runner, harness)
+    }
+
+    /// The runner module-routed dreamer completions use for a request from
+    /// `harness`: `dreamer.runner`, then `historian.runner`, then the harness default.
+    pub fn dreamer_runner_for(&self, harness: &str) -> ResolvedRunner {
+        resolve_runner(self.dreamer_runner.or(self.historian_runner), harness)
+    }
+
+    /// The runners the user tier names, without any harness applied.
+    pub fn configured_runners(&self) -> ConfiguredRunners {
+        ConfiguredRunners {
+            historian: self.historian_runner,
+            dreamer: self.dreamer_runner.or(self.historian_runner),
+        }
+    }
 }
 
-/// [`user_historian_runner`] against an explicit user config file.
-pub fn user_historian_runner_at(user_path: &Path) -> HistorianRunnerKind {
+/// The runners the user tier names for each role, with the dreamer's fallback to
+/// the historian's value already applied. `None` means "decided per request by the
+/// harness".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfiguredRunners {
+    pub historian: Option<HistorianRunnerKind>,
+    pub dreamer: Option<HistorianRunnerKind>,
+}
+
+/// The runners the user tier names.
+///
+/// Both runner settings are read from the user tier only, so the answer is the same
+/// for every project this process serves. That is what lets the boot manifest
+/// declare its routes from it. The harness default is per request, and a Claude
+/// Code request with nothing configured still goes to Broca, so the Broca route is
+/// declared unless BOTH roles are configured to the host runner.
+pub fn user_configured_runners() -> ConfiguredRunners {
+    user_configured_runners_at(&user_config_path())
+}
+
+/// [`user_configured_runners`] against an explicit user config file.
+pub fn user_configured_runners_at(user_path: &Path) -> ConfiguredRunners {
     let mut tier = TierConfig::default();
     let user = read_tier_cached(&mut tier, user_path.to_path_buf());
     let (config, warnings) = merge_tiers_with_warnings(user.as_ref(), None);
     emit_warnings(warnings);
-    config.historian_runner
+    config.configured_runners()
 }
 
 fn user_config_path() -> PathBuf {
@@ -520,16 +560,26 @@ fn merge_tiers_with_warnings(
         if let Some(temperature) = number_at(user, "/historian/temperature") {
             cfg.historian_temperature = Some(temperature);
         }
-        if let Some(runner) = user.pointer("/historian/runner").and_then(Value::as_str) {
-            match HistorianRunnerKind::parse(runner) {
-                Some(kind) => cfg.historian_runner = kind,
-                // An unreadable value keeps the default rather than refusing to fire.
-                // A typo then leaves folds running exactly where they ran before,
-                // instead of sending every completion somewhere the user never asked for.
-                None => warnings.push(format!(
-                    "ignoring historian.runner {runner:?}; expected one of {}",
-                    HistorianRunnerKind::ACCEPTED_VALUES.join(", ")
-                )),
+        for (pointer, name, slot) in [
+            (
+                "/historian/runner",
+                "historian.runner",
+                &mut cfg.historian_runner,
+            ),
+            ("/dreamer/runner", "dreamer.runner", &mut cfg.dreamer_runner),
+        ] {
+            if let Some(runner) = user.pointer(pointer).and_then(Value::as_str) {
+                match HistorianRunnerKind::parse(runner) {
+                    Some(kind) => *slot = Some(kind),
+                    // An unreadable value keeps the harness default rather than refusing
+                    // to fire. A typo then leaves completions running exactly where an
+                    // unconfigured install runs them, instead of sending every completion
+                    // somewhere the user never asked for.
+                    None => warnings.push(format!(
+                        "ignoring {name} {runner:?}; expected one of {}",
+                        HistorianRunnerKind::ACCEPTED_VALUES.join(", ")
+                    )),
+                }
             }
         }
         if let Some(raw) = user.pointer("/single_store").and_then(Value::as_str) {
@@ -1008,69 +1058,125 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_completion_route_defaults_to_broca_and_only_the_user_may_move_it() {
-        assert_eq!(
-            merge_tiers(None, None).historian_runner,
-            HistorianRunnerKind::Broca,
-            "an unconfigured install keeps folding exactly where it always has"
-        );
+    fn an_unconfigured_runner_is_left_to_the_harness_and_only_the_user_may_set_it() {
+        use crate::historian_runner::RunnerSource;
 
+        let unconfigured = merge_tiers(None, None);
+        assert_eq!(unconfigured.historian_runner, None);
+        assert_eq!(unconfigured.dreamer_runner, None);
+        for (harness, kind) in [
+            ("opencode", HistorianRunnerKind::Host),
+            ("opencode2", HistorianRunnerKind::Host),
+            ("claude-code", HistorianRunnerKind::Broca),
+            ("pi", HistorianRunnerKind::Broca),
+        ] {
+            for resolved in [
+                unconfigured.historian_runner_for(harness),
+                unconfigured.dreamer_runner_for(harness),
+            ] {
+                assert_eq!(resolved.kind, kind, "{harness}");
+                assert_eq!(resolved.source, RunnerSource::HarnessDefault, "{harness}");
+            }
+        }
+
+        let user = serde_json::json!({ "historian": { "runner": "broca" } });
+        let configured = merge_tiers(Some(&user), None);
+        assert_eq!(
+            configured.historian_runner,
+            Some(HistorianRunnerKind::Broca)
+        );
+        for resolved in [
+            configured.historian_runner_for("opencode"),
+            configured.dreamer_runner_for("opencode2"),
+        ] {
+            assert_eq!(resolved.kind, HistorianRunnerKind::Broca);
+            assert_eq!(resolved.source, RunnerSource::Configured);
+        }
+
+        // A cloned repository must not be able to move either completion to a
+        // different process or provider account.
+        let project = serde_json::json!({
+            "historian": { "runner": "broca" },
+            "dreamer": { "runner": "broca" },
+        });
+        let from_project = merge_tiers(None, Some(&project));
+        assert_eq!(from_project.historian_runner, None);
+        assert_eq!(from_project.dreamer_runner, None);
         let user = serde_json::json!({ "historian": { "runner": "host" } });
         assert_eq!(
-            merge_tiers(Some(&user), None).historian_runner,
-            HistorianRunnerKind::Host
-        );
-
-        // A cloned repository must not be able to move the historian completion
-        // to a different process or provider account.
-        let project = serde_json::json!({ "historian": { "runner": "host" } });
-        assert_eq!(
-            merge_tiers(None, Some(&project)).historian_runner,
-            HistorianRunnerKind::Broca
-        );
-        assert_eq!(
-            merge_tiers(
-                Some(&user),
-                Some(&serde_json::json!({
-                    "historian": { "runner": "broca" }
-                }))
-            )
-            .historian_runner,
-            HistorianRunnerKind::Host,
+            merge_tiers(Some(&user), Some(&project)).historian_runner,
+            Some(HistorianRunnerKind::Host),
             "the project tier cannot move the runner in either direction"
         );
     }
 
     #[test]
-    fn the_boot_runner_is_read_from_the_user_file_alone() {
+    fn the_dreamer_runner_falls_back_to_the_historian_runner_then_the_harness() {
+        let historian_only = merge_tiers(
+            Some(&serde_json::json!({ "historian": { "runner": "broca" } })),
+            None,
+        );
+        assert_eq!(
+            historian_only.dreamer_runner_for("opencode").kind,
+            HistorianRunnerKind::Broca
+        );
+        let split = merge_tiers(
+            Some(&serde_json::json!({
+                "historian": { "runner": "broca" },
+                "dreamer": { "runner": "host" },
+            })),
+            None,
+        );
+        assert_eq!(
+            split.historian_runner_for("opencode").kind,
+            HistorianRunnerKind::Broca
+        );
+        assert_eq!(
+            split.dreamer_runner_for("claude-code").kind,
+            HistorianRunnerKind::Host
+        );
+    }
+
+    #[test]
+    fn the_boot_runners_are_read_from_the_user_file_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("magic-context.jsonc");
-        assert_eq!(user_historian_runner_at(&path), HistorianRunnerKind::Broca);
+        assert_eq!(
+            user_configured_runners_at(&path),
+            ConfiguredRunners {
+                historian: None,
+                dreamer: None,
+            }
+        );
         std::fs::write(
             &path,
             r#"{ // user tier
             "historian": { "runner": "host" } }"#,
         )
         .expect("write user config");
-        assert_eq!(user_historian_runner_at(&path), HistorianRunnerKind::Host);
+        assert_eq!(
+            user_configured_runners_at(&path),
+            ConfiguredRunners {
+                historian: Some(HistorianRunnerKind::Host),
+                dreamer: Some(HistorianRunnerKind::Host),
+            }
+        );
     }
 
     #[test]
-    fn an_unreadable_runner_value_leaves_completions_where_they_were() {
+    fn an_unreadable_runner_value_leaves_the_choice_to_the_harness() {
         for value in [serde_json::json!("hosted"), serde_json::json!("")] {
-            let user = serde_json::json!({ "historian": { "runner": value } });
-            assert_eq!(
-                merge_tiers(Some(&user), None).historian_runner,
-                HistorianRunnerKind::Broca,
-                "value {value}"
-            );
+            let user = serde_json::json!({
+                "historian": { "runner": value.clone() },
+                "dreamer": { "runner": value.clone() },
+            });
+            let cfg = merge_tiers(Some(&user), None);
+            assert_eq!(cfg.historian_runner, None, "value {value}");
+            assert_eq!(cfg.dreamer_runner, None, "value {value}");
         }
         // A non-string is not a runner name at all and is ignored the same way.
         let user = serde_json::json!({ "historian": { "runner": 7 } });
-        assert_eq!(
-            merge_tiers(Some(&user), None).historian_runner,
-            HistorianRunnerKind::Broca
-        );
+        assert_eq!(merge_tiers(Some(&user), None).historian_runner, None);
     }
 
     #[test]

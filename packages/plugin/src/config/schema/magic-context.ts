@@ -624,6 +624,12 @@ const AgentMetadataSchema = AgentOverrideConfigSchema.pick({
 
 /** Combined dreamer metadata plus independent strict execution blocks. */
 export const DreamerConfigSchema = AgentMetadataSchema.extend({
+    runner: z
+        .enum(["broca", "host"])
+        .optional()
+        .describe(
+            'Which side runs the dreamer completions the Rust module routes (classify-memories) in Rust transform mode: "host" runs them on this process\'s carrier, "broca" routes them to the Broca module. When unset, historian.runner applies, and when that is unset too the harness decides the same way it does for the historian. User-level config only.',
+        ),
     opencode: DreamerOpenCodeHarnessBlockSchema.optional(),
     pi: DreamerPiHarnessBlockSchema.optional(),
     omp: DreamerOmpHarnessBlockSchema.optional(),
@@ -649,7 +655,7 @@ export const HistorianConfigSchema = AgentMetadataSchema.extend({
         .enum(["broca", "host"])
         .optional()
         .describe(
-            'Which side runs the historian completion in Rust transform mode: "broca" routes it to the Broca module (default), "host" queues it for this process to run on the configured historian model. User-level config only — it decides whose provider account pays for the call.',
+            'Which side runs the historian completion in Rust transform mode: "host" queues it for this process to run on the configured historian model, "broca" routes it to the Broca module. When unset the harness decides: OpenCode 1 and OpenCode 2 use "host", Claude Code (through the Thalamus gateway, which has no host to run a completion) uses "broca". User-level config only — it decides whose provider account pays for the call.',
         ),
     host_runner: z
         .object({
@@ -662,7 +668,7 @@ export const HistorianConfigSchema = AgentMetadataSchema.extend({
         })
         .optional()
         .describe(
-            "Controls for this process's historian pull loop, which answers runs queued by `historian.runner: \"host\"`. User-level config only — it decides whether this machine's provider account is spent on folds.",
+            "Controls for this process's historian pull loop, which answers runs the Rust module queues for the host runner (`historian.runner: \"host\"`, or unset on OpenCode 1 and OpenCode 2). User-level config only — it decides whether this machine's provider account is spent on folds.",
         ),
     two_pass: z
         .boolean()

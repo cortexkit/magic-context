@@ -127,7 +127,7 @@ fn a2_module_on(
 
 fn host_runner_config() -> McModuleConfig {
     let mut config = default_test_config();
-    config.historian_runner = HistorianRunnerKind::Host;
+    config.historian_runner = Some(HistorianRunnerKind::Host);
     config
 }
 
@@ -731,7 +731,7 @@ async fn gate_a_host_bound_to_one_project_cannot_walk_another_projects_run() {
 
 /// Eighty-one messages, twenty-seven of them tool arcs, each arc's output large
 /// enough that dropping it is worth the reduction's while.
-fn tool_bearing_messages() -> Vec<CkIngressMessage> {
+pub(super) fn tool_bearing_messages() -> Vec<CkIngressMessage> {
     let mut messages = Vec::new();
     let mut ordinal = 1u64;
     for index in 0..27 {

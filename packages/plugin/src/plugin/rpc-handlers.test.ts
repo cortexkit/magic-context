@@ -246,6 +246,76 @@ describe("buildStatusDetail — historian refusal provenance", () => {
     });
 });
 
+describe("buildStatusDetail — completion runner provenance", () => {
+    test("carries which runner the module used for the session and why", () => {
+        const db = createTestDb();
+        try {
+            const detail = buildStatusDetail(
+                db,
+                "ses-runner-status",
+                process.cwd(),
+                undefined,
+                { transform_mode: "rust" },
+                undefined,
+                undefined,
+                {
+                    historian: {
+                        runner: {
+                            runner: "host",
+                            source: "default_for_harness",
+                            harness: "opencode2",
+                            observed: "last_completion",
+                        },
+                    },
+                    dreamer: {
+                        runner: {
+                            runner: "broca",
+                            source: "configured",
+                            harness: "opencode2",
+                            observed: "resolved_for_route",
+                        },
+                    },
+                },
+            );
+
+            expect(detail.historianRunner).toEqual({
+                runner: "host",
+                source: "default_for_harness",
+                harness: "opencode2",
+                observed: "last_completion",
+            });
+            expect(detail.dreamerRunner).toEqual({
+                runner: "broca",
+                source: "configured",
+                harness: "opencode2",
+                observed: "resolved_for_route",
+            });
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("drops a runner value it does not recognise instead of rendering it", () => {
+        const db = createTestDb();
+        try {
+            const detail = buildStatusDetail(
+                db,
+                "ses-runner-unknown",
+                process.cwd(),
+                undefined,
+                { transform_mode: "rust" },
+                undefined,
+                undefined,
+                { historian: { runner: { runner: "llm", source: "configured" } } },
+            );
+            expect(detail.historianRunner).toBeUndefined();
+            expect(detail.dreamerRunner).toBeUndefined();
+        } finally {
+            closeQuietly(db);
+        }
+    });
+});
+
 describe("buildStatusDetail — memory importance histogram", () => {
     test("returns the exact active distribution and unclassified denominator", () => {
         const db = createTestDb();

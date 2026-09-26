@@ -112,6 +112,7 @@ import type {
     DebugMemoryHolders,
     DebugMemoryUsageResponse,
     EmbedDetail,
+    RunnerStatus,
     SidebarSnapshot,
     StatusDetail,
 } from "../shared/rpc-types";
@@ -185,6 +186,29 @@ export interface RustSessionStatus {
         last_no_fire?: string | null;
         refusal_stage?: "credential" | "provider" | "model" | "resolution" | null;
         canonical_cause?: RunnerRefusalCanonicalCause | null;
+        runner?: ModuleRunnerStatus;
+    };
+    dreamer?: {
+        runner?: ModuleRunnerStatus;
+    };
+}
+
+/** The module's account of which completion runner a session used, and why. */
+interface ModuleRunnerStatus {
+    runner?: string;
+    source?: string;
+    harness?: string;
+    observed?: string;
+}
+
+function runnerStatusFromModule(status: ModuleRunnerStatus | undefined): RunnerStatus | undefined {
+    if (status?.runner !== "host" && status?.runner !== "broca") return undefined;
+    if (status.source !== "configured" && status.source !== "default_for_harness") return undefined;
+    return {
+        runner: status.runner,
+        source: status.source,
+        harness: typeof status.harness === "string" ? status.harness : "",
+        observed: status.observed === "last_completion" ? "last_completion" : "resolved_for_route",
     };
 }
 const rustStatusInFlight = new Map<string, Promise<RustSessionStatus | undefined>>();
@@ -797,6 +821,8 @@ export function buildStatusDetail(
         lastTransformError: null,
         historianFailureCount: 0,
         historianRefusal,
+        historianRunner: runnerStatusFromModule(moduleHistorian?.runner),
+        dreamerRunner: runnerStatusFromModule(moduleStatus?.dreamer?.runner),
         isSubagent: false,
         pendingOps: [],
         contextLimit: 0,
