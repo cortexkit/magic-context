@@ -117,7 +117,8 @@ forEachHost(import.meta.url, null, () => {
         expect(scheduler).toContain(`inputTokens=${HIGH.input_tokens}`);
         expect(scheduler).toContain("decision=execute");
         const percentage = Number(/percentage=([\d.]+)%/.exec(scheduler)?.[1]);
-        // At or above the force band.
+        // 95% of the usable limit or more: the band where queued work is applied
+        // even inside the protected window and the emergency path can fire.
         expect(percentage).toBeGreaterThanOrEqual(95);
 
         // The tool-result request really went out after that pass.
@@ -135,8 +136,10 @@ forEachHost(import.meta.url, null, () => {
         });
         expect(toolResultRequest).toBeDefined();
 
-        // Evidence for review: the scheduler line, and the host's open database
-        // files (throwaway roots only).
+        // With MC_OVER_LIMIT_NEXT_PASS_EVIDENCE set, write the scheduler line and
+        // the database files the OpenCode process holds open (from lsof) to that
+        // directory. They show the run used the harness's temporary data
+        // directories and never a real user store.
         const evidenceDir = process.env.MC_OVER_LIMIT_NEXT_PASS_EVIDENCE;
         if (evidenceDir) {
             mkdirSync(evidenceDir, { recursive: true });
