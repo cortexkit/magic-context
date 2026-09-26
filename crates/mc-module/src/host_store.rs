@@ -164,7 +164,9 @@ pub const MAX_VISIBILITY_CHUNK_ROWS: usize = 256;
 /// Module config `single_store`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SingleStoreMode {
-    /// The module does not open `context.db` at all. The mirror remains the only path.
+    /// The module writes nothing to `context.db`; the mirror remains the only path. It
+    /// still opens the file read-only, without creating it, to read the single-store
+    /// marker on `mirror.pull` and `mirror.marker_status`.
     #[default]
     Off,
     /// The module runs its writers against a scratch copy and reports how the rows it
@@ -268,6 +270,12 @@ pub enum HostStoreError {
     Busy {
         reason: String,
     },
+    /// A write transaction touched a `project_path`-scoped row belonging to a project
+    /// other than the one it declared, and was rolled back.
+    ScopeViolation {
+        declared: String,
+        detail: String,
+    },
     Sqlite(rusqlite::Error),
 }
 
@@ -283,6 +291,7 @@ impl HostStoreError {
             HostStoreError::PrivilegeFlipFailed { .. } => "single_store_privilege_flip_failed",
             HostStoreError::ChunkBudgetExceeded { .. } => "single_store_chunk_budget_exceeded",
             HostStoreError::Busy { .. } => "single_store_busy",
+            HostStoreError::ScopeViolation { .. } => SCOPE_VIOLATION_CODE,
             HostStoreError::Sqlite(_) => "single_store_sqlite_error",
         }
     }
@@ -336,6 +345,10 @@ impl fmt::Display for HostStoreError {
             HostStoreError::Busy { reason } => write!(
                 formatter,
                 "context.db stayed locked by another writer past the {CONTEXT_BUSY_TIMEOUT_MS} ms busy timeout: {reason}"
+            ),
+            HostStoreError::ScopeViolation { declared, detail } => write!(
+                formatter,
+                "a context.db write declared for project {declared} touched another project's row and was rolled back: {detail}"
             ),
             HostStoreError::Sqlite(error) => write!(formatter, "context.db write failed: {error}"),
         }
@@ -911,10 +924,17 @@ impl HostStore {
 /// writer inside one transaction, so no other connection ever reads it as 1. A panic or
 /// an error rolls the transaction back, which also rolls back the flip — the row cannot
 /// be left armed by a crash mid-write.
+///
+/// `scope_project` is the one project this transaction may write. Every row it inserts,
+/// updates or deletes in a [`SCOPED_TABLES`] table must carry that `project_path` (or
+/// none); anything else rolls the transaction back with [`HostStoreError::ScopeViolation`].
+/// The check applies to those tables whether or not `tables` declares them, because the
+/// closure receives an unrestricted transaction.
 fn with_privileged_transaction<T>(
     conn: &mut Connection,
     fence: &FenceState,
     tables: &[&str],
+    scope_project: &str,
     writes: impl FnOnce(&Transaction<'_>) -> Result<T, HostStoreError>,
 ) -> Result<(T, i64), HostStoreError> {
     let started_at = Instant::now();
@@ -928,6 +948,11 @@ fn with_privileged_transaction<T>(
     for table in tables {
         live_fence.check_table(table)?;
     }
+
+    // The scope triggers live in this connection's temp schema and inside this
+    // transaction, so a rollback removes them and the explicit drop below removes them
+    // before a commit. No other connection ever sees them.
+    install_scope_triggers(&transaction, scope_project)?;
 
     transaction.execute(
         "INSERT INTO context_privilege_state(id, enabled) VALUES (1, 1)
@@ -949,8 +974,10 @@ fn with_privileged_transaction<T>(
         });
     }
 
-    let result = writes(&transaction)?;
+    let result =
+        writes(&transaction).map_err(|error| scope_violation_from(error, scope_project))?;
 
+    drop_scope_triggers(&transaction)?;
     transaction.execute(
         "UPDATE context_privilege_state SET enabled = 0 WHERE id = 1",
         [],
@@ -958,6 +985,98 @@ fn with_privileged_transaction<T>(
     transaction.commit()?;
     let elapsed_us = i64::try_from(started_at.elapsed().as_micros()).unwrap_or(i64::MAX);
     Ok((result, elapsed_us))
+}
+
+// ── Per-transaction project scope ────────────────────────────────────────
+
+/// The stable code a scope violation is reported under.
+pub const SCOPE_VIOLATION_CODE: &str = "single_store_scope_violation";
+
+/// The domain tables that carry a `project_path` column, and so the tables whose rows a
+/// write transaction must keep inside its declared project.
+///
+/// The user-scoped tables and the session-keyed tables have no `project_path` and are
+/// outside the check.
+pub const SCOPED_TABLES: &[&str] = &[
+    "memories",
+    "notes",
+    "primer_candidates",
+    "memory_embedding_watermarks",
+];
+
+const SCOPE_TRIGGER_PREFIX: &str = "mc_single_store_scope_";
+
+fn sql_text_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+/// Create one connection-local trigger per scoped table and operation that aborts a row
+/// change outside `scope_project`.
+///
+/// A NULL `project_path` is inside every scope: `notes.project_path` is nullable and the
+/// note writer never sets it, so a NULL there says nothing about ownership. A non-NULL
+/// value is compared byte for byte (`COLLATE BINARY`). An update is judged on both its
+/// old and its new row, so moving a row into or out of another project is caught.
+fn install_scope_triggers(tx: &Transaction<'_>, scope_project: &str) -> Result<(), HostStoreError> {
+    let declared = sql_text_literal(scope_project);
+    let foreign = |row: &str| {
+        format!(
+            "({row}.project_path IS NOT NULL AND {row}.project_path COLLATE BINARY != {declared})"
+        )
+    };
+    let mut sql = String::new();
+    for table in SCOPED_TABLES {
+        for (operation, predicate) in [
+            ("INSERT", foreign("NEW")),
+            ("DELETE", foreign("OLD")),
+            (
+                "UPDATE",
+                format!("{} OR {}", foreign("OLD"), foreign("NEW")),
+            ),
+        ] {
+            let message = sql_text_literal(&format!(
+                "{SCOPE_VIOLATION_CODE}: {operation} on {table} outside the declared project"
+            ));
+            sql.push_str(&format!(
+                "CREATE TEMP TRIGGER {SCOPE_TRIGGER_PREFIX}{table}_{op}
+                 BEFORE {operation} ON main.{table}
+                 WHEN {predicate}
+                 BEGIN SELECT RAISE(ABORT, {message}); END;\n",
+                op = operation.to_ascii_lowercase(),
+            ));
+        }
+    }
+    tx.execute_batch(&sql)?;
+    Ok(())
+}
+
+/// Remove the triggers [`install_scope_triggers`] created, so the next transaction on
+/// this connection is judged only by its own declaration.
+fn drop_scope_triggers(tx: &Transaction<'_>) -> Result<(), HostStoreError> {
+    let mut sql = String::new();
+    for table in SCOPED_TABLES {
+        for op in ["insert", "delete", "update"] {
+            sql.push_str(&format!(
+                "DROP TRIGGER IF EXISTS temp.{SCOPE_TRIGGER_PREFIX}{table}_{op};\n"
+            ));
+        }
+    }
+    tx.execute_batch(&sql)?;
+    Ok(())
+}
+
+/// Name a write the scope triggers aborted as a scope violation rather than a generic
+/// SQLite failure.
+fn scope_violation_from(error: HostStoreError, scope_project: &str) -> HostStoreError {
+    match error {
+        HostStoreError::Sqlite(sqlite) if sqlite.to_string().contains(SCOPE_VIOLATION_CODE) => {
+            HostStoreError::ScopeViolation {
+                declared: scope_project.to_string(),
+                detail: sqlite.to_string(),
+            }
+        }
+        other => other,
+    }
 }
 
 // ── Domain writers ──────────────────────────────────────────────────────────
@@ -1680,10 +1799,13 @@ impl HostStore {
             let rows = chunk.rows(publish);
             let fence = self.fence.clone();
             let tables = chunk.tables();
-            let (chunk_result, elapsed_us) =
-                with_privileged_transaction(&mut self.conn, &fence, &tables, |tx| {
-                    apply_chunk(tx, publish, &chunk, &outcome)
-                })?;
+            let (chunk_result, elapsed_us) = with_privileged_transaction(
+                &mut self.conn,
+                &fence,
+                &tables,
+                &publish.project_path,
+                |tx| apply_chunk(tx, publish, &chunk, &outcome),
+            )?;
             outcome.chunk_rows.push(rows);
             outcome.chunk_durations_us.push(elapsed_us);
             outcome.memory_ids.extend(chunk_result.memory_ids);
@@ -1986,61 +2108,67 @@ impl HostStore {
     fn rewind_publish_scope(&mut self, publish: &FoldPublish) -> Result<(), HostStoreError> {
         let fence = self.fence.clone();
         let tables: Vec<&str> = DOMAIN_TABLES.to_vec();
-        let (_, _) = with_privileged_transaction(&mut self.conn, &fence, &tables, |tx| {
-            tx.execute(
-                "DELETE FROM compartment_events WHERE session_id = ?1",
-                params![publish.session_id],
-            )?;
-            tx.execute(
-                "DELETE FROM session_facts WHERE session_id = ?1",
-                params![publish.session_id],
-            )?;
-            for compartment in &publish.compartments {
+        let (_, _) = with_privileged_transaction(
+            &mut self.conn,
+            &fence,
+            &tables,
+            &publish.project_path,
+            |tx| {
                 tx.execute(
-                    "DELETE FROM compartments WHERE session_id = ?1 AND sequence = ?2",
-                    params![publish.session_id, compartment.sequence],
+                    "DELETE FROM compartment_events WHERE session_id = ?1",
+                    params![publish.session_id],
                 )?;
-            }
-            for memory in &publish.memories {
                 tx.execute(
-                    "DELETE FROM memories WHERE project_path = ?1 AND content = ?2",
-                    params![publish.project_path, memory.content],
+                    "DELETE FROM session_facts WHERE session_id = ?1",
+                    params![publish.session_id],
                 )?;
-            }
-            for note in &publish.notes {
-                tx.execute(
-                    "DELETE FROM notes WHERE session_id = ?1 AND content = ?2",
-                    params![publish.session_id, note.content],
-                )?;
-            }
-            for candidate in &publish.primer_candidates {
-                tx.execute(
-                    "DELETE FROM primer_candidates
+                for compartment in &publish.compartments {
+                    tx.execute(
+                        "DELETE FROM compartments WHERE session_id = ?1 AND sequence = ?2",
+                        params![publish.session_id, compartment.sequence],
+                    )?;
+                }
+                for memory in &publish.memories {
+                    tx.execute(
+                        "DELETE FROM memories WHERE project_path = ?1 AND content = ?2",
+                        params![publish.project_path, memory.content],
+                    )?;
+                }
+                for note in &publish.notes {
+                    tx.execute(
+                        "DELETE FROM notes WHERE session_id = ?1 AND content = ?2",
+                        params![publish.session_id, note.content],
+                    )?;
+                }
+                for candidate in &publish.primer_candidates {
+                    tx.execute(
+                        "DELETE FROM primer_candidates
                       WHERE project_path = ?1 AND harness = ?2 AND session_id = ?3
                         AND source_start_message_id = ?4 AND source_end_message_id = ?5",
-                    params![
-                        publish.project_path,
-                        publish.harness,
-                        publish.session_id,
-                        candidate.source_start_message_id,
-                        candidate.source_end_message_id,
-                    ],
-                )?;
-            }
-            for observation in &publish.user_observations {
-                tx.execute(
-                    "DELETE FROM user_memory_candidates WHERE session_id = ?1 AND content = ?2",
-                    params![publish.session_id, observation.content.trim()],
-                )?;
-            }
-            for memory in &publish.user_memories {
-                tx.execute(
-                    "DELETE FROM user_memories WHERE content = ?1",
-                    params![memory.content],
-                )?;
-            }
-            Ok(())
-        })?;
+                        params![
+                            publish.project_path,
+                            publish.harness,
+                            publish.session_id,
+                            candidate.source_start_message_id,
+                            candidate.source_end_message_id,
+                        ],
+                    )?;
+                }
+                for observation in &publish.user_observations {
+                    tx.execute(
+                        "DELETE FROM user_memory_candidates WHERE session_id = ?1 AND content = ?2",
+                        params![publish.session_id, observation.content.trim()],
+                    )?;
+                }
+                for memory in &publish.user_memories {
+                    tx.execute(
+                        "DELETE FROM user_memories WHERE content = ?1",
+                        params![memory.content],
+                    )?;
+                }
+                Ok(())
+            },
+        )?;
         Ok(())
     }
 
@@ -2197,6 +2325,97 @@ pub fn resolve_context_db_path() -> PathBuf {
             .join("magic-context")
     };
     storage_dir.join("context.db")
+}
+
+// ── The single-store marker read ──────────────────────────────────────────
+
+/// The refusal code for a project that is marked single-store, or whose marker cannot
+/// be trusted. The plugin's drain, reconcile and pull paths use the same code.
+pub const SINGLE_STORE_TRIPWIRE_CODE: &str = "single_store_tripwire";
+
+/// The marked projects in one `context.db`, as read on one call.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MarkerSnapshot {
+    /// True when the file's migration lane is below [`MARKER_LANE_VERSION`]: the marker
+    /// table was not consulted and every project is unmarked.
+    pub below_lane: bool,
+    /// Project identity strings that carry a marker row, compared byte for byte.
+    pub marked: std::collections::BTreeSet<String>,
+}
+
+impl MarkerSnapshot {
+    pub fn is_marked(&self, project: &str) -> bool {
+        self.marked.contains(project)
+    }
+}
+
+/// Why a marker read produced no answer.
+#[derive(Debug)]
+pub enum MarkerReadError {
+    /// `context.db` could not be opened, for example because it does not exist. That is
+    /// not a fact about any project's marker, so callers report it under their ordinary
+    /// failure code rather than as a tripwire.
+    Open(HostStoreError),
+    /// The file has no readable migration lane, or it is at or above the marker lane and
+    /// its marker table is missing, altered or unreadable. Every project on the file is
+    /// refused, because an unmarked answer could not be told apart from a lost marker.
+    Untrusted(HostStoreError),
+}
+
+/// Read the marker table of the `context.db` at `path`.
+///
+/// The open never creates anything: a missing file stays missing, with no `-wal` or
+/// `-shm` beside it. The connection is query-only. Nothing is cached, so a marker row
+/// written after the previous call is seen by the next one.
+pub fn read_marker_snapshot(path: &Path) -> Result<MarkerSnapshot, MarkerReadError> {
+    use rusqlite::OpenFlags;
+    let open_failed = |reason: String| {
+        MarkerReadError::Open(HostStoreError::OpenFailed {
+            path: path.display().to_string(),
+            reason,
+        })
+    };
+    // Without SQLITE_OPEN_CREATE, a missing file is an open error instead of a new,
+    // empty database.
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| open_failed(error.to_string()))?;
+    conn.pragma_update(None, "query_only", "ON")
+        .map_err(|error| {
+            open_failed(format!("could not make the connection read-only: {error}"))
+        })?;
+    conn.busy_timeout(std::time::Duration::from_millis(u64::from(
+        CONTEXT_BUSY_TIMEOUT_MS,
+    )))
+    .map_err(|error| open_failed(format!("could not set busy_timeout: {error}")))?;
+
+    let fence = FenceState::read(&conn, path, BUILT_CONTEXT_FENCE_VERSION)
+        .map_err(MarkerReadError::Untrusted)?;
+    if fence.persisted_version < MARKER_LANE_VERSION {
+        return Ok(MarkerSnapshot {
+            below_lane: true,
+            marked: Default::default(),
+        });
+    }
+    // Only the marker table's own fingerprint matters here: a changed domain table
+    // refuses domain writes, not a read of which projects are marked.
+    fence
+        .check_table(MARKER_TABLE)
+        .map_err(MarkerReadError::Untrusted)?;
+    let marked = (|| -> Result<_, rusqlite::Error> {
+        let mut statement = conn.prepare(&format!("SELECT project_path FROM {MARKER_TABLE}"))?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+        Ok(rows)
+    })()
+    .map_err(|error| MarkerReadError::Untrusted(HostStoreError::from(error)))?;
+    Ok(MarkerSnapshot {
+        below_lane: false,
+        marked,
+    })
 }
 
 /// Where a shadow run puts its scratch copy: a temp directory, never beside the real
@@ -2729,7 +2948,7 @@ mod tests {
     #[test]
     fn the_marker_lane_is_the_plugin_migration_that_creates_the_marker_table() {
         assert_eq!(plugin_migration_creating(MARKER_TABLE), MARKER_LANE_VERSION);
-        assert!(MARKER_LANE_VERSION <= BUILT_CONTEXT_FENCE_VERSION);
+        const { assert!(MARKER_LANE_VERSION <= BUILT_CONTEXT_FENCE_VERSION) };
         let dir = tempfile::tempdir().unwrap();
         let path = fixture_db(dir.path(), "context.db");
         let store = HostStore::open(&path).unwrap();
@@ -2893,6 +3112,408 @@ mod tests {
             observed_rx.try_recv().is_err(),
             "a second connection observed the privilege row armed"
         );
+    }
+
+    // ── Per-transaction project scope ────────────────────────────────────
+
+    const SCOPE_A: &str = "git:scope-a";
+    const SCOPE_B: &str = "git:scope-b";
+
+    /// Insert one row for `project` into a scoped table, keyed by `key` so a test can
+    /// find it again. `project` may be `None` only for `notes`, whose column is nullable.
+    fn insert_scoped_row(
+        conn: &Connection,
+        table: &str,
+        project: Option<&str>,
+        key: &str,
+    ) -> rusqlite::Result<usize> {
+        match table {
+            "memories" => conn.execute(
+                "INSERT INTO memories
+                   (project_path, category, content, normalized_hash, first_seen_at,
+                    created_at, updated_at, last_seen_at)
+                 VALUES (?1, 'ARCHITECTURE', ?2, ?2, 1, 1, 1, 1)",
+                params![project, key],
+            ),
+            "notes" => conn.execute(
+                "INSERT INTO notes (content, session_id, project_path, created_at, updated_at)
+                 VALUES (?2, 'ses_scope', ?1, 1, 1)",
+                params![project, key],
+            ),
+            "primer_candidates" => conn.execute(
+                "INSERT INTO primer_candidates
+                   (project_path, session_id, question, normalized_question,
+                    source_start_message_id, source_message_time, created_at)
+                 VALUES (?1, 'ses_scope', ?2, ?2, ?2, 1, 1)",
+                params![project, key],
+            ),
+            "memory_embedding_watermarks" => conn.execute(
+                "INSERT INTO memory_embedding_watermarks (project_path, written_memory_id)
+                 VALUES (?1, 1)",
+                params![project],
+            ),
+            other => panic!("{other} is not a scoped table"),
+        }
+    }
+
+    /// The column that identifies a row inserted by [`insert_scoped_row`].
+    fn scoped_key_column(table: &str) -> &'static str {
+        match table {
+            "memories" | "notes" => "content",
+            "primer_candidates" => "question",
+            _ => "project_path",
+        }
+    }
+
+    fn scoped_row_project(path: &Path, table: &str, key: &str) -> Option<Option<String>> {
+        let conn = Connection::open(path).unwrap();
+        conn.query_row(
+            &format!(
+                "SELECT project_path FROM {table} WHERE {} = ?1",
+                scoped_key_column(table)
+            ),
+            params![key],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    fn privilege_enabled(path: &Path) -> i64 {
+        Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT enabled FROM context_privilege_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn temp_scope_objects(store: &HostStore) -> Vec<String> {
+        let mut statement = store
+            .conn
+            .prepare("SELECT name FROM sqlite_temp_master ORDER BY name")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    fn run_scoped(
+        store: &mut HostStore,
+        project: &str,
+        tables: &[&str],
+        writes: impl FnOnce(&Transaction<'_>) -> Result<(), HostStoreError>,
+    ) -> Result<(), HostStoreError> {
+        let fence = store.fence.clone();
+        with_privileged_transaction(&mut store.conn, &fence, tables, project, writes).map(|_| ())
+    }
+
+    fn assert_scope_violation(result: Result<(), HostStoreError>) {
+        let error = result.expect_err("a write outside the declared project must roll back");
+        assert_eq!(error.code(), SCOPE_VIOLATION_CODE, "{error}");
+        assert!(
+            matches!(error, HostStoreError::ScopeViolation { .. }),
+            "{error:?}"
+        );
+    }
+
+    /// A store with one pre-existing project-B row in every scoped table, written before
+    /// either project is managed so the authority guards do not refuse the setup.
+    fn scope_fixture(dir: &Path) -> (PathBuf, HostStore) {
+        let path = fixture_db(dir, "context.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for table in SCOPED_TABLES {
+                insert_scoped_row(&conn, table, Some(SCOPE_B), "b-existing").unwrap();
+            }
+            insert_scoped_row(&conn, "notes", None, "null-existing").unwrap();
+        }
+        mark_managed(&path, SCOPE_A);
+        mark_managed(&path, SCOPE_B);
+        let store = HostStore::open(&path).unwrap();
+        (path, store)
+    }
+
+    fn b_existing_key(table: &str) -> &'static str {
+        if table == "memory_embedding_watermarks" {
+            SCOPE_B
+        } else {
+            "b-existing"
+        }
+    }
+
+    #[test]
+    fn a_write_outside_the_declared_project_rolls_back_in_every_scoped_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, mut store) = scope_fixture(dir.path());
+
+        // A second connection samples the privilege row throughout every cell.
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+        let reader_path = path.clone();
+        let reader = std::thread::spawn(move || {
+            let conn = Connection::open(&reader_path).unwrap();
+            conn.busy_timeout(std::time::Duration::from_millis(5_000))
+                .unwrap();
+            let (mut samples, mut armed) = (0_u64, 0_u64);
+            while stop_rx.try_recv().is_err() {
+                let enabled: i64 = conn
+                    .query_row(
+                        "SELECT enabled FROM context_privilege_state WHERE id = 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                samples += 1;
+                armed += u64::from(enabled != 0);
+            }
+            (samples, armed)
+        });
+
+        for table in SCOPED_TABLES {
+            // Declaring only memories: the check covers every scoped table regardless.
+            let declared: &[&str] = &["memories"];
+
+            // Insert a project-B row.
+            let key = format!("b-new-{table}");
+            let insert_key = if *table == "memory_embedding_watermarks" {
+                "git:scope-b-new".to_string()
+            } else {
+                key.clone()
+            };
+            let result = run_scoped(&mut store, SCOPE_A, declared, |tx| {
+                let project = if *table == "memory_embedding_watermarks" {
+                    "git:scope-b-new"
+                } else {
+                    SCOPE_B
+                };
+                insert_scoped_row(tx, table, Some(project), &key)?;
+                Ok(())
+            });
+            assert_scope_violation(result);
+            assert_eq!(
+                scoped_row_project(&path, table, &insert_key),
+                None,
+                "{table}"
+            );
+
+            // Delete the pre-existing project-B row.
+            let existing = b_existing_key(table);
+            let result = run_scoped(&mut store, SCOPE_A, declared, |tx| {
+                tx.execute(
+                    &format!(
+                        "DELETE FROM {table} WHERE {} = ?1",
+                        scoped_key_column(table)
+                    ),
+                    params![existing],
+                )?;
+                Ok(())
+            });
+            assert_scope_violation(result);
+            assert_eq!(
+                scoped_row_project(&path, table, existing),
+                Some(Some(SCOPE_B.to_string())),
+                "{table}"
+            );
+
+            // Move the pre-existing project-B row into project A.
+            let result = run_scoped(&mut store, SCOPE_A, declared, |tx| {
+                tx.execute(
+                    &format!(
+                        "UPDATE {table} SET project_path = ?1 WHERE {} = ?2",
+                        scoped_key_column(table)
+                    ),
+                    params![SCOPE_A, existing],
+                )?;
+                Ok(())
+            });
+            assert_scope_violation(result);
+            assert_eq!(
+                scoped_row_project(&path, table, existing),
+                Some(Some(SCOPE_B.to_string())),
+                "{table}"
+            );
+            assert_eq!(privilege_enabled(&path), 0, "{table}");
+        }
+
+        let _ = stop_tx.send(());
+        let (samples, armed) = reader.join().unwrap();
+        assert!(samples > 0, "the reader never sampled the privilege row");
+        assert_eq!(armed, 0, "a second connection observed the bracket armed");
+    }
+
+    #[test]
+    fn a_rolled_back_mixed_write_leaves_neither_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, mut store) = scope_fixture(dir.path());
+        let result = run_scoped(&mut store, SCOPE_A, &["memories", "notes"], |tx| {
+            insert_scoped_row(tx, "memories", Some(SCOPE_A), "a-mixed")?;
+            insert_scoped_row(tx, "memories", Some(SCOPE_B), "b-mixed-memory")?;
+            insert_scoped_row(tx, "notes", Some(SCOPE_B), "b-mixed-note")?;
+            Ok(())
+        });
+        assert_scope_violation(result);
+        for (table, key) in [
+            ("memories", "a-mixed"),
+            ("memories", "b-mixed-memory"),
+            ("notes", "b-mixed-note"),
+        ] {
+            assert_eq!(scoped_row_project(&path, table, key), None, "{key}");
+        }
+        assert_eq!(privilege_enabled(&path), 0);
+    }
+
+    /// `notes.project_path` is nullable and the note writer never sets it, so NULL is
+    /// inside every scope; an explicit foreign value on either side of an update is not.
+    #[test]
+    fn a_null_note_project_is_in_scope_but_a_foreign_value_on_either_side_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, mut store) = scope_fixture(dir.path());
+
+        run_scoped(&mut store, SCOPE_A, &["notes"], |tx| {
+            insert_scoped_row(tx, "notes", None, "null-new")?;
+            insert_scoped_row(tx, "notes", Some(SCOPE_A), "a-note")?;
+            Ok(())
+        })
+        .expect("a NULL-project note and an in-scope note commit");
+        assert_eq!(scoped_row_project(&path, "notes", "null-new"), Some(None));
+
+        run_scoped(&mut store, SCOPE_A, &["notes"], |tx| {
+            tx.execute(
+                "UPDATE notes SET project_path = NULL WHERE content = 'a-note'",
+                [],
+            )?;
+            tx.execute("DELETE FROM notes WHERE content = 'null-existing'", [])?;
+            Ok(())
+        })
+        .expect("A -> NULL and deleting a NULL-project note commit");
+        assert_eq!(scoped_row_project(&path, "notes", "null-existing"), None);
+
+        assert_scope_violation(run_scoped(&mut store, SCOPE_A, &["notes"], |tx| {
+            tx.execute(
+                "UPDATE notes SET project_path = NULL WHERE content = 'b-existing'",
+                [],
+            )?;
+            Ok(())
+        }));
+        assert_eq!(
+            scoped_row_project(&path, "notes", "b-existing"),
+            Some(Some(SCOPE_B.to_string()))
+        );
+
+        assert_scope_violation(run_scoped(&mut store, SCOPE_A, &["notes"], |tx| {
+            tx.execute(
+                "UPDATE notes SET project_path = ?1 WHERE content = 'null-new'",
+                params![SCOPE_B],
+            )?;
+            Ok(())
+        }));
+        assert_eq!(scoped_row_project(&path, "notes", "null-new"), Some(None));
+    }
+
+    #[test]
+    fn scope_is_declared_per_transaction_and_leaves_nothing_on_the_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, mut store) = scope_fixture(dir.path());
+        assert_eq!(temp_scope_objects(&store), Vec::<String>::new());
+
+        run_scoped(&mut store, SCOPE_A, &["memories"], |tx| {
+            insert_scoped_row(tx, "memories", Some(SCOPE_A), "a-first")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(temp_scope_objects(&store), Vec::<String>::new());
+
+        run_scoped(&mut store, SCOPE_B, &["memories"], |tx| {
+            insert_scoped_row(tx, "memories", Some(SCOPE_B), "b-second")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(temp_scope_objects(&store), Vec::<String>::new());
+
+        assert_scope_violation(run_scoped(&mut store, SCOPE_A, &["memories"], |tx| {
+            insert_scoped_row(tx, "memories", Some(SCOPE_B), "b-third")?;
+            Ok(())
+        }));
+        assert_eq!(temp_scope_objects(&store), Vec::<String>::new());
+
+        assert_eq!(
+            scoped_row_project(&path, "memories", "a-first"),
+            Some(Some(SCOPE_A.to_string()))
+        );
+        assert_eq!(
+            scoped_row_project(&path, "memories", "b-second"),
+            Some(Some(SCOPE_B.to_string()))
+        );
+        assert_eq!(scoped_row_project(&path, "memories", "b-third"), None);
+        assert_eq!(privilege_enabled(&path), 0);
+    }
+
+    fn trigger_names(path: &Path) -> Vec<String> {
+        let conn = Connection::open(path).unwrap();
+        let mut statement = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    /// An in-scope publish over a file that already holds another project's rows and a
+    /// watermark for the publishing project commits with the check active, raises that
+    /// watermark in place, and adds nothing to the shared schema.
+    #[test]
+    fn an_in_scope_publish_commits_beside_other_projects_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_db(dir.path(), "context.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            for table in SCOPED_TABLES {
+                insert_scoped_row(&conn, table, Some(SCOPE_B), "b-existing").unwrap();
+            }
+            conn.execute(
+                "INSERT INTO memory_embedding_watermarks
+                   (project_path, written_memory_id, embedded_memory_id, updated_at)
+                 VALUES ('git:fixture', 0, 0, 0)",
+                [],
+            )
+            .unwrap();
+        }
+        mark_managed(&path, "git:fixture");
+        let triggers_before = trigger_names(&path);
+        let mut store = HostStore::open(&path).unwrap();
+        let publish = sample_publish();
+        let outcome = store.publish_fold(&publish).unwrap();
+
+        assert_eq!(outcome.memory_ids.len(), publish.memories.len());
+        let highest = outcome.memory_ids.iter().copied().max().unwrap();
+        let conn = Connection::open(&path).unwrap();
+        let (project, written): (String, i64) = conn
+            .query_row(
+                "SELECT project_path, written_memory_id FROM memory_embedding_watermarks
+                  WHERE project_path = 'git:fixture'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(project, "git:fixture");
+        assert_eq!(written, highest);
+        assert_eq!(outcome.embedding_watermark, highest);
+        for table in SCOPED_TABLES {
+            assert_eq!(
+                scoped_row_project(&path, table, b_existing_key(table)),
+                Some(Some(SCOPE_B.to_string())),
+                "{table}"
+            );
+        }
+        assert_eq!(privilege_enabled(&path), 0);
+        assert_eq!(trigger_names(&path), triggers_before);
+        assert_eq!(temp_scope_objects(&store), Vec::<String>::new());
     }
 
     // ── Domain writers ──────────────────────────────────────────────────────
