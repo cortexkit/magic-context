@@ -1032,6 +1032,59 @@ describe("createEventHandler", () => {
         });
     });
 
+    // Issue 545. OpenCode creates the assistant message for a new request, with
+    // zero tokens, before it runs that request's transform; a request the
+    // provider refuses (a spent quota) also ends with zero tokens. Neither is a
+    // served response, so neither may move the idle clock: after a long idle the
+    // transform must still see the cache as expired and apply queued drops.
+    it("keeps last_response_time for tokenless assistant updates, including errors", async () => {
+        useTempDataHome("context-event-tokenless-clock-");
+        const contextUsageMap = new Map<string, { usage: ContextUsage; updatedAt: number }>([
+            ["ses-idle", { usage: { percentage: 20, inputTokens: 40_000 }, updatedAt: Date.now() }],
+        ]);
+        const deps = createDeps(contextUsageMap);
+        updateSessionMeta(deps.db, "ses-idle", {
+            lastResponseTime: 5_000,
+            lastContextPercentage: 20,
+            lastInputTokens: 40_000,
+        });
+        const handler = createEventHandler(deps);
+
+        await handler({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        role: "assistant",
+                        id: "msg_shell",
+                        sessionID: "ses-idle",
+                        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+                    },
+                },
+            },
+        });
+        await handler({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        role: "assistant",
+                        id: "msg_refused",
+                        sessionID: "ses-idle",
+                        finish: "error",
+                        error: {
+                            name: "APIError",
+                            data: { message: "Your credit balance is too low to access the API." },
+                        },
+                        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+                    },
+                },
+            },
+        });
+
+        expect(getOrCreateSessionMeta(openDatabase(), "ses-idle").lastResponseTime).toBe(5_000);
+    });
+
     it("ignores tokenless assistant updates when no prior usage exists", async () => {
         useTempDataHome("context-event-no-finish-");
         const handler = createEventHandler(createDeps(new Map()));

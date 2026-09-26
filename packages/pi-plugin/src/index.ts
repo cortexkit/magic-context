@@ -731,7 +731,20 @@ export async function persistPiPressureFromMessageEnd(args: {
 		lastUsageContextLimit: number;
 		observedSafeInputTokens: number;
 		cacheAlertSent: boolean;
-	}> = { lastResponseTime: Date.now() };
+	}> = {};
+	// last_response_time is the idle clock for the provider cache: the
+	// scheduler's TTL execute and the ttl_idle HARD fold both measure from it.
+	// Only a request the provider served refreshes that cache, and only such a
+	// request reports usage, so only an assistant message with provider usage
+	// moves the clock (the same rule as OpenCode's message.updated handler).
+	// Pi also emits message_end for the user's own prompt (before that
+	// prompt's context pass), for tool results, and for failed requests (a
+	// quota error arrives as an assistant message with zero usage). Stamping
+	// on those made a pass after a long idle look like it followed a fresh
+	// response, so it deferred and queued drops never applied.
+	if (unboundedPressure !== null) {
+		updates.lastResponseTime = Date.now();
+	}
 
 	if (
 		trustedAbsoluteWall !== undefined &&
