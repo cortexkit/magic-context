@@ -44,7 +44,6 @@ import {
     getPersistedCompactionMarkerState,
     getThinkingBindingRecoveryTarget,
     getTrailingBlankDecisions,
-    NEWEST_REASONING_BEARING_ASSISTANT,
     type PersistedCompactionMarkerState,
     type PostprocessReplaySnapshot,
     retireDeferredClearedCompactionMarkerState,
@@ -126,11 +125,10 @@ import { estimateTokens } from "./read-session-formatting";
 import { modelAcceptsEmptyContent, replaySentinelByMessageIds } from "./sentinel";
 import {
     applyFrozenTrailingBlankDecisions,
-    assistantHasReasoningPart,
     clearOldReasoning,
     findLatestAssistantReasoningMutationExemptMessage,
     findMergedReasoningStripDecisions,
-    findNewestReasoningBearingAssistantId,
+    findReasoningBearingAssistantIds,
     findTrailingBlankDecisionCandidates,
     snapshotTrailingBlankSourceDecisions,
     stripClearedReasoning,
@@ -419,6 +417,61 @@ export async function applyTodoSynthesis(args: {
     return 0;
 }
 
+/** An armed binding-recovery flag consumed by one live pass. */
+export interface ThinkingBindingRecoveryApplication {
+    /** The flag value read, so the caller clears only that value. */
+    flagTarget: string;
+    /** Every assistant whose reasoning this pass sends as an empty sentinel. */
+    messageIds: string[];
+}
+
+/**
+ * Consume an armed binding-recovery flag by freezing every reasoning-bearing
+ * assistant on the wire into the binding-mismatch strip set.
+ *
+ * Anthropic rejects every signed thinking block after the first changed
+ * prefix position, and removing all blocks is always valid. Stripping only one
+ * block per failed request would cost one user-visible failure per block.
+ *
+ * The newest assistant is included even when its tool_use is still waiting
+ * for the model to read the tool_result. After a prefix edit that block is
+ * invalid too, so keeping it would fail the same request again. Anthropic's
+ * own drop_block mode removes every failing block, whichever turn holds it,
+ * and the request succeeds, so the API accepts that turn without its thinking.
+ * The final request message is the user tool_result, not this assistant, so
+ * the rule that a final assistant message must open with thinking does not
+ * apply.
+ *
+ * The ids are persisted before any bytes change, so every later pass (defer
+ * included) replays the same strips and a removed block never reappears.
+ * Blocks produced after recovery are not in the set and are kept.
+ *
+ * Returns null only when persistence fails; the caller then serves the blocks
+ * unchanged and leaves the flag armed.
+ */
+function freezeAllReasoningForBindingRecovery(args: {
+    db: ContextDatabase;
+    sessionId: string;
+    messages: MessageLike[];
+    flagTarget: string;
+    recoveredMessageIds: Set<string>;
+}): ThinkingBindingRecoveryApplication | null {
+    const messageIds = findReasoningBearingAssistantIds(args.messages);
+    const newIds = messageIds.filter((id) => !args.recoveredMessageIds.has(id));
+    if (
+        newIds.length > 0 &&
+        !addMergedReasoningStrippedIds(
+            args.db,
+            args.sessionId,
+            newIds.map(thinkingBindingRecoveryFrozenId),
+        )
+    ) {
+        return null;
+    }
+    for (const id of newIds) args.recoveredMessageIds.add(id);
+    return { flagTarget: args.flagTarget, messageIds };
+}
+
 /** Reapply durable binding-mismatch strips when a Rust LKG snapshot is replayed. */
 export function replayRustModeBindingMismatchStrips(args: {
     db: ContextDatabase;
@@ -645,7 +698,7 @@ export function runRustModePostprocess(args: {
     tagger: Tagger;
     ctxReduceAvailability: CtxReduceAvailabilityVerdict;
 }): {
-    thinkingBindingRecovery: { flagTarget: string; messageId: string } | null;
+    thinkingBindingRecovery: ThinkingBindingRecoveryApplication | null;
     markerAt: string | null;
 } {
     if (!args.fullFeatureMode || args.compactionOff) {
@@ -775,7 +828,7 @@ export function runRustModePostprocess(args: {
     }
 
     const recoveryMessageIds = new Set<string>();
-    let thinkingBindingRecovery: { flagTarget: string; messageId: string } | null = null;
+    let thinkingBindingRecovery: ThinkingBindingRecoveryApplication | null = null;
     if (modelAcceptsEmptyContent(args.resolvedProviderID)) {
         try {
             for (const id of getMergedReasoningStrippedIds(args.db, args.sessionId)) {
@@ -788,24 +841,18 @@ export function runRustModePostprocess(args: {
                 ? getThinkingBindingRecoveryTarget(args.db, args.sessionId)
                 : null;
             if (flagTarget) {
-                const messageId =
-                    flagTarget === NEWEST_REASONING_BEARING_ASSISTANT
-                        ? findNewestReasoningBearingAssistantId(args.messages)
-                        : flagTarget;
-                if (messageId && assistantHasReasoningPart(args.messages, messageId)) {
-                    const frozenId = thinkingBindingRecoveryFrozenId(messageId);
-                    const persisted =
-                        recoveryMessageIds.has(messageId) ||
-                        addMergedReasoningStrippedIds(args.db, args.sessionId, [frozenId]);
-                    if (persisted) {
-                        recoveryMessageIds.add(messageId);
-                        thinkingBindingRecovery = { flagTarget, messageId };
-                    } else {
-                        sessionLog(
-                            args.sessionId,
-                            "rust thinking binding recovery: persistence failed; leaving the bound block intact",
-                        );
-                    }
+                thinkingBindingRecovery = freezeAllReasoningForBindingRecovery({
+                    db: args.db,
+                    sessionId: args.sessionId,
+                    messages: args.messages,
+                    flagTarget,
+                    recoveredMessageIds: recoveryMessageIds,
+                });
+                if (!thinkingBindingRecovery) {
+                    sessionLog(
+                        args.sessionId,
+                        "rust thinking binding recovery: persistence failed; leaving the bound blocks intact",
+                    );
                 }
             }
         } catch (error) {
@@ -1188,7 +1235,7 @@ export interface PostTransformPhaseResult {
     emergency: boolean;
     bustedThisPass: boolean;
     /** Pending flag applied to the live output; the caller clears it only after the live lane succeeds. */
-    thinkingBindingRecovery: { flagTarget: string; messageId: string } | null;
+    thinkingBindingRecovery: ThinkingBindingRecoveryApplication | null;
 }
 
 export interface ConfirmedAbortClient {
@@ -2803,7 +2850,7 @@ export async function runPostTransformPhase(
     // and replay because Anthropic requires its signed blocks byte-identically.
     const mergedReasoningStrippedIds = new Set(replaySnapshot?.mergedReasoningStrippedIds ?? []);
     const thinkingBindingRecoveryMessageIds = new Set<string>();
-    let thinkingBindingRecovery: { flagTarget: string; messageId: string } | null = null;
+    let thinkingBindingRecovery: ThinkingBindingRecoveryApplication | null = null;
     if (canUseEmptySentinels && !compactionOff) {
         try {
             for (const id of mergedReasoningStrippedIds) {
@@ -2817,27 +2864,24 @@ export async function runPostTransformPhase(
                 ? (replaySnapshot?.thinkingBindingRecoveryTarget ?? null)
                 : null;
             if (flagTarget) {
-                const messageId =
-                    flagTarget === NEWEST_REASONING_BEARING_ASSISTANT
-                        ? findNewestReasoningBearingAssistantId(args.messages)
-                        : flagTarget;
-                if (messageId && assistantHasReasoningPart(args.messages, messageId)) {
-                    const frozenId = thinkingBindingRecoveryFrozenId(messageId);
-                    const persisted =
-                        mergedReasoningStrippedIds.has(frozenId) ||
-                        addMergedReasoningStrippedIds(args.db, args.sessionId, [frozenId]);
-                    if (persisted) {
-                        mergedReasoningStrippedIds.add(frozenId);
-                        thinkingBindingRecoveryMessageIds.add(messageId);
-                        thinkingBindingRecovery = { flagTarget, messageId };
-                        bustedThisPass = true;
-                    } else {
-                        args.passOutcome?.record("thinking-binding-recovery-persistence-failure");
-                        sessionLog(
-                            args.sessionId,
-                            "thinking binding recovery: persistence failed; leaving the bound block intact",
-                        );
+                thinkingBindingRecovery = freezeAllReasoningForBindingRecovery({
+                    db: args.db,
+                    sessionId: args.sessionId,
+                    messages: args.messages,
+                    flagTarget,
+                    recoveredMessageIds: thinkingBindingRecoveryMessageIds,
+                });
+                if (thinkingBindingRecovery) {
+                    for (const messageId of thinkingBindingRecovery.messageIds) {
+                        mergedReasoningStrippedIds.add(thinkingBindingRecoveryFrozenId(messageId));
                     }
+                    if (thinkingBindingRecovery.messageIds.length > 0) bustedThisPass = true;
+                } else {
+                    args.passOutcome?.record("thinking-binding-recovery-persistence-failure");
+                    sessionLog(
+                        args.sessionId,
+                        "thinking binding recovery: persistence failed; leaving the bound blocks intact",
+                    );
                 }
             }
 

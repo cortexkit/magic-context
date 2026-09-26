@@ -3,7 +3,7 @@ import { scheduleClearAndReindex } from "../../features/magic-context/message-in
 import {
     detectOverflow,
     detectThinkingBindingMismatch,
-    isFable51ThinkingBindingModel,
+    isPrefixBoundThinkingModel,
 } from "../../features/magic-context/overflow-detection";
 import {
     armThinkingBindingRecovery,
@@ -332,12 +332,12 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     if (
                         deps.thinkingBindingRecoveryEnabled !== false &&
                         !deps.compactionOff &&
-                        isFable51ThinkingBindingModel(model?.providerID, model?.modelID)
+                        isPrefixBoundThinkingModel(model?.providerID, model?.modelID)
                     ) {
-                        armThinkingBindingRecovery(
-                            deps.db,
+                        armThinkingBindingRecovery(deps.db, errInfo.sessionID);
+                        sessionLog(
                             errInfo.sessionID,
-                            bindingMismatch.messageId,
+                            `thinking binding recovery armed from session.error (provider paths: failing=${bindingMismatch.failingBlockPath ?? "?"} firstChanged=${bindingMismatch.firstChangedPath ?? "?"})`,
                         );
                         dropSlot(errInfo.sessionID, "thinking-binding-recovery-arm");
                         deps.onSessionCacheInvalidated?.(errInfo.sessionID);
@@ -490,13 +490,13 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     bindingMismatch.isBindingMismatch &&
                     deps.thinkingBindingRecoveryEnabled !== false &&
                     !deps.compactionOff &&
-                    isFable51ThinkingBindingModel(info.providerID, info.modelID)
+                    isPrefixBoundThinkingModel(info.providerID, info.modelID)
                 ) {
                     try {
-                        armThinkingBindingRecovery(
-                            deps.db,
+                        armThinkingBindingRecovery(deps.db, info.sessionID);
+                        sessionLog(
                             info.sessionID,
-                            bindingMismatch.messageId,
+                            `thinking binding recovery armed from message.updated (provider paths: failing=${bindingMismatch.failingBlockPath ?? "?"} firstChanged=${bindingMismatch.firstChangedPath ?? "?"})`,
                         );
                         dropSlot(info.sessionID, "thinking-binding-recovery-arm");
                         deps.onSessionCacheInvalidated?.(info.sessionID);

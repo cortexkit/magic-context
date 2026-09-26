@@ -27,7 +27,7 @@ import {
 } from "../../features/magic-context/mural/render-trigger";
 import type { MuralWireOptions } from "../../features/magic-context/mural/resolve-mural";
 import { getMuralIdentity } from "../../features/magic-context/mural/storage-mural";
-import { isFable51ThinkingBindingModel } from "../../features/magic-context/overflow-detection";
+import { isPrefixBoundThinkingModel } from "../../features/magic-context/overflow-detection";
 import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
 import type { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import {
@@ -149,6 +149,7 @@ import {
     applyRustModeDeferredCompactionMarker,
     replayRustModeBindingMismatchStrips,
     runRustModePostprocess,
+    type ThinkingBindingRecoveryApplication,
 } from "./transform-postprocess-phase";
 import { logTransformTiming } from "./transform-stage-logger";
 
@@ -3645,7 +3646,7 @@ export function createRustModeTransform(
                 sessionLog(sessionId, "deferred frozen-prefix divergence; replaying LKG");
             }
             const materializedBoundary = materializedCompactionBoundary(response);
-            let thinkingBindingRecovery: { flagTarget: string; messageId: string } | null = null;
+            let thinkingBindingRecovery: ThinkingBindingRecoveryApplication | null = null;
             let frozenHealthyPassesAfterApply: number | null = null;
             let frozenReleaseReason: string | null = null;
             const applyStartedAt = performance.now();
@@ -3723,7 +3724,7 @@ export function createRustModeTransform(
                         fullFeatureMode: !sessionMeta.isSubagent,
                         compactionOff: deps.compactionOff,
                         resolvedProviderID: model?.providerID,
-                        thinkingBindingRecoveryEnabledForModel: isFable51ThinkingBindingModel(
+                        thinkingBindingRecoveryEnabledForModel: isPrefixBoundThinkingModel(
                             model?.providerID,
                             model?.modelID,
                         ),
@@ -3784,7 +3785,7 @@ export function createRustModeTransform(
                     );
                     sessionLog(
                         sessionId,
-                        `rust thinking binding recovery: stripped bound reasoning from assistant ${thinkingBindingRecovery.messageId}; flag=${cleared ? "cleared" : "rearmed"}`,
+                        `rust thinking binding recovery: stripped bound reasoning from ${thinkingBindingRecovery.messageIds.length} assistant(s) [${thinkingBindingRecovery.messageIds.join(",")}]; flag=${cleared ? "cleared" : "rearmed"}`,
                     );
                 }
 

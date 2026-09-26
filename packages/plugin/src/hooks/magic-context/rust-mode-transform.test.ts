@@ -4755,7 +4755,7 @@ describe("Rust mode authority adapter", () => {
         const failedInstallReplay = await run();
         const frozenId = "binding_mismatch:m1";
         expect(getThinkingBindingRecoveryTarget(db, sessionId)).toBe(
-            "newest_reasoning_bearing_assistant",
+            "all_reasoning_bearing_assistants",
         );
         expect(getMergedReasoningStrippedIds(db, sessionId)).toContain(frozenId);
         expect(JSON.stringify(failedInstallReplay)).not.toContain("bound thinking");

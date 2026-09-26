@@ -4,6 +4,7 @@ import {
     detectOverflow,
     detectThinkingBindingMismatch,
     extractErrorMessage,
+    isPrefixBoundThinkingModel,
     parseReportedLimit,
 } from "./overflow-detection";
 
@@ -130,7 +131,7 @@ describe("overflow-detection / detectOverflow", () => {
 });
 
 describe("overflow-detection / detectThinkingBindingMismatch", () => {
-    test("matches the documented Fable 5.1 400 shape", () => {
+    test("matches the documented 400 shape", () => {
         const detection = detectThinkingBindingMismatch({
             status: 400,
             error: {
@@ -143,19 +144,50 @@ describe("overflow-detection / detectThinkingBindingMismatch", () => {
         expect(detection).toEqual({
             isBindingMismatch: true,
             matchedPattern: "bound to a different conversation",
+            failingBlockPath: "messages.4.content.0",
         });
     });
 
-    test("extracts a provider-supplied offending message id when present", () => {
+    // Captured on 2026-09-26; the body was byte-identical for Claude Fable 5.1
+    // and Claude Opus 5.5 (docs/reports/anthropic-thinking-binding.md section 2).
+    // It carries no message id of any kind, only lowered wire-array paths.
+    const LIVE_BINDING_400_BODY = {
+        type: "error",
+        error: {
+            type: "invalid_request_error",
+            message:
+                'messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to "drop_block". Content before this block differs from when it was created, first at `messages.0.content.0`.',
+        },
+        request_id: "req_011CfSakFxfwQ2vmA7q6iK45",
+    };
+
+    test("reads only the wire paths from the live 400 body, never a host message id", () => {
+        expect(detectThinkingBindingMismatch({ status: 400, ...LIVE_BINDING_400_BODY })).toEqual({
+            isBindingMismatch: true,
+            matchedPattern: "bound to a different conversation",
+            failingBlockPath: "messages.1.content.0",
+            firstChangedPath: "messages.0.content.0",
+        });
+        // A message_id field is not part of the API contract; it must not leak
+        // into the detection as a recovery target.
+        const withForeignId = detectThinkingBindingMismatch({
+            ...LIVE_BINDING_400_BODY,
+            error: { ...LIVE_BINDING_400_BODY.error, message_id: "assistant-x" },
+        }) as Record<string, unknown>;
+        expect(withForeignId.messageId).toBeUndefined();
+        expect(withForeignId.isBindingMismatch).toBe(true);
+    });
+
+    test("does not treat the missing-beta block_binding 400 as a binding mismatch", () => {
         expect(
             detectThinkingBindingMismatch({
                 status: 400,
                 error: {
-                    message: "The block is bound to a different conversation",
-                    message_id: "assistant-with-bound-block",
+                    type: "invalid_request_error",
+                    message: "thinking.adaptive.block_binding: Extra inputs are not permitted",
                 },
-            }).messageId,
-        ).toBe("assistant-with-bound-block");
+            }).isBindingMismatch,
+        ).toBe(false);
     });
 
     test("tolerates provider prefix and suffix drift but rejects unrelated 400s", () => {
@@ -176,6 +208,32 @@ describe("overflow-detection / detectThinkingBindingMismatch", () => {
                 message: "The block is bound to a different conversation",
             }).isBindingMismatch,
         ).toBe(false);
+    });
+});
+
+describe("overflow-detection / isPrefixBoundThinkingModel", () => {
+    test("covers Claude Fable 5.1 and Claude Opus 5.5 on the anthropic provider only", () => {
+        for (const modelID of [
+            "claude-fable-5-1",
+            "fable-5-1-20260831",
+            "claude-opus-5-5",
+            "claude-opus-5.5",
+            "claude-opus-5-5-20260901",
+        ]) {
+            expect(isPrefixBoundThinkingModel("anthropic", modelID)).toBe(true);
+        }
+        for (const modelID of [
+            "fable-5-0",
+            "claude-opus-5",
+            "claude-opus-5-4",
+            "claude-opus-4-5",
+        ]) {
+            expect(isPrefixBoundThinkingModel("anthropic", modelID)).toBe(false);
+        }
+        expect(isPrefixBoundThinkingModel("amazon-bedrock", "claude-opus-5-5")).toBe(false);
+        expect(isPrefixBoundThinkingModel("google-vertex-anthropic", "claude-fable-5-1")).toBe(
+            false,
+        );
     });
 });
 

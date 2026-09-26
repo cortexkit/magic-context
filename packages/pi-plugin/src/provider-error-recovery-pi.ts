@@ -1,7 +1,7 @@
 import {
 	detectOverflow,
 	detectThinkingBindingMismatch,
-	isFable51ThinkingBindingModel,
+	isPrefixBoundThinkingModel,
 } from "@magic-context/core/features/magic-context/overflow-detection";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import {
@@ -9,7 +9,6 @@ import {
 	armThinkingBindingRecovery,
 	getMergedReasoningStrippedIds,
 	getThinkingBindingRecoveryTarget,
-	NEWEST_REASONING_BEARING_ASSISTANT,
 	recordOverflowDetected,
 	THINKING_BINDING_RECOVERY_FROZEN_PREFIX,
 	thinkingBindingRecoveryFrozenId,
@@ -71,18 +70,18 @@ export function handlePiProviderFailure(args: {
 		const enabled =
 			args.thinkingBindingRecoveryEnabled !== false &&
 			!args.compactionOff &&
-			isFable51ThinkingBindingModel(provider, model);
+			isPrefixBoundThinkingModel(provider, model);
 		if (enabled) {
-			// Pi's AgentMessage has no OpenCode-style internal assistant id. The
-			// branch projection provides stable entry ids on the next context pass,
-			// so recover the newest reasoning-bearing assistant there.
+			// The 400 names only provider request-array paths. The next context
+			// pass maps the flag onto stable branch entry ids and strips thinking
+			// from every assistant that still carries it.
 			armThinkingBindingRecovery(args.db, args.sessionId);
 			clearPiLkgSessionState(args.sessionId);
 			dropSlot(args.sessionId, "thinking-binding-recovery-arm");
 			reportBindingRecovery(
 				args.sessionId,
 				args.report,
-				`Fable thinking-binding recovery armed from message_end target=${NEWEST_REASONING_BEARING_ASSISTANT}`,
+				`thinking-binding recovery armed from message_end (provider paths: failing=${binding.failingBlockPath ?? "?"} firstChanged=${binding.firstChangedPath ?? "?"})`,
 			);
 		}
 		return { kind: "thinking_binding", armed: enabled };
@@ -162,11 +161,22 @@ function stripThinkingParts(message: unknown): number {
 }
 
 export interface PiThinkingBindingApplication {
+	/** The flag value read, so the caller clears only that value. */
 	flagTarget: string;
-	entryId: string;
+	/** Every branch entry whose thinking this pass removes. */
+	entryIds: string[];
 }
 
-/** Apply and replay the persisted Fable thinking-binding recovery decision. */
+/**
+ * Apply an armed thinking-binding recovery and replay earlier ones.
+ *
+ * An armed flag freezes every assistant entry that still carries thinking,
+ * the newest one included even when its tool call waits on a pending tool
+ * result: after a prefix edit all of those blocks are invalid, and removing
+ * all of them is always valid, so one failed request is enough. The frozen
+ * set is persisted before bytes change and replays on every later pass, so a
+ * removed block never comes back; blocks produced afterwards are kept.
+ */
 export function applyPiThinkingBindingRecovery(args: {
 	db: ContextDatabase;
 	sessionId: string;
@@ -189,40 +199,33 @@ export function applyPiThinkingBindingRecovery(args: {
 		if (entryId.length > 0) frozenEntryIds.add(entryId);
 	}
 
-	const flagTarget = isFable51ThinkingBindingModel(args.provider, args.model)
+	const flagTarget = isPrefixBoundThinkingModel(args.provider, args.model)
 		? getThinkingBindingRecoveryTarget(args.db, args.sessionId)
 		: null;
 	let applied: PiThinkingBindingApplication | null = null;
 	if (flagTarget) {
-		let messageIndex = -1;
-		if (flagTarget === NEWEST_REASONING_BEARING_ASSISTANT) {
-			for (let index = args.messages.length - 1; index >= 0; index -= 1) {
-				if (hasThinkingPart(args.messages[index]) && args.entryIds[index]) {
-					messageIndex = index;
-					break;
-				}
-			}
-		} else {
-			messageIndex = args.entryIds.findIndex(
-				(entryId, index) =>
-					entryId === flagTarget && hasThinkingPart(args.messages[index]),
-			);
+		const entryIds = new Set<string>();
+		for (let index = 0; index < args.messages.length; index += 1) {
+			const entryId = args.entryIds[index];
+			if (entryId && hasThinkingPart(args.messages[index]))
+				entryIds.add(entryId);
 		}
-		const entryId = messageIndex >= 0 ? args.entryIds[messageIndex] : undefined;
-		if (entryId) {
-			const frozenId = thinkingBindingRecoveryFrozenId(entryId);
-			if (
-				frozenEntryIds.has(entryId) ||
-				addMergedReasoningStrippedIds(args.db, args.sessionId, [frozenId])
-			) {
-				frozenEntryIds.add(entryId);
-				applied = { flagTarget, entryId };
-				reportBindingRecovery(
-					args.sessionId,
-					args.report,
-					`Fable thinking-binding recovery consumed on context pass target=${flagTarget} entry=${entryId}`,
-				);
-			}
+		const newEntryIds = [...entryIds].filter((id) => !frozenEntryIds.has(id));
+		if (
+			newEntryIds.length === 0 ||
+			addMergedReasoningStrippedIds(
+				args.db,
+				args.sessionId,
+				newEntryIds.map(thinkingBindingRecoveryFrozenId),
+			)
+		) {
+			for (const id of newEntryIds) frozenEntryIds.add(id);
+			applied = { flagTarget, entryIds: [...entryIds] };
+			reportBindingRecovery(
+				args.sessionId,
+				args.report,
+				`thinking-binding recovery consumed on context pass target=${flagTarget} entries=${applied.entryIds.length} [${applied.entryIds.join(",")}]`,
+			);
 		}
 	}
 
