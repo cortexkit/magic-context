@@ -1,3 +1,5 @@
+import { V2_MEMORY_CATEGORIES } from "../memory/constants";
+
 const POLICY_SENTENCE_START =
     /(?:^|[.!?]\s+|\n\s*)(?:[-*]\s+|\d+[.)]\s+)?(?:you\s+|we\s+)?(?:must(?:\s+not)?|never|always|do\s+not|don't|shall\s+not)\b/i;
 const ACTOR_POLICY =
@@ -17,7 +19,7 @@ const DECISION_AUTHORITY =
  * "binds use spread args" deliberately remain outside the gate and verifiable.
  */
 export function isDirectiveShapedProjectRule(category: string, content: string): boolean {
-    if (category !== "PROJECT_RULES") return false;
+    if (category !== V2_MEMORY_CATEGORIES[0]) return false;
     const text = content.trim();
     if (!text) return false;
     return (

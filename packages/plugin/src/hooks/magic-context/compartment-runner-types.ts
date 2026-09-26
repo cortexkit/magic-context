@@ -272,6 +272,8 @@ export type ValidatedHistorianPassResult =
           ok: true;
           compartments: CandidateCompartment[];
           facts: Array<{ category: string; content: string }>;
+          droppedFactBlocks?: number;
+          droppedFacts?: number;
           userObservations?: string[];
           /** Durable standing-question candidates for Primers v1 (stored side-table only).
            *  `originCompartmentIndex` is the 1-based index into THIS publish's

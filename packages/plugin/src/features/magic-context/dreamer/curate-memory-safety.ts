@@ -1,14 +1,9 @@
 import { log } from "../../../shared/logger";
 import type { Memory } from "../memory";
+import { V2_MEMORY_CATEGORIES } from "../memory/constants";
 import { isDirectiveShapedProjectRule } from "./memory-claim-safety";
 
-const PROJECT_SCOPED_CATEGORIES = new Set([
-    "PROJECT_RULES",
-    "ARCHITECTURE",
-    "CONSTRAINTS",
-    "CONFIG_VALUES",
-    "NAMING",
-]);
+const PROJECT_SCOPED_CATEGORIES: ReadonlySet<string> = new Set(V2_MEMORY_CATEGORIES);
 const USER_PROFILE_REFERENCE = /\buser(?:[\s_-]+)(?:profile|preferences?)\b|\bU\d+\b/i;
 
 export type CurateMutationVerdict = "archive" | "update";

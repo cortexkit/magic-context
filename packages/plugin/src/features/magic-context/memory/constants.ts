@@ -16,11 +16,7 @@ export const V2_MEMORY_CATEGORIES = [
 
 export const PROMOTABLE_CATEGORIES: MemoryCategory[] = [
     // v2 world taxonomy (what the historian emits today)
-    "PROJECT_RULES",
-    "ARCHITECTURE",
-    "CONSTRAINTS",
-    "CONFIG_VALUES",
-    "NAMING",
+    ...V2_MEMORY_CATEGORIES,
     // legacy 9-cat — still promotable so pre-v2 behavior + any lingering
     // legacy-category writes keep working until the E3 recategorization
     "ARCHITECTURE_DECISIONS",
@@ -34,11 +30,7 @@ export const PROMOTABLE_CATEGORIES: MemoryCategory[] = [
 
 export const CATEGORY_PRIORITY: MemoryCategory[] = [
     // v2 world taxonomy first (these dominate new sessions)
-    "PROJECT_RULES",
-    "ARCHITECTURE",
-    "CONSTRAINTS",
-    "CONFIG_VALUES",
-    "NAMING",
+    ...V2_MEMORY_CATEGORIES,
     // legacy 9-cat ordering preserved below for pre-v2 rows
     "USER_DIRECTIVES",
     "USER_PREFERENCES",

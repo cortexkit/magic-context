@@ -1,3 +1,6 @@
+import { V2_MEMORY_CATEGORIES } from "../../features/magic-context/memory/constants";
+import { log } from "../../shared/logger";
+
 export interface ParsedCompartment {
     startMessage: number;
     endMessage: number;
@@ -47,6 +50,8 @@ export interface ParsedPrimerCandidate {
 export interface ParsedCompartmentOutput {
     compartments: ParsedCompartment[];
     facts: ParsedFact[];
+    droppedFactBlocks: number;
+    droppedFacts: number;
     events: ParsedEvent[];
     unprocessedFrom: number | null;
     userObservations: string[];
@@ -83,10 +88,8 @@ const TIER_CLOSE_ANY_REGEX = /<\/p\d/;
 // Any tier's OPENING tag (`<p1>`…`<p9>`) — the over-capture guard: a tier body
 // must never swallow a following tier's opener.
 const TIER_OPEN_ANY_REGEX = /<p\d/;
-// v2 world taxonomy (5 categories). The historian emits only these; legacy 9-cat
-// names are accepted at the ctx_memory layer (E3 aliases), not here.
-const CATEGORY_BLOCK_REGEX =
-    /<(PROJECT_RULES|ARCHITECTURE|CONSTRAINTS|CONFIG_VALUES|NAMING)>(.*?)<\/\1>/gs;
+const CATEGORY_BLOCK_REGEX = /<([A-Za-z_][A-Za-z0-9_-]*)>(.*?)<\/\1>/gs;
+const HISTORIAN_CATEGORIES: ReadonlySet<string> = new Set(V2_MEMORY_CATEGORIES);
 const FACT_ITEM_REGEX = /^\s*\*\s*(.+)$/gm;
 const UNPROCESSED_REGEX = /<unprocessed_from>(\d+)<\/unprocessed_from>/;
 const USER_OBSERVATIONS_REGEX = /<user_observations>(.*?)<\/user_observations>/s;
@@ -162,6 +165,8 @@ export function extractTiersFromInner(inner: string): {
 export function parseCompartmentOutput(text: string): ParsedCompartmentOutput {
     const compartments: ParsedCompartment[] = [];
     const facts: ParsedFact[] = [];
+    let droppedFactBlocks = 0;
+    let droppedFacts = 0;
 
     for (const match of text.matchAll(COMPARTMENT_REGEX)) {
         const attrs = match[1];
@@ -229,23 +234,29 @@ export function parseCompartmentOutput(text: string): ParsedCompartmentOutput {
     const factsBlockMatch = text.match(FACTS_BLOCK_REGEX);
     // When a <facts> block is present (the v2 norm), scope extraction to it.
     // The fallback (legacy/transition outputs with bare category blocks) strips
-    // BOTH the events block AND every <compartment> body first — otherwise a
-    // category-shaped tag living inside a compartment's P1-P4 prose (or its
-    // attributes) would be misread as a promotable fact.
+    // events, compartment bodies and side channels first — otherwise a category
+    // tag in narrative prose or metadata would be misread as a fact.
     const factsScope = factsBlockMatch
         ? factsBlockMatch[1]
         : text
               .replace(EVENTS_BLOCK_REGEX, "")
-              .replace(/<compartment\s+[^>]*?\s*>.*?<\/compartment>/gs, "");
+              .replace(/<compartment\s+[^>]*?\s*>.*?<\/compartment>/gs, "")
+              .replace(/<(meta|user_observations|primer_candidates)>.*?<\/\1>/gs, "")
+              .replace(/<\/?(?:output|compartments)>/g, "");
     for (const categoryMatch of factsScope.matchAll(CATEGORY_BLOCK_REGEX)) {
         const category = categoryMatch[1];
         const blockContent = categoryMatch[2];
-        for (const itemMatch of blockContent.matchAll(FACT_ITEM_REGEX)) {
-            const content = unescapeXml(itemMatch[1].trim());
-            if (content) {
-                facts.push({ category, content });
-            }
+        const items = [...blockContent.matchAll(FACT_ITEM_REGEX)]
+            .map((match) => unescapeXml(match[1].trim()))
+            .filter(Boolean);
+        if (!HISTORIAN_CATEGORIES.has(category)) {
+            if (items.length === 0) continue;
+            droppedFactBlocks++;
+            droppedFacts += items.length;
+            log(`[historian] Dropped <facts> category ${category} (${items.length} facts)`);
+            continue;
         }
+        for (const content of items) facts.push({ category, content });
     }
 
     const unprocessedMatch = text.match(UNPROCESSED_REGEX);
@@ -290,7 +301,16 @@ export function parseCompartmentOutput(text: string): ParsedCompartmentOutput {
 
     compartments.sort((a, b) => a.startMessage - b.startMessage);
 
-    return { compartments, facts, events, unprocessedFrom, userObservations, primerCandidates };
+    return {
+        compartments,
+        facts,
+        droppedFactBlocks,
+        droppedFacts,
+        events,
+        unprocessedFrom,
+        userObservations,
+        primerCandidates,
+    };
 }
 
 /**

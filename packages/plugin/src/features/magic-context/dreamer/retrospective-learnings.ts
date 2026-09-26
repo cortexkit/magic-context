@@ -1,4 +1,5 @@
 import type { Database } from "../../../shared/sqlite";
+import { V2_MEMORY_CATEGORIES } from "../memory/constants";
 import { computeNormalizedHash } from "../memory/normalize-hash";
 import { getMemoryByHash, insertMemory } from "../memory/storage-memory";
 import type { MemoryCategory } from "../memory/types";
@@ -30,13 +31,7 @@ export interface RetrospectiveApplyResult {
 const LEARNINGS_BLOCK_REGEX = /<learnings\b[^>]*>(.*?)<\/learnings>/is;
 const LEARNING_REGEX = /<learning\b([^>]*)>(.*?)<\/learning>/gis;
 const ATTR_REGEX = /([a-zA-Z_:-]+)\s*=\s*"([^"]*)"/g;
-const VALID_MEMORY_CATEGORIES = new Set<MemoryCategory>([
-    "PROJECT_RULES",
-    "ARCHITECTURE",
-    "CONSTRAINTS",
-    "CONFIG_VALUES",
-    "NAMING",
-]);
+const VALID_MEMORY_CATEGORIES: ReadonlySet<string> = new Set(V2_MEMORY_CATEGORIES);
 const RAW_QUOTE_REGEX = /["“”][^"“”]{4,}["“”]|'[^']{4,}'/;
 const DATE_REGEX =
     /\b(?:20\d{2}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}\/\d{1,2}\/20\d{2}|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2},?\s+20\d{2})\b/i;

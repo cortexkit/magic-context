@@ -139,7 +139,7 @@ export function validateHistorianOutput(
         "parse",
         parseStarted,
         "completed",
-        `compartments=${parsed.compartments.length}`,
+        `compartments=${parsed.compartments.length} dropped_fact_blocks=${parsed.droppedFactBlocks} dropped_facts=${parsed.droppedFacts}`,
     );
 
     const validationStarted = startHistorianPublishStage(sessionId, "validate");
@@ -206,6 +206,9 @@ export function validateHistorianOutput(
         ok: true,
         compartments: mapped.compartments,
         facts: parsed.facts,
+        ...(parsed.droppedFactBlocks > 0
+            ? { droppedFactBlocks: parsed.droppedFactBlocks, droppedFacts: parsed.droppedFacts }
+            : {}),
         userObservations: parsed.userObservations.length > 0 ? parsed.userObservations : undefined,
         primerCandidates:
             parsed.primerCandidates.length > 0 ? parsed.primerCandidates.slice(0, 1) : undefined,

@@ -16,6 +16,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { V2_MEMORY_CATEGORIES } from "../src/features/magic-context/memory/constants";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SRC = resolve(here, "../src/hooks/magic-context/historian-prompt.source.md");
@@ -37,6 +38,14 @@ for (const marker of ["<compartments>", "<unprocessed_from>", "<facts>"]) {
   if (!raw.includes(marker)) {
     throw new Error(`build-historian-prompt: source missing required output marker '${marker}'`);
   }
+}
+
+const expectedCategories = [...V2_MEMORY_CATEGORIES];
+const headings = [...raw.matchAll(/^#### `([A-Z][A-Z0-9_]*)`$/gm)].map((match) => match[1]);
+const emitted = [...raw.matchAll(/^<([A-Z][A-Z0-9_]*)>$/gm)].map((match) => match[1]);
+if (JSON.stringify(headings) !== JSON.stringify(expectedCategories) ||
+    JSON.stringify(emitted) !== JSON.stringify(expectedCategories)) {
+  throw new Error(`build-historian-prompt: category drift: expected ${expectedCategories.join(", ")}; headings ${headings.join(", ")}; emitted ${emitted.join(", ")}`);
 }
 
 // Escape for a TS template literal: backslash, backtick, then ${.

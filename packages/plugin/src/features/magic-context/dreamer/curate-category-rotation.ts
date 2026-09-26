@@ -1,13 +1,8 @@
 import type { Database } from "../../../shared/sqlite";
+import { V2_MEMORY_CATEGORIES } from "../memory/constants";
 import { getTaskScheduleState, writeTaskStateJson } from "./storage-task-schedule";
 
-export const CURATE_MEMORY_CATEGORIES = [
-    "PROJECT_RULES",
-    "ARCHITECTURE",
-    "CONSTRAINTS",
-    "CONFIG_VALUES",
-    "NAMING",
-] as const;
+export const CURATE_MEMORY_CATEGORIES = V2_MEMORY_CATEGORIES;
 
 export type CurateMemoryCategory = (typeof CURATE_MEMORY_CATEGORIES)[number];
 
