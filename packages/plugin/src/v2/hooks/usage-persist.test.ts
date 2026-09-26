@@ -185,4 +185,36 @@ describe("persistV2UsageReading", () => {
         }
         expect(resolveContextLimit("deepseek", "deepseek-flash", { db, sessionID })).toBe(750_000);
     });
+
+    // Issue 545. last_response_time is the idle clock the cache TTL is measured
+    // from. A reply the provider refused (a spent quota) can be stored with zero
+    // tokens and a completion time; it refreshed no cache, so it must not move
+    // the clock, or the first pass after a long idle would defer queued drops.
+    it("moves last_response_time only for a reading with provider tokens", () => {
+        process.env.XDG_DATA_HOME = makeTempDir("v2-usage-persist-");
+        const db = openDatabase();
+        const sessionID = "ses-v2-idle-clock";
+        const contextUsageMap: TransformDeps["contextUsageMap"] = new Map();
+        const persist = (inputTokens: number, completed: number) =>
+            persistV2UsageReading({
+                db,
+                sessionID,
+                draftModel: { providerID: "test-provider", id: "test-model" },
+                reading: {
+                    inputTokens,
+                    limit: 200_000,
+                    admissionLimit: 200_000,
+                    modelKey: "test-provider/test-model",
+                    completed,
+                },
+                contextUsageMap,
+            });
+
+        persist(40_000, 1_000);
+        expect(getOrCreateSessionMeta(db, sessionID).lastResponseTime).toBe(1_000);
+        persist(0, 2_000);
+        expect(getOrCreateSessionMeta(db, sessionID).lastResponseTime).toBe(1_000);
+        persist(41_000, 3_000);
+        expect(getOrCreateSessionMeta(db, sessionID).lastResponseTime).toBe(3_000);
+    });
 });

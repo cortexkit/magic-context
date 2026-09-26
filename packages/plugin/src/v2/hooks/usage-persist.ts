@@ -31,7 +31,10 @@ export function persistV2UsageReading(args: PersistV2UsageReadingArgs): void {
     const { db, sessionID, draftModel, reading } = args;
     const draftModelKey = `${draftModel.providerID}/${draftModel.id}`;
     const readingMatchesDraft = usageReadingMatchesDraft(reading, draftModel);
-    if (reading.completed !== undefined)
+    // last_response_time is the idle clock for the provider cache. A reply with
+    // no tokens (a request the provider refused) refreshed no cache, so it does
+    // not move the clock; the same rule OpenCode 1 and Pi apply.
+    if (reading.completed !== undefined && reading.inputTokens > 0)
         updateSessionMeta(db, sessionID, { lastResponseTime: reading.completed });
     const percentage = (reading.inputTokens / reading.limit) * 100;
     updateSessionMeta(db, sessionID, {

@@ -644,9 +644,20 @@ export function createEventHandler(deps: EventHandlerDeps) {
 
             try {
                 const modelKey = resolveModelKey(info.providerID, info.modelID);
-                const updates: Partial<SessionMeta> & { lastResponseTime: number } = {
-                    lastResponseTime: now,
-                };
+                const updates: Partial<SessionMeta> = {};
+                // last_response_time is the idle clock for the provider cache:
+                // the scheduler's TTL execute and the ttl_idle HARD fold both
+                // measure from it. Only a request the provider served refreshes
+                // that cache, and only such a request reports tokens. OpenCode
+                // creates the assistant message for a new request with zero
+                // tokens before it runs that request's transform, and a request
+                // the provider refuses (a spent quota) ends with zero tokens.
+                // Stamping on those made the first pass after a long idle look
+                // like it followed a fresh response, so it deferred and queued
+                // drops never applied.
+                if (hasUsageTokens) {
+                    updates.lastResponseTime = now;
+                }
 
                 if (typeof deps.config.cache_ttl === "string") {
                     updates.cacheTtl = resolveCacheTtl(deps.config.cache_ttl, modelKey);
