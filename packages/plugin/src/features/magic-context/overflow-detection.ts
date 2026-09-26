@@ -110,11 +110,20 @@ export interface ThinkingBindingMismatchDetection {
     isBindingMismatch: boolean;
     /** Stable provider message substring used for diagnostics. */
     matchedPattern?: string;
-    /** Provider-supplied id of the assistant whose bound block was rejected. */
-    messageId?: string;
+    /**
+     * Diagnostics only: the provider's path to the first rejected thinking block
+     * (for example `messages.1.content.0`). It indexes the provider request array
+     * after the host lowered it, not host message ids, so recovery never uses it
+     * to pick a message.
+     */
+    failingBlockPath?: string;
+    /** Diagnostics only: the provider's path to the first changed prefix position. */
+    firstChangedPath?: string;
 }
 
 const THINKING_BINDING_MISMATCH_PATTERN = /bound to a different conversation/i;
+const THINKING_BINDING_FAILING_PATH_PATTERN = /^\s*(messages\.\d+\.content\.\d+):/;
+const THINKING_BINDING_FIRST_CHANGED_PATTERN = /first at `?(messages\.\d+\.content\.\d+)`?/;
 
 export interface OverflowDetection {
     /** True if the error message matches a known overflow pattern. */
@@ -164,30 +173,6 @@ export function extractErrorMessage(error: unknown): string {
     return String(error);
 }
 
-/**
- * Detect whether an error represents a provider-side context-overflow
- * rejection, and optionally extract the reported limit.
- */
-function extractThinkingBindingMessageId(error: unknown): string | undefined {
-    if (!error || typeof error !== "object") return undefined;
-    const seen = new Set<object>();
-    const queue: object[] = [error];
-    while (queue.length > 0) {
-        const current = queue.shift();
-        if (!current || seen.has(current)) continue;
-        seen.add(current);
-        const record = current as Record<string, unknown>;
-        for (const key of ["message_id", "messageID", "messageId"]) {
-            const value = record[key];
-            if (typeof value === "string" && value.length > 0) return value;
-        }
-        for (const value of Object.values(record)) {
-            if (value && typeof value === "object") queue.push(value);
-        }
-    }
-    return undefined;
-}
-
 function extractExplicitHttpStatus(error: unknown): number | undefined {
     if (!error || typeof error !== "object") return undefined;
     const seen = new Set<object>();
@@ -209,11 +194,12 @@ function extractExplicitHttpStatus(error: unknown): number | undefined {
 }
 
 /**
- * Classify Fable 5.1's documented thinking-prefix binding rejection. The docs
- * guarantee the phrase, not the surrounding error prose, so only that stable
- * substring is matched. Runtime account enforcement and exact SDK wrappers vary.
- * Source (no live specimen available):
- * https://platform.claude.com/docs/en/models/fable-5-1/whats-new-fable-5-1
+ * Classify Anthropic's thinking-prefix binding rejection (Claude Fable 5.1 and
+ * Claude Opus 5.5). Only the stable phrase is matched; the surrounding prose
+ * and SDK wrappers vary. The live 400 (captured in
+ * docs/reports/anthropic-thinking-binding.md) carries no message id, only
+ * provider request-array paths, so the result never names a host message.
+ * Source: https://platform.claude.com/docs/en/build-with-claude/preserved-thinking
  */
 export function detectThinkingBindingMismatch(error: unknown): ThinkingBindingMismatchDetection {
     const message = extractErrorMessage(error);
@@ -224,15 +210,38 @@ export function detectThinkingBindingMismatch(error: unknown): ThinkingBindingMi
     ) {
         return { isBindingMismatch: false };
     }
-    const messageId = extractThinkingBindingMessageId(error);
+    const failingBlockPath = THINKING_BINDING_FAILING_PATH_PATTERN.exec(message)?.[1];
+    const firstChangedPath = THINKING_BINDING_FIRST_CHANGED_PATTERN.exec(message)?.[1];
     return {
         isBindingMismatch: true,
         matchedPattern: "bound to a different conversation",
-        ...(messageId ? { messageId } : {}),
+        ...(failingBlockPath ? { failingBlockPath } : {}),
+        ...(firstChangedPath ? { firstChangedPath } : {}),
     };
 }
 
-/** True only for canonical Anthropic Fable 5.1 model identifiers. */
+/**
+ * True for the models whose signed thinking blocks Anthropic binds to the
+ * request prefix: Claude Fable 5.1 and Claude Opus 5.5. Accounts created on or
+ * after 2026-08-31 get a 400 on these models when anything before a replayed
+ * thinking block changed. Only the first-party `anthropic` provider is covered;
+ * Bedrock and Vertex enforce the same rule but are not handled here.
+ */
+export function isPrefixBoundThinkingModel(
+    providerID: string | null | undefined,
+    modelID: string | null | undefined,
+): boolean {
+    if (providerID?.toLowerCase() !== "anthropic" || !modelID) return false;
+    return (
+        isFable51ThinkingBindingModel(providerID, modelID) ||
+        /(?:^|[-_.])opus[-_.]?5[-_.]5(?:$|[-_.])/i.test(modelID)
+    );
+}
+
+/**
+ * True only for canonical Anthropic Fable 5.1 model identifiers. Binding
+ * recovery uses isPrefixBoundThinkingModel instead, which also covers Opus 5.5.
+ */
 export function isFable51ThinkingBindingModel(
     providerID: string | null | undefined,
     modelID: string | null | undefined,
@@ -241,6 +250,10 @@ export function isFable51ThinkingBindingModel(
     return /(?:^|[-_.])fable[-_.]?5[-_.]1(?:$|[-_.])/i.test(modelID);
 }
 
+/**
+ * Detect whether an error represents a provider-side context-overflow
+ * rejection, and optionally extract the reported limit.
+ */
 export function detectOverflow(error: unknown): OverflowDetection {
     const message = extractErrorMessage(error);
     if (!message) {

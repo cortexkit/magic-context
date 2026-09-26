@@ -18,7 +18,7 @@ import {
     type MessageReconciliationSource,
     scheduleReconciliation,
 } from "../../features/magic-context/message-index-async";
-import { isFable51ThinkingBindingModel } from "../../features/magic-context/overflow-detection";
+import { isPrefixBoundThinkingModel } from "../../features/magic-context/overflow-detection";
 import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import { parseCacheTtl } from "../../features/magic-context/scheduler";
@@ -2667,7 +2667,7 @@ export function createTransform(deps: TransformDeps) {
             // empty-sentinel gate and whole-message placeholder choice agrees for
             // this transform pass, including cold DB-recovered passes.
             resolvedProviderID,
-            thinkingBindingRecoveryEnabledForModel: isFable51ThinkingBindingModel(
+            thinkingBindingRecoveryEnabledForModel: isPrefixBoundThinkingModel(
                 modelForBudget?.providerID,
                 modelForBudget?.modelID,
             ),
@@ -3070,7 +3070,7 @@ export function createTransform(deps: TransformDeps) {
             );
             sessionLog(
                 sessionId,
-                `thinking binding recovery: stripped bound reasoning from assistant ${bindingRecovery.messageId}; flag=${cleared ? "cleared" : "rearmed"}`,
+                `thinking binding recovery: stripped bound reasoning from ${bindingRecovery.messageIds.length} assistant(s) [${bindingRecovery.messageIds.join(",")}]; flag=${cleared ? "cleared" : "rearmed"}`,
             );
         }
     };

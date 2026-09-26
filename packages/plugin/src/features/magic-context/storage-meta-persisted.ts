@@ -2497,9 +2497,15 @@ export function removeStrippedPlaceholderId(
     return true;
 }
 
-// ── State for retrying Fable 5.1 requests after a thinking-prefix binding rejection ──
+// ── State for recovering from a thinking-prefix binding rejection (Fable 5.1, Opus 5.5) ──
 
-export const NEWEST_REASONING_BEARING_ASSISTANT = "newest_reasoning_bearing_assistant";
+/**
+ * Armed-flag value: the next live pass strips reasoning from every assistant
+ * that still carries it. Any other non-empty stored value (an older build wrote
+ * `newest_reasoning_bearing_assistant` or a message id) is read the same way,
+ * so no migration is needed.
+ */
+export const THINKING_BINDING_RECOVERY_ALL_ASSISTANTS = "all_reasoning_bearing_assistants";
 export const THINKING_BINDING_RECOVERY_FROZEN_PREFIX = "binding_mismatch:";
 
 export function thinkingBindingRecoveryFrozenId(messageId: string): string {
@@ -2515,31 +2521,16 @@ export function getThinkingBindingRecoveryTarget(db: Database, sessionId: string
 }
 
 /**
- * Persist the provider-supplied assistant id. When no id is available, store a
- * marker that makes the next live transform select the newest assistant that
- * still contains reasoning.
+ * Arm recovery after a binding 400. Anthropic invalidates every signed thinking
+ * block after the first changed prefix position, and its error names only a
+ * provider request-array path, so the next live pass strips reasoning from all
+ * assistants still carrying it. That converges after one failed request.
  */
-export function armThinkingBindingRecovery(
-    db: Database,
-    sessionId: string,
-    messageId?: string,
-): void {
+export function armThinkingBindingRecovery(db: Database, sessionId: string): void {
     ensureSessionMetaRow(db, sessionId);
-    const target =
-        typeof messageId === "string" && messageId.length > 0
-            ? messageId
-            : NEWEST_REASONING_BEARING_ASSISTANT;
-    if (target === NEWEST_REASONING_BEARING_ASSISTANT) {
-        // A later session.error without an id must not replace a more precise id
-        // already captured from message.updated or the provider error body.
-        db.prepare(
-            "UPDATE session_meta SET thinking_binding_recovery_target = ? WHERE session_id = ? AND COALESCE(thinking_binding_recovery_target, '') = ''",
-        ).run(target, sessionId);
-        return;
-    }
     db.prepare(
         "UPDATE session_meta SET thinking_binding_recovery_target = ? WHERE session_id = ?",
-    ).run(target, sessionId);
+    ).run(THINKING_BINDING_RECOVERY_ALL_ASSISTANTS, sessionId);
 }
 
 /** Clear only the flag this live pass actually applied; a concurrent re-arm wins. */

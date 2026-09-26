@@ -468,36 +468,26 @@ function hasReasoningReplayContent(message: MessageLike): boolean {
 }
 
 /**
- * Return the newest assistant that is visible in the provider replay. OpenCode may append a
- * metadata-only request shell; the adapter drops that shell, so it cannot own the exemption for
- * the completed assistant whose signed reasoning is actually replayed last.
+ * Ids of every assistant that still sends a thinking-like part, oldest first.
+ * Binding recovery strips all of them: after a prefix edit Anthropic rejects
+ * every signed block past the edit, and removing all blocks is always valid.
+ * That includes the newest assistant even when it holds an open tool round.
  */
-export function findNewestReasoningBearingAssistantId(messages: MessageLike[]): string | undefined {
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-        const message = messages[index];
+export function findReasoningBearingAssistantIds(messages: MessageLike[]): string[] {
+    const ids = new Set<string>();
+    for (const message of messages) {
         if (message.info.role !== "assistant") continue;
+        const id = message.info.id;
+        if (typeof id !== "string" || id.length === 0) continue;
         if (
-            !message.parts.some(
+            message.parts.some(
                 (part) => isRecord(part) && REASONING_PART_TYPES.has(String(part.type)),
             )
         ) {
-            continue;
+            ids.add(id);
         }
-        const id = message.info.id;
-        if (typeof id === "string" && id.length > 0) return id;
     }
-    return undefined;
-}
-
-export function assistantHasReasoningPart(messages: MessageLike[], messageId: string): boolean {
-    return messages.some(
-        (message) =>
-            message.info.role === "assistant" &&
-            message.info.id === messageId &&
-            message.parts.some(
-                (part) => isRecord(part) && REASONING_PART_TYPES.has(String(part.type)),
-            ),
-    );
+    return [...ids];
 }
 
 export function findLatestAssistantReasoningMutationExemptMessage(

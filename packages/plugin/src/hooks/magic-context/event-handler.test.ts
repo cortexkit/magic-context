@@ -198,6 +198,18 @@ function providersClient(limit: number, prompt?: ReturnType<typeof mock>) {
     };
 }
 
+// Captured 400 body for Claude Fable 5.1 and Claude Opus 5.5 (identical on both),
+// from docs/reports/anthropic-thinking-binding.md section 2.
+const LIVE_BINDING_400_BODY = {
+    type: "error",
+    error: {
+        type: "invalid_request_error",
+        message:
+            'messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to "drop_block". Content before this block differs from when it was created, first at `messages.0.content.0`.',
+    },
+    request_id: "req_011CfSakFxfwQ2vmA7q6iK45",
+};
+
 describe("createEventHandler", () => {
     it("arms documented Fable 5.1 binding mismatch recovery and ignores other models", async () => {
         useTempDataHome("context-event-thinking-binding-");
@@ -228,7 +240,7 @@ describe("createEventHandler", () => {
             },
         });
         expect(getThinkingBindingRecoveryTarget(deps.db, "ses-fable-51")).toBe(
-            "newest_reasoning_bearing_assistant",
+            "all_reasoning_bearing_assistants",
         );
 
         await handler({
@@ -247,6 +259,60 @@ describe("createEventHandler", () => {
             },
         });
         expect(getThinkingBindingRecoveryTarget(deps.db, "ses-other-model")).toBeNull();
+    });
+
+    it("arms binding recovery for Opus 5.5 from the live 400 body", async () => {
+        useTempDataHome("context-event-thinking-binding-opus-");
+        const deps = createDeps(new Map());
+        const handler = createEventHandler(deps);
+        await handler({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        id: "failed-opus-shell",
+                        role: "assistant",
+                        sessionID: "ses-opus-55",
+                        providerID: "anthropic",
+                        modelID: "claude-opus-5-5",
+                        error: { status: 400, ...LIVE_BINDING_400_BODY },
+                    },
+                },
+            },
+        });
+        expect(getThinkingBindingRecoveryTarget(deps.db, "ses-opus-55")).toBe(
+            "all_reasoning_bearing_assistants",
+        );
+    });
+
+    it("never targets a single message from a message_id field the API does not send", async () => {
+        useTempDataHome("context-event-thinking-binding-id-");
+        const deps = createDeps(new Map());
+        const handler = createEventHandler(deps);
+        await handler({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        id: "failed-shell",
+                        role: "assistant",
+                        sessionID: "ses-fable-id",
+                        providerID: "anthropic",
+                        modelID: "claude-fable-5-1",
+                        error: {
+                            status: 400,
+                            error: {
+                                ...LIVE_BINDING_400_BODY.error,
+                                message_id: "assistant-with-bound-block",
+                            },
+                        },
+                    },
+                },
+            },
+        });
+        expect(getThinkingBindingRecoveryTarget(deps.db, "ses-fable-id")).toBe(
+            "all_reasoning_bearing_assistants",
+        );
     });
 
     it("normalizes transform decision reasons across harnesses", () => {

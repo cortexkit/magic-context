@@ -90,6 +90,7 @@ import {
     evaluateEmergencyFailClosed,
     finalizeMessageRepresentation,
     reconcileMarkerRepresentation,
+    replayRustModeBindingMismatchStrips,
     runPostTransformPhase,
     runRustModePostprocess,
 } from "./transform-postprocess-phase";
@@ -5593,8 +5594,8 @@ describe("final message representation", () => {
         );
 
         expect(recovery.thinkingBindingRecovery).toEqual({
-            flagTarget: "newest_reasoning_bearing_assistant",
-            messageId: "assistant-bound",
+            flagTarget: "all_reasoning_bearing_assistants",
+            messageIds: ["assistant-bound"],
         });
         expect(findMessage(recoveryMessages, "assistant-bound").parts[0]).toEqual({
             type: "text",
@@ -5604,7 +5605,7 @@ describe("final message representation", () => {
         // transform clears it, so a last-known-good fallback cannot clear recovery
         // for an output that was not successfully transformed.
         expect(getThinkingBindingRecoveryTarget(db, sessionId)).toBe(
-            "newest_reasoning_bearing_assistant",
+            "all_reasoning_bearing_assistants",
         );
         expect(
             clearThinkingBindingRecoveryIf(
@@ -5668,15 +5669,15 @@ describe("final message representation", () => {
         const recovery = postprocess(recoveryMessages);
 
         expect(recovery.thinkingBindingRecovery).toEqual({
-            flagTarget: "newest_reasoning_bearing_assistant",
-            messageId: "assistant-bound",
+            flagTarget: "all_reasoning_bearing_assistants",
+            messageIds: ["assistant-bound"],
         });
         expect(findMessage(recoveryMessages, "assistant-bound").parts[0]).toEqual({
             type: "text",
             text: "",
         });
         expect(getThinkingBindingRecoveryTarget(db, sessionId)).toBe(
-            "newest_reasoning_bearing_assistant",
+            "all_reasoning_bearing_assistants",
         );
         expect(
             clearThinkingBindingRecoveryIf(
@@ -5692,6 +5693,220 @@ describe("final message representation", () => {
         expect(serializeAnthropicWirePrefix(replayMessages)).toBe(
             serializeAnthropicWirePrefix(recoveryMessages),
         );
+    });
+
+    // Anthropic invalidates every signed thinking block after the first changed
+    // position, and its 400 names only a wire path, never a host message id. The
+    // fixture models three reasoning-bearing assistants whose blocks all became
+    // invalid after one prefix edit; the newest one is an open tool round whose
+    // tool_result the model has not answered yet.
+    const buildBoundMultiAssistantSession = (sessionId: string): MessageLike[] =>
+        [
+            {
+                info: { id: "user-prefix", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "re-rendered first user message" }],
+            },
+            {
+                info: { id: "assistant-one", role: "assistant", sessionID: sessionId },
+                parts: [
+                    { type: "thinking", thinking: "bound one", signature: "sig-one" },
+                    { type: "text", text: "answer one" },
+                ],
+            },
+            {
+                info: { id: "user-two", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "second question" }],
+            },
+            {
+                info: { id: "assistant-two", role: "assistant", sessionID: sessionId },
+                parts: [
+                    {
+                        type: "reasoning",
+                        text: "bound two",
+                        metadata: { anthropic: { signature: "sig-two" } },
+                    },
+                    { type: "text", text: "answer two" },
+                ],
+            },
+            {
+                info: { id: "user-three", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "run the tool" }],
+            },
+            {
+                info: { id: "assistant-open-tool", role: "assistant", sessionID: sessionId },
+                parts: [
+                    { type: "thinking", thinking: "bound three", signature: "sig-three" },
+                    {
+                        type: "tool",
+                        callID: "call-open",
+                        tool: "bash",
+                        state: { status: "completed", input: {}, output: "tool output" },
+                    },
+                ],
+            },
+        ] as unknown as MessageLike[];
+    const BOUND_ASSISTANT_IDS = ["assistant-one", "assistant-two", "assistant-open-tool"];
+    const REASONING_TYPES = new Set(["thinking", "reasoning", "redacted_thinking"]);
+    // Stand-in for Anthropic's prefix check on an enforced account: the request
+    // is rejected while any block signed against the old prefix is still sent.
+    const anthropicRejectsForBinding = (messages: MessageLike[]): boolean =>
+        messages.some(
+            (message) =>
+                BOUND_ASSISTANT_IDS.includes(String(message.info.id)) &&
+                message.parts.some(
+                    (part) =>
+                        part !== null &&
+                        typeof part === "object" &&
+                        REASONING_TYPES.has(String((part as { type?: unknown }).type)),
+                ),
+        );
+
+    it("converges after exactly one binding failure by stripping every reasoning-bearing assistant", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-binding-converges-once";
+        let failures = 0;
+        let acceptedWire: MessageLike[] | null = null;
+        for (let attempt = 0; attempt < 6; attempt += 1) {
+            const wire = buildBoundMultiAssistantSession(sessionId);
+            const result = await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, wire, {
+                    schedulerDecision: "defer",
+                    resolvedProviderID: "anthropic",
+                    thinkingBindingRecoveryEnabledForModel: true,
+                }),
+            );
+            if (result.thinkingBindingRecovery) {
+                clearThinkingBindingRecoveryIf(
+                    db,
+                    sessionId,
+                    result.thinkingBindingRecovery.flagTarget,
+                );
+            }
+            if (!anthropicRejectsForBinding(wire)) {
+                acceptedWire = wire;
+                break;
+            }
+            failures += 1;
+            armThinkingBindingRecovery(db, sessionId);
+        }
+
+        expect(failures).toBe(1);
+        if (!acceptedWire) throw new Error("recovery never produced an accepted request");
+        // The open tool round loses its invalid thinking too; its tool call stays.
+        const openTool = findMessage(acceptedWire, "assistant-open-tool");
+        expect(openTool.parts[0]).toEqual({ type: "text", text: "" });
+        expect(openTool.parts[1]).toMatchObject({ type: "tool", callID: "call-open" });
+        expect(getThinkingBindingRecoveryTarget(db, sessionId)).toBeNull();
+    });
+
+    it("replays an all-assistant binding recovery byte-identically and never restores a stripped block", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-binding-all-replay";
+        armThinkingBindingRecovery(db, sessionId);
+        const armedTarget = getThinkingBindingRecoveryTarget(db, sessionId);
+        const recoveryWire = buildBoundMultiAssistantSession(sessionId);
+        const recovery = await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, recoveryWire, {
+                schedulerDecision: "defer",
+                resolvedProviderID: "anthropic",
+                thinkingBindingRecoveryEnabledForModel: true,
+            }),
+        );
+        expect(recovery.thinkingBindingRecovery).toEqual({
+            flagTarget: armedTarget,
+            messageIds: BOUND_ASSISTANT_IDS,
+        });
+        expect(anthropicRejectsForBinding(recoveryWire)).toBe(false);
+        clearThinkingBindingRecoveryIf(db, sessionId, recovery.thinkingBindingRecovery.flagTarget);
+
+        const replayWire = buildBoundMultiAssistantSession(sessionId);
+        const replay = await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, replayWire, {
+                schedulerDecision: "defer",
+                resolvedProviderID: "anthropic",
+                thinkingBindingRecoveryEnabledForModel: true,
+            }),
+        );
+        expect(replay.thinkingBindingRecovery).toBeNull();
+        expect(JSON.stringify(replayWire)).toBe(JSON.stringify(recoveryWire));
+
+        // A block produced after the recovery was signed against the edited
+        // prefix, so it stays; the recovered blocks stay out.
+        const laterWire = [
+            ...buildBoundMultiAssistantSession(sessionId),
+            {
+                info: { id: "user-four", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "next" }],
+            },
+            {
+                info: { id: "assistant-fresh", role: "assistant", sessionID: sessionId },
+                parts: [
+                    { type: "thinking", thinking: "fresh", signature: "sig-fresh" },
+                    { type: "text", text: "fresh answer" },
+                ],
+            },
+        ] as unknown as MessageLike[];
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, laterWire, {
+                schedulerDecision: "defer",
+                resolvedProviderID: "anthropic",
+                thinkingBindingRecoveryEnabledForModel: true,
+            }),
+        );
+        expect(JSON.stringify(laterWire.slice(0, recoveryWire.length))).toBe(
+            JSON.stringify(recoveryWire),
+        );
+        expect(thinkingParts(findMessage(laterWire, "assistant-fresh"))).toHaveLength(1);
+    });
+
+    it("converges after exactly one binding failure through Rust-mode host postprocess", () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-binding-converges-once-rust";
+        let failures = 0;
+        let accepted = false;
+        let replayBytes: string | null = null;
+        for (let attempt = 0; attempt < 6; attempt += 1) {
+            const wire = buildBoundMultiAssistantSession(sessionId);
+            const result = runRustModePostprocess({
+                db,
+                sessionId,
+                messages: wire,
+                fullFeatureMode: true,
+                resolvedProviderID: "anthropic",
+                thinkingBindingRecoveryEnabledForModel: true,
+                tagger: createTagger(),
+                ctxReduceAvailability: { callable: true, frozen: true },
+            });
+            if (result.thinkingBindingRecovery) {
+                clearThinkingBindingRecoveryIf(
+                    db,
+                    sessionId,
+                    result.thinkingBindingRecovery.flagTarget,
+                );
+            }
+            if (!anthropicRejectsForBinding(wire)) {
+                accepted = true;
+                replayBytes = JSON.stringify(wire);
+                break;
+            }
+            failures += 1;
+            armThinkingBindingRecovery(db, sessionId);
+        }
+        expect(failures).toBe(1);
+        expect(accepted).toBe(true);
+
+        // The Rust last-known-good replay path applies the same persisted set.
+        const lkgReplay = buildBoundMultiAssistantSession(sessionId);
+        replayRustModeBindingMismatchStrips({
+            db,
+            sessionId,
+            messages: lkgReplay,
+            resolvedProviderID: "anthropic",
+        });
+        expect(JSON.stringify(lkgReplay)).toBe(replayBytes);
     });
 
     it("lets Rust module trailing-blank output outrank host keep decisions", () => {
