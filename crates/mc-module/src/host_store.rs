@@ -64,7 +64,15 @@ pub const SINGLE_STORE_CAPABLE: bool = mc_store::SINGLE_STORE_CAPABLE;
 /// this binary was built; whether that migration changed anything these writers depend
 /// on is answered per table by the fingerprints, so a migration that touched only tables
 /// the module never writes does not stop the module writing.
-pub const BUILT_CONTEXT_FENCE_VERSION: i64 = 91;
+pub const BUILT_CONTEXT_FENCE_VERSION: i64 = 93;
+
+/// The `context.db` migration version that creates [`MARKER_TABLE`].
+///
+/// The plugin carries the same number. A file whose persisted lane is below it has not
+/// run that migration, so every project on it is unmarked and the marker table is not
+/// consulted; at or above it, a missing or altered marker table refuses rather than
+/// reading as "unmarked".
+pub const MARKER_LANE_VERSION: i64 = 93;
 
 /// Versions at or above this number belong to downstream forks and are excluded when
 /// reading the persisted lane, matching the host's own fence arithmetic.
@@ -104,6 +112,13 @@ pub const DOMAIN_TABLES: &[&str] = &[
 /// one per file) would leave the module setting a row the guards no longer read, so any
 /// change to this table refuses every write.
 pub const BRACKET_TABLE: &str = "context_privilege_state";
+
+/// The per-project single-store marker table: one row per project whose memories and
+/// notes live only in `context.db`.
+///
+/// The module reads it and never writes it, so it is fingerprinted but deliberately not
+/// in [`DOMAIN_TABLES`], which is also the list of tables the module may write.
+pub const MARKER_TABLE: &str = "single_store_projects";
 
 /// Maximum rows one non-final chunk may write.
 ///
@@ -363,7 +378,8 @@ fn counted<T>(result: Result<T, HostStoreError>) -> Result<T, HostStoreError> {
 
 // ── Schema fingerprints ─────────────────────────────────────────────────────
 
-/// The `sqlite_master` fingerprint each domain table, and [`BRACKET_TABLE`], must carry.
+/// The `sqlite_master` fingerprint each domain table, [`BRACKET_TABLE`] and
+/// [`MARKER_TABLE`] must carry.
 ///
 /// Regenerate together with any migration that touches a domain table:
 /// `bun scripts/dump-context-db-schema.ts > crates/mc-module/tests/fixtures/context-db-schema.sql`
@@ -403,6 +419,10 @@ pub const DOMAIN_TABLE_FINGERPRINTS: &[(&str, &str)] = &[
         "1e619e665f653afa4ab62a45f37e0dedee798085f4081ece02f40f278a834f64",
     ),
     (
+        "single_store_projects",
+        "728845f06faae85f8043df7a30adedd166d0a0187b0a4efbcaa6654eeb8a4cd3",
+    ),
+    (
         "user_memories",
         "d1b14d392fe181fb9563068356ebec6519ff956f3fc27ffc7cdc4438a3cbcd98",
     ),
@@ -411,6 +431,15 @@ pub const DOMAIN_TABLE_FINGERPRINTS: &[(&str, &str)] = &[
         "8129e1b067e2f1f69d2ea36d44c42df0757bc0d86f7c32eab57fb11a5847305a",
     ),
 ];
+
+/// Every table whose schema this binary fingerprints: the tables it writes, the bracket
+/// table it flips, and the marker table it reads.
+fn fingerprinted_tables() -> impl Iterator<Item = &'static &'static str> {
+    DOMAIN_TABLES
+        .iter()
+        .chain(std::iter::once(&BRACKET_TABLE))
+        .chain(std::iter::once(&MARKER_TABLE))
+}
 
 fn expected_fingerprint(table: &str) -> Option<&'static str> {
     DOMAIN_TABLE_FINGERPRINTS
@@ -507,7 +536,7 @@ impl FenceState {
                 path: path.display().to_string(),
             })?;
         let mut fingerprints = BTreeMap::new();
-        for table in DOMAIN_TABLES.iter().chain(std::iter::once(&BRACKET_TABLE)) {
+        for table in fingerprinted_tables() {
             if let Some(fingerprint) = read_table_fingerprint(conn, table)? {
                 fingerprints.insert((*table).to_string(), fingerprint);
             }
@@ -826,7 +855,7 @@ impl HostStore {
     /// The health block the status surface reports.
     pub fn health_value(&self, mode: SingleStoreMode) -> Value {
         let mut tables = serde_json::Map::new();
-        for table in DOMAIN_TABLES.iter().chain(std::iter::once(&BRACKET_TABLE)) {
+        for table in fingerprinted_tables() {
             let state = match self.fence.check_write(table) {
                 Ok(()) => json!({ "writable": true }),
                 Err(error) => json!({
@@ -2517,7 +2546,7 @@ mod tests {
         let path = fixture_db(dir.path(), "context.db");
         let conn = Connection::open(&path).unwrap();
         let mut drift = Vec::new();
-        for table in DOMAIN_TABLES.iter().chain(std::iter::once(&BRACKET_TABLE)) {
+        for table in fingerprinted_tables() {
             let found = read_table_fingerprint(&conn, table)
                 .unwrap()
                 .unwrap_or_else(|| panic!("committed schema snapshot has no {table} table"));
@@ -2669,6 +2698,102 @@ mod tests {
             "single_store_table_missing"
         );
         assert!(store.fence().check_table("memories").is_ok());
+    }
+
+    // ── The marker table ────────────────────────────────────────────────────
+
+    /// The plugin's migration list, read from source so the module's lane constant is
+    /// pinned to the migration that actually creates the marker table.
+    const PLUGIN_MIGRATIONS_SOURCE: &str =
+        include_str!("../../../packages/plugin/src/features/magic-context/migrations.ts");
+
+    /// The `version:` of the plugin migration whose body creates `table`.
+    fn plugin_migration_creating(table: &str) -> i64 {
+        let needle = format!("CREATE TABLE IF NOT EXISTS {table}");
+        let at = PLUGIN_MIGRATIONS_SOURCE
+            .find(&needle)
+            .unwrap_or_else(|| panic!("no plugin migration creates {table}"));
+        let before = &PLUGIN_MIGRATIONS_SOURCE[..at];
+        let version_at = before
+            .rfind("version: ")
+            .expect("a migration entry precedes the table's DDL");
+        before[version_at + "version: ".len()..]
+            .split(',')
+            .next()
+            .unwrap()
+            .trim()
+            .parse()
+            .expect("numeric migration version")
+    }
+
+    #[test]
+    fn the_marker_lane_is_the_plugin_migration_that_creates_the_marker_table() {
+        assert_eq!(plugin_migration_creating(MARKER_TABLE), MARKER_LANE_VERSION);
+        assert!(MARKER_LANE_VERSION <= BUILT_CONTEXT_FENCE_VERSION);
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_db(dir.path(), "context.db");
+        let store = HostStore::open(&path).unwrap();
+        assert!(store.fence().persisted_version >= MARKER_LANE_VERSION);
+        assert!(store.fence().fingerprints.contains_key(MARKER_TABLE));
+    }
+
+    #[test]
+    fn the_marker_table_is_fingerprinted_but_never_writable() {
+        assert_eq!(DOMAIN_TABLES.len(), 9);
+        assert!(!DOMAIN_TABLES.contains(&MARKER_TABLE));
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_db(dir.path(), "context.db");
+        let store = HostStore::open(&path).unwrap();
+        assert!(store.fence().check_table(MARKER_TABLE).is_ok());
+        assert_eq!(store.writable_tables(), DOMAIN_TABLES.to_vec());
+        let health = store.health_value(SingleStoreMode::Off);
+        assert_eq!(health["tables"][MARKER_TABLE]["writable"], json!(true));
+    }
+
+    #[test]
+    fn check_table_reports_table_missing_for_a_file_without_the_marker_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_db(dir.path(), "context.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("DROP TABLE single_store_projects;")
+            .unwrap();
+        let store = HostStore::open(&path).unwrap();
+        let error = store.fence().check_table(MARKER_TABLE).unwrap_err();
+        assert!(
+            matches!(error, HostStoreError::TableMissing { .. }),
+            "{error:?}"
+        );
+        // The domain tables are untouched by the marker table's absence.
+        assert_eq!(store.writable_tables(), DOMAIN_TABLES.to_vec());
+    }
+
+    #[test]
+    fn check_table_reports_fingerprint_mismatch_for_an_altered_marker_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_db(dir.path(), "context.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("ALTER TABLE single_store_projects ADD COLUMN x TEXT;")
+            .unwrap();
+        let altered = read_table_fingerprint(&conn, MARKER_TABLE)
+            .unwrap()
+            .unwrap();
+        let store = HostStore::open(&path).unwrap();
+        match store.fence().check_table(MARKER_TABLE).unwrap_err() {
+            HostStoreError::FingerprintMismatch {
+                table,
+                expected,
+                found,
+            } => {
+                assert_eq!(table, MARKER_TABLE);
+                assert_eq!(Some(expected.as_str()), expected_fingerprint(MARKER_TABLE));
+                assert_eq!(found, altered);
+            }
+            other => panic!("expected FingerprintMismatch, got {other:?}"),
+        }
+        for table in DOMAIN_TABLES.iter().chain(std::iter::once(&BRACKET_TABLE)) {
+            assert!(store.fence().check_table(table).is_ok(), "{table}");
+        }
     }
 
     // ── The privileged write bracket ────────────────────────────────────────

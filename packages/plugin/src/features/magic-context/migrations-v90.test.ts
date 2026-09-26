@@ -44,7 +44,7 @@ describe("migration v90: compartment lease owner pid", () => {
             initializeDatabase(db);
             runMigrations(db);
 
-            expect(LATEST_SUPPORTED_VERSION).toBe(91);
+            expect(LATEST_SUPPORTED_VERSION).toBe(93);
             expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
             expect(columnNames(db, "compartment_state_lease")).toContain("owner_pid");
             expect(

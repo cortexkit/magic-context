@@ -54,7 +54,7 @@ describe("migration v89: indexed message times", () => {
             initializeDatabase(db);
             runMigrations(db);
 
-            expect(LATEST_SUPPORTED_VERSION).toBe(91);
+            expect(LATEST_SUPPORTED_VERSION).toBe(93);
             expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
             expect(columnNames(db, "message_fts_rowid_map")).toContain("message_time_ms");
             expect(indexNames(db, "message_fts_rowid_map")).toContain(

@@ -3150,6 +3150,32 @@ export const MIGRATIONS: Migration[] = [
             `);
         },
     },
+    {
+        // 92 is reserved for the ordinal-checkpoint migration held on another branch;
+        // both are meant to ship in the same release, and the runner applies any
+        // version above the persisted lane that has no row yet.
+        version: 93,
+        description: "per-project single-store marker table",
+        up(db: Database): void {
+            // One row per project whose memories and notes live only in this file
+            // (single-store). Nothing in this release writes a row; the table exists
+            // so every installed build can see a marker before any build writes one,
+            // and refuse to run the store.db mirror and drain for that project.
+            //
+            // project_path is the resolver's project identity string, the same value
+            // memories.project_path carries. context_store_uuid is this file's
+            // context_store_meta uuid at marking time, so a copied or restored file
+            // shows up as a mismatch. marked_by_version is the writer's build identity.
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS single_store_projects (
+                    project_path TEXT PRIMARY KEY,
+                    context_store_uuid TEXT NOT NULL,
+                    marked_at INTEGER NOT NULL,
+                    marked_by_version TEXT NOT NULL
+                );
+            `);
+        },
+    },
 ];
 
 /**
