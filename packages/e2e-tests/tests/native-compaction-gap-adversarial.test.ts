@@ -435,3 +435,43 @@ it(
     },
     600_000,
 );
+
+it(
+    "a gap row deleted through the host API after a restart, before the new process's first pass",
+    async () => {
+        const sessionId = await compactedSession();
+        h.mock.setDefault(smallUsage("after-compaction"));
+        const promptA = "restart-then-delete: first prompt after the native compaction";
+        await h.sendPrompt(sessionId, promptA);
+        const passA = requestContaining(promptA);
+
+        const request = compactionRequest(sessionId);
+        const boundary = readBaseline(sessionId).boundary;
+        const gap = rowsBetween(sessionId, boundary as string, request?.tailStartId as string);
+        const victim = gap.filter((row) => row.role === "assistant").at(-1);
+        expect(victim).toBeDefined();
+
+        // The new process has served nothing yet when the host removes the row.
+        await h.restart();
+        assertOpenDatabasesAreThrowaway();
+        const response = await fetch(
+            `${h.opencode.url}/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(victim?.id as string)}`,
+            { method: "DELETE" },
+        );
+        console.log(`ADVERSARIAL restart-then-delete ${victim?.id} -> HTTP ${response.status}`);
+        expect(response.ok).toBe(true);
+        await h.waitForMockQuiescence({ label: "quiet after delete" });
+
+        const promptB = "restart-then-delete: first pass after the restart";
+        await h.sendPrompt(sessionId, promptB);
+        const passB = requestContaining(promptB);
+        const result = compare("restart-then-delete: A -> B (first pass after restart, defer)", passA, passB);
+        const lines = pluginLog()
+            .split("\n")
+            .filter((line) => line.includes(sessionId) && /scheduler:|host compaction gap|message.removed|WILL|HARD/.test(line))
+            .map((line) => line.slice(60, 300));
+        console.log(`ADVERSARIAL restart-then-delete log ${JSON.stringify(lines.slice(-10))}`);
+        expect(result.busts).toBe(0);
+    },
+    600_000,
+);
