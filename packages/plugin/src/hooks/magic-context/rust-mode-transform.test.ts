@@ -73,6 +73,7 @@ import { createDbLkgPersistence } from "./lkg-persist";
 import { getSlot, registerLkgPersistence, resetLkgSlotsForTest } from "./lkg-slot";
 import { MODULE_ORDINAL_PAGE_SIZE, MODULE_PAGE_MAX_BYTES } from "./module-wire";
 import { clearNoteNudgeTriggerOnly } from "./note-nudger";
+import { loadPersistedOrdinalCheckpoints } from "./ordinal-checkpoint-persist";
 import { RawFallbackContextLimitError } from "./raw-fallback-context-limit";
 import { setRawMessageProvider } from "./read-session-chunk";
 import { closeReadOnlySessionDb } from "./read-session-db";
@@ -3404,6 +3405,239 @@ describe("Rust mode authority adapter", () => {
         }
     });
 
+    describe("ordinal checkpoints persisted across an adapter restart", () => {
+        const ROWS = 10_000;
+        /** Rows OpenCode hands the adapter: the post-compaction tail of the session. */
+        const WIRE_ROWS = 10;
+        /** Rows written while no adapter was running. */
+        const ROWS_AFTER_RESTART = 7;
+
+        type StoreRow = {
+            id: string;
+            timeCreated: number;
+            contributesOrdinal: boolean;
+            hasValidInfo: boolean;
+        };
+
+        /**
+         * One throwaway host store per session with its own row counter. A few rows are
+         * compaction summaries (no ordinal), so an ordinal is not simply its row index.
+         */
+        const makeStore = (sessionId: string) => {
+            const rows: StoreRow[] = Array.from({ length: ROWS }, (_, index) => ({
+                id: `m-${String(index + 1).padStart(6, "0")}`,
+                timeCreated: index + 1,
+                contributesOrdinal: (index + 1) % 997 !== 0,
+                hasValidInfo: true,
+            }));
+            const counters = { ordinalRows: 0, fullReads: 0 };
+            const after = (row: StoreRow, anchor: { timeCreated: number; id: string }) =>
+                row.timeCreated > anchor.timeCreated ||
+                (row.timeCreated === anchor.timeCreated && row.id > anchor.id);
+            unregisters.push(
+                setRawMessageProvider(sessionId, {
+                    readMessages: () => {
+                        counters.fullReads += 1;
+                        return [];
+                    },
+                    readMessageOrdinalPage: (anchor, limit) => {
+                        const page = rows
+                            .filter((row) => !anchor || after(row, anchor))
+                            .slice(0, limit);
+                        counters.ordinalRows += page.length;
+                        return page;
+                    },
+                    getStoredMessageCount: () => rows.length,
+                    readMessageOrdinalAnchorRank: (anchor) =>
+                        rows.some(
+                            (row) => row.id === anchor.id && row.timeCreated === anchor.timeCreated,
+                        )
+                            ? rows.filter((row) => !after(row, anchor)).length
+                            : null,
+                }),
+            );
+            const append = (count: number) => {
+                for (let index = 0; index < count; index += 1) {
+                    const next = rows.length + 1;
+                    rows.push({
+                        id: `m-${String(next).padStart(6, "0")}`,
+                        timeCreated: next,
+                        contributesOrdinal: true,
+                        hasValidInfo: true,
+                    });
+                }
+            };
+            return { rows, counters, append };
+        };
+
+        /** A fresh adapter instance, as a restarted host creates it, over a shared context.db. */
+        const makeAdapter = (db: ContextDatabase, sessionId: string, rows: StoreRow[]) => {
+            let sent: Array<[string, number]> = [];
+            const moduleClient: RustModeModuleClient = {
+                invalidateStateSyncCapabilities: () => undefined,
+                call: async ({ method, body }) => {
+                    if (method !== "transform") return { ok: true };
+                    sent = ((body as { messages?: unknown[] }).messages ?? []).map((message) => {
+                        const record = message as { mid?: string; ordinal?: number };
+                        return [String(record.mid), Number(record.ordinal)];
+                    });
+                    return {
+                        decision: "SOFT+",
+                        native_messages: [
+                            { role: "assistant", parts: [{ type: "text", text: "stable" }] },
+                        ],
+                    };
+                },
+            };
+            const transform = createRustModeTransform(makeDeps(db, moduleClient), {
+                moduleClient,
+            });
+            const runPass = async (): Promise<Array<[string, number]>> => {
+                const messages: MessageLike[] = rows.slice(-WIRE_ROWS).map((row) => ({
+                    info: {
+                        id: row.id,
+                        role: "user",
+                        sessionID: sessionId,
+                        model: { providerID: "test-provider", modelID: "test-model" },
+                    },
+                    parts: [{ type: "text", text: row.id }],
+                }));
+                await transform.run(
+                    sessionId,
+                    messages,
+                    { messages: messages as unknown[] },
+                    makeMeta(db, sessionId),
+                );
+                return sent;
+            };
+            return { transform, runPass };
+        };
+
+        /** Ordinals a cold adapter with no persisted checkpoints sends for the same store. */
+        const fullRebuildOrdinals = async (label: string, rows: StoreRow[]) => {
+            const sessionId = `${label}-reference-${Date.now()}`;
+            sessions.push(sessionId);
+            installAvailabilityDb(sessionId, {});
+            const reference = makeStore(sessionId);
+            reference.rows.splice(0, reference.rows.length, ...rows.map((row) => ({ ...row })));
+            const adapter = makeAdapter(makeDb(), sessionId, reference.rows);
+            const sent = await adapter.runPass();
+            expect(reference.counters.ordinalRows).toBe(rows.length);
+            return sent;
+        };
+
+        const ordinalLines = (logSpy: ReturnType<typeof spyOn>) =>
+            logSpy.mock.calls
+                .map((call) => String(call[1]))
+                .filter((line) => line.includes("stage=rust.ordinal_resolve"));
+
+        /** First adapter instance: primes from the first row and persists checkpoints. */
+        const primeAndPersist = async (label: string) => {
+            const sessionId = `${label}-${Date.now()}`;
+            sessions.push(sessionId);
+            installAvailabilityDb(sessionId, {});
+            const db = makeDb();
+            const store = makeStore(sessionId);
+            const first = makeAdapter(db, sessionId, store.rows);
+            await first.runPass();
+            expect(store.counters.ordinalRows).toBe(ROWS);
+            const persisted = loadPersistedOrdinalCheckpoints(db, sessionId);
+            expect(persisted.at(-1)?.storedCount).toBe(ROWS);
+            expect(persisted.length).toBe(ROWS / MODULE_ORDINAL_PAGE_SIZE);
+            store.append(ROWS_AFTER_RESTART);
+            store.counters.ordinalRows = 0;
+            return { sessionId, db, store };
+        };
+
+        it("reads only the rows after the checkpoints and matches a full rebuild", async () => {
+            const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+            try {
+                const { sessionId, db, store } = await primeAndPersist("rust-ordinal-restart");
+                logSpy.mockClear();
+
+                const restarted = makeAdapter(db, sessionId, store.rows);
+                const sent = await restarted.runPass();
+
+                // The rows written after the newest checkpoint, plus the one checkpoint
+                // segment the wire's older messages sit in: not the session.
+                expect(store.counters.ordinalRows).toBe(
+                    ROWS_AFTER_RESTART + MODULE_ORDINAL_PAGE_SIZE,
+                );
+                expect(store.counters.fullReads).toBe(0);
+                const lines = ordinalLines(logSpy);
+                expect(lines.some((line) => line.includes("mode=restore"))).toBe(true);
+                expect(lines.some((line) => line.includes("mode=prime"))).toBe(false);
+
+                expect(sent).toHaveLength(WIRE_ROWS);
+                expect(sent).toEqual(await fullRebuildOrdinals("rust-ordinal-restart", store.rows));
+            } finally {
+                logSpy.mockRestore();
+            }
+        });
+
+        it("discards the checkpoints and reads the whole session when a row before them was removed", async () => {
+            const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+            try {
+                const { sessionId, db, store } = await primeAndPersist("rust-ordinal-revert");
+                store.rows.splice(100, 1);
+                logSpy.mockClear();
+
+                const restarted = makeAdapter(db, sessionId, store.rows);
+                const sent = await restarted.runPass();
+
+                const logged = logSpy.mock.calls.map((call) => String(call[1]));
+                expect(
+                    logged.some((line) =>
+                        line.startsWith(
+                            `rust ordinal checkpoints discarded: anchor_moved id=m-${String(ROWS).padStart(6, "0")}`,
+                        ),
+                    ),
+                ).toBe(true);
+                const lines = ordinalLines(logSpy);
+                expect(
+                    lines.some(
+                        (line) =>
+                            line.includes("mode=prime") &&
+                            line.includes("cause=checkpoint_discarded"),
+                    ),
+                ).toBe(true);
+                expect(store.counters.ordinalRows).toBeGreaterThanOrEqual(store.rows.length);
+                expect(sent).toEqual(await fullRebuildOrdinals("rust-ordinal-revert", store.rows));
+            } finally {
+                logSpy.mockRestore();
+            }
+        });
+
+        it("discards the checkpoints when a row inside a re-read segment stopped carrying an ordinal", async () => {
+            const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+            try {
+                const { sessionId, db, store } = await primeAndPersist("rust-ordinal-convert");
+                // Same row count and anchors, but the segment the wire's older messages
+                // sit in now holds one ordinal fewer than its checkpoint recorded.
+                const converted = store.rows[ROWS - 50];
+                if (!converted) throw new Error("missing row");
+                converted.contributesOrdinal = false;
+                logSpy.mockClear();
+
+                const restarted = makeAdapter(db, sessionId, store.rows);
+                const sent = await restarted.runPass();
+
+                const logged = logSpy.mock.calls.map((call) => String(call[1]));
+                expect(
+                    logged.some((line) =>
+                        line.startsWith(
+                            `rust ordinal checkpoints discarded: segment_ordinal_mismatch id=m-${String(ROWS).padStart(6, "0")}`,
+                        ),
+                    ),
+                ).toBe(true);
+                expect(store.counters.ordinalRows).toBeGreaterThanOrEqual(store.rows.length);
+                expect(sent).toEqual(await fullRebuildOrdinals("rust-ordinal-convert", store.rows));
+            } finally {
+                logSpy.mockRestore();
+            }
+        });
+    });
+
     it("restarts a paged transform series after an attempt mismatch", async () => {
         const sessionId = `rust-series-restart-${Date.now()}`;
         sessions.push(sessionId);
@@ -3683,6 +3917,96 @@ describe("Rust mode authority adapter", () => {
         expect(transform.getState(sessionId).ordinalMemoStoredCount).toBe(1);
         expect(transform.getState(sessionId).ordinalMemoCanonicalCount).toBe(1);
         expect(transform.getState(sessionId).idOrdinalMemo).toEqual(new Map([["m1", 1]]));
+    });
+
+    it("re-primes after a reset in the continuation numbering the module reported", async () => {
+        const sessionId = `rust-continuation-reprime-${Date.now()}`;
+        sessions.push(sessionId);
+        const rows = [
+            { id: "m1", timeCreated: 1, contributesOrdinal: true, hasValidInfo: true },
+            { id: "m2", timeCreated: 2, contributesOrdinal: true, hasValidInfo: true },
+            { id: "m3", timeCreated: 3, contributesOrdinal: true, hasValidInfo: true },
+        ];
+        unregisters.push(
+            setRawMessageProvider(sessionId, {
+                readMessages: () => rows,
+                readMessageOrdinalPage: (after, limit) =>
+                    rows
+                        .filter(
+                            (row) =>
+                                !after ||
+                                row.timeCreated > after.timeCreated ||
+                                (row.timeCreated === after.timeCreated && row.id > after.id),
+                        )
+                        .slice(0, limit),
+                getStoredMessageCount: () => rows.length,
+            }),
+        );
+        const db = makeDb();
+        // A continued (converted) session: the module numbers this host store's rows
+        // after the 10 messages the source session already had.
+        const sentOrdinals: Array<Array<[string, number]>> = [];
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method, body }) => {
+                if (method !== "transform") return { ok: true };
+                const wire = (body as { messages?: unknown[] }).messages ?? [];
+                sentOrdinals.push(
+                    wire.map((message) => {
+                        const record = message as { mid?: string; ordinal?: number };
+                        return [String(record.mid), Number(record.ordinal)];
+                    }),
+                );
+                return {
+                    decision: "PASSTHROUGH",
+                    native_messages: [],
+                    ordinal_continuation_base: 10,
+                };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const messages = () =>
+            rows.map((row) => ({
+                info: { id: row.id, role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: row.id }],
+            }));
+        const run = async () => {
+            const wire = messages();
+            await transform.run(sessionId, wire, { messages: [...wire] }, makeMeta(db, sessionId));
+        };
+        await run();
+        expect(transform.getState(sessionId).ordinalContinuationBase).toBe(10);
+        expect(transform.getState(sessionId).idOrdinalMemo).toEqual(
+            new Map([
+                ["m1", 11],
+                ["m2", 12],
+                ["m3", 13],
+            ]),
+        );
+
+        // Removing the last row drifts the store count below every page checkpoint, so
+        // the adapter clears the memo and re-reads the session from its first row.
+        rows.splice(2, 1);
+        transform.invalidateWireState(sessionId);
+        await run();
+
+        const state = transform.getState(sessionId);
+        expect(state.ordinalMemoResetCause).toBe("mismatch_mismatch");
+        expect(state.idOrdinalMemo).toEqual(
+            new Map([
+                ["m1", 11],
+                ["m2", 12],
+            ]),
+        );
+        expect(state.ordinalMemoCanonicalCount).toBe(12);
+        expect(sentOrdinals.at(-1)).toEqual([
+            ["m1", 11],
+            ["m2", 12],
+        ]);
+
+        // A later message keeps counting from the continued numbering, not from 3.
+        rows.push({ id: "m4", timeCreated: 4, contributesOrdinal: true, hasValidInfo: true });
+        await run();
+        expect(transform.getState(sessionId).idOrdinalMemo.get("m4")).toBe(13);
     });
 
     it("clears Rust state, wire caches, and the transport route for a deleted session", async () => {

@@ -1504,6 +1504,15 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       updated_at INTEGER NOT NULL DEFAULT 0
     );
 
+    -- Sparse page checkpoints of the Rust adapter's host-store ordinal walk, so a
+    -- restarted process can rebuild its id-to-ordinal map without reading every
+    -- stored row. Validated against the host store on load. Migration v92.
+    CREATE TABLE IF NOT EXISTS rust_ordinal_checkpoints (
+      session_id TEXT PRIMARY KEY,
+      checkpoints_json TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
     -- Projects whose memories and notes live only in this file. Migration v93.
     CREATE TABLE IF NOT EXISTS single_store_projects (
       project_path TEXT PRIMARY KEY,

@@ -42,6 +42,7 @@ export const SESSION_SCOPED_TABLES: readonly SessionScopedTableDefinition[] = [
     { table: "message_history_source", harnessScoped: true },
     { table: "message_history_index", harnessScoped: true },
     { table: "lkg_slots" },
+    { table: "rust_ordinal_checkpoints" },
 ];
 
 export interface DeleteSessionScopedRowsOptions {

@@ -581,6 +581,11 @@ CREATE TABLE retrospective_processed_windows (
       processed_at INTEGER NOT NULL,
       PRIMARY KEY (project_path, window_key)
     );
+CREATE TABLE rust_ordinal_checkpoints (
+      session_id TEXT PRIMARY KEY,
+      checkpoints_json TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
 CREATE TABLE schema_migrations (
 			version INTEGER PRIMARY KEY,
 			description TEXT NOT NULL,

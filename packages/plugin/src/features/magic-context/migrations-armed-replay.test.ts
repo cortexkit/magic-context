@@ -478,6 +478,26 @@ function assertV91EmbeddingWatermarkArm(db: DatabaseType): void {
     ).run();
 }
 
+function assertV92OrdinalCheckpointArm(db: DatabaseType): void {
+    // Upgraded installs start with no persisted checkpoints (every session's first
+    // pass after the upgrade is a full read), and the table must accept a row.
+    expect(db.prepare("SELECT COUNT(*) AS count FROM rust_ordinal_checkpoints").get()).toEqual({
+        count: 0,
+    });
+    db.prepare(
+        `INSERT INTO rust_ordinal_checkpoints (session_id, checkpoints_json, updated_at)
+         VALUES ('ses-armed-replay', '{"version":1,"checkpoints":[]}', 1)`,
+    ).run();
+    expect(
+        db
+            .prepare(
+                "SELECT checkpoints_json FROM rust_ordinal_checkpoints WHERE session_id = 'ses-armed-replay'",
+            )
+            .get(),
+    ).toEqual({ checkpoints_json: '{"version":1,"checkpoints":[]}' });
+    db.prepare("DELETE FROM rust_ordinal_checkpoints WHERE session_id = 'ses-armed-replay'").run();
+}
+
 function populateModuleOwnedRows(db: DatabaseType, version: number, state: ReplayState): void {
     if (!state.contextStoreUuid) throw new Error("armed replay has no context store identity");
 
@@ -710,6 +730,11 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
             assertV91EmbeddingWatermarkArm(db);
             populateModuleOwnedRows(db, version, state);
             return;
+        case 92:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            assertV92OrdinalCheckpointArm(db);
+            populateModuleOwnedRows(db, version, state);
+            return;
         case 93:
             if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
             assertV93SingleStoreMarkerArm(db);
@@ -768,15 +793,8 @@ test("every migration lands on populated rows and v72+ stores stay armed", () =>
         initializeDatabase(db);
         installMigrationLedgerFromSource(db);
 
-        // v92 is reserved for the ordinal-checkpoint migration that ships in the same
-        // release as v93 from another branch. Every other version must be contiguous;
-        // remove the reservation when v92 lands here.
-        const reservedVersions = new Set([92]);
-        let expectedVersion = 1;
-        for (const migration of MIGRATIONS) {
-            while (reservedVersions.has(expectedVersion)) expectedVersion += 1;
-            expect(migration.version).toBe(expectedVersion);
-            expectedVersion += 1;
+        for (const [index, migration] of MIGRATIONS.entries()) {
+            expect(migration.version).toBe(index + 1);
             assertPopulatedRowsLanded(db, state);
             applyExactlyOneMigration(db, migration);
             populateForVersion(db, migration.version, state);

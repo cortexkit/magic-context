@@ -159,6 +159,57 @@ describe("migration v93: per-project single-store marker table", () => {
         }
     });
 
+    test("stepping v91 -> v92 -> v93 over populated tables applies both, in order", () => {
+        const db = new Database(":memory:");
+        try {
+            initializeDatabase(db);
+            runMigrations(db);
+            db.exec("DROP TABLE IF EXISTS rust_ordinal_checkpoints");
+            db.exec("DROP TABLE IF EXISTS single_store_projects");
+            db.prepare("DELETE FROM schema_migrations WHERE version >= 92").run();
+            expect(getPersistedSchemaVersion(db)).toBe(91);
+
+            const memory = insertMemory(db, {
+                projectPath: "git:p",
+                category: "ARCHITECTURE",
+                content: "kept across both steps",
+            });
+            db.prepare(
+                `INSERT INTO memory_embedding_watermarks
+                    (project_path, written_memory_id, embedded_memory_id, updated_at)
+                 VALUES ('git:p', 7, 3, 9)`,
+            ).run();
+            db.prepare(
+                `INSERT INTO authority_managed(project_path, context_store_uuid, marked_at)
+                 VALUES ('git:p', 'uuid-p', 1)`,
+            ).run();
+
+            runMigrations(db);
+
+            const applied = (
+                db
+                    .prepare(
+                        "SELECT version FROM schema_migrations WHERE version >= 91 ORDER BY applied_at, version",
+                    )
+                    .all() as Array<{ version: number }>
+            ).map((row) => row.version);
+            expect(applied.slice(-2)).toEqual([92, 93]);
+            expect(tableExists(db, "rust_ordinal_checkpoints")).toBe(true);
+            expect(tableExists(db, MARKER_TABLE)).toBe(true);
+            expect(getMemoriesByProject(db, "git:p").map((row) => [row.id, row.content])).toEqual([
+                [memory.id, "kept across both steps"],
+            ]);
+            expect(
+                db.prepare("SELECT written_memory_id FROM memory_embedding_watermarks").get(),
+            ).toEqual({ written_memory_id: 7 });
+            expect(db.prepare(`SELECT COUNT(*) AS count FROM ${MARKER_TABLE}`).get()).toEqual({
+                count: 0,
+            });
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
     test("re-running v93 preserves marker rows already recorded", () => {
         const db = openBeforeV93();
         try {

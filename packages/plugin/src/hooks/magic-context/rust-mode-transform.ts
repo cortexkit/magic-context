@@ -131,8 +131,13 @@ import {
     type OrdinalMemoCheckpoint,
     type OrdinalResolveStats,
     resolveOrdinalsForModule,
+    restoreOrdinalMemoFromCheckpoints,
 } from "./module-wire";
 import { onNoteTrigger } from "./note-nudger";
+import {
+    loadPersistedOrdinalCheckpoints,
+    persistOrdinalCheckpointsIfDue,
+} from "./ordinal-checkpoint-persist";
 import { RECOVERY_NO_HEAD_LIMIT } from "./protected-tail-boundary";
 import { RawFallbackContextLimitError } from "./raw-fallback-context-limit";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
@@ -421,6 +426,10 @@ interface RustSessionState extends ModuleStateSyncState {
     /** Durable prior-lineage tail returned by the module after descent. Fresh arrays
      * continue after this base instead of regenerating index+1 ordinals. */
     ordinalContinuationBase: number | null;
+    /** Stored-row count the persisted ordinal checkpoints reach, or null before this
+     * process has written or restored any. Throttles checkpoint writes to one per page
+     * of new rows. */
+    ordinalCheckpointsPersistedThrough: number | null;
     failureCount: number;
     parkCount: number;
     syntheticTurnCount: number;
@@ -1088,6 +1097,7 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
             ordinalMemoVerifyPending: false,
             ordinalMemoResetCause: "cold",
             ordinalContinuationBase: null,
+            ordinalCheckpointsPersistedThrough: null,
             seedPassPending: true,
             failureCount: 0,
             parkCount: 0,
@@ -2066,6 +2076,68 @@ export function createRustModeTransform(
         state.forceFullWire = true;
     };
 
+    /**
+     * A fresh process has no ordinal memo. Rebuild it from the checkpoints an earlier
+     * process persisted so the first pass reads only rows after them; when they no longer
+     * match the store, log why and leave the memo empty so the resolver does the full
+     * read, reporting the discard reason as its prime cause.
+     */
+    const restoreOrdinalMemoOnColdStart = async (
+        sessionId: string,
+        state: RustSessionState,
+        messages: MessageLike[],
+        timings: RustPassTimings,
+    ): Promise<void> => {
+        const persisted = loadPersistedOrdinalCheckpoints(deps.db, sessionId);
+        if (persisted.length === 0) return;
+        const startedAt = performance.now();
+        const restored = await restoreOrdinalMemoFromCheckpoints({
+            sessionId,
+            messages,
+            persisted,
+            canonicalBase: state.ordinalContinuationBase ?? 0,
+            memo: state.idOrdinalMemo,
+            memoCheckpoints: state.ordinalMemoCheckpoints,
+        });
+        if (!restored.ok) {
+            state.ordinalMemoResetCause = "checkpoint_discarded";
+            recordOrdinalResolve(
+                sessionId,
+                state,
+                startedAt,
+                timings,
+                restored.stats,
+                `fallback=full_read reason=${restored.reason}`,
+            );
+            sessionLog(
+                sessionId,
+                `rust ordinal checkpoints discarded: ${restored.reason}; falling back to a full read`,
+            );
+            return;
+        }
+        state.idOrdinalMemoGeneration = state.moduleGeneration;
+        state.ordinalMemoAnchor = restored.memoAnchor;
+        state.ordinalMemoStoredCount = restored.memoStoredCount;
+        state.ordinalMemoCanonicalCount = restored.memoCanonicalCount;
+        state.ordinalCheckpointsPersistedThrough = persisted.at(-1)?.storedCount ?? null;
+        recordOrdinalResolve(sessionId, state, startedAt, timings, restored.stats);
+    };
+
+    const persistOrdinalCheckpoints = (
+        sessionId: string,
+        state: RustSessionState,
+        timings: RustPassTimings,
+    ): void => {
+        state.ordinalCheckpointsPersistedThrough = persistOrdinalCheckpointsIfDue({
+            db: deps.db,
+            sessionId,
+            checkpoints: state.ordinalMemoCheckpoints,
+            continuationBase: state.ordinalContinuationBase,
+            persistedThrough: state.ordinalCheckpointsPersistedThrough,
+            rebuilt: timings.ordinalMode === "prime" || timings.ordinalMode === "rewind",
+        });
+    };
+
     /** Record one ordinal resolution: timing, rows read, and a named rebuild stage. */
     const recordOrdinalResolve = (
         sessionId: string,
@@ -2075,7 +2147,7 @@ export function createRustModeTransform(
         stats: OrdinalResolveStats,
         extra?: string,
     ): void => {
-        const rank = { memo: 0, incremental: 1, rewind: 2, prime: 3 } as const;
+        const rank = { memo: 0, incremental: 1, restore: 2, rewind: 3, prime: 4 } as const;
         if (rank[stats.mode] > rank[timings.ordinalMode]) timings.ordinalMode = stats.mode;
         timings.ordinalRows += stats.rowsRead;
         const cause =
@@ -2086,7 +2158,7 @@ export function createRustModeTransform(
                   : "none";
         const detail = `mode=${stats.mode} rows=${stats.rowsRead} pages=${stats.pages} rewinds=${stats.rewinds} cause=${cause}${extra ? ` ${extra}` : ""}`;
         logStage(sessionId, "ordinalResolve", startedAt, timings, detail);
-        if (stats.mode === "prime" || stats.mode === "rewind") {
+        if (stats.mode === "prime" || stats.mode === "rewind" || stats.mode === "restore") {
             // Named separately so a slow whole-session or rewound read is visible in the
             // pass summary instead of hiding inside ordinal_resolve or request latency.
             timings.ordinalRebuild += Math.max(0, performance.now() - startedAt);
@@ -2946,6 +3018,9 @@ export function createRustModeTransform(
                       );
                   })()
                 : (state.ordinalContinuationBase ?? undefined);
+            if (state.ordinalMemoStoredCount === null && state.ordinalMemoResetCause === "cold") {
+                await restoreOrdinalMemoOnColdStart(sessionId, state, messages, timings);
+            }
             const ordinalStartedAt = performance.now();
             let resolved = await resolveOrdinalsForModule({
                 sessionId,
@@ -2957,6 +3032,7 @@ export function createRustModeTransform(
                 memoStoredCount: state.ordinalMemoStoredCount,
                 memoCanonicalCount: state.ordinalMemoCanonicalCount,
                 memoCheckpoints: state.ordinalMemoCheckpoints,
+                primeCanonicalBase: state.ordinalContinuationBase ?? 0,
                 verifyStore: state.ordinalMemoVerifyPending,
                 provisionalBase,
                 forceProbeForTests: options.disableHotPathIoCachesForTests,
@@ -2979,6 +3055,7 @@ export function createRustModeTransform(
                     memoStoredCount: state.ordinalMemoStoredCount,
                     memoCanonicalCount: state.ordinalMemoCanonicalCount,
                     memoCheckpoints: state.ordinalMemoCheckpoints,
+                    primeCanonicalBase: state.ordinalContinuationBase ?? 0,
                     provisionalBase: state.ordinalContinuationBase ?? undefined,
                     forceProbeForTests: options.disableHotPathIoCachesForTests,
                 });
@@ -3002,6 +3079,7 @@ export function createRustModeTransform(
             state.ordinalMemoStoredCount = resolved.memoStoredCount;
             state.ordinalMemoCanonicalCount = resolved.memoCanonicalCount;
             state.ordinalMemoVerifyPending = false;
+            persistOrdinalCheckpoints(sessionId, state, timings);
             const firstInputId = messages[0] ? messageIdOf(messages[0]) : null;
             inputFirstOrdinal = firstInputId
                 ? (state.idOrdinalMemo.get(firstInputId) ?? null)
@@ -3465,6 +3543,7 @@ export function createRustModeTransform(
                         memoStoredCount: state.ordinalMemoStoredCount,
                         memoCanonicalCount: state.ordinalMemoCanonicalCount,
                         memoCheckpoints: state.ordinalMemoCheckpoints,
+                        primeCanonicalBase: state.ordinalContinuationBase ?? 0,
                         provisionalBase: state.ordinalContinuationBase ?? undefined,
                         forceProbeForTests: options.disableHotPathIoCachesForTests,
                     });
@@ -3489,6 +3568,7 @@ export function createRustModeTransform(
                             memoStoredCount: state.ordinalMemoStoredCount,
                             memoCanonicalCount: state.ordinalMemoCanonicalCount,
                             memoCheckpoints: state.ordinalMemoCheckpoints,
+                            primeCanonicalBase: state.ordinalContinuationBase ?? 0,
                             forceProbeForTests: options.disableHotPathIoCachesForTests,
                         });
                         recordOrdinalResolve(
@@ -3507,6 +3587,7 @@ export function createRustModeTransform(
                     state.ordinalMemoAnchor = retryResolved.memoAnchor;
                     state.ordinalMemoStoredCount = retryResolved.memoStoredCount;
                     state.ordinalMemoCanonicalCount = retryResolved.memoCanonicalCount;
+                    persistOrdinalCheckpoints(sessionId, state, timings);
                     const retryEncodedInput = encodeOpenCodeMessagesToCk(
                         retryResolved.annotatedInput,
                     );

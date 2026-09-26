@@ -3151,9 +3151,25 @@ export const MIGRATIONS: Migration[] = [
         },
     },
     {
-        // 92 is reserved for the ordinal-checkpoint migration held on another branch;
-        // both are meant to ship in the same release, and the runner applies any
-        // version above the persisted lane that has no row yet.
+        version: 92,
+        description: "persisted page checkpoints of the Rust adapter's ordinal walk",
+        up(db: Database): void {
+            // The Rust adapter maps OpenCode message ids to ordinals by walking the
+            // host store; the map lived only in memory, so the first pass after a
+            // restart re-read every stored row of the session. One row per session
+            // holds a sparse JSON list of walk checkpoints the next process can
+            // start from. The reader validates them against the host store, so a
+            // stale row only costs the full read it replaces.
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS rust_ordinal_checkpoints (
+                    session_id TEXT PRIMARY KEY,
+                    checkpoints_json TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+            `);
+        },
+    },
+    {
         version: 93,
         description: "per-project single-store marker table",
         up(db: Database): void {

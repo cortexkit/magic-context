@@ -42,6 +42,7 @@ function openAtV90(): Database {
     initializeDatabase(db);
     runMigrations(db);
     db.exec("DROP TABLE IF EXISTS memory_embedding_watermarks");
+    db.exec("DROP TABLE IF EXISTS rust_ordinal_checkpoints");
     db.exec("DROP TABLE IF EXISTS single_store_projects");
     db.prepare("DELETE FROM schema_migrations WHERE version >= 91").run();
     return db;

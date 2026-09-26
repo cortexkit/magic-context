@@ -348,6 +348,33 @@ export function readRawSessionMessageOrdinalPageFromDb(
     });
 }
 
+/**
+ * Stored rows of the session ordered at or before `anchor` in the ordinal walk's
+ * (time_created, id) order, or null when the anchor row itself no longer exists.
+ * Neither query reads message JSON.
+ */
+export function readRawSessionMessageOrdinalAnchorRankFromDb(
+    db: Database,
+    sessionId: string,
+    anchor: RawMessageOrdinalAnchor,
+): number | null {
+    const present = db
+        .prepare(
+            "SELECT 1 AS one FROM message WHERE id = ? AND session_id = ? AND time_created = ?",
+        )
+        .get(anchor.id, sessionId, anchor.timeCreated);
+    if (!present) return null;
+    const row = db
+        .prepare(
+            `SELECT COUNT(*) AS count
+             FROM message
+             WHERE session_id = ?
+               AND (time_created, id) <= (?, ?)`,
+        )
+        .get(sessionId, anchor.timeCreated, anchor.id) as { count?: number } | null;
+    return typeof row?.count === "number" ? row.count : 0;
+}
+
 /** Count stored rows without inspecting message JSON, allowing the session-id index to answer it. */
 export function countStoredRawSessionMessagesFromDb(db: Database, sessionId: string): number {
     const row = db
