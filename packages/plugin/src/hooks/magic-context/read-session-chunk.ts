@@ -30,11 +30,13 @@ import {
     countRawSessionMessageOrdinalsFromDb,
     countStoredRawSessionMessagesFromDb,
     type HostMessageRangeRead,
+    type HostShapedMessage,
     type RawMessage,
     type RawMessageOrdinalAnchor,
     type RawMessageOrdinalEntry,
     type RawMessageParts,
     readHostMessageRangeFromDb,
+    readHostMessagesByIdFromDb,
     readRawSeedTailFromDb,
     readRawSessionMessageByIdFromDb,
     readRawSessionMessageIdOrdinalsFromDb,
@@ -744,7 +746,7 @@ export function compareRawSessionMessageOrder(
  */
 export function readHostSessionMessageRange(
     sessionId: string,
-    afterId: string,
+    afterId: string | null,
     beforeId: string,
     maxRows: number,
 ): HostMessageRangeRead | null {
@@ -753,6 +755,16 @@ export function readHostSessionMessageRange(
     return withReadOnlySessionDb((db) =>
         readHostMessageRangeFromDb(db, sessionId, afterId, beforeId, maxRows),
     );
+}
+
+/** The named OpenCode 1 rows in the host's shape; null under the same rule as the range read. */
+export function readHostSessionMessagesById(
+    sessionId: string,
+    ids: readonly string[],
+): Map<string, HostShapedMessage> | null {
+    if (sessionProviders.has(sessionId)) return null;
+    if (!openCodeDbExists()) return null;
+    return withReadOnlySessionDb((db) => readHostMessagesByIdFromDb(db, sessionId, ids));
 }
 
 export function readRawSessionMessageById(sessionId: string, messageId: string): RawMessage | null {

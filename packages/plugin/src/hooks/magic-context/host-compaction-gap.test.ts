@@ -6,11 +6,15 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     clearHostCompactionGapState,
     type HostCompactionGapOutcome,
+    holdHostCompactionGapRow,
     hostCompactionGapBudgetTokens,
+    markHostCompactionTagsKept,
+    resolveHostCompactionGapLowerBound,
     restoreHostCompactionGap,
+    settleHostCompactionTags,
 } from "./host-compaction-gap";
 import { findHostCompactionWindow } from "./inject-compartments";
-import { readHostMessageRangeFromDb } from "./read-session-raw";
+import { readHostMessageRangeFromDb, readHostMessagesByIdFromDb } from "./read-session-raw";
 import type { MessageLike } from "./tag-messages";
 
 const SESSION = "ses-gap";
@@ -42,7 +46,25 @@ function createStore(): Database {
         CREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);
         CREATE INDEX part_session_idx ON part(session_id);
         CREATE INDEX part_message_id_id_idx ON part(message_id, id);
+
+        -- The Magic Context tables the restore reads and writes, in the same database
+        -- for brevity.
+        CREATE TABLE session_meta (
+            session_id TEXT PRIMARY KEY,
+            deferred_execute_state TEXT,
+            cached_m0_bytes BLOB,
+            cached_m0_last_baseline_end_message_id TEXT
+        );
+        CREATE TABLE compartments (
+            session_id TEXT,
+            sequence INTEGER,
+            end_message_id TEXT,
+            rebase_status TEXT NOT NULL DEFAULT 'resolved'
+        );
+        CREATE TABLE tags (session_id TEXT, message_id TEXT, status TEXT, tag_number INTEGER);
+        CREATE TABLE pending_ops (session_id TEXT, tag_id INTEGER);
     `);
+    db.prepare("INSERT INTO session_meta (session_id) VALUES (?)").run(SESSION);
     let clock = 0;
     const add = (id: string, info: Record<string, unknown>, parts: Record<string, unknown>[]) => {
         clock += 10;
@@ -152,7 +174,10 @@ function compareOrder(db: Database, left: string, right: string): number | null 
 }
 
 interface PassOptions {
+    /** The boundary row; null means no boundary can be resolved. Defaults to a1. */
     boundaryId?: string | null;
+    /** Start the range at the session's first row. */
+    fromSessionStart?: boolean;
     refreshAllowed?: boolean;
     budgetTokens?: number;
     messages?: MessageLike[];
@@ -165,15 +190,22 @@ function pass(
     const messages = options.messages ?? hostWindow(db);
     const window = findHostCompactionWindow(messages, () => null);
     if (!window) throw new Error("the host window does not start with a compaction pair");
+    const boundaryId = options.boundaryId === undefined ? "a1" : options.boundaryId;
     const outcome = restoreHostCompactionGap({
+        db,
         sessionId: SESSION,
         messages,
         window,
-        boundaryId: options.boundaryId === undefined ? "a1" : options.boundaryId,
+        lower: options.fromSessionStart
+            ? { afterId: null }
+            : boundaryId === null
+              ? null
+              : { afterId: boundaryId },
         refreshAllowed: options.refreshAllowed ?? false,
         budgetTokens: options.budgetTokens ?? 1_000_000,
         readRange: (afterId, beforeId, maxRows) =>
             readHostMessageRangeFromDb(db, SESSION, afterId, beforeId, maxRows),
+        readById: (rowIds) => readHostMessagesByIdFromDb(db, SESSION, rowIds),
         compareOrder: (left, right) => compareOrder(db, left, right),
     });
     return { outcome, messages };
@@ -332,7 +364,7 @@ describe("restoring the rows a native compaction hid", () => {
         request.parts = [{ type: "compaction", auto: false }];
         const before = structuredClone(messages);
         const { outcome } = pass(db, { messages });
-        expect(outcome).toEqual({ status: "fallback", reason: "no-tail-start" });
+        expect(outcome).toMatchObject({ status: "fallback", reason: "no-tail-start" });
         expect(messages).toEqual(before);
     });
 
@@ -340,7 +372,7 @@ describe("restoring the rows a native compaction hid", () => {
         const messages = hostWindow(db);
         const before = structuredClone(messages);
         const { outcome } = pass(db, { messages, boundaryId: null });
-        expect(outcome).toEqual({ status: "fallback", reason: "no-boundary" });
+        expect(outcome).toMatchObject({ status: "fallback", reason: "no-boundary" });
         expect(messages).toEqual(before);
     });
 
@@ -355,12 +387,12 @@ describe("restoring the rows a native compaction hid", () => {
         const messages = hostWindow(db);
         const before = structuredClone(messages);
         const first = pass(db, { messages, budgetTokens: 1 });
-        expect(first.outcome).toEqual({ status: "fallback", reason: "too-large" });
+        expect(first.outcome).toMatchObject({ status: "fallback", reason: "too-large" });
         expect(first.messages).toEqual(before);
 
         // A defer pass may not start serving the range: that would change its bytes.
         const deferPass = pass(db, { budgetTokens: 1_000_000 });
-        expect(deferPass.outcome).toEqual({ status: "fallback", reason: "too-large" });
+        expect(deferPass.outcome).toMatchObject({ status: "fallback", reason: "too-large" });
         expect(ids(deferPass.messages)).toContain("req");
 
         const bustingPass = pass(db, { budgetTokens: 1_000_000, refreshAllowed: true });
@@ -442,7 +474,207 @@ describe("the restored range across passes", () => {
         clearHostCompactionGapState();
         const restarted = pass(db, { boundaryId: "a2" });
         expect(restarted.outcome.status).toBe("restored");
-        if (restarted.outcome.status === "restored") expect(restarted.outcome.source).toBe("store");
+        if (restarted.outcome.status === "restored")
+            expect(restarted.outcome.source).toBe("record");
         expect(JSON.stringify(restarted.messages)).toBe(JSON.stringify(deferPass));
+    });
+});
+
+describe("where the restored range starts", () => {
+    const setBaseline = (m0: string | null, boundary: string | null) =>
+        db
+            .prepare(
+                "UPDATE session_meta SET cached_m0_bytes = ?, cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
+            )
+            .run(m0, boundary, SESSION);
+    const addCompartment = (end: string) =>
+        db
+            .prepare(
+                "INSERT INTO compartments (session_id, sequence, end_message_id) VALUES (?, 1, ?)",
+            )
+            .run(SESSION, end);
+
+    it("starts after the boundary a cached m[0] records", () => {
+        setBaseline("m0", "a1");
+        addCompartment("a2");
+        expect(resolveHostCompactionGapLowerBound(db, SESSION)).toEqual({ afterId: "a1" });
+    });
+
+    it("starts at the session's first row when the cached m[0] covers no compartment, even after one is published", () => {
+        setBaseline("m0", null);
+        addCompartment("a2");
+        expect(resolveHostCompactionGapLowerBound(db, SESSION)).toEqual({ afterId: null });
+    });
+
+    it("uses the latest compartment end only when no m[0] is cached", () => {
+        addCompartment("a2");
+        expect(resolveHostCompactionGapLowerBound(db, SESSION)).toEqual({ afterId: "a2" });
+    });
+
+    it("resolves nothing without a cached m[0] or a compartment", () => {
+        expect(resolveHostCompactionGapLowerBound(db, SESSION)).toBeNull();
+    });
+
+    it("restores from the session's first row", () => {
+        const { messages } = pass(db, { fromSessionStart: true });
+        expect(ids(messages)).toEqual([
+            "sum",
+            "u1",
+            "a1",
+            "u2",
+            "a2",
+            "u3",
+            "a3",
+            "u4",
+            "a4",
+            "u5",
+        ]);
+    });
+
+    it("keeps rows a new compartment covers on the wire until a busting pass moves the boundary", () => {
+        const served = JSON.stringify(pass(db, { fromSessionStart: true }).messages);
+        // A compartment over u1..a1 is published but m[0] is not re-rendered: the
+        // lower bound is still the session start, so the served rows do not move.
+        expect(JSON.stringify(pass(db, { fromSessionStart: true }).messages)).toBe(served);
+        // The busting pass records a1 as the boundary; the passes after it serve
+        // the rows after a1, as that pass's prefix trim did.
+        expect(ids(pass(db, { boundaryId: "a1" }).messages)).toEqual([
+            "sum",
+            "u2",
+            "a2",
+            "u3",
+            "a3",
+            "u4",
+            "a4",
+            "u5",
+        ]);
+    });
+});
+
+describe("the served range across a restart", () => {
+    const removeRow = (id: string) => {
+        db.prepare("DELETE FROM part WHERE message_id = ?").run(id);
+        db.prepare("DELETE FROM message WHERE id = ?").run(id);
+    };
+
+    it("replays a served row the host removed, on the first pass after a restart", () => {
+        const served = JSON.stringify(pass(db).messages);
+        expect(holdHostCompactionGapRow(db, SESSION, "a2", "removed")).toBe(true);
+        removeRow("a2");
+        expect(JSON.stringify(pass(db).messages)).toBe(served);
+
+        clearHostCompactionGapState();
+        const restarted = pass(db);
+        expect(restarted.outcome).toMatchObject({ status: "restored", source: "record" });
+        expect(JSON.stringify(restarted.messages)).toBe(served);
+
+        // A pass already known to bust reads the store again: the row leaves the
+        // range, and its state may be cleaned now.
+        const busting = pass(db, { refreshAllowed: true });
+        expect(ids(busting.messages)).toEqual(["sum", "u2", "u3", "a3", "u4", "a4", "u5"]);
+        expect(busting.outcome.rowsLeftRange).toEqual(["a2"]);
+        expect(pass(db).outcome.rowsLeftRange).toEqual([]);
+    });
+
+    it("replays a served row the host edited, on the first pass after a restart", () => {
+        const served = JSON.stringify(pass(db).messages);
+        expect(holdHostCompactionGapRow(db, SESSION, "u3", "changed")).toBe(true);
+        db.prepare("UPDATE part SET data = ? WHERE id = 'p-u3-0'").run(
+            JSON.stringify({ type: "text", text: "edited" }),
+        );
+        clearHostCompactionGapState();
+        expect(JSON.stringify(pass(db).messages)).toBe(served);
+        expect(JSON.stringify(pass(db, { refreshAllowed: true }).messages)).toContain("edited");
+    });
+
+    it("does not hold a row it does not serve", () => {
+        pass(db);
+        expect(holdHostCompactionGapRow(db, SESSION, "u4", "removed")).toBe(false);
+        expect(holdHostCompactionGapRow(db, SESSION, "u1", "removed")).toBe(false);
+    });
+
+    it("reads the store again when the store changed while no process recorded the served rows", () => {
+        pass(db);
+        removeRow("a2");
+        clearHostCompactionGapState();
+        const restarted = pass(db);
+        expect(restarted.outcome).toMatchObject({ status: "restored", source: "store" });
+        expect(ids(restarted.messages)).not.toContain("a2");
+    });
+
+    it("keeps a too-large verdict across a restart until a busting pass", () => {
+        pass(db, { budgetTokens: 1 });
+        clearHostCompactionGapState();
+        expect(pass(db).outcome).toMatchObject({ status: "fallback", reason: "too-large" });
+        expect(pass(db, { refreshAllowed: true }).outcome.status).toBe("restored");
+    });
+
+    it("keeps a read failure's verdict on the passes after it, until a busting pass", () => {
+        pass(db);
+        removeRow("a1");
+        const busting = pass(db, { refreshAllowed: true });
+        expect(busting.outcome).toMatchObject({ status: "fallback", reason: "missing-bound" });
+        expect(pass(db).outcome).toMatchObject({ status: "fallback", reason: "missing-bound" });
+        clearHostCompactionGapState();
+        expect(pass(db).outcome).toMatchObject({ status: "fallback", reason: "missing-bound" });
+    });
+
+    it("leaves the rest of the shared session state column alone", () => {
+        db.prepare("UPDATE session_meta SET deferred_execute_state = ? WHERE session_id = ?").run(
+            JSON.stringify({ other: { kept: true } }),
+            SESSION,
+        );
+        pass(db);
+        const root = JSON.parse(
+            (
+                db
+                    .prepare(
+                        "SELECT deferred_execute_state AS s FROM session_meta WHERE session_id = ?",
+                    )
+                    .get(SESSION) as { s: string }
+            ).s,
+        ) as Record<string, unknown>;
+        expect(root.other).toEqual({ kept: true });
+        expect(Object.keys(root).sort()).toEqual(["magicContextHostCompactionGap", "other"]);
+    });
+});
+
+describe("tag statuses a native compaction kept", () => {
+    const seedTags = () => {
+        db.prepare("INSERT INTO tags VALUES (?, 'u2', 'dropped', 1), (?, 'u4', 'active', 2)").run(
+            SESSION,
+            SESSION,
+        );
+        db.prepare("INSERT INTO pending_ops VALUES (?, 2)").run(SESSION);
+    };
+    const statuses = () =>
+        (
+            db
+                .prepare("SELECT status FROM tags WHERE session_id = ? ORDER BY tag_number")
+                .all(SESSION) as Array<{ status: string }>
+        ).map((row) => row.status);
+    const pendingOps = () =>
+        (db.prepare("SELECT COUNT(*) AS c FROM pending_ops").get() as { c: number }).c;
+
+    it("stay when the first pass after the compaction restores the rows", () => {
+        seedTags();
+        markHostCompactionTagsKept(db, SESSION);
+        const { outcome } = pass(db);
+        expect(settleHostCompactionTags(db, SESSION, outcome)).toBe("kept");
+        expect(statuses()).toEqual(["dropped", "active"]);
+        expect(pendingOps()).toBe(1);
+        // Settled once: a later pass changes nothing.
+        expect(settleHostCompactionTags(db, SESSION, pass(db, { budgetTokens: 1 }).outcome)).toBe(
+            "none",
+        );
+    });
+
+    it("are retired as a native compaction always retired them when that pass cannot restore", () => {
+        seedTags();
+        markHostCompactionTagsKept(db, SESSION);
+        const { outcome } = pass(db, { budgetTokens: 1 });
+        expect(settleHostCompactionTags(db, SESSION, outcome)).toBe("retired");
+        expect(statuses()).toEqual(["compacted", "compacted"]);
+        expect(pendingOps()).toBe(0);
     });
 });

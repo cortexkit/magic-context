@@ -1156,9 +1156,9 @@ describe("createEventHandler", () => {
         getOrCreateSessionMeta(deps.db, "ses-plain");
         deps.db
             .prepare(
-                "UPDATE session_meta SET cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
+                "UPDATE session_meta SET cached_m0_bytes = ?, cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
             )
-            .run("m-boundary", "ses-restore");
+            .run(Buffer.from("m0"), "m-boundary", "ses-restore");
 
         for (const sessionID of ["ses-restore", "ses-plain"]) {
             await handler({ event: { type: "session.compacted", properties: { sessionID } } });
@@ -1170,6 +1170,16 @@ describe("createEventHandler", () => {
             "active",
         ]);
         expect(getOrCreateSessionMeta(deps.db, "ses-restore").compartmentInProgress).toBe(true);
+        // The first pass after the compaction settles the kept statuses.
+        expect(
+            (
+                deps.db
+                    .prepare(
+                        "SELECT deferred_execute_state AS s FROM session_meta WHERE session_id = ?",
+                    )
+                    .get("ses-restore") as { s: string }
+            ).s,
+        ).toContain('"tagsKept":true');
         // Without one nothing is restored: the tags are retired as before and the
         // historian is left to its usual trigger.
         expect(getTagsBySession(deps.db, "ses-plain").map((tag) => tag.status)).toEqual([

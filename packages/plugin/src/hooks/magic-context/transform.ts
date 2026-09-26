@@ -112,8 +112,9 @@ import {
 import type { LiveModelBySession } from "./hook-handlers";
 import {
     hostCompactionGapBudgetTokens,
-    readHostCompactionGapBoundary,
+    resolveHostCompactionGapLowerBound,
     restoreHostCompactionGap,
+    settleHostCompactionTags,
 } from "./host-compaction-gap";
 import {
     capturePrefixTrimSourceOrder,
@@ -140,10 +141,12 @@ import {
 import {
     compareRawSessionMessageOrder,
     readHostSessionMessageRange,
+    readHostSessionMessagesById,
     readRawSessionMessages,
 } from "./read-session-chunk";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { extractInMemoryMessageViews } from "./read-session-raw";
+import { cleanupRemovedMessageState } from "./removed-message-cleanup";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendStatusNotification } from "./send-session-notification";
 import { modelAcceptsEmptyContent } from "./sentinel";
@@ -1702,18 +1705,16 @@ export function createTransform(deps: TransformDeps) {
         if (hostCompaction && fullFeatureMode && !compactionOff) {
             try {
                 const gap = restoreHostCompactionGap({
+                    db,
                     sessionId,
                     messages,
                     window: hostCompaction,
-                    boundaryId: readHostCompactionGapBoundary(db, sessionId),
-                    // Passes already known, this early, to rebuild the cached
-                    // prefix. Only these read the range from the store again when
-                    // the rows served on an earlier pass could answer it.
-                    refreshAllowed:
-                        schedulerDecision === "execute" ||
-                        isCacheBusting ||
-                        contextUsageEarly.percentage >= forceMaterializationPercentage ||
-                        deps.pendingMaterializationSessions.has(sessionId),
+                    lower: resolveHostCompactionGapLowerBound(db, sessionId),
+                    // Only a pass already known, this early, to rebuild the cached
+                    // prefix may read the range from the store again: one that
+                    // renders newly published history into m[1]. An execute pass is
+                    // not enough on its own; with nothing to apply it changes no byte.
+                    refreshAllowed: consumingDeferredEarly,
                     budgetTokens: hostCompactionGapBudgetTokens(
                         resolvedContextLimit,
                         resolveExecuteThreshold(
@@ -1728,9 +1729,24 @@ export function createTransform(deps: TransformDeps) {
                     ),
                     readRange: (afterId, beforeId, maxRows) =>
                         readHostSessionMessageRange(sessionId, afterId, beforeId, maxRows),
+                    readById: (ids) => readHostSessionMessagesById(sessionId, ids),
                     compareOrder: (left, right) =>
                         compareRawSessionMessageOrder(sessionId, left, right),
                 });
+                // Rows the host removed while they were served kept their state
+                // until now, when this pass stopped serving them.
+                for (const messageId of gap.rowsLeftRange) {
+                    cleanupRemovedMessageState(db, sessionId, messageId);
+                }
+                if (gap.rowsLeftRange.length > 0) deps.tagger.cleanup(sessionId);
+                const settled = settleHostCompactionTags(db, sessionId, gap);
+                if (settled === "retired") {
+                    deps.tagger.cleanup(sessionId);
+                    sessionLog(
+                        sessionId,
+                        "host compaction gap: not restored, so the tags kept at the compaction are retired as a native compaction always retired them",
+                    );
+                }
                 if (gap.status === "restored") {
                     // The trailing-blank snapshot above was taken from the host's
                     // input; the restored rows are host-shaped input too.

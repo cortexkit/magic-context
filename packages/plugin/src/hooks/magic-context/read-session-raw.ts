@@ -745,7 +745,7 @@ export type HostMessageRangeRead =
  * each one the way OpenCode 1 loads it: the message JSON with its row id and session
  * id added, and each part's JSON with its part id, session id and message id added,
  * parts in id order. An `after` bound that sorts at or past `before` is an empty
- * range, not an error.
+ * range, not an error; a null `after` reads from the session's first row.
  *
  * One indexed range read on (session, time_created, id), capped at `maxRows + 1`
  * rows so an unexpectedly long range is refused before any part is read.
@@ -753,14 +753,18 @@ export type HostMessageRangeRead =
 export function readHostMessageRangeFromDb(
     db: Database,
     sessionId: string,
-    afterId: string,
+    afterId: string | null,
     beforeId: string,
     maxRows: number,
 ): HostMessageRangeRead {
     const anchor = db.prepare(
         "SELECT time_created, id FROM message WHERE id = ? AND session_id = ?",
     );
-    const after = anchor.get(afterId, sessionId);
+    // Nothing sorts before (time -infinity, ""), so a null bound starts at the first row.
+    const after =
+        afterId === null
+            ? { time_created: Number.MIN_SAFE_INTEGER, id: "" }
+            : anchor.get(afterId, sessionId);
     if (!isAnchorRow(after)) return { status: "missing-bound", missing: "after" };
     const before = anchor.get(beforeId, sessionId);
     if (!isAnchorRow(before)) return { status: "missing-bound", missing: "before" };
@@ -788,7 +792,47 @@ export function readHostMessageRangeFromDb(
             limit + 1,
         ) as Array<{ id: unknown; session_id: unknown; data: unknown }>;
     if (messageRows.length > limit) return { status: "too-many-rows", rows: messageRows.length };
+    return { status: "ok", messages: buildHostShapedMessages(db, sessionId, messageRows) };
+}
 
+/**
+ * Read the named rows of one session in OpenCode 1's shape (see
+ * `readHostMessageRangeFromDb`), keyed by id. A row that is not stored is absent.
+ */
+export function readHostMessagesByIdFromDb(
+    db: Database,
+    sessionId: string,
+    ids: readonly string[],
+): Map<string, HostShapedMessage> {
+    const rows: Array<{ id: unknown; session_id: unknown; data: unknown }> = [];
+    const CHUNK = 800;
+    for (let i = 0; i < ids.length; i += CHUNK) {
+        const slice = ids.slice(i, i + CHUNK);
+        const placeholders = slice.map(() => "?").join(",");
+        rows.push(
+            ...(db
+                .prepare(
+                    `SELECT id, session_id, data FROM message WHERE session_id = ? AND id IN (${placeholders})`,
+                )
+                .all(sessionId, ...slice) as Array<{
+                id: unknown;
+                session_id: unknown;
+                data: unknown;
+            }>),
+        );
+    }
+    const byId = new Map<string, HostShapedMessage>();
+    for (const message of buildHostShapedMessages(db, sessionId, rows)) {
+        byId.set(message.info.id as string, message);
+    }
+    return byId;
+}
+
+function buildHostShapedMessages(
+    db: Database,
+    sessionId: string,
+    messageRows: ReadonlyArray<{ id: unknown; session_id: unknown; data: unknown }>,
+): HostShapedMessage[] {
     const partsByMessageId = new Map<string, Record<string, unknown>[]>();
     const ids = messageRows.flatMap((row) => (typeof row.id === "string" ? [row.id] : []));
     const CHUNK = 800;
@@ -832,7 +876,7 @@ export function readHostMessageRangeFromDb(
             parts: partsByMessageId.get(row.id) ?? [],
         });
     }
-    return { status: "ok", messages };
+    return messages;
 }
 
 /** Read the canonical servable tail and its parts in one query, including its boundary row. */
