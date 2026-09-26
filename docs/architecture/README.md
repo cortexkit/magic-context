@@ -16,6 +16,7 @@ Where a page and the code disagree, the code is right; fix the page.
 | [dreamer.md](dreamer.md) | Scheduling and leases, every task, failure records, documentation proposals. |
 | [calibration.md](calibration.md) | Tokenizer calibration seeds, family fallback, the per-session snapshot and where decisions read it. |
 | [storage.md](storage.md) | The schema fence and migration rules, the shared database, session-scoped tables, clones, timestamps, backups. |
+| [single-store-b0-rollback.md](single-store-b0-rollback.md) | Rolling back the context.db v92 + v93 release: older plugin fences, the manual file downgrade, keeping `ck-mc` and the plugin on one release. |
 | [diagnostics.md](diagnostics.md) | Logging, redaction, decision records, `doctor`, cache-bust analysis scripts. |
 
 Paths in each page are relative to `packages/plugin/` unless the page says otherwise.
