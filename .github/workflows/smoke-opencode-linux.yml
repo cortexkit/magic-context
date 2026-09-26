@@ -54,7 +54,7 @@ jobs:
         # regression, so it must run the version users get. See ci.yml host job
         # for the re-pin escape hatch if an upstream build is known-bad.
         run: |
-          curl -fsSL https://opencode.ai/install | bash
+          OPENCODE_VERSION=latest bash tests/docker/install-opencode.sh
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
       - name: Verify opencode binary

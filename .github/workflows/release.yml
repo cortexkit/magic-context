@@ -253,7 +253,7 @@ jobs:
         # Float to LATEST (the version users run). See ci.yml for the rationale
         # + re-pin escape hatch for known-bad upstream builds.
         run: |
-          curl -fsSL https://opencode.ai/install | bash
+          OPENCODE_VERSION=latest bash tests/docker/install-opencode.sh
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
       - name: Verify opencode on PATH
@@ -307,7 +307,7 @@ jobs:
       # (see ci.yml for the rationale + re-pin escape hatch).
       - name: Install opencode
         run: |
-          curl -fsSL https://opencode.ai/install | bash
+          OPENCODE_VERSION=latest bash tests/docker/install-opencode.sh
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
       - name: Verify opencode on PATH
@@ -472,7 +472,7 @@ jobs:
 
       - name: Install OpenCode
         run: |
-          curl -fsSL https://opencode.ai/install | bash
+          OPENCODE_VERSION=latest bash tests/docker/install-opencode.sh
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
       - name: Verify OpenCode on PATH
