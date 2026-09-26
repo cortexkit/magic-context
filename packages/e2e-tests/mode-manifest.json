@@ -648,6 +648,21 @@
             ]
         },
         {
+            "path": "tests/opencode2/execute-threshold-tokens.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane: with execute_threshold_percentage 80 and execute_threshold_tokens.default 20000 on a 100k window, a pass after a 10k-token turn defers (the control) and a pass after a 30k-token turn executes, read from the plugin's per-pass scheduler log; before the token threshold reached the OpenCode 2 context hook that pass deferred. The v2 lane runs from its own invocation (bun test tests/opencode2)",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/tool-result-image.test.ts",
             "tier": "excluded",
             "invocation": {

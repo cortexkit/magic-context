@@ -216,6 +216,29 @@ export function createHostSeams(
     };
 }
 
+type V2ThresholdConfig = Pick<
+    ReturnType<typeof loadPluginConfigDetailed>["config"],
+    "execute_threshold_percentage" | "execute_threshold_tokens"
+>;
+
+/**
+ * The execute thresholds the shared transform and its scheduler read, built the way the
+ * OpenCode 1 hook builds them: the percentage and the absolute token threshold, which
+ * overrides the percentage when set. Like OpenCode 1, both are read once at startup.
+ */
+export function createV2ThresholdDeps(
+    config: V2ThresholdConfig,
+): Pick<TransformDeps, "scheduler" | "executeThresholdPercentage" | "executeThresholdTokens"> {
+    return {
+        scheduler: createScheduler({
+            executeThresholdPercentage: config.execute_threshold_percentage,
+            executeThresholdTokens: config.execute_threshold_tokens,
+        }),
+        executeThresholdPercentage: config.execute_threshold_percentage,
+        executeThresholdTokens: config.execute_threshold_tokens,
+    };
+}
+
 function toolResultText(result: { content?: unknown } | undefined): string {
     const content = result?.content ?? (result as { output?: unknown } | undefined)?.output;
     if (typeof content === "string") return content;
@@ -1015,9 +1038,7 @@ export async function registerContext(context: V2Context) {
             transform ??= createTransform({
                 db,
                 tagger,
-                scheduler: createScheduler({
-                    executeThresholdPercentage: config.execute_threshold_percentage,
-                }),
+                ...createV2ThresholdDeps(config),
                 contextUsageMap: usage,
                 compactionOff,
                 // OpenCode 2 reads `session_message`, which numbers the same
@@ -1034,7 +1055,6 @@ export async function registerContext(context: V2Context) {
                 }),
                 protectedTokens: config.protected_tokens,
                 protectedTokenTierOverrides: getProtectedTokensTierOverrides(config),
-                executeThresholdPercentage: config.execute_threshold_percentage,
                 liveModelBySession: liveModels,
                 getToolSetHash: (sessionId) => {
                     const model = liveModels.get(sessionId);
