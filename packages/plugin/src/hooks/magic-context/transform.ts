@@ -136,6 +136,7 @@ import {
     snapshotTrailingBlankSourceDecisions,
     stripClearedReasoning,
 } from "./strip-content";
+import type { TagMessagesOptions } from "./tag-messages";
 import { injectTemporalMarkers } from "./temporal-awareness";
 import { createPreAdoptionToolSweepResolver, useScopedToolSweep } from "./tool-sweep-policy";
 import { historianJoinFailClosedMessage, runCompartmentPhase } from "./transform-compartment-phase";
@@ -1995,7 +1996,21 @@ export function createTransform(deps: TransformDeps) {
                 // prefixes now — they self-manage tool bloat. DB tag records are
                 // maintained either way so heuristics and drops continue to work;
                 // only the agent-visible prefix is gated.
-                const skipPrefixInjection = !ctxReduceCallable;
+                //
+                // The OpenCode 2 lane additionally withholds the prefix from
+                // assistant-role text parts: the host checkpointed those raw
+                // bytes and its incremental-continuation check requires them to
+                // stay identical, so re-prefixing a served assistant part forces
+                // a full-history resend on the WebSocket Responses transport
+                // (issue #582). Tag assignment is unaffected, so ctx_reduce can
+                // still target the part. `storeGeneration` is the per-host lane
+                // signal supplied by the v1/v2 hooks; it is not a process global.
+                const skipPrefixInjection: TagMessagesOptions["skipPrefixInjection"] =
+                    !ctxReduceCallable
+                        ? true
+                        : deps.storeGeneration === "v2"
+                          ? "assistant-text"
+                          : false;
                 // History preparation trims a prefix before the compaction marker is
                 // written later in this pass. OpenCode uses that new marker to build
                 // the next request, where rows hidden only from this transform can

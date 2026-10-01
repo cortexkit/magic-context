@@ -429,14 +429,23 @@ function extractToolTagMetadata(part: unknown): {
 
 export interface TagMessagesOptions {
     /**
-     * When true, skip injecting §N§ prefix into message text/tool output parts.
-     * DB-level tag records are still created normally — this flag only affects
-     * whether the agent-visible part content gets the tag prefix. Used when
-     * the session's tool allow-list denies ctx_reduce so agents don't see tag
-     * markers they can't act on. Cache-safe: the availability verdict is frozen
-     * per session, so message shape stays stable.
+     * Controls §N§ prefix injection. DB-level tag records are always created,
+     * so `ctx_reduce` targets, drops and accounting are unaffected — this only
+     * gates whether the agent-visible part content carries the prefix.
+     *
+     * - `true`: skip every prefix (text and tool output). Used when the
+     *   session's tool allow-list denies ctx_reduce so agents don't see tag
+     *   markers they can't act on. Cache-safe: the availability verdict is
+     *   frozen per session, so message shape stays stable.
+     * - `"assistant-text"`: skip only **assistant-role text parts**. The
+     *   OpenCode 2 lane sets this: the host checkpointed the raw assistant
+     *   bytes and its incremental-continuation check replays them verbatim, so
+     *   injecting a prefix between turns forces a full-history resend on the
+     *   WebSocket Responses transport (issue #582). User text and tool outputs
+     *   enter the request as new tail items and keep their prefixes.
+     * - absent/`false`: inject prefixes everywhere (OpenCode 1 behavior).
      */
-    skipPrefixInjection?: boolean;
+    skipPrefixInjection?: boolean | "assistant-text";
     /**
      * Prune only tool-drop owners; callers enable this after persisting
      * cache-safe session adoption. A resolver defers the choice to finalize
@@ -482,7 +491,9 @@ export function tagMessages(
     db: ContextDatabase,
     options: TagMessagesOptions = {},
 ): TagMessagesResult {
-    const skipPrefixInjection = options.skipPrefixInjection === true;
+    const skipPrefixMode = options.skipPrefixInjection ?? false;
+    const skipPrefixInjection = skipPrefixMode === true;
+    const skipAssistantTextPrefix = skipPrefixMode === "assistant-text";
     const onToolOwnerFallbackLookup = options.onToolOwnerFallbackLookup;
     const targets = new Map<number, TagTarget>();
     const normalizationTargets: TagNormalizationTarget[] = [];
@@ -865,7 +876,15 @@ export function tagMessages(
                     message,
                     Math.max(messageTagNumbers.get(message) ?? 0, tagId),
                 );
-                if (!skipPrefixInjection) {
+                // Assistant-role text is the only part the OpenCode 2 host
+                // checkpointed before Magic Context ever saw it; rewriting its
+                // bytes between turns busts the host's incremental-continuation
+                // check (issue #582). Withhold only that prefix in the v2 lane,
+                // while still assigning the tag so ctx_reduce can target it.
+                const skipTextPrefix =
+                    skipPrefixInjection ||
+                    (skipAssistantTextPrefix && message.info.role === "assistant");
+                if (!skipTextPrefix) {
                     textPart.text = prependTag(tagId, textPart.text);
                     normalizationTargets.push({
                         tagNumber: tagId,
