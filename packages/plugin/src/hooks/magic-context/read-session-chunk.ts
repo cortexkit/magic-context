@@ -181,7 +181,7 @@ export interface BoundedRawMessageProvider {
     readServedBoundaryId?: (messageId: string) => string | null;
 }
 
-const sessionProviders = new Map<string, RawMessageProvider>();
+const sessionProviders = new Map<string, { provider: RawMessageProvider; scopes: number }>();
 
 /**
  * Map a stored compartment boundary id to the message id a request actually
@@ -189,7 +189,7 @@ const sessionProviders = new Map<string, RawMessageProvider>();
  */
 export function resolveHostServedBoundaryId(sessionId: string, messageId: string): string {
     if (messageId.length === 0) return messageId;
-    return sessionProviders.get(sessionId)?.readServedBoundaryId?.(messageId) ?? messageId;
+    return sessionProviders.get(sessionId)?.provider.readServedBoundaryId?.(messageId) ?? messageId;
 }
 
 /** Whether this session has an explicit non-OpenCode raw-history source. */
@@ -202,12 +202,22 @@ export function hasRawMessageProvider(sessionId: string): boolean {
  * unregister function. Pass-through harnesses (OpenCode) never call
  * this; only Pi/future harnesses install themselves before triggering
  * historian.
+ * Re-registering the current provider shares its lifetime across scopes.
+ * A different provider replaces it; cleanup never restores an older source.
  */
 export function setRawMessageProvider(sessionId: string, provider: RawMessageProvider): () => void {
-    sessionProviders.set(sessionId, provider);
+    const current = sessionProviders.get(sessionId);
+    const registration = current?.provider === provider ? current : { provider, scopes: 0 };
+    registration.scopes += 1;
+    sessionProviders.set(sessionId, registration);
+    let active = true;
     return () => {
-        const current = sessionProviders.get(sessionId);
-        if (current === provider) sessionProviders.delete(sessionId);
+        if (!active) return;
+        active = false;
+        registration.scopes -= 1;
+        if (registration.scopes === 0 && sessionProviders.get(sessionId) === registration) {
+            sessionProviders.delete(sessionId);
+        }
     };
 }
 
@@ -346,7 +356,7 @@ export function readRawSessionMessagePage(
     limit: number,
     finalWatermark: number,
 ): RawMessage[] {
-    const provider = sessionProviders.get(sessionId);
+    const provider = sessionProviders.get(sessionId)?.provider;
     if (provider?.readMessagePage) {
         return provider.readMessagePage(afterOrdinal, limit, finalWatermark);
     }
@@ -365,7 +375,7 @@ export function readRawSessionMessagePage(
 }
 
 export function getRawSessionMessageOrdinalCount(sessionId: string): number {
-    const provider = sessionProviders.get(sessionId);
+    const provider = sessionProviders.get(sessionId)?.provider;
     if (provider) {
         if (provider.getMessageCount) return provider.getMessageCount();
         const messages = provider.readMessages();
@@ -385,7 +395,7 @@ function readRawSessionMessageRangeFromSource(
     fromOrdinal: number,
     toOrdinal: number,
 ): RawMessage[] {
-    const provider = sessionProviders.get(sessionId);
+    const provider = sessionProviders.get(sessionId)?.provider;
     if (provider?.iterateMessageRange)
         return [...provider.iterateMessageRange(fromOrdinal, toOrdinal)];
     if (provider && !provider.readMessagePage) {
@@ -450,7 +460,7 @@ export function visitRawSessionMessages(
     const from = Math.max(1, Math.floor(fromOrdinal));
     const to = Math.floor(toOrdinal);
     if (to < from) return;
-    const provider = sessionProviders.get(sessionId);
+    const provider = sessionProviders.get(sessionId)?.provider;
     if (provider?.iterateMessageRange) {
         for (const message of provider.iterateMessageRange(from, to)) {
             if (!visit(message)) return;
@@ -571,7 +581,7 @@ export function primeTailRawMessageCache(args: {
     // the full read (correct for the no-compartment / #132 case).
     if (lastCompartmentEnd < 1 || !anchorMessageId) return false;
 
-    const provider = sessionProviders.get(sessionId);
+    const provider = sessionProviders.get(sessionId)?.provider;
     if (provider) {
         if (!provider.readMessagePage || !provider.getMessageCount) return false;
         const absoluteMessageCount = provider.getMessageCount();
@@ -656,7 +666,7 @@ export function readRawSessionMessageOrdinalPage(
     after: RawMessageOrdinalAnchor | null,
     limit: number,
 ): RawMessageOrdinalEntry[] {
-    const provider = sessionProviders.get(sessionId);
+    const provider = sessionProviders.get(sessionId)?.provider;
     if (provider?.readMessageOrdinalPage) return provider.readMessageOrdinalPage(after, limit);
     if (provider) {
         const rows = provider
@@ -686,7 +696,7 @@ export function readRawSessionMessageOrdinalPage(
 }
 
 export function getRawSessionStoredMessageCount(sessionId: string): number {
-    const provider = sessionProviders.get(sessionId);
+    const provider = sessionProviders.get(sessionId)?.provider;
     if (provider?.getStoredMessageCount) return provider.getStoredMessageCount();
     if (provider) return provider.readMessages().length;
     if (!openCodeDbExists()) return 0;
@@ -701,7 +711,7 @@ export function readRawSessionMessageIdOrdinalsForRange(
     const from = Math.max(1, Math.floor(fromOrdinal));
     const to = Math.floor(toOrdinal);
     if (to < from) return new Map();
-    const provider = sessionProviders.get(sessionId);
+    const provider = sessionProviders.get(sessionId)?.provider;
     if (provider?.readMessageIdOrdinalsForRange) {
         return provider.readMessageIdOrdinalsForRange(from, to);
     }
@@ -725,7 +735,7 @@ export function readRawSessionMessagePartsById(
     messageId: string,
     onQuery?: () => void,
 ): RawMessageParts | null {
-    const provider = sessionProviders.get(sessionId);
+    const provider = sessionProviders.get(sessionId)?.provider;
     if (provider?.readMessagePartsById) return provider.readMessagePartsById(messageId);
     if (provider?.readMessageById) return provider.readMessageById(messageId);
     if (provider) {
@@ -738,7 +748,7 @@ export function readRawSessionMessagePartsById(
 }
 
 export function hasRawSessionMessageById(sessionId: string, messageId: string): boolean {
-    const provider = sessionProviders.get(sessionId);
+    const provider = sessionProviders.get(sessionId)?.provider;
     if (provider?.hasMessageById) return provider.hasMessageById(messageId);
     return readRawSessionMessageById(sessionId, messageId) !== null;
 }
@@ -747,7 +757,7 @@ export function readRawSessionMessageOrdinalById(
     sessionId: string,
     messageId: string,
 ): number | null {
-    const provider = sessionProviders.get(sessionId);
+    const provider = sessionProviders.get(sessionId)?.provider;
     if (provider?.readMessageOrdinalById) {
         return provider.readMessageOrdinalById(messageId);
     }
@@ -797,7 +807,7 @@ export function compareRawSessionMessageOrder(
     leftId: string,
     rightId: string,
 ): number | null {
-    const provider = sessionProviders.get(sessionId);
+    const provider = sessionProviders.get(sessionId)?.provider;
     if (provider) {
         if (!provider.readMessageOrdinalById) return null;
         const left = provider.readMessageOrdinalById(leftId);
@@ -833,7 +843,7 @@ export function compareRawSessionMessageOrder(
 }
 
 export function readRawSessionMessageById(sessionId: string, messageId: string): RawMessage | null {
-    const provider = sessionProviders.get(sessionId);
+    const provider = sessionProviders.get(sessionId)?.provider;
     if (provider?.readMessageById) {
         return provider.readMessageById(messageId);
     }
@@ -845,7 +855,7 @@ export function readRawSessionMessageById(sessionId: string, messageId: string):
 }
 
 function readRawSessionMessagesFromSource(sessionId: string): RawMessage[] {
-    const provider = sessionProviders.get(sessionId);
+    const provider = sessionProviders.get(sessionId)?.provider;
     if (provider) return provider.readMessages();
     // No provider: fall back to OpenCode's session DB — but only if it exists.
     // A Pi-only install has no opencode.db, and a Pi transform whose provider
@@ -857,7 +867,7 @@ function readRawSessionMessagesFromSource(sessionId: string): RawMessage[] {
 }
 
 export function getRawSessionMessageCount(sessionId: string): number {
-    const provider = sessionProviders.get(sessionId);
+    const provider = sessionProviders.get(sessionId)?.provider;
     if (provider) {
         if (provider.getMessageCount) return provider.getMessageCount();
         const messages = provider.readMessages();
@@ -1367,7 +1377,7 @@ export function readRawSessionSeedTail(
     boundaryId: string | null,
     onQuery?: () => void,
 ): Map<string, RawMessage> {
-    const provider = sessionProviders.get(sessionId);
+    const provider = sessionProviders.get(sessionId)?.provider;
     if (provider) {
         const boundaryOrdinal =
             boundaryId === null ? 1 : readRawSessionMessageOrdinalById(sessionId, boundaryId);
