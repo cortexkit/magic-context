@@ -11387,7 +11387,10 @@ impl McHandler {
         if !page_complete
             && request.as_object().is_some_and(|object| {
                 object.keys().any(|key| {
-                    !["method", "session_id", "shadow_generation"]
+                    // `accept_reply_pages` is the caller's reply-paging capability. The plugin's
+                    // transport adds it to every request body, so it arrives on non-final pages
+                    // too; it changes only how the final reply is delivered, never the input.
+                    !["method", "session_id", "shadow_generation", "accept_reply_pages"]
                         .into_iter()
                         .chain(TRANSFORM_PAGE_FIELDS)
                         .chain(TRANSFORM_PAGE_ARRAY_FIELDS)
@@ -37834,6 +37837,50 @@ mod tests {
             let response = handler.dispatch_value(channel, final_page).await;
             assert!(matches!(response, HandlerOutcome::Response(_)));
         }
+    }
+
+    /// The plugin's transport adds `accept_reply_pages` to every request body it sends,
+    /// including each page of a paged transform. A non-final page carrying it must be
+    /// staged, not refused as a protocol mismatch: that refusal sent every large Rust-mode
+    /// session to last-known-good replay on every pass.
+    #[tokio::test]
+    async fn non_final_transform_pages_accept_the_reply_paging_capability() {
+        let state = Arc::new(ProducerState::default());
+        let (handler, _store, _dir, project) = handler_with_store(state, default_test_config());
+        handler.bind_route(8, binding(project.to_str().unwrap(), "authority-a"));
+        let mut first = paged_transform_page(
+            "transform",
+            "authority-a",
+            "page-reply-capability",
+            0,
+            0,
+            2,
+            false,
+            vec![json!({"mid": "a0", "ordinal": 0, "ck": ck("a0", 0, "first").ck})],
+        );
+        first["accept_reply_pages"] = json!(true);
+        match handler.dispatch_value(8, first).await {
+            HandlerOutcome::Response(bytes) => {
+                let reply: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(reply["staged"], json!(true), "{reply}");
+            }
+            other => panic!("non-final page with accept_reply_pages was refused: {other:?}"),
+        }
+        let mut final_page = paged_transform_page(
+            "transform",
+            "authority-a",
+            "page-reply-capability",
+            0,
+            1,
+            2,
+            true,
+            vec![json!({"mid": "a1", "ordinal": 1, "ck": ck("a1", 1, "final").ck})],
+        );
+        final_page["accept_reply_pages"] = json!(true);
+        assert!(matches!(
+            handler.dispatch_value(8, final_page).await,
+            HandlerOutcome::Response(_)
+        ));
     }
 
     #[tokio::test]
