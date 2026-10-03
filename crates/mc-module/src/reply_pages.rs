@@ -11,8 +11,20 @@ use std::{
 use subc_client_rs::HandlerOutcome;
 
 pub(crate) const FRAME_TARGET: usize = 512 * 1024;
-// JSON escaping can expand one byte to six. This leaves room for page metadata.
-const CHUNK_BYTES: usize = 64 * 1024;
+// Each page's `data` is cut by its JSON-escaped size, not its raw size, so a page fills
+// most of the frame. A fixed raw cut had to assume the worst case (one byte escaping to
+// six) and so used 64 KiB pages, which turned a large reply into a hundred-plus sequential
+// round trips through the daemon. The headroom covers the page's own metadata fields.
+const PAGE_DATA_ESCAPED_BUDGET: usize = FRAME_TARGET - 4 * 1024;
+
+/// Bytes `c` occupies inside a JSON string as serde_json writes it.
+fn escaped_len(c: char) -> usize {
+    match c {
+        '"' | '\\' | '\u{08}' | '\u{0c}' | '\n' | '\r' | '\t' => 2,
+        c if (c as u32) < 0x20 => 6,
+        c => c.len_utf8(),
+    }
+}
 const CACHE_BYTES: usize = 128 * 1024 * 1024;
 const CACHE_ENTRIES: usize = 64;
 const TTL: Duration = Duration::from_secs(120);
@@ -103,14 +115,17 @@ impl ReplyPages {
                 }
             }
             let mut boundaries = vec![0];
-            let mut start = 0;
-            while start < text.len() {
-                let mut end = (start + CHUNK_BYTES).min(text.len());
-                while !text.is_char_boundary(end) {
-                    end -= 1;
+            let mut escaped = 0;
+            for (offset, c) in text.char_indices() {
+                let width = escaped_len(c);
+                if escaped + width > PAGE_DATA_ESCAPED_BUDGET {
+                    boundaries.push(offset);
+                    escaped = 0;
                 }
-                boundaries.push(end);
-                start = end;
+                escaped += width;
+            }
+            if *boundaries.last().expect("first boundary") != text.len() {
+                boundaries.push(text.len());
             }
             self.bytes += text.len();
             self.entries.insert(
@@ -212,5 +227,52 @@ mod tests {
             HandlerOutcome::Error { .. }
         ));
         assert_eq!(cache.bytes, 0);
+    }
+
+    fn page_count(original: &[u8]) -> usize {
+        let mut cache = ReplyPages::default();
+        let HandlerOutcome::Response(first) =
+            cache.bound((7, 1), HandlerOutcome::Response(original.to_vec()), true)
+        else {
+            panic!("expected page");
+        };
+        let first: Value = serde_json::from_slice(&first).unwrap();
+        let id = first["reply_page"]["id"].as_str().unwrap().to_string();
+        let total = first["reply_page"]["total"].as_u64().unwrap() as usize;
+        let mut rebuilt = Vec::new();
+        for index in 0..total {
+            let HandlerOutcome::Response(bytes) = cache.page((7, 1), &id, index) else {
+                panic!("page {index} of {total} was refused");
+            };
+            assert!(
+                bytes.len() <= FRAME_TARGET,
+                "page {index} exceeded the frame"
+            );
+            let page: Value = serde_json::from_slice(&bytes).unwrap();
+            rebuilt.extend_from_slice(page["reply_page"]["data"].as_str().unwrap().as_bytes());
+        }
+        assert_eq!(rebuilt, original);
+        total
+    }
+
+    #[test]
+    fn ordinary_replies_page_in_few_round_trips() {
+        // A transform reply is JSON text: mostly plain characters, with quotes and
+        // newlines that escape to two bytes. 5 MiB of it must not take ~80 pages.
+        let message = json!({"role": "tool", "text": "line of output\n".repeat(40)});
+        let original = serde_json::to_vec(&json!({
+            "messages": std::iter::repeat_n(message, 9_000).collect::<Vec<_>>()
+        }))
+        .unwrap();
+        assert!(original.len() > 5 * 1024 * 1024);
+        let pages = page_count(&original);
+        assert!(pages <= 16, "{} bytes took {pages} pages", original.len());
+    }
+
+    #[test]
+    fn worst_case_escaping_still_fits_each_frame() {
+        // Every byte a control character that escapes to six bytes.
+        let original = serde_json::to_vec(&json!({"data": "\u{01}".repeat(1_000_000)})).unwrap();
+        page_count(&original);
     }
 }
