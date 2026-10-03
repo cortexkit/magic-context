@@ -11390,12 +11390,17 @@ impl McHandler {
                     // `accept_reply_pages` is the caller's reply-paging capability. The plugin's
                     // transport adds it to every request body, so it arrives on non-final pages
                     // too; it changes only how the final reply is delivered, never the input.
-                    !["method", "session_id", "shadow_generation", "accept_reply_pages"]
-                        .into_iter()
-                        .chain(TRANSFORM_PAGE_FIELDS)
-                        .chain(TRANSFORM_PAGE_ARRAY_FIELDS)
-                        .chain(TRANSFORM_PAGE_MAP_FIELDS)
-                        .any(|allowed| allowed == key.as_str())
+                    ![
+                        "method",
+                        "session_id",
+                        "shadow_generation",
+                        "accept_reply_pages",
+                    ]
+                    .into_iter()
+                    .chain(TRANSFORM_PAGE_FIELDS)
+                    .chain(TRANSFORM_PAGE_ARRAY_FIELDS)
+                    .chain(TRANSFORM_PAGE_MAP_FIELDS)
+                    .any(|allowed| allowed == key.as_str())
                 })
             })
         {
