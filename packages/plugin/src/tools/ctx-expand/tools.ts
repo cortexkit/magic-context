@@ -14,6 +14,13 @@ export { CTX_EXPAND_LIGHT_DESCRIPTION } from "../light-descriptions";
 export interface CtxExpandToolDeps {
     db: ContextDatabase;
     expandTools?: ToolExpansionMap;
+    /**
+     * Last message ordinal already compacted out of the host's live context, or -1
+     * when nothing is compacted yet. Hosts that own their history (Claude Code)
+     * derive it from the host's compaction boundary; when omitted it is the last
+     * compartment end, as on OpenCode and Pi.
+     */
+    getLastCompactedOrdinal?: (sessionId: string) => number;
 }
 
 const ctxExpandArgsShape = {
@@ -82,7 +89,9 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
             // agent already sees in context, so re-reading it just burns output
             // tokens and duplicates visible content. -1 means "no compartments
             // yet" → nothing is compacted, so don't clamp.
-            const lastCompartmentEnd = getLastCompartmentEndMessage(deps.db, sessionId);
+            const lastCompartmentEnd = deps.getLastCompactedOrdinal
+                ? deps.getLastCompactedOrdinal(sessionId)
+                : getLastCompartmentEndMessage(deps.db, sessionId);
             if (lastCompartmentEnd >= 0 && start > lastCompartmentEnd) {
                 return `Range ${start}-${end} is entirely within the live tail (after the last compacted message ${lastCompartmentEnd}); those messages are already visible in context.`;
             }

@@ -1,0 +1,39 @@
+{
+    "description": "Magic Context: load project memory, session notes and operation skills at session start, resume, /clear and after compaction; when a prompt names a recorded operation, put its verified flow in front of the model; at the end of a turn with verified work, ask the session's own model to save what it verified",
+    "hooks": {
+        "SessionStart": [
+            {
+                "matcher": "startup|resume|clear|compact",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/dist/hook.js\" session-start",
+                        "timeout": 15
+                    }
+                ]
+            }
+        ],
+        "UserPromptSubmit": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/dist/prompt-hook.js\"",
+                        "timeout": 5
+                    }
+                ]
+            }
+        ],
+        "Stop": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/dist/stop-hook.js\"",
+                        "timeout": 10
+                    }
+                ]
+            }
+        ]
+    }
+}

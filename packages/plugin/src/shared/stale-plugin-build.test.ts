@@ -110,6 +110,17 @@ describe("stale plugin build classification", () => {
         );
     });
 
+    it("tells a Claude Code user to restart Claude Code, not an OpenCode host", () => {
+        const claudeDist = "/tmp/plugins/cache/cortexkit/magic-context/1.0.0/dist";
+        registerStalePluginBuildHost({
+            moduleUrl: `file://${claudeDist}/mcp-server.js`,
+            harness: "claude-code",
+        });
+        expect(classifyStalePluginBuild(missing(`${claudeDist}/chunk-old.js`))?.guidance).toBe(
+            "Magic Context was rebuilt while this Claude Code session was running; restart Claude Code to load the new build",
+        );
+    });
+
     it("guards arbitrary lazy imports while preserving unrelated errors", async () => {
         registerStalePluginBuildHost({ moduleUrl: `file://${dist}/index.js`, harness: "pi" });
         const error = missing(`${dist}/index-old.js`);

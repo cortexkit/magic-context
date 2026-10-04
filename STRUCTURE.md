@@ -13,6 +13,7 @@ crates/
 packages/
   plugin/         OpenCode plugin and the shared TypeScript core (@cortexkit/opencode-magic-context)
   pi-plugin/      Pi and OMP plugin (@cortexkit/pi-magic-context)
+  claude-code-plugin/ Claude Code plugin (MCP server + SessionStart hook); installed from .claude-plugin/marketplace.json
   cli/            setup, doctor and migration CLI (@cortexkit/magic-context)
   dashboard/      Tauri desktop dashboard
   docs/           documentation site (docs.cortexkit.io/magic-context), deployed by hand
@@ -38,6 +39,7 @@ docs/             design references and audit evidence (docs/private is gitignor
 ## Other packages
 
 - `packages/pi-plugin/src`: the Pi context handler (`context-handler.ts`), Pi-specific commands, dreamer and subagent runners, Pi pressure and LKG handling. Parity with OpenCode is tracked in `PARITY.md`.
+- `packages/claude-code-plugin/src`: `mcp-server.ts` and `hook.ts` (entry points), `mcp/server.ts` (stdio JSON-RPC), `tools.ts` (shared tools as MCP tools), `transcript.ts` (Claude Code JSONL transcripts as raw messages), `inject.ts` (session-start context), `operation-skills/` (`ctx_skill`, the skill store, and `trigger.ts`: prompt → recorded operation), `prompt-hook.ts` (UserPromptSubmit), `capture.ts` + `stop-hook.ts` (capture on the session's model). The plugin manifests sit beside `src/` (`.claude-plugin/`, `.mcp.json`, `hooks/`, `commands/`); `scripts/smoke.ts` is the end-to-end check.
 - `packages/cli/src`: `commands/` (setup, doctor, migrate) and `adapters/` per host.
 - `packages/dashboard`: `src/` (Solid frontend) and `src-tauri/src/` (Rust backend: database readers, commands, log parser).
 - `crates/mc-module/src`: `lib.rs` routes requests; `transform.rs`, `historian.rs`, `injection.rs`, `boundary.rs` mirror the TypeScript runtime.

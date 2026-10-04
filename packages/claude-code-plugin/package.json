@@ -1,0 +1,43 @@
+{
+    "name": "@cortexkit/claude-code-magic-context",
+    "version": "0.44.4",
+    "private": true,
+    "type": "module",
+    "description": "Claude Code plugin for Magic Context: cross-session project memory, notes and recall (MCP server and hooks)",
+    "license": "MIT",
+    "author": "ualtinok",
+    "keywords": [
+        "claude-code",
+        "claude-code-plugin",
+        "mcp",
+        "memory",
+        "context",
+        "magic-context"
+    ],
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/cortexkit/magic-context",
+        "directory": "packages/claude-code-plugin"
+    },
+    "scripts": {
+        "build": "bun ../../scripts/check-bun.mjs && tsc -p ../retina-local-fs/tsconfig.build.json && bun scripts/build.ts",
+        "typecheck": "tsc -p ../retina-local-fs/tsconfig.build.json && tsc --noEmit",
+        "test": "bun ../../scripts/check-bun.mjs && bun test --timeout 30000",
+        "smoke": "bun scripts/smoke.ts",
+        "smoke:live": "bun scripts/smoke.ts --live",
+        "probe": "node scripts/load-probe.mjs",
+        "lint": "bun ../../scripts/check-bun.mjs && biome check src scripts test-preload.ts",
+        "lint:fix": "biome check --write src scripts test-preload.ts",
+        "format": "biome format --write src scripts",
+        "clean": "bun -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\""
+    },
+    "devDependencies": {
+        "@biomejs/biome": "^2.5.1",
+        "@types/bun": "^1.3.10",
+        "@types/node": "^22.20.0",
+        "typescript": "^5.8.0"
+    },
+    "engines": {
+        "node": ">=22.13.0"
+    }
+}

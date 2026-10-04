@@ -1,0 +1,19 @@
+{
+    "name": "cortexkit",
+    "owner": {
+        "name": "CortexKit",
+        "url": "https://github.com/cortexkit"
+    },
+    "metadata": {
+        "description": "CortexKit plugins for Claude Code"
+    },
+    "plugins": [
+        {
+            "name": "magic-context",
+            "source": "./packages/claude-code-plugin",
+            "description": "Persistent project memory for Claude Code, shared with OpenCode and Pi: memories and notes that survive compaction and carry into new sessions, plus recall of compacted conversation history.",
+            "category": "productivity",
+            "homepage": "https://github.com/cortexkit/magic-context"
+        }
+    ]
+}

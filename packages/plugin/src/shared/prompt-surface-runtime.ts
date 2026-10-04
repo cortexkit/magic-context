@@ -103,7 +103,8 @@ function resolveUserConfigDirectory(options: CreatePromptSurfaceRuntimeOptions):
     const shared = detectConfigFile(sharedBase);
     if (shared.format !== "none") return dirname(shared.path);
 
-    if (options.harness) {
+    // Claude Code has no per-host legacy config location: it only ever used the shared one.
+    if (options.harness && options.harness !== "claude-code") {
         const legacy = resolveLegacyConfigSourcesForHarness(
             options.directory ?? process.cwd(),
             options.harness === "omp"

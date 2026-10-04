@@ -1,0 +1,32 @@
+{
+    "compilerOptions": {
+        "target": "ESNext",
+        "module": "ESNext",
+        "moduleResolution": "bundler",
+        "noEmit": true,
+        "sourceMap": true,
+        "strict": true,
+        "esModuleInterop": true,
+        "skipLibCheck": true,
+        "forceConsistentCasingInFileNames": true,
+        "resolveJsonModule": true,
+        "isolatedModules": true,
+        "lib": ["ES2022"],
+        "types": ["node", "bun"],
+        "baseUrl": ".",
+        "paths": {
+            "@magic-context/core/*": ["../plugin/src/*"],
+            "@cortexkit/retina-local-fs/*": [
+                "../retina-local-fs/dist/types/*",
+                "../retina-local-fs/src/*"
+            ]
+        }
+    },
+    "include": ["src/**/*.ts", "src/**/*.d.ts", "scripts/**/*.ts", "test-preload.ts"],
+    "exclude": ["node_modules", "dist", "src/**/__tests__/**"],
+    "references": [
+        {
+            "path": "../retina-local-fs/tsconfig.build.json"
+        }
+    ]
+}

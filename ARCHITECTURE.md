@@ -6,6 +6,7 @@ It runs in several hosts and shares one implementation of the core behaviour:
 
 - **OpenCode 1.x and 2.x**, as the npm plugin `@cortexkit/opencode-magic-context` (`packages/plugin`). The 1.x and 2.x hosts have different plugin APIs; each has a thin adapter over the same core.
 - **Pi and OMP**, as `@cortexkit/pi-magic-context` (`packages/pi-plugin`), which imports the core from the OpenCode package.
+- **Claude Code**, as a Claude Code plugin (`packages/claude-code-plugin`): an MCP server with `ctx_memory`, `ctx_note`, `ctx_search` and `ctx_expand`, and a `SessionStart` hook that injects project memory and session notes. Claude Code has no hook for rewriting the conversation it sends, so it keeps its own compaction and there is no transform, historian or dreamer; history recall reads Claude Code's JSONL transcripts.
 - **The Rust module `ck-mc`** (`crates/`), a module of the subconscious daemon (subc). It runs the transform and historian when a project opts into Rust transform mode, and it serves Claude Code through the Thalamus proxy.
 
 All hosts and all projects on a machine share one SQLite database, `~/.local/share/cortexkit/magic-context/context.db`. Session-scoped tables carry a `harness` column; project-scoped tables (memories, git commits) are shared across hosts. The Rust module keeps its own store, `store.db`, which moves in step with `context.db` (see Storage).
@@ -35,6 +36,7 @@ Magic Context rewrites the message array and system prompt the host is about to 
 | Tools | `src/tools/` | `ctx_reduce`, `ctx_expand`, `ctx_note`, `ctx_memory`, `ctx_search`. |
 | Shared | `src/shared/`, `src/config/` | Logger, SQLite backend, RPC, config schema and loader, prompt surfaces, window geometry. |
 | Pi | `packages/pi-plugin/src/` | Pi and OMP hooks over the shared core. Deliberate differences are listed in `packages/pi-plugin/PARITY.md`. |
+| Claude Code | `packages/claude-code-plugin/src/` | MCP server, `SessionStart` hook and transcript reader over the shared core (`claude-code` harness). |
 | Rust | `crates/mc-core`, `mc-store`, `mc-module`, `mc-tokenizer` | Transform and classification, the module store, the subc module and historian, the token estimator. |
 | CLI | `packages/cli/` | `npx @cortexkit/magic-context` setup, doctor and migrations. |
 | Dashboard | `packages/dashboard/` | Tauri desktop app: config editor, sessions, cache diagnostics, memories. |

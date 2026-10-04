@@ -1,0 +1,12 @@
+{
+    "name": "magic-context",
+    "version": "0.44.4",
+    "description": "Persistent project memory for Claude Code, shared with OpenCode and Pi: memories and notes that survive compaction and carry into new sessions, plus recall of compacted conversation history.",
+    "author": {
+        "name": "ualtinok"
+    },
+    "homepage": "https://github.com/cortexkit/magic-context",
+    "repository": "https://github.com/cortexkit/magic-context",
+    "license": "MIT",
+    "keywords": ["memory", "context", "compaction", "mcp", "magic-context"]
+}

@@ -1,0 +1,11 @@
+{
+    "mcpServers": {
+        "magic-context": {
+            "command": "node",
+            "args": [
+                "--disable-warning=ExperimentalWarning",
+                "${CLAUDE_PLUGIN_ROOT}/dist/mcp-server.js"
+            ]
+        }
+    }
+}

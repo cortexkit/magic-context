@@ -53,9 +53,11 @@ function distForModule(moduleUrl: string): string | undefined {
 }
 
 export function stalePluginBuildGuidance(harness: HarnessId): string {
-    return harness === "pi" || harness === "omp"
-        ? "Magic Context was rebuilt while this Pi was running; type /reload to load the new build"
-        : "Magic Context was rebuilt while this OpenCode host was running; restart the host to load the new build";
+    if (harness === "pi" || harness === "omp")
+        return "Magic Context was rebuilt while this Pi was running; type /reload to load the new build";
+    if (harness === "claude-code")
+        return "Magic Context was rebuilt while this Claude Code session was running; restart Claude Code to load the new build";
+    return "Magic Context was rebuilt while this OpenCode host was running; restart the host to load the new build";
 }
 
 function deliverNotice(host: BuildHost): void {

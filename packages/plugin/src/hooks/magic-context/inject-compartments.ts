@@ -1166,7 +1166,7 @@ export interface MemoryRenderOptions {
     sourceNameByMemoryId?: ReadonlyMap<number, string>;
 }
 
-function resolveWorkspaceRenderContext(args: {
+export function resolveWorkspaceRenderContext(args: {
     db: Database;
     projectPath?: string;
     workspaceIdentitySet?: WorkspaceIdentitySet;
@@ -1209,7 +1209,7 @@ function resolveWorkspaceRenderContext(args: {
     };
 }
 
-function sourceNamesForMemories(args: {
+export function sourceNamesForMemories(args: {
     memories: readonly Memory[];
     projectPath?: string;
     workspace: WorkspaceRenderContext;

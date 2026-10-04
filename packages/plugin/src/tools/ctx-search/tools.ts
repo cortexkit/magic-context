@@ -125,8 +125,12 @@ function createCtxSearchTool(deps: CtxSearchToolDeps): ToolDefinition {
             // the live tail and must be excluded. A negative sentinel here would mean
             // "search everything" and leak the current prompt back to the agent — the
             // exact opposite of the intent (issue #131).
-            const lastCompartmentEnd = getLastCompartmentEndMessage(deps.db, toolContext.sessionID);
-            const messageOrdinalCutoff = lastCompartmentEnd >= 0 ? lastCompartmentEnd : 0;
+            const messageOrdinalCutoff = Math.max(
+                0,
+                deps.resolveMessageOrdinalCutoff
+                    ? deps.resolveMessageOrdinalCutoff(toolContext.sessionID)
+                    : getLastCompartmentEndMessage(deps.db, toolContext.sessionID),
+            );
 
             // Hard-filter memories already rendered in <session-history>.
             // They're visible in message[0], so returning them wastes output

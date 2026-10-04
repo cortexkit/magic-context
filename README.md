@@ -128,6 +128,18 @@ Then create `magic-context.jsonc` with the OpenCode historian setting:
 - **Optional:** the `dreamer` model/disable block. Omit it to leave periodic memory consolidation off.
 - **Optional:** `embedding`. Omit it to use the local `Xenova/all-MiniLM-L6-v2`; turning embeddings off removes semantic/embedding-backed search, but keyword search and context management continue.
 
+### Claude Code
+
+Claude Code gets Magic Context's memory layer as a plugin: project memories and notes injected at session start and after every compaction, plus `ctx_memory`, `ctx_note`, `ctx_search`, `ctx_expand` and `ctx_skill` as MCP tools. Memories are shared with OpenCode and Pi through the same database. Claude Code keeps compacting its own context; `ctx_search` and `ctx_expand` recover what it compacted away. Operation skills turn the project's verified flows (which button calls which API and writes what) into skills the next session follows without re-analysing the code, and capturing runs on the session's own model, with no extra model to configure. From a checkout of this repository:
+
+```bash
+bun install && bun run --cwd packages/claude-code-plugin build
+claude plugin marketplace add "$PWD"
+claude plugin install magic-context@cortexkit
+```
+
+See [packages/claude-code-plugin/README.md](packages/claude-code-plugin/README.md) for configuration and limitations (no `ctx_reduce`, historian or dreamer under Claude Code).
+
 ### Flat model-config migration (before/after)
 
 Existing flat model settings migrate automatically on the first config read. The

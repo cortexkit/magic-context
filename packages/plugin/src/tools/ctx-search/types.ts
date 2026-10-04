@@ -29,6 +29,13 @@ export interface CtxSearchToolDeps {
     embeddingEnabled?: boolean;
     /** When true, ctx_search surfaces indexed git commits as a 3rd source. */
     gitCommitsEnabled?: boolean;
+    /**
+     * Highest message ordinal the message lane may return. Hosts that own their
+     * history (Claude Code compacts it itself) derive this from the host's own
+     * compaction boundary; when omitted it is the last compartment end, as on
+     * OpenCode and Pi. 0 means every message is still in the live tail.
+     */
+    resolveMessageOrdinalCutoff?: (sessionId: string) => number;
     /** Override message reader for testing (avoids opening OpenCode DB in CI). */
     readMessages?: (sessionId: string) => Array<{
         ordinal: number;

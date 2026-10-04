@@ -15,6 +15,9 @@ Thumbs.db
 node_modules/
 dist/
 build/
+# Claude Code installs a plugin by copying its directory out of a git marketplace,
+# with no build step, so the Claude Code plugin's bundles are committed.
+!packages/claude-code-plugin/dist/
 
 *.log
 coverage/
