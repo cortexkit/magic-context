@@ -476,12 +476,17 @@ async function runCompiledSmartNoteCheckLocked(
         const deadline = startedAt + timeoutMs;
         options.onExecutionStart?.();
         throwIfRunAborted(controller.signal);
-        const context = quickjs.newContext();
+        // Own both lifetimes explicitly: the async module's implicit newContext
+        // helper does not transfer runtime ownership to its context in 0.32.
+        const runtime = quickjs.newRuntime();
+        let context: QuickJSAsyncContext | undefined;
+        let releaseCapabilities: (() => void) | undefined;
         const disposalHook = afterContextDisposal;
         try {
-            context.runtime.setMemoryLimit(options.heapLimitBytes ?? DEFAULT_HEAP_LIMIT_BYTES);
-            context.runtime.setMaxStackSize(options.stackLimitBytes ?? DEFAULT_STACK_LIMIT_BYTES);
-            context.runtime.setInterruptHandler(() => {
+            context = runtime.newContext();
+            runtime.setMemoryLimit(options.heapLimitBytes ?? DEFAULT_HEAP_LIMIT_BYTES);
+            runtime.setMaxStackSize(options.stackLimitBytes ?? DEFAULT_STACK_LIMIT_BYTES);
+            runtime.setInterruptHandler(() => {
                 const now = performance.now();
                 if (cpuBudgetExceeded(now)) {
                     cpuTimedOut = true;
@@ -494,7 +499,7 @@ async function runCompiledSmartNoteCheckLocked(
                 }
                 return controller.signal.aborted;
             });
-            installCapabilityObject(context, {
+            releaseCapabilities = installCapabilityObject(context, {
                 ...capabilities,
                 httpGet: async (url) => {
                     const waitStartedAt = performance.now();
@@ -535,8 +540,16 @@ async function runCompiledSmartNoteCheckLocked(
             }
             return { ok: true, result: { met: checkResult.met } };
         } finally {
-            context.dispose();
-            disposalHook?.(context);
+            try {
+                try {
+                    releaseCapabilities?.();
+                } finally {
+                    context?.dispose();
+                }
+            } finally {
+                runtime.dispose();
+            }
+            if (context) disposalHook?.(context);
         }
     } catch (error) {
         // A previously caught network error must not relabel a subsequent busy
@@ -595,8 +608,33 @@ function truncate(value: string): string {
     return value.slice(0, MAX_SANDBOX_ERROR_CHARS);
 }
 
-function installCapabilityObject(context: QuickJSAsyncContext, cap: SmartNoteCapabilityApi): void {
+function installCapabilityObject(
+    context: QuickJSAsyncContext,
+    cap: SmartNoteCapabilityApi,
+): () => void {
     const capObject = context.newObject();
+    const release = () => {
+        try {
+            // Evaluation has settled. Cleanup must still be able to allocate
+            // property keys after an OOM or a CPU/abort interruption.
+            context.runtime.setMemoryLimit(-1);
+            context.runtime.removeInterruptHandler();
+            // Guest wrappers can outlive check() through globals or prototypes.
+            // Detach their private native functions while the runtime's HostRef
+            // callbacks are still registered, then release our final handle.
+            for (const name of [
+                "__readFile",
+                "__httpGet",
+                "__gitHeadSha",
+                "__gitTag",
+                "__gitLog",
+            ]) {
+                context.setProp(capObject, name, context.undefined);
+            }
+        } finally {
+            capObject.dispose();
+        }
+    };
     try {
         installAsyncStringFunction(context, capObject, "__readFile", async (arg) => {
             const value = await cap.readFile(arg);
@@ -614,8 +652,10 @@ function installCapabilityObject(context: QuickJSAsyncContext, cap: SmartNoteCap
             return JSON.stringify(await cap.gitLog(opts));
         });
         context.setProp(context.global, "__mcHostCap", capObject);
-    } finally {
-        capObject.dispose();
+        return release;
+    } catch (error) {
+        release();
+        throw error;
     }
 }
 
@@ -652,7 +692,10 @@ function disableAmbientDynamicCode(context: QuickJSAsyncContext): void {
 }
 
 async function evalCheck(context: QuickJSAsyncContext, compiledCheck: string): Promise<unknown> {
+    // Local bindings must die with evaluation rather than become global roots
+    // for capability closures when the context and runtime are freed.
     const wrapped = `
+(() => {
 "use strict";
 const module = { exports: {} };
 const exports = module.exports;
@@ -675,7 +718,8 @@ const __check = typeof check === "function" ? check : module.exports.check;
 if (typeof __check !== "function") throw new Error("compiled check must define check(cap)");
 const __result = __check(__mcCap);
 if (!__result || typeof __result.met !== "boolean") throw new Error("check() must return { met: boolean }");
-JSON.stringify({ met: __result.met });`;
+return JSON.stringify({ met: __result.met });
+})();`;
     const evalResult = await context.evalCodeAsync(wrapped, "smart-note-check.js", {
         type: "global",
     });
