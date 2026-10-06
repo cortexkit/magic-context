@@ -147,6 +147,7 @@
         "@types/better-sqlite3": "^7.6.13",
         "@types/bun": "^1.3.10",
         "@types/node": "^22.20.0",
+        "@types/webassembly-js-api": "0.0.3",
         "bun-types": "^1.3.10",
         "effect": "4.0.0-rc.112",
         "typescript": "^5.8.0",
@@ -1083,6 +1084,8 @@
     "@types/sax": ["@types/sax@1.2.7", "", { "dependencies": { "@types/node": "*" } }, "sha512-rO73L89PJxeYM3s3pPPjiPgVVcymqU490g0YO5n5By0k2Erzj6tay/4lr1CHAAU4JyOWd1rpQ8bCf6cZfHU96A=="],
 
     "@types/unist": ["@types/unist@3.0.3", "", {}, "sha512-ko/gIFJRv177XgZsZcBwnqJN5x/Gien8qNOn0D5bQU/zAzVf9Zt3BlcUiLqhV9y4ARk0GbT3tnUiPNgnTXzc/Q=="],
+
+    "@types/webassembly-js-api": ["@types/webassembly-js-api@0.0.3", "", {}, "sha512-9c8QN9vJKF8PYeMeh459PbCfNJVF7rJN9F7AAv7zrLvkmFC8/9OhUTEDZnFl8JzyHDArqbEWaNh72EpmzBKo9Q=="],
 
     "@types/ws": ["@types/ws@8.18.1", "", { "dependencies": { "@types/node": "*" } }, "sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg=="],
 
