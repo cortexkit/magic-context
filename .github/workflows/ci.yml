@@ -85,7 +85,10 @@ jobs:
         env:
           SMART_NOTE_LOAD_PROFILE: "1"
         working-directory: packages/plugin
-        run: timeout 180s bun scripts/profile-smart-note-host.ts
+        run: |
+          timeout 120s bun scripts/profile-quickjs-variant.ts
+          timeout 120s bun scripts/profile-quickjs-variant.ts --sync
+          timeout 120s bun scripts/profile-quickjs-variant.ts --budget=50
 
       # Exercise the node:sqlite branch of shared/sqlite.ts under REAL Node —
       # bun test only covers the bun:sqlite branch, so the transaction() shim,
