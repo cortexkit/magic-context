@@ -85,7 +85,7 @@ jobs:
         env:
           SMART_NOTE_LOAD_PROFILE: "1"
         working-directory: packages/plugin
-        run: bun test --parallel=4 --timeout 30000 src/features/magic-context/smart-notes
+        run: bun scripts/profile-quickjs-startup.ts
 
       # Exercise the node:sqlite branch of shared/sqlite.ts under REAL Node —
       # bun test only covers the bun:sqlite branch, so the transaction() shim,
