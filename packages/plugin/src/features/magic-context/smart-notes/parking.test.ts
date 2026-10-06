@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import type { HiddenCompletionExecutor } from "../../../hooks/magic-context/compartment-runner-types";
 import { Database } from "../../../shared/sqlite";
 import { createCtxNoteTools } from "../../../tools/ctx-note/tools";
@@ -27,9 +27,34 @@ const FAR_FUTURE = Date.now() + 365 * 24 * 3600 * 1000;
 const context = { sessionID: OWNER, directory: process.cwd() } as never;
 let db: Database;
 let restoreTransport: (() => Promise<void>) | undefined;
+let wasm: ReturnType<typeof spyOn<typeof WebAssembly, "instantiate">> | undefined;
 
 beforeEach(() => {
     if (process.env.SMART_NOTE_TEST_TRACE === "1") {
+        const instantiate = WebAssembly.instantiate;
+        wasm = spyOn(WebAssembly, "instantiate").mockImplementation((source, imports) => {
+            console.log(
+                "SMART_NOTE_NATIVE_WASM parking:start",
+                process.pid,
+                String(process.hrtime.bigint()),
+            );
+            const pending = instantiate(source, imports);
+            void pending.then(
+                () =>
+                    console.log(
+                        "SMART_NOTE_NATIVE_WASM parking:settled",
+                        process.pid,
+                        String(process.hrtime.bigint()),
+                    ),
+                (error) =>
+                    console.log(
+                        "SMART_NOTE_NATIVE_WASM parking:rejected",
+                        process.pid,
+                        String(error),
+                    ),
+            );
+            return pending;
+        });
         __sandboxRunnerTest.setTrace((event) => {
             console.log("SMART_NOTE_TRACE parking", process.pid, JSON.stringify(event));
         });
@@ -43,6 +68,8 @@ beforeEach(() => {
     expect(acquireLease(db, "holder", "parking-lease")).toBe(true);
 });
 afterEach(async () => {
+    wasm?.mockRestore();
+    wasm = undefined;
     __sandboxRunnerTest.reset();
     await restoreTransport?.();
     restoreTransport = undefined;

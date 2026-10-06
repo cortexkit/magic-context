@@ -42,7 +42,12 @@ import {
 let asyncModulePromise: Promise<QuickJSAsyncWASMModule> | null = null;
 let asyncModuleLoaded = false;
 let beforeModuleAcquisition: (() => Promise<void>) | undefined;
-type SandboxTraceEvent = { run: number; phase: string; details?: Record<string, unknown> };
+type SandboxTraceEvent = {
+    run: number;
+    phase: string;
+    at: string;
+    details?: Record<string, unknown>;
+};
 type SandboxTrace = (phase: string, details?: Record<string, unknown>) => void;
 let traceHook: ((event: SandboxTraceEvent) => void) | undefined;
 let tracedRuns = 0;
@@ -69,7 +74,7 @@ function traceForRun(): SandboxTrace | undefined {
     // visible even after its afterEach removes the tracing seam.
     return (phase, details) => {
         try {
-            hook({ run, phase, details });
+            hook({ run, phase, at: String(process.hrtime.bigint()), details });
         } catch {
             // Diagnostics must not change the sandbox's result or cleanup.
         }
@@ -97,25 +102,22 @@ function getAsyncModule(trace?: SandboxTrace): Promise<QuickJSAsyncWASMModule> {
                   ...singlefileAsyncifyVariant,
                   importFFI: () => {
                       trace("ffi-import:start");
-                      return singlefileAsyncifyVariant.importFFI().then((ffi) => {
-                          trace("ffi-import:settled");
-                          return ffi;
-                      });
+                      const imported = singlefileAsyncifyVariant.importFFI();
+                      void imported.then(
+                          () => trace("ffi-import:settled"),
+                          (error) => trace("ffi-import:rejected", { error: String(error) }),
+                      );
+                      return imported;
                   },
                   importModuleLoader: () => {
                       trace("emscripten-loader-import:start");
-                      return singlefileAsyncifyVariant.importModuleLoader().then((imported) => {
-                          trace("emscripten-loader-import:settled");
-                          const outer = "default" in imported ? imported.default : imported;
-                          const loader = "default" in outer ? outer.default : outer;
-                          return (options) => {
-                              trace("wasm-factory:start");
-                              return loader(options).then((module) => {
-                                  trace("wasm-factory:settled");
-                                  return module;
-                              });
-                          };
-                      });
+                      const imported = singlefileAsyncifyVariant.importModuleLoader();
+                      void imported.then(
+                          () => trace("emscripten-loader-import:settled"),
+                          (error) =>
+                              trace("emscripten-loader-import:rejected", { error: String(error) }),
+                      );
+                      return imported;
                   },
               }
             : singlefileAsyncifyVariant;
