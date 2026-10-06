@@ -16,6 +16,7 @@
 // below is erased at build time and pulls in no runtime code.
 import type {
     QuickJSAsyncContext,
+    QuickJSAsyncVariant,
     QuickJSAsyncWASMModule,
     QuickJSHandle,
 } from "quickjs-emscripten";
@@ -91,7 +92,34 @@ function getAsyncModule(trace?: SandboxTrace): Promise<QuickJSAsyncWASMModule> {
             );
         trace?.("module-import:settled");
         trace?.("wasm-instantiation:start");
-        const module = await newQuickJSAsyncWASMModuleFromVariant(singlefileAsyncifyVariant);
+        const tracedVariant: QuickJSAsyncVariant = trace
+            ? {
+                  ...singlefileAsyncifyVariant,
+                  importFFI: () => {
+                      trace("ffi-import:start");
+                      return singlefileAsyncifyVariant.importFFI().then((ffi) => {
+                          trace("ffi-import:settled");
+                          return ffi;
+                      });
+                  },
+                  importModuleLoader: () => {
+                      trace("emscripten-loader-import:start");
+                      return singlefileAsyncifyVariant.importModuleLoader().then((imported) => {
+                          trace("emscripten-loader-import:settled");
+                          const outer = "default" in imported ? imported.default : imported;
+                          const loader = "default" in outer ? outer.default : outer;
+                          return (options) => {
+                              trace("wasm-factory:start");
+                              return loader(options).then((module) => {
+                                  trace("wasm-factory:settled");
+                                  return module;
+                              });
+                          };
+                      });
+                  },
+              }
+            : singlefileAsyncifyVariant;
+        const module = await newQuickJSAsyncWASMModuleFromVariant(tracedVariant);
         trace?.("wasm-instantiation:settled");
         asyncModuleLoaded = true;
         return module;
