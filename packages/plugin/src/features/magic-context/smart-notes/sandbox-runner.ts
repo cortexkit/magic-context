@@ -1,6 +1,3 @@
-/// <reference types="webassembly-js-api" />
-// The shared source is also checked by the Node-only Pi project. Use WASM-only
-// declarations rather than DOM globals that would alter unrelated host types.
 // Asyncify is required for async host capabilities, but its initialization can
 // compile and instantiate synchronously. Native asynchronous WASM compilation
 // can leave an unresolved promise in isolated Bun workers, before any check or
@@ -13,6 +10,7 @@
 // load and subagent spawn. No live-host filesystem read or global WASM override
 // is needed, and the bounded shared-load wait remains independent of execution.
 import type {
+    EmscriptenModuleLoaderOptions,
     QuickJSAsyncContext,
     QuickJSAsyncWASMModule,
     QuickJSHandle,
@@ -26,6 +24,18 @@ import {
     SmartNoteNetworkError,
     smartNoteNetworkTimeout,
 } from "./types";
+
+// Node-only consumers do not include browser globals. Describe just the native
+// constructors used for bootstrap, reusing Emscripten's import/instance types.
+// This declaration is erased; it does not patch or replace WebAssembly at runtime.
+type InstantiateWasm = NonNullable<EmscriptenModuleLoaderOptions["instantiateWasm"]>;
+declare const WebAssembly: {
+    Module: new (bytes: Uint8Array) => object;
+    Instance: new (
+        module: object,
+        imports: Parameters<InstantiateWasm>[0],
+    ) => Parameters<Parameters<InstantiateWasm>[1]>[0];
+};
 
 /**
  * The WASM module is expensive to instantiate (~1MB compile) but reusable across
