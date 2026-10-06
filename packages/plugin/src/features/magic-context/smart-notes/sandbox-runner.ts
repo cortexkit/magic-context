@@ -1,19 +1,14 @@
-// The SINGLEFILE variant embeds the WASM as binary INSIDE the JS module, so it
-// survives bundling into dist/index.js. The default wasmfile variant loads a
-// sibling `emscripten-module.wasm` via `new URL(..., import.meta.url)`, which
-// resolves to `dist/emscripten-module.wasm` in the bundle — a file the build
-// never emits, so every sandbox run fails with ENOENT. (Documented fix:
-// emscriptenInclusion=singlefile is "for missing .wasm files when bundling".)
-// We use the ASYNCIFY variant because the capability API (readFile/httpGet/git)
-// is async and the sandbox installs async host functions.
+// Asyncify is required for async host capabilities, but its initialization can
+// compile and instantiate synchronously. Native asynchronous WASM compilation
+// can leave an unresolved promise in isolated Bun workers, before any check or
+// VM lock has started. Use Emscripten's supported instantiateWasm callback with
+// the real asyncify bytecode, not the sync-only interpreter variant.
 //
-// These two modules are imported LAZILY inside getAsyncModule() (below), not at
-// the top of this file. The singlefile variant inlines ~2.6MB of base64 WASM into
-// the bundle; a top-level import forced the JS engine to parse that blob on every
-// plugin load — and on every subagent child spawn — adding hundreds of ms (issue
-// #242). Deferring the import to the first smart-note evaluation splits the variant
-// into its own chunk that stays out of the cold-start parse. The type-only import
-// below is erased at build time and pulls in no runtime code.
+// The bytecode is embedded by a build-time macro in a lazy JS chunk. The default
+// wasmfile loader would instead fetch a sibling .wasm file that our bundles do
+// not emit. Keeping the bytecode lazy also avoids parsing it on every plugin
+// load and subagent spawn. No live-host filesystem read or global WASM override
+// is needed, and the bounded shared-load wait remains independent of execution.
 import type {
     QuickJSAsyncContext,
     QuickJSAsyncWASMModule,
@@ -75,14 +70,30 @@ function getAsyncModule(): Promise<QuickJSAsyncWASMModule> {
     const startedAt = performance.now();
     const load = (async () => {
         if (beforeModuleLoad) await beforeModuleLoad();
-        const [{ default: singlefileAsyncifyVariant }, { newQuickJSAsyncWASMModuleFromVariant }] =
-            await importPluginModule(() =>
-                Promise.all([
-                    import("@jitl/quickjs-singlefile-cjs-release-asyncify"),
-                    import("quickjs-emscripten"),
-                ]),
-            );
-        const module = await newQuickJSAsyncWASMModuleFromVariant(singlefileAsyncifyVariant);
+        const [
+            { default: asyncifyVariant },
+            { newQuickJSAsyncWASMModuleFromVariant, newVariant },
+            { quickJsWasmBase64 },
+        ] = await importPluginModule(() =>
+            Promise.all([
+                import("@jitl/quickjs-wasmfile-release-asyncify"),
+                import("quickjs-emscripten"),
+                import("./quickjs-wasm-bytecode"),
+            ]),
+        );
+        const compiledModule = new WebAssembly.Module(
+            new Uint8Array(Buffer.from(quickJsWasmBase64, "base64")),
+        );
+        const variant = newVariant(asyncifyVariant, {
+            emscriptenModule: {
+                instantiateWasm(imports, onSuccess) {
+                    const instance = new WebAssembly.Instance(compiledModule, imports);
+                    onSuccess(instance);
+                    return instance.exports;
+                },
+            },
+        });
+        const module = await newQuickJSAsyncWASMModuleFromVariant(variant);
         return module;
     })();
     const bounded = new Promise<QuickJSAsyncWASMModule>((resolve, reject) => {

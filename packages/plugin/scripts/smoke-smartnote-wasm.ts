@@ -9,16 +9,16 @@
 //
 // This script BUNDLES sandbox-runner.ts exactly like the production build
 // (esm, node target) into a temp file, then imports that bundle and runs a real
-// check. If the wasm isn't embedded in the bundle (singlefile variant), the
+// check. If the wasm bytecode isn't embedded in the bundle, the
 // import/run throws — failing the smoke. Run: bun packages/plugin/scripts/smoke-smartnote-wasm.ts
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createTestTempDir } from "../src/shared/test-temp-dir";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const entry = join(here, "../src/features/magic-context/smart-notes/sandbox-runner.ts");
-const outDir = mkdtempSync(join(tmpdir(), "mc-smartnote-wasm-smoke-"));
+const { dir: outDir, cleanup } = createTestTempDir("mc-smartnote-wasm-smoke-");
 
 let failures = 0;
 function check(name: string, cond: boolean, detail?: string): void {
@@ -41,13 +41,14 @@ try {
     });
     check("sandbox-runner bundles cleanly", result.success, result.logs.map(String).join("; "));
     if (!result.success) throw new Error("bundle failed");
+    check("bundle needs no external wasm asset", !result.outputs.some((output) => output.path.endsWith(".wasm")));
 
     const bundlePath = result.outputs.find((o) => o.path.endsWith(".js"))?.path;
     check("bundle emitted a js file", Boolean(bundlePath));
     if (!bundlePath) throw new Error("no bundle output");
 
     // The whole point: importing + running the BUNDLE must not ENOENT on a
-    // sibling .wasm. A singlefile (inlined) variant loads from the bundle itself.
+    // sibling .wasm. The bytecode must come from the bundle itself.
     const mod = (await import(bundlePath)) as {
         runCompiledSmartNoteCheck: (opts: unknown) => Promise<{ ok: boolean; result?: unknown }>;
     };
@@ -69,11 +70,30 @@ try {
         res.ok === true && JSON.stringify(res.result) === JSON.stringify({ met: true }),
         JSON.stringify(res),
     );
+    const nodeVersion = spawnSync("node", ["--version"], { encoding: "utf8", timeout: 10_000, windowsHide: true });
+    check("Node runtime is available for the bundle probe", nodeVersion.status === 0, String(nodeVersion.error ?? nodeVersion.stderr));
+    if (nodeVersion.status !== 0) throw new Error("Node runtime unavailable");
+    console.log(`  Node ${nodeVersion.stdout.trim()}`);
+    const node = spawnSync("node", ["--input-type=module", "--eval", `
+        import { pathToFileURL } from "node:url";
+        const { runCompiledSmartNoteCheck } = await import(pathToFileURL(process.argv[1]).href);
+        const result = await runCompiledSmartNoteCheck({
+            compiledCheck: 'function check(cap) { return {met: cap.readFile("ready.txt") === "ready"}; }',
+            capabilities: {
+                readFile: async () => "ready", gitHeadSha: async () => null,
+                gitTag: async () => null, gitLog: async () => [],
+                httpGet: async () => ({status: 200, body: "ok"}),
+            },
+        });
+        console.log(JSON.stringify(result));
+        if (!result.ok || result.result.met !== true) process.exit(1);
+    `, bundlePath], { cwd: outDir, encoding: "utf8", timeout: 20_000, windowsHide: true });
+    check("standalone Node bundle runs a real asyncify capability check", node.status === 0 && node.stdout.includes('"met":true'), `${node.stdout}\n${node.stderr}\n${node.error ?? ""}`);
 } catch (error) {
     failures++;
     console.log(`FAIL  bundle-path smoke threw — ${error instanceof Error ? error.message : String(error)}`);
 } finally {
-    rmSync(outDir, { recursive: true, force: true });
+    cleanup();
 }
 
 if (failures > 0) {
