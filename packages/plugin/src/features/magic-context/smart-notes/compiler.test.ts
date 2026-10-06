@@ -1,4 +1,3 @@
-import "./__tests__/load-profile.test";
 import { describe, expect, test } from "bun:test";
 import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";

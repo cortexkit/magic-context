@@ -1,4 +1,3 @@
-import "./__tests__/load-profile.test";
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import * as dns from "node:dns/promises";

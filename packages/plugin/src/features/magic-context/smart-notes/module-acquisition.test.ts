@@ -1,4 +1,3 @@
-import "./__tests__/load-profile.test";
 import { afterEach, expect, test } from "bun:test";
 import type { SmartNoteCapabilityApi } from "./capabilities";
 import {

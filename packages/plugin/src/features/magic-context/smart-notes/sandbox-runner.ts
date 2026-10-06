@@ -44,26 +44,12 @@ let asyncModuleLoadAttempted = false;
 let beforeModuleAcquisition: (() => Promise<void>) | undefined;
 let beforeModuleLoad: (() => Promise<void>) | undefined;
 let moduleLoadTimeoutOverride: number | undefined;
-type ModuleLoadProfile = {
-    pid: number;
-    load: number;
-    phase: string;
-    wallMs: number;
-    userMs: number;
-    systemMs: number;
-    delayed: boolean;
-};
-let moduleLoadObserver: ((profile: ModuleLoadProfile) => void) | undefined;
-let profiledLoads = 0;
 let afterContextDisposal: ((context: QuickJSAsyncContext) => void) | undefined;
 
 /** Delay module availability in tests without slowing production checks. */
 export const __sandboxRunnerTest = {
     setAfterContextDisposal(hook: ((context: QuickJSAsyncContext) => void) | undefined): void {
         afterContextDisposal = hook;
-    },
-    setModuleLoadObserver(observer: ((profile: ModuleLoadProfile) => void) | undefined): void {
-        moduleLoadObserver = observer;
     },
     setBeforeModuleAcquisition(hook: () => Promise<void>): void {
         beforeModuleAcquisition = hook;
@@ -92,29 +78,6 @@ function getAsyncModule(): Promise<QuickJSAsyncWASMModule> {
     asyncModuleLoadAttempted = true;
     const timeoutMs = moduleLoadTimeoutOverride ?? SMART_NOTE_MODULE_LOAD_TIMEOUT_MS;
     const startedAt = performance.now();
-    const observer = moduleLoadObserver;
-    const profileStart = observer ? process.hrtime.bigint() : 0n;
-    const profileCpu = observer ? process.cpuUsage() : undefined;
-    const loadId = observer ? ++profiledLoads : 0;
-    const delayed = beforeModuleLoad !== undefined;
-    const report = (phase: string) => {
-        if (!observer || !profileCpu) return;
-        const cpu = process.cpuUsage(profileCpu);
-        try {
-            observer({
-                pid: process.pid,
-                load: loadId,
-                phase,
-                wallMs: Number(process.hrtime.bigint() - profileStart) / 1e6,
-                userMs: cpu.user / 1e3,
-                systemMs: cpu.system / 1e3,
-                delayed,
-            });
-        } catch {
-            /* Measurement must not alter startup or cleanup. */
-        }
-    };
-    report("start");
     const load = (async () => {
         if (beforeModuleLoad) await beforeModuleLoad();
         const [{ default: singlefileAsyncifyVariant }, { newQuickJSAsyncWASMModuleFromVariant }] =
@@ -124,17 +87,11 @@ function getAsyncModule(): Promise<QuickJSAsyncWASMModule> {
                     import("quickjs-emscripten"),
                 ]),
             );
-        report("imports-ready");
-        report("native-factory-start");
         const module = await newQuickJSAsyncWASMModuleFromVariant(singlefileAsyncifyVariant);
-        report("native-factory-ready");
         return module;
     })();
     const bounded = new Promise<QuickJSAsyncWASMModule>((resolve, reject) => {
-        const timeout = () => {
-            report("deadline");
-            reject(new SandboxModuleLoadTimeoutError());
-        };
+        const timeout = () => reject(new SandboxModuleLoadTimeoutError());
         const timer = setTimeout(timeout, timeoutMs);
         // Keep both handlers attached after timeout. A late native load can finish
         // safely, but must neither execute guest code nor publish over a retry.
@@ -146,7 +103,6 @@ function getAsyncModule(): Promise<QuickJSAsyncWASMModule> {
                 else resolve(module);
             },
             (error) => {
-                report("rejected");
                 clearTimeout(timer);
                 reject(error);
             },

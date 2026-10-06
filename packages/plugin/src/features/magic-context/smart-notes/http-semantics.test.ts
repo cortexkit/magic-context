@@ -408,5 +408,3 @@ test("persistent due-check access failure notifies owner once and keeps note pen
         closeQuietly(db);
     }
 });
-
-import "./__tests__/load-profile.test";

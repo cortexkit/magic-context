@@ -1,4 +1,3 @@
-import "./__tests__/load-profile.test";
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import type { HiddenCompletionExecutor } from "../../../hooks/magic-context/compartment-runner-types";
 import { Database } from "../../../shared/sqlite";

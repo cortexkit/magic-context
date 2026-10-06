@@ -81,14 +81,7 @@ jobs:
         run: bun crates/mc-module/gen/gen-historian-prompt-golden.ts --check
 
       - name: Test
-        # Temporary startup contention probe; restore the full suite before merge.
-        env:
-          SMART_NOTE_LOAD_PROFILE: "1"
-        working-directory: packages/plugin
-        run: |
-          timeout 120s bun scripts/profile-quickjs-variant.ts
-          timeout 120s bun scripts/profile-quickjs-variant.ts --sync
-          timeout 120s bun scripts/profile-quickjs-variant.ts --budget=50
+        run: bun run test
 
       # Exercise the node:sqlite branch of shared/sqlite.ts under REAL Node —
       # bun test only covers the bun:sqlite branch, so the transaction() shim,

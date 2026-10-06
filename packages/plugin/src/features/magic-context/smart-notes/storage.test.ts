@@ -1,6 +1,5 @@
 /// <reference types="bun-types" />
 
-import "./__tests__/load-profile.test";
 import { afterEach, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
