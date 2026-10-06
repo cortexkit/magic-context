@@ -55,9 +55,13 @@ type ModuleLoadProfile = {
 };
 let moduleLoadObserver: ((profile: ModuleLoadProfile) => void) | undefined;
 let profiledLoads = 0;
+let afterContextDisposal: ((context: QuickJSAsyncContext) => void) | undefined;
 
 /** Delay module availability in tests without slowing production checks. */
 export const __sandboxRunnerTest = {
+    setAfterContextDisposal(hook: ((context: QuickJSAsyncContext) => void) | undefined): void {
+        afterContextDisposal = hook;
+    },
     setModuleLoadObserver(observer: ((profile: ModuleLoadProfile) => void) | undefined): void {
         moduleLoadObserver = observer;
     },
@@ -75,6 +79,7 @@ export const __sandboxRunnerTest = {
         beforeModuleAcquisition = undefined;
         beforeModuleLoad = undefined;
         moduleLoadTimeoutOverride = undefined;
+        afterContextDisposal = undefined;
     },
 };
 
@@ -472,6 +477,7 @@ async function runCompiledSmartNoteCheckLocked(
         options.onExecutionStart?.();
         throwIfRunAborted(controller.signal);
         const context = quickjs.newContext();
+        const disposalHook = afterContextDisposal;
         try {
             context.runtime.setMemoryLimit(options.heapLimitBytes ?? DEFAULT_HEAP_LIMIT_BYTES);
             context.runtime.setMaxStackSize(options.stackLimitBytes ?? DEFAULT_STACK_LIMIT_BYTES);
@@ -530,6 +536,7 @@ async function runCompiledSmartNoteCheckLocked(
             return { ok: true, result: { met: checkResult.met } };
         } finally {
             context.dispose();
+            disposalHook?.(context);
         }
     } catch (error) {
         // A previously caught network error must not relabel a subsequent busy
