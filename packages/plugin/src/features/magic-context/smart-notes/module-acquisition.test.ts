@@ -1,4 +1,5 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import "./__tests__/load-profile.test";
+import { afterEach, expect, test } from "bun:test";
 import type { SmartNoteCapabilityApi } from "./capabilities";
 import {
     __sandboxRunnerTest,
@@ -16,22 +17,6 @@ const capabilities: SmartNoteCapabilityApi = {
 const check = 'function check(cap) { return { met: cap.readFile("ready.txt") === "ready" }; }';
 
 afterEach(() => __sandboxRunnerTest.reset());
-
-test("cold initialization uses real synchronous asyncify WASM without native asynchronous instantiation", async () => {
-    __sandboxRunnerTest.setBeforeModuleLoad(async () => {}, 10_000);
-    const native = spyOn(WebAssembly, "instantiate").mockImplementation(() => {
-        throw new Error("native asynchronous WASM instantiation must not be used");
-    });
-    try {
-        expect(await runCompiledSmartNoteCheck({ compiledCheck: check, capabilities })).toEqual({
-            ok: true,
-            result: { met: true },
-        });
-        expect(native).not.toHaveBeenCalled();
-    } finally {
-        native.mockRestore();
-    }
-});
 
 test("a stalled module load is not run and a later check retries a fresh acquisition", async () => {
     let factories = 0;

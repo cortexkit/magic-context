@@ -1,3 +1,4 @@
+import "./__tests__/load-profile.test";
 import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";

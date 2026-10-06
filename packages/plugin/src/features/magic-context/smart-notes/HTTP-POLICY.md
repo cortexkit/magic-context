@@ -46,15 +46,6 @@ earlier at its admission or lease deadline without cancelling other callers' loa
 Late load completion/rejection is consumed but cannot publish a module over a
 replacement attempt or execute a check that already returned not run.
 
-Initialization uses synchronous `WebAssembly.Module` and `WebAssembly.Instance`
-through Emscripten's supported `instantiateWasm` callback. The interpreter remains
-the asyncify build, so host capability awaits still suspend and resume normally.
-The pinned bytecode is embedded at build time in a lazy JavaScript chunk, not read
-from a live host path. Native asynchronous compilation is avoided because its
-promise can stall in isolated Linux Bun workers even with fake-clock tests absent.
-If synchronous loading blocks delivery of its timer, the elapsed-load check still
-rejects an overdue result before guest execution.
-
 Every host capability await is bounded at the VM bridge by the run's abort signal,
 not just by the transport's cooperation. A promise that never settles cannot keep
 the VM or serialization lock suspended beyond the check deadline (plus event-loop

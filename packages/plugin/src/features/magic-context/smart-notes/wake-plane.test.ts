@@ -259,3 +259,5 @@ describe("wake-plane smart-note gates", () => {
         }
     });
 });
+
+import "./__tests__/load-profile.test";

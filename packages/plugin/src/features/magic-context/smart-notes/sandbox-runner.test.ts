@@ -1,3 +1,4 @@
+import "./__tests__/load-profile.test";
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { rm } from "node:fs/promises";
