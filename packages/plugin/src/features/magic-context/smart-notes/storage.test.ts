@@ -13,6 +13,7 @@ import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import { addNote, dismissNote, getNotes, getPendingSmartNotes, updateNote } from "../storage-notes";
 import { runDueCompiledSmartNoteChecks } from "./runner";
+import { __sandboxRunnerTest, runCompiledSmartNoteCheck } from "./sandbox-runner";
 import {
     commitSmartNoteState,
     getSmartNotesNeedingCompilation,
@@ -46,6 +47,7 @@ function setCheckColumns(db: Database, noteId: number, columns: Record<string, u
 }
 
 afterEach(() => {
+    __sandboxRunnerTest.reset();
     for (const dir of tempDirs.splice(0)) {
         rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
@@ -400,6 +402,20 @@ describe("smart-note cancellation health policy", () => {
                 policy_version: SMART_NOTE_CHECK_POLICY_VERSION,
             });
 
+            // This assertion concerns guest CPU exhaustion, not whether a cold
+            // infrastructure load fits inside the sweep's admission deadline.
+            expect(
+                await runCompiledSmartNoteCheck({
+                    compiledCheck: "function check() { return { met: false }; }",
+                    capabilities: {
+                        readFile: async () => null,
+                        gitHeadSha: async () => null,
+                        gitTag: async () => null,
+                        gitLog: async () => [],
+                        httpGet: async () => ({ status: 200, body: "ok" }),
+                    },
+                }),
+            ).toEqual({ ok: true, result: { met: false } });
             const result = await runDueCompiledSmartNoteChecks({
                 db,
                 projectIdentity: PROJECT,
@@ -409,6 +425,49 @@ describe("smart-note cancellation health policy", () => {
 
             expect(result.failed).toBe(1);
             expect(getPendingSmartNotes(db, PROJECT)[0].checkFailureCount).toBe(1);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("a module load timeout leaves a due note healthy and eligible for the next sweep", async () => {
+        const db = freshDb();
+        try {
+            const note = addNote(db, "smart", {
+                projectPath: PROJECT,
+                content: "waiting",
+                surfaceCondition: "later",
+            });
+            setCheckColumns(db, note.id, {
+                compiled_check: "function check() { return { met: true }; }",
+                check_hash: "hash",
+                check_cron: "* * * * *",
+                check_status: "compiled",
+                check_next_due_at: 0,
+                policy_version: SMART_NOTE_CHECK_POLICY_VERSION,
+            });
+            const root = tempProject();
+            __sandboxRunnerTest.setBeforeModuleLoad(() => new Promise<void>(() => {}), 50);
+            expect(
+                await runDueCompiledSmartNoteChecks({
+                    db,
+                    projectIdentity: PROJECT,
+                    projectRoot: root,
+                }),
+            ).toEqual({ ran: 1, surfaced: 0, failed: 0, networkFailed: 0 });
+            expect(getPendingSmartNotes(db, PROJECT)[0]).toMatchObject({
+                checkFailureCount: 0,
+                checkNetworkFailureCount: 0,
+                checkNextDueAt: 0,
+            });
+            __sandboxRunnerTest.reset();
+            expect(
+                await runDueCompiledSmartNoteChecks({
+                    db,
+                    projectIdentity: PROJECT,
+                    projectRoot: root,
+                }),
+            ).toEqual({ ran: 1, surfaced: 1, failed: 0, networkFailed: 0 });
         } finally {
             closeQuietly(db);
         }

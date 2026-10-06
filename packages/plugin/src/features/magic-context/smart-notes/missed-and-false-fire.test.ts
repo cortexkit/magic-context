@@ -19,7 +19,7 @@ import { setPersistedNoteNudgeTrigger } from "../storage-meta-persisted";
 import { addNote, getNotes } from "../storage-notes";
 import type { SmartNoteCapabilityApi } from "./capabilities";
 import { compileSmartNoteCheck } from "./compiler";
-import { __sandboxRunnerTest, runCompiledSmartNoteCheck } from "./sandbox-runner";
+import { runCompiledSmartNoteCheck } from "./sandbox-runner";
 import { markSmartNoteCompilationFailure } from "./storage";
 import { SmartNoteNetworkError } from "./types";
 
@@ -27,41 +27,7 @@ const directories: string[] = [];
 const databases: Database[] = [];
 let lookup: ReturnType<typeof spyOn<typeof dns, "lookup">>;
 let request: ReturnType<typeof spyOn<typeof https, "request">>;
-let wasm: ReturnType<typeof spyOn<typeof WebAssembly, "instantiate">> | undefined;
 beforeEach(() => {
-    if (process.env.SMART_NOTE_TEST_TRACE === "1") {
-        const instantiate = WebAssembly.instantiate;
-        wasm = spyOn(WebAssembly, "instantiate").mockImplementation((source, imports) => {
-            console.log(
-                "SMART_NOTE_NATIVE_WASM missed-and-false-fire:start",
-                process.pid,
-                String(process.hrtime.bigint()),
-            );
-            const pending = instantiate(source, imports);
-            void pending.then(
-                () =>
-                    console.log(
-                        "SMART_NOTE_NATIVE_WASM missed-and-false-fire:settled",
-                        process.pid,
-                        String(process.hrtime.bigint()),
-                    ),
-                (error) =>
-                    console.log(
-                        "SMART_NOTE_NATIVE_WASM missed-and-false-fire:rejected",
-                        process.pid,
-                        String(error),
-                    ),
-            );
-            return pending;
-        });
-        __sandboxRunnerTest.setTrace((event) => {
-            console.log(
-                "SMART_NOTE_TRACE missed-and-false-fire",
-                process.pid,
-                JSON.stringify(event),
-            );
-        });
-    }
     // All HTTP data comes from injected capabilities. Fail closed if a future
     // compiler change accidentally bypasses those fixtures.
     lookup = spyOn(dns, "lookup").mockImplementation(() => {
@@ -72,9 +38,6 @@ beforeEach(() => {
     });
 });
 afterEach(() => {
-    wasm?.mockRestore();
-    wasm = undefined;
-    __sandboxRunnerTest.reset();
     const dnsCalls = lookup.mock.calls.length;
     const networkCalls = request.mock.calls.length;
     lookup.mockRestore();

@@ -38,6 +38,14 @@ it admits no more notes after that. Caller/lease cancellation still interrupts a
 active check. External cancellation leaves note health unchanged unless running
 JavaScript has already exhausted its CPU budget, which remains a logic failure.
 
+The shared sandbox module load has its own 10-second infrastructure deadline,
+independent of the guest's CPU/HTTP budget and any caller's cancellation. A stalled
+load returns **not run** (a cancelled result), spends no note-health strike, and
+evicts the cached attempt so the next sweep can retry. A caller may still give up
+earlier at its admission or lease deadline without cancelling other callers' load.
+Late load completion/rejection is consumed but cannot publish a module over a
+replacement attempt or execute a check that already returned not run.
+
 Every host capability await is bounded at the VM bridge by the run's abort signal,
 not just by the transport's cooperation. A promise that never settles cannot keep
 the VM or serialization lock suspended beyond the check deadline (plus event-loop
