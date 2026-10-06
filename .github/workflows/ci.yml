@@ -81,6 +81,9 @@ jobs:
         run: bun crates/mc-module/gen/gen-historian-prompt-golden.ts --check
 
       - name: Test
+        # Temporary smart-note stall probe; remove before merging the fix.
+        env:
+          SMART_NOTE_TEST_TRACE: "1"
         run: bun run test
 
       # Exercise the node:sqlite branch of shared/sqlite.ts under REAL Node —

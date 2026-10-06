@@ -41,23 +41,47 @@ import {
 let asyncModulePromise: Promise<QuickJSAsyncWASMModule> | null = null;
 let asyncModuleLoaded = false;
 let beforeModuleAcquisition: (() => Promise<void>) | undefined;
+type SandboxTraceEvent = { run: number; phase: string; details?: Record<string, unknown> };
+type SandboxTrace = (phase: string, details?: Record<string, unknown>) => void;
+let traceHook: ((event: SandboxTraceEvent) => void) | undefined;
+let tracedRuns = 0;
 
 /** Delay module availability in tests without slowing production checks. */
 export const __sandboxRunnerTest = {
+    setTrace(hook: (event: SandboxTraceEvent) => void): void {
+        traceHook = hook;
+    },
     setBeforeModuleAcquisition(hook: () => Promise<void>): void {
         beforeModuleAcquisition = hook;
     },
     reset(): void {
         beforeModuleAcquisition = undefined;
+        traceHook = undefined;
     },
 };
+
+function traceForRun(): SandboxTrace | undefined {
+    const hook = traceHook;
+    if (!hook) return undefined;
+    const run = ++tracedRuns;
+    // Capture the callback so a timed-out test's later abort/cleanup remains
+    // visible even after its afterEach removes the tracing seam.
+    return (phase, details) => {
+        try {
+            hook({ run, phase, details });
+        } catch {
+            // Diagnostics must not change the sandbox's result or cleanup.
+        }
+    };
+}
 
 export function getQuickJsNativeMemoryStats(): { loadAttempted: boolean; loaded: boolean } {
     return { loadAttempted: asyncModulePromise !== null, loaded: asyncModuleLoaded };
 }
 
-function getAsyncModule(): Promise<QuickJSAsyncWASMModule> {
+function getAsyncModule(trace?: SandboxTrace): Promise<QuickJSAsyncWASMModule> {
     asyncModulePromise ??= (async () => {
+        trace?.("module-import:start");
         const [{ default: singlefileAsyncifyVariant }, { newQuickJSAsyncWASMModuleFromVariant }] =
             await importPluginModule(() =>
                 Promise.all([
@@ -65,7 +89,10 @@ function getAsyncModule(): Promise<QuickJSAsyncWASMModule> {
                     import("quickjs-emscripten"),
                 ]),
             );
+        trace?.("module-import:settled");
+        trace?.("wasm-instantiation:start");
         const module = await newQuickJSAsyncWASMModuleFromVariant(singlefileAsyncifyVariant);
+        trace?.("wasm-instantiation:settled");
         asyncModuleLoaded = true;
         return module;
     })();
@@ -82,10 +109,18 @@ function getAsyncModule(): Promise<QuickJSAsyncWASMModule> {
  * instead of reporting cancellation. Acquisition therefore happens OUTSIDE
  * withSandboxLock, and a caller with an aborted signal returns immediately.
  */
-function acquireSandboxModule(signal?: AbortSignal): Promise<QuickJSAsyncWASMModule> {
+function acquireSandboxModule(
+    signal?: AbortSignal,
+    trace?: SandboxTrace,
+): Promise<QuickJSAsyncWASMModule> {
+    trace?.("module-acquisition:start", {
+        loadAttempted: asyncModulePromise !== null,
+        loaded: asyncModuleLoaded,
+        delayed: beforeModuleAcquisition !== undefined,
+    });
     const modulePromise = beforeModuleAcquisition
-        ? beforeModuleAcquisition().then(getAsyncModule)
-        : getAsyncModule();
+        ? beforeModuleAcquisition().then(() => getAsyncModule(trace))
+        : getAsyncModule(trace);
     if (!signal) return modulePromise;
     if (signal.aborted) {
         return Promise.reject(signal.reason ?? new Error("smart-note check aborted"));
@@ -93,16 +128,19 @@ function acquireSandboxModule(signal?: AbortSignal): Promise<QuickJSAsyncWASMMod
     return new Promise((resolve, reject) => {
         const cleanup = () => signal.removeEventListener("abort", onAbort);
         const onAbort = () => {
+            trace?.("module-acquisition:abort", { reason: String(signal.reason) });
             cleanup();
             reject(signal.reason ?? new Error("smart-note check aborted"));
         };
         signal.addEventListener("abort", onAbort, { once: true });
         void modulePromise.then(
             (module) => {
+                trace?.("module-acquisition:settled");
                 cleanup();
                 resolve(module);
             },
             (error) => {
+                trace?.("module-acquisition:rejected", { error: String(error) });
                 cleanup();
                 reject(error);
             },
@@ -133,16 +171,23 @@ function withSandboxLock<T>(
     fn: () => Promise<T>,
     signal?: AbortSignal,
     cancelled?: () => T,
+    trace?: SandboxTrace,
 ): Promise<T> {
     let started = false;
+    trace?.("lock:queued");
     const start = () => {
         started = true;
+        trace?.("lock:entered", { aborted: signal?.aborted ?? false });
         return signal?.aborted && cancelled ? cancelled() : fn();
     };
     const run = sandboxRunChain.then(start, start);
     sandboxRunChain = run.then(
-        () => undefined,
-        () => undefined,
+        () => {
+            trace?.("lock:released");
+        },
+        () => {
+            trace?.("lock:released-after-rejection");
+        },
     );
     // Once running, the VM must classify its own interruption. A promise race
     // returning cancellation here would hide an already-exhausted CPU budget.
@@ -239,23 +284,34 @@ const MAX_SANDBOX_ERROR_CHARS = 2 * 1024;
 function resolveCapabilitiesForRun(
     options: RunCompiledSmartNoteCheckOptions,
     signal: AbortSignal,
+    trace?: SandboxTrace,
 ): SmartNoteCapabilityApi {
     const capabilities = options.capabilityFactory?.(signal) ?? options.capabilities;
     if (!capabilities) throw new Error("smart-note check requires capabilities");
     return {
-        readFile: (path) => awaitCapability(() => capabilities.readFile(path), signal),
-        httpGet: (url) => awaitCapability(() => capabilities.httpGet(url), signal),
-        gitHeadSha: () => awaitCapability(() => capabilities.gitHeadSha(), signal),
-        gitTag: () => awaitCapability(() => capabilities.gitTag(), signal),
-        gitLog: (opts) => awaitCapability(() => capabilities.gitLog(opts), signal),
+        readFile: (path) =>
+            awaitCapability(() => capabilities.readFile(path), signal, trace, "readFile"),
+        httpGet: (url) =>
+            awaitCapability(() => capabilities.httpGet(url), signal, trace, "httpGet"),
+        gitHeadSha: () =>
+            awaitCapability(() => capabilities.gitHeadSha(), signal, trace, "gitHeadSha"),
+        gitTag: () => awaitCapability(() => capabilities.gitTag(), signal, trace, "gitTag"),
+        gitLog: (opts) => awaitCapability(() => capabilities.gitLog(opts), signal, trace, "gitLog"),
     };
 }
 
-function awaitCapability<T>(call: () => Promise<T>, signal: AbortSignal): Promise<T> {
+function awaitCapability<T>(
+    call: () => Promise<T>,
+    signal: AbortSignal,
+    trace?: SandboxTrace,
+    capability?: string,
+): Promise<T> {
+    trace?.("capability-await:start", { capability, aborted: signal.aborted });
     throwIfRunAborted(signal);
     return new Promise<T>((resolve, reject) => {
         const cleanup = () => signal.removeEventListener("abort", abort);
         const abort = () => {
+            trace?.("capability-await:abort", { capability, reason: String(signal.reason) });
             cleanup();
             reject(signal.reason ?? new Error("smart-note check aborted"));
         };
@@ -265,15 +321,18 @@ function awaitCapability<T>(call: () => Promise<T>, signal: AbortSignal): Promis
             // fulfillment/rejection is consumed without touching any VM handles.
             void call().then(
                 (value) => {
+                    trace?.("capability-await:resolved", { capability });
                     cleanup();
                     resolve(value);
                 },
                 (error) => {
+                    trace?.("capability-await:rejected", { capability, error: String(error) });
                     cleanup();
                     reject(error);
                 },
             );
         } catch (error) {
+            trace?.("capability-await:threw", { capability, error: String(error) });
             cleanup();
             reject(error);
         }
@@ -289,6 +348,8 @@ function throwIfRunAborted(signal: AbortSignal): void {
 export async function runCompiledSmartNoteCheck(
     options: RunCompiledSmartNoteCheckOptions,
 ): Promise<RunCompiledSmartNoteCheckResult> {
+    const trace = traceForRun();
+    trace?.("run:start", { aborted: options.signal?.aborted ?? false });
     if (options.signal?.aborted) return cancelledResult(options.signal.reason);
     if (Buffer.byteLength(options.compiledCheck, "utf8") > MAX_COMPILED_CHECK_BYTES) {
         return failureResult("compiled check exceeds 64 KiB", false);
@@ -299,7 +360,8 @@ export async function runCompiledSmartNoteCheck(
     // compile is still in flight.
     let quickjs: QuickJSAsyncWASMModule;
     try {
-        quickjs = await acquireSandboxModule(options.signal);
+        quickjs = await acquireSandboxModule(options.signal, trace);
+        trace?.("module-acquisition:returned");
     } catch (error) {
         if (options.signal?.aborted) return cancelledResult(options.signal.reason);
         const stale = classifyStalePluginBuild(error);
@@ -313,15 +375,17 @@ export async function runCompiledSmartNoteCheck(
     // per-check timeout and host-capability controller start INSIDE the lock so
     // a check queued behind another doesn't burn its own budget waiting.
     return withSandboxLock(
-        () => runCompiledSmartNoteCheckLocked(options, quickjs),
+        () => runCompiledSmartNoteCheckLocked(options, quickjs, trace),
         options.signal,
         () => cancelledResult(options.signal?.reason),
+        trace,
     );
 }
 
 async function runCompiledSmartNoteCheckLocked(
     options: RunCompiledSmartNoteCheckOptions,
     quickjs: QuickJSAsyncWASMModule,
+    trace?: SandboxTrace,
 ): Promise<RunCompiledSmartNoteCheckResult> {
     if (options.signal?.aborted) return cancelledResult(options.signal.reason);
     const timeoutMs = options.timeoutMs ?? SMART_NOTE_CHECK_TIMEOUT_MS;
@@ -341,6 +405,7 @@ async function runCompiledSmartNoteCheckLocked(
     const cpuBudgetExceeded = (now: number) =>
         startedAt !== undefined && !waitingOnHttp && now - startedAt - httpWaitMs >= cpuBudgetMs;
     const externalAbort = () => {
+        trace?.("run:external-abort", { reason: String(options.signal?.reason) });
         // Lease/sweep cancellation is not a pardon for JavaScript that has
         // already spent its CPU budget. Suspended HTTP never spends that budget.
         if (cpuBudgetExceeded(performance.now())) {
@@ -352,6 +417,7 @@ async function runCompiledSmartNoteCheckLocked(
     };
     options.signal?.addEventListener("abort", externalAbort, { once: true });
     const timer = setTimeout(() => {
+        trace?.("run:timeout", { timeoutMs, waitingOnHttp });
         executionTimedOut = true;
         if (waitingOnHttp) {
             httpFailure = smartNoteNetworkTimeout(
@@ -363,10 +429,11 @@ async function runCompiledSmartNoteCheckLocked(
     }, timeoutMs);
     try {
         throwIfRunAborted(controller.signal);
-        const capabilities = resolveCapabilitiesForRun(options, controller.signal);
+        const capabilities = resolveCapabilitiesForRun(options, controller.signal, trace);
         startedAt = performance.now();
         const deadline = startedAt + timeoutMs;
         options.onExecutionStart?.();
+        trace?.("execution:start", { startedAt, deadline, cpuBudgetMs });
         throwIfRunAborted(controller.signal);
         const context = quickjs.newContext();
         try {
@@ -414,7 +481,9 @@ async function runCompiledSmartNoteCheckLocked(
                 },
             });
             disableAmbientDynamicCode(context);
+            trace?.("eval:start");
             const result = await evalCheck(context, options.compiledCheck);
+            trace?.("eval:settled");
             throwIfRunAborted(controller.signal);
             // Accept a returned {met} verdict: HTTP 404/410 can prove deletion.
             // Fetch failures (access, rate limit, size or timeout) still fail the
@@ -426,9 +495,17 @@ async function runCompiledSmartNoteCheckLocked(
             }
             return { ok: true, result: { met: checkResult.met } };
         } finally {
+            trace?.("context-dispose:start");
             context.dispose();
+            trace?.("context-dispose:settled");
         }
     } catch (error) {
+        trace?.("execution:rejected", {
+            error: String(error),
+            cpuTimedOut,
+            executionTimedOut,
+            externallyCancelled,
+        });
         // A previously caught network error must not relabel a subsequent busy
         // loop as transient. CPU exhaustion is independently a logic failure.
         if (cpuTimedOut) return failureResult("smart-note check exceeded CPU budget", false);

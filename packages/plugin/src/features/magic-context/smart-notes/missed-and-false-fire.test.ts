@@ -19,7 +19,7 @@ import { setPersistedNoteNudgeTrigger } from "../storage-meta-persisted";
 import { addNote, getNotes } from "../storage-notes";
 import type { SmartNoteCapabilityApi } from "./capabilities";
 import { compileSmartNoteCheck } from "./compiler";
-import { runCompiledSmartNoteCheck } from "./sandbox-runner";
+import { __sandboxRunnerTest, runCompiledSmartNoteCheck } from "./sandbox-runner";
 import { markSmartNoteCompilationFailure } from "./storage";
 import { SmartNoteNetworkError } from "./types";
 
@@ -28,6 +28,15 @@ const databases: Database[] = [];
 let lookup: ReturnType<typeof spyOn<typeof dns, "lookup">>;
 let request: ReturnType<typeof spyOn<typeof https, "request">>;
 beforeEach(() => {
+    if (process.env.SMART_NOTE_TEST_TRACE === "1") {
+        __sandboxRunnerTest.setTrace((event) => {
+            console.log(
+                "SMART_NOTE_TRACE missed-and-false-fire",
+                process.pid,
+                JSON.stringify(event),
+            );
+        });
+    }
     // All HTTP data comes from injected capabilities. Fail closed if a future
     // compiler change accidentally bypasses those fixtures.
     lookup = spyOn(dns, "lookup").mockImplementation(() => {
@@ -38,6 +47,7 @@ beforeEach(() => {
     });
 });
 afterEach(() => {
+    __sandboxRunnerTest.reset();
     const dnsCalls = lookup.mock.calls.length;
     const networkCalls = request.mock.calls.length;
     lookup.mockRestore();

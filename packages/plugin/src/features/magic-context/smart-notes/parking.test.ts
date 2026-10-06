@@ -11,6 +11,7 @@ import { localSmartNoteHttpTransport } from "./__tests__/http-timeout-fixture.te
 import { createSmartNoteCapabilities } from "./capabilities";
 import { compileSmartNoteCheck } from "./compiler";
 import { runDueCompiledSmartNoteChecks } from "./runner";
+import { __sandboxRunnerTest } from "./sandbox-runner";
 import {
     getDueCompiledSmartNoteChecks,
     getSmartNotesNeedingCompilation,
@@ -28,6 +29,11 @@ let db: Database;
 let restoreTransport: (() => Promise<void>) | undefined;
 
 beforeEach(() => {
+    if (process.env.SMART_NOTE_TEST_TRACE === "1") {
+        __sandboxRunnerTest.setTrace((event) => {
+            console.log("SMART_NOTE_TRACE parking", process.pid, JSON.stringify(event));
+        });
+    }
     __wakePlaneTest.reset();
     __wakePlaneTest.setCatalogProbe(async () => []);
     db = new Database(":memory:");
@@ -37,6 +43,7 @@ beforeEach(() => {
     expect(acquireLease(db, "holder", "parking-lease")).toBe(true);
 });
 afterEach(async () => {
+    __sandboxRunnerTest.reset();
     await restoreTransport?.();
     restoreTransport = undefined;
     db.close();
