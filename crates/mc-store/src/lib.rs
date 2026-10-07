@@ -22,6 +22,8 @@ pub use context_boundaries::ResolvedContextBoundary;
 pub mod context_writes;
 mod historian_claim;
 pub mod move_inventory;
+pub mod move_snapshot;
+pub mod move_store;
 pub mod private_permissions;
 pub mod single_store_domain;
 pub mod single_store_schema;
@@ -3228,6 +3230,10 @@ const MIGRATIONS: &[Migration] = &[
             include_str!("migrations/store_063_pass_trace_ring.sql"),
         ),
     },
+    Migration {
+        version: 64,
+        statements: move_store::SCHEMA_SQL,
+    },
 ];
 
 /// The highest `mc_cache` schema migration this binary ships.
@@ -5946,6 +5952,8 @@ pub enum ModuleStateSyncError {
 #[derive(Debug)]
 pub enum McStoreError {
     Store(StoreError),
+    /// A durable move fence or staged import owns this session.
+    SessionMoving,
     /// The on-disk row_version moved under us (a concurrent writer committed first).
     /// The caller re-loads and re-steps.
     CasConflict {
@@ -6068,6 +6076,7 @@ pub enum McStoreError {
 impl std::fmt::Display for McStoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            McStoreError::SessionMoving => write!(f, "session_moving"),
             McStoreError::Store(e) => write!(f, "store: {e}"),
             McStoreError::CasConflict { expected, found } => {
                 write!(f, "cas conflict: expected {expected:?}, found {found}")
@@ -6175,7 +6184,11 @@ impl std::fmt::Display for McStoreError {
 impl std::error::Error for McStoreError {}
 impl From<StoreError> for McStoreError {
     fn from(e: StoreError) -> Self {
-        McStoreError::Store(e)
+        if e.to_string().contains("session_moving") {
+            McStoreError::SessionMoving
+        } else {
+            McStoreError::Store(e)
+        }
     }
 }
 
@@ -7355,16 +7368,17 @@ impl<'a> FacadeMutationTxn<'a> {
 /// the module's lifetime, plus the installed [`ContextDomain`] for the rows in `context.db`.
 pub struct McStore {
     inner: SqliteStore,
+    move_path: Option<std::path::PathBuf>,
     // Distinguishes independent stores in the process-local tag baseline cache. Production
     // opens one store for the module lifetime; tests and embedded callers may open several.
-    tag_cache_namespace: u64,
+    tag_cache_namespace: Arc<std::sync::atomic::AtomicU64>,
     /// Serializes facade mutations, so one command's ledger check and write cannot
     /// interleave with another's.
     facade_mutation_lock: Mutex<()>,
     /// Where the domain rows live. The module installs it right after opening the store;
     /// until then every domain read and write refuses with `context_not_installed`.
     context: std::sync::RwLock<Option<Arc<dyn ContextDomain>>>,
-    context_boundary_cache: Mutex<context_boundaries::BoundaryValidationCache>,
+    context_boundary_cache: Arc<Mutex<context_boundaries::BoundaryValidationCache>>,
     #[cfg(any(test, feature = "test-support"))]
     abandon_historian_hook: AbandonHistorianHook,
     #[cfg(any(test, feature = "test-support"))]
@@ -7644,7 +7658,7 @@ pub fn migrate_store_to_pre_single_store(path: &Path) -> Result<u32, McStoreErro
 impl McStore {
     /// Process-local identity for cache entries that otherwise use a session id as their key.
     pub fn tag_cache_namespace(&self) -> u64 {
-        self.tag_cache_namespace
+        self.tag_cache_namespace.load(Ordering::Relaxed)
     }
 
     /// Install the `context.db` connections domain rows are read from and written to.
@@ -7959,6 +7973,7 @@ impl McStore {
             tracing::error!("mc-store: refusing to open: {error}");
             return Err(error);
         }
+        inner.with_conn(move_store::install_writer_guards)?;
         // An empty store just took migration 61 through the ordinary chain. Stamp its marker so
         // the module can write the matching context.db flag; the suffix tells it this was a
         // fresh install rather than a migrated store whose context.db flag went missing.
@@ -7984,10 +7999,18 @@ impl McStore {
         }
         let store = McStore {
             inner,
-            tag_cache_namespace: NEXT_TAG_CACHE_NAMESPACE.fetch_add(1, Ordering::Relaxed),
+            move_path: match &descriptor.backend {
+                cortexkit_store_types::StorageBackend::Sqlite { path } => {
+                    Some(std::path::PathBuf::from(path))
+                }
+                _ => None,
+            },
+            tag_cache_namespace: Arc::new(std::sync::atomic::AtomicU64::new(
+                NEXT_TAG_CACHE_NAMESPACE.fetch_add(1, Ordering::Relaxed),
+            )),
             facade_mutation_lock: Mutex::new(()),
             context: std::sync::RwLock::new(None),
-            context_boundary_cache: Mutex::new(Default::default()),
+            context_boundary_cache: Arc::new(Mutex::new(Default::default())),
             #[cfg(any(test, feature = "test-support"))]
             abandon_historian_hook: std::sync::Arc::new(std::sync::Mutex::new(None)),
             #[cfg(any(test, feature = "test-support"))]
@@ -8108,6 +8131,10 @@ impl McStore {
                 conn.execute(
                     "DELETE FROM mc_transform_session_roots AS roots
                       WHERE roots.observed_at < ?1
+                        AND NOT EXISTS (
+                            SELECT 1 FROM mc_move_fences AS fence
+                             WHERE fence.session_id = roots.session_id
+                        )
                         AND NOT EXISTS (
                             SELECT 1 FROM mc_cache_state AS cache
                              WHERE cache.session_id = roots.session_id
@@ -8469,6 +8496,7 @@ impl McStore {
         session_id: &str,
         project_path: &str,
     ) -> Result<usize, McStoreError> {
+        self.check_session_not_moving(session_id)?;
         // The session's history rows in context.db first, then every store.db cache row.
         let mut deleted = self.context_write(
             &[
@@ -8512,6 +8540,9 @@ impl McStore {
             };
             let mut deleted = 0usize;
             for table in tables {
+                if ["mc_move_fences", "mc_move_cuts", "mc_move_installs", "mc_move_key_map", "mc_move_tag_epochs"].contains(&table.as_str()) {
+                    continue;
+                }
                 let quoted = format!("\"{}\"", table.replace('"', "\"\""));
                 let has_session_id = {
                     let mut stmt = tx.prepare(&format!("PRAGMA table_info({quoted})"))?;
@@ -8649,6 +8680,7 @@ impl McStore {
         let meta_json = cache_codec::encode_small_meta(meta)
             .map_err(|error| McStoreError::Serde(error.to_string()))?;
         let outcome = self.inner.with_conn_fenced(|tx| {
+            move_store::check_writer(tx, session_id)?;
             let current: Option<(i64, bool)> = tx
                 .query_row(
                     "SELECT row_version, meta = ?2 FROM mc_cache_state WHERE session_id = ?1",
@@ -10765,6 +10797,7 @@ impl McStore {
 
         let outcome = self.inner.with_conn_fenced(|tx| {
             // Read the current row_version inside the fenced txn; NO_ROW when absent.
+            move_store::check_writer(tx, session_id)?;
             let current: i64 = tx.query_row(
                 "SELECT COALESCE((SELECT row_version FROM mc_cache_state WHERE session_id = ?1), ?2)",
                 params![session_id, NO_ROW],
