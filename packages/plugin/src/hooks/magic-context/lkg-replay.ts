@@ -14,6 +14,7 @@ import {
     memoizedLkgContentDigestFromFields,
     noteEntry,
 } from "./lkg-slot";
+import { moveMessageDigestFromFields } from "./move-inputs";
 import { assertOpenAiCompatAdjacency } from "./openai-compat-adjacency";
 import type { MessageLike } from "./transform-operations";
 
@@ -61,6 +62,7 @@ export interface LkgEntryProjection {
     hasIncompleteTool: boolean;
     /** Immutable entry digest, exposed non-enumerably without retaining the live message. */
     contentDigest?: () => string | null;
+    moveDigest?: () => string;
 }
 
 export function projectLkgEntry(messages: MessageLike[]): LkgEntryProjection[] {
@@ -151,13 +153,18 @@ export function createLkgEntryProjector(
             bytes += size;
         }
         options.onReuse?.({ reused, retained: retainedCount, retainedBytes: size });
-        return projectEntryWithDigests(messages, digests);
+        return projectEntryWithDigests(
+            messages,
+            digests,
+            snapshots.map((snapshot) => snapshot.fields),
+        );
     };
 }
 
 function projectEntryWithDigests(
     messages: MessageLike[],
     digests: readonly (string | null)[],
+    snapshots?: readonly ReturnType<typeof lkgContentFields>[],
 ): LkgEntryProjection[] {
     return messages.map((message, index) => {
         const info = messageInfo(message);
@@ -209,6 +216,14 @@ function projectEntryWithDigests(
             value: () => contentDigest,
             enumerable: false,
         });
+        const fields = snapshots?.[index] ?? lkgContentFields(message);
+        Object.defineProperty(projection, "moveDigest", {
+            value: () => {
+                if (!fields) throw new Error("portable input snapshot unavailable");
+                return moveMessageDigestFromFields(fields);
+            },
+            enumerable: false,
+        });
         return projection;
     });
 }
@@ -222,6 +237,7 @@ export interface LkgCaptureInput {
     capturedAt?: number;
     systemPromptTokens?: number;
     agentName?: string;
+    onPrepared?: (slot: LkgSlot, fullCoverage: boolean) => void;
 }
 
 export type LkgValidationFailure =
@@ -417,6 +433,15 @@ export function captureLkgSlot(args: LkgCaptureInput): boolean {
         providerKey: modelKeys.providerKey,
         capturedAt: args.capturedAt ?? Date.now(),
     };
+    if (args.onPrepared) {
+        slot.inputMoveDigests = asEntryProjection(args.input)
+            .slice(0, built.anchorIndex + 1)
+            .map((entry) => {
+                if (!entry.moveDigest) throw new Error("portable input digest unavailable");
+                return entry.moveDigest();
+            });
+        args.onPrepared(slot, built.anchorIndex === args.input.length - 1);
+    }
     const captured = captureSlot(args.sessionId, slot);
     if (captured)
         noteCapturedLkgRequest({

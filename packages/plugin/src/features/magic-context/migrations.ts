@@ -3211,6 +3211,20 @@ export const MIGRATIONS: Migration[] = [
             installV95PerfSchema(db, true);
         },
     },
+    {
+        version: 96,
+        description: "durable served capture markers and portable input frontier digests",
+        up(db: Database): void {
+            ensureColumn(db, "lkg_slots", "served_capture_id", "INTEGER");
+            ensureColumn(db, "lkg_slots", "input_move_digests", "TEXT");
+            db.exec(`CREATE TABLE IF NOT EXISTS lkg_served_markers (
+                session_id TEXT PRIMARY KEY,
+                served_capture_id INTEGER NOT NULL CHECK (served_capture_id > 0),
+                full_coverage INTEGER NOT NULL CHECK (full_coverage IN (0, 1)),
+                slot_state TEXT NOT NULL
+            )`);
+        },
+    },
 ];
 
 /**

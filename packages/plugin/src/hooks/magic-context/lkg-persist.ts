@@ -6,6 +6,11 @@ import { drainBackgroundBatches } from "../../shared/background-batch-drain";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
+import {
+    readServedMarker,
+    recordServedSlotState,
+    ServedMarkerWriteError,
+} from "./lkg-served-marker";
 import type { LkgPersistenceBackend, LkgSlot } from "./lkg-slot";
 
 /**
@@ -41,6 +46,8 @@ interface LkgSlotRow {
     captured_at?: unknown;
     row_version?: unknown;
     capture_sequence?: unknown;
+    served_capture_id?: unknown;
+    input_move_digests?: unknown;
 }
 
 function parseStringArray(value: unknown): string[] | null {
@@ -156,6 +163,21 @@ export function parsePersistedLkgSlot(row: unknown): LkgSlot | undefined {
     if (rowVersion !== undefined) slot.rowVersion = rowVersion;
     const captureSequence = parseNullableInteger(record.capture_sequence);
     if (captureSequence !== undefined) slot.captureSequence = captureSequence;
+    const servedCaptureId = parseNullableInteger(record.served_capture_id);
+    if (servedCaptureId !== undefined) {
+        if (servedCaptureId <= 0) return undefined;
+        slot.servedCaptureId = servedCaptureId;
+    }
+    if (record.input_move_digests !== null && record.input_move_digests !== undefined) {
+        const digests = parseStringArray(record.input_move_digests);
+        if (
+            !digests ||
+            digests.length !== inputIdSeq.length ||
+            digests.some((digest) => !/^[0-9a-f]{64}$/.test(digest))
+        )
+            return undefined;
+        slot.inputMoveDigests = digests;
+    }
     return slot;
 }
 
@@ -197,6 +219,8 @@ function slotFingerprint(slot: LkgSlot): string {
                 slot.providerKey,
                 slot.rowVersion,
                 slot.captureSequence,
+                slot.servedCaptureId,
+                slot.inputMoveDigests,
             ]),
         )
         .digest("hex");
@@ -213,12 +237,33 @@ function slotFingerprint(slot: LkgSlot): string {
  * of slices past the new count, and the metadata row (with the count, length and
  * hash a load verifies) commit in one transaction.
  */
-export function saveLkgSlotToDb(db: Database, sessionId: string, slot: LkgSlot): boolean {
+export function saveLkgSlotToDb(
+    db: Database,
+    sessionId: string,
+    slot: LkgSlot,
+    options: { force?: boolean } = {},
+): boolean {
     const fingerprint = slotFingerprint(slot);
-    if (persistedFingerprints.get(db)?.get(sessionId) === fingerprint) return true;
+    if (!options.force && persistedFingerprints.get(db)?.get(sessionId) === fingerprint)
+        return true;
     const layout = layoutLkgPrefix(slot.jsonPrefix);
     try {
         db.transaction(() => {
+            // Historical migration fixtures also save pre-marker slots. When the
+            // columns exist, an uncertified overwrite must clear their old ids.
+            const withServedMetadata =
+                slot.servedCaptureId !== undefined ||
+                (db.prepare("PRAGMA table_info(lkg_slots)").all() as Array<{ name: string }>).some(
+                    (column) => column.name === "served_capture_id",
+                );
+            if (slot.servedCaptureId !== undefined) {
+                const marker = readServedMarker(db, sessionId);
+                if (
+                    marker?.servedCaptureId !== slot.servedCaptureId ||
+                    marker.slotState !== "captured"
+                )
+                    throw new Error("LKG capture was superseded or invalidated");
+            }
             const storedHashes = new Map<unknown, unknown>();
             for (const row of db
                 .prepare("SELECT chunk, hash FROM lkg_slot_chunks WHERE session_id = ?")
@@ -242,8 +287,8 @@ export function saveLkgSlotToDb(db: Database, sessionId: string, slot: LkgSlot):
                     session_id, json_prefix_chars, json_prefix_chunks, json_prefix_hash,
                     input_id_seq, input_content_digests, input_content_signatures,
                     last_input_message_id, model_key, provider_key,
-                    captured_at, row_version, capture_sequence
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    captured_at, row_version, capture_sequence${withServedMetadata ? ", served_capture_id, input_move_digests" : ""}
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${withServedMetadata ? ", ?, ?" : ""})
                 ON CONFLICT(session_id) DO UPDATE SET
                     json_prefix_chars = excluded.json_prefix_chars,
                     json_prefix_chunks = excluded.json_prefix_chunks,
@@ -256,7 +301,7 @@ export function saveLkgSlotToDb(db: Database, sessionId: string, slot: LkgSlot):
                     provider_key = excluded.provider_key,
                     captured_at = excluded.captured_at,
                     row_version = excluded.row_version,
-                    capture_sequence = excluded.capture_sequence`,
+                    capture_sequence = excluded.capture_sequence${withServedMetadata ? ", served_capture_id = excluded.served_capture_id, input_move_digests = excluded.input_move_digests" : ""}`,
             ).run(
                 sessionId,
                 layout.chars,
@@ -279,6 +324,12 @@ export function saveLkgSlotToDb(db: Database, sessionId: string, slot: LkgSlot):
                 slot.capturedAt,
                 slot.rowVersion ?? null,
                 slot.captureSequence ?? null,
+                ...(withServedMetadata
+                    ? [
+                          slot.servedCaptureId ?? null,
+                          slot.inputMoveDigests ? JSON.stringify(slot.inputMoveDigests) : null,
+                      ]
+                    : []),
             );
         }).immediate();
         rememberFingerprint(db, sessionId, fingerprint);
@@ -289,20 +340,31 @@ export function saveLkgSlotToDb(db: Database, sessionId: string, slot: LkgSlot):
     }
 }
 
-export function clearPersistedLkgSlot(db: Database, sessionId: string): void {
+export function clearPersistedLkgSlot(db: Database, sessionId: string, reason?: string): void {
     try {
-        clearPersistedLkgSlotStrict(db, sessionId);
+        clearPersistedLkgSlotStrict(db, sessionId, reason);
     } catch (error) {
+        if (error instanceof ServedMarkerWriteError) throw error;
         sessionLog(sessionId, "LKG snapshot durable clear failed:", error);
     }
 }
 
 /** A cut must not commit when durable old-representation invalidation failed. */
-export function clearPersistedLkgSlotStrict(db: Database, sessionId: string): void {
-    db.transaction(() => {
-        db.prepare("DELETE FROM lkg_slot_chunks WHERE session_id = ?").run(sessionId);
-        db.prepare("DELETE FROM lkg_slots WHERE session_id = ?").run(sessionId);
-    }).immediate();
+export function clearPersistedLkgSlotStrict(
+    db: Database,
+    sessionId: string,
+    reason?: string,
+): void {
+    try {
+        db.transaction(() => {
+            if (reason) recordServedSlotState(db, sessionId, reason);
+            db.prepare("DELETE FROM lkg_slot_chunks WHERE session_id = ?").run(sessionId);
+            db.prepare("DELETE FROM lkg_slots WHERE session_id = ?").run(sessionId);
+        }).immediate();
+    } catch (error) {
+        if (reason) throw new ServedMarkerWriteError(error);
+        throw error;
+    }
     persistedFingerprints.get(db)?.delete(sessionId);
 }
 
@@ -428,6 +490,6 @@ export async function drainStaleLkgSlots(
 export function createDbLkgPersistence(db: Database): LkgPersistenceBackend {
     return {
         load: (sessionId) => loadPersistedLkgSlot(db, sessionId),
-        clear: (sessionId) => clearPersistedLkgSlot(db, sessionId),
+        clear: (sessionId, reason) => clearPersistedLkgSlot(db, sessionId, reason),
     };
 }

@@ -19,6 +19,8 @@ import ts from "typescript";
  * block every writer for the length of the read.
  */
 const READ_ONLY_DEFERRED_TRANSACTIONS: Record<string, string> = {
+    "packages/plugin/src/hooks/magic-context/lkg-served-marker.ts#checkLkgDurability":
+        "reads the served marker and durable slot id in one snapshot; never hydrates, repairs or writes",
     "packages/plugin/src/v2/store-reader.ts#window":
         "reads the latest compaction and the rows after it as one consistent snapshot of the OpenCode 2 store; never writes",
     "packages/pi-plugin/src/inject-compartments-pi.ts#readFrozenM0InputsPi":

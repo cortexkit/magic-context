@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { sessionLog } from "../../shared/logger";
 import { clearCapturedLkgMeasurement } from "./lkg-measured-request";
+import { ServedMarkerWriteError } from "./lkg-served-marker";
 import type { MessageLike } from "./transform-operations";
 
 export interface LkgSlot {
@@ -19,6 +20,10 @@ export interface LkgSlot {
     capturedAt: number;
     rowVersion?: number;
     captureSequence?: number;
+    /** Cross-process capture identity; unrelated to the adapter's cancel counter. */
+    servedCaptureId?: number;
+    /** RFC 8785 message digests for the portable hostCut frontier. */
+    inputMoveDigests?: string[];
 }
 
 export interface LkgEntryNote {
@@ -51,7 +56,7 @@ const hydrationAttemptBySession = new BoundedSessionMap<number>(1_000);
  */
 export interface LkgPersistenceBackend {
     load(sessionId: string): LkgSlot | undefined;
-    clear(sessionId: string): void;
+    clear(sessionId: string, reason?: string): void;
 }
 
 let persistenceBackend: LkgPersistenceBackend | undefined;
@@ -474,6 +479,7 @@ export function captureSlot(sessionId: string, slot: LkgSlot): boolean {
             ...(slot.piOutputEntryIds ? { piOutputEntryIds: [...slot.piOutputEntryIds] } : {}),
             inputIdSeq: [...slot.inputIdSeq],
             inputContentDigests: [...slot.inputContentDigests],
+            inputMoveDigests: slot.inputMoveDigests ? [...slot.inputMoveDigests] : undefined,
             inputContentSignatures: slot.inputContentSignatures
                 ? [...slot.inputContentSignatures]
                 : undefined,
@@ -513,6 +519,7 @@ function installHydratedSlot(sessionId: string, slot: LkgSlot): boolean {
             ...(slot.piOutputEntryIds ? { piOutputEntryIds: [...slot.piOutputEntryIds] } : {}),
             inputIdSeq: [...slot.inputIdSeq],
             inputContentDigests: [...slot.inputContentDigests],
+            inputMoveDigests: slot.inputMoveDigests ? [...slot.inputMoveDigests] : undefined,
             inputContentSignatures: slot.inputContentSignatures
                 ? [...slot.inputContentSignatures]
                 : undefined,
@@ -550,6 +557,7 @@ function copySlotForRead(slot: LkgSlot): LkgSlot {
         ...(slot.piOutputEntryIds ? { piOutputEntryIds: [...slot.piOutputEntryIds] } : {}),
         inputIdSeq: [...slot.inputIdSeq],
         inputContentDigests: [...slot.inputContentDigests],
+        inputMoveDigests: slot.inputMoveDigests ? [...slot.inputMoveDigests] : undefined,
         inputContentSignatures: slot.inputContentSignatures
             ? [...slot.inputContentSignatures]
             : undefined,
@@ -585,7 +593,7 @@ export function forgetInMemorySlot(sessionId: string): void {
     }
 }
 
-export function dropSlot(sessionId: string, _reason?: string): void {
+export function dropSlot(sessionId: string, _reason?: string, certify = true): void {
     clearCapturedLkgMeasurement(sessionId);
     forgetInMemorySlot(sessionId);
     // The durable row must follow the drop: a slot invalidated in memory
@@ -594,8 +602,9 @@ export function dropSlot(sessionId: string, _reason?: string): void {
     const backend = persistenceBackend;
     if (!backend) return;
     try {
-        backend.clear(sessionId);
+        backend.clear(sessionId, certify ? _reason : undefined);
     } catch (error) {
+        if (error instanceof ServedMarkerWriteError) throw error;
         sessionLog(sessionId, "LKG durable clear failed:", error);
     }
     const pass = hydrationPassBySession.peek(sessionId);

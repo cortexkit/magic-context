@@ -161,7 +161,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastUnconfirmedMigrationHolders = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 95;
+export const LATEST_SUPPORTED_VERSION = 96;
 
 /**
  * Every runtime backend receives the same finite wait before the first schema
@@ -1705,6 +1705,12 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     -- Last-known-good replay slots, their prefix slices, and trailing-blank replay
     -- decisions, in the layout of migration v94.
     ${LKG_SLOTS_DDL}
+    CREATE TABLE IF NOT EXISTS lkg_served_markers (
+        session_id TEXT PRIMARY KEY,
+        served_capture_id INTEGER NOT NULL CHECK (served_capture_id > 0),
+        full_coverage INTEGER NOT NULL CHECK (full_coverage IN (0, 1)),
+        slot_state TEXT NOT NULL
+    );
     ${LKG_SLOT_CHUNKS_DDL}
     ${SESSION_REPLAY_DECISIONS_DDL}
 
@@ -2039,6 +2045,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     installCompartmentHistoryVersions(db);
 
     ensureColumn(db, "message_fts_rowid_map", "message_time_ms", "INTEGER");
+    ensureColumn(db, "lkg_slots", "served_capture_id", "INTEGER");
+    ensureColumn(db, "lkg_slots", "input_move_digests", "TEXT");
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_message_fts_rowid_map_session_time
         ON message_fts_rowid_map(session_id, message_time_ms);

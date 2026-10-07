@@ -2,12 +2,12 @@
 
 ## Inventory boundary
 
-`crates/mc-store/src/move_inventory.rs` pins inventory version **1**, context.db
-schema **95**, and store.db schema **63**. Its explicit table/column census was
+`crates/mc-store/src/move_inventory.rs` pins inventory version **2**, context.db
+schema **96**, and store.db schema **63**. Its explicit table/column census was
 generated from `initializeDatabase` followed by `runMigrations` on a new context
 database, and `McStore::open` on a new store database. The census uses
 `sqlite_master` plus `PRAGMA table_xinfo`, not historical `CREATE TABLE` text or
-the pre-single-store schema. It contains **106 context tables** and **32 store
+the pre-single-store schema. It contains **107 context tables** and **32 store
 tables**, including FTS virtual tables, their hidden columns and shadow tables.
 Store migration 61's dropped domain tables are absent. Context's still-present
 legacy authority/mirror tables are explicitly `not_session`, not shipped.
@@ -80,9 +80,10 @@ and embedded-JSON references (e.g. `source_contents.tag_id` and
 `pending_ops.tag_id`). `mc_tags` is first in the store inventory so the later
 installer can apply its triggers before finalizing the shipped generation.
 
-The served marker and `lkg_slots.served_capture_id` do not exist at these schema
-heads. Their migration must update this inventory and version; adding a
-speculative entry now would conceal whether the real schema was classified.
+Context migration 96 adds shipped `lkg_served_markers`, plus
+`lkg_slots.served_capture_id` and `input_move_digests`. The latter records canonical
+host-input digests without changing the older field-token replay digests. Store.db
+stays at 63: both TS and Rust served markers are owned by context.db.
 
 ### Render-input closure
 
@@ -184,6 +185,33 @@ shared by all hosts. The pinned Broca three-message vector (objects, mids,
 per-message digests and combined digest) is pending Broca's commit and must be
 pinned byte-for-byte by a later slice; this inventory does not fabricate it.
 
+### Pi frontier projection correction
+
+Pi's current durable LKG hashes native `AgentMessage` entries with reconciled
+JSONL entry ids; consecutive `toolResult` entries remain separate. Its tagging
+and raw-history views group those results into `synth-user-*`, but that view is
+not the persisted replay frontier. Therefore Pi's move `mid` is the native entry
+id, not a synthetic user id. This supersedes the reviewed spec's synthetic-id
+assumption without changing Pi's replay seams or served bytes. OpenCode and Rust
+use the same normalized `MessageLike` inputs their capture sites ingest. Each
+host hashes RFC 8785 canonical JSON of that input shape; migration 96 stores
+those lowercase-hex digests separately from existing replay digests. The host
+adapter supplies exactly the ingestion prefix (excluding its answering assistant)
+to `moveInputs`, in transcript order; MC does not sort message ids or re-read the
+host database. The move integration must wire `startLkgDurabilityPoll` to its
+open sessions' draining fences and stop the timer on host disposal.
+
+### Native-compaction limitation
+
+With `compactionOff`, the host owns the prompt and MC per-turn failures remain
+fail-open. Those passes never write served markers, including slot drops. Move
+integration must pass the session's current `compactionOff` setting to
+`checkLkgDurability`; it returns `certified: false`, even if a previous managed
+pass left a marker. Such a move promises no MC prefix identity, omits carried
+replay authority, and the importer rebuilds normally. The draining poll reader
+must exclude these uncertified sessions. Managed sessions still fail visibly
+before sending if the served-marker write fails.
+
 ## Verification and reproduction
 
 Embedded tests run the actual current Bun migration chain and `McStore::open`
@@ -191,7 +219,7 @@ against throwaway databases under the worktree's ignored `target/` directory.
 They compare every live table, every `table_xinfo` column and every PK with the
 checked-in inventory, exercise all six A2 drift cases, excluded/generated-column
 drift and `ANALYZE`, and select independently seeded memory/workspace/profile
-sentinels. They also check the live 34-table session list, all-harness predicates,
+sentinels. They also check the live 35-table session list, all-harness predicates,
 session-only notes, and facade-ledger ownership.
 
 Until mc-store exposes this module, create an **ignored**, worktree-local harness

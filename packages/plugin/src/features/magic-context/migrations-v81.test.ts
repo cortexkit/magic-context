@@ -53,6 +53,8 @@ describe("migration v81: durable last-known-good transform snapshots", () => {
                 "captured_at",
                 "row_version",
                 "capture_sequence",
+                "served_capture_id",
+                "input_move_digests",
             ]);
             expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
         } finally {
