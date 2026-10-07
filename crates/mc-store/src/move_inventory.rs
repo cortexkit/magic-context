@@ -2767,6 +2767,30 @@ mod tests {
             .unwrap()
     }
 
+    fn assert_bun_succeeded(output: &std::process::Output) {
+        assert!(
+            output.status.success(),
+            "Bun inventory fixture failed ({}). If dependencies are missing, run bun install at the repository root.\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    #[test]
+    fn missing_inventory_dependencies_name_the_root_install_prerequisite() {
+        let output = Command::new("bun").current_dir(root())
+            .args(["-e", "console.error('Cannot find package required by inventory fixtures'); process.exit(1)"])
+            .output().unwrap();
+        let error = std::panic::catch_unwind(|| assert_bun_succeeded(&output)).unwrap_err();
+        let message = error
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| error.downcast_ref::<&str>().copied())
+            .unwrap();
+        assert!(message.contains("run bun install at the repository root"));
+    }
+
     // Each test runs the real migration chains in a throwaway root, not a copy
     // of the inventory or a schema reconstructed from its column list.
     fn fresh_stores() -> (tempfile::TempDir, Connection, Connection) {
@@ -2787,11 +2811,7 @@ mod tests {
             .env("MOVE_TEST_CONTEXT", dir.path().join("context.db"))
             .output()
             .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert_bun_succeeded(&output);
         drop(
             crate::McStore::open(&StorageDescriptor {
                 module_id: "magic-context".into(),
@@ -3004,7 +3024,7 @@ mod tests {
             .args(["-e", script])
             .output()
             .unwrap();
-        assert!(output.status.success());
+        assert_bun_succeeded(&output);
         let session_tables: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(session_tables.len(), 35);
         for table in session_tables {

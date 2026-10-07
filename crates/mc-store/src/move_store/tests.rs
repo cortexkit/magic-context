@@ -781,77 +781,373 @@ fn startup_pending_replay_skips_draining_frozen_and_staged_sessions() {
 }
 #[test]
 fn a6_store_155_mib_capture_install_discard_release_other_session_writer_and_bound_locks() {
+    run_a6_fixture();
+}
+#[test]
+#[ignore = "wall-clock A6 gate requires a quiet machine and --test-threads=1; see move_store module docs"]
+fn a6_store_155_mib_wall_clock_lock_bound() {
+    for metrics in run_a6_fixture() {
+        assert!(
+            metrics.longest_hold <= Duration::from_millis(100),
+            "move lock exceeded A6: {metrics:?}"
+        );
+    }
+}
+fn run_a6_fixture() -> [LockMetrics; 2] {
     let source = tempfile::tempdir().unwrap();
     let destination = tempfile::tempdir().unwrap();
     // 620 * 256 KiB is the independently sized 155 MiB store-half fixture.
     let src = Arc::new(seeded(source.path(), 620, 256 * 1024));
     let dst = Arc::new(open(destination.path()));
+    for store in [&src, &dst] {
+        // Waiting to acquire a lock is not a move lock hold. Allow scheduling
+        // delays in the parallel suite without changing production wait bounds.
+        store
+            .inner
+            .with_conn(|conn| conn.busy_timeout(Duration::from_secs(30)))
+            .unwrap();
+    }
     let staging = destination.path().join("staging");
     let running = Arc::new(AtomicBool::new(true));
     let source_commits = Arc::new(AtomicUsize::new(0));
     let destination_commits = Arc::new(AtomicUsize::new(0));
-    let workers = [src.clone(), dst.clone()]
-        .into_iter()
-        .zip([source_commits.clone(), destination_commits.clone()])
-        .map(|(store, committed)| {
-            let running = running.clone();
-            std::thread::spawn(move || {
-                let mut version = None;
-                while running.load(Ordering::Relaxed) {
-                    version = Some(
-                        store
-                            .commit(
-                                "unrelated",
-                                version,
-                                &CoreState::default(),
-                                &ModuleMeta {
-                                    last_system_prompt_hash: format!(
-                                        "sentinel {}",
-                                        version.unwrap_or(0)
-                                    ),
-                                    ..Default::default()
-                                },
-                            )
-                            .unwrap(),
-                    );
-                    committed.fetch_add(1, Ordering::Relaxed);
-                    // Continuous ordinary turns, not a synthetic maximum-rate
-                    // fsync/checkpoint storm competing with the size fixture.
-                    std::thread::park_timeout(Duration::from_millis(2));
-                }
+    let workers = FixtureWriters {
+        running: running.clone(),
+        workers: [src.clone(), dst.clone()]
+            .into_iter()
+            .zip([source_commits.clone(), destination_commits.clone()])
+            .map(|(store, committed)| {
+                let running = running.clone();
+                std::thread::spawn(move || {
+                    let mut version = None;
+                    while running.load(Ordering::Relaxed) {
+                        version = Some(
+                            store
+                                .commit(
+                                    "unrelated",
+                                    version,
+                                    &CoreState::default(),
+                                    &ModuleMeta {
+                                        last_system_prompt_hash: format!(
+                                            "sentinel {}",
+                                            version.unwrap_or(0)
+                                        ),
+                                        ..Default::default()
+                                    },
+                                )
+                                .unwrap(),
+                        );
+                        committed.fetch_add(1, Ordering::Relaxed);
+                        // Continuous ordinary turns, not a synthetic maximum-rate
+                        // fsync/checkpoint storm competing with the size fixture.
+                        std::thread::park_timeout(Duration::from_millis(2));
+                    }
+                })
             })
-        })
-        .collect::<Vec<_>>();
+            .collect::<Vec<_>>(),
+    };
     let before_capture = source_commits.load(Ordering::Relaxed);
-    let mut exporting = capture(&src, "cut", &staging);
+    let mut exporting = src.move_store().unwrap();
+    exporting
+        .writer
+        .busy_timeout(Duration::from_secs(30))
+        .unwrap();
+    let source_probe = TransactionProbe::attach(&mut exporting);
+    exporting.acquire_fence(&binding("cut")).unwrap();
+    exporting.freeze("cut").unwrap();
+    exporting.capture("cut", &staging).unwrap();
     assert!(source_commits.load(Ordering::Relaxed) > before_capture);
     let shipped = std::fs::metadata(&staging).unwrap().len();
     assert!(shipped >= 155 * 1024 * 1024);
     let mut importing = dst.move_store().unwrap();
     importing
+        .writer
+        .busy_timeout(Duration::from_secs(30))
+        .unwrap();
+    let destination_probe = TransactionProbe::attach(&mut importing);
+    importing
         .reserve_install(&binding("cut"), "digest", &staging)
         .unwrap();
     let before_install = destination_commits.load(Ordering::Relaxed);
     install(&mut importing, "cut");
+    for events in destination_probe.transactions() {
+        assert_install_transaction_bounds(&events);
+    }
     assert!(destination_commits.load(Ordering::Relaxed) > before_install);
     assert_eq!(dst.tag_cache_summary("ses_move").unwrap().count, 620);
     let before_discard = destination_commits.load(Ordering::Relaxed);
+    let before_discard_transactions = destination_probe.transactions().len();
     discard(&mut importing, "cut");
     assert!(destination_commits.load(Ordering::Relaxed) > before_discard);
     exporting
         .record_capture("cut", "digest", &source.path().join("missing"), "receipt")
         .unwrap();
     exporting.release_source("cut", false).unwrap();
-    running.store(false, Ordering::Relaxed);
-    for worker in workers {
-        worker.join().unwrap();
+    drop(workers);
+    let transactions = destination_probe.transactions();
+    for events in &transactions[before_discard_transactions..] {
+        assert_discard_transaction_bounds(events);
     }
-    for metrics in [exporting.lock_metrics(), importing.lock_metrics()] {
-        assert!(
-            metrics.longest_hold <= Duration::from_millis(100),
-            "move lock exceeded A6: {metrics:?}"
-        );
+    for events in source_probe.transactions() {
+        assert_install_transaction_bounds(&events);
+    }
+    assert_eq!(
+        transactions.len() as u64,
+        importing.lock_metrics().transactions
+    );
+    assert_eq!(
+        source_probe.transactions().len() as u64,
+        exporting.lock_metrics().transactions
+    );
+    let metrics = [exporting.lock_metrics(), importing.lock_metrics()];
+    for metrics in metrics {
         assert!(metrics.transactions > 0);
         println!("A6 store fixture shipped={shipped} bytes; {metrics:?}");
     }
+    metrics
+}
+
+// Observe the SQL mutations on the actual move connection, not the decoded row
+// buffer. A transaction accidentally containing two batches must leave two cursor
+// advances (or too many writes) in the same observation.
+#[derive(Clone, Debug)]
+struct RowMutation {
+    table: String,
+    operation: String,
+    bytes: usize,
+}
+struct FixtureWriters {
+    running: Arc<AtomicBool>,
+    workers: Vec<std::thread::JoinHandle<()>>,
+}
+impl Drop for FixtureWriters {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        for worker in self.workers.drain(..) {
+            let result = worker.join();
+            if !std::thread::panicking() {
+                assert!(result.is_ok(), "concurrent fixture writer failed");
+            }
+        }
+    }
+}
+#[derive(Default)]
+struct ProbeState {
+    active: bool,
+    pending: Vec<RowMutation>,
+    transactions: Vec<Vec<RowMutation>>,
+}
+#[derive(Clone, Default)]
+pub(super) struct TransactionProbe(Arc<Mutex<ProbeState>>);
+impl TransactionProbe {
+    pub(super) fn begin(&self) {
+        let mut state = self.0.lock().unwrap();
+        assert!(!state.active, "nested move transaction");
+        state.active = true;
+        assert!(state.pending.is_empty());
+    }
+    pub(super) fn finish(&self) {
+        let mut state = self.0.lock().unwrap();
+        state.active = false;
+        let events = std::mem::take(&mut state.pending);
+        state.transactions.push(events);
+    }
+    fn attach(mover: &mut MoveStore) -> Self {
+        let probe = Self::default();
+        let captured = probe.clone();
+        mover
+            .writer
+            .create_scalar_function(
+                "move_transaction_probe",
+                3,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                move |ctx| {
+                    let event = RowMutation {
+                        table: ctx.get(0)?,
+                        operation: ctx.get(1)?,
+                        bytes: ctx.get(2)?,
+                    };
+                    let mut state = captured.0.lock().unwrap();
+                    assert!(
+                        state.active,
+                        "move mutation outside an observed transaction"
+                    );
+                    state.pending.push(event);
+                    Ok(0)
+                },
+            )
+            .unwrap();
+        for table in move_inventory::tables(Store::Module)
+            .filter(|t| !move_inventory::is_sqlite_internal(t.table))
+        {
+            for operation in ["INSERT", "UPDATE", "DELETE"] {
+                let side = if operation == "DELETE" { "OLD" } else { "NEW" };
+                // SQLite measures the stored values independently of the stream
+                // decoder: integer/real are 8 bytes, text/blob use byte length.
+                let bytes = table.columns.iter().map(|column| {
+                    let value = format!("{side}.{}", codec::quoted(column));
+                    format!("CASE typeof({value}) WHEN 'null' THEN 0 WHEN 'integer' THEN 8 WHEN 'real' THEN 8 ELSE length(CAST({value} AS BLOB)) END")
+                }).collect::<Vec<_>>().join(" + ");
+                let label = if operation == "UPDATE" && table.table == "mc_move_installs" {
+                    "CASE WHEN NEW.table_index IS NOT OLD.table_index OR NEW.file_offset IS NOT OLD.file_offset OR NEW.rows_remaining IS NOT OLD.rows_remaining OR NEW.last_source_key IS NOT OLD.last_source_key OR NEW.complete IS NOT OLD.complete THEN 'install_cursor' ELSE 'UPDATE' END".into()
+                } else if operation == "UPDATE" && table.table == "mc_move_cuts" {
+                    "CASE WHEN NEW.discard_table IS NOT OLD.discard_table THEN 'discard_cursor' ELSE 'UPDATE' END".into()
+                } else {
+                    format!("'{operation}'")
+                };
+                mover.writer.execute_batch(&format!(
+                    "CREATE TEMP TRIGGER {} AFTER {operation} ON main.{} BEGIN SELECT move_transaction_probe('{}', {label}, {bytes}); END;",
+                    codec::quoted(&format!("probe_{}_{operation}",table.table)), codec::quoted(table.table), table.table
+                )).unwrap();
+            }
+        }
+        mover.transaction_probe = Some(probe.clone());
+        probe
+    }
+    fn transactions(&self) -> Vec<Vec<RowMutation>> {
+        self.0.lock().unwrap().transactions.clone()
+    }
+}
+fn count_mutations(events: &[RowMutation], table: &str, operation: &str) -> usize {
+    events
+        .iter()
+        .filter(|event| event.table == table && event.operation == operation)
+        .count()
+}
+fn primary_mutations(events: &[RowMutation]) -> Vec<&RowMutation> {
+    events
+        .iter()
+        .filter(|event| {
+            event.table != "mc_tag_cache_generations"
+                && move_inventory::entry(Store::Module, &event.table)
+                    .unwrap()
+                    .class
+                    != Class::NotSession
+        })
+        .collect()
+}
+fn assert_install_transaction_bounds(events: &[RowMutation]) {
+    let source_rows = count_mutations(events, "mc_move_key_map", "INSERT");
+    let primary = primary_mutations(events);
+    assert!(
+        source_rows <= 16,
+        "install transaction exceeded 16 source rows: {events:?}"
+    );
+    assert!(
+        primary.len() <= source_rows,
+        "session rows escaped the batch key map: {events:?}"
+    );
+    let bytes: usize = events.iter().map(|event| event.bytes).sum();
+    // Key-map copies, cursor/generation rows and fixed cut metadata contribute
+    // less than 4 KiB for these fixtures. Larger indivisible values stand alone.
+    let oversized = primary.iter().map(|event| event.bytes).max().unwrap_or(0);
+    assert!(
+        bytes <= 256 * 1024 + 4096
+            || (source_rows == 1
+                && primary.len() == 1
+                && oversized > 256 * 1024
+                && bytes <= oversized + 4096),
+        "install transaction exceeded the byte budget: {bytes} bytes, {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .filter(|event| event.operation == "install_cursor")
+            .count()
+            <= 1,
+        "one transaction spanned multiple install batches: {events:?}"
+    );
+}
+fn assert_discard_transaction_bounds(events: &[RowMutation]) {
+    let primary = primary_mutations(events);
+    let deletes = events
+        .iter()
+        .filter(|event| {
+            event.operation == "DELETE"
+                && move_inventory::entry(Store::Module, &event.table)
+                    .unwrap()
+                    .class
+                    != Class::NotSession
+        })
+        .count();
+    assert!(
+        deletes <= 1,
+        "discard transaction deleted more than one session row: {events:?}"
+    );
+    assert!(primary.iter().all(|event| event.operation == "DELETE"));
+    assert!(count_mutations(events, "mc_move_key_map", "DELETE") <= 64);
+    let bytes: usize = events.iter().map(|event| event.bytes).sum();
+    assert!(
+        bytes <= 256 * 1024 + 4096,
+        "discard transaction exceeded the fixture byte budget: {bytes}"
+    );
+    assert!(
+        events
+            .iter()
+            .filter(|event| event.operation == "discard_cursor")
+            .count()
+            <= 1,
+        "one transaction spanned multiple discard batches: {events:?}"
+    );
+}
+
+#[test]
+fn install_byte_budget_does_not_pack_two_rows_past_the_limit() {
+    for size in [1024, 150 * 1024, 512 * 1024] {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let src = seeded(source.path(), 20, size);
+        let dst = open(destination.path());
+        let staging = destination.path().join("staging");
+        capture(&src, "cut", &staging);
+        let mut mover = dst.move_store().unwrap();
+        mover
+            .reserve_install(&binding("cut"), "digest", &staging)
+            .unwrap();
+        let probe = TransactionProbe::attach(&mut mover);
+        install(&mut mover, "cut");
+        for events in probe.transactions() {
+            assert_install_transaction_bounds(&events);
+        }
+        assert_eq!(dump(&src, "mc_tags", "*"), dump(&dst, "mc_tags", "*"));
+    }
+}
+
+#[test]
+fn transaction_probe_rejects_two_cursor_advances_in_one_transaction() {
+    let source = tempfile::tempdir().unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let src = seeded(source.path(), 1, 10);
+    let dst = open(destination.path());
+    let staging = destination.path().join("staging");
+    capture(&src, "cut", &staging);
+    let mut mover = dst.move_store().unwrap();
+    mover
+        .reserve_install(&binding("cut"), "digest", &staging)
+        .unwrap();
+    let probe = TransactionProbe::attach(&mut mover);
+    mover
+        .write("cut", |tx| {
+            tx.execute(
+                "UPDATE mc_move_installs SET file_offset = 1 WHERE cut_id = 'cut'",
+                [],
+            )?;
+            tx.execute(
+                "UPDATE mc_move_installs SET file_offset = 2 WHERE cut_id = 'cut'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let transactions = probe.transactions();
+    assert_eq!(transactions.len(), 1);
+    assert_eq!(
+        count_mutations(&transactions[0], "mc_move_installs", "install_cursor"),
+        2
+    );
+    let refused = std::panic::catch_unwind(|| assert_install_transaction_bounds(&transactions[0]));
+    assert!(
+        refused.is_err(),
+        "transaction audit accepted two batch advances"
+    );
 }
