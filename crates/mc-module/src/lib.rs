@@ -67,6 +67,7 @@ pub mod project_docs;
 pub mod project_identity;
 pub mod prompt_surface;
 pub mod protection_window;
+mod providers;
 mod reply_pages;
 mod retained_size;
 mod transport_handler;
@@ -685,6 +686,9 @@ struct StoreOpenCoordinator {
     policy: Mutex<StoreOpenPolicy>,
     attempt: Mutex<Option<StoreOpenAttempt>>,
     failure: Mutex<Option<StoreOpenFailure>>,
+    /// A deterministic startup barrier for exercising the real route/open race.
+    #[cfg(test)]
+    open_gate: Mutex<Option<Arc<Notify>>>,
 }
 
 impl StoreOpenCoordinator {
@@ -702,6 +706,8 @@ impl StoreOpenCoordinator {
             policy: Mutex::new(StoreOpenPolicy::default()),
             attempt: Mutex::new(None),
             failure: Mutex::new(None),
+            #[cfg(test)]
+            open_gate: Mutex::new(None),
         }
     }
 
@@ -3865,6 +3871,9 @@ pub struct McHandler {
     /// The last full catalog fetched with a composition for each bound session.
     /// Preflight and digest probes cannot overwrite the session's admitted tools.
     frozen_tool_catalogs: Mutex<HashMap<(PathBuf, String), tool_catalog::FrozenCatalog>>,
+    provider_store: Arc<providers::Storage>,
+    provider_serial: Arc<tokio::sync::Mutex<()>>,
+    provider_runner: Arc<dyn session_resolver::ProviderRunner>,
     #[cfg(test)]
     guidance_now_ms: Mutex<Option<i64>>,
     #[cfg(test)]
@@ -4458,14 +4467,23 @@ impl McHandler {
             None => Arc::new(MissingProducerFactory),
         };
         let session_resolver: Arc<dyn SessionResolver> = match connection_file {
-            Some(path) => Arc::new(RealSessionResolver::new_with_route_targets(
-                path,
-                route_targets,
+            Some(ref path) => Arc::new(RealSessionResolver::new_with_route_targets(
+                path.clone(),
+                route_targets.clone(),
             )),
             None => Arc::new(MissingSessionResolver),
         };
+        let provider_runner: Arc<dyn session_resolver::ProviderRunner> = match connection_file {
+            Some(path) => Arc::new(session_resolver::RealProviderRunner::new(
+                path,
+                route_targets,
+            )),
+            None => Arc::new(session_resolver::MissingProviderRunner),
+        };
+        let store = Arc::new(OnceLock::new());
+        let provider_store = Arc::new(providers::Storage::new(Arc::clone(&store)));
         McHandler {
-            store: Arc::new(OnceLock::new()),
+            store,
             log_directory: None,
             store_open: Arc::new(StoreOpenCoordinator::new()),
             producer_factory,
@@ -4495,6 +4513,9 @@ impl McHandler {
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             tool_provider_v1_channels: Mutex::new(HashSet::new()),
             frozen_tool_catalogs: Mutex::new(HashMap::new()),
+            provider_store,
+            provider_serial: Arc::new(tokio::sync::Mutex::new(())),
+            provider_runner,
             #[cfg(test)]
             guidance_now_ms: Mutex::new(None),
             #[cfg(test)]
@@ -4585,6 +4606,17 @@ impl McHandler {
         coordinator: Arc<StoreOpenCoordinator>,
         descriptor: StorageDescriptor,
     ) {
+        #[cfg(test)]
+        {
+            let gate = coordinator
+                .open_gate
+                .lock()
+                .expect("store open test gate")
+                .clone();
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+        }
         let policy = *coordinator.policy.lock().expect("store open policy mutex");
         let mut last_lease_error = match Self::open_store_once(&descriptor).await {
             Ok(opened) => {
@@ -4854,8 +4886,10 @@ impl McHandler {
         config: McModuleConfig,
         session_resolver: Arc<dyn SessionResolver>,
     ) -> Self {
+        let store = Arc::new(OnceLock::new());
+        let provider_store = Arc::new(providers::Storage::new(Arc::clone(&store)));
         McHandler {
-            store: Arc::new(OnceLock::new()),
+            store,
             log_directory: None,
             store_open: Arc::new(StoreOpenCoordinator::new()),
             producer_factory: factory,
@@ -4884,6 +4918,9 @@ impl McHandler {
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             tool_provider_v1_channels: Mutex::new(HashSet::new()),
             frozen_tool_catalogs: Mutex::new(HashMap::new()),
+            provider_store,
+            provider_serial: Arc::new(tokio::sync::Mutex::new(())),
+            provider_runner: Arc::new(session_resolver::MissingProviderRunner),
             guidance_now_ms: Mutex::new(None),
             reduction_injection: Mutex::new(HashMap::new()),
             between_transform_and_prepare: Mutex::new(None),
@@ -12721,14 +12758,9 @@ impl McHandler {
             // reaches them by name on Magic Context's tool route whether or not it
             // declared the role at bind.
             cortexkit_role_tool_provider::ops::TOOL_CATALOG => {
-                self.handle_tool_catalog_value(channel, &request)
+                self.handle_tool_catalog_value(channel, &request).await
             }
-            cortexkit_role_tool_provider::ops::ROLE_DESCRIBE => {
-                match tool_catalog::role_describe_bytes() {
-                    Ok(bytes) => HandlerOutcome::Response(bytes),
-                    Err(error) => error.into_outcome(),
-                }
-            }
+            cortexkit_role_tool_provider::ops::ROLE_DESCRIBE => providers::describe(),
             // A consumer that declared tool-provider/v1 gets the role's refusal for a
             // name Magic Context does not serve; every other route keeps the legacy
             // error code it has always had.
@@ -12746,7 +12778,7 @@ impl McHandler {
 
     /// `tool.catalog`: the catalog and guidance text for the request's plan item,
     /// resolved against the configuration of the project the route is bound to.
-    fn handle_tool_catalog_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
+    async fn handle_tool_catalog_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
         let Ok(binding) = self.facade_binding(channel) else {
             return HandlerOutcome::Error {
                 code: "route_unbound".to_string(),
@@ -12773,7 +12805,24 @@ impl McHandler {
                                 .expect("catalog tool name")
                                 .to_string()
                         })
-                        .collect();
+                        .collect::<std::collections::BTreeSet<String>>();
+                    let catalog = providers::Catalog {
+                        compacting: tool_catalog::compacts_session(arguments)
+                            .expect("validated composition"),
+                        tools: tools.clone(),
+                    };
+                    // HELLO_ACK starts the coordinator's open asynchronously. A
+                    // bound plan-fetch route can get here before it completes,
+                    // without any transform ever having run. Wait through that
+                    // existing startup path, but keep discovery storage-independent.
+                    let persisted = match self.store_for_request().await {
+                        Ok(_) => self.provider_store.save_catalog(&binding, &catalog),
+                        Err(refusal) => Err(refusal.into_outcome()),
+                    };
+                    match persisted {
+                        Ok(()) => self.provider_store.clear_catalog_failure(&binding),
+                        Err(error) => self.provider_store.record_catalog_failure(&binding, &error),
+                    }
                     self.frozen_tool_catalogs
                         .lock()
                         .expect("frozen catalog mutex")
@@ -12827,6 +12876,20 @@ impl McHandler {
                 .get(&(binding.project_root, binding.session))
                 .cloned()
         });
+        let frozen = match self.facade_binding(channel) {
+            Ok(binding) if binding.harness == session_resolver::RUNNER_BIND_HARNESS => {
+                let key = self.provider_store.tool_key(&binding)?;
+                self.provider_store
+                    .load(&key)?
+                    .catalog
+                    .map(|catalog| tool_catalog::FrozenCatalog {
+                        compacting: catalog.compacting,
+                        tools: catalog.tools,
+                    })
+                    .or(frozen)
+            }
+            _ => frozen,
+        };
         if preset.is_none() && frozen.is_none() {
             return Ok(());
         }
@@ -12942,7 +13005,9 @@ impl McHandler {
             binding.harness == OPENCODE_HARNESS || binding.harness == "opencode2";
         let transform_session_known =
             self.module_knows_transform_session(bound_session, &binding.project_root);
-        let conversation_key = if opencode_harness && transform_session_known {
+        let conversation_key = if binding.harness == session_resolver::RUNNER_BIND_HARNESS {
+            self.provider_store.tool_key(&binding)?.engine_key()
+        } else if opencode_harness && transform_session_known {
             bound_session.to_string()
         } else {
             match self
@@ -13019,6 +13084,12 @@ impl McHandler {
             Ok(scope) => scope,
             Err(outcome) => return outcome,
         };
+        if self
+            .facade_binding(channel)
+            .is_ok_and(|binding| binding.harness == session_resolver::RUNNER_BIND_HARNESS)
+        {
+            return self.handle_provider_reduce(channel, &requested).await;
+        }
         let store = match self.store_for_request().await {
             Ok(store) => store,
             Err(refusal) => return refusal.into_facade_outcome(),
@@ -14319,11 +14390,28 @@ impl McHandler {
             .get("method")
             .and_then(Value::as_str)
             .or_else(|| request.get("kind").and_then(Value::as_str));
+        let catalog_request = method.is_none()
+            && request.get("name").and_then(Value::as_str) == Some("tool.catalog")
+            && request.get("arguments").is_some();
+        if matches!(
+            method,
+            Some("compaction.setup" | "compaction.step" | "transform.hook")
+        ) {
+            if let (Ok(binding), Some(session)) = (
+                self.facade_binding(channel),
+                request.pointer("/params/session").and_then(Value::as_str),
+            ) {
+                if let Some(refusal) = self.provider_store.catalog_refusal(&binding, session) {
+                    return refusal;
+                }
+            }
+        }
         // A store that a newer ck-mc migrated past this binary refuses every request by name,
         // whatever its lane. Most lanes would refuse anyway because no store handle exists, but
-        // a lane that can answer without the store would otherwise half-work, and each lane
-        // rendering its own "no store" error would hide the one fact the caller needs.
-        if method != Some("echo") {
+        // Catalog discovery is the exception: its bytes derive from config, not
+        // rows. It reports a failed persistence attempt only to later stateful
+        // provider calls; a plan fetch must not turn into a storage refusal.
+        if method != Some("echo") && !catalog_request {
             if let Some(refusal) = self.store_open.store_ahead_refusal() {
                 let facade = method.is_none()
                     && request.get("name").is_some()
@@ -14337,6 +14425,15 @@ impl McHandler {
         }
         if let Some(method) = method {
             return match method {
+                "role.describe" => providers::describe(),
+                "compaction.setup" | "compaction.step" | "transform.declare" | "transform.hook" => {
+                    self.handle_provider_value(
+                        channel,
+                        method,
+                        request.get("params").unwrap_or(&Value::Null),
+                    )
+                    .await
+                }
                 // Proves the store opened end-to-end and, when a session_id is supplied,
                 // returns the session's stored trace state directly from the module.
                 "health" | "status" | "diagnostics" => self.handle_status_value(&request),
@@ -19014,10 +19111,16 @@ pub fn manifest_with_route_targets(
     ModuleManifest::builder(module_id.to_string(), env!("CARGO_PKG_VERSION").to_string())
     .trust_tier(Some(TrustTier::FirstParty))
     .protocol_ver(PROTOCOL_VERSION)
-    // Introduced by subc-protocol 0.12: optional pre-validated capability
-    // declarations. MC requests nothing beyond its role grants, so None keeps
-    // the HELLO identical to the pre-field wire shape (serde skips None).
-    .capabilities(None)
+    // The provider majors are protocol capabilities, not model-facing tools.
+    // Runner groups are discovered through role.describe, never required here.
+    .capabilities(Some(subc_protocol::manifest::CapabilityDeclarations {
+        provides: vec![
+            cortexkit_role_compaction_provider::PROVIDES.to_string(),
+            cortexkit_role_step_transform_provider::PROVIDES.to_string(),
+        ],
+        requires: vec![],
+        must_never_reach: vec![],
+    }))
     // Introduced by subc-protocol 0.14: optional self-signal manifest registry.
     // The historian firing and the classify task both spend provider quota through
     // the runner route, so they are declared from the same resolved route registry
@@ -19102,6 +19205,7 @@ mod tests {
     pub(crate) fn per_pass_fixed_now_ms() -> Option<i64> {
         per_pass_cost::fixed_now_ms()
     }
+    mod catalog_startup;
     mod single_store_drill;
     mod tool_catalog;
     mod tool_catalog_conformance;
@@ -20636,7 +20740,7 @@ mod tests {
         let line = supported_fences_line();
         assert_eq!(
             line,
-            format!("context.db=95 store.db={LATEST_MIGRATION_VERSION}")
+            format!("context.db=96 store.db={LATEST_MIGRATION_VERSION}")
         );
     }
 

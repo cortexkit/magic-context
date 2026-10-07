@@ -18,6 +18,105 @@ use subc_protocol::{BindIdentity, RouteTarget};
 use crate::route_targets::{RegisteredRoute, RouteTargetConfig};
 const SESSION_RESOLVE_DEADLINE: Duration = Duration::from_secs(2);
 
+/// Broca binds provider and tool routes as a runner, not as the caller's harness.
+/// The caller's harness travels separately in compaction and hook request bodies.
+pub const RUNNER_BIND_HARNESS: &str = "runner";
+
+/// Provider callbacks use the configured runner route and the SDK's daemon-verified
+/// module launch identity. They must never use the gateway's session resolver.
+#[async_trait]
+pub trait ProviderRunner: Send + Sync {
+    async fn call(
+        &self,
+        project_root: &Path,
+        session: &str,
+        method: &str,
+        params: Value,
+        budget: Duration,
+    ) -> Result<Value, SessionResolveError>;
+}
+
+pub struct RealProviderRunner {
+    connection_file: PathBuf,
+    route_targets: RouteTargetConfig,
+}
+
+impl RealProviderRunner {
+    pub fn new(connection_file: PathBuf, route_targets: RouteTargetConfig) -> Self {
+        Self {
+            connection_file,
+            route_targets,
+        }
+    }
+}
+
+#[async_trait]
+impl ProviderRunner for RealProviderRunner {
+    async fn call(
+        &self,
+        project_root: &Path,
+        session: &str,
+        method: &str,
+        params: Value,
+        budget: Duration,
+    ) -> Result<Value, SessionResolveError> {
+        let target = self
+            .route_targets
+            .target(RegisteredRoute::ProviderRunner)
+            .expect("provider runner has a registered target");
+        let identity = BindIdentity::new(project_root.to_path_buf(), RUNNER_BIND_HARNESS, session);
+        let work = async {
+            let mut options = consumer_options();
+            options.handshake_timeout = budget;
+            options.call_timeout = budget;
+            let consumer = SubcConsumer::connect(&self.connection_file, options)
+                .await
+                .map_err(|e| SessionResolveError::Transport(e.to_string()))?;
+            let response = consumer
+                .call(
+                    target.clone(),
+                    identity.clone(),
+                    serde_json::to_vec(&json!({"method": method, "params": params}))
+                        .map_err(|e| SessionResolveError::Transport(e.to_string()))?,
+                    CallOptions {
+                        timeout: budget,
+                        route_retry_deadline: budget,
+                        ..call_options()
+                    },
+                )
+                .await;
+            consumer
+                .close_route(target, identity, CloseRouteOptions::default())
+                .await;
+            consumer.close().await;
+            let bytes = response.map_err(call_error_to_resolve_error)?;
+            serde_json::from_slice(&bytes)
+                .map_err(|e| SessionResolveError::InvalidResponse(e.to_string()))
+        };
+        tokio::time::timeout(budget, work)
+            .await
+            .map_err(|_| SessionResolveError::Timeout)?
+    }
+}
+
+pub struct MissingProviderRunner;
+
+#[async_trait]
+impl ProviderRunner for MissingProviderRunner {
+    async fn call(
+        &self,
+        _: &Path,
+        _: &str,
+        _: &str,
+        _: Value,
+        _: Duration,
+    ) -> Result<Value, SessionResolveError> {
+        Err(SessionResolveError::Transport(
+            "provider runner connection is unavailable".into(),
+        ))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSession {
     /// Opaque composite conversation key returned by the thalamus gateway. Callers must not parse it;

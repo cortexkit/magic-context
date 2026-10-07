@@ -16,6 +16,27 @@ Aliases, from the one shared definition table: `primary` → `head`, `subagent` 
 `worker`, `tools-only` → `head`. They do not imply compaction. An omitted preset
 defaults to head. OpenCode and Pi plugin tool/guidance paths are unchanged.
 `role.describe` keeps the shared contract's build-only discovery shape.
+It now also lists `compaction-provider/v1` (`role.describe`, `compaction.setup`,
+`compaction.step`) and `step-transform-provider/v1` (`role.describe`,
+`transform.declare`, `transform.hook`), both alpha. The top-level
+`runner_groups` is `["transcript_reads"]`. These methods do not enter the tool
+list. HELLO adds the two new strings to `capabilities.provides`, with no
+capability requirements; the legacy tool-provider role and tools are unchanged.
+
+Example `role.describe` (implementation version varies with the build):
+
+```json
+{
+  "majors": [
+    {"version":"tool-provider/v1","ops":["role.describe","tool.catalog"],"stability":"alpha"},
+    {"version":"compaction-provider/v1","ops":["role.describe","compaction.setup","compaction.step"],"stability":"alpha"},
+    {"version":"step-transform-provider/v1","ops":["role.describe","transform.declare","transform.hook"],"stability":"alpha"}
+  ],
+  "implementation_version": "ck-mc 0.1.0",
+  "capabilities": [],
+  "runner_groups": ["transcript_reads"]
+}
+```
 
 ## Refusal contract for the gateway
 
@@ -75,15 +96,48 @@ succeed on a v1-declaring route, including real memory/note writes, with respons
 byte-identical to a legacy non-declaring route. An omitted call preset still
 cannot bypass an already fetched non-compacting catalog.
 
-**Future Broca compaction prerequisite, reported but not fixed:**
-`frozen_tool_catalogs` is process-local and is lost on ck-mc restart (also when
-the session's last route closes). Broca does not re-fetch its frozen plan on
-resume. Current non-compacting Broca sessions are unaffected, but a future
-compacting Broca head call carrying `preset: head` after a restart has no frozen
-record, is treated as not compacting, and `ctx_reduce` is refused. Before Magic
-Context serves as Broca's compaction provider, this record must be durable or
-re-derivable from the session's frozen plan. No persistence, schema or migration
-change is included here.
+**Runner catalog durability:** the admitted catalog is also recorded in
+`store.db` and runner-bound tool routes consult it after a restart. Preflight,
+digest-only and failed catalog fetches still cannot replace it. Compaction and
+hook records are keyed by the bound project, trimmed handle and required caller
+`harness`; Broca binds routes with `harness: "runner"`. A tool route joins only
+a known, unambiguous handle and never asks the Thalamus gateway to resolve it.
+The provider tables are installed by store migration 65 and classified as
+session-owned shipping state in the move inventory. Provider code lives in
+`crates/mc-module/src/providers/`; its record adapter uses mc-store's main
+connection and fenced transactions. The store's `synchronous=NORMAL` policy is
+unchanged: the fault cuts promise survival of a provider process kill, not a
+separate host power-loss synchronization guarantee.
+
+### First catalog fetch and startup ordering
+
+The SDK's `serve_with_handle` awaits HELLO_ACK and `on_hello_ack` before starting
+its frame loop. `McHandler::on_hello_ack` starts `StoreOpenCoordinator` with
+`tokio::spawn`; it does not await the database open. `on_bind` likewise records
+the route without waiting for storage. Therefore a first composition catalog
+fetch can arrive on a bound route before the store opens and before any transform.
+
+The catalog joins that existing coordinator's bounded request wait. If opening
+or persistence fails, it still returns the exact pinned catalog bytes, retains
+the in-process admitted tools, and logs/records the persistence failure for the
+bound project and session. Later stateful provider calls refuse by the name
+`provider_catalog_unpersisted`, even if the open subsequently succeeds, until a
+successful full catalog refetch records admission. Digest-only and preflight
+probes do not clear that failure. The failure marker is process-local when the
+store cannot be written; no second database or side file is created.
+
+`src/tests/catalog_startup.rs` drives a fresh `McHandler` through the real
+subc-daemon and SDK callbacks. Its startup barrier proves that both route bind
+and the first catalog request precede the completed open, compares the returned
+bytes to `head-full.answer.jcs`, and covers fresh, ahead-fenced, damaged and
+delayed storage. No transform runs in these cases.
+
+Step-hook subscriptions are advisory (`on_unavailable: "pass"`) and declare a
+1,500 ms budget, below Broca's 30,000 ms admission cap. Broca freezes applied ops
+or an unavailable outcome in the subject's WAL record and never re-runs that
+subject. Pending reminders/nudges therefore target later subjects, and MC must
+advance applied state only from accepted, durably observed effects. S4 exercises
+that WAL acceptance/unavailable integration, including permanent missed edits.
 
 **Deferred guidance sentence:** commons `CatalogRequest` has only `params`,
 `preset`, `composition`, `system_text` and `digest_only`. It has no actual

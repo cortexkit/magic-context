@@ -1,0 +1,41 @@
+[
+  {
+    "message": {
+      "content": [
+        {"text":"Use the read tool on note.txt, then reply with one short sentence stating the answer it contains.","type":"text"}
+      ],
+      "role":"user"
+    },
+    "mid":"m0",
+    "ordinal":0
+  },
+  {
+    "message": {
+      "content": [
+        {
+          "signature":"CAISqQYK3gIIEhgCKkDzLfqBuslqJcEw2fg+Vv9eVXJREvWDBhSGrbGq/Ca5qBs8fB+GYthaY3OCISGcRCujhh4HC46fR26pGSpWF3r9Mg1jbGF1ZGUtb3B1cy01OAFCCHRoaW5raW5nWiRiODFmMDg0My05ZDg4LTQ4YTAtYTFkNy1kNjI3NjczYTk2MmWaAQ8KDWNsYXVkZS1vcHVzLTWoAcKPmdYGwgFYCA4QABoqAYciAqW+A083BV5oBCatBWMpCiQCA083C7ygBCatBVuVA083BfchBCatIAIyBBJxzyU6BOPpaYdCBJahsQ1KBH6X9eJQAVoE2QXhVmAGaAFwAdoBYAoWcHJlZml4X2JlZm9yZV9ibG9ja192MRIgh/OkePxWHr9Jqm6NEtdJYebF8K4te3NbA5CdGvuU184iADIgwsATyGqckuIvlm89hhd2j4t6RMkCrcwJe/oeCYr7Th9IAxIMHKPf7wbyPqgwduuRGgzYPRNspkZatdJkcSciMAKWAz/XUhaxQ82U3+FnFKJPPcPfKoxUIahisnavom0D5hfXL1m3g5ybv88bvkZvSyr3Akrf1ztIReIgIx7arbvvJe/3+QNmT5kv+JBxobdWLxNdBMDUZb3JnS+uFUdPtnuLktJ2DJ4IWIhia9mo1xWNxje09iKDsANXzdNR580+oAQFUTSULplfIOTKs8JOpwjZBQiHQdnet+kz/DR6tqwpStP8y10L97ih+kFdPyT8/8mZYv2BuL4T+eIpL9iApzaRKxayYHdMYd1u2Bka8vjDRGe39uWPOwzlDjff+LY3ZtlCnB+VcygXh8yZusUxc80PHvSi/TwtxMmdiiZhjmAUvQWd/1P2oiDFG7mh+4SoANk36IekdLc+kH7/xtYwquevE67hxG8zPNCy4uydaj1h30r1j939RlMGLSjmZpeG6eM6LIRqN389t+tWycaDrCeBNIsO+gX1m7kdPMwaBNmB/izRqQkx6V3/Z4k2mjYnGG1M8rGryWSBpcpd8Lmv0TEfiDLbDKE+sctqTtYKo0lJ08gH+k1LEmb2QlPal2/8ODLAPHYIIsMr6RgB",
+          "text":"Checking 391 for primality: 17×23=391, so it's composite, not prime.\n\nNow let me go back to look at note.txt again.\n\n",
+          "type":"reasoning"
+        },
+        {
+          "text":"I'll work through the factors first, then re-read the file.\n\nChecking 391: it's odd (not divisible by 2), digit sum is 13 (not divisible by 3), doesn't end in 0 or 5, 7×56=392 (no), 11×36=396 (no), 13×30=390 (no), and 17×23=391 — a hit. So 391 is composite.",
+          "type":"text"
+        },
+        {"input":{"filePath":"note.txt"},"tool_call_id":"toolu_0112Mnk5SFKBPDpjk2Jswpkr","tool_name":"read","type":"tool_call"}
+      ],
+      "origin":{"model_id":"claude-opus-5","provider_module_id":"anthropic"},
+      "role":"assistant"
+    },
+    "mid":"m5",
+    "ordinal":5,
+    "tool_calls":[{"call_key":"378e8211-cd6c-4f3f-a89c-f1070ef015fe:19","dispatched_to":"aft","indeterminate":false,"tool_call_id":"toolu_0112Mnk5SFKBPDpjk2Jswpkr"}]
+  },
+  {
+    "message": {
+      "content":[{"is_error":false,"output":{"kind":"text","text":"1: Fixture note: the answer is 42.\n"},"tool_call_id":"toolu_0112Mnk5SFKBPDpjk2Jswpkr","type":"tool_result"}],
+      "role":"tool"
+    },
+    "mid":"m6",
+    "ordinal":6
+  }
+]

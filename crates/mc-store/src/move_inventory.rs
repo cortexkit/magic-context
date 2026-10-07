@@ -5,9 +5,9 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-pub const INVENTORY_VERSION: u32 = 2;
+pub const INVENTORY_VERSION: u32 = 3;
 pub const CONTEXT_SCHEMA_VERSION: u32 = 96;
-pub const STORE_SCHEMA_VERSION: u32 = 64;
+pub const STORE_SCHEMA_VERSION: u32 = 65;
 pub const GLOBAL_USER_PROFILE_PROJECT_PATH: &str = "__global__";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +76,18 @@ pub struct TableInventory {
 }
 
 impl TableInventory {
+    /// The classified owner coordinate used by write guards and imported-row
+    /// validation. Provider records spell it `session`; the facade ledger uses
+    /// `identity_scope`. Neither may silently fall back to a nonexistent column.
+    pub fn session_column(&self) -> Option<&'static str> {
+        if !matches!(self.rows, RowSelector::Predicate(_)) {
+            return None;
+        }
+        ["session_id", "identity_scope", "session"]
+            .into_iter()
+            .find(|column| self.columns.contains(column))
+    }
+
     pub fn shipped_columns(&self) -> Vec<&'static str> {
         if self.class != Class::Ship {
             return Vec::new();
@@ -196,7 +208,7 @@ pub const TABLES: &[TableInventory] = &[
         None
     ),
     // BEGIN FRESH-MIGRATION CENSUS
-    // context.db: 106 tables observed after fresh migration.
+    // context.db: 107 tables observed after fresh migration.
     table!(
         Context,
         "authority_capture_bounds",
@@ -2080,7 +2092,34 @@ pub const TABLES: &[TableInventory] = &[
         None,
         Some(RenderInput::Workspace)
     ),
-    // store.db: 32 tables observed after fresh migration.
+    // store.db: 39 tables observed after fresh migration.
+    // Provider state cannot be rebuilt: it includes allocated versions and tags,
+    // frozen catalog admission, and answers that the runner may not have applied.
+    // Select every project/harness coordinate of this opaque host session. Both
+    // the route project_root and the caller harness are preserved primary-key
+    // components, not a project-global render-input predicate.
+    table!(
+        Module,
+        "mc_provider_sessions_v1",
+        Ship,
+        RowSelector::Predicate("session = ?1"),
+        &["project_root", "session", "harness"],
+        &["project_root", "session", "harness", "record"],
+        &[],
+        Some(KeyPolicy::Preserve),
+        None
+    ),
+    table!(
+        Module,
+        "mc_provider_catalogs_v1",
+        Ship,
+        RowSelector::Predicate("session = ?1"),
+        &["project_root", "session"],
+        &["project_root", "session", "catalog"],
+        &[],
+        Some(KeyPolicy::Preserve),
+        None
+    ),
     table!(
         Module,
         "mc_tags",
@@ -2903,6 +2942,64 @@ mod tests {
             "mc_project_state",
         ] {
             assert!(entry(Store::Module, dropped).is_none());
+        }
+    }
+
+    #[test]
+    fn provider_inventory_ships_every_project_and_harness_coordinate_of_the_session() {
+        let (_dir, _context, module) = fresh_stores();
+        for table in ["mc_provider_sessions_v1", "mc_provider_catalogs_v1"] {
+            let definition = entry(Store::Module, table).unwrap();
+            assert_eq!(definition.class, Class::Ship);
+            assert_eq!(definition.key_policy, Some(KeyPolicy::Preserve));
+            assert_eq!(definition.shipped_columns(), definition.columns);
+            let RowSelector::Predicate(predicate) = definition.rows else {
+                panic!("session predicate required");
+            };
+            if table == "mc_provider_sessions_v1" {
+                for (project, session, harness) in [
+                    ("/a", "wanted", "broca"),
+                    ("/a", "wanted", "claude-code"),
+                    ("/b", "wanted", "broca"),
+                    ("/a", "other", "broca"),
+                ] {
+                    module
+                        .execute(
+                            "INSERT INTO mc_provider_sessions_v1 VALUES (?1,?2,?3,'{}')",
+                            rusqlite::params![project, session, harness],
+                        )
+                        .unwrap();
+                }
+                let rows=module.prepare(&format!("SELECT project_root,harness FROM {table} WHERE {predicate} ORDER BY project_root,harness")).unwrap()
+                    .query_map(["wanted"],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+                assert_eq!(
+                    rows,
+                    vec![
+                        ("/a".into(), "broca".into()),
+                        ("/a".into(), "claude-code".into()),
+                        ("/b".into(), "broca".into())
+                    ]
+                );
+            } else {
+                for (project, session) in [("/a", "wanted"), ("/b", "wanted"), ("/a", "other")] {
+                    module
+                        .execute(
+                            "INSERT INTO mc_provider_catalogs_v1 VALUES (?1,?2,'{}')",
+                            [project, session],
+                        )
+                        .unwrap();
+                }
+                let rows = module
+                    .prepare(&format!(
+                        "SELECT project_root FROM {table} WHERE {predicate} ORDER BY project_root"
+                    ))
+                    .unwrap()
+                    .query_map(["wanted"], |row| row.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
+                assert_eq!(rows, ["/a", "/b"]);
+            }
         }
     }
 
