@@ -70,7 +70,7 @@ nix = { version = "0.31.3", features = ["fs"] }
 # Do NOT add drive-fault to a default feature set, and do NOT add new fault arms
 # without the matching absence-proof note here and the fault-shape tests in lib.rs.
 # MC_PROVIDER_FAULT_POINT additionally parks at the six provider durable cuts
-# declared in provider_surface::FAULT_POINTS. The marker is printed only after
+# declared in providers::FAULT_POINTS. The marker is printed only after
 # the SQLite commit; the conformance harness then kills the process. This entire
 # environment-controlled branch is absent from a default build.
 drive-fault = []

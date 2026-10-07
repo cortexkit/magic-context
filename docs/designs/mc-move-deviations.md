@@ -2,12 +2,12 @@
 
 ## Inventory boundary
 
-`crates/mc-store/src/move_inventory.rs` pins inventory version **2**, context.db
-schema **96**, and store.db schema **63**. Its explicit table/column census was
+`crates/mc-store/src/move_inventory.rs` pins inventory version **3**, context.db
+schema **96**, and store.db schema **65**. Its explicit table/column census was
 generated from `initializeDatabase` followed by `runMigrations` on a new context
 database, and `McStore::open` on a new store database. The census uses
 `sqlite_master` plus `PRAGMA table_xinfo`, not historical `CREATE TABLE` text or
-the pre-single-store schema. It contains **107 context tables** and **32 store
+the pre-single-store schema. It contains **107 context tables** and **39 store
 tables**, including FTS virtual tables, their hidden columns and shadow tables.
 Store migration 61's dropped domain tables are absent. Context's still-present
 legacy authority/mirror tables are explicitly `not_session`, not shipped.
@@ -61,6 +61,12 @@ is project-keyed, not session-owned. The other previously undecided tables,
 ship; no served-byte equivalence proof licenses dropping them.
 
 Every entry lists columns in `table_xinfo` order and primary keys in PK order.
+Store migration 64 retains the agent-move metadata tables. Store migration 65
+adds `mc_provider_sessions_v1` and `mc_provider_catalogs_v1`.
+Both ship with `session = ?1`, including every project and caller-harness
+coordinate of that opaque host session. `project_root` is a preserved key, not
+a project-global render input. All columns ship: dropping the record or catalog
+would lose allocated versions/tags, frozen admission or unapplied answers.
 `shipped_columns` returns only a ship entry's columns minus its explicit deny
 list. **No current shipped column is denied**: opaque rendered requests and
 replay/decision documents are intentional session state, and this inventory does

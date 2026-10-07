@@ -25,6 +25,8 @@ pub mod move_inventory;
 pub mod move_snapshot;
 pub mod move_store;
 pub mod private_permissions;
+mod provider_records;
+pub use provider_records::ProviderSessionKey;
 pub mod single_store_domain;
 pub mod single_store_schema;
 
@@ -3233,6 +3235,12 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 64,
         statements: move_store::SCHEMA_SQL,
+    },
+    Migration {
+        version: 65,
+        // Provider answers, version/tag high-water marks and catalog admission
+        // are session-owned state, so migrate and classify them before serving.
+        statements: include_str!("migrations/store_065_provider_records.sql"),
     },
 ];
 

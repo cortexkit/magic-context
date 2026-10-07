@@ -998,12 +998,16 @@ fn migration_63_is_the_text_migcheck_verified() {
         .expect("migration 63 is bundled")
         .statements;
     assert_eq!(bundled, verified);
-    // Move metadata is the next migration; migration 63's verified text is unchanged.
-    assert_eq!(crate::LATEST_MIGRATION_VERSION, 64);
+    // Later migrations leave migration 63's verified text unchanged.
+    assert_eq!(
+        crate::LATEST_MIGRATION_VERSION,
+        crate::move_inventory::STORE_SCHEMA_VERSION
+    );
 }
 
 /// Put a fresh store back into its version-62 shape: the tables, columns and view migration
-/// 63 adds are dropped, the two array columns it drops come back, and its version record goes.
+/// 63 adds are dropped, the two array columns it drops come back, and every later
+/// migration stamp goes. Leaving a newer stamp would make open skip migration 63.
 fn rewind_to_62(store: &McStore) {
     // A version-62 writer did not install the move guards, and dropping a
     // guarded column cannot leave a trigger referring to that newer column.
@@ -1021,6 +1025,8 @@ fn rewind_to_62(store: &McStore) {
          DROP TABLE mc_pass_trace_history;
          DROP TABLE mc_cache_frozen_chunks;
          DROP TABLE mc_cache_sections;
+         DROP TABLE mc_provider_sessions_v1;
+         DROP TABLE mc_provider_catalogs_v1;
          ALTER TABLE mc_cache_state DROP COLUMN section_index;
          ALTER TABLE mc_pass_trace DROP COLUMN scheduler_next_seq;
          ALTER TABLE mc_pass_trace DROP COLUMN interesting_next_seq;

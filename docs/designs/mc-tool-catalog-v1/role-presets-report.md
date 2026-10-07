@@ -102,6 +102,12 @@ digest-only and failed catalog fetches still cannot replace it. Compaction and
 hook records are keyed by the bound project, trimmed handle and required caller
 `harness`; Broca binds routes with `harness: "runner"`. A tool route joins only
 a known, unambiguous handle and never asks the Thalamus gateway to resolve it.
+The provider tables are installed by store migration 65 and classified as
+session-owned shipping state in the move inventory. Provider code lives in
+`crates/mc-module/src/providers/`; its record adapter uses mc-store's main
+connection and fenced transactions. The store's `synchronous=NORMAL` policy is
+unchanged: the fault cuts promise survival of a provider process kill, not a
+separate host power-loss synchronization guarantee.
 
 **Deferred guidance sentence:** commons `CatalogRequest` has only `params`,
 `preset`, `composition`, `system_text` and `digest_only`. It has no actual
