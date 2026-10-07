@@ -55,8 +55,9 @@ describe("migration 96", () => {
             expect(db.prepare("SELECT * FROM lkg_slot_chunks").all()).toEqual(before);
             expect(loadPersistedLkgSlot(db, "legacy")).toEqual(slot);
             expect(checkLkgDurability(db, "legacy")).toEqual({
-                durable: false,
-                reason: "lkg_not_durable",
+                durable: true,
+                servedCaptureId: null,
+                certified: false,
             });
             expect(db.prepare("SELECT * FROM lkg_served_markers").all()).toEqual([]);
             const servedCaptureId = recordServedCapture(db, "legacy", true);

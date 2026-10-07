@@ -209,8 +209,65 @@ integration must pass the session's current `compactionOff` setting to
 `checkLkgDurability`; it returns `certified: false`, even if a previous managed
 pass left a marker. Such a move promises no MC prefix identity, omits carried
 replay authority, and the importer rebuilds normally. The draining poll reader
-must exclude these uncertified sessions. Managed sessions still fail visibly
-before sending if the served-marker write fails.
+must exclude native-compaction sessions, not managed sessions whose last marker
+failed.
+
+### Marker availability and the accepted crash window
+
+Move certification is optional and never refuses an otherwise servable turn.
+A failed or contended served-marker write returns no id. The normal deferred
+LKG save still runs and writes `lkg_slots.served_capture_id = NULL`; an older
+marker cannot certify that newer capture. `checkLkgDurability` reports
+`certified: false` whenever the persisted slot and marker do not match. The move
+then omits carried replay authority and rebuilds normally. A subsequent successful
+marker and slot write restores certification, including an unchanged Pi pass
+whose previous capture had no certificate. Existing strict history-boundary and
+LKG invalidation rules are not weakened by making the move marker best-effort.
+
+A host crash between serving new bytes and the deferred slot save can leave a
+stale but self-consistent old slot and marker pair. This window is accepted:
+replay uses the old LKG plus the host's newer messages as tail, exactly as a local
+post-crash restart does. History is not lost; the first request may incur one
+prefix-cache miss. No sidecar file, extra database, or additional fsync is added
+to engineer around this accepted window.
+
+**Live-move prerequisite for s3:** wait for in-flight passes and queued capture
+callbacks to settle under the draining fence, then have the live owner poll
+certify its final in-memory capture. `repairLkgDurability` can write a missing
+marker, bind it to that same capture, and re-persist the slot without advancing
+`capture_sequence` or changing served bytes. It never hydrates an older disk
+slot to invent ownership of final bytes. If either write remains unavailable,
+report the move as uncertified and rebuild on import. The repair reader must
+exclude frozen/import-gated sessions and native-compaction sessions.
+
+### Pi synchronous marker cost
+
+The worktree-local `target/s2-pi-benchmark.ts` fixture uses 500 native messages
+(1,211,756 serialized bytes), 20 warmups and 120 measured passes per mode.
+Balanced, alternating before/after capture timings (median / p90, milliseconds)
+were **0.484 / 1.882 without the marker** and **0.898 / 4.453 with it**. The
+paired added per-pass distribution was **0.292 / 3.975**; timing only the marker
+API separately yielded **0.032 / 0.037**. The larger capture tail includes
+allocation/GC and runtime variance, not only SQL. A separate-phase run produced
+0.441 / 1.157 before and 1.140 / 17.194 after, despite an isolated marker cost of
+0.049 / 0.211, which motivated interleaving the fixtures rather than attributing
+phase/heap drift to the marker.
+
+An instrumented alternating run measured 0.505 / 2.401 before and 0.739 / 2.798
+after, paired added 0.205 / 2.338, marker API 0.036 / 0.156, marker transaction
+0.163 / 0.425, and its COMMIT 0.033 / 0.116. Thus the extra p90 is predominantly
+outside the measured transaction/id allocation and commit, consistent with
+capture allocation/GC and scheduling; GC itself was not separately profiled.
+The marker opens its own small transaction. Sharing the deferred payload save
+would change certification timing or pull large slot work into the synchronous
+path, so it is not a small commit-cost optimization and was not done.
+
+The paying-pass counter advanced the marker to 140 for 140 new-byte captures;
+five subsequent unchanged certified captures and five replays left both that id
+and `total_changes()` unchanged (850 before and after). A previously unmarked
+capture is the intentional exception: an unchanged pass retries certification.
+A scheduler defer that refreshes LKG for a new tail is still a new-byte capture
+and pays the marker; defer/replay paths that capture nothing write nothing.
 
 ## Verification and reproduction
 

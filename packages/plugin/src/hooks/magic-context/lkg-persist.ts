@@ -6,11 +6,7 @@ import { drainBackgroundBatches } from "../../shared/background-batch-drain";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
-import {
-    readServedMarker,
-    recordServedSlotState,
-    ServedMarkerWriteError,
-} from "./lkg-served-marker";
+import { readServedMarker, recordServedSlotState } from "./lkg-served-marker";
 import type { LkgPersistenceBackend, LkgSlot } from "./lkg-slot";
 
 /**
@@ -344,7 +340,6 @@ export function clearPersistedLkgSlot(db: Database, sessionId: string, reason?: 
     try {
         clearPersistedLkgSlotStrict(db, sessionId, reason);
     } catch (error) {
-        if (error instanceof ServedMarkerWriteError) throw error;
         sessionLog(sessionId, "LKG snapshot durable clear failed:", error);
     }
 }
@@ -355,16 +350,11 @@ export function clearPersistedLkgSlotStrict(
     sessionId: string,
     reason?: string,
 ): void {
-    try {
-        db.transaction(() => {
-            if (reason) recordServedSlotState(db, sessionId, reason);
-            db.prepare("DELETE FROM lkg_slot_chunks WHERE session_id = ?").run(sessionId);
-            db.prepare("DELETE FROM lkg_slots WHERE session_id = ?").run(sessionId);
-        }).immediate();
-    } catch (error) {
-        if (reason) throw new ServedMarkerWriteError(error);
-        throw error;
-    }
+    db.transaction(() => {
+        if (reason) recordServedSlotState(db, sessionId, reason);
+        db.prepare("DELETE FROM lkg_slot_chunks WHERE session_id = ?").run(sessionId);
+        db.prepare("DELETE FROM lkg_slots WHERE session_id = ?").run(sessionId);
+    }).immediate();
     persistedFingerprints.get(db)?.delete(sessionId);
 }
 

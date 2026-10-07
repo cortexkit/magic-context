@@ -463,7 +463,7 @@ describe("Pi context handler LKG replay", () => {
 				).rejects.toMatchObject({ code: "PI_STORAGE_BUSY" });
 
 				expect(logLines).toContain(
-					"TRANSIENT STORAGE FAILURE SQLITE_BUSY: LKG replay unavailable (Magic Context could not durably record the served capture. This turn was not sent; retry.); refusing unreduced 1-message input",
+					"TRANSIENT STORAGE FAILURE SQLITE_BUSY: LKG unavailable (lkg_invalidated_reshape); refusing unreduced 1-message input",
 				);
 			} finally {
 				locker.exec("ROLLBACK");

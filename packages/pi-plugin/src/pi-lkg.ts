@@ -787,6 +787,7 @@ export function createPiLkgCoordinator(
 				...livePrior,
 				capturedAt: plan.capturedAt,
 				captureSequence: plan.captureSequence,
+				fullCoverage: true,
 			};
 			if (captureSlot(plan.sessionId, kept)) state.acceptedSlot = kept;
 			else state.syncCaptureRequired = true;
@@ -805,7 +806,9 @@ export function createPiLkgCoordinator(
 		plan.servedCaptureId =
 			args.certify === false
 				? undefined
-				: unchanged && !state.syncCaptureRequired
+				: unchanged &&
+						!state.syncCaptureRequired &&
+						livePrior.servedCaptureId !== undefined
 					? livePrior.servedCaptureId
 					: recordServedCapture(db, snapshot.sessionId, true);
 		// Keep all N stable inputs flattened before returning from this context handler.
@@ -868,6 +871,7 @@ export function createPiLkgCoordinator(
 					prior &&
 					reusedPrefix === plan.inputs.length &&
 					prior.inputIdSeq.length === plan.inputs.length &&
+					prior.servedCaptureId === plan.servedCaptureId &&
 					prior.jsonPrefix === plan.jsonPrefix &&
 					JSON.stringify(prior.piOutputEntryIds) === JSON.stringify(ownership)
 				) {
@@ -886,6 +890,7 @@ export function createPiLkgCoordinator(
 					capturedAt: plan.capturedAt,
 					captureSequence: plan.captureSequence,
 					servedCaptureId: plan.servedCaptureId,
+					fullCoverage: true,
 					inputMoveDigests: plan.inputs.map((input) =>
 						moveMessageDigestFromFields(input.fields),
 					),

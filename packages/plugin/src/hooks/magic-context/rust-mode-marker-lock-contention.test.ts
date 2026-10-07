@@ -28,8 +28,8 @@ import {
     startSqliteWriteLocker,
 } from "../../shared/sqlite-write-locker-test-support";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
-import { createDbLkgPersistence } from "./lkg-persist";
-import { checkLkgDurability, readServedMarker, ServedMarkerWriteError } from "./lkg-served-marker";
+import { createDbLkgPersistence, saveLkgSlotToDb } from "./lkg-persist";
+import { checkLkgDurability, readServedMarker } from "./lkg-served-marker";
 import { getSlot, registerLkgPersistence, resetLkgSlotsForTest } from "./lkg-slot";
 import { setRawMessageProvider } from "./read-session-chunk";
 import { closeReadOnlySessionDb } from "./read-session-db";
@@ -260,7 +260,7 @@ describe("Rust-mode compaction target recording under cross-process write conten
         expect(result.drained[0]).toMatchObject({ ordinal: 7, endMessageId: "m1" });
     }, 20_000);
 
-    it("SOFT+ capture refuses a blocked served marker, retries durably, and permits unchanged replay under lock", async () => {
+    it("metadata-only SOFT+ serves during marker contention and the next pass re-certifies identical bytes", async () => {
         const { db, dbPath } = openFileDb();
         // The foreground admission has its own budget; this connection's normal
         // timeout must be restored even when the separate locker outlasts it.
@@ -268,20 +268,32 @@ describe("Rust-mode compaction target recording under cross-process write conten
         const sessionId = "ses_lock_held";
         const sessionLog = spyOn(logger, "sessionLog");
         try {
-            // There is no prior served capture in this fixture. Installing the
-            // module's SOFT+ bytes is a capture, not an unchanged LKG replay, so
-            // it must certify its served identity before any request is emitted.
-            await expect(
-                runPassUnderLock({
-                    db,
-                    dbPath,
-                    sessionId,
-                    lockHoldMs: 1000,
-                    decision: "SOFT+",
-                }),
-            ).rejects.toBeInstanceOf(ServedMarkerWriteError);
+            // Move certification is optional. The held writer cannot prevent
+            // a metadata-only SOFT+ from serving the module's exact native bytes.
+            const contended = await runPassUnderLock({
+                db,
+                dbPath,
+                sessionId,
+                lockHoldMs: 20000,
+                decision: "SOFT+",
+            });
+            expect(contended.elapsedSinceLockMs).toBeLessThan(19500);
+            expect(servedText(contended.served)).toContain(MODULE_TEXT);
+            expect(contended.moduleCalls).toBe(1);
+            expect(contended.drained).toHaveLength(0);
+            expect(getPendingCompactionMarkerState(db, sessionId)).toBeNull();
             expect(readServedMarker(db, sessionId)).toBeUndefined();
-            expect(getSlot(sessionId)).toBeUndefined();
+            const latest = getSlot(sessionId)!;
+            expect(latest.jsonPrefix).toBe(JSON.stringify(contended.served));
+            expect(latest.servedCaptureId).toBeUndefined();
+            // The lock is now released, allowing the deferred row to carry its
+            // null id durably. A move must rebuild rather than borrow a marker.
+            expect(saveLkgSlotToDb(db, sessionId, latest)).toBe(true);
+            expect(checkLkgDurability(db, sessionId)).toEqual({
+                durable: true,
+                servedCaptureId: null,
+                certified: false,
+            });
             const skipCall = sessionLog.mock.calls.find(
                 ([loggedSession, message]) =>
                     loggedSession === sessionId &&
@@ -289,8 +301,7 @@ describe("Rust-mode compaction target recording under cross-process write conten
                     message.startsWith(RUST_MARKER_LOCK_SKIP_LOG),
             );
             expect(skipCall).toBeUndefined();
-            // Once the lock is available the same turn is servable, and its
-            // exact bytes reach the slot whose id equals the durable marker.
+            // The next uncontended pass certifies the same served bytes.
             const result = await runPassUnderLock({
                 db,
                 dbPath,
@@ -302,7 +313,11 @@ describe("Rust-mode compaction target recording under cross-process write conten
             expect(result.moduleCalls).toBe(1);
             expect(result.drained).toHaveLength(0);
             expect(getPendingCompactionMarkerState(db, sessionId)).toBeNull();
-            expect(checkLkgDurability(db, sessionId).durable).toBe(true);
+            expect(JSON.stringify(result.served)).toBe(JSON.stringify(contended.served));
+            expect(checkLkgDurability(db, sessionId)).toEqual({
+                durable: true,
+                servedCaptureId: 1,
+            });
             const marker = readServedMarker(db, sessionId);
             expect(getSlot(sessionId)?.jsonPrefix).toBe(JSON.stringify(result.served));
             // A genuine unchanged replay requires no new marker. The live turn

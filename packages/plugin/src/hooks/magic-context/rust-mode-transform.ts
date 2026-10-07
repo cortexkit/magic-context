@@ -108,11 +108,7 @@ import {
     measureLkgReplayRequest,
     RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN,
 } from "./lkg-replay-fit";
-import {
-    recordServedCapture,
-    recordServedSlotState,
-    ServedMarkerWriteError,
-} from "./lkg-served-marker";
+import { recordServedCapture, recordServedSlotState } from "./lkg-served-marker";
 import {
     captureSlot,
     contentSnapshotValue,
@@ -2420,6 +2416,7 @@ export function createRustModeTransform(
             rowVersion: plan.rowVersion,
             captureSequence: plan.captureSequence,
             servedCaptureId: plan.servedCaptureId,
+            fullCoverage: true,
             inputMoveDigests: inputs.map((input) => moveMessageDigestFromFields(input.fields)),
         };
         const rejection = lkgSlotRejection(plan.sessionId, slot);
@@ -4664,7 +4661,6 @@ export function createRustModeTransform(
                 state.markerAdmissionFenced = false;
             }
         } catch (error) {
-            if (error instanceof ServedMarkerWriteError) throw error;
             if (markerDefinitelyNoCut) {
                 try {
                     // A snapshot write can finish before later bookkeeping fails, even

@@ -95,8 +95,8 @@ import {
     clearLkgMeasuredRequest,
     noteLkgProviderResponse,
 } from "./lkg-measured-request";
-import { createDbLkgPersistence, loadPersistedLkgSlot } from "./lkg-persist";
-import { checkLkgDurability, readServedMarker, ServedMarkerWriteError } from "./lkg-served-marker";
+import { createDbLkgPersistence, loadPersistedLkgSlot, saveLkgSlotToDb } from "./lkg-persist";
+import { checkLkgDurability, readServedMarker } from "./lkg-served-marker";
 import * as lkgSlot from "./lkg-slot";
 import { getSlot, registerLkgPersistence, resetLkgSlotsForTest } from "./lkg-slot";
 import { MODULE_ORDINAL_PAGE_SIZE, MODULE_PAGE_MAX_BYTES } from "./module-wire";
@@ -5838,7 +5838,7 @@ describe("Rust mode authority adapter", () => {
         expect(transform.getState(sessionId).consecutiveFailures).toBe(1);
     });
 
-    it("refuses module output when busy context.db cannot write the served marker", async () => {
+    it("serves module output while context.db is busy, persists an uncertified refresh, then re-certifies", async () => {
         const sessionId = `rust-context-busy-${Date.now()}`;
         sessions.push(sessionId);
         const db = makeFileDb();
@@ -5876,12 +5876,17 @@ describe("Rust mode authority adapter", () => {
             blocker.exec("PRAGMA busy_timeout=0");
             blocker.exec("BEGIN IMMEDIATE");
             const secondOutput = { messages: [...input] as unknown[] };
-            // The large slot refresh remains best-effort, but losing the small
-            // synchronous served marker can no longer silently serve new bytes.
-            await expect(
-                transform.run(sessionId, input, secondOutput, makeMeta(db, sessionId)),
-            ).rejects.toBeInstanceOf(ServedMarkerWriteError);
-            expect(getSlot(sessionId)?.jsonPrefix).toContain("module output 1");
+            await transform.run(sessionId, input, secondOutput, makeMeta(db, sessionId));
+            expect(JSON.stringify(secondOutput.messages)).toBe(
+                JSON.stringify([
+                    {
+                        info: { id: "served", role: "assistant", sessionID: sessionId },
+                        parts: [{ type: "text", text: "module output 2" }],
+                    },
+                ]),
+            );
+            expect(getSlot(sessionId)?.jsonPrefix).toContain("module output 2");
+            expect(getSlot(sessionId)?.servedCaptureId).toBeUndefined();
             // The durable prefix is stored as ordered slices.
             const persisted = (
                 db
@@ -5896,17 +5901,30 @@ describe("Rust mode authority adapter", () => {
             closeQuietly(blocker);
         }
 
+        // The deferred refresh can now land without borrowing the older marker.
+        expect(saveLkgSlotToDb(db, sessionId, getSlot(sessionId)!)).toBe(true);
+        expect(checkLkgDurability(db, sessionId)).toEqual({
+            durable: true,
+            servedCaptureId: null,
+            certified: false,
+        });
+        expect(readServedMarker(db, sessionId)?.servedCaptureId).toBe(2);
+        const thirdOutput = { messages: [...input] as unknown[] };
+        await transform.run(sessionId, input, thirdOutput, makeMeta(db, sessionId));
+        expect(JSON.stringify(thirdOutput.messages)).toContain("module output 3");
+        expect(checkLkgDurability(db, sessionId)).toEqual({ durable: true, servedCaptureId: 3 });
+
         unavailable = true;
         const hotReplay = { messages: [...input] as unknown[] };
         await transform.run(sessionId, input, hotReplay, makeMeta(db, sessionId));
-        expect(JSON.stringify(hotReplay.messages)).toContain("module output 1");
+        expect(JSON.stringify(hotReplay.messages)).toContain("module output 3");
 
         resetLkgSlotsForTest();
         registerLkgPersistence(createDbLkgPersistence(db));
         const restarted = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
         const coldReplay = { messages: [...input] as unknown[] };
         await restarted.run(sessionId, input, coldReplay, makeMeta(db, sessionId));
-        expect(JSON.stringify(coldReplay.messages)).toContain("module output 1");
+        expect(JSON.stringify(coldReplay.messages)).toContain("module output 3");
     });
 
     it("binds two Rust captures at one row_version to distinct durable served ids", async () => {

@@ -5,7 +5,6 @@ import { loadPersistedLkgSlot } from "@magic-context/core/hooks/magic-context/lk
 import {
 	checkLkgDurability,
 	readServedMarker,
-	ServedMarkerWriteError,
 } from "@magic-context/core/hooks/magic-context/lkg-served-marker";
 import {
 	getSlot,
@@ -158,8 +157,9 @@ describe("Pi incremental LKG capture", () => {
 			slotState: "captured",
 		});
 		expect(checkLkgDurability(harness.db, "move-pi")).toEqual({
-			durable: false,
-			reason: "lkg_not_durable",
+			durable: true,
+			servedCaptureId: null,
+			certified: false,
 		});
 		expect(loadPersistedLkgSlot(harness.db, "move-pi")).toBeUndefined();
 		harness.flushCapture();
@@ -179,34 +179,71 @@ describe("Pi incremental LKG capture", () => {
 		);
 	});
 
-	it("a failed synchronous served-marker write refuses before queuing a Pi capture", () => {
+	it("failed marker certification serves exact Pi bytes, persists a null id, and retries on an unchanged pass", () => {
 		const harness = createHarness();
 		databases.push(harness.db);
-		const messages = [message("unchanged wire")];
-		const wire = JSON.stringify(messages);
-		const snapshot = harness.coordinator.beginPass({
-			sessionId: "marker-fails",
-			messages,
-			entryIds: ["u"],
-			modelKey: "test/model",
-			providerKey: "test",
-		});
-		harness.db.exec(
-			"CREATE TRIGGER marker_fail BEFORE INSERT ON lkg_served_markers BEGIN SELECT RAISE(ABORT, 'injected marker failure'); END",
-		);
-		expect(() =>
+		const messages = [message("alpha")];
+		const pass = () =>
 			harness.coordinator.captureAppliedPass({
-				snapshot,
+				snapshot: harness.coordinator.beginPass({
+					sessionId: "marker-fails",
+					messages,
+					entryIds: ["u"],
+					modelKey: "test/model",
+					providerKey: "test",
+				}),
 				outputMessages: messages,
 				outputEntryIds: ["u"],
 				cacheBusting: false,
-			}),
-		).toThrow(ServedMarkerWriteError);
-		expect(JSON.stringify(messages)).toBe(wire);
-		expect(() => harness.flushCapture()).toThrow(
-			"expected a scheduled LKG capture",
+			});
+		expect(pass()?.json).toBe(JSON.stringify(messages));
+		harness.flushCapture();
+		expect(readServedMarker(harness.db, "marker-fails")?.servedCaptureId).toBe(
+			1,
 		);
-		expect(readServedMarker(harness.db, "marker-fails")).toBeUndefined();
+		harness.db.exec(
+			"CREATE TRIGGER marker_fail BEFORE INSERT ON lkg_served_markers BEGIN SELECT RAISE(ABORT, 'injected marker failure'); END",
+		);
+		messages[0]!.content = "bravo";
+		const wire = JSON.stringify(messages);
+		expect(pass()?.json).toBe(wire);
+		harness.flushCapture();
+		expect(JSON.stringify(messages)).toBe(wire);
+		expect(loadPersistedLkgSlot(harness.db, "marker-fails")?.jsonPrefix).toBe(
+			wire,
+		);
+		expect(
+			harness.db
+				.prepare(
+					"SELECT served_capture_id FROM lkg_slots WHERE session_id='marker-fails'",
+				)
+				.get(),
+		).toEqual({ served_capture_id: null });
+		expect(readServedMarker(harness.db, "marker-fails")?.servedCaptureId).toBe(
+			1,
+		);
+		expect(checkLkgDurability(harness.db, "marker-fails")).toEqual({
+			durable: true,
+			servedCaptureId: null,
+			certified: false,
+		});
+		harness.db.exec("DROP TRIGGER marker_fail");
+		// Even unchanged bytes must retry certification while the slot has no id.
+		expect(pass()?.json).toBe(wire);
+		harness.flushCapture();
+		expect(checkLkgDurability(harness.db, "marker-fails")).toEqual({
+			durable: true,
+			servedCaptureId: 2,
+		});
+		expect(loadPersistedLkgSlot(harness.db, "marker-fails")?.jsonPrefix).toBe(
+			wire,
+		);
+		const changes = harness.db.prepare("SELECT total_changes() AS n").get();
+		expect(pass()?.json).toBe(wire);
+		harness.flushCapture();
+		expect(harness.db.prepare("SELECT total_changes() AS n").get()).toEqual(
+			changes,
+		);
 	});
 	it("detaches exact nested output fields and rejects same-length in-place rewrites", () => {
 		const harness = createHarness();

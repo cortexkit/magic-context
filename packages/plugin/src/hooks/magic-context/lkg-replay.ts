@@ -432,6 +432,7 @@ export function captureLkgSlot(args: LkgCaptureInput): boolean {
         modelKey: modelKeys.modelKey,
         providerKey: modelKeys.providerKey,
         capturedAt: args.capturedAt ?? Date.now(),
+        fullCoverage: built.anchorIndex === args.input.length - 1,
     };
     if (args.onPrepared) {
         slot.inputMoveDigests = asEntryProjection(args.input)

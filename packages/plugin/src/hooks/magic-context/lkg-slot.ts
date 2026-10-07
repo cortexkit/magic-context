@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { sessionLog } from "../../shared/logger";
 import { clearCapturedLkgMeasurement } from "./lkg-measured-request";
-import { ServedMarkerWriteError } from "./lkg-served-marker";
 import type { MessageLike } from "./transform-operations";
 
 export interface LkgSlot {
@@ -22,6 +21,8 @@ export interface LkgSlot {
     captureSequence?: number;
     /** Cross-process capture identity; unrelated to the adapter's cancel counter. */
     servedCaptureId?: number;
+    /** Coverage of this process's capture, retained for drained marker repair. */
+    fullCoverage?: boolean;
     /** RFC 8785 message digests for the portable hostCut frontier. */
     inputMoveDigests?: string[];
 }
@@ -604,7 +605,6 @@ export function dropSlot(sessionId: string, _reason?: string, certify = true): v
     try {
         backend.clear(sessionId, certify ? _reason : undefined);
     } catch (error) {
-        if (error instanceof ServedMarkerWriteError) throw error;
         sessionLog(sessionId, "LKG durable clear failed:", error);
     }
     const pass = hydrationPassBySession.peek(sessionId);
