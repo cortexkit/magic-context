@@ -597,17 +597,15 @@ fn tag_generation_exceeds_shipped_and_previously_observed_generation() {
     let destination = tempfile::tempdir().unwrap();
     let src = seeded(source.path(), 4, 10);
     let dst = open(destination.path());
-    dst.inner
+    src.inner
         .with_conn(|conn| {
             conn.execute(
-                "INSERT INTO mc_tag_cache_generations VALUES('ses_move',500,0,0)",
+                "UPDATE mc_tag_cache_generations SET generation = 500 WHERE session_id = 'ses_move'",
                 [],
             )?;
             Ok(())
         })
         .unwrap();
-    let old = dst.tag_cache_summary("ses_move").unwrap();
-    assert_eq!(old.generation, 500);
     let staging = destination.path().join("staging");
     capture(&src, "cut", &staging);
     let mut mover = dst.move_store().unwrap();
@@ -615,10 +613,20 @@ fn tag_generation_exceeds_shipped_and_previously_observed_generation() {
         .reserve_install(&binding("cut"), "digest", &staging)
         .unwrap();
     install(&mut mover, "cut");
+    mover.finish_install("cut", "result").unwrap();
+    let old = dst.tag_cache_summary("ses_move").unwrap();
+    assert_eq!(old.generation, 501);
+    discard(&mut mover, "cut");
+    // The live store has observed 501 even though discard removed the shipped
+    // rows. Only the local high-water mark may survive destination preflight.
+    let staging = destination.path().join("staging2");
+    src.move_store().unwrap().capture("cut", &staging).unwrap();
+    mover
+        .reserve_install(&binding("new"), "digest2", &staging)
+        .unwrap();
+    install(&mut mover, "new");
     let new = dst.tag_cache_summary("ses_move").unwrap();
-    // The four tag inserts bump the live row to 504, and the final batch must
-    // advance past that too, not just past the 500 observed before staging.
-    assert_eq!(new.generation, 505);
+    assert_eq!(new.generation, 502);
     assert_eq!(new.count, 4);
     assert_eq!(new.max_tag_number, 4);
 }
@@ -705,6 +713,25 @@ fn preflight_refusals_do_not_reserve_or_write_live_rows() {
         .reserve_install(&binding("cut"), "digest", &staging)
         .unwrap_err();
     assert_eq!(error.code(), "destination_populated");
+    dst.inner
+        .with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM mc_facade_mutation_ledger WHERE identity_scope = 'ses_move'",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO mc_tag_cache_generations VALUES('ses_move',500,0,0)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let error = mover
+        .reserve_install(&binding("cut"), "digest", &staging)
+        .unwrap_err();
+    assert!(
+        matches!(error,MoveError::Refused {code:"destination_populated",table:Some(ref table)} if table == "mc_tag_cache_generations")
+    );
 }
 #[test]
 fn capture_inventory_drift_refuses_before_writing_and_files_are_private() {

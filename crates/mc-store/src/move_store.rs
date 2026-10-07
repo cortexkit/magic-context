@@ -874,16 +874,9 @@ fn check_destination(conn: &Connection, session: &str) -> Result<(), MoveError> 
         let RowSelector::Predicate(predicate) = table.rows else {
             continue;
         };
-        // A running module may have observed an empty tag generation. Preserve
-        // that high-water mark, but any actual tags/counts still mean populated.
-        let extra = if table.table == "mc_tag_cache_generations" {
-            " AND (tag_count <> 0 OR max_tag_number <> 0)"
-        } else {
-            ""
-        };
         if conn.query_row(
             &format!(
-                "SELECT EXISTS(SELECT 1 FROM {} WHERE ({predicate}){extra})",
+                "SELECT EXISTS(SELECT 1 FROM {} WHERE ({predicate}))",
                 codec::quoted(table.table)
             ),
             [session],
