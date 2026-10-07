@@ -3,7 +3,10 @@ import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { upsertCommits } from "@magic-context/core/features/magic-context/git-commits/storage-git-commits";
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
-import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
+import {
+    initializeDatabase,
+    LATEST_SUPPORTED_VERSION,
+} from "@magic-context/core/features/magic-context/storage-db";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { createTestTempDir } from "../../../plugin/src/shared/test-temp-dir";
 import { inspectGitFtsMap, runDoctorGitFtsMap, runDoctorGitFtsMapCli } from "./doctor-git-fts-map";
@@ -67,7 +70,7 @@ test("read-only doctor detects missing, wrong and extra map entries without repa
 });
 
 test("offline repair verifies a paired backup before replacing only map inventory", () => {
-    mutate("DELETE FROM git_commit_fts_rowid_map; DELETE FROM schema_migrations WHERE version=95");
+    mutate("DELETE FROM git_commit_fts_rowid_map; DELETE FROM schema_migrations WHERE version>=95");
     const before = read();
     const fts = before.prepare("SELECT rowid,* FROM git_commits_fts ORDER BY rowid").all();
     const meta = before.prepare("SELECT * FROM session_meta").all();
@@ -131,7 +134,7 @@ test("offline repair verifies a paired backup before replacing only map inventor
         ).toEqual({ t: "integer" });
         runMigrations(after);
         expect(after.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({
-            v: 95,
+            v: LATEST_SUPPORTED_VERSION,
         });
     } finally {
         after.close();

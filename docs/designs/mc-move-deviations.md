@@ -2,12 +2,12 @@
 
 ## Inventory boundary
 
-`crates/mc-store/src/move_inventory.rs` pins inventory version **1**, context.db
-schema **95**, and store.db schema **63**. Its explicit table/column census was
+`crates/mc-store/src/move_inventory.rs` pins inventory version **2**, context.db
+schema **96**, and store.db schema **63**. Its explicit table/column census was
 generated from `initializeDatabase` followed by `runMigrations` on a new context
 database, and `McStore::open` on a new store database. The census uses
 `sqlite_master` plus `PRAGMA table_xinfo`, not historical `CREATE TABLE` text or
-the pre-single-store schema. It contains **106 context tables** and **32 store
+the pre-single-store schema. It contains **107 context tables** and **32 store
 tables**, including FTS virtual tables, their hidden columns and shadow tables.
 Store migration 61's dropped domain tables are absent. Context's still-present
 legacy authority/mirror tables are explicitly `not_session`, not shipped.
@@ -80,9 +80,10 @@ and embedded-JSON references (e.g. `source_contents.tag_id` and
 `pending_ops.tag_id`). `mc_tags` is first in the store inventory so the later
 installer can apply its triggers before finalizing the shipped generation.
 
-The served marker and `lkg_slots.served_capture_id` do not exist at these schema
-heads. Their migration must update this inventory and version; adding a
-speculative entry now would conceal whether the real schema was classified.
+Context migration 96 adds shipped `lkg_served_markers`, plus
+`lkg_slots.served_capture_id` and `input_move_digests`. The latter records canonical
+host-input digests without changing the older field-token replay digests. Store.db
+stays at 63: both TS and Rust served markers are owned by context.db.
 
 ### Render-input closure
 
@@ -184,6 +185,90 @@ shared by all hosts. The pinned Broca three-message vector (objects, mids,
 per-message digests and combined digest) is pending Broca's commit and must be
 pinned byte-for-byte by a later slice; this inventory does not fabricate it.
 
+### Pi frontier projection correction
+
+Pi's current durable LKG hashes native `AgentMessage` entries with reconciled
+JSONL entry ids; consecutive `toolResult` entries remain separate. Its tagging
+and raw-history views group those results into `synth-user-*`, but that view is
+not the persisted replay frontier. Therefore Pi's move `mid` is the native entry
+id, not a synthetic user id. This supersedes the reviewed spec's synthetic-id
+assumption without changing Pi's replay seams or served bytes. OpenCode and Rust
+use the same normalized `MessageLike` inputs their capture sites ingest. Each
+host hashes RFC 8785 canonical JSON of that input shape; migration 96 stores
+those lowercase-hex digests separately from existing replay digests. The host
+adapter supplies exactly the ingestion prefix (excluding its answering assistant)
+to `moveInputs`, in transcript order; MC does not sort message ids or re-read the
+host database. The move integration must wire `startLkgDurabilityPoll` to its
+open sessions' draining fences and stop the timer on host disposal.
+
+### Native-compaction limitation
+
+With `compactionOff`, the host owns the prompt and MC per-turn failures remain
+fail-open. Those passes never write served markers, including slot drops. Move
+integration must pass the session's current `compactionOff` setting to
+`checkLkgDurability`; it returns `certified: false`, even if a previous managed
+pass left a marker. Such a move promises no MC prefix identity, omits carried
+replay authority, and the importer rebuilds normally. The draining poll reader
+must exclude native-compaction sessions, not managed sessions whose last marker
+failed.
+
+### Marker availability and the accepted crash window
+
+Move certification is optional and never refuses an otherwise servable turn.
+A failed or contended served-marker write returns no id. The normal deferred
+LKG save still runs and writes `lkg_slots.served_capture_id = NULL`; an older
+marker cannot certify that newer capture. `checkLkgDurability` reports
+`certified: false` whenever the persisted slot and marker do not match. The move
+then omits carried replay authority and rebuilds normally. A subsequent successful
+marker and slot write restores certification, including an unchanged Pi pass
+whose previous capture had no certificate. Existing strict history-boundary and
+LKG invalidation rules are not weakened by making the move marker best-effort.
+
+A host crash between serving new bytes and the deferred slot save can leave a
+stale but self-consistent old slot and marker pair. This window is accepted:
+replay uses the old LKG plus the host's newer messages as tail, exactly as a local
+post-crash restart does. History is not lost; the first request may incur one
+prefix-cache miss. No sidecar file, extra database, or additional fsync is added
+to engineer around this accepted window.
+
+**Live-move prerequisite for s3:** wait for in-flight passes and queued capture
+callbacks to settle under the draining fence, then have the live owner poll
+certify its final in-memory capture. `repairLkgDurability` can write a missing
+marker, bind it to that same capture, and re-persist the slot without advancing
+`capture_sequence` or changing served bytes. It never hydrates an older disk
+slot to invent ownership of final bytes. If either write remains unavailable,
+report the move as uncertified and rebuild on import. The repair reader must
+exclude frozen/import-gated sessions and native-compaction sessions.
+
+### Pi synchronous marker cost
+
+The worktree-local `target/s2-pi-benchmark.ts` fixture uses 500 native messages
+(1,211,756 serialized bytes), 20 warmups and 120 measured passes per mode.
+Balanced, alternating before/after capture timings (median / p90, milliseconds)
+were **0.484 / 1.882 without the marker** and **0.898 / 4.453 with it**. The
+paired added per-pass distribution was **0.292 / 3.975**; timing only the marker
+API separately yielded **0.032 / 0.037**. The larger capture tail includes
+allocation/GC and runtime variance, not only SQL. A separate-phase run produced
+0.441 / 1.157 before and 1.140 / 17.194 after, despite an isolated marker cost of
+0.049 / 0.211, which motivated interleaving the fixtures rather than attributing
+phase/heap drift to the marker.
+
+An instrumented alternating run measured 0.505 / 2.401 before and 0.739 / 2.798
+after, paired added 0.205 / 2.338, marker API 0.036 / 0.156, marker transaction
+0.163 / 0.425, and its COMMIT 0.033 / 0.116. Thus the extra p90 is predominantly
+outside the measured transaction/id allocation and commit, consistent with
+capture allocation/GC and scheduling; GC itself was not separately profiled.
+The marker opens its own small transaction. Sharing the deferred payload save
+would change certification timing or pull large slot work into the synchronous
+path, so it is not a small commit-cost optimization and was not done.
+
+The paying-pass counter advanced the marker to 140 for 140 new-byte captures;
+five subsequent unchanged certified captures and five replays left both that id
+and `total_changes()` unchanged (850 before and after). A previously unmarked
+capture is the intentional exception: an unchanged pass retries certification.
+A scheduler defer that refreshes LKG for a new tail is still a new-byte capture
+and pays the marker; defer/replay paths that capture nothing write nothing.
+
 ## Verification and reproduction
 
 Embedded tests run the actual current Bun migration chain and `McStore::open`
@@ -191,7 +276,7 @@ against throwaway databases under the worktree's ignored `target/` directory.
 They compare every live table, every `table_xinfo` column and every PK with the
 checked-in inventory, exercise all six A2 drift cases, excluded/generated-column
 drift and `ANALYZE`, and select independently seeded memory/workspace/profile
-sentinels. They also check the live 34-table session list, all-harness predicates,
+sentinels. They also check the live 35-table session list, all-harness predicates,
 session-only notes, and facade-ledger ownership.
 
 Until mc-store exposes this module, create an **ignored**, worktree-local harness

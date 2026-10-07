@@ -97,7 +97,7 @@ describe("migration 95", () => {
             ).run(blob);
             expect(() => runMigrations(db)).not.toThrow();
             expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({
-                v: 95,
+                v: LATEST_SUPPORTED_VERSION,
             });
             expect(
                 db
@@ -238,9 +238,9 @@ describe("migration 95", () => {
             const ranks = ranked();
             expect(MIGRATIONS.filter((migration) => migration.version === 95)).toHaveLength(1);
             runMigrations(db);
-            expect(LATEST_SUPPORTED_VERSION).toBe(95);
+            expect(LATEST_SUPPORTED_VERSION).toBe(Math.max(...MIGRATIONS.map((m) => m.version)));
             expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({
-                v: 95,
+                v: LATEST_SUPPORTED_VERSION,
             });
             expect(db.prepare("SELECT * FROM session_meta").all()).toEqual(expectedMeta);
             expect(db.prepare("SELECT * FROM tags").all()).toEqual(tags);
@@ -435,11 +435,11 @@ describe("migration 95", () => {
         try {
             upsertCommits(db, "project", [commit]);
             runMigrations(db);
-            db.exec("DELETE FROM schema_migrations WHERE version=95");
+            db.exec("DELETE FROM schema_migrations WHERE version>=95");
             runMigrations(db);
             expect(map(db)).toEqual(identities(db));
             db.exec(
-                "DELETE FROM schema_migrations WHERE version=95; DELETE FROM git_commit_fts_rowid_map",
+                "DELETE FROM schema_migrations WHERE version>=95; DELETE FROM git_commit_fts_rowid_map",
             );
             expect(() => runMigrations(db)).toThrow(
                 /git FTS rowid inventory differs.*magic-context doctor git-fts-map --repair/,
@@ -491,7 +491,7 @@ describe("migration 95", () => {
                     )
                     .get(),
             ).toEqual({ ft: "integer", mt: "integer" });
-            db.exec("DELETE FROM schema_migrations WHERE version=95");
+            db.exec("DELETE FROM schema_migrations WHERE version>=95");
             runMigrations(db);
             upsertCommits(db, "project", [{ ...commit, sha: "123" }]);
             expect(

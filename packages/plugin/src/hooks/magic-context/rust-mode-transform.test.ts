@@ -95,10 +95,12 @@ import {
     clearLkgMeasuredRequest,
     noteLkgProviderResponse,
 } from "./lkg-measured-request";
-import { createDbLkgPersistence, loadPersistedLkgSlot } from "./lkg-persist";
+import { createDbLkgPersistence, loadPersistedLkgSlot, saveLkgSlotToDb } from "./lkg-persist";
+import { checkLkgDurability, readServedMarker } from "./lkg-served-marker";
 import * as lkgSlot from "./lkg-slot";
 import { getSlot, registerLkgPersistence, resetLkgSlotsForTest } from "./lkg-slot";
 import { MODULE_ORDINAL_PAGE_SIZE, MODULE_PAGE_MAX_BYTES } from "./module-wire";
+import { moveInputs, persistedMoveInputs } from "./move-inputs";
 import { clearNoteNudgeTriggerOnly } from "./note-nudger";
 import { RawFallbackContextLimitError } from "./raw-fallback-context-limit";
 import { setRawMessageProvider } from "./read-session-chunk";
@@ -192,6 +194,7 @@ function randomText(random: () => number, length: number): string {
 }
 
 afterEach(() => {
+    resetLkgSlotsForTest();
     __resetToolDefinitionMeasurements();
     closeReadOnlySessionDb();
     transformDecisionTest.reset();
@@ -210,6 +213,7 @@ function makeDb(): ContextDatabase {
     initializeDatabase(db);
     runMigrations(db);
     databases.push(db);
+    registerLkgPersistence(createDbLkgPersistence(db));
     return db;
 }
 
@@ -219,6 +223,7 @@ function makeFileDb(): ContextDatabase {
     const db = openDatabase(join(directory, "context.db")) as ContextDatabase | null;
     if (!db) throw new Error("file-backed test database did not open");
     databases.push(db);
+    registerLkgPersistence(createDbLkgPersistence(db));
     return db;
 }
 
@@ -5833,7 +5838,7 @@ describe("Rust mode authority adapter", () => {
         expect(transform.getState(sessionId).consecutiveFailures).toBe(1);
     });
 
-    it("serves module output while context.db is busy and skips only the durable LKG refresh", async () => {
+    it("serves module output while context.db is busy, persists an uncertified refresh, then re-certifies", async () => {
         const sessionId = `rust-context-busy-${Date.now()}`;
         sessions.push(sessionId);
         const db = makeFileDb();
@@ -5872,8 +5877,16 @@ describe("Rust mode authority adapter", () => {
             blocker.exec("BEGIN IMMEDIATE");
             const secondOutput = { messages: [...input] as unknown[] };
             await transform.run(sessionId, input, secondOutput, makeMeta(db, sessionId));
-            expect(JSON.stringify(secondOutput.messages)).toContain("module output 2");
+            expect(JSON.stringify(secondOutput.messages)).toBe(
+                JSON.stringify([
+                    {
+                        info: { id: "served", role: "assistant", sessionID: sessionId },
+                        parts: [{ type: "text", text: "module output 2" }],
+                    },
+                ]),
+            );
             expect(getSlot(sessionId)?.jsonPrefix).toContain("module output 2");
+            expect(getSlot(sessionId)?.servedCaptureId).toBeUndefined();
             // The durable prefix is stored as ordered slices.
             const persisted = (
                 db
@@ -5888,17 +5901,127 @@ describe("Rust mode authority adapter", () => {
             closeQuietly(blocker);
         }
 
+        // The deferred refresh can now land without borrowing the older marker.
+        expect(saveLkgSlotToDb(db, sessionId, getSlot(sessionId)!)).toBe(true);
+        expect(checkLkgDurability(db, sessionId)).toEqual({
+            durable: true,
+            servedCaptureId: null,
+            certified: false,
+        });
+        expect(readServedMarker(db, sessionId)?.servedCaptureId).toBe(2);
+        const thirdOutput = { messages: [...input] as unknown[] };
+        await transform.run(sessionId, input, thirdOutput, makeMeta(db, sessionId));
+        expect(JSON.stringify(thirdOutput.messages)).toContain("module output 3");
+        expect(checkLkgDurability(db, sessionId)).toEqual({ durable: true, servedCaptureId: 3 });
+
         unavailable = true;
         const hotReplay = { messages: [...input] as unknown[] };
         await transform.run(sessionId, input, hotReplay, makeMeta(db, sessionId));
-        expect(JSON.stringify(hotReplay.messages)).toContain("module output 2");
+        expect(JSON.stringify(hotReplay.messages)).toContain("module output 3");
 
         resetLkgSlotsForTest();
         registerLkgPersistence(createDbLkgPersistence(db));
         const restarted = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
         const coldReplay = { messages: [...input] as unknown[] };
         await restarted.run(sessionId, input, coldReplay, makeMeta(db, sessionId));
-        expect(JSON.stringify(coldReplay.messages)).toContain("module output 1");
+        expect(JSON.stringify(coldReplay.messages)).toContain("module output 3");
+    });
+
+    it("binds two Rust captures at one row_version to distinct durable served ids", async () => {
+        const db = makeDb();
+        const sessionId = "rust-served-ids";
+        sessions.push(sessionId);
+        installRawProvider(sessionId);
+        let calls = 0;
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) => {
+                if (method !== "transform") return { ok: true };
+                calls++;
+                return {
+                    decision: "HARD",
+                    prefix_bust_permitted: true,
+                    row_version: 800,
+                    native_messages: [
+                        {
+                            info: { id: "served", role: "assistant", sessionID: sessionId },
+                            parts: [{ type: "text", text: `capture ${calls}` }],
+                        },
+                    ],
+                };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const input = makeMessages(sessionId);
+        for (let i = 1; i <= 2; i++) {
+            await transform.run(
+                sessionId,
+                input,
+                { messages: [...input] },
+                makeMeta(db, sessionId),
+            );
+            const saved = loadPersistedLkgSlot(db, sessionId)!;
+            // Bootstrap's by-design cache-bust drop reserved id 1 before the
+            // first capture. Served ids need not equal either module counter.
+            expect(saved.servedCaptureId).toBe(i + 1);
+            expect(saved.rowVersion).toBe(800);
+            expect(saved.captureSequence).toBe(i);
+            expect(checkLkgDurability(db, sessionId)).toEqual({
+                durable: true,
+                servedCaptureId: i + 1,
+            });
+            expect(persistedMoveInputs(saved)).toEqual(moveInputs("rust", input));
+        }
+        const before = readServedMarker(db, sessionId);
+        // A replay-only failure emits no capture marker.
+        const failing: RustModeModuleClient = {
+            call: async () => {
+                throw new Error("module unavailable");
+            },
+        };
+        const restarted = createRustModeTransform(makeDeps(db, failing), { moduleClient: failing });
+        await restarted.run(sessionId, input, { messages: [...input] }, makeMeta(db, sessionId));
+        expect(readServedMarker(db, sessionId)).toEqual(before);
+        transform.dispose();
+        restarted.dispose();
+    });
+
+    it("compactionOff serves without marker writes and move reports an uncertified session", async () => {
+        const db = makeDb();
+        const sessionId = "rust-unmanaged-marker";
+        sessions.push(sessionId);
+        installRawProvider(sessionId);
+        db.exec(
+            "CREATE TRIGGER marker_fail BEFORE INSERT ON lkg_served_markers BEGIN SELECT RAISE(ABORT, 'marker must not be attempted'); END",
+        );
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) => {
+                if (method !== "transform") return { ok: true };
+                return {
+                    decision: "HARD",
+                    prefix_bust_permitted: true,
+                    row_version: 1,
+                    native_messages: [
+                        {
+                            info: { id: "u", role: "user", sessionID: sessionId },
+                            parts: [{ type: "text", text: "native-compaction bytes" }],
+                        },
+                    ],
+                };
+            },
+        };
+        const deps = { ...makeDeps(db, moduleClient), compactionOff: true };
+        const transform = createRustModeTransform(deps, { moduleClient });
+        const input = makeMessages(sessionId);
+        const output = { messages: [...input] };
+        await transform.run(sessionId, input, output, makeMeta(db, sessionId));
+        expect(JSON.stringify(output.messages)).toContain("native-compaction bytes");
+        expect(readServedMarker(db, sessionId)).toBeUndefined();
+        expect(checkLkgDurability(db, sessionId, { compactionOff: true })).toEqual({
+            durable: true,
+            servedCaptureId: null,
+            certified: false,
+        });
+        transform.dispose();
     });
 
     it("persists a priced replacement before a process restart can expose stale LKG", async () => {

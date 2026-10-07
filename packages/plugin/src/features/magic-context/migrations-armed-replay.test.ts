@@ -745,6 +745,25 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
             });
             populateModuleOwnedRows(db, version, state);
             return;
+        case 96:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            expect(
+                (db.prepare("PRAGMA table_info(lkg_slots)").all() as Array<{ name: string }>).map(
+                    (column) => column.name,
+                ),
+            ).toEqual(expect.arrayContaining(["served_capture_id", "input_move_digests"]));
+            db.prepare(`INSERT INTO lkg_served_markers
+                (session_id, served_capture_id, full_coverage, slot_state)
+                VALUES ('armed-v96', 1, 1, 'captured')`).run();
+            expect(
+                db
+                    .prepare(
+                        "SELECT served_capture_id FROM lkg_served_markers WHERE session_id='armed-v96'",
+                    )
+                    .get(),
+            ).toEqual({ served_capture_id: 1 });
+            populateModuleOwnedRows(db, version, state);
+            return;
         default:
             throw new Error(`populateForVersion has no arm for migration v${version}`);
     }

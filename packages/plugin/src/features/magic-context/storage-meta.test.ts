@@ -97,7 +97,7 @@ describe("storage-meta", () => {
             expect(db.transaction).toHaveBeenCalledTimes(1);
             // The indexed temporal choices are session-owned too; adding their
             // deletion must not split cleanup across separate transactions.
-            expect(db.prepare).toHaveBeenCalledTimes(39);
+            expect(db.prepare).toHaveBeenCalledTimes(40);
         });
     });
 });

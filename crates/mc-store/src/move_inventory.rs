@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 pub const INVENTORY_VERSION: u32 = 2;
-pub const CONTEXT_SCHEMA_VERSION: u32 = 95;
+pub const CONTEXT_SCHEMA_VERSION: u32 = 96;
 pub const STORE_SCHEMA_VERSION: u32 = 64;
 pub const GLOBAL_USER_PROFILE_PROJECT_PATH: &str = "__global__";
 
@@ -693,6 +693,22 @@ pub const TABLES: &[TableInventory] = &[
     ),
     table!(
         Context,
+        "lkg_served_markers",
+        Ship,
+        RowSelector::Predicate("session_id = ?1"),
+        &["session_id"],
+        &[
+            "session_id",
+            "served_capture_id",
+            "full_coverage",
+            "slot_state"
+        ],
+        &[],
+        Some(KeyPolicy::Preserve),
+        None
+    ),
+    table!(
+        Context,
         "lkg_slot_chunks",
         Ship,
         RowSelector::Predicate("session_id = ?1"),
@@ -721,7 +737,9 @@ pub const TABLES: &[TableInventory] = &[
             "provider_key",
             "captured_at",
             "row_version",
-            "capture_sequence"
+            "capture_sequence",
+            "served_capture_id",
+            "input_move_digests"
         ],
         &[],
         Some(KeyPolicy::Preserve),
@@ -2760,7 +2778,7 @@ mod tests {
             import { runMigrations } from './packages/plugin/src/features/magic-context/migrations';
             const db = new Database(process.env.MOVE_TEST_CONTEXT);
             initializeDatabase(db); runMigrations(db);
-            if (LATEST_SUPPORTED_VERSION !== 95 || db.prepare('SELECT MAX(version) AS v FROM schema_migrations WHERE version < 10000').get().v !== 95) throw new Error('update the schema-pinned inventory');
+            if (LATEST_SUPPORTED_VERSION !== 96 || db.prepare('SELECT MAX(version) AS v FROM schema_migrations WHERE version < 10000').get().v !== 96) throw new Error('update the schema-pinned inventory');
             db.close();
         "#;
         let output = Command::new("bun")
@@ -2988,7 +3006,7 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
         let session_tables: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(session_tables.len(), 34);
+        assert_eq!(session_tables.len(), 35);
         for table in session_tables {
             assert!(matches!(
                 entry(Store::Context, &table).unwrap().class,

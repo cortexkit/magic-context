@@ -108,6 +108,7 @@ import {
     measureLkgReplayRequest,
     RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN,
 } from "./lkg-replay-fit";
+import { recordServedCapture, recordServedSlotState } from "./lkg-served-marker";
 import {
     captureSlot,
     contentSnapshotValue,
@@ -153,6 +154,7 @@ import {
     type OrdinalResolveStats,
     resolveOrdinalsForModule,
 } from "./module-wire";
+import { moveMessageDigestFromFields } from "./move-inputs";
 import { onNoteTrigger } from "./note-nudger";
 import { RECOVERY_NO_HEAD_LIMIT } from "./protected-tail-boundary";
 import { RawFallbackContextLimitError } from "./raw-fallback-context-limit";
@@ -291,6 +293,7 @@ export interface RustModeModuleClient extends ModuleStateSyncClient {
 }
 
 interface RustLkgCapturePlan {
+    servedCaptureId?: number;
     sessionId: string;
     inputIds: string[];
     inputSnapshots: readonly Pick<MessageContentSnapshot, "fields">[];
@@ -2090,7 +2093,7 @@ export function createRustModeTransform(
             return false;
         }
         if (!entry) {
-            dropSlot(sessionId, "lkg_invalidated_reshape");
+            dropSlot(sessionId, "lkg_invalidated_reshape", deps.compactionOff !== true);
             const state = states.get(sessionId);
             if (state) state.lkgAcceptedCapture = undefined;
             sessionLog(sessionId, "lkg_invalidated_reshape");
@@ -2171,10 +2174,13 @@ export function createRustModeTransform(
         deps.db
             .transaction(() => {
                 setRustMarkerAdmissionFence(deps.db, sessionId, true);
+                if (!deps.compactionOff)
+                    recordServedSlotState(deps.db, sessionId, "rust_marker_admission_fenced");
                 if (!quarantine) clearPersistedLkgSlotStrict(deps.db, sessionId);
             })
             .immediate();
-        if (!quarantine) dropSlot(sessionId, "rust_marker_admission_fenced");
+        if (!quarantine)
+            dropSlot(sessionId, "rust_marker_admission_fenced", deps.compactionOff !== true);
         state.lkgAcceptedCapture = undefined;
         state.lkgSyncCaptureRequired = true;
     };
@@ -2351,6 +2357,9 @@ export function createRustModeTransform(
             capturedAt: Date.now(),
             rowVersion: responseRowVersion,
             captureSequence: state.lkgCaptureSequence,
+            servedCaptureId: deps.compactionOff
+                ? undefined
+                : recordServedCapture(deps.db, sessionId, true),
             requestIdentity: claimLkgRequestIdentity(sessionId),
             systemPromptTokens,
             agentName: deps.getNotificationParams?.(sessionId)?.agent,
@@ -2406,6 +2415,9 @@ export function createRustModeTransform(
             capturedAt: plan.capturedAt,
             rowVersion: plan.rowVersion,
             captureSequence: plan.captureSequence,
+            servedCaptureId: plan.servedCaptureId,
+            fullCoverage: true,
+            inputMoveDigests: inputs.map((input) => moveMessageDigestFromFields(input.fields)),
         };
         const rejection = lkgSlotRejection(plan.sessionId, slot);
         const captured = rejection === null && captureSlot(plan.sessionId, slot);
@@ -4340,7 +4352,11 @@ export function createRustModeTransform(
                         // A priced module replacement invalidates its prior durable
                         // snapshot even when final admission refuses before installation.
                         if (cacheBustingPass) {
-                            dropSlot(sessionId, "lkg_over_limit_replacement");
+                            dropSlot(
+                                sessionId,
+                                "lkg_over_limit_replacement",
+                                deps.compactionOff !== true,
+                            );
                             state.lkgAcceptedCapture = undefined;
                         }
                         const error = contextRefusalError(refusal);
@@ -4380,7 +4396,11 @@ export function createRustModeTransform(
                 // replacement is installed. If installation fails, the prior LKG remains available
                 // and its replay still applies durable binding-mismatch strips.
                 if (synchronousReplacement && !markerDefinitelyNoCut) {
-                    dropSlot(sessionId, "lkg_cache_bust_pending_capture");
+                    dropSlot(
+                        sessionId,
+                        "lkg_cache_bust_pending_capture",
+                        deps.compactionOff !== true,
+                    );
                     state.lkgAcceptedCapture = undefined;
                 }
                 // Build the capture from the installed array. Rebuilds and local safety
@@ -4405,7 +4425,12 @@ export function createRustModeTransform(
                     ) {
                         return;
                     }
-                    if (!markerDefinitelyNoCut) dropSlot(sessionId, `lkg_${mode}_capture_failed`);
+                    if (!markerDefinitelyNoCut)
+                        dropSlot(
+                            sessionId,
+                            `lkg_${mode}_capture_failed`,
+                            deps.compactionOff !== true,
+                        );
                     state.lkgAcceptedCapture = undefined;
                     state.lkgSyncCaptureRequired = true;
                     sessionLog(
@@ -4644,6 +4669,12 @@ export function createRustModeTransform(
                     deps.db
                         .transaction(() => {
                             if (markerSafeSnapshot) {
+                                markerSafeSnapshot = {
+                                    ...markerSafeSnapshot,
+                                    servedCaptureId: deps.compactionOff
+                                        ? undefined
+                                        : recordServedCapture(deps.db, sessionId, true),
+                                };
                                 if (!saveLkgSlotToDb(deps.db, sessionId, markerSafeSnapshot))
                                     throw new Error("could not restore the unchanged-boundary LKG");
                             } else {
@@ -4659,7 +4690,11 @@ export function createRustModeTransform(
                     if (markerSafeSnapshot && !captureSlot(sessionId, markerSafeSnapshot))
                         throw new Error("could not restore the unchanged-boundary LKG in memory");
                     if (!markerSafeSnapshot)
-                        dropSlot(sessionId, "unchanged_boundary_without_prior_lkg");
+                        dropSlot(
+                            sessionId,
+                            "unchanged_boundary_without_prior_lkg",
+                            deps.compactionOff !== true,
+                        );
                     state.markerAdmissionFenced = false;
                     state.lkgAcceptedCapture = undefined;
                     state.lkgSyncCaptureRequired = true;
@@ -4856,7 +4891,7 @@ export function createRustModeTransform(
             const projectRoot =
                 states.get(sessionId)?.recordedSessionDirectory ?? options.projectRoot ?? null;
             const clearLocalState = () => {
-                dropSlot(sessionId, "session-deleted");
+                dropSlot(sessionId, "session-deleted", deps.compactionOff !== true);
                 states.delete(sessionId);
                 passStampBySession.delete(sessionId);
                 heapHolder.wireCaches.delete(sessionId);

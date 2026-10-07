@@ -98,7 +98,7 @@ describe("startup migrations run on a worker thread", () => {
         closeDatabase();
         const setup = new Database(dbPath);
         setup.exec(
-            "DELETE FROM schema_migrations WHERE version=95; DROP TABLE git_commit_fts_rowid_map",
+            "DELETE FROM schema_migrations WHERE version>=95; DROP TABLE git_commit_fts_rowid_map",
         );
         setup.close();
         __setMigrationWorkerEntryForTests(pathToFileURL(join(root, "missing-worker.mjs")));

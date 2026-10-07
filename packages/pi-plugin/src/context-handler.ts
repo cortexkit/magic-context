@@ -4095,6 +4095,7 @@ export function registerPiContextHandler(
 					/* Missing optional attribution must not prevent capturing the good prefix. */
 				}
 				serializedOutput = lkgCoordinator.captureAppliedPass({
+					certify: !lkgCompactionOff,
 					hostEnvelopeSignature,
 					snapshot: lkgPassSnapshot,
 					outputMessages,

@@ -3,6 +3,7 @@ import {
 	saveLkgSlotToDb,
 } from "@magic-context/core/hooks/magic-context/lkg-persist";
 import { replayLkg } from "@magic-context/core/hooks/magic-context/lkg-replay";
+import { recordServedCapture } from "@magic-context/core/hooks/magic-context/lkg-served-marker";
 import {
 	captureSlot,
 	contentSnapshotValue,
@@ -26,6 +27,7 @@ import {
 	registerLkgPersistence,
 	signatureForFields,
 } from "@magic-context/core/hooks/magic-context/lkg-slot";
+import { moveMessageDigestFromFields } from "@magic-context/core/hooks/magic-context/move-inputs";
 import type { MessageLike } from "@magic-context/core/hooks/magic-context/transform-operations";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { sessionLog } from "@magic-context/core/shared/logger";
@@ -90,6 +92,7 @@ interface PiLkgSessionState {
 }
 
 interface PiLkgCapturePlan {
+	servedCaptureId?: number;
 	sessionId: string;
 	inputs: PiLkgInputSnapshot[];
 	jsonPrefix: string;
@@ -229,6 +232,8 @@ export interface PiLkgCoordinator {
 		outputMessages: readonly unknown[];
 		outputEntryIds?: readonly (string | null | undefined)[];
 		cacheBusting: boolean;
+		/** Native compaction owns the prompt when false; no move certification. */
+		certify?: boolean;
 		hostEnvelopeSignature?: string;
 	}): PiLkgSerializedOutput | undefined;
 }
@@ -752,7 +757,11 @@ export function createPiLkgCoordinator(
 					}
 				: null;
 		} catch (error) {
-			dropSlot(snapshot.sessionId, "lkg_snapshot_serialize_failed");
+			dropSlot(
+				snapshot.sessionId,
+				"lkg_snapshot_serialize_failed",
+				args.certify !== false,
+			);
 			const failedState = stateFor(snapshot.sessionId);
 			failedState.syncCaptureRequired = true;
 			failedState.acceptedInputs = null;
@@ -829,15 +838,30 @@ export function createPiLkgCoordinator(
 				...livePrior,
 				capturedAt: plan.capturedAt,
 				captureSequence: plan.captureSequence,
+				fullCoverage: true,
 			};
 			if (captureSlot(plan.sessionId, kept)) state.acceptedSlot = kept;
 			else state.syncCaptureRequired = true;
 		}
 		if (args.cacheBusting && !unchanged) {
-			dropSlot(snapshot.sessionId, "lkg_cache_bust_pending_capture");
+			dropSlot(
+				snapshot.sessionId,
+				"lkg_cache_bust_pending_capture",
+				args.certify !== false,
+			);
 			// Replay is invalidated immediately, but detached input fingerprints are
 			// safe for a new capture after exact id/content validation.
 		}
+		// Only the small cross-process identity is synchronous. Unchanged bytes
+		// retain their previous identity and do not rewrite either durable record.
+		plan.servedCaptureId =
+			args.certify === false
+				? undefined
+				: unchanged &&
+						!state.syncCaptureRequired &&
+						livePrior.servedCaptureId !== undefined
+					? livePrior.servedCaptureId
+					: recordServedCapture(db, snapshot.sessionId, true);
 		// Keep all N stable inputs flattened before returning from this context handler.
 		// Pi passes a structured clone through awaited extension handlers, so a later
 		// extension in the same emitContext call may rewrite any returned entry before
@@ -898,6 +922,7 @@ export function createPiLkgCoordinator(
 					prior &&
 					reusedPrefix === plan.inputs.length &&
 					prior.inputIdSeq.length === plan.inputs.length &&
+					prior.servedCaptureId === plan.servedCaptureId &&
 					prior.jsonPrefix === plan.jsonPrefix &&
 					JSON.stringify(prior.piOutputEntryIds) === JSON.stringify(ownership)
 				) {
@@ -915,6 +940,11 @@ export function createPiLkgCoordinator(
 					providerKey: plan.providerKey,
 					capturedAt: plan.capturedAt,
 					captureSequence: plan.captureSequence,
+					servedCaptureId: plan.servedCaptureId,
+					fullCoverage: true,
+					inputMoveDigests: plan.inputs.map((input) =>
+						moveMessageDigestFromFields(input.fields),
+					),
 				};
 				if (!captureSlot(plan.sessionId, slot)) {
 					throw new Error("LKG slot rejected the Pi snapshot");
@@ -925,7 +955,11 @@ export function createPiLkgCoordinator(
 				state.syncCaptureRequired = !persisted;
 			} catch (error) {
 				if (plan.captureSequence !== state.captureSequence) return;
-				dropSlot(plan.sessionId, "lkg_async_capture_failed");
+				dropSlot(
+					plan.sessionId,
+					"lkg_async_capture_failed",
+					args.certify !== false,
+				);
 				state.syncCaptureRequired = true;
 				state.acceptedInputs = null;
 				sessionLog(
@@ -951,7 +985,11 @@ export function createPiLkgCoordinator(
 			try {
 				scheduleCapture(commit);
 			} catch (error) {
-				dropSlot(plan.sessionId, "lkg_capture_schedule_failed");
+				dropSlot(
+					plan.sessionId,
+					"lkg_capture_schedule_failed",
+					args.certify !== false,
+				);
 				state.syncCaptureRequired = true;
 				state.acceptedInputs = null;
 				sessionLog(

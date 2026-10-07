@@ -125,6 +125,7 @@ import {
 } from "./inject-compartments";
 import { saveLkgSlotToDb } from "./lkg-persist";
 import { captureLkgSlot, createLkgEntryProjector, resolveLkgModelKeys } from "./lkg-replay";
+import { recordServedCapture } from "./lkg-served-marker";
 import { beginLkgPass, dropSlot, getInMemorySlot } from "./lkg-slot";
 import { onNoteTrigger } from "./note-nudger";
 import {
@@ -1215,7 +1216,7 @@ export function createTransform(deps: TransformDeps) {
                     const preserveOutgoingOverflow =
                         outgoingOverflow.detectedContextLimit > 0 &&
                         outgoingOverflow.detectedContextLimitModelKey !== null;
-                    dropSlot(sessionId, "model-change");
+                    dropSlot(sessionId, "model-change", deps.compactionOff !== true);
                     sessionLog(
                         sessionId,
                         `transform: model change since last usage (${lastUsageModelKey} -> ${outgoingModelKey}), clearing stale per-model state`,
@@ -1381,7 +1382,7 @@ export function createTransform(deps: TransformDeps) {
                     // Flag-only arm: undefined reportedLimit sets
                     // needs_emergency_recovery WITHOUT writing
                     // detected_context_limit.
-                    dropSlot(sessionId, "overflow-recovery-arm");
+                    dropSlot(sessionId, "overflow-recovery-arm", deps.compactionOff !== true);
                     recordOverflowDetected(
                         db,
                         sessionId,
@@ -3025,6 +3026,11 @@ export function createTransform(deps: TransformDeps) {
                 providerKey,
                 systemPromptTokens: sessionMeta.systemPromptTokens,
                 agentName: notificationParams?.agent,
+                onPrepared: deps.compactionOff
+                    ? undefined
+                    : (slot, fullCoverage) => {
+                          slot.servedCaptureId = recordServedCapture(db, sessionId, fullCoverage);
+                      },
             });
             if (captured) {
                 // Keep the durable snapshot in step with the TS-mode capture too:
@@ -3039,8 +3045,8 @@ export function createTransform(deps: TransformDeps) {
                     );
                 }
             }
-            if (postTransformResult.bustedThisPass && !captured) {
-                dropSlot(sessionId, "lkg_refresh_declined");
+            if (!captured) {
+                dropSlot(sessionId, "lkg_refresh_declined", deps.compactionOff !== true);
             }
         } else if (passOutcome.degradations.length > 0) {
             sessionLog(
