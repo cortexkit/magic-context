@@ -195,6 +195,16 @@ pub fn route_targets(config: &RouteTargetConfig) -> Vec<String> {
     targets
 }
 
+/// A real test caller opens MC's incoming tool route, not one of MC's consumed
+/// runner/gateway routes. Keep the wire construction here without advertising
+/// a production self-consume edge.
+#[cfg(test)]
+pub(crate) fn catalog_provider_target_for_test() -> RouteTarget {
+    RouteTarget::ToolProvider {
+        module_id: crate::DEFAULT_MODULE_ID.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;

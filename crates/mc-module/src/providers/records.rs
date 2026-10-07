@@ -101,11 +101,55 @@ pub struct Record {
 /// policy or schema: store open and migrations finish before the slot is filled.
 pub struct Storage {
     store: Arc<OnceLock<Arc<McStore>>>,
+    /// If storage cannot record admission, the process remembers that fact until
+    /// a full successful refetch. Discovery still serves its unchanged bytes.
+    catalog_failures: Mutex<BTreeMap<(PathBuf, String), String>>,
 }
 
 impl Storage {
     pub fn new(store: Arc<OnceLock<Arc<McStore>>>) -> Self {
-        Self { store }
+        Self {
+            store,
+            catalog_failures: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    pub fn record_catalog_failure(&self, binding: &SessionBinding, error: &HandlerOutcome) {
+        let reason = match error {
+            HandlerOutcome::Error { code, message }
+            | HandlerOutcome::ErrorWithDetail { code, message, .. } => format!("{code}: {message}"),
+            _ => "catalog persistence failed".to_string(),
+        };
+        tracing::warn!(
+            reason,
+            "mc-module: tool catalog served without durable provider admission"
+        );
+        self.catalog_failures
+            .lock()
+            .expect("catalog failures")
+            .insert(
+                (binding.project_root.clone(), binding.session.trim().into()),
+                reason,
+            );
+    }
+
+    pub fn clear_catalog_failure(&self, binding: &SessionBinding) {
+        self.catalog_failures
+            .lock()
+            .expect("catalog failures")
+            .remove(&(binding.project_root.clone(), binding.session.trim().into()));
+    }
+
+    pub fn catalog_refusal(
+        &self,
+        binding: &SessionBinding,
+        session: &str,
+    ) -> Option<HandlerOutcome> {
+        self.catalog_failures.lock().expect("catalog failures").get(&(binding.project_root.clone(),session.trim().into())).map(|reason|HandlerOutcome::ErrorWithDetail {
+            code:"provider_catalog_unpersisted".into(),
+            message:"The admitted tool catalog was not persisted; fetch tool.catalog again after storage is available".into(),
+            detail:json!({"cause":reason}),
+        })
     }
 
     fn store(&self) -> Result<&McStore, HandlerOutcome> {
@@ -153,6 +197,9 @@ impl Storage {
     }
 
     pub fn tool_key(&self, binding: &SessionBinding) -> Result<Key, HandlerOutcome> {
+        if let Some(refusal) = self.catalog_refusal(binding, &binding.session) {
+            return Err(refusal);
+        }
         let rows = self
             .store()?
             .provider_records_for_session(

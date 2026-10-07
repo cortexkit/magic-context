@@ -58,7 +58,7 @@ fn example_catalog_config() -> CatalogConfig {
 
 /// The same example config as the module holds it after reading the user and
 /// project tiers (`config::merge_tiers_with_warnings` is tested on its own).
-fn example_module_config() -> McModuleConfig {
+pub(super) fn example_module_config() -> McModuleConfig {
     let mut config = default_test_config();
     config.catalog = crate::config::CatalogConfigInputs {
         prompt_surface_default: Some("full".to_string()),

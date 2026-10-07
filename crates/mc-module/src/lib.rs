@@ -686,6 +686,9 @@ struct StoreOpenCoordinator {
     policy: Mutex<StoreOpenPolicy>,
     attempt: Mutex<Option<StoreOpenAttempt>>,
     failure: Mutex<Option<StoreOpenFailure>>,
+    /// A deterministic startup barrier for exercising the real route/open race.
+    #[cfg(test)]
+    open_gate: Mutex<Option<Arc<Notify>>>,
 }
 
 impl StoreOpenCoordinator {
@@ -703,6 +706,8 @@ impl StoreOpenCoordinator {
             policy: Mutex::new(StoreOpenPolicy::default()),
             attempt: Mutex::new(None),
             failure: Mutex::new(None),
+            #[cfg(test)]
+            open_gate: Mutex::new(None),
         }
     }
 
@@ -4601,6 +4606,17 @@ impl McHandler {
         coordinator: Arc<StoreOpenCoordinator>,
         descriptor: StorageDescriptor,
     ) {
+        #[cfg(test)]
+        {
+            let gate = coordinator
+                .open_gate
+                .lock()
+                .expect("store open test gate")
+                .clone();
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+        }
         let policy = *coordinator.policy.lock().expect("store open policy mutex");
         let mut last_lease_error = match Self::open_store_once(&descriptor).await {
             Ok(opened) => {
@@ -12742,7 +12758,7 @@ impl McHandler {
             // reaches them by name on Magic Context's tool route whether or not it
             // declared the role at bind.
             cortexkit_role_tool_provider::ops::TOOL_CATALOG => {
-                self.handle_tool_catalog_value(channel, &request)
+                self.handle_tool_catalog_value(channel, &request).await
             }
             cortexkit_role_tool_provider::ops::ROLE_DESCRIBE => providers::describe(),
             // A consumer that declared tool-provider/v1 gets the role's refusal for a
@@ -12762,7 +12778,7 @@ impl McHandler {
 
     /// `tool.catalog`: the catalog and guidance text for the request's plan item,
     /// resolved against the configuration of the project the route is bound to.
-    fn handle_tool_catalog_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
+    async fn handle_tool_catalog_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
         let Ok(binding) = self.facade_binding(channel) else {
             return HandlerOutcome::Error {
                 code: "route_unbound".to_string(),
@@ -12776,9 +12792,6 @@ impl McHandler {
                 if arguments.get("composition").is_some_and(Value::is_object)
                     && arguments.get("digest_only") != Some(&Value::Bool(true))
                 {
-                    if self.store.get().is_none() {
-                        return self.store_refusal();
-                    }
                     // These bytes were just produced by the catalog, not supplied
                     // by a caller. Retain only the facts needed to admit calls.
                     let answer: Value = serde_json::from_slice(&bytes).expect("catalog JSON");
@@ -12798,8 +12811,17 @@ impl McHandler {
                             .expect("validated composition"),
                         tools: tools.clone(),
                     };
-                    if let Err(error) = self.provider_store.save_catalog(&binding, &catalog) {
-                        return error;
+                    // HELLO_ACK starts the coordinator's open asynchronously. A
+                    // bound plan-fetch route can get here before it completes,
+                    // without any transform ever having run. Wait through that
+                    // existing startup path, but keep discovery storage-independent.
+                    let persisted = match self.store_for_request().await {
+                        Ok(_) => self.provider_store.save_catalog(&binding, &catalog),
+                        Err(refusal) => Err(refusal.into_outcome()),
+                    };
+                    match persisted {
+                        Ok(()) => self.provider_store.clear_catalog_failure(&binding),
+                        Err(error) => self.provider_store.record_catalog_failure(&binding, &error),
                     }
                     self.frozen_tool_catalogs
                         .lock()
@@ -14368,11 +14390,28 @@ impl McHandler {
             .get("method")
             .and_then(Value::as_str)
             .or_else(|| request.get("kind").and_then(Value::as_str));
+        let catalog_request = method.is_none()
+            && request.get("name").and_then(Value::as_str) == Some("tool.catalog")
+            && request.get("arguments").is_some();
+        if matches!(
+            method,
+            Some("compaction.setup" | "compaction.step" | "transform.hook")
+        ) {
+            if let (Ok(binding), Some(session)) = (
+                self.facade_binding(channel),
+                request.pointer("/params/session").and_then(Value::as_str),
+            ) {
+                if let Some(refusal) = self.provider_store.catalog_refusal(&binding, session) {
+                    return refusal;
+                }
+            }
+        }
         // A store that a newer ck-mc migrated past this binary refuses every request by name,
         // whatever its lane. Most lanes would refuse anyway because no store handle exists, but
-        // a lane that can answer without the store would otherwise half-work, and each lane
-        // rendering its own "no store" error would hide the one fact the caller needs.
-        if method != Some("echo") {
+        // Catalog discovery is the exception: its bytes derive from config, not
+        // rows. It reports a failed persistence attempt only to later stateful
+        // provider calls; a plan fetch must not turn into a storage refusal.
+        if method != Some("echo") && !catalog_request {
             if let Some(refusal) = self.store_open.store_ahead_refusal() {
                 let facade = method.is_none()
                     && request.get("name").is_some()
@@ -19166,6 +19205,7 @@ mod tests {
     pub(crate) fn per_pass_fixed_now_ms() -> Option<i64> {
         per_pass_cost::fixed_now_ms()
     }
+    mod catalog_startup;
     mod single_store_drill;
     mod tool_catalog;
     mod tool_catalog_conformance;
@@ -20700,7 +20740,7 @@ mod tests {
         let line = supported_fences_line();
         assert_eq!(
             line,
-            format!("context.db=95 store.db={LATEST_MIGRATION_VERSION}")
+            format!("context.db=96 store.db={LATEST_MIGRATION_VERSION}")
         );
     }
 

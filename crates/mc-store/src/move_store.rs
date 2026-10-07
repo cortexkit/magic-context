@@ -160,11 +160,9 @@ pub(crate) fn install_writer_guards(conn: &Connection) -> rusqlite::Result<()> {
         if table.class == Class::NotSession {
             continue;
         }
-        let owner = if table.table == "mc_facade_mutation_ledger" {
-            "identity_scope"
-        } else {
-            "session_id"
-        };
+        let owner = table.session_column().ok_or_else(|| {
+            rusqlite::Error::InvalidColumnName(format!("{} session owner", table.table))
+        })?;
         for action in ["INSERT", "UPDATE", "DELETE"] {
             let sides: &[&str] = match action {
                 "INSERT" => &["NEW"],
@@ -926,11 +924,9 @@ fn validate_row_owner(
     row: &[Value],
     session: &str,
 ) -> Result<(), MoveError> {
-    let owner = if table.table == "mc_facade_mutation_ledger" {
-        "identity_scope"
-    } else {
-        "session_id"
-    };
+    let owner = table
+        .session_column()
+        .ok_or_else(|| MoveError::refusal("inventory_mismatch"))?;
     let columns = table.shipped_columns();
     let index = columns
         .iter()

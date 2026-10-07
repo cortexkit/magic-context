@@ -109,6 +109,36 @@ connection and fenced transactions. The store's `synchronous=NORMAL` policy is
 unchanged: the fault cuts promise survival of a provider process kill, not a
 separate host power-loss synchronization guarantee.
 
+### First catalog fetch and startup ordering
+
+The SDK's `serve_with_handle` awaits HELLO_ACK and `on_hello_ack` before starting
+its frame loop. `McHandler::on_hello_ack` starts `StoreOpenCoordinator` with
+`tokio::spawn`; it does not await the database open. `on_bind` likewise records
+the route without waiting for storage. Therefore a first composition catalog
+fetch can arrive on a bound route before the store opens and before any transform.
+
+The catalog joins that existing coordinator's bounded request wait. If opening
+or persistence fails, it still returns the exact pinned catalog bytes, retains
+the in-process admitted tools, and logs/records the persistence failure for the
+bound project and session. Later stateful provider calls refuse by the name
+`provider_catalog_unpersisted`, even if the open subsequently succeeds, until a
+successful full catalog refetch records admission. Digest-only and preflight
+probes do not clear that failure. The failure marker is process-local when the
+store cannot be written; no second database or side file is created.
+
+`src/tests/catalog_startup.rs` drives a fresh `McHandler` through the real
+subc-daemon and SDK callbacks. Its startup barrier proves that both route bind
+and the first catalog request precede the completed open, compares the returned
+bytes to `head-full.answer.jcs`, and covers fresh, ahead-fenced, damaged and
+delayed storage. No transform runs in these cases.
+
+Step-hook subscriptions are advisory (`on_unavailable: "pass"`) and declare a
+1,500 ms budget, below Broca's 30,000 ms admission cap. Broca freezes applied ops
+or an unavailable outcome in the subject's WAL record and never re-runs that
+subject. Pending reminders/nudges therefore target later subjects, and MC must
+advance applied state only from accepted, durably observed effects. S4 exercises
+that WAL acceptance/unavailable integration, including permanent missed edits.
+
 **Deferred guidance sentence:** commons `CatalogRequest` has only `params`,
 `preset`, `composition`, `system_text` and `digest_only`. It has no actual
 model-visible tool set. `composition.providers` records admitted provider tools,

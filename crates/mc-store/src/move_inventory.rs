@@ -76,6 +76,18 @@ pub struct TableInventory {
 }
 
 impl TableInventory {
+    /// The classified owner coordinate used by write guards and imported-row
+    /// validation. Provider records spell it `session`; the facade ledger uses
+    /// `identity_scope`. Neither may silently fall back to a nonexistent column.
+    pub fn session_column(&self) -> Option<&'static str> {
+        if !matches!(self.rows, RowSelector::Predicate(_)) {
+            return None;
+        }
+        ["session_id", "identity_scope", "session"]
+            .into_iter()
+            .find(|column| self.columns.contains(column))
+    }
+
     pub fn shipped_columns(&self) -> Vec<&'static str> {
         if self.class != Class::Ship {
             return Vec::new();

@@ -115,6 +115,11 @@ impl McHandler {
                 Err(e) => e,
             };
         }
+        if let Some(session) = params.get("session").and_then(Value::as_str) {
+            if let Some(refusal) = self.provider_store.catalog_refusal(&binding, session) {
+                return refusal;
+            }
+        }
         let result = match method {
             "compaction.setup" => self.provider_setup(binding, params).await,
             "compaction.step" => self.provider_step(binding, params).await,

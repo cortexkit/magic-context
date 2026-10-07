@@ -701,6 +701,39 @@ fn fault_points_match_the_pinned_role_vocabulary() {
     assert_eq!(FAULT_POINTS, expected);
 }
 
+#[test]
+fn every_declared_hook_is_advisory_and_within_broca_budget_cap() {
+    use hooks::subscription::OnUnavailable;
+    for preset in ["head", "worker", "reader"] {
+        for composition in [
+            None,
+            Some(json!({"compaction":{"provider":DEFAULT_MODULE_ID}})),
+            Some(json!({"compaction":{"provider":"another-provider"}})),
+        ] {
+            let mut request = json!({"preset":preset,"params":{}});
+            if let Some(composition) = composition {
+                request["composition"] = composition;
+            }
+            let declared = declaration(&request).unwrap();
+            assert!(!declared.subscriptions.is_empty());
+            for subscription in declared.subscriptions {
+                // Broca refuses plans above 30 seconds. MC edits are advisory:
+                // an unavailable hook must leave the subject unchanged, not fail
+                // a user turn over tagging, stripping or reminder optimisation.
+                assert!(
+                    subscription.budget_ms > 0 && subscription.budget_ms <= 30_000,
+                    "{preset}: {subscription:?}"
+                );
+                assert_eq!(
+                    subscription.on_unavailable,
+                    Some(OnUnavailable::Pass),
+                    "{preset}: {subscription:?}"
+                );
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn catalog_and_hook_high_water_survive_a_fresh_handler() {
     let dir = tempfile::tempdir().unwrap();

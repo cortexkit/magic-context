@@ -749,6 +749,7 @@ dependencies = [
  "subc-client-rs",
  "subc-control",
  "subc-core",
+ "subc-daemon",
  "subc-os",
  "subc-protocol",
  "subc-transport",

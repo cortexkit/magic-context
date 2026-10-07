@@ -222,7 +222,7 @@ fn frozen_fence_triggers_cover_insert_update_delete_for_every_session_table() {
                 let values = fields
                     .iter()
                     .map(|(name, ty)| {
-                        if name == "session_id" || name == "identity_scope" {
+                        if Some(name.as_str()) == table.session_column() {
                             Value::Text("ses_move".into())
                         } else if ty.contains("INT") {
                             Value::Integer(1)
@@ -260,11 +260,7 @@ fn frozen_fence_triggers_cover_insert_update_delete_for_every_session_table() {
             for table in move_inventory::tables(Store::Module).filter(|t| {
                 t.class != Class::NotSession && matches!(t.rows, RowSelector::Predicate(_))
             }) {
-                let owner = if table.table == "mc_facade_mutation_ledger" {
-                    "identity_scope"
-                } else {
-                    "session_id"
-                };
+                let owner = table.session_column().expect("classified session owner");
                 let quoted = codec::quoted(table.table);
                 for sql in [
                     format!(

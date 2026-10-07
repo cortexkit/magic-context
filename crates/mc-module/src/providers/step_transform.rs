@@ -5,6 +5,9 @@ pub fn declaration(params: &Value) -> Result<hooks::subscription::Declaration, H
     use hooks::subscription::{Declaration, DeclaredSubscription as Sub, Hook, OnUnavailable, Op};
     let request: hooks::subscription::DeclareRequest = decode(params)?;
     preset(request.preset.as_deref())?;
+    // These edits optimise a single new subject. Broca freezes unavailable
+    // outcomes too, so a missed tag, strip or reminder must pass through rather
+    // than fail the user's turn; any still-due append targets a later subject.
     let mut subscriptions = vec![
         Sub::new(Hook::PreUser, vec![Op::Append], HOOK_BUDGET_MS)
             .with_on_unavailable(OnUnavailable::Pass),
