@@ -542,7 +542,9 @@ impl McStore {
     pub fn resume_all_pending_context_writes(&self) -> Result<usize, McStoreError> {
         let sessions: Vec<String> = self.inner.with_conn(|conn| {
             let mut statement = conn.prepare(
-                "SELECT session_id FROM mc_single_store_pending_publish ORDER BY created_at",
+                "SELECT p.session_id FROM mc_single_store_pending_publish p
+                 WHERE NOT EXISTS(SELECT 1 FROM mc_move_fences f WHERE f.session_id = p.session_id)
+                 ORDER BY p.created_at",
             )?;
             let rows = statement
                 .query_map([], |row| row.get::<_, String>(0))?

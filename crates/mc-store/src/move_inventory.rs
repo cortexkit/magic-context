@@ -1,15 +1,13 @@
 //! Schema-pinned move inventory, generated from fresh context/store migration heads.
 //!
-//! This module is intentionally path-importable until the move API wires it into
-//! mc-store. See docs/designs/mc-move-deviations.md for the standalone test harness.
 //! New schema objects must be reviewed here before any exporter reads row data.
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-pub const INVENTORY_VERSION: u32 = 1;
+pub const INVENTORY_VERSION: u32 = 2;
 pub const CONTEXT_SCHEMA_VERSION: u32 = 95;
-pub const STORE_SCHEMA_VERSION: u32 = 63;
+pub const STORE_SCHEMA_VERSION: u32 = 64;
 pub const GLOBAL_USER_PROFILE_PROJECT_PATH: &str = "__global__";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +107,94 @@ macro_rules! table {
 /// Stable table order for the v1 stream; each store half is filtered from this
 /// explicit list. Schema discovery is validation only and never grants shipping.
 pub const TABLES: &[TableInventory] = &[
+    table!(
+        Module,
+        "mc_move_tag_epochs",
+        NotSession,
+        RowSelector::None,
+        &["session_id"],
+        &["session_id", "generation"],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Module,
+        "cortexkit_fence",
+        NotSession,
+        RowSelector::None,
+        &["id"],
+        &["id", "epoch"],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Module,
+        "mc_move_fences",
+        NotSession,
+        RowSelector::None,
+        &["session_id"],
+        &["session_id", "cut_id", "phase"],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Module,
+        "mc_move_cuts",
+        NotSession,
+        RowSelector::None,
+        &["cut_id"],
+        &[
+            "cut_id",
+            "session_id",
+            "binding",
+            "manifest_digest",
+            "state",
+            "result",
+            "file_path",
+            "discard_table"
+        ],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Module,
+        "mc_move_installs",
+        NotSession,
+        RowSelector::None,
+        &["cut_id"],
+        &[
+            "cut_id",
+            "session_id",
+            "manifest_digest",
+            "table_index",
+            "file_offset",
+            "rows_remaining",
+            "last_source_key",
+            "complete",
+            "prior_generation",
+            "shipped_generation",
+            "tag_count",
+            "max_tag_number"
+        ],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Module,
+        "mc_move_key_map",
+        NotSession,
+        RowSelector::None,
+        &["cut_id", "table_name", "source_key"],
+        &["cut_id", "table_name", "source_key", "destination_key"],
+        &[],
+        None,
+        None
+    ),
     // BEGIN FRESH-MIGRATION CENSUS
     // context.db: 106 tables observed after fresh migration.
     table!(

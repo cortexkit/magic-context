@@ -136,6 +136,11 @@ fn matches_canonical_id(raw: &str, index: Option<i64>, module_id: &str) -> bool 
 pub(crate) struct BoundaryValidationCache {
     entries: std::collections::VecDeque<BoundaryValidationEntry>,
 }
+impl BoundaryValidationCache {
+    pub(crate) fn invalidate_session(&mut self, session: &str) {
+        self.entries.retain(|entry| entry.session != session);
+    }
+}
 
 struct BoundaryValidationEntry {
     session: String,

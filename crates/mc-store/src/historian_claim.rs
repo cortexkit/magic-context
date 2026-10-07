@@ -284,6 +284,32 @@ fn mint_token(run_id: &str, attempt: u32, claimant_instance_id: &str, now_ms: i6
     digest.iter().take(16).map(|b| format!("{b:02x}")).collect()
 }
 
+/// Return true when an owned move drain cancels this session's recorded intent.
+/// Frozen/staged gates are never terminalization permissions.
+fn cancel_for_move(tx: &rusqlite::Transaction<'_>, session: &str) -> rusqlite::Result<bool> {
+    let Some(phase) = crate::move_store::phase(tx, session)? else {
+        return Ok(false);
+    };
+    if phase != "draining" {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_TRIGGER),
+            Some("session_moving".into()),
+        ));
+    }
+    tx.execute(
+        "DELETE FROM mc_historian_pending_run WHERE session_id = ?1",
+        [session],
+    )?;
+    if let Some((version, mut meta)) = load_meta(tx, session)? {
+        if meta.historian.state != HistorianPhase::Idle {
+            meta.historian = crate::idle_historian_after_success(&meta.historian);
+            meta.historian.last_failure = Some("cancelled for session move".into());
+            store_meta(tx, session, version, &meta)?;
+        }
+    }
+    Ok(true)
+}
+
 /// Read a session's meta and its row version inside an open transaction.
 fn load_meta(
     tx: &rusqlite::Transaction<'_>,
@@ -340,6 +366,16 @@ fn store_meta(
 }
 
 impl McStore {
+    /// Complete cancellation of an already recorded historian intent during a
+    /// move drain. No compartments, facts, prompts or cache sections are published.
+    pub fn cancel_historian_for_move(&self, session_id: &str) -> Result<(), McStoreError> {
+        self.inner
+            .with_conn_fenced(|tx| {
+                cancel_for_move(tx, session_id)?;
+                Ok(())
+            })
+            .map_err(Into::into)
+    }
     /// Queue a fired run for a claimant and park the session on `Reclaiming`.
     ///
     /// Both writes land in one transaction: a queue row whose session is not
@@ -429,6 +465,8 @@ impl McStore {
                   WHERE project_path = ?1
                     AND (?2 IS NULL OR session_id = ?2)
                     AND deadline_ms > ?3
+                    AND NOT EXISTS(SELECT 1 FROM mc_move_fences f
+                                   WHERE f.session_id = mc_historian_pending_run.session_id)
                   ORDER BY created_at_ms ASC, run_id ASC",
             )?;
             let mapped = statement
@@ -635,6 +673,11 @@ impl McStore {
                     HistorianReportRefusal::RunExpired,
                 ));
             }
+            if cancel_for_move(tx, &session_id)? {
+                return Ok(HistorianHeartbeatOutcome::Refused(
+                    HistorianReportRefusal::RunExpired,
+                ));
+            }
             let claim_deadline_ms = now_ms.saturating_add(claim.lease_ms).min(claim.deadline_ms);
             tx.execute(
                 "UPDATE mc_historian_pending_run
@@ -739,7 +782,7 @@ impl McStore {
         let outcome = self.inner.with_conn_fenced(|tx| {
             let row = tx
                 .query_row(
-                    "SELECT coordinator_token, report_kind, deadline_ms
+                    "SELECT coordinator_token, report_kind, deadline_ms, session_id
                        FROM mc_historian_pending_run
                       WHERE run_id = ?1 AND project_path = ?2",
                     params![run_id, project_path],
@@ -748,11 +791,12 @@ impl McStore {
                             row.get::<_, Option<String>>(0)?,
                             row.get::<_, Option<String>>(1)?,
                             row.get::<_, i64>(2)?,
+                            row.get::<_, String>(3)?,
                         ))
                     },
                 )
                 .optional()?;
-            let Some((stored_token, existing_report, deadline_ms)) = row else {
+            let Some((stored_token, existing_report, deadline_ms, session_id)) = row else {
                 return Ok(HistorianRecordOutcome::Refused(
                     HistorianReportRefusal::UnknownRun,
                 ));
@@ -778,6 +822,11 @@ impl McStore {
             // gets, because it means the same thing and asks for the same response:
             // the run is over, stop rather than take the next one.
             if deadline_ms <= now_ms {
+                return Ok(HistorianRecordOutcome::Refused(
+                    HistorianReportRefusal::RunExpired,
+                ));
+            }
+            if cancel_for_move(tx, &session_id)? {
                 return Ok(HistorianRecordOutcome::Refused(
                     HistorianReportRefusal::RunExpired,
                 ));
@@ -1004,7 +1053,9 @@ impl McStore {
         let expired = self.inner.with_conn_fenced(|tx| {
             let mut statement = tx.prepare(
                 "SELECT run_id, session_id FROM mc_historian_pending_run
-                  WHERE phase = ?1 AND claim_deadline_ms IS NOT NULL AND claim_deadline_ms <= ?2",
+                   WHERE phase = ?1 AND claim_deadline_ms IS NOT NULL AND claim_deadline_ms <= ?2
+                     AND NOT EXISTS(SELECT 1 FROM mc_move_fences f
+                                    WHERE f.session_id = mc_historian_pending_run.session_id)",
             )?;
             let rows = statement
                 .query_map(params![PHASE_CLAIMED, now_ms], |row| {
@@ -1039,7 +1090,9 @@ impl McStore {
             // the size of the work actually outstanding across restarts.
             let mut statement = tx.prepare(
                 "SELECT run_id FROM mc_historian_pending_run
-                  WHERE phase = ?1 AND deadline_ms <= ?2",
+                   WHERE phase = ?1 AND deadline_ms <= ?2
+                     AND NOT EXISTS(SELECT 1 FROM mc_move_fences f
+                                    WHERE f.session_id = mc_historian_pending_run.session_id)",
             )?;
             let dropped = statement
                 .query_map(params![PHASE_PARKED, now_ms], |row| row.get::<_, String>(0))?

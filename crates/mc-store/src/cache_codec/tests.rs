@@ -998,12 +998,23 @@ fn migration_63_is_the_text_migcheck_verified() {
         .expect("migration 63 is bundled")
         .statements;
     assert_eq!(bundled, verified);
-    assert_eq!(crate::LATEST_MIGRATION_VERSION, 63);
+    // Move metadata is the next migration; migration 63's verified text is unchanged.
+    assert_eq!(crate::LATEST_MIGRATION_VERSION, 64);
 }
 
 /// Put a fresh store back into its version-62 shape: the tables, columns and view migration
 /// 63 adds are dropped, the two array columns it drops come back, and its version record goes.
 fn rewind_to_62(store: &McStore) {
+    // A version-62 writer did not install the move guards, and dropping a
+    // guarded column cannot leave a trigger referring to that newer column.
+    store.inner.with_conn(|conn| {
+        let mut stmt = conn.prepare("SELECT name FROM sqlite_temp_master WHERE type = 'trigger' AND name LIKE 'mc_move_guard_%'")?;
+        let names = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        for name in names {
+            conn.execute_batch(&format!("DROP TRIGGER temp.\"{name}\""))?;
+        }
+        Ok(())
+    }).unwrap();
     exec(
         store,
         "DROP VIEW mc_pass_trace_history_arrays;
@@ -1016,7 +1027,12 @@ fn rewind_to_62(store: &McStore) {
          ALTER TABLE mc_pass_trace DROP COLUMN request_next_seq;
          ALTER TABLE mc_pass_trace ADD COLUMN scheduler_history TEXT NOT NULL DEFAULT '[]';
          ALTER TABLE mc_pass_trace ADD COLUMN scheduler_interesting_history TEXT NOT NULL DEFAULT '[]';
-         DELETE FROM cortexkit_schema_version WHERE namespace = 'mc_cache' AND version = 63;",
+          DROP TABLE mc_move_key_map;
+          DROP TABLE mc_move_installs;
+          DROP TABLE mc_move_cuts;
+          DROP TABLE mc_move_fences;
+          DROP TABLE mc_move_tag_epochs;
+          DELETE FROM cortexkit_schema_version WHERE namespace = 'mc_cache' AND version >= 63;",
     );
 }
 
@@ -1084,7 +1100,10 @@ fn migration_63_moves_every_shape_and_the_codec_reads_it_back() {
     }
     drop(store);
     let store = McStore::open_for_test(&store_descriptor(dir.path())).unwrap();
-    assert_eq!(store.module_store_schema_version().unwrap(), 63);
+    assert_eq!(
+        store.module_store_schema_version().unwrap(),
+        crate::LATEST_MIGRATION_VERSION
+    );
     let loaded = store.load("full").unwrap();
     assert_eq!(loaded.core, full_core);
     assert_eq!(
