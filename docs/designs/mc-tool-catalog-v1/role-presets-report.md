@@ -16,6 +16,27 @@ Aliases, from the one shared definition table: `primary` → `head`, `subagent` 
 `worker`, `tools-only` → `head`. They do not imply compaction. An omitted preset
 defaults to head. OpenCode and Pi plugin tool/guidance paths are unchanged.
 `role.describe` keeps the shared contract's build-only discovery shape.
+It now also lists `compaction-provider/v1` (`role.describe`, `compaction.setup`,
+`compaction.step`) and `step-transform-provider/v1` (`role.describe`,
+`transform.declare`, `transform.hook`), both alpha. The top-level
+`runner_groups` is `["transcript_reads"]`. These methods do not enter the tool
+list. HELLO adds the two new strings to `capabilities.provides`, with no
+capability requirements; the legacy tool-provider role and tools are unchanged.
+
+Example `role.describe` (implementation version varies with the build):
+
+```json
+{
+  "majors": [
+    {"version":"tool-provider/v1","ops":["role.describe","tool.catalog"],"stability":"alpha"},
+    {"version":"compaction-provider/v1","ops":["role.describe","compaction.setup","compaction.step"],"stability":"alpha"},
+    {"version":"step-transform-provider/v1","ops":["role.describe","transform.declare","transform.hook"],"stability":"alpha"}
+  ],
+  "implementation_version": "ck-mc 0.1.0",
+  "capabilities": [],
+  "runner_groups": ["transcript_reads"]
+}
+```
 
 ## Refusal contract for the gateway
 
@@ -75,15 +96,12 @@ succeed on a v1-declaring route, including real memory/note writes, with respons
 byte-identical to a legacy non-declaring route. An omitted call preset still
 cannot bypass an already fetched non-compacting catalog.
 
-**Future Broca compaction prerequisite, reported but not fixed:**
-`frozen_tool_catalogs` is process-local and is lost on ck-mc restart (also when
-the session's last route closes). Broca does not re-fetch its frozen plan on
-resume. Current non-compacting Broca sessions are unaffected, but a future
-compacting Broca head call carrying `preset: head` after a restart has no frozen
-record, is treated as not compacting, and `ctx_reduce` is refused. Before Magic
-Context serves as Broca's compaction provider, this record must be durable or
-re-derivable from the session's frozen plan. No persistence, schema or migration
-change is included here.
+**Runner catalog durability:** the admitted catalog is also recorded in
+`store.db` and runner-bound tool routes consult it after a restart. Preflight,
+digest-only and failed catalog fetches still cannot replace it. Compaction and
+hook records are keyed by the bound project, trimmed handle and required caller
+`harness`; Broca binds routes with `harness: "runner"`. A tool route joins only
+a known, unambiguous handle and never asks the Thalamus gateway to resolve it.
 
 **Deferred guidance sentence:** commons `CatalogRequest` has only `params`,
 `preset`, `composition`, `system_text` and `digest_only`. It has no actual

@@ -44,6 +44,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rusqlite = { workspace = true }
 # subc-protocol is resolved from crates.io, matching the role crate's dependency.
 cortexkit-role-tool-provider = "=0.5.0"
+cortexkit-role-compaction-provider = { git = "https://github.com/cortexkit/commons", rev = "9abd24916a087162b7650ad7db71cf287be1330c" }
+cortexkit-role-step-transform-provider = { git = "https://github.com/cortexkit/commons", rev = "9abd24916a087162b7650ad7db71cf287be1330c" }
 # RFC 8785 (JCS) canonical JSON for tool.catalog's answer bytes and digests: the
 # same canonicaliser the role crate uses, so floats and non-ASCII keys in a
 # caller's composition hash exactly as the runner hashes them.
@@ -67,6 +69,10 @@ nix = { version = "0.31.3", features = ["fs"] }
 #
 # Do NOT add drive-fault to a default feature set, and do NOT add new fault arms
 # without the matching absence-proof note here and the fault-shape tests in lib.rs.
+# MC_PROVIDER_FAULT_POINT additionally parks at the six provider durable cuts
+# declared in provider_surface::FAULT_POINTS. The marker is printed only after
+# the SQLite commit; the conformance harness then kills the process. This entire
+# environment-controlled branch is absent from a default build.
 drive-fault = []
 
 [dev-dependencies]
@@ -87,3 +93,4 @@ async-trait = "0.1"
 # The role's conformance suite, run in-process against tool.catalog and
 # role.describe (src/tests/tool_catalog_conformance.rs).
 cortexkit-role-tool-provider-conformance = "=0.5.0"
+cortexkit-role-llm-runner-conformance = { git = "https://github.com/cortexkit/commons", rev = "9abd24916a087162b7650ad7db71cf287be1330c" }
