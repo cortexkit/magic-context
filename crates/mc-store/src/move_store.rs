@@ -1,6 +1,14 @@
 //! Store-half move primitives. Transport and the two-store coordinator live above
 //! this API. Every method takes a short transaction on a dedicated connection;
 //! capture uses a separate read-only connection and never McStore's shared handle.
+//!
+//! Install batches contain at most 16 source rows and 256 KiB of encoded row
+//! bytes. An indivisible row larger than that budget is installed alone. Discard
+//! deletes one session row per transaction; key-map cleanup deletes at most 64.
+//! The default A6 test audits actual SQL writes and cursor advances to check these
+//! structural limits. Wall-clock holds are printed, not asserted under parallel
+//! load. Run the 100 ms wall-clock gate on a quiet machine with:
+//! `cargo test --locked -p mc-store move_store::tests::a6_store_155_mib_wall_clock_lock_bound -- --ignored --exact --test-threads=1 --nocapture`.
 use crate::move_inventory::{self, Class, KeyPolicy, RowSelector, Store};
 use crate::move_snapshot::{self as codec, SnapshotError};
 use crate::{McStore, McStoreError};
@@ -14,6 +22,9 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::time::{Duration, Instant};
+
+const MAX_INSTALL_ROWS: usize = 16;
+const MAX_INSTALL_BYTES: u64 = 256 * 1024;
 
 pub const SCHEMA_SQL: &str = r#"
 -- cortexkit-store otherwise creates its local writer epoch on the first fenced
@@ -242,6 +253,8 @@ pub struct MoveStore {
     metrics: LockMetrics,
     namespace: Arc<AtomicU64>,
     boundaries: Arc<Mutex<crate::context_boundaries::BoundaryValidationCache>>,
+    #[cfg(test)]
+    transaction_probe: Option<tests::TransactionProbe>,
 }
 impl MoveStore {
     fn open(
@@ -266,6 +279,8 @@ impl MoveStore {
             metrics: LockMetrics::default(),
             namespace,
             boundaries,
+            #[cfg(test)]
+            transaction_probe: None,
         })
     }
     pub fn lock_metrics(&self) -> LockMetrics {
@@ -322,6 +337,10 @@ impl MoveStore {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         // Waiting for another writer precedes this timestamp and holds no lock.
         let started = Instant::now();
+        #[cfg(test)]
+        if let Some(probe) = &self.transaction_probe {
+            probe.begin();
+        }
         let result = run(&tx);
         let result = match result {
             Ok(value) => tx.commit().map(|()| value).map_err(Into::into),
@@ -332,6 +351,10 @@ impl MoveStore {
         };
         self.metrics.transactions += 1;
         self.metrics.longest_hold = self.metrics.longest_hold.max(started.elapsed());
+        #[cfg(test)]
+        if let Some(probe) = &self.transaction_probe {
+            probe.finish();
+        }
         // SQLite's busy handler backs other writers off, so immediately taking
         // the next batch can starve a writer that is already waiting. Leave a
         // short scheduling window after the transaction released its lock.
@@ -581,7 +604,10 @@ impl MoveStore {
         // and byte work; a single large SQLite value is an indivisible insert.
         let mut rows = Vec::new();
         let mut bytes = 0u64;
-        while next.table < tables.len() && rows.len() < 16 && bytes < 256 * 1024 {
+        while next.table < tables.len()
+            && rows.len() < MAX_INSTALL_ROWS
+            && bytes < MAX_INSTALL_BYTES
+        {
             let table = tables[next.table];
             if next.remaining == -1 {
                 next.remaining = i64::try_from(codec::read_section(&mut input, table)?)
@@ -593,12 +619,20 @@ impl MoveStore {
                 next.key = None;
                 continue;
             }
+            let row_start = input.stream_position()?;
             let row = codec::read_row(&mut input, table)?;
+            let end = input.stream_position()?;
+            let row_bytes = end - row_start;
+            if !rows.is_empty() && bytes + row_bytes > MAX_INSTALL_BYTES {
+                // Keep the decoded section header, but leave the next row for
+                // the next transaction. A lone oversized row still makes progress.
+                input.seek(SeekFrom::Start(row_start))?;
+                break;
+            }
             let key = codec::source_key(table, &row)?;
             next.key = Some(key.clone());
             next.remaining -= 1;
-            let end = input.stream_position()?;
-            bytes += end - next.offset;
+            bytes += row_bytes;
             next.offset = end;
             rows.push((table, row, key, next.clone()));
         }
