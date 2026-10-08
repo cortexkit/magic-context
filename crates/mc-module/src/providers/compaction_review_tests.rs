@@ -591,3 +591,199 @@ async fn module_ahead_descent_after_restart_burns_stranded_tags_without_rewritin
     assert!(!rebuilt.to_string().contains("§1§"));
     assert_eq!(runner.0.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn r3_nonfinal_bootstrap_with_hook_complete_history_waits_without_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let (h, b, s, k, _) = fixture(dir.path());
+    response(h.provider_setup(b.clone(), &setup_request()).await);
+    for ordinal in 1..=3 {
+        pending_hook(&s, &k, ordinal);
+    }
+    let before = s.load_meta("s").unwrap().row_version;
+    let mut page = step("more-but-covered", vec![], 3);
+    page["more"] = json!(true);
+    page["prefix_rebuilding"] = json!({"reason":"pipeline_switch"});
+    let actual = response(h.provider_step(b, &page).await);
+    assert_eq!(
+        actual["answer"], "wait",
+        "non-final bootstrap may not render a view: {actual}"
+    );
+    assert_eq!(s.load_meta("s").unwrap().row_version, before);
+    assert!(s
+        .load_provider_hook_answers(&k.store_key())
+        .unwrap()
+        .iter()
+        .all(|a| a.state == "pending"));
+}
+
+#[tokio::test]
+async fn r3_upgrade_identity_change_is_not_transport_adoption() {
+    for host in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (h, b, s, k, _) = fixture(dir.path());
+        let w = h.provider_work(&s, b, k).unwrap();
+        publication(&s, 0, 1, "BASE");
+        let mut req = engine_request(1000);
+        req.upgrade_state = "old-release".into();
+        let mut ctx = producer_context(&w, "fixture", 100000, false);
+        ctx.observed_last_response_at_ms = Some(ctx.now_ms);
+        transform::transform_with_projection(&s, &req, &ctx).unwrap();
+        publication(&s, 1, 2, "DELTA");
+        req.usage.as_mut().unwrap().current_total_input_tokens = 75000;
+        assert_eq!(
+            transform::transform_with_projection(&s, &req, &ctx)
+                .unwrap()
+                .response
+                .action,
+            "SOFT"
+        );
+        req.usage.as_mut().unwrap().current_total_input_tokens = 1000;
+        req.upgrade_state = "new-release".into();
+        if host {
+            req.kind = "compaction.host".into();
+        }
+        let actual = transform::transform_with_projection(&s, &req, &ctx).unwrap();
+        assert_eq!(
+            actual.response.action, "HARD",
+            "host={host}, upgrade is independent of pipeline adoption"
+        );
+        assert!(actual.response.prefix_bust_permitted);
+    }
+}
+
+#[test]
+fn r3_recomp_reset_summary_agrees_with_full_core() {
+    let dir = tempfile::tempdir().unwrap();
+    let (h, b, s, k, _) = fixture(dir.path());
+    let w = h.provider_work(&s, b, k).unwrap();
+    full_engine(&s, &w, 1000);
+    let before = s.load("s").unwrap();
+    assert!(!s
+        .load_compaction_trigger_core("s")
+        .unwrap()
+        .unwrap()
+        .frozen_units
+        .is_empty());
+    s.reset_session_for_recomp("s", before.row_version).unwrap();
+    let summary = s.load_compaction_trigger_core("s").unwrap().unwrap();
+    let actual = s.load("s").unwrap();
+    assert!(actual.core.frozen_units.is_empty());
+    assert!(!actual.meta.initialized);
+    assert!(summary.boundary_id.is_empty());
+    assert_eq!(
+        summary
+            .frozen_units
+            .iter()
+            .map(|u| &u.key)
+            .collect::<Vec<_>>(),
+        actual
+            .core
+            .frozen_units
+            .iter()
+            .map(|u| &u.key)
+            .collect::<Vec<_>>(),
+        "reset summary retains retired head keys"
+    );
+}
+
+fn r3_native(
+    output: &transform::TransformWithProjection,
+    req: &TransformRequest,
+    newest: u64,
+) -> Value {
+    let view = transform::compaction::View {
+        compaction_id: "oracle".into(),
+        version: 1,
+        range: transform::compaction::Range {
+            lineage_id: "L".into(),
+            from: 1,
+            to: newest + 1,
+        },
+        replacement: output
+            .response
+            .ck_messages
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|m| (**m).clone())
+            .collect(),
+    };
+    json!(
+        Codec::OpencodeAiSdk
+            .encode_view(
+                &view,
+                req,
+                &super::super::codec_opencode::NativeRenderContext::from(output)
+            )
+            .unwrap()
+            .replacement
+    )
+}
+
+async fn r3_old_render_epoch_comparison(pipeline_switch: bool) {
+    let ad = tempfile::tempdir().unwrap();
+    let od = tempfile::tempdir().unwrap();
+    let (h, b, s, k, _) = fixture(ad.path());
+    let (oh, ob, os, ok, _) = fixture(od.path());
+    let w = h.provider_work(&s, b.clone(), k.clone()).unwrap();
+    let ow = oh.provider_work(&os, ob, ok).unwrap();
+    let mut old = Value::Null;
+    for (ss, ww) in [(&s, &w), (&os, &ow)] {
+        publication(ss, 0, 1, "BASE");
+        full_engine(ss, ww, 1000);
+        publication(ss, 1, 2, "DELTA");
+        assert_eq!(full_engine(ss, ww, 75000).response.action, "SOFT");
+        old = r3_native(&full_engine(ss, ww, 1000), &engine_request(1000), 3);
+    }
+    response(h.provider_setup(b.clone(), &setup_request()).await);
+    let mut boot = step("boot", vec![message(1), message(2), message(3)], 3);
+    boot["prefix_rebuilding"] = json!({"reason":"pipeline_switch"});
+    let v = response(h.provider_step(b.clone(), &boot).await);
+    assert_eq!(v["compaction"]["replacement"], old);
+    let mut settled = step("settled", vec![], 3);
+    settled["last_applied"] = v["compaction"].clone();
+    assert_eq!(
+        response(h.provider_step(b.clone(), &settled).await)["answer"],
+        "noop"
+    );
+    for ss in [&s, &os] {
+        let mut state = ss.load_meta("s").unwrap();
+        let current = format!("mre:4:mre{}", crate::MEMORY_RENDER_FORMAT_EPOCH);
+        assert!(state.meta.last_render_config.contains(&current));
+        state.meta.last_render_config = state
+            .meta
+            .last_render_config
+            .replace(&current, "mre:4:mre2");
+        ss.commit_meta("s", state.row_version, &state.meta).unwrap();
+    }
+    let full = full_engine(&os, &ow, 1000);
+    assert_eq!(full.response.action, "HARD");
+    assert!(full.response.prefix_bust_permitted);
+    let expected = r3_native(&full, &engine_request(1000), 3);
+    assert_ne!(
+        expected, old,
+        "pending m1 delta must make the upgrade rebuild observable"
+    );
+    let mut pass = step("after-upgrade", vec![], 3);
+    if pipeline_switch {
+        pass["prefix_rebuilding"] = json!({"reason":"pipeline_switch"});
+    }
+    let actual = response(h.provider_step(b, &pass).await);
+    let served = if actual["answer"] == "compaction_message" {
+        actual["compaction"]["replacement"].clone()
+    } else {
+        old
+    };
+    assert_eq!(served, expected, "pipeline_switch={pipeline_switch}, full engine HARD upgrade was swallowed; answer={actual}");
+}
+
+#[tokio::test]
+async fn r3_upgrade_epoch_cannot_be_skipped_by_host_preflight() {
+    r3_old_render_epoch_comparison(false).await;
+}
+
+#[tokio::test]
+async fn r3_pipeline_switch_does_not_exempt_module_render_epoch() {
+    r3_old_render_epoch_comparison(true).await;
+}
