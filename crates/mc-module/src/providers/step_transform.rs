@@ -7,11 +7,11 @@ use mc_store::provider_records::{
 use serde::Deserialize;
 
 #[cfg(test)]
-#[path = "step_transform_review_tests.rs"]
-mod review_tests;
-#[cfg(test)]
 #[path = "step_transform_parity_tests.rs"]
 mod parity_tests;
+#[cfg(test)]
+#[path = "step_transform_review_tests.rs"]
+mod review_tests;
 
 #[derive(Deserialize, Default)]
 struct HostHookFields {
@@ -39,10 +39,13 @@ struct HostSubject {
 
 #[derive(Deserialize)]
 struct ProviderPassInput {
+    pass_id: Option<String>,
+    ordered_ids: Option<Vec<String>>,
     lineage_id: String,
     descends_from: Option<HostDescent>,
     appended: Vec<compact::status::StatusMessage>,
     physical_tail: Option<ProviderTail>,
+    prefix_mutation_permitted: Option<bool>,
 }
 #[derive(Deserialize, Serialize)]
 struct ProviderTail {
@@ -52,6 +55,11 @@ struct ProviderTail {
 
 fn provider_policy_error(error: mc_store::provider_records::ProviderError) -> HandlerOutcome {
     match error {
+        mc_store::provider_records::ProviderError::Transient(ref reason)
+            if reason == "an ingested ordinal changed" =>
+        {
+            invalid_field("message", "provider subject changed its admitted bytes")
+        }
         mc_store::provider_records::ProviderError::InvalidParams { field } => {
             invalid_field(field, "conflicting provider policy")
         }
@@ -116,11 +124,18 @@ fn host_channel1(
     state: &Value,
 ) -> (Vec<hooks::answer::Operation>, Value) {
     let mut meta = channel1_meta(state);
+    meta.channel1_reduce_suppressed = state
+        .get("reduce_pending")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    meta.tail_hygiene_baseline = Some(inputs.baseline.clone());
+    let mut current = Some(inputs.baseline.clone());
+    transform::apply_channel1_compliance_grace(&mut meta, &mut current, false);
     let before = (
         meta.channel1_last_nudge_undropped,
         meta.channel1_last_nudge_level.clone(),
     );
-    let decision = transform::decide_channel1(Some(&inputs.baseline), &meta, inputs.users);
+    let decision = transform::decide_channel1(current.as_ref(), &meta, inputs.users);
     let mut ops = Vec::new();
     let fire = decision.fire && inputs.carrier;
     if fire {
@@ -146,7 +161,7 @@ fn host_channel1(
         );
     (
         ops,
-        json!({"cadence_event":if fire || changed {Some(json!({"fire":fire,"nudge":meta.channel1_last_nudge_undropped,"level":meta.channel1_last_nudge_level,"users":inputs.users}))} else {None},
+        json!({"reduce_pending":meta.channel1_reduce_suppressed,"grace_u":meta.tail_hygiene_baseline.as_ref().and_then(|b|b.channel1_post_reduce_grace_baseline_u),"grace_level":meta.tail_hygiene_baseline.as_ref().map(|b|&b.channel1_post_reduce_grace_pre_level),"cadence_event":if fire || changed {Some(json!({"fire":fire,"nudge":meta.channel1_last_nudge_undropped,"level":meta.channel1_last_nudge_level,"users":inputs.users}))} else {None},
         "channel1":{"channel1_last_nudge_undropped":meta.channel1_last_nudge_undropped,"channel1_last_nudge_level":meta.channel1_last_nudge_level,"channel1_last_fire_level":meta.channel1_last_fire_level,"channel1_last_fire_ordinal":meta.channel1_last_fire_ordinal}}),
     )
 }
@@ -341,7 +356,13 @@ impl McHandler {
                 .rev()
                 .find(|p| p.tag_kind.as_deref() == Some("tool_result"))
                 .map(|p| p.block_id.clone());
-            let context = json!({"lineage_id":pass.lineage_id,"appended_ids":pass.appended.iter().map(|m|&m.mid).collect::<Vec<_>>(),"physical_tail":pass.physical_tail,"eligible_user_mid":eligible_user,"eligible_tool_block":eligible_tool});
+            let ids = pass
+                .ordered_ids
+                .unwrap_or_else(|| pass.appended.iter().map(|m| m.mid.clone()).collect());
+            let pass_id = pass.pass_id.unwrap_or_else(|| {
+                sha256_hex(&serde_json::to_vec(&(&pass.lineage_id, &ids)).expect("pass identity"))
+            });
+            let context = json!({"pass_id":pass_id,"lineage_id":pass.lineage_id,"appended_ids":ids,"physical_tail":pass.physical_tail,"eligible_user_mid":eligible_user,"eligible_tool_block":eligible_tool,"prefix_mutation_permitted":pass.prefix_mutation_permitted});
             let messages = pass
                 .appended
                 .iter()
@@ -696,7 +717,9 @@ impl McHandler {
                     let mut ops = Vec::new();
                     let mut tags = Vec::new();
                     let mut non_tag_ops = Vec::new();
-                    let state = &ctx.counters["policy_state"];
+                    let mut policy_state=ctx.counters["policy_state"].clone();
+                    policy_state["reduce_pending"]=ctx.counters.pointer("/engine_policy/reduce_suppressed").cloned().unwrap_or(json!(false));
+                    let state=&policy_state;
                     for (index, target) in targets.iter().enumerate() {
                         if let Some((kind, source)) = transform::taggable_source(target) {
                             let number = ctx.parts.iter().find(|p|p.block_id==target.id).and_then(|p|p.tag_number).or_else(||ctx.tag_high_water.checked_add(tags.len() as i64+1))
@@ -720,6 +743,8 @@ impl McHandler {
                             if hook == Hook::PreUser
                                 && index == 0
                                 && binding.config.temporal_awareness
+                                && ctx.counters.pointer("/pass_context/prefix_mutation_permitted").and_then(Value::as_bool)==Some(true)
+                                && ctx.counters.pointer("/pass_context/lineage_id").and_then(Value::as_str)==Some(lineage_id)
                             {
                                 if let Some(prefix) = ctx.parts.iter().filter(|p|p.kind=="header" && p.ordinal<ordinal).max_by_key(|p|p.ordinal).and_then(|p|transform::temporal_marker_from_timestamps(p.created_at_ms,p.completed_at_ms,ingress.ck.meta.created_at_ms)).filter(|p|!p.is_empty())
                                 {
@@ -758,7 +783,9 @@ impl McHandler {
                             non_tag_ops.push(op);
                         }
                     }
-                    let carrier=hook==Hook::PostTool && targets.iter().any(|t|ctx.counters.pointer("/pass_context/eligible_tool_block").and_then(Value::as_str)==Some(t.id.as_str()));
+                    let new_ids=ctx.counters.pointer("/pass_context/appended_ids").and_then(Value::as_array);
+                    let carrier_block=ctx.parts.iter().filter(|p|p.tag_kind.as_deref()==Some("tool_result") && new_ids.is_some_and(|ids|ids.iter().any(|id|id.as_str()==Some(p.mid.as_str())))).max_by_key(|p|(p.ordinal,p.block_index));
+                    let carrier=hook==Hook::PostTool && targets.iter().any(|t|carrier_block.is_some_and(|p|p.block_id==t.id));
                     let inputs=transform::channel1_inputs_from_parts(&ctx.parts,&ctx.counters["engine_policy"],binding.config.resolve_protected_tokens(100_000).floor,&binding.config.protected_tools,carrier);
                     if ctx.counters.pointer("/engine_policy/baseline/baseline_generation").and_then(Value::as_u64)!=Some(inputs.baseline.baseline_generation) {
                         counters["policy_baseline_updates"]=json!(inputs.baseline.baseline_parts.iter().map(|m|json!({"block_id":m.key.split('\0').next().unwrap_or(""),"measurement":m})).collect::<Vec<_>>());
@@ -768,6 +795,9 @@ impl McHandler {
                         counters["engine_policy"]["baseline_len"]=json!(inputs.baseline.baseline_parts.len());
                     }
                     let (mut cadence_ops, mut policy) = host_channel1(&inputs,state);
+                    counters["engine_policy"]["reduce_suppressed"]=policy["reduce_pending"].clone();
+                    counters["engine_policy"]["baseline"]["channel1_post_reduce_grace_baseline_u"]=policy["grace_u"].clone();
+                    counters["engine_policy"]["baseline"]["channel1_post_reduce_grace_pre_level"]=policy["grace_level"].clone();
                     policy.as_object_mut().expect("policy object").remove("channel1");
                     if hook == Hook::PostTool {
                         ops.append(&mut cadence_ops.clone());
@@ -807,12 +837,7 @@ impl McHandler {
                     ))
                 },
             )
-            .map_err(|error| match error {
-                mc_store::provider_records::ProviderError::InvalidParams { field } => {
-                    invalid_field(field, "conflicting provider hook")
-                }
-                error => transient(error),
-            })?;
+            .map_err(provider_policy_error)?;
         fault("HookStateRecorded");
         bytes(&answer)
     }
@@ -1268,7 +1293,7 @@ mod host_tests {
         let tail = appended
             .last()
             .map(|(ordinal, message)| json!({"mid":message["info"]["id"],"ordinal":ordinal}));
-        response(h.dispatch_value(7,json!({"method":"state_sync","session_id":"s","provider_pass":{"lineage_id":"L","appended":appended.iter().map(|(ordinal,message)|json!({"mid":message["info"]["id"],"ordinal":ordinal,"message":message})).collect::<Vec<_>>(),"physical_tail":tail}})).await);
+        response(h.dispatch_value(7,json!({"method":"state_sync","session_id":"s","provider_pass":{"lineage_id":"L","appended":appended.iter().map(|(ordinal,message)|json!({"mid":message["info"]["id"],"ordinal":ordinal,"message":message})).collect::<Vec<_>>(),"physical_tail":tail,"prefix_mutation_permitted":true}})).await);
     }
     pub(super) fn text(mid: &str, role: &str, value: &str) -> Value {
         json!({"info":{"id":mid,"role":role},"parts":[{"id":format!("{mid}-text"),"type":"text","text":value}]})

@@ -76,6 +76,7 @@ CREATE TABLE mc_provider_policy_parts_v1 (
     PRIMARY KEY(conv_key, lineage_id, block_id)
 );
 CREATE INDEX mc_provider_policy_parts_ordinal ON mc_provider_policy_parts_v1(conv_key,lineage_id,ordinal);
+CREATE INDEX mc_provider_policy_parts_identity ON mc_provider_policy_parts_v1(conv_key,block_id);
 CREATE TABLE mc_provider_views_v1 (
     conv_key TEXT NOT NULL,
     version INTEGER NOT NULL,

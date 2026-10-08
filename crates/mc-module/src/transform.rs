@@ -6856,29 +6856,11 @@ fn apply_once(
     rearm_channel2_after_measured_collapse(&mut meta, is_bust_pass);
     let agent_drops_applied_this_pass =
         pending_agent_drops_applied_this_pass(&pending_agent_drops, &loaded.core, &core);
-    if meta.channel1_reduce_suppressed || agent_drops_applied_this_pass {
-        if let Some(baseline) = current_hygiene_baseline
-            .as_mut()
-            .filter(|baseline| baseline.evaluable && !baseline.generation_invalidated)
-        {
-            // Measurement already excludes queued drops from U. Capturing any
-            // earlier value would make compliance grace expire immediately.
-            let post_reduce_u = effective_tail_hygiene(baseline).0;
-            baseline.channel1_post_reduce_grace_baseline_u = Some(post_reduce_u);
-            baseline.channel1_post_reduce_grace_pre_level = meta.channel1_last_nudge_level.clone();
-            meta.channel1_reduce_suppressed = false;
-            if let Some(persisted) = meta.tail_hygiene_baseline.as_mut() {
-                persisted.channel1_post_reduce_grace_baseline_u = Some(post_reduce_u);
-                persisted.channel1_post_reduce_grace_pre_level =
-                    baseline.channel1_post_reduce_grace_pre_level.clone();
-            } else {
-                meta.tail_hygiene_baseline = Some(baseline.clone());
-            }
-        } else {
-            // Keep the pending bit until a trustworthy post-drop U exists.
-            meta.channel1_reduce_suppressed = true;
-        }
-    }
+    apply_channel1_compliance_grace(
+        &mut meta,
+        &mut current_hygiene_baseline,
+        agent_drops_applied_this_pass,
+    );
 
     if tagging_active {
         if let Some((row, unit)) = maybe_append_channel1_nudge(
@@ -10805,7 +10787,11 @@ pub(crate) fn capture_provider_parts(
             tag_kind,
             tag_number: tag.map(|tag| tag.tag_number),
             tag_tokens: source_tokens,
-            tool_name: block.name.clone().unwrap_or_default(),
+            tool_name: match &block.wire_shape().kind {
+                ck_wire::CkKind::ToolCall { name, .. } => name.clone(),
+                ck_wire::CkKind::ToolResult { tool_name, .. } => tool_name.clone(),
+                _ => String::new(),
+            },
             arc_id: block.arc_id.clone(),
             subject_part: String::new(),
             active: true,
@@ -10850,6 +10836,8 @@ pub(crate) struct Channel1PolicyInputs {
 
 /// Project stored measurements through the same protection, selection, calibrated
 /// refresh and oldest-tag functions as a full engine pass. No content is fetched.
+/// This correctness-stage projector walks the full active metadata lineage; it
+/// is not yet incremental. The bounded-summary integration gate remains closed.
 pub(crate) fn channel1_inputs_from_parts(
     parts: &[mc_store::provider_records::ProviderPolicyPart],
     settings: &Value,
@@ -12396,6 +12384,34 @@ pub(crate) fn apply_channel1_decision_state(meta: &mut ModuleMeta, decision: &Ch
         if let Some(baseline) = meta.tail_hygiene_baseline.as_mut() {
             baseline.channel1_post_reduce_grace_baseline_u = None;
             baseline.channel1_post_reduce_grace_pre_level.clear();
+        }
+    }
+}
+
+/// One renderer and one cadence transition for both full and incremental lanes.
+pub(crate) fn apply_channel1_compliance_grace(
+    meta: &mut ModuleMeta,
+    current: &mut Option<TailHygieneBaseline>,
+    applied: bool,
+) {
+    if meta.channel1_reduce_suppressed || applied {
+        if let Some(baseline) = current
+            .as_mut()
+            .filter(|b| b.evaluable && !b.generation_invalidated)
+        {
+            let u = effective_tail_hygiene(baseline).0;
+            baseline.channel1_post_reduce_grace_baseline_u = Some(u);
+            baseline.channel1_post_reduce_grace_pre_level = meta.channel1_last_nudge_level.clone();
+            meta.channel1_reduce_suppressed = false;
+            if let Some(persisted) = meta.tail_hygiene_baseline.as_mut() {
+                persisted.channel1_post_reduce_grace_baseline_u = Some(u);
+                persisted.channel1_post_reduce_grace_pre_level =
+                    baseline.channel1_post_reduce_grace_pre_level.clone();
+            } else {
+                meta.tail_hygiene_baseline = Some(baseline.clone());
+            }
+        } else {
+            meta.channel1_reduce_suppressed = true;
         }
     }
 }

@@ -159,3 +159,62 @@ Rust ran on the remote Linux worker with **cargo 1.99.0 (5f94df478 2026-08-27)**
 The named failures are ordinary output/state assertions, intentionally committed red for the fixing owner; none is ignored or inverted to endorse M3's behavior. Intermediate fixture-control failures were corrected before accepting findings (candidate-pool selectivity, initial versus established protection, and warming the rendered memory head).
 
 `move_inventory`'s known 96-versus-97 schema-pin failures are excluded from these package-scoped behavior runs and are not findings. A full workspace suite and full build were not rerun: this review changes only tests, module declarations and documentation, and the worktree arrived with the build already green. Scoped inspection remained partial (unavailable checkout call graph/Biome diagnostics and Rust analyzer check in progress); authoritative Rust compilation and tsc checks succeeded. New Rust files are rustfmt-formatted; the new TypeScript file is checked using the installed package-local Biome 2.5.1.
+
+## Correctness remediation (M3 stage one)
+
+The eleven reviewed regression assertions are preserved. Their red baseline was rerun: eight module failures with the conflict control green, one store sibling-release failure with the restart control green, and two TypeScript barrier failures. After remediation all eleven are green. Fixture setup now supplies the policy inputs that the original scalar-only test calls could not express; no expected byte, state assertion, or refusal expectation was changed.
+
+| Finding | Remediation |
+|---|---|
+| 1 | Immutable per-message created/completed metadata uses the same extracted timestamp fallback as the full walk. |
+| 2 | Content-free per-block measurements, the persisted protection projection, coverage, frozen reductions, frozen class calibration and grace are passed through the engine's protection/window, selection and calibrated-refresh functions. |
+| 3 | The engine's oldest-eligible-tag function receives actual tag numbers, tool names, token estimates, queue membership and protection cutoff. The live corpus also caught and fixed a missing tool-result name on the metadata capture path. |
+| 4 | Both the binding's auto-search enable gate and the frozen plan's disable flag are honored. |
+| 5 | Internal `state_sync.provider_pass` supplies only new ingest entries, ordered new IDs and the physical tail. Missing pass context suppresses the hint and logs the reason. No new commons hook field was added. |
+| 6 | The frozen engine head's rendered-memory IDs are carried into lexical hint exclusion. |
+| 7 | Queueing a text tag removes only that block's contribution, retaining sibling mass and eligibility. |
+| 8 | Each answer records its own fire/reset event, not an inherited cadence snapshot. Burn recovery resolves surviving events. |
+| 9 | The conversation lock is acquired before authority state-sync mutation; a busy refusal changes neither side. |
+| 10 | A restart reported by a no-change barrier forces resynchronization, including model-chain inputs, before completion. |
+| 11 | Adopting a completed seed receipt closes this pass separately; seed identity excludes the scheduling hint. |
+
+`mc_provider_policy_parts_v1` is an unreleased-v66 amendment containing estimates, hashes, timestamps and eligibility metadata, never message or operation content. It must move with the lineage: rebuilding it by reading known messages would violate the host admission contract. New messages enter the existing log once at state sync; later hooks validate their admitted bytes and reuse reserved tag numbers in CK block order. Unanswered reservations expire without creating a phantom live tag. Internal pass pages are measured as the actual flat transport envelope and capped at 3 MiB; oversized individual entries refuse with `provider_message_too_large`.
+
+### Fixture adaptations
+
+The two direct Channel-1 review fixtures now pass canonical policy baselines and the nonempty oldest-tag input. The disabled-search, multi-append-tail, timestamp-fallback, frozen-memory-head and burn-cadence review fixtures synchronize their real pass inputs first. The original overlay and formula corpus fixtures were adapted similarly without changing expected bytes. The TypeScript review fixture now uses the repository's registered temporary-directory helper; its assertions are unchanged.
+
+### Parity corpus and independent before/after control
+
+`step_transform_parity_tests.rs` drives three variants of four deterministic/adversarial seeds, 24 passes per seed: **288 passes and 8,364 per-message byte comparisons**. Seeds are `0x13a59910`, `0x72be041f`, `0xcafe8712`, `0xd00d4405`. Cases include one to three appends, interleaved assistant text/tool parts, large and small arcs inside/outside protection, queued tool and sibling text tags, auto-search on/off, temporal awareness on/off, optional completion timestamps, memories in/out of the head, and frozen non-neutral calibration. Separate controls cover frozen reductions/coverage and a successful admission followed by an unanswered/timed-out hook.
+
+The ordinary corpus also compares full-engine output digests against a frozen 96-pass reference produced from pre-extraction commit `ad1c0d99e329a1c0ad5802e0bf5a27a8a7693767`. The independent capture branch is `alfonso/m3-pre-extraction-reference`, commit `364b6085eec9c28d640dbc26a9f6a8f354131a43`. The live engine-versus-hook comparison asserts exact scalar-message bytes, not equality of two copies of the incremental estimator. The digest corpus is an additional full-path before/after control.
+
+### Temporal integration remains open in M4
+
+The real corpus exposed another shared input: today's engine discards *new* temporal markers on a warmed defer (`prefix_replay_must_be_preserved`). Hooks therefore require an explicitly synchronized `prefix_mutation_permitted`; absent permission never guesses a marker. Cold/HARD and warmed-defer arms are tested.
+
+The parent ruled that a late HARD view must render the engine's temporal overlay for everything it covers. `late_hard_view_covers_new_users_and_renders_full_engine_temporal_marker` is deliberately committed red until M4's template/evaluator change lands. Its full HARD positive control produces `<!-- +5m -->`; the current S3 adapter returns noop instead of a marker-changing covering view. M3 does **not** claim late-HARD temporal acceptance or complete host-pipeline enablement at this tip.
+
+## Performance / enablement gate: CLOSED
+
+This is the correctness stage, not the bounded incremental summary stage. The current projector loads and walks **the entire active content-free metadata lineage** on every hook. It reads no known message/operation content, but this is history-sized work and is **not yet incremental**. The comments at both the store walker and engine projector state this explicitly.
+
+A real-shaped fixture has 5,560 native messages, each with text and three completed tool arcs: **50,040 policy parts**. Six actual hooks were measured in two three-hook passes on the Linux worker:
+
+- Per-hook milliseconds: `2367.519, 892.667, 768.661, 979.972, 767.388, 771.991`.
+- First/cold three-hook pass: **4,028.851 ms**; second three-hook pass: **2,519.355 ms**.
+- Steady-hook median: **771.991 ms**, roughly **154x** the 5 ms per-hook target. The second pass is roughly **84x** the 30 ms ordinary-pass median target before including the rest of host orchestration.
+- An initial measurement found an unindexed baseline-update lookup with a 265-second cold hook. Adding `(conv_key, block_id)` removed that quadratic lookup; the full-walk cost above still closes the performance gate.
+
+`bounded_policy_summary_does_not_return_the_entire_known_metadata_lineage` is an explicitly skipped stage-two integration gate. The manual measurement is also explicitly ignored in routine runs; it was executed with `--ignored`. No A2/P1/P3 performance or enablement acceptance is claimed.
+
+### Proposed bounded-summary stage
+
+1. Maintain raw tool/prose T and actionable U buckets, real-user counts, frozen-prefix output counts and the calibrated baseline/grace scalars in fixed-size lineage summaries. Update them in the same transaction as admission, promotion, burn, queue and consume.
+2. Keep per-block source estimates immutable; apply point eligibility/representation deltas for queued, reduced, covered and protected blocks. Maintain indexed arc links so paired input/output mass changes atomically without fetching content.
+3. Resolve token-window protection from an indexed newest-tool suffix bounded by the frozen floor and newest-three rule. Maintain named-tool keep-count indexes and eligible oldest-hint indexes. Read only changed window members and the four winning hints, not retained history.
+4. Resolve temporal predecessor and physical tail with indexed message-shell metadata; retain the same created/completed fallback, viewport and pass eligibility semantics.
+5. Maintain own-fire/reset event indexes and invalidate only burned events. Never propagate a predecessor's fire as another answer's state.
+6. Rebuild the summary on lineage revert or an engine rebuild, not an ordinary append. Engine rebuilds capture the authoritative frozen reduction, coverage, calibration and head-memory inputs.
+7. Differentially check the bounded summary against this full metadata walk across the complete corpus, random burns/queues/consumes and 1k/8k/50k-part retained tails. Add content-read, metadata-row, serialized-byte and durable-write counters plus staged mutation controls before reopening A2/P1/P3 or enabling the host lane.

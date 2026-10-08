@@ -147,6 +147,8 @@ pub struct ProviderPolicyPart {
     pub completed_at_ms: Option<i64>,
 }
 
+/// Correctness-stage full metadata walk. This does not read transcript content,
+/// but its cost grows with retained parts; bounded lineage summaries are stage two.
 fn policy_parts_tx(
     conn: &Connection,
     conv: &str,
@@ -223,20 +225,22 @@ fn admit_policy_parts_tx(
     parts: &[ProviderPolicyPart],
     high: &mut i64,
     repeat: Option<&ProviderSubject>,
+    rearm_all: bool,
 ) -> rusqlite::Result<()> {
     for part in parts {
         let held:Option<String>=conn.query_row("SELECT policy_json FROM mc_provider_policy_parts_v1 WHERE conv_key=?1 AND lineage_id=?2 AND block_id=?3",params![conv,lineage,part.block_id],|r|r.get(0)).optional()?;
         if let Some(held) = held {
             let held: ProviderPolicyPart = serde_json::from_str(&held).map_err(sql_json)?;
             if held.active
-                || !repeat.is_some_and(|s| {
-                    s.subject_mid == part.mid
-                        && s.subject_part == part.subject_part
-                        && match s.hook.as_str() {
-                            "post_tool" => part.tag_kind.as_deref() == Some("tool_result"),
-                            _ => part.tag_kind.as_deref() == Some("message"),
-                        }
-                })
+                || (!rearm_all
+                    && !repeat.is_some_and(|s| {
+                        s.subject_mid == part.mid
+                            && s.subject_part == part.subject_part
+                            && match s.hook.as_str() {
+                                "post_tool" => part.tag_kind.as_deref() == Some("tool_result"),
+                                _ => part.tag_kind.as_deref() == Some("message"),
+                            }
+                    }))
             {
                 continue;
             }
@@ -964,6 +968,19 @@ impl McStore {
                 let new_lineage = lineage_tx(conn,&conv,&request.lineage.lineage_id)?.is_none();
                 ensure_lineage_tx(conn,&conv,request.lineage)?;
                 for m in messages {insert_message_tx(conn,&conv,&request.lineage.lineage_id,m)?;}
+                if let Some(context)=pass_context {
+                    let old=parse(&c.hook_counters_json)?;
+                    if old.pointer("/pass_context/pass_id")!=context.get("pass_id") {
+                        // An admitted but unanswered reservation was never served.
+                        // Keep its raw mass and clock, but never count its tag as actionable.
+                        conn.execute("UPDATE mc_provider_policy_parts_v1 SET policy_json=json_set(policy_json,'$.active',json('false')) WHERE conv_key=?1 AND json_extract(policy_json,'$.served')=false AND json_extract(policy_json,'$.tag_number') IS NOT NULL AND NOT EXISTS(SELECT 1 FROM mc_provider_hook_answers_v1 a,json_each(a.tags_json) t WHERE a.conv_key=?1 AND a.state IN ('pending','live') AND json_extract(t.value,'$.number')=json_extract(mc_provider_policy_parts_v1.policy_json,'$.tag_number'))",[&conv])?;
+                        for m in messages {
+                            let mut q=conn.prepare("SELECT subject_mid,hook,subject_part FROM mc_provider_hook_answers_v1 WHERE conv_key=?1 AND lineage_id=?2 AND subject_mid=?3 AND state='pending'")?;
+                            let subjects=q.query_map(params![conv,request.lineage.lineage_id,m.mid],|r|Ok(ProviderSubject {subject_mid:r.get(0)?,hook:r.get(1)?,subject_part:r.get(2)?}))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                            for subject in subjects {burn_subject_tx(conn,&conv,&request.lineage.lineage_id,&subject)?;}
+                        }
+                    }
+                }
                 let acknowledged = acknowledged_through_tx(conn,&conv,&c,request.lineage,new_lineage,request.served_through_ordinal)?;
                 for s in request.unserved_subjects {
                     for (ancestor, _) in ancestry_tx(conn,&conv,&request.lineage.lineage_id)? {
@@ -979,7 +996,7 @@ impl McStore {
                 let live_max: i64 = conn.query_row("SELECT coalesce(max(tag_number),0) FROM mc_tags WHERE session_id=?1",[&c.engine_namespace],|r|r.get(0))?;
                 let tag_high_water = counters.get("tag_high_water").and_then(Value::as_i64).unwrap_or(0).max(counters.get("high_water").and_then(Value::as_i64).unwrap_or(0)).max(live_max);
                 let mut reserved_high=tag_high_water.max(counters.get("reserved_tag_high_water").and_then(Value::as_i64).unwrap_or(0));
-                admit_policy_parts_tx(conn,&conv,&request.lineage.lineage_id,&c.engine_namespace,parts,&mut reserved_high,request.repeat_subject)?;
+                admit_policy_parts_tx(conn,&conv,&request.lineage.lineage_id,&c.engine_namespace,parts,&mut reserved_high,request.repeat_subject,pass_context.is_some())?;
                 counters["reserved_tag_high_water"]=json!(reserved_high);
                 if let Some(context)=pass_context {counters["pass_context"]=context.clone();}
                 let policy_parts=policy_parts_tx(conn,&conv,&request.lineage.lineage_id)?;
@@ -1103,10 +1120,12 @@ impl McStore {
     ) -> Result<(), McStoreError> {
         self.inner.with_conn_fenced(|conn| {
             let conv=key.conversation_key();
+            let mut changed=false;
             for number in numbers {
                 let known:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM mc_provider_hook_answers_v1 a,json_each(a.tags_json) t WHERE a.conv_key=?1 AND a.state IN ('pending','live') AND a.legacy_json IS NULL AND json_extract(t.value,'$.number')=?2 AND NOT coalesce(json_extract(t.value,'$.consumed'),false))",params![conv,number],|r|r.get(0))?;
                 if !known {return Err(rusqlite::Error::InvalidQuery)}
                 if conn.execute("INSERT INTO mc_provider_pending_drops_v1 VALUES (?1,?2,json_extract(?1,'$[1]')) ON CONFLICT DO NOTHING",params![conv,number])?==0 {continue;}
+                changed=true;
                 conn.execute("UPDATE mc_provider_policy_parts_v1 SET policy_json=json_set(policy_json,'$.queued',json('true')) WHERE conv_key=?1 AND json_extract(policy_json,'$.tag_number')=?2",params![conv,number])?;
                 let mut q=conn.prepare("SELECT a.answer_seq,a.policy_json,json_extract(t.value,'$.kind'),json_extract(t.value,'$.token_count') FROM mc_provider_hook_answers_v1 a,json_each(a.tags_json) t WHERE a.conv_key=?1 AND a.state IN ('pending','live') AND json_extract(t.value,'$.number')=?2")?;
                 let rows=q.query_map(params![conv,number],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,i64>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1119,6 +1138,12 @@ impl McStore {
                     policy["metrics"]=serde_json::to_value(metrics).map_err(sql_json)?;
                     conn.execute("UPDATE mc_provider_hook_answers_v1 SET policy_json=?3 WHERE conv_key=?1 AND answer_seq=?2",params![conv,seq,policy.to_string()])?;
                 }
+            }
+            if changed {
+                let raw:String=conn.query_row("SELECT hook_counters_json FROM mc_provider_conversations_v2 WHERE conv_key=?1",[&conv],|r|r.get(0))?;
+                let mut counters=parse(&raw)?;
+                counters["engine_policy"]["reduce_suppressed"]=json!(true);
+                conn.execute("UPDATE mc_provider_conversations_v2 SET hook_counters_json=?2 WHERE conv_key=?1",params![conv,counters.to_string()])?;
             }
             Ok(())
         })?;

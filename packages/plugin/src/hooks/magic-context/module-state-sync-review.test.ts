@@ -1,11 +1,12 @@
 /// <reference types="bun-types" />
 import { afterEach, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runMigrations } from "../../features/magic-context/migrations";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { Database } from "../../shared/sqlite";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     loadModuleWatermarks,
     type ModuleStateSyncState,
@@ -27,7 +28,7 @@ afterEach(() => {
 });
 
 function fixture() {
-    const dir = mkdtempSync(join(tmpdir(), "m3-sync-review-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "m3-sync-review-"));
     dirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
     process.env.MAGIC_CONTEXT_LOG_PATH = join(dir, "review.log");

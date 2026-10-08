@@ -10976,6 +10976,14 @@ impl McHandler {
     }
 
     fn handle_state_sync_value(&self, channel: u16, request: Value) -> HandlerOutcome {
+        if request.get("provider_pass").is_some()
+            && serde_json::to_vec(&request).map_or(true, |bytes| bytes.len() > 3 * 1024 * 1024)
+        {
+            return HandlerOutcome::Error {
+                code: "provider_message_too_large".into(),
+                message: "provider state-sync page exceeds 3 MiB encoded cap".into(),
+            };
+        }
         // A provider pass without appends still has a barrier, even when all
         // synchronized watermarks are unchanged. This carries no message data.
         if (request.get("pass_complete") == Some(&Value::Bool(true))

@@ -36,6 +36,7 @@ import {
     buildPagedModuleStateSyncPayloads,
     loadModuleWatermarks,
     type ModuleStateSyncState,
+    providerPassPages,
     syncModuleState,
 } from "./module-state-sync";
 import { StateSyncTiming } from "./module-state-sync-timing";
@@ -1472,5 +1473,51 @@ describe("provider historian chain watermarks", () => {
         expect(calls).toEqual([
             { method: "state_sync", session_id: "barrier-session", pass_complete: true },
         ]);
+    });
+});
+
+describe("provider pass admission paging", () => {
+    it("pages only new ingest, preserves order and identity, and closes only the last encoded page", () => {
+        const appended = Array.from({ length: 3 }, (_, i) => ({
+            ordinal: i + 1,
+            mid: `m${i}`,
+            message: {
+                info: { id: `m${i}`, role: "user" },
+                parts: [{ type: "text", text: '"é\\n'.repeat(40) }],
+            },
+        }));
+        const pass = {
+            lineage_id: "L",
+            pass_id: "pass",
+            appended,
+            physical_tail: { ordinal: 3, mid: "m2" },
+            prefix_mutation_permitted: false,
+        };
+        const cap = 700;
+        const pages = providerPassPages(pass, "s", true, cap);
+        expect(pages.length).toBeGreaterThan(1);
+        expect(pages.every((body) => Buffer.byteLength(JSON.stringify(body)) <= cap)).toBe(true);
+        expect(pages.filter((body) => body.pass_complete === true)).toHaveLength(1);
+        expect(pages.at(-1)?.pass_complete).toBe(true);
+        const entries = pages.flatMap((body) => (body.provider_pass as typeof pass).appended);
+        expect(entries).toEqual(appended);
+        entries.forEach((entry, i) => {
+            expect(entry).toBe(appended[i]);
+        });
+    });
+
+    it("refuses one encoded over-cap message before sending a partial pass", () => {
+        const pass = {
+            lineage_id: "L",
+            pass_id: "pass",
+            appended: [{ ordinal: 1, mid: "u", message: { text: "é".repeat(400) } }],
+            physical_tail: { ordinal: 1, mid: "u" },
+        };
+        try {
+            providerPassPages(pass, "s", false, 500);
+            throw new Error("oversized provider message unexpectedly fit");
+        } catch (error) {
+            expect((error as { code?: string }).code).toBe("provider_message_too_large");
+        }
     });
 });

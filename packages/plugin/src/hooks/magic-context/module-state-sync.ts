@@ -199,18 +199,43 @@ export interface ModuleProviderPass {
     descends_from?: { lineage_id: string; through_ordinal: number };
     appended: readonly { ordinal: number; mid: string; message: unknown }[];
     physical_tail: { ordinal: number; mid: string } | null;
+    /** From the shared engine pass-plan evaluator; absence never permits a marker. */
+    prefix_mutation_permitted?: boolean;
 }
 
 /** Internal pass metadata is paged independently of reusable seed data. */
-export function providerPassPages(pass: ModuleProviderPass, sessionId: string, complete: boolean, maxBytes = MODULE_PAGE_MAX_BYTES): Record<string, unknown>[] {
+export function providerPassPages(
+    pass: ModuleProviderPass,
+    sessionId: string,
+    complete: boolean,
+    maxBytes = MODULE_PAGE_MAX_BYTES,
+): Record<string, unknown>[] {
     const common = { ...pass, ordered_ids: pass.appended.map((entry) => entry.mid), appended: [] };
-    const body = (appended: ModuleProviderPass["appended"], last: boolean) => ({ method: "state_sync", session_id: sessionId,
-        provider_pass: { ...common, appended }, ...(last && complete ? { pass_complete: true } : {}) });
+    const body = (appended: ModuleProviderPass["appended"], last: boolean) => ({
+        method: "state_sync",
+        session_id: sessionId,
+        provider_pass: { ...common, appended },
+        ...(last && complete ? { pass_complete: true } : {}),
+    });
+    const encodedBytes = (value: ReturnType<typeof body>): number => {
+        const { method, ...params } = value;
+        return moduleWireBodyBytes({ method, params });
+    };
     const pages: Record<string, unknown>[] = [];
+    if (encodedBytes(body([], true)) > maxBytes)
+        throw Object.assign(new Error("provider pass metadata exceeds state-sync encoded cap"), {
+            code: "provider_message_too_large",
+        });
     let batch: ModuleProviderPass["appended"] = [];
     for (const entry of pass.appended) {
-        if (moduleWireBodyBytes(body([entry], true)) > maxBytes) throw Object.assign(new Error("provider message exceeds state-sync encoded cap"), { code: "provider_message_too_large" });
-        if (batch.length && moduleWireBodyBytes(body([...batch, entry], true)) > maxBytes) { pages.push(body(batch, false)); batch = []; }
+        if (encodedBytes(body([entry], true)) > maxBytes)
+            throw Object.assign(new Error("provider message exceeds state-sync encoded cap"), {
+                code: "provider_message_too_large",
+            });
+        if (batch.length && encodedBytes(body([...batch, entry], true)) > maxBytes) {
+            pages.push(body(batch, false));
+            batch = [];
+        }
         batch = [...batch, entry];
     }
     pages.push(body(batch, true));
@@ -1331,9 +1356,18 @@ export async function syncModuleState(args: {
         let force = args.force;
         const closePass = async (): Promise<boolean> => {
             if (args.pass.providerPass) {
-                for (const body of providerPassPages(args.pass.providerPass, args.pass.sessionId, args.options?.passComplete === true)) {
-                    const result = await args.client.call({ sessionId: args.pass.sessionId, projectRoot: args.projectRoot,
-                        method: "state_sync", generationSensitive: true, body });
+                for (const body of providerPassPages(
+                    args.pass.providerPass,
+                    args.pass.sessionId,
+                    args.options?.passComplete === true,
+                )) {
+                    const result = await args.client.call({
+                        sessionId: args.pass.sessionId,
+                        projectRoot: args.projectRoot,
+                        method: "state_sync",
+                        generationSensitive: true,
+                        body,
+                    });
                     if (isModuleTransportGenerationChangedResult(result)) return true;
                 }
             } else if (args.options?.passComplete) {
@@ -1561,7 +1595,7 @@ export async function syncModuleState(args: {
                                 await afterGenerationChange();
                                 force = true;
                                 args.state.lastAckedWatermarks = null;
-                                continue syncLoop;
+                                continue;
                             }
                             return { status: "acked", watermarks: payload.watermarks };
                         }
@@ -1625,9 +1659,11 @@ export async function syncModuleState(args: {
                         continue syncLoop;
                     }
                 }
-                if (args.pass.providerPass && await closePass()) {
-                    await afterGenerationChange(); force = true; args.state.lastAckedWatermarks = null;
-                    continue syncLoop;
+                if (args.pass.providerPass && (await closePass())) {
+                    await afterGenerationChange();
+                    force = true;
+                    args.state.lastAckedWatermarks = null;
+                    continue;
                 }
             } catch (error) {
                 if (isHistorianCompartmentSyncBusy(error)) {
