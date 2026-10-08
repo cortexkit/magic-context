@@ -1368,8 +1368,8 @@ describe("provider historian chain watermarks", () => {
         const calls: Record<string, unknown>[] = [];
         const client = {
             getCachedStateSyncCapabilities: () => ({ state_sync_deltas: true }),
-            async call(args: { body: Record<string, unknown> }) {
-                calls.push(args.body);
+            async call(args: { body: unknown }) {
+                calls.push(args.body as Record<string, unknown>);
                 return { ok: true };
             },
         };
@@ -1453,8 +1453,8 @@ describe("provider historian chain watermarks", () => {
         const pass = { db, sessionId: "barrier-session", nowMs: 1, historianModelChain: [] };
         const calls: Record<string, unknown>[] = [];
         const client = {
-            async call(args: { body: Record<string, unknown> }) {
-                calls.push(args.body);
+            async call(args: { body: unknown }) {
+                calls.push(args.body as Record<string, unknown>);
                 return { ok: true };
             },
         };
