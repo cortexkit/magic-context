@@ -1,0 +1,64 @@
+{
+  "requests": [
+    {
+      "name": "step on a descendant lineage",
+      "request": {
+        "session": "s", "harness": "host", "request_id": "r1", "lineage_id": "new-lineage",
+        "step_id": "step", "step_kind": "user_turn", "model": "m",
+        "estimate": {"request_tokens": 3}, "messages": [], "now": 1,
+        "descends_from": {"lineage_id": "old-lineage", "through_ordinal": 2}
+      }
+    }
+  ],
+  "summaries": [
+    {
+      "name": "published summary reports its covered newest message",
+      "answer": {
+        "answer": "compaction_message", "request_id": "r1",
+        "compaction": {
+          "compaction_id": "c", "version": 2, "range": {"from": 0, "to": 3},
+          "replacement": [{"speaker": "human", "parts": [{"kind": "text", "value": "summary"}]}]
+        },
+        "coverage": {"end_mid": "m2", "ordinal": 2}
+      }
+    }
+  ],
+  "refusals": [
+    {
+      "name": "retryable history gap reports the first missing ordinal",
+      "answer": {
+        "answer": "refuse", "request_id": "r1", "code": "history_unreadable",
+        "reason": "missing history from ordinal 1", "detail": {"history_gap_from": 1}
+      }
+    },
+    {
+      "name": "empty detail omits the absent history hint",
+      "answer": {"answer": "refuse", "request_id": "r2", "code": "history_unreadable", "reason": "cannot read history", "detail": {}}
+    }
+  ],
+  "undecodable_requests": [
+    {
+      "name": "ancestry missing through ordinal",
+      "request": {
+        "session": "s", "harness": "host", "request_id": "r1", "lineage_id": "l",
+        "step_id": "step", "step_kind": "user_turn", "model": "m",
+        "estimate": {"request_tokens": 3}, "messages": [], "now": 1,
+        "descends_from": {"lineage_id": "old"}
+      }
+    }
+  ],
+  "undecodable_answers": [
+    {
+      "name": "coverage missing message id",
+      "answer": {
+        "answer": "compaction_message", "request_id": "r1",
+        "compaction": {"compaction_id": "c", "version": 2, "range": {"from": 0, "to": 3}, "replacement": []},
+        "coverage": {"ordinal": 2}
+      }
+    },
+    {
+      "name": "negative gap ordinal",
+      "answer": {"answer": "refuse", "request_id": "r1", "code": "history_unreadable", "reason": "missing history", "detail": {"history_gap_from": -1}}
+    }
+  ]
+}

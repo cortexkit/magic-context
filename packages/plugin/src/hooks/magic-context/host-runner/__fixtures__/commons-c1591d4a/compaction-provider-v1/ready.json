@@ -1,0 +1,125 @@
+{
+  "requests": [
+    {
+      "name": "names the session and the request that got the wait",
+      "request": {
+        "session": "ses_01J9Z",
+        "request_id": "cr-000042"
+      }
+    }
+  ],
+  "tolerated": [
+    {
+      "name": "provider extras are ignored",
+      "request": {
+        "session": "ses_01J9Z",
+        "request_id": "cr-000042",
+        "version": 12
+      }
+    }
+  ],
+  "undecodable": [
+    {
+      "name": "no request id",
+      "request": {
+        "session": "ses_01J9Z"
+      }
+    },
+    {
+      "name": "no session",
+      "request": {
+        "request_id": "cr-000042"
+      }
+    },
+    {
+      "name": "a request id that is not a string",
+      "request": {
+        "session": "ses_01J9Z",
+        "request_id": 42
+      }
+    }
+  ],
+  "checks": [
+    {
+      "name": "the session's provider, newest request: call again",
+      "request": {
+        "session": "ses_01J9Z",
+        "request_id": "cr-000042"
+      },
+      "caller": "magic-context",
+      "plan": {
+        "compaction_item": {
+          "provider": "magic-context",
+          "preset": "default",
+          "params": {}
+        }
+      },
+      "newest_request_id": "cr-000042",
+      "outcome": "call_again"
+    },
+    {
+      "name": "the session's provider, a superseded request: ignored, not an error",
+      "request": {
+        "session": "ses_01J9Z",
+        "request_id": "cr-000041"
+      },
+      "caller": "magic-context",
+      "plan": {
+        "compaction_item": {
+          "provider": "magic-context",
+          "preset": "default",
+          "params": {}
+        }
+      },
+      "newest_request_id": "cr-000042",
+      "outcome": "ignored"
+    },
+    {
+      "name": "before any request was issued: ignored",
+      "request": {
+        "session": "ses_01J9Z",
+        "request_id": "cr-000042"
+      },
+      "caller": "magic-context",
+      "plan": {
+        "compaction_item": {
+          "provider": "magic-context",
+          "preset": "default",
+          "params": {}
+        }
+      },
+      "newest_request_id": null,
+      "outcome": "ignored"
+    },
+    {
+      "name": "another module: refused",
+      "request": {
+        "session": "ses_01J9Z",
+        "request_id": "cr-000042"
+      },
+      "caller": "acme-compactor",
+      "plan": {
+        "compaction_item": {
+          "provider": "magic-context",
+          "preset": "default",
+          "params": {}
+        }
+      },
+      "newest_request_id": "cr-000042",
+      "outcome": "not_session_compaction_provider"
+    },
+    {
+      "name": "a session with no compaction item: refused",
+      "request": {
+        "session": "ses_01J9Z",
+        "request_id": "cr-000042"
+      },
+      "caller": "magic-context",
+      "plan": {
+        "tool_items": []
+      },
+      "newest_request_id": null,
+      "outcome": "not_session_compaction_provider"
+    }
+  ]
+}

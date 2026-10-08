@@ -1,0 +1,29 @@
+{
+  "codes": [
+    {"code": "invalid_params", "retryable": false},
+    {"code": "transient", "retryable": true},
+    {"code": "a_code_this_role_does_not_define", "retryable": false}
+  ],
+  "refuse_codes": [
+    {"code": "window_too_small", "named": true, "retryable": false},
+    {"code": "provider_busy", "named": true, "retryable": true},
+    {"code": "misconfigured", "named": true, "retryable": false},
+    {"code": "history_unreadable", "named": true, "retryable": true},
+    {"code": "acme_own_code", "named": false, "retryable": false}
+  ],
+  "runner_provider_codes": [
+    "compaction_unavailable",
+    "compaction_wait_exceeded"
+  ],
+  "retryability": [
+    {"code": "invalid_params", "retryable": false, "ends_run_at": []},
+    {"code": "transient", "retryable": true, "ends_run_at": []},
+    {"code": "window_too_small", "retryable": false, "ends_run_at": ["setup", "step"]},
+    {"code": "provider_busy", "retryable": true, "ends_run_at": ["setup", "step"]},
+    {"code": "misconfigured", "retryable": false, "ends_run_at": ["setup", "step"]},
+    {"code": "history_unreadable", "retryable": true, "ends_run_at": ["setup", "step"]},
+    {"code": "not_session_compaction_provider", "retryable": false, "ends_run_at": []},
+    {"code": "compaction_unavailable", "retryable": false, "ends_run_at": ["setup"]},
+    {"code": "compaction_wait_exceeded", "retryable": true, "ends_run_at": ["step"]}
+  ]
+}
