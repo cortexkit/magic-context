@@ -2266,7 +2266,13 @@ pub mod compaction {
     /// Share the engine's classifier and concrete shape predicates. Unknown
     /// legacy summaries must run the engine; pending deltas alone remain deferred.
     pub fn can_skip_classified(input: &ClassifierInput) -> bool {
-        !input.reconcile_pending && classify(input) == PassPlan::Defer
+        let plan = classify(input);
+        if input.reconcile_pending || plan != PassPlan::Defer {
+            // A conservative preflight candidate only requires an engine run;
+            // it is never permission to change bytes at hook time.
+            return false;
+        }
+        !super::pass_plan_permits_prefix_mutation(&plan, false)
     }
 
     pub fn skip_facts(
@@ -2828,6 +2834,22 @@ pub mod compaction {
             message.mark_modified();
         }
     }
+}
+
+/// Whether the engine's exact pass plan may change the provider-visible prefix.
+/// This is valid only for a plan produced by the engine's exact classifier,
+/// never a conservative preflight candidate. A caller without an exact plan at
+/// hook time must treat the pass as a defer and add no temporal marker; a later
+/// HARD or SOFT view supplies its shared temporal overlay over the covered range.
+/// This evaluator reads no messages, frozen payloads, or other store state.
+pub fn pass_plan_permits_prefix_mutation(
+    plan: &mc_core::PassPlan,
+    marker_hard_serves_frozen_prefix: bool,
+) -> bool {
+    matches!(
+        plan,
+        PassPlan::Hard | PassPlan::MigrateHard | PassPlan::Soft
+    ) && !marker_hard_serves_frozen_prefix
 }
 
 pub(crate) fn transform_with_projection_cached(
@@ -5807,10 +5829,8 @@ fn apply_once(
     // transition consumption, guidance date, and the hygiene/calibration adoption below.
     let marker_hard_serves_frozen_prefix =
         marker_hard_keeps_provider_cache && !supersession_ride_available && !reductions_pending_now;
-    let is_provider_prefix_mutation_pass = matches!(
-        plan,
-        PassPlan::Hard | PassPlan::MigrateHard | PassPlan::Soft
-    ) && !marker_hard_serves_frozen_prefix;
+    let is_provider_prefix_mutation_pass =
+        pass_plan_permits_prefix_mutation(&plan, marker_hard_serves_frozen_prefix);
     // The reductions-only child branch preserves inherited history and accepts
     // reduction units only. Image/system/age-reasoning strip units stay primary-only;
     // an execute ride must not silently widen that separate replay contract.
@@ -16864,6 +16884,35 @@ pub(crate) mod tests {
 
         fn wire_bytes(messages: &[CkWireMessage]) -> Vec<u8> {
             serde_json::to_vec(messages).unwrap()
+        }
+
+        #[test]
+        fn public_pass_plan_permission_matches_full_engine_defer_and_hard() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            let request = req("plan-permission", "cfg", vec![item("u", 0, "plain user")]);
+            let hard = transform_with_projection(&store, &request, &context()).unwrap();
+            assert_eq!(hard.response.action, "HARD");
+            assert_eq!(
+                pass_plan_permits_prefix_mutation(&PassPlan::Hard, false),
+                hard.response.prefix_bust_permitted,
+            );
+            let defer = transform_with_projection(&store, &request, &context()).unwrap();
+            assert_eq!(defer.response.action, "SOFT+");
+            assert_eq!(
+                pass_plan_permits_prefix_mutation(&PassPlan::Defer, false),
+                defer.response.prefix_bust_permitted,
+            );
+            assert!(!pass_plan_permits_prefix_mutation(&PassPlan::Hard, true));
+            assert!(pass_plan_permits_prefix_mutation(&PassPlan::Soft, false));
+            assert!(pass_plan_permits_prefix_mutation(
+                &PassPlan::MigrateHard,
+                false
+            ));
+            assert!(!pass_plan_permits_prefix_mutation(
+                &PassPlan::Reject("unsafe shape"),
+                false
+            ));
         }
 
         #[test]
