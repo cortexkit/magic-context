@@ -1073,3 +1073,32 @@ summary with a loaded full core after bootstrap, append, scalar update, recomp,
 empty rewrite and rebootstrap. All 35 codec tests pass, with the one pre-existing
 profile benchmark ignored; package compilation passes. Existing chunk/hash and
 unchanged-write controls remain green.
+
+### Independent upgrade identity and metadata preflight
+
+The two engine-path upgrade tests are green without changing their expectations.
+The HOST_PASS exception now requires identical model, provider, system and upgrade
+state **and** identical decoded epoch fields. Only an opaque transport-plan base
+string may differ. Length-prefixed epoch decoding accepts only a complete suffix,
+so a delimiter inside a plan or an encoded field value cannot become an epoch.
+The ordinary SOFT+ adoption controls remain green. During adoption the head retains
+its advertised tagger surface; rendering live host tags is a separate overlay lane,
+not a reason to invent a tagger epoch solely because the transport changed.
+
+`r3_upgrade_epoch_cannot_be_skipped_by_host_preflight` is also green. The preflight
+constructs its versioned identity through the full engine's `m0_content_epoch_for_pass`
+and `fold_m0_content_epoch` builders from metadata inputs. It compares every epoch
+field, including module, compartment, serializer-profile, tagger and prompt epochs,
+not only the model. The persisted mural identity is retained from metadata, exactly
+as the engine uses the persisted mural for classification; no frozen payload is
+loaded. The added workspace/prompt-identity reads and hashing are read-only.
+
+A seventeenth concrete trigger, `real_state_trigger_previous_module_epoch`, first
+establishes a real SOFT m1 delta and a skip-eligible SOFT+ baseline. It writes the
+previous module-render epoch into the stored identity, invokes the actual metadata
+preflight, and requires the following real full engine to HARD-fold. Every concrete
+trigger additionally checks that preflight preserves the metadata row version and
+full-decode counter. A staged `NON-VACUITY BREAK` disabling the versioned identity
+comparison made exactly this seventeenth test fail (`preflight skipped a concrete
+module_epoch trigger`); all prior sixteen tests stayed green. Restoring the staged
+implementation left an empty unstaged diff, and all seventeen then passed on Linux.

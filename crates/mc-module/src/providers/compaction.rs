@@ -2181,6 +2181,46 @@ mod host_tests {
             "model" => {
                 req.model_key = Some("changed-model".into());
             }
+            "module_epoch" => {
+                s.replace_compartments("s", &[baseline.clone(), delta.clone()])
+                    .unwrap();
+                let mut ctx = producer_context(&work, "fixture", 100000, false);
+                ctx.observed_last_response_at_ms = Some(ctx.now_ms);
+                req.usage.as_mut().unwrap().current_total_input_tokens = 75000;
+                assert_eq!(
+                    transform::transform_with_projection(&s, &req, &ctx)
+                        .unwrap()
+                        .response
+                        .action,
+                    "SOFT"
+                );
+                req.usage.as_mut().unwrap().current_total_input_tokens = 1000;
+                assert_eq!(
+                    transform::transform_with_projection(&s, &req, &ctx)
+                        .unwrap()
+                        .response
+                        .action,
+                    "SOFT+"
+                );
+                assert!(can_skip_host_step(
+                    &s,
+                    &work,
+                    "s",
+                    "fixture",
+                    &status(&params, &Record::default()).unwrap(),
+                    false
+                )
+                .unwrap());
+                let mut stored = s.load_meta("s").unwrap();
+                let current = format!("mre:4:mre{}", crate::MEMORY_RENDER_FORMAT_EPOCH);
+                assert!(stored.meta.last_render_config.contains(&current));
+                stored.meta.last_render_config = stored
+                    .meta
+                    .last_render_config
+                    .replace(&current, "mre:4:mre2");
+                s.commit_meta("s", stored.row_version, &stored.meta)
+                    .unwrap();
+            }
             "first_publication" => {
                 s.replace_compartments("s", std::slice::from_ref(&baseline))
                     .unwrap();
@@ -2256,9 +2296,21 @@ mod host_tests {
         }
         let model = req.model_key.as_deref().unwrap();
         let status = status(&params, &Record::default()).unwrap();
+        let row_version = s.load_meta("s").unwrap().row_version;
+        let full_decodes = mc_store::cache_codec::full_decode_count();
         assert!(
             !can_skip_host_step(&s, &work, "s", model, &status, false).unwrap(),
             "preflight skipped a concrete {cause} trigger"
+        );
+        assert_eq!(
+            s.load_meta("s").unwrap().row_version,
+            row_version,
+            "preflight must be read-only"
+        );
+        assert_eq!(
+            mc_store::cache_codec::full_decode_count(),
+            full_decodes,
+            "preflight must not decode frozen chunks"
         );
         let mut ctx = producer_context(&work, model, 100000, false);
         ctx.observed_last_response_at_ms = Some(ctx.now_ms);
@@ -2308,6 +2360,10 @@ mod host_tests {
     #[test]
     fn real_state_trigger_model_identity() {
         real_state_trigger_comparison("model", "HARD");
+    }
+    #[test]
+    fn real_state_trigger_previous_module_epoch() {
+        real_state_trigger_comparison("module_epoch", "HARD");
     }
     #[test]
     fn real_state_trigger_first_publication() {

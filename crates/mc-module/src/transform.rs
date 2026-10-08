@@ -2313,7 +2313,8 @@ pub mod compaction {
             is_legacy_baseline: is_legacy_baseline(&core),
             valid_m0m1_shape: valid_m0m1_shape(&core),
             cached_m1_missing: cached_m1_missing(&core),
-            render_config_changed: meta.last_model_key != model,
+            render_config_changed: meta.last_model_key != model
+                || metadata_render_epochs_changed(store, namespace, ctx, model, &meta)?,
             hard_fold_requested: first_fold || external || protection || meta.project_memory_epoch_pending || meta.bootstrap_seed_fold_pending || meta.pending_rewrite.is_some()
                 // Replay treatments can need content-dependent repair. Without
                 // decoding content a preflight cannot prove them safe to skip.
@@ -8416,8 +8417,7 @@ fn versioned_render_epochs(config: &str) -> Option<BTreeMap<String, String>> {
     for (at, _) in config.match_indices("|m0epoch[") {
         let mut rest = &config[at + "|m0epoch[".len()..];
         let mut fields = BTreeMap::new();
-        loop {
-            let Some(colon) = rest.find(':') else { break };
+        while let Some(colon) = rest.find(':') {
             let key = &rest[..colon];
             if key.is_empty() || !key.bytes().all(|b| b.is_ascii_alphanumeric()) {
                 break;
@@ -8451,6 +8451,53 @@ fn versioned_render_epochs(config: &str) -> Option<BTreeMap<String, String>> {
         }
     }
     None
+}
+
+/// Build versioned identity with the same epoch formatter as the full engine.
+/// Status lacks a new tool/system/upgrade observation, so those inputs come from
+/// the namespace's metadata. Opaque transport serialization is not an epoch.
+fn metadata_render_epochs_changed(
+    store: &McStore,
+    namespace: &str,
+    ctx: &ProducerContext<'_>,
+    model: &str,
+    meta: &ModuleMeta,
+) -> Result<bool, TransformError> {
+    if !meta.initialized {
+        return Ok(false);
+    }
+    let Some(old) = versioned_render_epochs(&meta.last_render_config) else {
+        return Ok(true);
+    };
+    let request: TransformRequest = serde_json::from_value(serde_json::json!({
+        "v":2,"kind":"compaction.host","session_id":namespace,"messages":[],
+        "serializer_profile":"opencode-aisdk","render_config":"","model_key":model,
+        "provider_id":(!meta.last_provider_id.is_empty()).then_some(&meta.last_provider_id),
+        "system_prompt_hash":meta.last_system_prompt_hash,"upgrade_state":meta.last_upgrade_state,
+        "tool_present":meta.tagging_surface_active || meta.cc_u1_active,"auto_search_enabled":false,
+    }))
+    .map_err(|e| TransformError::LineageProtocol(format!("invalid metadata render inputs: {e}")))?;
+    let epoch = m0_content_epoch_for_pass(
+        store,
+        &request,
+        ctx,
+        Some(SerializerProfile::OpencodeAiSdk),
+        request.tool_present,
+    )?;
+    let identity = fold_m0_content_epoch(
+        &render_identity_base(&request, &epoch.prompt_surface_epoch),
+        &epoch,
+    );
+    let Some(mut current) = versioned_render_epochs(&identity) else {
+        return Ok(true);
+    };
+    // The engine compares the persisted mural, not a newly requested mural.
+    // Its identity is already recorded in metadata, so no frozen payload read is
+    // needed to retain that same comparison input in the preflight.
+    if let Some(mural) = old.get("mur") {
+        current.insert("mur".into(), mural.clone());
+    }
+    Ok(old != current)
 }
 
 fn scheduler_config(execute_threshold_percentage: f64) -> SchedulerConfig {
