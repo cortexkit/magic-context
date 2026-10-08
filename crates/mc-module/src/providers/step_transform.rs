@@ -9,6 +9,9 @@ use serde::Deserialize;
 #[cfg(test)]
 #[path = "step_transform_review_tests.rs"]
 mod review_tests;
+#[cfg(test)]
+#[path = "step_transform_parity_tests.rs"]
+mod parity_tests;
 
 #[derive(Deserialize, Default)]
 struct HostHookFields {
