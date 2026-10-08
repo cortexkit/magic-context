@@ -923,6 +923,9 @@ impl McStore {
 mod tests;
 
 #[cfg(test)]
+mod review_tests;
+
+#[cfg(test)]
 mod lineage_metadata_tests {
     use super::*;
     use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};

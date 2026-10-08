@@ -6,6 +6,10 @@ use mc_store::provider_records::{
 };
 use serde::Deserialize;
 
+#[cfg(test)]
+#[path = "step_transform_review_tests.rs"]
+mod review_tests;
+
 #[derive(Deserialize, Default)]
 struct HostHookFields {
     subject_mid: Option<String>,
