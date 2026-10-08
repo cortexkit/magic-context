@@ -64,6 +64,7 @@ export interface ModuleWatermarks {
     workspace_fingerprint?: string | null;
     reasoning_cleared_through_tag?: number;
     note_evaluation_available?: boolean;
+    historian_model_chain_hash?: string;
 }
 
 export interface ModuleWorkspacePayload {
@@ -138,6 +139,8 @@ export interface ModuleStateSyncPayload {
     method: "state_sync";
     params: {
         session_id?: string;
+        historian_model_chain?: readonly string[];
+        pass_complete?: true;
         note_evaluation_available?: boolean;
         shadow_generation: number;
         expected_shadow_seq: number;
@@ -184,6 +187,8 @@ export interface ModuleStateSyncPass {
     sessionId: string;
     projectPath?: string;
     nowMs: number;
+    /** Host-resolved chain; absent preserves the full-request sender's wire. */
+    historianModelChain?: readonly string[];
 }
 
 export interface ModuleStateSyncOptions {
@@ -205,6 +210,8 @@ export interface ModuleStateSyncOptions {
      * This bypasses both capability and own-store reads; force/restart seeds ignore it.
      */
     knownWatermarksUnchanged?: boolean;
+    /** A no-append provider pass still closes its ingest barrier. */
+    passComplete?: boolean;
     noteEvaluationProjectPath?: string;
 }
 
@@ -296,6 +303,7 @@ export function loadModuleWatermarks(args: {
     /** Reuse the enclosing pass's session_meta projection. */
     sessionMeta?: ReturnType<typeof getOrCreateSessionMeta>;
     noteEvaluationProjectPath?: string;
+    historianModelChain?: readonly string[];
 }): ModuleWatermarks {
     const workspace = args.workspace ?? resolveModuleWorkspaceContext(args.db, args.projectPath);
     const sessionMeta = args.sessionMeta ?? getOrCreateSessionMeta(args.db, args.sessionId);
@@ -334,6 +342,9 @@ export function loadModuleWatermarks(args: {
         workspace_fingerprint: workspace.workspace?.fingerprint ?? null,
         reasoning_cleared_through_tag: sessionMeta.clearedReasoningThroughTag ?? 0,
         note_evaluation_available: true,
+        ...(args.historianModelChain !== undefined
+            ? { historian_model_chain_hash: stableHash(JSON.stringify(args.historianModelChain)) }
+            : {}),
     };
 }
 
@@ -353,6 +364,7 @@ export function moduleWatermarksEqual(
         (left.workspace_fingerprint ?? null) === (right.workspace_fingerprint ?? null) &&
         (left.reasoning_cleared_through_tag ?? 0) === (right.reasoning_cleared_through_tag ?? 0) &&
         (left.note_evaluation_available ?? false) === (right.note_evaluation_available ?? false)
+        && (left.historian_model_chain_hash ?? null) === (right.historian_model_chain_hash ?? null)
     );
 }
 
@@ -680,6 +692,8 @@ export function buildPagedModuleStateSyncPayloads(
         reasoningClearedThroughTag?: number;
         lastTodoState: string;
         watermarks: ModuleWatermarks;
+        historianModelChain?: readonly string[];
+        passComplete?: boolean;
     },
     maxPageBytes = MODULE_PAGE_MAX_BYTES,
 ): ModuleStateSyncPayload[] {
@@ -747,6 +761,9 @@ export function buildPagedModuleStateSyncPayloads(
         method: "state_sync",
         params: {
             shadow_generation: args.moduleGeneration,
+            ...(input.complete && args.historianModelChain !== undefined
+                ? { historian_model_chain: args.historianModelChain } : {}),
+            ...(input.complete && args.passComplete ? { pass_complete: true as const } : {}),
             expected_shadow_seq: args.expectedShadowSeq,
             seed_id: args.seedId,
             seed_generation: args.moduleGeneration,
@@ -914,6 +931,7 @@ async function collectModuleStateSyncPayload(args: {
         workspace,
         sessionMeta,
         noteEvaluationProjectPath: args.options?.noteEvaluationProjectPath,
+        historianModelChain: args.pass.historianModelChain,
     });
     if (!args.force && moduleWatermarksEqual(args.state.lastAckedWatermarks, currentWatermarks)) {
         return null;
@@ -1141,6 +1159,8 @@ async function collectModuleStateSyncPayload(args: {
         reasoningClearedThroughTag: sessionMeta.clearedReasoningThroughTag,
         lastTodoState: effectiveLastTodoState(args.pass.sessionId, sessionMeta),
         watermarks: currentWatermarks,
+        historianModelChain: args.pass.historianModelChain,
+        passComplete: args.options?.passComplete,
     };
     if (args.force) {
         const pageStarted = performance.now();
@@ -1152,6 +1172,9 @@ async function collectModuleStateSyncPayload(args: {
         method: "state_sync",
         params: {
             shadow_generation: args.state.moduleGeneration,
+            ...(args.pass.historianModelChain !== undefined
+                ? { historian_model_chain: args.pass.historianModelChain } : {}),
+            ...(args.options?.passComplete ? { pass_complete: true as const } : {}),
             expected_shadow_seq: args.state.lastAckedSeq,
             last_todo_state: effectiveLastTodoState(args.pass.sessionId, sessionMeta),
             acked_watermarks: currentWatermarks,
@@ -1278,6 +1301,16 @@ export async function syncModuleState(args: {
     args = { ...args, options: { ...args.options, timing } };
     try {
         let force = args.force;
+        const noChange = async (): Promise<ModuleStateSyncResult> => {
+            if (args.options?.passComplete) {
+                await args.client.call({
+                    sessionId: args.pass.sessionId, projectRoot: args.projectRoot,
+                    method: "state_sync", generationSensitive: true,
+                    body: { method: "state_sync", session_id: args.pass.sessionId, pass_complete: true },
+                });
+            }
+            return { status: "no_change" };
+        };
         const probe = async (body: Record<string, unknown>): Promise<unknown> => {
             const started = performance.now();
             try {
@@ -1302,8 +1335,11 @@ export async function syncModuleState(args: {
             args.options?.knownWatermarksUnchanged === true &&
             args.state.lastAckedWatermarks !== null &&
             args.state.lastAckedWatermarks.note_evaluation_available === true
+            && (args.pass.historianModelChain === undefined ||
+                args.state.lastAckedWatermarks.historian_model_chain_hash ===
+                    stableHash(JSON.stringify(args.pass.historianModelChain)))
         ) {
-            return { status: "no_change" };
+            return noChange();
         }
         const adoption = args.options?.authoritySeqAdoption ?? { used: false };
         let resumable = false;
@@ -1403,7 +1439,7 @@ export async function syncModuleState(args: {
                     (timing.collect - collectBefore) -
                     (timing.pageBuild - pagesBefore),
             );
-            if (payload === null) return { status: "no_change" };
+            if (payload === null) return noChange();
             if (
                 payload === "m0_mutation" ||
                 payload === "mismatch" ||

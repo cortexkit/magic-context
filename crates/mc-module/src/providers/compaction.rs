@@ -243,7 +243,7 @@ impl McHandler {
             .store_for_request()
             .await
             .map_err(StoreRefusal::into_outcome)?;
-        let _serial = self.provider_serial.lock().await;
+        let _serial = self.provider_serial.lock_for(&key).await;
         let mut record = self.provider_store.load(&key)?;
         if record.catalog.is_none() {
             record.catalog = self.provider_store.catalog(&SessionBinding {
@@ -379,7 +379,7 @@ impl McHandler {
             .store_for_request()
             .await
             .map_err(StoreRefusal::into_outcome)?;
-        let _serial = self.provider_serial.lock().await;
+        let _serial = self.provider_serial.lock_for(&key).await;
         let mut record = self.provider_store.load(&key)?;
         if record.setup.is_none() {
             return Err(error(
@@ -415,7 +415,7 @@ impl McHandler {
             tokio::spawn(async move {
                 tokio::task::yield_now().await;
                 fault("WaitAnswered");
-                let _serial = serial.lock().await;
+                let _serial = serial.lock_for(&key).await;
                 let result = async {
                     let mut record = storage.load(&key)?;
                     if record.wait_request.as_deref() != Some(&request.request_id) {

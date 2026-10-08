@@ -26,6 +26,49 @@ pub fn runner_groups() -> [&'static str; 1] {
     ["transcript_reads"]
 }
 
+/// Active and queued callers retain their lock; only idle entries can be evicted.
+/// A rebuild in one conversation must never queue a hook in another conversation.
+#[derive(Default)]
+pub(crate) struct ProviderSerial {
+    locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl ProviderSerial {
+    fn lock_arc(&self, key: &Key) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.locks.lock().expect("provider lock map");
+        if locks.len() >= 1024 {
+            locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+        }
+        Arc::clone(
+            locks
+                .entry(key.store_key().conversation_key())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    }
+    pub(crate) async fn lock_for(&self, key: &Key) -> tokio::sync::OwnedMutexGuard<()> {
+        self.lock_arc(key).lock_owned().await
+    }
+    pub(crate) fn try_lock_for(
+        &self,
+        key: &Key,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, tokio::sync::TryLockError> {
+        self.lock_arc(key).try_lock_owned()
+    }
+}
+
+fn invalid_field(field: &str, message: impl ToString) -> HandlerOutcome {
+    HandlerOutcome::ErrorWithDetail {
+        code: "invalid_params".into(),
+        message: message.to_string(),
+        detail: json!({"field":field}),
+    }
+}
+
+fn answer_observation(params: &Value) -> bool {
+    params.get("serializer_profile").and_then(Value::as_str) == Some("opencode-aisdk")
+        && params.get("observation").and_then(Value::as_str) == Some("answer")
+}
+
 pub fn describe() -> HandlerOutcome {
     let mut answer: Value = match tool_catalog::role_describe_bytes() {
         Ok(bytes) => serde_json::from_slice(&bytes).expect("compiled role description"),
@@ -110,6 +153,59 @@ impl McHandler {
                 )
             }
         };
+        // Until the daemon supplies attested caller identity, bind is the same
+        // trust boundary as full-request transform. Body harness never grants it.
+        let host = matches!(binding.harness.as_str(), "opencode" | "opencode2");
+        if !host && binding.harness != session_resolver::RUNNER_BIND_HARNESS {
+            return error(
+                "route_unbound",
+                "provider operations require a host or runner bind",
+            );
+        }
+        if matches!(method, "transform.declare" | "compaction.setup") {
+            let plan = &params["params"];
+            if let Err(error) = codec::Codec::from_params(plan) {
+                return error;
+            }
+            if !host {
+                for (field, value) in [
+                    ("observation", "answer"),
+                    ("serializer_profile", "opencode-aisdk"),
+                ] {
+                    if plan.get(field).and_then(Value::as_str) == Some(value) {
+                        return invalid_field(
+                            &format!("params.{field}"),
+                            "runner plans cannot opt into host observation",
+                        );
+                    }
+                }
+            } else if !answer_observation(plan) {
+                return invalid_field(
+                    "params.observation",
+                    "host lane requires both answer observation and opencode-aisdk",
+                );
+            }
+        }
+        if host {
+            for (field, expected) in [
+                ("session", binding.session.as_str()),
+                ("harness", binding.harness.as_str()),
+            ] {
+                if params
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value != expected)
+                {
+                    return invalid_field(
+                        field,
+                        "provider call does not match its bound conversation",
+                    );
+                }
+            }
+            if let Err(error) = self.admit_host_plan(&binding, method, params).await {
+                return error;
+            }
+        }
         if method == "transform.declare" {
             return match declaration(params).and_then(|d| bytes(&d)) {
                 Ok(bytes) => HandlerOutcome::Response(bytes),

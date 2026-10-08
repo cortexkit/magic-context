@@ -1910,13 +1910,13 @@ pub struct TransformWithProjection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TaggableKind {
+pub(crate) enum TaggableKind {
     Message,
     ToolResult,
 }
 
 impl TaggableKind {
-    fn as_store_kind(self) -> &'static str {
+    pub(crate) fn as_store_kind(self) -> &'static str {
         match self {
             Self::Message => "message",
             Self::ToolResult => "tool_result",
@@ -1925,7 +1925,7 @@ impl TaggableKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Channel1Level {
+pub(crate) enum Channel1Level {
     Gentle,
     Firm,
     Urgent,
@@ -1975,14 +1975,14 @@ struct ActiveTagForNudge {
 }
 
 #[derive(Debug, Clone)]
-struct Channel1Decision {
-    fire: bool,
-    sticky: bool,
-    level: Channel1Level,
-    reclaimable_tokens: i64,
-    next_last_nudge: i64,
-    next_last_level: String,
-    clear_post_reduce_grace: bool,
+pub(crate) struct Channel1Decision {
+    pub(crate) fire: bool,
+    pub(crate) sticky: bool,
+    pub(crate) level: Channel1Level,
+    pub(crate) reclaimable_tokens: i64,
+    pub(crate) next_last_nudge: i64,
+    pub(crate) next_last_level: String,
+    pub(crate) clear_post_reduce_grace: bool,
 }
 
 fn scale_hygiene_watermark(value: i64, tools_ratio: f64) -> i64 {
@@ -10556,7 +10556,9 @@ fn append_tag_mint_rows(
 
 /// Return exactly the span the overlay can prefix. Mint scope and overlay scope share
 /// this predicate so every visible tag number has a renderable §N§ carrier.
-fn taggable_source(block: &FlatBlock) -> Option<(TaggableKind, std::borrow::Cow<'_, str>)> {
+pub(crate) fn taggable_source(
+    block: &FlatBlock,
+) -> Option<(TaggableKind, std::borrow::Cow<'_, str>)> {
     if block.synthetic || block.role == "system" {
         return None;
     }
@@ -10809,7 +10811,7 @@ fn apply_tag_overlay_to_message(
     }
 }
 
-fn apply_tag_prefix_to_block(
+pub(crate) fn apply_tag_prefix_to_block(
     role: &str,
     block: &mut CkWireBlock,
     kind: TaggableKind,
@@ -10928,7 +10930,7 @@ fn append_channel1_to_output(output: &mut ck_wire::CkToolOutput, reminder: &str)
     false
 }
 
-fn tag_prefix(tag_number: i64) -> String {
+pub(crate) fn tag_prefix(tag_number: i64) -> String {
     format!("§{tag_number}§ ")
 }
 
@@ -10951,7 +10953,7 @@ fn strip_tag_prefix(value: &str, tag_number: i64) -> &str {
 /// rewriting genuine references such as `the tag §12§ was dropped`. Code fences and
 /// inline-code lines stay verbatim, and a token must be followed by whitespace or ASCII
 /// punctuation so malformed text is never partially consumed.
-fn strip_leading_tag_imitations(value: &str) -> String {
+pub(crate) fn strip_leading_tag_imitations(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     let mut in_fenced_code = false;
     let mut inline_code_delimiter = None;
@@ -11439,7 +11441,7 @@ fn compute_active_overlay_decisions(
 /// Decide one durable auto-search hint for a new live user tail. The caller may render the
 /// frozen decision immediately only when this request has not served the target block before.
 #[allow(clippy::too_many_arguments)]
-fn maybe_decide_live_user_hint(
+pub(crate) fn maybe_decide_live_user_hint(
     store: &McStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
@@ -11919,7 +11921,7 @@ pub(crate) fn utf16_prefix(text: &str, limit: usize) -> &str {
     &text[..end]
 }
 
-fn render_user_hint(
+pub(crate) fn render_user_hint(
     results: &[crate::memory_tool::MemorySearchResult],
     english_word_rules: bool,
 ) -> Option<String> {
@@ -12051,7 +12053,7 @@ fn maybe_append_channel1_nudge(
     Some((row, unit))
 }
 
-fn apply_channel1_decision_state(meta: &mut ModuleMeta, decision: &Channel1Decision) {
+pub(crate) fn apply_channel1_decision_state(meta: &mut ModuleMeta, decision: &Channel1Decision) {
     meta.channel1_last_nudge_undropped = decision.next_last_nudge;
     meta.channel1_last_nudge_level = decision.next_last_level.clone();
     if decision.clear_post_reduce_grace {
@@ -12525,7 +12527,7 @@ fn build_channel2_host_reminder(
     format!("<system-reminder>\n{text}\n</system-reminder>")
 }
 
-fn decide_channel1(
+pub(crate) fn decide_channel1(
     baseline: Option<&TailHygieneBaseline>,
     meta: &ModuleMeta,
     current_real_user_turn_count: u64,
@@ -13183,7 +13185,7 @@ pub(crate) fn reclaimable_tool_output_count(baseline: Option<&TailHygieneBaselin
         .count()
 }
 
-fn build_channel1_reminder(
+pub(crate) fn build_channel1_reminder(
     level: Channel1Level,
     reclaimable_tokens: i64,
     reclaimable_tool_outputs: usize,

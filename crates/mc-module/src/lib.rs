@@ -1579,6 +1579,10 @@ struct ModuleStateSyncWire {
     /// Host capability for creating smart notes. Omitted means unavailable.
     #[serde(default)]
     note_evaluation_available: Option<bool>,
+    #[serde(default)]
+    historian_model_chain: Option<Vec<String>>,
+    #[serde(default)]
+    pass_complete: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -3872,7 +3876,7 @@ pub struct McHandler {
     /// Preflight and digest probes cannot overwrite the session's admitted tools.
     frozen_tool_catalogs: Mutex<HashMap<(PathBuf, String), tool_catalog::FrozenCatalog>>,
     provider_store: Arc<providers::Storage>,
-    provider_serial: Arc<tokio::sync::Mutex<()>>,
+    provider_serial: Arc<providers::ProviderSerial>,
     provider_runner: Arc<dyn session_resolver::ProviderRunner>,
     #[cfg(test)]
     guidance_now_ms: Mutex<Option<i64>>,
@@ -4514,7 +4518,7 @@ impl McHandler {
             tool_provider_v1_channels: Mutex::new(HashSet::new()),
             frozen_tool_catalogs: Mutex::new(HashMap::new()),
             provider_store,
-            provider_serial: Arc::new(tokio::sync::Mutex::new(())),
+            provider_serial: Arc::new(providers::ProviderSerial::default()),
             provider_runner,
             #[cfg(test)]
             guidance_now_ms: Mutex::new(None),
@@ -4919,7 +4923,7 @@ impl McHandler {
             tool_provider_v1_channels: Mutex::new(HashSet::new()),
             frozen_tool_catalogs: Mutex::new(HashMap::new()),
             provider_store,
-            provider_serial: Arc::new(tokio::sync::Mutex::new(())),
+            provider_serial: Arc::new(providers::ProviderSerial::default()),
             provider_runner: Arc::new(session_resolver::MissingProviderRunner),
             guidance_now_ms: Mutex::new(None),
             reduction_injection: Mutex::new(HashMap::new()),
@@ -10970,6 +10974,25 @@ impl McHandler {
     }
 
     fn handle_state_sync_value(&self, channel: u16, request: Value) -> HandlerOutcome {
+        // A provider pass without appends still has a barrier, even when all
+        // synchronized watermarks are unchanged. This carries no message data.
+        if request.get("pass_complete") == Some(&Value::Bool(true))
+            && request.get("shadow_generation").is_none()
+        {
+            let binding = match self
+                .state_sync_binding(channel, request.get("session_id").and_then(Value::as_str))
+            {
+                Ok(binding) => binding,
+                Err(error) => return error,
+            };
+            let Some(store) = self.store.get() else {
+                return self.store_refusal();
+            };
+            return match self.sync_provider_pass_inputs(&binding, store, None, true) {
+                Ok(()) => respond(json!({"ok":true})),
+                Err(error) => error,
+            };
+        }
         let started = Instant::now();
         let mut timing = state_sync_timing::StateSyncTiming {
             session: request
@@ -11514,6 +11537,8 @@ impl McHandler {
         store: &McStore,
         parsed: ModuleStateSyncWire,
     ) -> HandlerOutcome {
+        let chain = parsed.historian_model_chain.clone();
+        let pass_complete = parsed.pass_complete == Some(true);
         let note_evaluation_available = parsed.note_evaluation_available.unwrap_or(false);
         #[cfg(test)]
         if !parsed.compartments.is_empty() {
@@ -11625,6 +11650,11 @@ impl McHandler {
             acked_watermarks,
         }) {
             Ok(result) => {
+                if let Err(error) =
+                    self.sync_provider_pass_inputs(binding, store, chain.as_deref(), pass_complete)
+                {
+                    return error;
+                }
                 self.set_note_evaluation_capability(
                     &binding.project_root,
                     note_evaluation_available,
@@ -13007,7 +13037,9 @@ impl McHandler {
             self.module_knows_transform_session(bound_session, &binding.project_root);
         let conversation_key = if binding.harness == session_resolver::RUNNER_BIND_HARNESS {
             self.provider_store.tool_key(&binding)?.engine_key()
-        } else if opencode_harness && transform_session_known {
+        } else if opencode_harness
+            && (transform_session_known || self.host_provider_conversation(&binding).is_some())
+        {
             bound_session.to_string()
         } else {
             match self
@@ -13084,10 +13116,10 @@ impl McHandler {
             Ok(scope) => scope,
             Err(outcome) => return outcome,
         };
-        if self
-            .facade_binding(channel)
-            .is_ok_and(|binding| binding.harness == session_resolver::RUNNER_BIND_HARNESS)
-        {
+        if self.facade_binding(channel).is_ok_and(|binding| {
+            binding.harness == session_resolver::RUNNER_BIND_HARNESS
+                || self.host_provider_conversation(&binding).is_some()
+        }) {
             return self.handle_provider_reduce(channel, &requested).await;
         }
         let store = match self.store_for_request().await {
@@ -16422,6 +16454,8 @@ fn assemble_state_sync_seed(
         note_evaluation_available: final_batch
             .note_evaluation_available
             .or(batched_note_evaluation_available),
+        historian_model_chain: final_batch.historian_model_chain,
+        pass_complete: final_batch.pass_complete,
     }
 }
 

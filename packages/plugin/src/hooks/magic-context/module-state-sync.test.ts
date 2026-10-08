@@ -1356,3 +1356,58 @@ it("scoped drop seeds use address indexes instead of scanning dropped history", 
     expect(plans.join("\n")).toContain("idx_tags_session_message_id");
     expect(plans.join("\n")).not.toContain("idx_tags_dropped_session_tag_number");
 });
+
+describe("provider historian chain watermarks", () => {
+    it("changed chain overrides the no-event hint and unchanged chain reads and serializes no known content", async () => {
+        useTempDataHome("module-state-sync-provider-chain-");
+        const db = createContextDb();
+        const sessionId = "chain-session";
+        createOpenCodeDb(sessionId, [{ id: "known-message", role: "user" }]);
+        const state: ModuleStateSyncState = syncState();
+        const calls: Record<string, unknown>[] = [];
+        const client = {
+            getCachedStateSyncCapabilities: () => ({ state_sync_deltas: true }),
+            async call(args: { body: Record<string, unknown> }) { calls.push(args.body); return { ok: true }; },
+        };
+        const pass = { db, sessionId, nowMs: 1, historianModelChain: ["provider/a"] };
+        expect((await syncModuleState({ client, state, pass, projectRoot: "/project", force: false })).status).toBe("acked");
+        const firstHash = state.lastAckedWatermarks?.historian_model_chain_hash;
+        expect(calls.at(-1)?.historian_model_chain).toEqual(["provider/a"]);
+        calls.length = 0;
+        pass.historianModelChain = ["provider/b"];
+        expect((await syncModuleState({ client, state, pass, projectRoot: "/project", force: false, options: { knownWatermarksUnchanged: true } })).status).toBe("acked");
+        expect(state.lastAckedWatermarks?.historian_model_chain_hash).not.toBe(firstHash);
+        expect(calls.at(-1)?.historian_model_chain).toEqual(["provider/b"]);
+        calls.length = 0;
+        let reads = 0;
+        let knownSerializations = 0;
+        const guardedDb = new Proxy(db, { get(target, property, receiver) {
+            if (property === "prepare") return () => { reads++; throw new Error("unchanged chain read the own store"); };
+            return Reflect.get(target, property, receiver);
+        } });
+        const stringify = JSON.stringify;
+        JSON.stringify = ((value: unknown, ...rest: unknown[]) => {
+            if (value && typeof value === "object" && (value as { info?: { id?: string } }).info?.id === "known-message") knownSerializations++;
+            return Reflect.apply(stringify, JSON, [value, ...rest]);
+        }) as typeof JSON.stringify;
+        try {
+            expect(await syncModuleState({ client, state, pass: { ...pass, db: guardedDb }, projectRoot: "/project", force: false, options: { knownWatermarksUnchanged: true } })).toEqual({ status: "no_change" });
+        } finally { JSON.stringify = stringify; }
+        expect(reads).toBe(0);
+        expect(knownSerializations).toBe(0);
+        expect(calls).toEqual([]);
+    });
+
+    it("unchanged chain closes a no-append pass with a content-free barrier", async () => {
+        useTempDataHome("module-state-sync-provider-barrier-");
+        const db = createContextDb();
+        const state: ModuleStateSyncState = syncState();
+        const pass = { db, sessionId: "barrier-session", nowMs: 1, historianModelChain: [] };
+        const calls: Record<string, unknown>[] = [];
+        const client = { async call(args: { body: Record<string, unknown> }) { calls.push(args.body); return { ok: true }; } };
+        await syncModuleState({ client, state, pass, projectRoot: "/project", force: false });
+        calls.length = 0;
+        expect(await syncModuleState({ client, state, pass, projectRoot: "/project", force: false, options: { knownWatermarksUnchanged: true, passComplete: true } })).toEqual({ status: "no_change" });
+        expect(calls).toEqual([{ method: "state_sync", session_id: "barrier-session", pass_complete: true }]);
+    });
+});
