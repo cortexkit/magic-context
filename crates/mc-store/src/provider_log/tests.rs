@@ -305,6 +305,93 @@ fn conflicting_status_refuses_before_promote_and_burn() {
 }
 
 #[test]
+fn acknowledgements_are_bounded_monotone_and_missing_never_promotes() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    let l = lineage("L", 4000);
+    hook(&store, &l, &message(4000), "p", None, false);
+    assert!(matches!(
+        store.commit_provider_status(&key(), &l, &[], Some(4001), &[]),
+        Err(ProviderError::InvalidParams {
+            field: "served_through_ordinal"
+        })
+    ));
+    assert_eq!(
+        store.load_provider_hook_answers(&key()).unwrap()[0].state,
+        "pending"
+    );
+    store
+        .commit_provider_status(&key(), &l, &[], Some(4000), &[])
+        .unwrap();
+    hook(&store, &l, &message(4001), "p", None, false);
+    assert_eq!(
+        store
+            .load_provider_conversation(&key())
+            .unwrap()
+            .unwrap()
+            .served_through_ordinal,
+        Some(4000)
+    );
+    assert_eq!(
+        store.load_provider_hook_answers(&key()).unwrap()[1].state,
+        "pending"
+    );
+    assert!(matches!(
+        store.commit_provider_status(&key(), &l, &[], Some(3999), &[subject("m4001", "p")]),
+        Err(ProviderError::InvalidParams {
+            field: "served_through_ordinal"
+        })
+    ));
+    assert_eq!(
+        store.load_provider_hook_answers(&key()).unwrap()[1].state,
+        "pending"
+    );
+    assert_eq!(store.load_tags_for_session("engine").unwrap().len(), 1);
+}
+
+#[test]
+fn acknowledgement_decreases_only_in_the_transaction_creating_a_descent() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    let root = lineage("L", 4000);
+    store
+        .commit_provider_status(
+            &key(),
+            &root,
+            &[message(4000), message(4001), message(4002)],
+            Some(4002),
+            &[],
+        )
+        .unwrap();
+    let child = ProviderLineage {
+        lineage_id: "child".into(),
+        first_ordinal: 4001,
+        descends_from: Some("L".into()),
+        through_ordinal: Some(4000),
+    };
+    store
+        .commit_provider_status(&key(), &child, &[], Some(4000), &[])
+        .unwrap();
+    assert_eq!(
+        store
+            .load_provider_conversation(&key())
+            .unwrap()
+            .unwrap()
+            .served_through_ordinal,
+        Some(4000)
+    );
+    store
+        .commit_provider_status(&key(), &child, &[message(4001)], Some(4001), &[])
+        .unwrap();
+    assert!(matches!(
+        store.commit_provider_status(&key(), &child, &[], Some(4000), &[]),
+        Err(ProviderError::InvalidParams {
+            field: "served_through_ordinal"
+        })
+    ));
+}
+
+#[test]
 fn descent_shares_prefix_without_copying_and_burns_module_ahead_allocations() {
     let dir = tempfile::tempdir().unwrap();
     let store = store(dir.path());

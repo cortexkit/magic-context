@@ -336,6 +336,43 @@ fn frontier_tx(conn: &Connection, conv: &str, lineage: &str) -> rusqlite::Result
     }
     Ok(next)
 }
+
+/// Acknowledgement is bounded by held ordinals, not by the caller's newest
+/// claim. Reading MAX keeps this check independent of transcript payload size.
+fn acknowledged_through_tx(
+    conn: &Connection,
+    conv: &str,
+    c: &ProviderConversation,
+    row: &ProviderLineage,
+    new_lineage: bool,
+    served: Option<u64>,
+) -> Result<Option<u64>, ProviderError> {
+    let reverting = new_lineage && row.descends_from.as_deref() == Some(&c.lineage_id);
+    let previous = if reverting {
+        c.served_through_ordinal
+            .map(|n| n.min(row.through_ordinal.expect("validated descent")))
+    } else {
+        c.served_through_ordinal
+    };
+    let Some(served) = served else {
+        // Absence is not confirmation, but must not erase the monotone watermark.
+        return Ok(previous);
+    };
+    let mut newest = None;
+    for (ancestor, cut) in ancestry_tx(conn, conv, &row.lineage_id)? {
+        let held: Option<u64> = conn.query_row(
+            "SELECT max(ordinal) FROM mc_provider_messages_v1 WHERE conv_key=?1 AND lineage_id=?2 AND ordinal<=?3",
+            params![conv, ancestor.lineage_id, as_i64(cut)?], |r| r.get(0),
+        )?;
+        newest = newest.max(held);
+    }
+    if served > newest.unwrap_or(0) || previous.is_some_and(|n| served < n) {
+        return Err(ProviderError::InvalidParams {
+            field: "served_through_ordinal",
+        });
+    }
+    Ok(Some(served))
+}
 fn ensure_lineage_tx(
     conn: &Connection,
     conv: &str,
@@ -592,6 +629,7 @@ impl McStore {
             .inner
             .with_conn(|conn| lineage_tx(conn, &key.conversation_key(), lineage_id))?)
     }
+
     pub fn save_provider_conversation(
         &self,
         key: &ProviderSessionKey,
@@ -657,8 +695,10 @@ impl McStore {
             let operation = || -> Result<T,ProviderError> {
                 let conv = key.conversation_key();
                 let c = conversation_tx(conn,key)?.ok_or_else(||ProviderError::Transient("provider conversation is not initialized".into()))?;
+                let new_lineage = lineage_tx(conn,&conv,&request.lineage.lineage_id)?.is_none();
                 ensure_lineage_tx(conn,&conv,request.lineage)?;
                 for m in messages {insert_message_tx(conn,&conv,&request.lineage.lineage_id,m)?;}
+                let acknowledged = acknowledged_through_tx(conn,&conv,&c,request.lineage,new_lineage,request.served_through_ordinal)?;
                 for s in request.unserved_subjects {
                     for (ancestor, _) in ancestry_tx(conn,&conv,&request.lineage.lineage_id)? {
                         burn_subject_tx(conn,&conv,&ancestor.lineage_id,s)?;
@@ -695,7 +735,7 @@ impl McStore {
                 }
                 if !write.counters.is_object() {return Err(ProviderError::Transient("hook counters must be an object".into()))}
                 write.counters["tag_high_water"]=json!(high);
-                conn.execute("UPDATE mc_provider_conversations_v2 SET lineage_id=?2,served_through_ordinal=?3,hook_counters_json=?4 WHERE conv_key=?1",params![conv,request.lineage.lineage_id,request.served_through_ordinal.map(as_i64).transpose()?,write.counters.to_string()])?;
+                conn.execute("UPDATE mc_provider_conversations_v2 SET lineage_id=?2,served_through_ordinal=?3,hook_counters_json=?4 WHERE conv_key=?1",params![conv,request.lineage.lineage_id,acknowledged.map(as_i64).transpose()?,write.counters.to_string()])?;
                 if let Some(metrics) = answer_policy.get("metrics") {
                     let metrics: ProviderPolicyTotals = serde_json::from_value(metrics.clone()).map_err(sql_json)?;
                     adjust_policy_tx(conn,&conv,&metrics,1)?;
