@@ -1025,7 +1025,14 @@ fn rewind_to_62(store: &McStore) {
          DROP TABLE mc_pass_trace_history;
          DROP TABLE mc_cache_frozen_chunks;
          DROP TABLE mc_cache_sections;
-         DROP TABLE mc_provider_sessions_v1;
+          DROP TABLE mc_provider_conversations_v2;
+          DROP TABLE mc_provider_lineages_v1;
+          DROP TABLE mc_provider_messages_v1;
+          DROP TABLE mc_provider_hook_answers_v1;
+          DROP TABLE mc_provider_views_v1;
+          DROP TABLE mc_provider_legacy_tags_v1;
+          DROP TABLE mc_provider_pending_drops_v1;
+          DROP TABLE mc_provider_sessions_v1;
          DROP TABLE mc_provider_catalogs_v1;
          ALTER TABLE mc_cache_state DROP COLUMN section_index;
          ALTER TABLE mc_pass_trace DROP COLUMN scheduler_next_seq;

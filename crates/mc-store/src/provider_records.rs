@@ -1,10 +1,34 @@
-//! Opaque provider records on the store's own connection and fenced transactions.
-//!
-//! The module owns the versioned JSON payload; the store owns its rows and the
-//! atomic write of a hook record together with its observed engine tags. These
-//! writes promise survival of a provider process kill, not host power-loss
-//! synchronization. A committed WAL record survives that process exit under the
-//! existing synchronous=NORMAL policy; no provider write changes the store policy.
+//! Provider records on the store's fenced connection. The older observation lane
+//! uses a normalized compatibility codec; host hooks use the incremental API.
+use crate::provider_legacy;
+pub use crate::provider_log::*;
+use rusqlite::functions::FunctionFlags;
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+
+pub(crate) fn register_migration_functions(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    conn.create_scalar_function(
+        "mc_provider_engine_namespace",
+        3,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            #[derive(Serialize)]
+            struct Key {
+                project: String,
+                session: String,
+                harness: String,
+            }
+            let key = Key {
+                project: ctx.get(0)?,
+                session: ctx.get(1)?,
+                harness: ctx.get(2)?,
+            };
+            let bytes = serde_json::to_vec(&key)
+                .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?;
+            Ok(format!("mc-provider:{:x}", Sha256::digest(bytes)))
+        },
+    )
+}
 
 use crate::{McStore, McStoreError, McTagRow};
 use rusqlite::{params, OptionalExtension};
@@ -22,15 +46,9 @@ impl McStore {
         &self,
         key: &ProviderSessionKey,
     ) -> Result<Option<String>, McStoreError> {
-        Ok(self.inner.with_conn(|conn| {
-            conn.query_row(
-                "SELECT record FROM mc_provider_sessions_v1
-                 WHERE project_root=?1 AND session=?2 AND harness=?3",
-                params![key.project_root, key.session, key.harness],
-                |row| row.get(0),
-            )
-            .optional()
-        })?)
+        Ok(self
+            .inner
+            .with_conn(|conn| provider_legacy::load_tx(conn, key))?)
     }
 
     /// Commit the answer/high-water record and newly live tags as one fenced write.
@@ -43,29 +61,7 @@ impl McStore {
         tags: &[McTagRow],
     ) -> Result<(), McStoreError> {
         self.inner.with_conn_fenced(|tx| {
-            tx.execute(
-                "INSERT INTO mc_provider_sessions_v1
-                 (project_root,session,harness,record) VALUES (?1,?2,?3,?4)
-                 ON CONFLICT(project_root,session,harness) DO UPDATE SET record=excluded.record",
-                params![key.project_root, key.session, key.harness, record_json],
-            )?;
-            for tag in tags {
-                tx.execute(
-                    "INSERT OR IGNORE INTO mc_tags
-                     (session_id,tag_number,block_id,kind,token_count,created_at_ms,source_bytes)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                    params![
-                        engine_session,
-                        tag.tag_number,
-                        tag.block_id,
-                        tag.kind,
-                        tag.token_count,
-                        tag.created_at_ms,
-                        tag.source_bytes.as_ref()
-                    ],
-                )?;
-            }
-            Ok(())
+            provider_legacy::save_tx(tx, key, record_json, engine_session, tags)
         })?;
         Ok(())
     }
@@ -76,16 +72,12 @@ impl McStore {
         session: &str,
     ) -> Result<Vec<(String, String)>, McStoreError> {
         Ok(self.inner.with_conn(|conn| {
-            let mut query = conn.prepare(
-                "SELECT harness,record FROM mc_provider_sessions_v1
-                 WHERE project_root=?1 AND session=?2",
-            )?;
-            let rows = query
-                .query_map(params![project_root, session], |row| {
-                    Ok((row.get(0)?, row.get(1)?))
-                })?
-                .collect();
-            rows
+            let mut query = conn.prepare("SELECT harness FROM mc_provider_conversations_v2 WHERE project_root=?1 AND session=?2")?;
+            let harnesses = query.query_map(params![project_root,session], |r|r.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            harnesses.into_iter().map(|harness| {
+                let key=ProviderSessionKey {project_root:project_root.into(),session:session.into(),harness:harness.clone()};
+                Ok((harness,provider_legacy::load_tx(conn,&key)?.unwrap()))
+            }).collect()
         })?)
     }
 
@@ -119,9 +111,9 @@ impl McStore {
                 params![project_root, session, catalog_json],
             )?;
             tx.execute(
-                "UPDATE mc_provider_sessions_v1 SET record=json_set(record,'$.catalog',json(?3))
+                "UPDATE mc_provider_conversations_v2 SET record_json=json_set(record_json,'$.catalog',json(?3))
                  WHERE project_root=?1 AND session=?2
-                   AND (SELECT COUNT(*) FROM mc_provider_sessions_v1
+                   AND (SELECT COUNT(*) FROM mc_provider_conversations_v2
                         WHERE project_root=?1 AND session=?2)=1",
                 params![project_root, session, catalog_json],
             )?;
@@ -171,7 +163,7 @@ mod tests {
     fn provider_migration_upgrades_a_populated_previous_store_and_survives_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let descriptor = descriptor(dir.path());
-        let previous = &MIGRATIONS[..MIGRATIONS.len() - 1];
+        let previous = &MIGRATIONS[..MIGRATIONS.len() - 2];
         let inner = open_sqlite(&descriptor).unwrap();
         inner.with_conn(register_legacy_trigger_functions).unwrap();
         inner.migrate(NS, previous).unwrap();
@@ -355,8 +347,11 @@ mod tests {
             .unwrap()
             .is_none());
         assert_eq!(
-            store.load_provider_record(&key).unwrap().as_deref(),
-            Some(before)
+            serde_json::from_str::<serde_json::Value>(
+                &store.load_provider_record(&key).unwrap().unwrap()
+            )
+            .unwrap(),
+            serde_json::from_str::<serde_json::Value>(before).unwrap()
         );
     }
 }
