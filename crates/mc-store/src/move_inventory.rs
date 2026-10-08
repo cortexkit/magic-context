@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 pub const INVENTORY_VERSION: u32 = 3;
-pub const CONTEXT_SCHEMA_VERSION: u32 = 96;
+pub const CONTEXT_SCHEMA_VERSION: u32 = 97;
 pub const STORE_SCHEMA_VERSION: u32 = 66;
 pub const GLOBAL_USER_PROFILE_PROJECT_PATH: &str = "__global__";
 
@@ -208,7 +208,7 @@ pub const TABLES: &[TableInventory] = &[
         None
     ),
     // BEGIN FRESH-MIGRATION CENSUS
-    // context.db: 107 tables observed after fresh migration.
+    // context.db: 111 tables observed after fresh migration.
     table!(
         Context,
         "authority_capture_bounds",
@@ -681,6 +681,119 @@ pub const TABLES: &[TableInventory] = &[
         ],
         &[],
         Some(KeyPolicy::PreserveOrRefuseCollision),
+        None
+    ),
+    // These four tables form one runner record per (session_id, harness), across
+    // all lineages, just as in V87_HARNESS_AGGREGATE_RULES. The host lane uses the
+    // record as its LKG request. Ship the whole group, without choosing a harness
+    // or assuming the destination bootstraps that lane. Rebuilding from the host
+    // store can change served bytes; v87 permits discarding a conflicting record
+    // only as one declared prefix rebuild, not as silent per-table reconstruction.
+    // Entries retain admitted bytes, hook answers and their op version so restart
+    // can derive the same served tail without reading changed host messages.
+    table!(
+        Context,
+        "host_runner_entries",
+        Ship,
+        RowSelector::Predicate("session_id = ?1"),
+        &["session_id", "harness", "lineage_id", "ordinal"],
+        &[
+            "session_id",
+            "harness",
+            "lineage_id",
+            "ordinal",
+            "message_id",
+            "ingest_json",
+            "hook_json",
+            "op_version",
+            "ingested",
+            "race",
+            "created_at"
+        ],
+        &[],
+        Some(KeyPolicy::Preserve),
+        None
+    ),
+    // IDs outlive pruned entries and include null-ordinal elided markers. Ship
+    // them to preserve revert detection and the ordinal space of the frozen view;
+    // reconstructing IDs from only the remaining tail loses that history.
+    table!(
+        Context,
+        "host_runner_ids",
+        Ship,
+        RowSelector::Predicate("session_id = ?1"),
+        &["session_id", "harness", "lineage_id", "message_id"],
+        &[
+            "session_id",
+            "harness",
+            "lineage_id",
+            "message_id",
+            "ordinal"
+        ],
+        &[],
+        Some(KeyPolicy::Preserve),
+        None
+    ),
+    // State freezes the plan/setup, lineage, admission cursors, request fences
+    // and pipeline exits. Ship even an inactive lane's state: a destination that
+    // changes lanes must honor the exit/reseed contract, not silently re-bootstrap
+    // and reset fences or serve a record whose ordinals have diverged.
+    table!(
+        Context,
+        "host_runner_state",
+        Ship,
+        RowSelector::Predicate("session_id = ?1"),
+        &["session_id", "harness"],
+        &[
+            "session_id",
+            "harness",
+            "lineage_id",
+            "ancestry_json",
+            "plan_json",
+            "setup_json",
+            "next_ordinal",
+            "cursor",
+            "served_through_ordinal",
+            "issued_request_id",
+            "issued_newest",
+            "wait_json",
+            "bootstrap_cursor",
+            "bootstrap_refused_json",
+            "last_not_applied_json",
+            "unserved_json",
+            "rebuild_generation_seen",
+            "ordinal_divergence",
+            "pipeline_exit_json",
+            "record_version"
+        ],
+        &[],
+        Some(KeyPolicy::Preserve),
+        None
+    ),
+    // Views hold the frozen replacement bytes, coverage and invalidation state.
+    // Ship both retained versions; re-rendering a replacement from destination
+    // inputs is a prefix rebuild, not byte-identical hydration of the first request.
+    table!(
+        Context,
+        "host_runner_views",
+        Ship,
+        RowSelector::Predicate("session_id = ?1"),
+        &["session_id", "harness", "version"],
+        &[
+            "session_id",
+            "harness",
+            "lineage_id",
+            "compaction_id",
+            "version",
+            "range_from",
+            "range_to",
+            "replacement_json",
+            "coverage_json",
+            "state",
+            "applied_at"
+        ],
+        &[],
+        Some(KeyPolicy::Preserve),
         None
     ),
     table!(
@@ -2987,7 +3100,7 @@ mod tests {
             import { runMigrations } from './packages/plugin/src/features/magic-context/migrations';
             const db = new Database(process.env.MOVE_TEST_CONTEXT);
             initializeDatabase(db); runMigrations(db);
-            if (LATEST_SUPPORTED_VERSION !== 96 || db.prepare('SELECT MAX(version) AS v FROM schema_migrations WHERE version < 10000').get().v !== 96) throw new Error('update the schema-pinned inventory');
+            if (LATEST_SUPPORTED_VERSION !== 97 || db.prepare('SELECT MAX(version) AS v FROM schema_migrations WHERE version < 10000').get().v !== 97) throw new Error('update the schema-pinned inventory');
             db.close();
         "#;
         let output = Command::new("bun")
@@ -3088,6 +3201,102 @@ mod tests {
             "mc_project_state",
         ] {
             assert!(entry(Store::Module, dropped).is_none());
+        }
+    }
+
+    #[test]
+    fn host_runner_inventory_ships_whole_v87_harness_aggregates() {
+        let (_dir, context, _module) = fresh_stores();
+        let script = r#"
+            import { V87_HARNESS_AGGREGATE_RULES } from './packages/plugin/src/features/magic-context/opencode2-relabel';
+            console.log(JSON.stringify(V87_HARNESS_AGGREGATE_RULES.map(rule => rule.tables)));
+        "#;
+        let output = Command::new("bun")
+            .current_dir(root())
+            .args(["-e", script])
+            .output()
+            .unwrap();
+        assert_bun_succeeded(&output);
+        let groups: Vec<Vec<String>> = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            groups,
+            vec![vec![
+                "host_runner_entries",
+                "host_runner_ids",
+                "host_runner_views",
+                "host_runner_state"
+            ]]
+        );
+        for table in &groups[0] {
+            let definition = entry(Store::Context, table).unwrap();
+            assert_eq!(definition.class, Class::Ship, "{table}");
+            assert_eq!(definition.key_policy, Some(KeyPolicy::Preserve), "{table}");
+            assert_eq!(definition.shipped_columns(), definition.columns, "{table}");
+            assert!(definition.primary_key.contains(&"harness"), "{table}");
+            assert_eq!(definition.session_column(), Some("session_id"), "{table}");
+            let RowSelector::Predicate(predicate) = definition.rows else {
+                panic!("missing host runner predicate: {table}")
+            };
+
+            // A move is not v87's conflicting-label repair: every harness moves,
+            // including fragments without a state row and old retained lineages.
+            let coordinates = [
+                ("s", "opencode", "current"),
+                ("s", "opencode2", "other-label"),
+                ("s", "opencode:rust", "rust"),
+                ("s", "pi", "pi"),
+                ("s", "omp", "omp"),
+                ("other", "opencode", "unrelated"),
+                ("s", "opencode", "ancestor"),
+                ("s", "stranded", "stranded"),
+            ];
+            for (index, (session, harness, lineage)) in coordinates.iter().enumerate() {
+                if table == "host_runner_state" && matches!(*lineage, "ancestor" | "stranded") {
+                    continue;
+                }
+                let ordinal = index as i64;
+                let message = format!("m{index}");
+                match table.as_str() {
+                    "host_runner_entries" => context.execute(
+                        "INSERT INTO host_runner_entries VALUES (?1,?2,?3,?4,?5,'{ \"text\": \"admitted\" }','{\"answers\":[]}',1,0,1,0)",
+                        params![session, harness, lineage, ordinal, message],
+                    ),
+                    "host_runner_ids" => context.execute(
+                        "INSERT INTO host_runner_ids VALUES (?1,?2,?3,?4,NULL)",
+                        params![session, harness, lineage, message],
+                    ),
+                    "host_runner_views" => context.execute(
+                        "INSERT INTO host_runner_views VALUES (?1,?2,?3,?4,?5,0,1,'[{\"text\":\"frozen\"}]',NULL,'invalidated',0)",
+                        params![session, harness, lineage, message, ordinal],
+                    ),
+                    "host_runner_state" => context.execute(
+                        "INSERT INTO host_runner_state (session_id,harness,lineage_id,ancestry_json,next_ordinal,cursor,served_through_ordinal,unserved_json) VALUES (?1,?2,?3,'[]',1,0,0,'[]')",
+                        params![session, harness, lineage],
+                    ),
+                    _ => panic!("unreviewed host runner aggregate table: {table}"),
+                }
+                .unwrap();
+            }
+            let actual: BTreeSet<(String, String)> = context
+                .prepare(&format!(
+                    "SELECT harness,lineage_id FROM {} WHERE {predicate}",
+                    quoted(table)
+                ))
+                .unwrap()
+                .query_map(["s"], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let expected = coordinates
+                .iter()
+                .filter(|(session, _, lineage)| {
+                    *session == "s"
+                        && (table != "host_runner_state"
+                            || !matches!(*lineage, "ancestor" | "stranded"))
+                })
+                .map(|(_, harness, lineage)| (harness.to_string(), lineage.to_string()))
+                .collect();
+            assert_eq!(actual, expected, "{table}");
         }
     }
 
@@ -3269,7 +3478,7 @@ mod tests {
             .unwrap();
         assert_bun_succeeded(&output);
         let session_tables: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(session_tables.len(), 35);
+        assert_eq!(session_tables.len(), 39);
         for table in session_tables {
             assert!(matches!(
                 entry(Store::Context, &table).unwrap().class,
