@@ -9,7 +9,10 @@ import {
 import { resolveSessionCacheTtl } from "../../../features/magic-context/session-cache-ttl";
 import { initializeDatabase } from "../../../features/magic-context/storage-db";
 import { loadHostRunnerRecord } from "../../../features/magic-context/storage-host-runner";
-import { getOrCreateSessionMeta } from "../../../features/magic-context/storage-meta";
+import {
+    getOrCreateSessionMeta,
+    updateSessionMeta,
+} from "../../../features/magic-context/storage-meta";
 import { createTagger } from "../../../features/magic-context/tagger";
 import { createMessagesTransformHandler } from "../../../plugin/messages-transform";
 import { Database } from "../../../shared/sqlite";
@@ -1068,3 +1071,187 @@ for (const host of ["v1", "v2"] as const)
         expect([...f.stored()!.ids.values()]).toEqual([41, 42]);
         expect(f.wires.filter((w) => w.method === "transform.hook")).toHaveLength(0);
     });
+
+for (const host of ["v1", "v2"] as const) {
+    test(`review resolution ${host}: HARD clock and view roll back together on a mid-answer fault`, async () => {
+        let clock = 1000;
+        const f = fixture(host, { now: () => clock });
+        await f.pass([message("A")]);
+        updateSessionMeta(f.db, "session", {
+            cachedM0MaterializedAt: 1000,
+            lastResponseTime: 2000,
+        });
+        resolveSessionCacheTtl(f.db, "session", "1m", "openai/gpt-5.6", true);
+        const before = f.stored()!;
+        f.db.exec(`CREATE TRIGGER fail_hard_clock BEFORE UPDATE OF cached_m0_materialized_at ON session_meta
+            BEGIN SELECT RAISE(ABORT, 'injected HARD clock fault'); END`);
+        clock = 64001;
+        await expect(f.pass([message("A")])).rejects.toBeInstanceOf(EmergencyFailClosedError);
+        const after = f.stored()!;
+        expect(after.views).toEqual(before.views);
+        expect(after.entries).toEqual(before.entries);
+        expect(after.state.setup_json).toBe(before.state.setup_json);
+        expect(getOrCreateSessionMeta(f.db, "session").cachedM0MaterializedAt).toBe(1000);
+        // Only the pre-request fence can advance; neither the view nor its clock did.
+        expect(after.state.issued_request_id).not.toBe(before.state.issued_request_id);
+        f.db.exec("DROP TRIGGER fail_hard_clock");
+        f.restart();
+        await f.pass([message("A")]);
+        expect(getOrCreateSessionMeta(f.db, "session").cachedM0MaterializedAt).toBe(clock);
+    });
+    test(`review resolution ${host}: SOFT view never moves the HARD materialization clock`, async () => {
+        const f = fixture(host, { now: () => 4000 });
+        await f.pass([message("A")]);
+        updateSessionMeta(f.db, "session", {
+            cachedM0MaterializedAt: 1000,
+            lastResponseTime: 2000,
+        });
+        f.deps.historyRefreshSessions.add("session");
+        f.setReply((w) =>
+            w.method === "compaction.step"
+                ? {
+                      answer: "compaction_message",
+                      decision: "SOFT",
+                      request_id: w.params.request_id,
+                      compaction: {
+                          compaction_id: "soft",
+                          version: 10,
+                          range: { from: 1, to: 2 },
+                          replacement: [message("A")],
+                      },
+                  }
+                : undefined,
+        );
+        await f.pass([message("A")]);
+        expect(f.stored()!.views[0]!.version).toBe(10);
+        expect(getOrCreateSessionMeta(f.db, "session").cachedM0MaterializedAt).toBe(1000);
+    });
+    test(`review resolution ${host}: switch-back replacement is atomic and safety exits stay sticky`, async () => {
+        const f = fixture(host);
+        await f.pass([message("A")]);
+        f.deps.rustPipeline = "full_request";
+        f.restart();
+        await f.pass([message("A")]);
+        const retired = f.stored()!;
+        expect(JSON.parse(retired.state.pipeline_exit_json!).switch_generation).toBe(2);
+        const clock = getOrCreateSessionMeta(f.db, "session").cachedM0MaterializedAt;
+        f.db.exec(`CREATE TRIGGER fail_switch BEFORE INSERT ON host_runner_state
+            BEGIN SELECT RAISE(ABORT, 'injected switch replacement fault'); END`);
+        f.deps.rustPipeline = "provider";
+        f.restart();
+        await expect(f.pass([message("A")])).rejects.toBeInstanceOf(EmergencyFailClosedError);
+        expect(f.stored()).toEqual(retired);
+        expect(getOrCreateSessionMeta(f.db, "session").cachedM0MaterializedAt).toBe(clock);
+        f.db.exec("DROP TRIGGER fail_switch");
+        f.restart();
+        await f.pass([message("A")]);
+        expect(f.adapter.isProviderSession("session")).toBe(true);
+        expect(JSON.parse(f.stored()!.state.setup_json!).switchGeneration).toBe(3);
+        await f.pass([message("foreign")]);
+        const safety = f.stored()!.state.pipeline_exit_json;
+        f.deps.rustPipeline = "full_request";
+        f.restart();
+        await f.pass([message("foreign")]);
+        f.deps.rustPipeline = "provider";
+        f.restart();
+        await f.pass([message("foreign")]);
+        expect(f.stored()!.state.pipeline_exit_json).toBe(safety);
+        expect(f.adapter.isProviderSession("session")).toBe(false);
+    });
+}
+
+test("review resolution v2: retained content is not read by projection, media discovery or commit", async () => {
+    const { rememberHostMedia } = await import("../../../v2/fold/host-media");
+    const f = fixture("v2");
+    class HostMessage {
+        role = "user" as const;
+        constructor(
+            public id: string,
+            public content: Record<string, unknown>[],
+        ) {}
+    }
+    const make = () => ({
+        sessionID: "session",
+        agent: "build",
+        model: { providerID: "openai", id: "gpt-5.6" },
+        system: [],
+        tools: {},
+        options: {},
+        messages: [new HostMessage("A", [{ type: "text", text: "A" }])],
+    });
+    const initial = make();
+    rememberHostMedia(initial.messages, "session");
+    const mapped = adaptPayload(initial as any);
+    await f.adapter.run("session", mapped.messages as MessageLike[], mapped, f.meta);
+    mapped.commit();
+    const next = make();
+    let reads = 0;
+    Object.defineProperty(next.messages[0], "content", {
+        get() {
+            reads++;
+            throw new Error("known content read");
+        },
+    });
+    next.messages.push(new HostMessage("B", [{ type: "text", text: "B" }]));
+    rememberHostMedia(next.messages, "session");
+    const ordinary = adaptPayload(next as any);
+    await f.adapter.run("session", ordinary.messages as MessageLike[], ordinary, f.meta);
+    ordinary.commit();
+    expect(reads).toBe(0);
+    expect(next.messages.map((m) => m.content[0]!.text)).toEqual(["A", "§2§ B"]);
+});
+
+test("review resolution v2: repeated projected call IDs keep distinct parts, results and error fields", async () => {
+    const f = fixture("v2");
+    await f.pass([message("A")]);
+    const draft = {
+        sessionID: "session",
+        agent: "build",
+        model: { providerID: "openai", id: "gpt-5.6" },
+        system: [],
+        tools: {},
+        options: {},
+        messages: [
+            { id: "A", role: "user", content: [{ type: "text", text: "A" }] },
+            {
+                id: "T",
+                role: "assistant",
+                content: [
+                    { type: "tool-call", id: "shared", name: "read", input: {} },
+                    { type: "tool-call", id: "shared", name: "read", input: {} },
+                ],
+            },
+            {
+                role: "tool",
+                content: [
+                    {
+                        type: "tool-result",
+                        id: "shared",
+                        name: "read",
+                        result: { type: "text", value: "first" },
+                    },
+                    {
+                        type: "tool-result",
+                        id: "shared",
+                        name: "read",
+                        result: { type: "error", value: "second" },
+                    },
+                ],
+            },
+        ],
+    };
+    const mapped = adaptPayload(draft as any);
+    await f.adapter.run("session", mapped.messages as MessageLike[], mapped, f.meta);
+    mapped.commit();
+    const hooks = f.wires.filter(
+        (w) => w.method === "transform.hook" && w.params.hook === "post_tool",
+    );
+    expect(hooks.map((w) => w.params.subject_part)).toEqual(["v2:0:shared", "v2:1:shared"]);
+    const results = draft.messages
+        .flatMap<Record<string, unknown>>((m) => m.content)
+        .filter((p) => p.type === "tool-result") as any[];
+    expect(results.map((p) => p.result)).toEqual([
+        { type: "text", value: "§2§ first" },
+        { type: "error", value: "§2§ second" },
+    ]);
+});

@@ -1318,7 +1318,7 @@ export async function registerContext(context: V2Context) {
     const runManagedContext = async (draft: SessionContext): Promise<void> => {
         // Learn the host's message and attachment classes, so attachments on rows restored
         // after a host checkpoint can be rebuilt in the host's own shape.
-        rememberHostMedia(draft.messages);
+        rememberHostMedia(draft.messages, draft.sessionID);
         if (hiddenChildHook.apply(draft)) return;
         // A dreamer that was off at boot and has since been turned on in the
         // config starts here; startDreamer stays a no-op while it is off.

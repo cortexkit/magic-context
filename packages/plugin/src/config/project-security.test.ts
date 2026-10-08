@@ -458,3 +458,12 @@ describe("dropInheritedEmbeddingKeyOnRedirect", () => {
         expect(warnings).toHaveLength(1);
     });
 });
+
+it("rust_pipeline is user-only while a project may still select the transform implementation", () => {
+    const raw: Record<string, unknown> = { rust_pipeline: "provider", transform_mode: "rust" };
+    const warnings = stripUnsafeProjectConfigFields(raw);
+    expect(raw).toEqual({ transform_mode: "rust" });
+    expect(warnings).toEqual([
+        "Ignoring rust_pipeline from project config (security: only user-level config may select the Rust provider pipeline).",
+    ]);
+});

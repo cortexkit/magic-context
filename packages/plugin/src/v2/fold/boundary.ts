@@ -6,6 +6,7 @@ import {
     setPersistedCompactionMarkerState,
 } from "../../features/magic-context/storage-meta-persisted";
 import type { MarkerUpdateOutcome } from "../../hooks/magic-context/compaction-marker-manager";
+import { getOpenCodeProviderProjection } from "../../hooks/magic-context/host-runner/opencode-adapter";
 import {
     hasRawMessageProvider,
     readRawSessionMessageIdOrdinalsForRange,
@@ -160,6 +161,11 @@ export function trimToRecordedBoundary(
     if (!boundaryId) return 0;
     const start = messages.findIndex((message) => message.id === boundaryId);
     if (start <= 0) return 0;
+    const provider = getOpenCodeProviderProjection(sessionId);
+    // An unseen id belongs to the admission scan, not to the old coverage. Never
+    // substitute a store position for it: a middle insertion appends at the tail.
+    if (provider && messages.slice(0, start).some((m) => !m.id || !provider.ids.has(m.id)))
+        return 0;
     // An indexed end (end_block_index set) may leave later blocks of that message
     // unsummarized, so the trim must never cut past such a message while its
     // remainder is uncovered. The remainder counts as covered once the next
@@ -213,9 +219,10 @@ export function trimToRecordedBoundary(
         }
         return false;
     };
-    let ordinals: Map<string, number> | undefined;
+    let ordinals: ReadonlyMap<string, number> | undefined = provider?.ids;
     const prefix = messages.slice(0, start);
     if (
+        !provider &&
         !prefix.every(
             (message) => Number.isSafeInteger(message.ordinal) && (message.ordinal ?? -1) >= 1,
         )

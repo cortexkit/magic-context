@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { drainSingleStoreEmbeddingWatermarks } from "../../../features/magic-context/memory/single-store-embedding-drain";
 import { computeHardCacheExpired } from "../../../features/magic-context/scheduler";
 import {
@@ -72,6 +72,38 @@ function part(value: unknown): Part {
 function mid(message: MessageLike): string | undefined {
     return message.info.id;
 }
+/** The v2 projection has a call ID, not a v1 store part ID. The part position
+ * disambiguates repeated call IDs within a terminal message and survives JSON. */
+export function providerSubjectPart(tool: Part, index: number): string {
+    if (typeof tool.id === "string" && tool.id) return tool.id;
+    if (typeof tool.callID !== "string" || !tool.callID)
+        throw new Error("Terminal tool has no stable identity");
+    const identity = `v2:${index}:${tool.callID}`;
+    return Buffer.byteLength(identity, "utf8") <= 256
+        ? identity
+        : `v2:${index}:${createHash("sha256").update(tool.callID).digest("hex")}`;
+}
+function toolTextField(state: Part): "error" | "output" {
+    return state.status === "error" && typeof state.error === "string" ? "error" : "output";
+}
+function publishMessages(output: { messages: unknown[] }, managed: readonly unknown[]): void {
+    output.messages.splice(0, output.messages.length, ...managed);
+}
+export interface OpenCodeProviderProjection {
+    /** Owns the front projection's pointer cache, never a legacy LKG slot. */
+    owner: object;
+    ids: ReadonlyMap<string, number>;
+}
+const providerProjections = new Map<
+    string,
+    { owner: object; read: () => OpenCodeProviderProjection | undefined }
+>();
+/** Only explicitly selected, active v2 provider sessions participate. */
+export function getOpenCodeProviderProjection(
+    sessionId: string,
+): OpenCodeProviderProjection | undefined {
+    return providerProjections.get(sessionId)?.read();
+}
 
 /** Magic Context's own head messages never enter the provider ordinal space. */
 export function isMagicContextHead(message: MessageLike): boolean {
@@ -98,7 +130,23 @@ export function providerIncoming(message: MessageLike): Incoming<MessageLike> {
                 ? "non_terminal"
                 : "terminal";
         },
-        read: () => message,
+        read: () => {
+            // Persist the projected identity in ingest as well as the hook. The
+            // module can address the same part after a rebuild changes part order.
+            let changed = false;
+            const parts = message.parts.map((p, index) => {
+                const tool = part(p);
+                if (
+                    tool.type !== "tool" ||
+                    (typeof tool.id === "string" && tool.id) ||
+                    !["completed", "error"].includes(String(part(tool.state).status))
+                )
+                    return p;
+                changed = true;
+                return { ...tool, id: providerSubjectPart(tool, index) };
+            });
+            return changed ? { ...message, parts } : message;
+        },
     };
 }
 export function providerSubjects(message: MessageLike): (HostHookSubject & Subject)[] {
@@ -112,21 +160,19 @@ export function providerSubjects(message: MessageLike): (HostHookSubject & Subje
     const result: (HostHookSubject & Subject)[] = [
         { hook: "post_assistant", subject_mid: id, step_id: id, blocks },
     ];
-    for (const p of message.parts) {
+    for (const [index, p] of message.parts.entries()) {
         const tool = part(p);
         if (tool.type !== "tool") continue;
         const state = part(tool.state);
         if (state.status !== "completed" && state.status !== "error") continue;
-        if (typeof tool.id !== "string" || !tool.id)
-            throw new Error("Terminal tool has no part id");
         result.push({
             hook: "post_tool",
             subject_mid: id,
-            subject_part: tool.id,
+            subject_part: providerSubjectPart(tool, index),
             step_id: id,
             tool: String(tool.tool),
             tool_call_id: String(tool.callID ?? tool.id),
-            blocks: [String(state.status === "error" ? (state.error ?? "") : (state.output ?? ""))],
+            blocks: [String(state[toolTextField(state)] ?? "")],
             is_error: state.status === "error",
         });
     }
@@ -142,7 +188,8 @@ export function applyProviderOps(
     for (const answer of answers) {
         const indexes = parts.flatMap((p, i) =>
             answer.subject.hook === "post_tool"
-                ? part(p).type === "tool" && part(p).id === answer.subject.subject_part
+                ? part(p).type === "tool" &&
+                  providerSubjectPart(part(p), i) === answer.subject.subject_part
                     ? [i]
                     : []
                 : part(p).type === "text" && typeof part(p).text === "string"
@@ -156,7 +203,7 @@ export function applyProviderOps(
             const p = part(parts[index]);
             const tool = answer.subject.hook === "post_tool";
             const state = tool ? part(p.state) : p;
-            const field = tool ? (state.status === "error" ? "error" : "output") : "text";
+            const field = tool ? toolTextField(state) : "text";
             const old = String(state[field] ?? "");
             const next =
                 op.op === "prepend"
@@ -202,6 +249,9 @@ interface Metadata {
     newestMid?: string;
     gap?: number;
     retryAt?: number;
+    switchGeneration?: number;
+    reentry?: boolean;
+    fullRequestNamespace?: string;
 }
 interface Session {
     record: RecordState;
@@ -211,6 +261,7 @@ interface Session {
     client: ProviderClient;
     pendingDescent?: number;
     syncSignature?: string;
+    replaceRecord?: string;
 }
 export interface OpenCodeProviderOptions {
     now?: () => number;
@@ -235,6 +286,8 @@ export function createOpenCodeProviderTransform(
     options: OpenCodeProviderOptions = {},
 ) {
     const sessions = new Map<string, Session>();
+    const projectionOwner = {};
+    const projectionTokens = new Map<string, { generation: number; token: object }>();
     const busy = new Set<string>();
     const now = options.now ?? Date.now;
     const harness = deps.storeGeneration === "v2" ? "opencode2" : "opencode";
@@ -244,6 +297,24 @@ export function createOpenCodeProviderTransform(
     const moduleClient = configuredModule;
     const key = (sessionId: string): HostRunnerKey => ({ session_id: sessionId, harness });
     const log = (id: string, text: string) => sessionLog(id, `provider pipeline: ${text}`);
+    function registerProjection(id: string): void {
+        if (harness !== "opencode2") return;
+        providerProjections.set(id, {
+            owner: projectionOwner,
+            read: () => {
+                if (deps.rustPipeline !== "provider") return undefined;
+                const s = hydrate(id);
+                if (!s?.metadata.active || s.record.pipeline_exit) return undefined;
+                const generation = s.metadata.switchGeneration ?? 1;
+                let held = projectionTokens.get(id);
+                if (!held || held.generation !== generation) {
+                    held = { generation, token: {} };
+                    projectionTokens.set(id, held);
+                }
+                return { owner: held.token, ids: s.record.ids };
+            },
+        });
+    }
     const historian =
         options.historian ??
         (deps.historianRunner !== "broca"
@@ -290,6 +361,7 @@ export function createOpenCodeProviderTransform(
         const state = stateFor(s);
         commitHostRunnerPass(deps.db, key(id), {
             state,
+            replace_retired_rollback: s.replaceRecord,
             elided,
             truncate_after: s.pendingDescent,
             uningested_from: gap,
@@ -304,13 +376,14 @@ export function createOpenCodeProviderTransform(
                 created_at: now(),
             })),
         });
+        s.replaceRecord = undefined;
         s.state = state;
         s.pendingDescent = undefined;
     }
     function client(id: string, s: Session): ProviderClient {
         return new ProviderClient({
             moduleClient,
-            sessionId: id,
+            sessionId: s.metadata.fullRequestNamespace ?? id,
             projectRoot,
             harness,
             now,
@@ -390,6 +463,7 @@ export function createOpenCodeProviderTransform(
         } as Session;
         s.client = client(id, s);
         sessions.set(id, s);
+        registerProjection(id);
         return s;
     }
     async function sync(id: string, s: Session, passComplete: boolean): Promise<void> {
@@ -522,9 +596,11 @@ export function createOpenCodeProviderTransform(
         output: { messages: unknown[] },
         meta: SessionMeta,
     ): Promise<void> {
-        const namespace = s?.record.pipeline_exit?.reseed_full_request
-            ? `${id}:full-request:${s.record.lineage_id}`
-            : undefined;
+        const namespace =
+            s?.metadata.fullRequestNamespace ??
+            (s?.record.pipeline_exit?.reseed_full_request
+                ? `${id}:full-request:${s.record.lineage_id}`
+                : undefined);
         if (options.fullRequest) return options.fullRequest(id, messages, output, meta, namespace);
         if (!namespace) return legacy.run(id, messages, output, meta);
         // A race's runner ordinals cannot enter the canonical full-request namespace.
@@ -638,9 +714,32 @@ export function createOpenCodeProviderTransform(
             s.state.bootstrap_cursor =
                 result.page.messages.at(-1)?.ordinal ?? s.state.bootstrap_cursor;
         }
+        let hardMaterializedAt: number | undefined;
         if (applied) {
             s.metadata.active = true;
-            s.metadata.materializedAt = now();
+            // SOFT flush/pressure views do not consume the idle HARD trigger.
+            const decision =
+                a.answer === "compaction_message"
+                    ? (a.decision ?? a.compaction.decision)
+                    : undefined;
+            if (
+                decision === "HARD" ||
+                (decision === undefined &&
+                    ["cold", "model_switch", "manifest_change"].includes(
+                        inputs.prefix_rebuilding?.reason ?? "",
+                    ))
+            ) {
+                hardMaterializedAt = now();
+                s.metadata.materializedAt = hardMaterializedAt;
+            }
+            // Once the final view is durable, its row owns all replacement bytes.
+            // Ordinary metadata writes retain Setup controls, not duplicate heads.
+            s.metadata.initial = { ...s.metadata.initial, replacement: [] };
+            if (s.metadata.setup?.answer === "ready")
+                s.metadata.setup = {
+                    ...s.metadata.setup,
+                    initial: { ...s.metadata.setup.initial, replacement: [] },
+                };
             s.metadata.model = inputs.model;
             s.metadata.manifest = manifest(messages);
             s.metadata.flush = flush(id);
@@ -655,9 +754,11 @@ export function createOpenCodeProviderTransform(
                     ? result.page.messages.at(-1)?.ordinal
                     : undefined,
             view: applied ? viewRow(s) : undefined,
+            hard_materialized_at: hardMaterializedAt,
         });
         s.state = state;
         if (applied) {
+            registerProjection(id);
             deps.historyRefreshSessions.delete(id);
             deps.pendingMaterializationSessions.delete(id);
             deps.rustMemorySyncRequestedSessions?.delete(id);
@@ -699,7 +800,13 @@ export function createOpenCodeProviderTransform(
             live ??
             [...messages]
                 .reverse()
-                .map((m) => part(m.info).model)
+                .map(
+                    (m) =>
+                        part(m.info).model ??
+                        (part(m.info).providerID && part(m.info).modelID
+                            ? { providerID: part(m.info).providerID, modelID: part(m.info).modelID }
+                            : undefined),
+                )
                 .find(Boolean);
         const value = part(m ?? {});
         return `${value.providerID ?? "unknown"}/${value.modelID ?? "unknown"}`;
@@ -751,11 +858,12 @@ export function createOpenCodeProviderTransform(
         s: Session | undefined,
         messages: MessageLike[],
         meta: SessionMeta,
+        reentry?: Session,
     ): Promise<Session | undefined> {
         const visible = messages.filter(
             (m) => !isMagicContextHead(m) && providerIncoming(m).classify() !== "marker",
         );
-        if (!s) {
+        if (!s || reentry) {
             const memo = legacy.getState(id);
             const resolved = await (options.resolveOrdinals ?? resolveOrdinalsForModule)({
                 sessionId: id,
@@ -795,7 +903,7 @@ export function createOpenCodeProviderTransform(
                     "bootstrap declined: message lacks its own canonical ordinal; decline counter +1",
                 );
                 declines++;
-                return undefined;
+                return reentry;
             }
             const first = ordinals[0] ?? 1;
             const initial = {
@@ -817,6 +925,17 @@ export function createOpenCodeProviderTransform(
                 ),
                 initial,
             });
+            if (reentry && !reentry.record.pipeline_exit?.reseed_full_request) {
+                // Setup re-entry does not authorize a new lineage by itself. Share
+                // only the covered prefix before this canonical bootstrap window;
+                // its pages explicitly re-admit the window on the descended lane.
+                const ancestor = {
+                    lineage_id: reentry.record.lineage_id,
+                    through_ordinal: Math.min(first - 1, reentry.record.next_ordinal - 1),
+                };
+                r.ancestry = [...reentry.record.ancestry, ancestor];
+                r.descends_from = ancestor;
+            }
             s = {
                 record: r,
                 state: createHostRunnerState(r.lineage_id, first),
@@ -829,8 +948,21 @@ export function createOpenCodeProviderTransform(
                     manifest: manifest(messages),
                     flush: flush(id),
                     materializedAt: meta.cachedM0MaterializedAt ?? 0,
+                    switchGeneration: reentry
+                        ? Number(
+                              JSON.parse(reentry.state.pipeline_exit_json ?? "{}")
+                                  .switch_generation ?? 2,
+                          ) + 1
+                        : 1,
+                    reentry: !!reentry,
+                    fullRequestNamespace:
+                        reentry?.metadata.fullRequestNamespace ??
+                        (reentry?.record.pipeline_exit?.reseed_full_request
+                            ? `${id}:full-request:${reentry.record.lineage_id}`
+                            : undefined),
                 },
                 client: undefined as unknown as ProviderClient,
+                replaceRecord: reentry?.state.pipeline_exit_json ?? undefined,
             };
             s.client = client(id, s);
             const declaration = await s.client.declare({
@@ -838,7 +970,7 @@ export function createOpenCodeProviderTransform(
                 params: r.plan.params,
             });
             checkFailure(declaration);
-            if (declaration.status !== "answered") return undefined;
+            if (declaration.status !== "answered") return reentry;
             r.plan = freezeProviderPlan(declaration.answer, {
                 preset: r.plan.preset,
                 params: { ...r.plan.params },
@@ -860,6 +992,7 @@ export function createOpenCodeProviderTransform(
                     save(id, s);
                     exit(id, s, admitted.exit);
                     sessions.set(id, s);
+                    registerProjection(id);
                     return s;
                 }
                 admissions.push(
@@ -869,6 +1002,7 @@ export function createOpenCodeProviderTransform(
             commitEntries(r, admissions);
             save(id, s, admissions);
             sessions.set(id, s);
+            registerProjection(id);
         } else {
             // Bootstrap can span host passes while the current pipeline still serves.
             // Admit new persisted tail rows before completing, rather than dropping
@@ -940,12 +1074,21 @@ export function createOpenCodeProviderTransform(
                 save(id, s);
                 return s;
             }
-            if (setup.answer.initial.range.from < setup.answer.initial.range.to) {
+            if (
+                setup.answer.initial.range.from < setup.answer.initial.range.to &&
+                !s.metadata.reentry
+            ) {
                 exit(id, s, "provider_record_lost");
                 return s;
             }
             s.metadata.setup = setup.answer;
-            s.record.view = { ...setup.answer.initial, state: "applied" } as RecordState["view"];
+            s.record.view = {
+                ...setup.answer.initial,
+                // A retained conversation is expected on an explicit switch back.
+                // Its prior view is only a version fence, never a staged serve.
+                ...(s.metadata.reentry ? { range: { from: 0, to: 0 }, replacement: [] } : {}),
+                state: "applied",
+            } as RecordState["view"];
             s.metadata.initial = s.record.view;
             s.sync.lastAckedWatermarks = null;
             save(id, s);
@@ -971,6 +1114,30 @@ export function createOpenCodeProviderTransform(
         meta: SessionMeta,
         conflictRetry = 0,
     ): Promise<void> {
+        // A legacy handoff preserves its original exception type. In particular,
+        // BUSY must still be eligible for the legacy wrapper's LKG recovery.
+        const existing = hydrate(id);
+        if (
+            deps.rustPipeline !== "provider" ||
+            (existing?.record.pipeline_exit &&
+                String(existing.record.pipeline_exit.reason) !== "rollback")
+        ) {
+            if (existing?.metadata.active && !existing.record.pipeline_exit) {
+                const value = {
+                    reason: "rollback",
+                    reseed_full_request: existing.record.ordinal_divergence > 0,
+                    switch_generation: (existing.metadata.switchGeneration ?? 1) + 1,
+                };
+                commitHostRunnerExit(deps.db, key(id), JSON.stringify(value));
+                existing.state.pipeline_exit_json = JSON.stringify(value);
+                existing.record.pipeline_exit = value as unknown as RecordState["pipeline_exit"];
+                log(
+                    id,
+                    `exit rollback${value.reseed_full_request ? " declared prefix rebuild into fresh full-request namespace" : ""}`,
+                );
+            }
+            return fallback(id, existing, messages, output, meta);
+        }
         if (busy.has(id)) throw new EmergencyFailClosedError("Provider pass already in flight");
         busy.add(id);
         let committedBeforePass: number | undefined;
@@ -981,31 +1148,16 @@ export function createOpenCodeProviderTransform(
                 : s
                   ? s.metadata.first - 1
                   : undefined;
-            if (deps.rustPipeline !== "provider" || s?.record.pipeline_exit) {
-                if (s?.metadata.active && !s.record.pipeline_exit) {
-                    // Rollback is explicit and sticky. It uses the same durable routing
-                    // boundary as a safety exit, but is not a history-loss event.
-                    const value = {
-                        reason: "rollback",
-                        reseed_full_request: s.record.ordinal_divergence > 0,
-                    };
-                    commitHostRunnerExit(deps.db, key(id), JSON.stringify(value));
-                    s.record.pipeline_exit = value as RecordState["pipeline_exit"];
-                    log(
-                        id,
-                        `exit rollback${value.reseed_full_request ? " declared prefix rebuild into fresh full-request namespace" : ""}`,
-                    );
-                }
-                await fallback(id, s, messages, output, meta);
-                return;
-            }
-            if (!s?.metadata.active) {
-                s = await bootstrap(id, s, messages, meta);
+            const reentry =
+                s?.record.pipeline_exit && String(s.record.pipeline_exit.reason) === "rollback"
+                    ? s
+                    : undefined;
+            if (!s?.metadata.active || reentry) {
+                s = await bootstrap(id, s, messages, meta, reentry);
                 if (!s?.metadata.active || s.record.pipeline_exit) {
-                    await fallback(id, s, messages, output, meta);
-                    return;
+                    return fallback(id, s, messages, output, meta);
                 }
-                output.messages = assemble(s.record);
+                publishMessages(output, assemble(s.record));
                 void historian?.pump(id);
                 return;
             }
@@ -1014,8 +1166,7 @@ export function createOpenCodeProviderTransform(
             let scan = scanWindow(s.record, incoming);
             if (scan.exit) {
                 exit(id, s, scan.exit);
-                await fallback(id, s, messages, output, meta);
-                return;
+                return fallback(id, s, messages, output, meta);
             }
             const reverted = scan.revert_through !== undefined;
             commitScan(s.record, scan, reverted ? randomUUID() : undefined);
@@ -1090,9 +1241,16 @@ export function createOpenCodeProviderTransform(
                         } else outcomes.push({ subject, unavailable: true });
                     }
                     if (conflict) break;
-                    admissions.push(
-                        finishEntry(candidate, admitted, outcomes, providerOpFunctions) as Admitted,
-                    );
+                    const finished = finishEntry(
+                        candidate,
+                        admitted,
+                        outcomes,
+                        providerOpFunctions,
+                    ) as Admitted;
+                    admissions.push(finished);
+                    // The next message's hook must burn these answers before deciding
+                    // cadence, even though the append transaction is later.
+                    s.record.unserved_subjects.push(...finished.unserved_subjects);
                 }
                 if (!conflict) break;
                 if (attempt === 1)
@@ -1102,7 +1260,12 @@ export function createOpenCodeProviderTransform(
                 s.pendingDescent = through;
                 save(id, s);
             }
-            commitEntries(s.record, admissions);
+            // Burns are already carried between hooks in this pass. Do not re-add
+            // subjects a later successful hook has acknowledged.
+            commitEntries(
+                s.record,
+                admissions.map((a) => ({ ...a, unserved_subjects: [] })),
+            );
             save(id, s, admissions, scan.elided);
             controls.newest = {
                 ordinal: s.record.next_ordinal - 1,
@@ -1110,7 +1273,7 @@ export function createOpenCodeProviderTransform(
             };
             for (const event of scan.events) log(id, `host-side prefix event ${event}`);
             const reason: string | undefined =
-                reverted && s.record.view.state === "invalidated"
+                s.record.view.state === "invalidated"
                     ? "revert"
                     : controls.model !== s.metadata.model
                       ? "model_switch"
@@ -1120,14 +1283,7 @@ export function createOpenCodeProviderTransform(
                             deps.rustMemorySyncRequestedSessions?.has(id) ||
                             flush(id) !== s.metadata.flush
                           ? "flush"
-                          : providerCold(
-                                  meta,
-                                  now(),
-                                  Math.max(
-                                      s.metadata.materializedAt,
-                                      meta.cachedM0MaterializedAt ?? 0,
-                                  ),
-                              )
+                          : providerCold(meta, now())
                             ? "cold"
                             : undefined;
             const setup = s.metadata.setup;
@@ -1153,7 +1309,7 @@ export function createOpenCodeProviderTransform(
                     await answer(id, pending, page, controls, messages);
                 });
             }
-            if (s.record.pipeline_exit) await fallback(id, s, messages, output, meta);
+            if (s.record.pipeline_exit) return fallback(id, s, messages, output, meta);
             else {
                 const measured = deps.contextUsageMap.get(id);
                 if (
@@ -1166,9 +1322,12 @@ export function createOpenCodeProviderTransform(
                         "Provider-proven emergency wall without a fold",
                     );
                 }
-                output.messages = assemble(
-                    s.record,
-                    scan.passthrough.map((p) => p.read()),
+                publishMessages(
+                    output,
+                    assemble(
+                        s.record,
+                        scan.passthrough.map((p) => p.read()),
+                    ),
                 );
                 void historian?.pump(id);
             }
@@ -1223,7 +1382,7 @@ export function createOpenCodeProviderTransform(
                 sessions.delete(id);
                 const s = hydrate(id);
                 if (!s?.metadata.active || s.record.pipeline_exit) return false;
-                output.messages = assemble(s.record);
+                publishMessages(output, assemble(s.record));
                 return true;
             } catch {
                 return false;
@@ -1234,10 +1393,15 @@ export function createOpenCodeProviderTransform(
             return s?.metadata.active && !s.record.pipeline_exit ? s.record.ids : undefined;
         },
         bootstrapDeclines: () => declines,
+        hasRecord: (id: string) => hydrate(id) !== undefined,
         dispose() {
+            for (const [id, projection] of providerProjections) {
+                if (projection.owner === projectionOwner) providerProjections.delete(id);
+            }
             void historian?.stop();
             for (const fresh of reseeded.values()) fresh.dispose();
             sessions.clear();
+            projectionTokens.clear();
         },
     };
 }

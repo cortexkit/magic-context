@@ -354,3 +354,97 @@ The red names above and their reported counts/errors are intentional regression
 evidence. Existing tests were neither inverted nor renamed, and no implementation
 mutation or real-module corpus result is claimed. Fixes and integration acceptance
 belong to the slice owner.
+
+
+## Implementation response (slice owner; independent report above retained)
+
+The independent commit `99316880a4a4e780aaa909192a5162b76fa15456` was imported as
+`857e08f322`. Its test file is unchanged. Before editing, the exact reproduction
+command above produced **6 passing controls, 23 failing finding tests, 94
+assertions** on Bun 1.4.2. Every named finding test then passed with its original
+expectations; neither a test rename nor an expectation inversion was used.
+
+### Resolutions and red-to-green ledger
+
+| Finding | Unchanged regression names / initial failure | Resolution / final result |
+| --- | --- | --- |
+| R1 | `R1 v1: provider publication updates the array retained by the host`; `R1 v2: payload commit sends provider bytes, not the pre-transform projection` — both red on host-retained bytes | All managed publication and recovery splices into the retained array. Payload `commit()` consumes those same managed elements. Both green. |
+| R2 | `R2 v2: a completed projected tool has a usable subject_part and reaches post_tool` — missing part id | Projected call ID plus stable part position supplies a bounded identity, including a hash for oversized call IDs. Admission persists that identity as the tool part id; hooks and inverse bridges use it, so repeated call IDs remain distinct. Green, with an additional real split-call/result fixture covering repeated IDs and an error result. |
+| R3 | On both hosts, `R3: invalidated covered revert retries on the next pass after noop` and `R3: invalidated covered revert retries on the next pass after transport error` — no retry step | An invalidated view itself requests `revert`, independently of a newly detected scan revert. All four green. |
+| R4 | On both hosts, `R4: a SOFT flush must not consume a later live-TTL cold decision` — no cold step | SOFT never advances the HARD clock. Accepted HARD decisions/natural HARD opportunities write `cached_m0_materialized_at` with the view in H2's existing transaction. TTL reads the actual full-path clock, not a second SOFT clock. Both green; supplemental SOFT and injected-clock-fault cases green. |
+| R5 | On both hosts, `R5: burn a partially failed message before the next message's cadence decision` — erroneous cadence text | Burns are staged immediately after a message freezes raw, sent on the next hook in the same pass, and not re-added after acknowledgement. Both green. |
+| R6 | On both hosts, `R6: deliberate full_request to provider switch-back bootstraps again` — only one Setup | Rollback records a switch generation. An explicit provider selection after that rollback stages the next generation, canonically resolves again and atomically replaces only that exact retired rollback record. Safety exits remain sticky. Both green; injected replacement failure preserves the complete retired record and clock. |
+| R7 | `R7 v2: ordinary projection does not read the content of a known message` — three getter reads | Active provider ids fence payload and media discovery before their content walks. Known projected rows are placeholders for the core id scan; commit reuses owned native/inverse projections by reference. Cache ownership is session/generation scoped and survives an in-process record reload. Green; a throwing getter also survives projection, media discovery and commit in the supplemental test. |
+| R8 | `R8 v2: front trim cannot discard an unknown race using canonical store ordinals` — X disappeared | Provider trim reads only runner ids/ordinals. Any unknown prefix id prevents the cut; canonical fallback remains available only to non-provider sessions. Green, with zero store ordinal reads. |
+| R9 | `R9 v1: absent setting preserves legacy BUSY replay for a never-provider session`; `R9 v1: full_request setting preserves legacy BUSY replay for a never-provider session`; corresponding two `R9 v2` tests — BUSY became provider refusal | Adapter selection is per session, not the existence of another session's row. Legacy handoffs are outside the provider catch and preserve BUSY exactly. All four error-path differentials green, in addition to the original healthy setting-off differentials. |
+| R10 | `R10 v1: a zero-append pass never serializes the known Setup head`; corresponding `R10 v2` — two serializations | After bootstrap applies, replacement bytes are owned solely by the view row. Setup/initial metadata retain only small controls and no duplicate head content, so ordinary saves serialize no known Setup head. Both green. |
+| R11 | `R11 v1: project config cannot opt a user-default full_request session into provider`; corresponding `R11 v2` — unauthorized Setup | The actual raw-project guard strips `rust_pipeline`, preserving project-allowed `transform_mode`. Both green; an additional policy test checks the warning and exact surviving fields. The generated schema now explicitly says user-level only. |
+
+### Storage and publication regressions
+
+The parent approved a narrow additive `storage-host-runner.ts` extension. There
+is **no migration or version change**: v97 is unchanged. Retired rollback
+replacement and HARD clock updates are extra statements inside the existing
+`BEGIN IMMEDIATE` pass/answer transactions, never nested or second transactions.
+An exact serialized rollback token is required; safety exits cannot be replaced.
+A clock update requires an accepted view. Injected triggers prove that a failure
+mid-replacement restores all four retired runner tables, and a failure at the
+clock update restores the preceding view, entries and clock. The request fence
+alone is expected to have advanced before an answer, as required by the protocol.
+
+All original H2 storage tests and the v87 relabel aggregate tests passed. The
+original 47 H4 tests and all 243 delivered H1/H3 tests also stayed green.
+
+### Restored non-vacuity controls
+
+Each mutation was marked `NON-VACUITY BREAK`. The live implementation was staged
+first and `git diff --stat` was empty. Each mutation then produced a non-empty
+one-file diff (one insertion, one deletion); restoration used `git checkout --
+<path> && touch <path>`, followed by an empty diff.
+
+| Mutation | Only test that reddened | Tests that stayed green |
+| --- | --- | --- |
+| Read one skipped known row in `v2/hooks/payload.ts` | `R7 v2: ordinary projection does not read the content of a known message` (0 expected, 1 actual) | `R1 v1: provider publication updates the array retained by the host`; `control v1: cold is strict and self-consuming after a newer response` |
+| Disable the provider lane selection in `v2/fold/boundary.ts` | `R8 v2: front trim cannot discard an unknown race using canonical store ordinals` (X missing) | `R1 v1: provider publication updates the array retained by the host`; the R7 getter test |
+| Retain the initial head in ordinary metadata in `opencode-adapter.ts` | `R10 v1: a zero-append pass never serializes the known Setup head` (0 expected, 1 actual) | `R1 v1: provider publication updates the array retained by the host`; the R7 getter test |
+
+Each filtered mutation run was **2 pass, 1 fail**, with no collateral failure.
+All were restored before final verification and commit.
+
+### Integration boundary retained
+
+These fixes and regressions still use the recording module boundary defined by
+the independent reviewer. They do not claim a real ck-mc corpus, live host,
+performance measurement or canary. In particular, M3/M4/M5 wire interoperability,
+real HARD-decision metadata, namespace reseeding, historian CAS and A3's real
+engine differential remain the T1/T2 integration gates previously assigned by
+the parent. A second independent review is to follow this delivery.
+
+### Final verification after mutation restoration
+
+- Targeted command covering all host-runner tests, `storage-host-runner.test.ts`,
+  `migrations-v87.test.ts`, project security, v2 payload, boundary and restore-media:
+  **445 pass, zero fail, 101,453 assertions, 12 files** (Bun 1.4.2). This includes
+  all 29 unchanged independent review cases and all eight supplemental adapter
+  regressions.
+- Explicit TypeScript program using package compiler options, with the adapter,
+  original/review tests, H2 storage tests and policy tests as roots:
+  **TypeScript 5.9.3; 1,302 source files; zero diagnostics**.
+- `npm run build`: passed, all three package build scripts and both OpenCode host
+  bundles (Bun 1.4.2). `npm run typecheck`: passed, all four package scripts
+  (TypeScript 5.9.3). `npm run lint`: passed, four package checks over 1,677 files
+  (Biome 2.5.1), with existing warnings outside the changed implementation.
+- `npm run test`: **7,684 pass, seven skip, 17 fail**, 7,708 tests in 722 plugin
+  files. The same 17 remote-environment failures remain from the prior delivery:
+  14 smart-note sandbox/HTTP deadline/cancellation cases, `cached metadata probe
+  releases WAL on native Bun close`, `context close checkpoints boot probes
+  before replay bytes are restored`, and the Node WASM Transformers offline-reuse
+  fixture. No review, adapter, H2 or v87 test failed. Chained Pi/CLI/Retina tests
+  were not reached after the plugin failure; full-suite green is not claimed.
+- Both named schema/docs generators ran. The schema's user-only description
+  changed; generated public documentation and `CONFIGURATION.md` remain unchanged
+  because `rust_pipeline` still uses the existing developer-only exclusion.
+- AFT inspection remains partial (graph/Biome producers unavailable), with zero
+  TypeScript errors/warnings; compiler and lint are the authoritative gates.
+- No manifest, lockfile, migration, or schema-version change. The frozen install
+  checked 1,010 installs across 1,251 packages with no dependency changes.

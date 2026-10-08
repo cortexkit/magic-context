@@ -1,4 +1,8 @@
 import { isDroppedToolOutput } from "../../hooks/magic-context/ctx-reduce-nudge";
+import {
+    getOpenCodeProviderProjection,
+    providerSubjectPart,
+} from "../../hooks/magic-context/host-runner/opencode-adapter";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import { log, sessionLog } from "../../shared/logger";
 import { hostMediaAsset } from "../fold/host-media";
@@ -34,6 +38,41 @@ interface ToolBridge {
     resultMessage?: V2Message;
     /** The host result's `content` value when it carries files (see fileContentValue). */
     files?: Part[];
+}
+interface ProviderProjectionCache {
+    rendered: Map<string, { native: MessageLike; messages: V2Message[] }>;
+    byNative: WeakMap<MessageLike, V2Message[]>;
+    metadata: Map<string, V2Message>;
+    bridges: Map<string, Map<string, ToolBridge>>;
+    hostParts: Map<string, { parts: Map<string, Part>; types: Set<unknown> }>;
+}
+const providerProjectionCaches = new WeakMap<object, ProviderProjectionCache>();
+function providerCache(owner: object): ProviderProjectionCache {
+    let cache = providerProjectionCaches.get(owner);
+    if (!cache) {
+        cache = {
+            rendered: new Map(),
+            byNative: new WeakMap(),
+            metadata: new Map(),
+            bridges: new Map(),
+            hostParts: new Map(),
+        };
+        providerProjectionCaches.set(owner, cache);
+    }
+    return cache;
+}
+function metadataOnly(message: V2Message): V2Message {
+    // Copy metadata without invoking the content getter of a retained host row.
+    return {
+        ...Object.fromEntries(
+            Object.keys(message)
+                .filter((key) => key !== "content")
+                .map((key) => [key, (message as unknown as Part)[key]]),
+        ),
+        content: [],
+        id: message.id,
+        role: message.role,
+    };
 }
 
 /** True for an object structuredClone would flatten: anything other than a plain object or
@@ -153,17 +192,32 @@ function rebuildFileContent(value: Part[], output: string): Part {
  * existing tag but cannot create one. The inverse projection preserves host metadata.
  */
 export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<string> = new Set()) {
+    const provider = getOpenCodeProviderProjection(draft.sessionID);
+    const cache = provider ? providerCache(provider.owner) : undefined;
+    const known = (message: V2Message) => !!message.id && provider?.ids.has(message.id) === true;
     const existingHeads = new Map(
         draft.messages.filter((m) => HEAD_IDS.some((id) => m.id === id)).map((m) => [m.id, m]),
     );
     const source = draft.messages.filter((m) => !existingHeads.has(m.id));
+    // A terminal assistant owns its following id-less tool-result carriers. They
+    // are already represented by its recorded tool parts, so do not re-read them.
+    const skipped = new Set<V2Message>();
+    let recordedAssistant = false;
+    for (const message of source) {
+        if (message.id || message.role !== "tool")
+            recordedAssistant = known(message) && message.role === "assistant";
+        if (known(message) || (!message.id && message.role === "tool" && recordedAssistant))
+            skipped.add(message);
+    }
     const results = new Map<string, Array<{ part: Part; message: V2Message }>>();
     // Host parts that hold class instances, keyed by content. Some pipeline stages swap a
     // structuredClone of a message's parts into place; commit() hands the host its original
     // object back for any such part the pipeline left unchanged.
     const hostParts = new Map<string, Part>();
     const hostPartTypes = new Set<unknown>();
+    const hostPartsByID = new Map<string, { parts: Map<string, Part>; types: Set<unknown> }>();
     for (const message of source) {
+        if (skipped.has(message)) continue;
         for (const part of message.content) {
             if (
                 part.type !== "tool-call" &&
@@ -174,6 +228,15 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                 const key = contentKey(part);
                 if (!hostParts.has(key)) hostParts.set(key, part);
                 hostPartTypes.add(part.type);
+                if (message.id) {
+                    const parts = hostPartsByID.get(message.id) ?? {
+                        parts: new Map(),
+                        types: new Set(),
+                    };
+                    parts.parts.set(key, part);
+                    parts.types.add(part.type);
+                    hostPartsByID.set(message.id, parts);
+                }
             }
             if (part.type === "tool-result" && typeof part.id === "string") {
                 const queue = results.get(part.id) ?? [];
@@ -193,6 +256,7 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
     const bridgesByMessageID = new Map<string, Map<string, ToolBridge>>();
     const bridgesByCarrier = new Map<MessageLike, Map<string, ToolBridge>>();
     const originalsByID = new Map<string, V2Message>();
+    const bridgesBySubject = new Map<string, Map<string, ToolBridge>>();
     const bridgesFor = (message: MessageLike) =>
         typeof message.info.id === "string"
             ? bridgesByMessageID.get(message.info.id)
@@ -260,6 +324,7 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
     // carriers, while the assistant row ID remains the composite tag owner.
     const callParts = new Map<Part, Part>();
     for (const message of source) {
+        if (skipped.has(message)) continue;
         for (const part of message.content) {
             if (part.type === "tool-call") {
                 callParts.set(part, nativeTool(part, results.get(String(part.id))?.shift()));
@@ -270,6 +335,19 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
     }
     const messages: MessageLike[] = [];
     for (const message of source) {
+        if (skipped.has(message)) {
+            if (message.id) {
+                originalsByID.set(
+                    message.id,
+                    cache?.metadata.get(message.id) ?? metadataOnly(message),
+                );
+                messages.push({
+                    info: { id: message.id, sessionID: draft.sessionID, role: message.role },
+                    parts: [],
+                });
+            }
+            continue;
+        }
         const parts: Part[] = [];
         for (const content of message.content) {
             if (paired.has(content)) continue;
@@ -283,13 +361,17 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
         }
         if (!parts.length && message.content.length) continue;
         const byCallID = new Map<string, ToolBridge>();
-        for (const part of parts) {
+        const bySubject = new Map<string, ToolBridge>();
+        for (const [index, part] of parts.entries()) {
             const bridge = bridges.get(part);
             if (bridge && typeof part.callID === "string") byCallID.set(part.callID, bridge);
+            if (bridge && typeof part.callID === "string" && part.callID)
+                bySubject.set(providerSubjectPart(part, index), bridge);
         }
         if (typeof message.id === "string") {
             bridgesByMessageID.set(message.id, byCallID);
             originalsByID.set(message.id, message);
+            bridgesBySubject.set(message.id, bySubject);
         }
         const mapped: MessageLike = {
             info: {
@@ -316,21 +398,50 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
     return {
         messages,
         commit() {
+            const active = getOpenCodeProviderProjection(draft.sessionID);
+            const saved = active ? providerCache(active.owner) : undefined;
+            if (saved) {
+                for (const [id, original] of originalsByID) {
+                    if (!saved.metadata.has(id)) saved.metadata.set(id, metadataOnly(original));
+                }
+                for (const [id, bridges] of bridgesBySubject) saved.bridges.set(id, bridges);
+                for (const [id, parts] of hostPartsByID) saved.hostParts.set(id, parts);
+            }
             let head = 0;
             const rendered: V2Message[] = [];
+            const nextRendered = new Map<string, { native: MessageLike; messages: V2Message[] }>();
             for (const message of messages) {
+                const mid = message.info.id;
+                const frozen = saved?.byNative.get(message);
+                if (frozen) {
+                    rendered.push(...frozen);
+                    if (mid) nextRendered.set(mid, { native: message, messages: frozen });
+                    if (message.info.syntheticHead) head++;
+                    continue;
+                }
+                const prior = mid ? saved?.rendered.get(mid) : undefined;
+                if (prior?.native === message) {
+                    rendered.push(...prior.messages);
+                    nextRendered.set(mid as string, prior);
+                    continue;
+                }
+                const start = rendered.length;
                 const original =
                     originals.get(message) ??
                     (typeof message.info.id === "string"
                         ? originalsByID.get(message.info.id)
                         : undefined);
-                const id = message.info.syntheticHead ? HEAD_IDS[head++] : original?.id;
+                const template = saved && mid ? saved.metadata.get(mid) : original;
+                const id = message.info.syntheticHead ? HEAD_IDS[head++] : (original?.id ?? mid);
                 const content: Part[] = [];
                 const following: V2Message[] = [];
-                for (const candidate of message.parts) {
+                for (const [index, candidate] of message.parts.entries()) {
                     const part = candidate as Part;
                     const bridge =
                         bridges.get(part) ??
+                        (saved && mid && part.type === "tool"
+                            ? saved.bridges.get(mid)?.get(providerSubjectPart(part, index))
+                            : undefined) ??
                         (part.type === "tool" && typeof part.callID === "string"
                             ? bridgesFor(message)?.get(part.callID)
                             : undefined);
@@ -408,9 +519,11 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                             continue;
                         }
                         const { synthetic: _synthetic, ...clean } = part;
+                        const remembered = mid ? saved?.hostParts.get(mid) : undefined;
                         const original =
-                            hostPartTypes.has(clean.type) && !containsHostInstance(clean)
-                                ? hostParts.get(contentKey(clean))
+                            (remembered?.types ?? hostPartTypes).has(clean.type) &&
+                            !containsHostInstance(clean)
+                                ? (remembered?.parts ?? hostParts).get(contentKey(clean))
                                 : undefined;
                         content.push(original ?? clean);
                         continue;
@@ -460,9 +573,9 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                         else following.push({ ...bridge.resultMessage, content: [result] });
                     }
                 }
-                if (content.length || !original?.content.length) {
+                if (content.length || !(saved ? template : original)?.content.length) {
                     const value: V2Message = {
-                        ...original,
+                        ...template,
                         id,
                         role: message.info.role ?? "user",
                         content,
@@ -471,6 +584,20 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                     rendered.push(existing ? Object.assign(existing, { content }) : value);
                 }
                 rendered.push(...following);
+                if (saved) {
+                    const owned = rendered.slice(start);
+                    saved.byNative.set(message, owned);
+                    if (mid) nextRendered.set(mid, { native: message, messages: owned });
+                }
+            }
+            if (saved) {
+                saved.rendered = nextRendered;
+                for (const id of saved.metadata.keys())
+                    if (!nextRendered.has(id)) {
+                        saved.metadata.delete(id);
+                        saved.bridges.delete(id);
+                        saved.hostParts.delete(id);
+                    }
             }
             draft.messages.splice(0, draft.messages.length, ...rendered);
         },

@@ -215,11 +215,33 @@ export interface HostRunnerPass {
     truncate_after?: number;
     /** History-gap recovery resends this retained tail from ingest, without re-hooking it. */
     uningested_from?: number;
+    /** Exact retired exit observed by an explicit switch; safety exits cannot be replaced. */
+    replace_retired_rollback?: string;
 }
 
 /** Ordinary pass: exactly one transaction for appended entries, ids and the small state row. */
 export function commitHostRunnerPass(db: Database, key: HostRunnerKey, pass: HostRunnerPass): void {
     writeTransaction(db, "pass", () => {
+        if (pass.replace_retired_rollback !== undefined) {
+            const retired = requiredState(db, key);
+            if (
+                retired.pipeline_exit_json !== pass.replace_retired_rollback ||
+                JSON.parse(pass.replace_retired_rollback).reason !== "rollback"
+            ) {
+                throw new Error("Only the observed deliberate rollback can be replaced");
+            }
+            for (const table of [
+                "host_runner_entries",
+                "host_runner_ids",
+                "host_runner_views",
+                "host_runner_state",
+            ]) {
+                db.prepare(`DELETE FROM ${table} WHERE session_id=? AND harness=?`).run(
+                    key.session_id,
+                    key.harness,
+                );
+            }
+        }
         const previous = readState(db, key);
         const state = pass.state;
         if (
@@ -336,6 +358,8 @@ export interface HostRunnerAnswer {
     ingested_through?: number;
     /** Omit on noop/wait/refusal; bootstrap progress is stored in state.bootstrap_cursor. */
     view?: HostRunnerView;
+    /** Accepted HARD m0 materialization only, committed with the view, never on SOFT. */
+    hard_materialized_at?: number;
 }
 
 /** The caller validates provider structure; storage also rejects answers to an uncommitted fence. */
@@ -410,6 +434,19 @@ export function commitHostRunnerAnswer(
                 key.session_id,
                 key.harness,
             );
+        }
+        if (answer.hard_materialized_at !== undefined) {
+            if (
+                !view ||
+                !Number.isSafeInteger(answer.hard_materialized_at) ||
+                answer.hard_materialized_at < 0
+            ) {
+                throw new Error("A HARD materialization clock requires an accepted view");
+            }
+            const updated = db
+                .prepare("UPDATE session_meta SET cached_m0_materialized_at=? WHERE session_id=?")
+                .run(answer.hard_materialized_at, key.session_id);
+            if (updated.changes !== 1) throw new Error("HARD materialization session is missing");
         }
         writeState(db, key, state);
     });

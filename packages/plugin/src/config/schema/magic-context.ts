@@ -1144,7 +1144,7 @@ export const MagicContextConfigSchema = z
             .enum(["full_request", "provider"])
             .default("full_request")
             .describe(
-                'Experimental, not for production use: off by default (full_request). The provider pipeline applies only with transform_mode: "rust" on OpenCode; full_request keeps the legacy request adapter.',
+                'Experimental, user-level only, not for production use: off by default (full_request). The provider pipeline applies only with transform_mode: "rust" on OpenCode; full_request keeps the legacy request adapter.',
             ),
         auto_update: z
             .boolean()

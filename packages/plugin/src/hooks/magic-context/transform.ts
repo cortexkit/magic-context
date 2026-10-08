@@ -693,13 +693,24 @@ export function createTransform(deps: TransformDeps) {
                   memorySyncRequestedSessions: deps.rustMemorySyncRequestedSessions,
               })
             : undefined;
-    const providerTransform =
-        rustModeTransform &&
-        !deps.compactionOff &&
-        (deps.rustPipeline === "provider" ||
-            deps.db.prepare("SELECT 1 FROM host_runner_state LIMIT 1").get())
+    let providerTransform =
+        rustModeTransform && !deps.compactionOff && deps.rustPipeline === "provider"
             ? createOpenCodeProviderTransform(deps, rustModeTransform)
             : undefined;
+    const providerForSession = (id: string) => {
+        if (!rustModeTransform || deps.compactionOff) return undefined;
+        if (
+            !providerTransform &&
+            deps.db
+                .prepare("SELECT 1 FROM host_runner_state WHERE session_id=? AND harness=?")
+                .get(id, deps.storeGeneration === "v2" ? "opencode2" : "opencode")
+        ) {
+            providerTransform = createOpenCodeProviderTransform(deps, rustModeTransform);
+        }
+        return deps.rustPipeline === "provider" || providerTransform?.hasRecord(id)
+            ? providerTransform
+            : undefined;
+    };
     let entryReuse: { reused: number; retained: number; retainedBytes: number } | undefined;
     const projectEntry = createLkgEntryProjector({
         onReuse: (stats) => {
@@ -1045,8 +1056,9 @@ export function createTransform(deps: TransformDeps) {
                     sessionMeta.isSubagent,
                 );
             }
-            if (providerTransform)
-                await providerTransform.run(sessionId, messages, output, sessionMeta);
+            const sessionProvider = providerForSession(sessionId);
+            if (sessionProvider)
+                await sessionProvider.run(sessionId, messages, output, sessionMeta);
             else await rustModeTransform.run(sessionId, messages, output, sessionMeta);
             // Rust returns before the TypeScript post-pass hook below. Run the
             // host-owned embedding trigger after either implementation publishes.
@@ -3302,10 +3314,10 @@ export function createTransform(deps: TransformDeps) {
     };
 
     return Object.assign(transform, {
-        isProviderSession: (id: string) => providerTransform?.isProviderSession(id) ?? false,
+        isProviderSession: (id: string) => providerForSession(id)?.isProviderSession(id) ?? false,
         recoverProviderOutput: (id: string, output: { messages: unknown[] }) =>
             providerTransform?.recoverOutput(id, output) ?? false,
-        providerOrdinals: (id: string) => providerTransform?.ordinals(id),
+        providerOrdinals: (id: string) => providerForSession(id)?.ordinals(id),
         invalidateRustWireState(sessionId: string): void {
             rustModeTransform?.invalidateWireState(sessionId);
         },
