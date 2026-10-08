@@ -2268,6 +2268,193 @@ mod host_tests {
     }
 
     #[tokio::test]
+    async fn no_exact_hook_plan_late_hard_and_soft_temporal_views_match_full_engine() {
+        for hard in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let (h, b, s, k) = handler(dir.path(), Arc::new(NoReads::default()));
+            let oracle_dir = tempfile::tempdir().unwrap();
+            let (oh, ob, os, ok) = handler(oracle_dir.path(), Arc::new(NoReads::default()));
+            let ow = oh.provider_work(&os, ob, ok).unwrap();
+            let timed = |ordinal: u64, role: &str, created: i64, completed: Option<i64>| {
+                let mut entry = message(ordinal);
+                entry["message"]["info"]["role"] = json!(role);
+                entry["message"]["info"]["time"]["created"] = json!(created);
+                if let Some(completed) = completed {
+                    entry["message"]["info"]["time"]["completed"] = json!(completed);
+                }
+                entry
+            };
+            let entries = vec![
+                timed(1, "user", 1000, None),
+                timed(2, "assistant", 2000, Some(3000)),
+                timed(3, "user", 7_203_000, None),
+                timed(4, "assistant", 7_204_000, Some(7_205_000)),
+                timed(5, "user", 10_805_000, None),
+            ];
+            let baseline = mc_store::StoredCompartment {
+                sequence: 0,
+                start_message: 1,
+                end_message: 1,
+                end_message_id: "m1#0".into(),
+                title: "baseline".into(),
+                content: "baseline history".into(),
+                p1: Some("baseline history".into()),
+                importance: 50,
+                ..Default::default()
+            };
+            let delta = mc_store::StoredCompartment {
+                sequence: 1,
+                start_message: 2,
+                end_message: 2,
+                end_message_id: "m2#0".into(),
+                title: "delta".into(),
+                content: "delta history".into(),
+                p1: Some("delta history".into()),
+                importance: 50,
+                ..Default::default()
+            };
+            for store in [&s, &os] {
+                store
+                    .replace_compartments("s", std::slice::from_ref(&baseline))
+                    .unwrap();
+            }
+            answer(h.provider_setup(b.clone(), &setup()).await);
+            let l = ProviderLineage {
+                lineage_id: "L".into(),
+                first_ordinal: 1,
+                descends_from: None,
+                through_ordinal: None,
+            };
+            for entry in &entries[..2] {
+                let hook = if entry["message"]["info"]["role"] == "user" {
+                    "pre_user"
+                } else {
+                    "post_assistant"
+                };
+                hook_answer(&s, &k, &l, entry, hook, ("", json!([]), &[0]));
+            }
+            let mut boot = step("boot", vec![], 2);
+            boot["served_through_ordinal"] = json!(2);
+            boot["prefix_rebuilding"] = json!({"reason":"pipeline_switch"});
+            let first = answer(h.provider_step(b.clone(), &boot).await);
+            let mut req: TransformRequest = decode(&json!({"v":2,"kind":"transform","session_id":"s","serializer_profile":"opencode-aisdk","render_config":"temporal-oracle","model_key":"fixture","messages":[],"tool_present":true,"auto_search_enabled":false,"usage":{"current_total_input_tokens":1000,"context_limit_tokens":100000}})).unwrap();
+            let decode_entries = |entries: &[Value]| {
+                entries
+                    .iter()
+                    .cloned()
+                    .map(|v| serde_json::from_value(v).unwrap())
+                    .collect::<Vec<compact::status::StatusMessage>>()
+            };
+            Codec::OpencodeAiSdk
+                .prepare_request(&mut req, &decode_entries(&entries[..2]))
+                .unwrap();
+            let mut ctx = producer_context(&ow, "fixture", 100000, false);
+            ctx.observed_last_response_at_ms = Some(ctx.now_ms);
+            transform::transform_with_projection(&os, &req, &ctx).unwrap();
+            // Hook-time metadata is not an exact engine plan. The fallback must
+            // leave every new idle-gap candidate unmarked on the served clone.
+            let exact_plan: Option<mc_core::PassPlan> = None;
+            assert!(!exact_plan
+                .as_ref()
+                .is_some_and(|p| transform::pass_plan_permits_prefix_mutation(p, false)));
+            for entry in &entries[2..] {
+                let hook = if entry["message"]["info"]["role"] == "user" {
+                    "pre_user"
+                } else {
+                    "post_assistant"
+                };
+                hook_answer(&s, &k, &l, entry, hook, ("", json!([]), &[0]));
+            }
+            let mut defer = step("defer", vec![], 5);
+            defer["served_through_ordinal"] = json!(5);
+            defer["last_applied"] = first["compaction"].clone();
+            assert_eq!(
+                answer(h.provider_step(b.clone(), &defer).await)["answer"],
+                "noop"
+            );
+            Codec::OpencodeAiSdk
+                .prepare_request(&mut req, &decode_entries(&entries))
+                .unwrap();
+            let held = transform::transform_with_projection(&os, &req, &ctx).unwrap();
+            assert_eq!(held.response.action, "SOFT+");
+            assert!(!held
+                .response
+                .ck_messages
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|m| serde_json::to_string(m).unwrap().contains("<!-- +")));
+            assert!(s
+                .load_provider_hook_answers(&k.store_key())
+                .unwrap()
+                .iter()
+                .all(|a| a.answer.ops_json == "[]"));
+            assert!(!s
+                .load_temporal_marks("s")
+                .unwrap()
+                .iter()
+                .any(|m| !m.marker_text.is_empty()));
+            for store in [&s, &os] {
+                store
+                    .replace_compartments("s", &[baseline.clone(), delta.clone()])
+                    .unwrap();
+            }
+            let mut rebuild = step("rebuild", vec![], 5);
+            rebuild["served_through_ordinal"] = json!(5);
+            if hard {
+                rebuild["prefix_rebuilding"] = json!({"reason":"cold"});
+                ctx.now_ms += 300_002;
+                ctx.observed_last_response_at_ms = Some(ctx.now_ms - 300_001);
+            } else {
+                rebuild["estimate"]["request_tokens"] = json!(75000);
+                req.usage.as_mut().unwrap().current_total_input_tokens = 75000;
+            }
+            let old = transform::transform_with_projection(&os, &req, &ctx).unwrap();
+            assert_eq!(old.response.action, if hard { "HARD" } else { "SOFT" });
+            let expected = Codec::OpencodeAiSdk
+                .encode_view(
+                    &transform::compaction::View {
+                        compaction_id: "oracle".into(),
+                        version: 1,
+                        range: transform::compaction::Range {
+                            lineage_id: "L".into(),
+                            from: 1,
+                            to: 6,
+                        },
+                        replacement: old
+                            .response
+                            .ck_messages
+                            .as_ref()
+                            .unwrap()
+                            .iter()
+                            .map(|m| (**m).clone())
+                            .collect(),
+                    },
+                    &req,
+                    &super::super::codec_opencode::NativeRenderContext::from(&old),
+                )
+                .unwrap();
+            let actual = answer(h.provider_step(b, &rebuild).await);
+            assert_eq!(actual["answer"], "compaction_message");
+            assert_eq!(actual["compaction"]["range"]["to"], 6);
+            assert_eq!(
+                actual["compaction"]["replacement"],
+                json!(expected.replacement),
+                "late {} temporal overlay differs",
+                if hard { "HARD" } else { "SOFT" }
+            );
+            let bytes = actual["compaction"]["replacement"].to_string();
+            assert_eq!(bytes.matches("<!-- +2h -->").count(), 1);
+            assert_eq!(bytes.matches("<!-- +1h -->").count(), 1);
+            assert_eq!(
+                s.load_tags_for_session("s").unwrap().len(),
+                5,
+                "view rendering must not mint extra tags"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn host_cold_signal_folds_below_threshold_without_changing_setup_or_broca_ttl() {
         let dir = tempfile::tempdir().unwrap();
         let (h, mut b, s, k) = handler(dir.path(), Arc::new(NoReads::default()));

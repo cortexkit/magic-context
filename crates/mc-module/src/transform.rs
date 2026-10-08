@@ -4872,8 +4872,11 @@ fn apply_once(
     // the provider response has no visible §N§ tags. Creating these rows does not change rendered
     // output; create the corresponding caveman units only during a bust pass.
     let caveman_tagging_requested = req.caveman_enabled && !req.is_subagent;
+    // Host hooks own tag allocation, but a view still owns temporal decisions
+    // over its entire working range. Hooks without an exact pass plan leave gap
+    // candidates unmarked; the shared overlay adopts them on a HARD or SOFT,
+    // and the exact defer gate below discards them without changing served bytes.
     if (tagging_active || caveman_tagging_requested)
-        && !compaction::host_pass(req)
         && !loaded.core.reconcile_pending
         && (loaded.meta.pending_rewrite.is_none() || clear_pending_rewrite_on_present)
     {
@@ -4886,7 +4889,8 @@ fn apply_once(
             tag_rows: &mut tag_rows,
             temporal_rows: &mut temporal_marks,
             overlay_frontier,
-            tag_mint_enabled: tagging_active || caveman_tagging_requested,
+            tag_mint_enabled: (tagging_active || caveman_tagging_requested)
+                && !compaction::host_pass(req),
             temporal_enabled: temporal_active,
             rewrite_temporal_marks,
             mutation_exempt_mid,
