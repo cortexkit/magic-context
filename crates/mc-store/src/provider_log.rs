@@ -283,6 +283,15 @@ pub struct ProviderHookRequest<'a> {
     pub repeat_subject: Option<&'a ProviderSubject>,
 }
 
+pub struct ProviderStatusPage<'a> {
+    pub lineage: &'a ProviderLineage,
+    pub messages: &'a [ProviderMessage],
+    pub served: Option<u64>,
+    pub unserved: &'a [ProviderSubject],
+    pub newest: Option<u64>,
+    pub more: bool,
+}
+
 fn sql_json(e: serde_json::Error) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(e))
 }
@@ -738,7 +747,7 @@ impl McStore {
         decide: impl FnOnce(&ProviderHookContext) -> Result<(ProviderHookWrite, T), ProviderError>,
     ) -> Result<T, ProviderError> {
         let messages = request.message.map(std::slice::from_ref).unwrap_or(&[]);
-        self.commit_provider_delta(key, request, messages, decide)
+        self.commit_provider_delta(key, request, messages, None, decide)
     }
 
     /// A status page validates every entry before burns or promotion. The last
@@ -761,6 +770,7 @@ impl McStore {
                 repeat_subject: None,
             },
             messages,
+            None,
             |ctx| {
                 Ok((
                     ProviderHookWrite {
@@ -773,11 +783,56 @@ impl McStore {
         )
     }
 
+    /// Final pages validate completeness in the same rollback fence as conflicts.
+    /// Intermediate pages only admit bytes; acknowledgement waits for a complete
+    /// final page. A returned gap committed nothing, including message admissions.
+    pub fn commit_provider_status_page(
+        &self,
+        key: &ProviderSessionKey,
+        page: ProviderStatusPage<'_>,
+    ) -> Result<Option<u64>, ProviderError> {
+        let result = self.commit_provider_delta(
+            key,
+            ProviderHookRequest {
+                lineage: page.lineage,
+                message: None,
+                served_through_ordinal: if page.more { None } else { page.served },
+                unserved_subjects: if page.more { &[] } else { page.unserved },
+                repeat_subject: None,
+            },
+            page.messages,
+            if page.more { None } else { page.newest },
+            |ctx| {
+                Ok((
+                    ProviderHookWrite {
+                        answer: None,
+                        counters: ctx.counters.clone(),
+                    },
+                    (),
+                ))
+            },
+        );
+        match result {
+            Ok(()) => Ok(None),
+            Err(ProviderError::Transient(reason))
+                if reason.starts_with("provider history gap:") =>
+            {
+                Ok(Some(
+                    reason["provider history gap:".len()..]
+                        .parse()
+                        .expect("store-authored ordinal"),
+                ))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn commit_provider_delta<T>(
         &self,
         key: &ProviderSessionKey,
         request: ProviderHookRequest<'_>,
         messages: &[ProviderMessage],
+        complete_through: Option<u64>,
         decide: impl FnOnce(&ProviderHookContext) -> Result<(ProviderHookWrite, T), ProviderError>,
     ) -> Result<T, ProviderError> {
         let mut refusal = None;
@@ -788,6 +843,10 @@ impl McStore {
                 let new_lineage = lineage_tx(conn,&conv,&request.lineage.lineage_id)?.is_none();
                 ensure_lineage_tx(conn,&conv,request.lineage)?;
                 for m in messages {insert_message_tx(conn,&conv,&request.lineage.lineage_id,m)?;}
+                if let Some(newest) = complete_through {
+                    let gap = frontier_tx(conn,&conv,&request.lineage.lineage_id)?;
+                    if gap <= newest {return Err(ProviderError::Transient(format!("provider history gap:{gap}")))}
+                }
                 let acknowledged = acknowledged_through_tx(conn,&conv,&c,request.lineage,new_lineage,request.served_through_ordinal)?;
                 for s in request.unserved_subjects {
                     for (ancestor, _) in ancestry_tx(conn,&conv,&request.lineage.lineage_id)? {

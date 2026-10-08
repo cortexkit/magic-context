@@ -8672,6 +8672,36 @@ impl McStore {
         }
     }
 
+    /// Read the cache header and bounded shape summary, never chunk payloads.
+    /// Missing summaries are deliberately unknown, not an empty frozen set.
+    pub fn load_compaction_trigger_core(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<CoreState>, McStoreError> {
+        Ok(self.inner.with_conn(|conn| {
+            let Some(row) = cache_codec::read_small_row(conn, session_id)? else {
+                return Ok(None);
+            };
+            let Some(keys) =
+                cache_codec::SectionIndex::parse(&row.section_index).and_then(|i| i.shape)
+            else {
+                return Ok(None);
+            };
+            let mut core = cache_codec::decode_small_core(&row.core_state)?;
+            core.frozen_units = keys
+                .into_iter()
+                .map(|key| FrozenUnit {
+                    key,
+                    kind: String::new(),
+                    frozen_payload: String::new(),
+                    durability_class: DurabilityClass::Lineage,
+                    reset_rule: String::new(),
+                })
+                .collect();
+            Ok(Some(core))
+        })?)
+    }
+
     /// Commit a meta-only edit under the `row_version` CAS.
     ///
     /// It rewrites the small row's `meta` and nothing else: never `core_state`, never

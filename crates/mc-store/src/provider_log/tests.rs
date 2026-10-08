@@ -305,6 +305,66 @@ fn conflicting_status_refuses_before_promote_and_burn() {
 }
 
 #[test]
+fn final_status_gap_rolls_back_admission_and_acknowledgement_in_the_conflict_fence() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    let l = lineage("L", 1);
+    hook(&store, &l, &message(1), "p1", None, false);
+    let before = serde_json::to_value(store.load_provider_conversation(&key()).unwrap()).unwrap();
+    assert_eq!(
+        store
+            .commit_provider_status_page(
+                &key(),
+                ProviderStatusPage {
+                    lineage: &l,
+                    messages: &[message(3)],
+                    served: Some(3),
+                    unserved: &[subject("m1", "p1")],
+                    newest: Some(3),
+                    more: false
+                }
+            )
+            .unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        store.load_provider_messages(&key(), "L").unwrap(),
+        vec![message(1)]
+    );
+    assert_eq!(
+        store.load_provider_hook_answers(&key()).unwrap()[0].state,
+        "pending"
+    );
+    assert!(store.load_tags_for_session("engine").unwrap().is_empty());
+    assert_eq!(
+        serde_json::to_value(store.load_provider_conversation(&key()).unwrap()).unwrap(),
+        before
+    );
+    let mut conflict = message(1);
+    conflict.mid = "other".into();
+    assert!(matches!(
+        store.commit_provider_status_page(
+            &key(),
+            ProviderStatusPage {
+                lineage: &l,
+                messages: &[message(3), conflict],
+                served: Some(3),
+                unserved: &[],
+                newest: Some(3),
+                more: false
+            }
+        ),
+        Err(ProviderError::InvalidParams {
+            field: "subject_ordinal"
+        })
+    ));
+    assert_eq!(
+        store.load_provider_messages(&key(), "L").unwrap(),
+        vec![message(1)]
+    );
+}
+
+#[test]
 fn acknowledgements_are_bounded_monotone_and_missing_never_promotes() {
     let dir = tempfile::tempdir().unwrap();
     let store = store(dir.path());

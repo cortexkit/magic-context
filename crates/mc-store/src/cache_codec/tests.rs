@@ -208,6 +208,7 @@ fn encode_then_decode_round_trips_exactly() {
     );
     let index = SectionIndex {
         sv: 1,
+        shape: None,
         f: Some(FrozenIndex {
             n: 200,
             c: 4,
@@ -246,6 +247,111 @@ fn encode_then_decode_round_trips_exactly() {
     assert_eq!(decoded.core, core);
     assert_eq!(decoded.meta, meta);
     assert!(!decoded.sections.any_discarded());
+}
+
+#[test]
+fn shape_summary_is_old_reader_compatible_and_preserves_chunk_bytes_and_hashes() {
+    #[derive(Deserialize)]
+    struct OldIndex {
+        sv: u64,
+        f: Option<FrozenIndex>,
+        b: Option<SectionIndexEntry>,
+        t: Option<SectionIndexEntry>,
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(dir.path());
+    let (core, _) = seeded(&store);
+    let with_summary = snapshot(&store);
+    let old: OldIndex = serde_json::from_str(with_summary.section_index.as_ref().unwrap()).unwrap();
+    let current = SectionIndex::parse(with_summary.section_index.as_ref().unwrap()).unwrap();
+    assert!(current.shape.is_some());
+    assert_eq!(
+        (old.sv, old.f, old.b, old.t),
+        (
+            current.sv,
+            current.f.clone(),
+            current.b.clone(),
+            current.t.clone()
+        )
+    );
+    let old_chunk_bytes = core
+        .frozen_units
+        .chunks(FROZEN_CHUNK_UNITS)
+        .enumerate()
+        .map(|(i, units)| (i as i64, serde_json::to_string(units).unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(with_summary.chunks, old_chunk_bytes);
+    let mut old_index = current.clone();
+    old_index.shape = None;
+    store
+        .inner
+        .with_conn_fenced(|conn| {
+            conn.execute(
+                "UPDATE mc_cache_state SET section_index=?2 WHERE session_id=?1",
+                params![SESSION, old_index.to_json()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let without = snapshot(&store);
+    assert_eq!(without.chunks, with_summary.chunks);
+    assert_eq!(without.core_state, with_summary.core_state);
+    assert_eq!(without.meta, with_summary.meta);
+    assert_eq!(
+        SectionIndex::parse(without.section_index.as_ref().unwrap())
+            .unwrap()
+            .f,
+        current.f
+    );
+    assert_eq!(store.load(SESSION).unwrap().core, core);
+    assert!(store
+        .load_compaction_trigger_core(SESSION)
+        .unwrap()
+        .is_none());
+    // A scalar-only update must not create the missing summary or touch chunks.
+    let loaded = store.load_meta(SESSION).unwrap();
+    let mut meta = loaded.meta;
+    meta.last_model_key = "changed".into();
+    store
+        .commit_meta(SESSION, loaded.row_version, &meta)
+        .unwrap();
+    let scalar = snapshot(&store);
+    assert_eq!(scalar.section_index, without.section_index);
+    assert_eq!(scalar.chunks, without.chunks);
+}
+
+#[test]
+fn shape_accessor_reads_only_header_metadata_not_frozen_chunk_payloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(dir.path());
+    seeded(&store);
+    let before = store
+        .load_compaction_trigger_core(SESSION)
+        .unwrap()
+        .unwrap();
+    let decodes = full_decode_count();
+    store
+        .inner
+        .with_conn_fenced(|conn| {
+            conn.execute(
+                "UPDATE mc_cache_frozen_chunks SET body='unreadable payload' WHERE session_id=?1",
+                [SESSION],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        store
+            .load_compaction_trigger_core(SESSION)
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        full_decode_count(),
+        decodes,
+        "shape reads must not decode frozen payloads"
+    );
 }
 
 #[test]

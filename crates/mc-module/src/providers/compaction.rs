@@ -75,6 +75,8 @@ struct HostSetup {
     produced: Option<ViewSummary>,
     #[serde(default)]
     invalidated: bool,
+    #[serde(default)]
+    repair_pending: bool,
 }
 #[derive(Serialize, Deserialize)]
 struct HostView {
@@ -398,6 +400,13 @@ fn execute_host(
         .load_meta(&conversation.engine_namespace)
         .map_err(transient)?
         .meta;
+    // Provider status does not carry the full request's system/provider identity.
+    // Preserve the namespace's observed inputs instead of treating their absence
+    // as a system-prompt change during transport adoption.
+    template.provider_id =
+        (!meta.last_provider_id.is_empty()).then(|| meta.last_provider_id.clone());
+    template.system_prompt_hash = meta.last_system_prompt_hash.clone();
+    template.upgrade_state = meta.last_upgrade_state.clone();
     let mut context = producer_context(
         work,
         &setup.setup.request.model,
@@ -407,6 +416,24 @@ fn execute_host(
     // The host owns idle detection on this lane. Without a trusted prior-response
     // time the engine would treat every positive-usage step as TTL-expired.
     context.cache_ttl = "never".into();
+    if transform::compaction::skip_facts(
+        store,
+        &conversation.engine_namespace,
+        &context,
+        &setup.setup.request.model,
+        status.context_window,
+    )
+    .map_err(transient)?
+    .is_some_and(|facts| facts.cached_m1_missing)
+    {
+        setup.repair_pending = true;
+    }
+    // A repaired head is frozen before its answer can be observed. Retain the
+    // outstanding repair until acknowledgement, so a lost answer can be replayed
+    // even though the engine's newly committed head is already complete.
+    let mut status = status.clone();
+    status.prefix_rebuilding |= setup.repair_pending;
+    let status = &status;
     let mut state = setup.setup.state.clone();
     state.last_applied = setup
         .applied
@@ -512,6 +539,10 @@ fn status(
         prefix_rebuilding: params
             .get("prefix_rebuilding")
             .is_some_and(|v| !v.is_null()),
+        pipeline_switch: params
+            .pointer("/prefix_rebuilding/reason")
+            .and_then(Value::as_str)
+            == Some("pipeline_switch"),
         last_applied_version: params
             .pointer("/last_applied/version")
             .and_then(Value::as_u64),
@@ -705,6 +736,7 @@ impl McHandler {
                 applied: None,
                 produced: None,
                 invalidated: false,
+                repair_pending: false,
             };
             conversation.params_json = serde_json::to_string(&request.params).map_err(transient)?;
             conversation.preset = request.preset.clone();
@@ -806,6 +838,22 @@ impl McHandler {
             })?)
             .map_err(transient)?;
         let lineage = host_lineage(store, &work.key, params, &request)?;
+        // An acknowledgement names a frozen object, not just a sequence number.
+        // Validate both components before admission can promote or burn anything.
+        for field in ["last_applied", "last_not_applied"] {
+            if let Some(ack) = params.get(field).filter(|v| !v.is_null()) {
+                let version = ack.get("version").and_then(Value::as_u64);
+                if ack.get("compaction_id").and_then(Value::as_str)
+                    != Some(setup.setup.state.compaction_id.as_str())
+                    || ![&setup.applied, &setup.produced]
+                        .into_iter()
+                        .flatten()
+                        .any(|v| Some(v.version) == version)
+                {
+                    return Err(invalid_field(field));
+                }
+            }
+        }
         if let Some(parent) = &lineage.descends_from {
             let cut = lineage.through_ordinal.expect("paired descent");
             let frontier = store
@@ -877,23 +925,31 @@ impl McHandler {
             .transpose()?;
         // The store validates the whole page before any acknowledgement or burn;
         // a conflicting resend must not make a stranded hook answer live.
-        if let Err(e) = store.commit_provider_status(
+        match store.commit_provider_status_page(
             &work.key.store_key(),
-            &lineage,
-            &messages,
-            served,
-            &unserved,
+            mc_store::provider_records::ProviderStatusPage {
+                lineage: &lineage,
+                messages: &messages,
+                served,
+                unserved: &unserved,
+                newest: request.newest.as_ref().map(|n| n.ordinal),
+                more: params.get("more").and_then(Value::as_bool) == Some(true),
+            },
         ) {
-            return Err(match e {
-                ProviderError::InvalidParams {
-                    field: "subject_mid" | "subject_ordinal",
-                } => invalid_field("messages"),
-                ProviderError::InvalidParams { field } => invalid_field(field),
-                ProviderError::Transient(reason) if reason == "an ingested ordinal changed" => {
-                    invalid_field("messages")
-                }
-                other => transient(other),
-            });
+            Ok(Some(gap)) => return bytes(&gap_answer(&request.request_id, gap)),
+            Ok(None) => {}
+            Err(e) => {
+                return Err(match e {
+                    ProviderError::InvalidParams {
+                        field: "subject_mid" | "subject_ordinal",
+                    } => invalid_field("messages"),
+                    ProviderError::InvalidParams { field } => invalid_field(field),
+                    ProviderError::Transient(reason) if reason == "an ingested ordinal changed" => {
+                        invalid_field("messages")
+                    }
+                    other => transient(other),
+                });
+            }
         }
         fault("MessagesIngested");
         conversation = store
@@ -915,6 +971,11 @@ impl McHandler {
             },
         )?;
         setup.setup.request.model = request.model.clone();
+        if let Some(rejected) = normalized.last_not_applied.filter(|v| v.structural) {
+            store
+                .set_provider_view_state(&work.key.store_key(), rejected.version, "not_applied")
+                .map_err(transient)?;
+        }
         if let Some(version) = normalized.last_applied_version {
             if setup
                 .produced
@@ -923,6 +984,7 @@ impl McHandler {
             {
                 setup.applied = setup.produced.clone();
                 setup.invalidated = false;
+                setup.repair_pending = false;
                 store
                     .set_provider_view_state(&work.key.store_key(), version, "applied")
                     .map_err(transient)?;
@@ -1021,8 +1083,26 @@ impl McHandler {
                     || meta.project_memory_epoch_pending
                     || meta.pending_rewrite.is_some()
                     || meta.bootstrap_seed_fold_pending
+                    || meta.deferred_execute_state.is_some()
+                    || meta.pending_compaction_marker.is_some()
+                    || meta.boundary_divergence_pending_count > 0
+                    || !meta.reasoning_clear_initialized
                     || meta.last_model_key != request.model,
-            });
+            }) && transform::compaction::skip_facts(
+                store,
+                &conversation.engine_namespace,
+                &producer_context(
+                    work,
+                    &request.model,
+                    normalized.context_window,
+                    meta.historian.state != mc_store::HistorianPhase::Idle,
+                ),
+                &request.model,
+                normalized.context_window,
+            )
+            .map_err(transient)?
+            .as_ref()
+            .is_some_and(transform::compaction::can_skip_classified);
             if skip {
                 json!({"answer":"noop","request_id":request.request_id})
             } else {
@@ -1449,10 +1529,9 @@ mod host_tests {
         lineage: &ProviderLineage,
         entry: &Value,
         hook: &str,
-        part: &str,
-        ops: Value,
-        tag_blocks: &[usize],
+        target: (&str, Value, &[usize]),
     ) {
+        let (part, ops, tag_blocks) = target;
         let message = ProviderMessage {
             ordinal: entry["ordinal"].as_u64().unwrap(),
             mid: entry["mid"].as_str().unwrap().into(),
@@ -1527,9 +1606,11 @@ mod host_tests {
             &l,
             &user,
             "pre_user",
-            "",
-            json!([{"op":"prepend","block":0,"text":"<!-- +2h -->\n"},{"op":"append","block":0,"text":"\nhint"}]),
-            &[0],
+            (
+                "",
+                json!([{"op":"prepend","block":0,"text":"<!-- +2h -->\n"},{"op":"append","block":0,"text":"\nhint"}]),
+                &[0],
+            ),
         );
         hook_answer(
             &s,
@@ -1537,9 +1618,7 @@ mod host_tests {
             &l,
             &assistant,
             "post_assistant",
-            "",
-            json!([]),
-            &[0],
+            ("", json!([]), &[0]),
         );
         hook_answer(
             &s,
@@ -1547,9 +1626,11 @@ mod host_tests {
             &l,
             &assistant,
             "post_tool",
-            "tool1",
-            json!([{"op":"append","block":0,"text":"\nreminder"}]),
-            &[2],
+            (
+                "tool1",
+                json!([{"op":"append","block":0,"text":"\nreminder"}]),
+                &[2],
+            ),
         );
         hook_answer(
             &s,
@@ -1557,9 +1638,7 @@ mod host_tests {
             &l,
             &assistant,
             "post_tool",
-            "tool2",
-            json!([]),
-            &[4],
+            ("tool2", json!([]), &[4]),
         );
         let mut page = step("rebuild", vec![], 4001);
         page["served_through_ordinal"] = json!(4001);
@@ -1632,9 +1711,7 @@ mod host_tests {
             &l,
             &message(2),
             "pre_user",
-            "",
-            json!({"unreadable_ops":true}),
-            &[],
+            ("", json!({"unreadable_ops":true}), &[]),
         );
         let before = s.load_meta("s").unwrap().row_version;
         let mut noop = step("noop", vec![], 2);
@@ -1668,7 +1745,7 @@ mod host_tests {
             descends_from: None,
             through_ordinal: None,
         };
-        hook_answer(&s, &k, &l, &message(2), "pre_user", "", json!([]), &[0]);
+        hook_answer(&s, &k, &l, &message(2), "pre_user", ("", json!([]), &[0]));
         let mut page = step("switch", vec![message(1), message(3)], 3);
         page["served_through_ordinal"] = json!(3);
         page["prefix_rebuilding"] = json!({"reason":"pipeline_switch"});
@@ -1769,7 +1846,7 @@ mod host_tests {
                 "info":{"id":format!("tool{ordinal}"),"role":"assistant","time":{"created":1,"completed":2}},
                 "parts":[{"id":"part","type":"tool","callID":format!("call{ordinal}"),"tool":"read",
                     "state":{"status":"completed","input":{"path":"a"},"output":if ordinal==2 {"obsolete payload"} else {"fresh payload"}}}]}});
-            hook_answer(&s, &k, &l, &tool, "post_tool", "part", json!([]), &[1]);
+            hook_answer(&s, &k, &l, &tool, "post_tool", ("part", json!([]), &[1]));
         }
         let mut bootstrap = step("bootstrap", vec![message(1), message(6)], 6);
         bootstrap["served_through_ordinal"] = json!(6);
@@ -1867,6 +1944,116 @@ mod host_tests {
         }
     }
 
+    #[test]
+    fn fast_path_never_skips_any_engine_hard_or_soft_classifier_trigger() {
+        use mc_core::{ClassifierInput, PassPlan};
+        let base = ClassifierInput {
+            initialized: true,
+            valid_m0m1_shape: true,
+            boundary_present: true,
+            ..Default::default()
+        };
+        assert!(transform::compaction::can_skip_classified(&base));
+        let cases = [
+            (
+                "bootstrap",
+                ClassifierInput {
+                    initialized: false,
+                    ..base.clone()
+                },
+            ),
+            (
+                "legacy migration",
+                ClassifierInput {
+                    is_legacy_baseline: true,
+                    ..base.clone()
+                },
+            ),
+            (
+                "missing cached m1",
+                ClassifierInput {
+                    cached_m1_missing: true,
+                    ..base.clone()
+                },
+            ),
+            (
+                "unknown shape",
+                ClassifierInput {
+                    valid_m0m1_shape: false,
+                    ..base.clone()
+                },
+            ),
+            (
+                "render identity",
+                ClassifierInput {
+                    render_config_changed: true,
+                    ..base.clone()
+                },
+            ),
+            (
+                "hard fold",
+                ClassifierInput {
+                    hard_fold_requested: true,
+                    ..base.clone()
+                },
+            ),
+            (
+                "reconcile missing boundary",
+                ClassifierInput {
+                    reconcile_pending: true,
+                    boundary_present: false,
+                    ..base.clone()
+                },
+            ),
+            (
+                "soft m1 delta",
+                ClassifierInput {
+                    m1_revision_changed: true,
+                    bust_opportunity: true,
+                    ..base.clone()
+                },
+            ),
+            (
+                "soft reduction",
+                ClassifierInput {
+                    reductions_pending: true,
+                    bust_opportunity: true,
+                    ..base.clone()
+                },
+            ),
+        ];
+        for (name, input) in cases {
+            assert_ne!(
+                mc_core::classify(&input),
+                PassPlan::Defer,
+                "fixture must trigger: {name}"
+            );
+            assert!(
+                !transform::compaction::can_skip_classified(&input),
+                "unsafe skip: {name}"
+            );
+        }
+        for cause in [
+            "first publication",
+            "reasoning repair",
+            "protection snapshot",
+            "boundary divergence",
+            "idle expiry",
+            "system absorption",
+            "external memory revision",
+            "project memory epoch",
+        ] {
+            let input = ClassifierInput {
+                hard_fold_requested: true,
+                ..base.clone()
+            };
+            assert!(
+                !transform::compaction::can_skip_classified(&input),
+                "unsafe hard-fold skip: {cause}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn fast_path_matches_full_engine_across_pressure_rebuild_rejection_and_flush() {
         for tokens in [1_000, 64_999, 65_000, 85_000, 95_000] {
@@ -1876,71 +2063,71 @@ mod host_tests {
                         let dir = tempfile::tempdir().unwrap();
                         let (h, b, s, k) = handler(dir.path(), Arc::new(NoReads::default()));
                         answer(h.provider_setup(b.clone(), &setup()).await);
-                        let mut bootstrap = step("bootstrap", vec![message(1), message(2)], 2);
-                        bootstrap["prefix_rebuilding"] = json!({"reason":"pipeline_switch"});
-                        answer(h.provider_step(b.clone(), &bootstrap).await);
-                        let c = s
-                            .load_provider_conversation(&k.store_key())
-                            .unwrap()
+                        let mut boot = step("boot", vec![message(1), message(2)], 2);
+                        boot["prefix_rebuilding"] = json!({"reason":"pipeline_switch"});
+                        answer(h.provider_step(b.clone(), &boot).await);
+                        let compartment = mc_store::StoredCompartment {
+                            sequence: 0,
+                            start_message: 1,
+                            end_message: 1,
+                            end_message_id: "m1#0".into(),
+                            title: "history".into(),
+                            content: "published".into(),
+                            p1: Some("published".into()),
+                            importance: 50,
+                            ..Default::default()
+                        };
+                        s.replace_compartments("s", std::slice::from_ref(&compartment))
                             .unwrap();
-                        let mut setup: HostSetup =
-                            serde_json::from_str(c.setup_json.as_ref().unwrap()).unwrap();
-                        if !rejected {
-                            setup.applied = setup.produced.clone();
-                        }
-                        s.replace_compartments(
-                            "s",
-                            &[mc_store::StoredCompartment {
-                                sequence: 1,
-                                start_message: 1,
-                                end_message: 1,
-                                end_message_id: "m1#0".into(),
-                                title: "history".into(),
-                                content: "published".into(),
-                                p1: Some("published".into()),
-                                importance: 50,
-                                ..Default::default()
-                            }],
-                        )
-                        .unwrap();
                         if flush {
                             s.arm_soft_refresh("s").unwrap();
                         }
-                        let status = transform::compaction::Status {
-                            lineage_id: "L".into(),
-                            newest_ordinal: Some(2),
-                            previous_usage: None,
-                            request_tokens: tokens,
-                            context_window: 100000,
-                            prefix_rebuilding: prefix,
-                            last_applied_version: setup.applied.as_ref().map(|v| v.version),
-                            last_not_applied: rejected.then(|| transform::compaction::NotApplied {
-                                version: setup.produced.as_ref().unwrap().version,
-                                structural: false,
-                            }),
-                        };
+                        let work = h.provider_work(&s, b.clone(), k).unwrap();
+                        let context = producer_context(&work, "fixture", 100000, false);
+                        let facts =
+                            transform::compaction::skip_facts(&s, "s", &context, "fixture", 100000)
+                                .unwrap()
+                                .unwrap();
                         let threshold = b
                             .config
                             .resolve_execute_threshold(Some("fixture"))
                             .percentage;
-                        let input = FastPathInputs {
+                        let skip = can_skip_engine(FastPathInputs {
                             prefix_rebuilding: prefix,
                             relevant_not_applied: rejected,
                             execute_due: tokens as f64 / 1000.0 >= threshold,
                             force_band: tokens >= 85000,
                             emergency: tokens >= 95000,
                             forced_work: flush,
-                        };
-                        let work = h.provider_work(&s, b, k.clone()).unwrap();
-                        let l = s
-                            .load_provider_lineage(&k.store_key(), "L")
-                            .unwrap()
+                        }) && transform::compaction::can_skip_classified(&facts);
+                        // The oracle is the real full-request entry point in an
+                        // independently prepared store, not the host wrapper.
+                        let oracle_dir = tempfile::tempdir().unwrap();
+                        let (oh, ob, os, ok) =
+                            handler(oracle_dir.path(), Arc::new(NoReads::default()));
+                        let ow = oh.provider_work(&os, ob, ok).unwrap();
+                        let mut req: TransformRequest = decode(&json!({"v":2,"kind":"transform","session_id":"s","serializer_profile":"opencode-aisdk","render_config":"full-request-oracle","model_key":"fixture","messages":[],"tool_present":false,"auto_search_enabled":false,"usage":{"current_total_input_tokens":1000,"context_limit_tokens":100000}})).unwrap();
+                        let entries = [message(1), message(2)]
+                            .into_iter()
+                            .map(|v| serde_json::from_value(v).unwrap())
+                            .collect::<Vec<_>>();
+                        Codec::OpencodeAiSdk
+                            .prepare_request(&mut req, &entries)
                             .unwrap();
-                        // Run the real engine, bypassing the predicate. Pending
-                        // publication is intentional: it may ride an opportunity,
-                        // but cannot itself authorize a below-threshold bust.
-                        let full = execute_host(&s, &work, &c, &mut setup, &status, &l).unwrap();
-                        assert!(!(can_skip_engine(input) && full.is_some()),"unsafe skip: tokens={tokens}, prefix={prefix}, rejected={rejected}, flush={flush}, meta={:?}", s.load_meta("s").unwrap().meta);
+                        let mut ctx = producer_context(&ow, "fixture", 100000, false);
+                        ctx.observed_last_response_at_ms = Some(ctx.now_ms);
+                        transform::transform_with_projection(&os, &req, &ctx).unwrap();
+                        os.replace_compartments("s", &[compartment]).unwrap();
+                        if flush {
+                            os.arm_soft_refresh("s").unwrap();
+                        }
+                        if prefix {
+                            ctx.now_ms += 300_002;
+                            ctx.observed_last_response_at_ms = Some(ctx.now_ms - 300_001);
+                        }
+                        req.usage.as_mut().unwrap().current_total_input_tokens = tokens;
+                        let full = transform::transform_with_projection(&os, &req, &ctx).unwrap();
+                        assert!(!(skip && full.response.prefix_bust_permitted),"unsafe skip: tokens={tokens}, prefix={prefix}, rejected={rejected}, flush={flush}");
                     }
                 }
             }
@@ -2014,6 +2201,70 @@ mod host_tests {
                 .engine_namespace,
             b.session
         );
+    }
+
+    #[tokio::test]
+    async fn pipeline_switch_keeps_observed_provider_and_system_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let (h, b, s, k) = handler(dir.path(), Arc::new(NoReads::default()));
+        let work = h.provider_work(&s, b.clone(), k.clone()).unwrap();
+        let mut req: TransformRequest = decode(&json!({"v":2,"kind":"transform","session_id":"s","serializer_profile":"opencode-aisdk","render_config":"old-full-request","model_key":"fixture","provider_id":"provider","system_prompt_hash":"system","upgrade_state":"upgrade","messages":[],"tool_present":false,"auto_search_enabled":false,"usage":{"current_total_input_tokens":1000,"context_limit_tokens":100000}})).unwrap();
+        let entries = [message(1), message(2)]
+            .into_iter()
+            .map(|v| serde_json::from_value(v).unwrap())
+            .collect::<Vec<_>>();
+        Codec::OpencodeAiSdk
+            .prepare_request(&mut req, &entries)
+            .unwrap();
+        let mut ctx = producer_context(&work, "fixture", 100000, false);
+        ctx.observed_last_response_at_ms = Some(ctx.now_ms);
+        transform::transform_with_projection(&s, &req, &ctx).unwrap();
+        let old = transform::transform_with_projection(&s, &req, &ctx).unwrap();
+        assert_eq!(old.response.action, "SOFT+");
+        let expected = Codec::OpencodeAiSdk
+            .encode_view(
+                &transform::compaction::View {
+                    compaction_id: "old".into(),
+                    version: 1,
+                    range: transform::compaction::Range {
+                        lineage_id: "L".into(),
+                        from: 1,
+                        to: 3,
+                    },
+                    replacement: old
+                        .response
+                        .ck_messages
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .map(|m| (**m).clone())
+                        .collect(),
+                },
+                &req,
+                &super::super::codec_opencode::NativeRenderContext::from(&old),
+            )
+            .unwrap();
+        answer(h.provider_setup(b.clone(), &setup()).await);
+        let mut page = step("switch", vec![message(1), message(2)], 2);
+        page["prefix_rebuilding"] = json!({"reason":"pipeline_switch"});
+        let actual = answer(h.provider_step(b, &page).await);
+        assert_eq!(
+            actual["compaction"]["replacement"],
+            json!(expected.replacement)
+        );
+        let meta = s.load_meta("s").unwrap().meta;
+        assert_eq!(meta.last_provider_id, "provider");
+        assert_eq!(meta.last_system_prompt_hash, "system");
+        let setup: HostSetup = serde_json::from_str(
+            s.load_provider_conversation(&k.store_key())
+                .unwrap()
+                .unwrap()
+                .setup_json
+                .as_ref()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(setup.setup.state.rebuild_epoch, 0);
     }
 
     #[tokio::test]
@@ -2122,7 +2373,7 @@ mod host_tests {
         let refused = answer(refused);
         assert_eq!(refused["code"], "history_unreadable");
         assert_eq!(refused["detail"], json!({"history_gap_from":4001}));
-        let mut final_page = step("page3", vec![message(4001)], 4002);
+        let mut final_page = step("page3", vec![message(4001), message(4002)], 4002);
         final_page["prefix_rebuilding"] = json!({"reason":"pipeline_switch"});
         let view = answer(h.provider_step(b, &final_page).await);
         assert_eq!(view["answer"], "compaction_message");
@@ -2142,6 +2393,14 @@ mod host_tests {
         let dir = tempfile::tempdir().unwrap();
         let (h, b, _, _) = handler(dir.path(), Arc::new(NoReads::default()));
         answer(h.provider_setup(b.clone(), &setup()).await);
+        // Only an intermediate page admits a partial transcript. The refused
+        // final page below must not be used as a source of held bytes.
+        let mut partial = step("partial", vec![message(10), message(12)], 12);
+        partial["more"] = json!(true);
+        assert_eq!(
+            answer(h.provider_step(b.clone(), &partial).await)["answer"],
+            "wait"
+        );
         let page = step("first", vec![message(10), message(12)], 12);
         assert_eq!(
             answer(h.provider_step(b.clone(), &page).await)["detail"]["history_gap_from"],

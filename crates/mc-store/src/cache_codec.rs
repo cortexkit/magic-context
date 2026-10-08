@@ -197,6 +197,10 @@ pub(crate) struct SectionIndex {
     pub b: Option<SectionIndexEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub t: Option<SectionIndexEntry>,
+    /// Bounded representative keys for the engine's existing shape classifier.
+    /// Older readers ignore this field; older indexes conservatively lack it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -688,6 +692,7 @@ pub(crate) struct EncodedRow {
     pub chunks: Vec<EncodedBody>,
     pub boundaries: Option<(EncodedBody, u64)>,
     pub tail: Option<EncodedBody>,
+    pub shape: Vec<String>,
 }
 
 fn encoded(body: String) -> EncodedBody {
@@ -758,6 +763,38 @@ pub(crate) fn encode_row(core: &CoreState, meta: &ModuleMeta) -> Result<EncodedR
         chunks,
         boundaries,
         tail,
+        shape: {
+            let mut keys = std::collections::BTreeMap::<String, usize>::new();
+            for unit in frozen_units {
+                let key = if ["red:", "strip:", "cav:", "channel1:"]
+                    .iter()
+                    .any(|p| unit.key.starts_with(p))
+                {
+                    unit.key
+                        .split_once(':')
+                        .expect("prefix separator")
+                        .0
+                        .to_string()
+                        + ":"
+                } else if matches!(
+                    unit.key.as_str(),
+                    "m0" | "m1"
+                        | "m0-mural"
+                        | "baseline"
+                        | "migration:renderer-transition-v1"
+                        | "migration:renderer-transition-v2"
+                ) {
+                    unit.key.clone()
+                } else {
+                    "unknown".into()
+                };
+                let n = keys.entry(key).or_default();
+                *n = (*n + 1).min(2);
+            }
+            keys.into_iter()
+                .flat_map(|(key, n)| std::iter::repeat_n(key, n))
+                .collect()
+        },
     })
 }
 
@@ -857,6 +894,7 @@ pub(crate) fn write_sections(
 ) -> rusqlite::Result<WrittenSections> {
     let stored_sv = stored_index.map_or(0, |index| index.sv);
     let mut wrote = false;
+    let mut wrote_frozen = false;
     let encoded_frozen = || {
         SectionState::Intact(FrozenBase {
             chunk_digests: encoded.chunks.iter().map(|chunk| chunk.digest).collect(),
@@ -880,6 +918,7 @@ pub(crate) fn write_sections(
                         )?
                         .execute(params![session_id])?;
                         wrote = true;
+                        wrote_frozen = true;
                         None
                     }
                 },
@@ -895,6 +934,7 @@ pub(crate) fn write_sections(
                 if !unchanged {
                     upsert.execute(params![session_id, position as i64, chunk.body])?;
                     wrote = true;
+                    wrote_frozen = true;
                 }
             }
             let deleted = tx
@@ -903,6 +943,7 @@ pub(crate) fn write_sections(
                 )?
                 .execute(params![session_id, encoded.chunks.len() as i64])?;
             wrote |= deleted > 0;
+            wrote_frozen |= deleted > 0;
             let digests: Vec<u128> = encoded.chunks.iter().map(|chunk| chunk.digest).collect();
             Some(FrozenIndex {
                 n: encoded.unit_count,
@@ -964,6 +1005,11 @@ pub(crate) fn write_sections(
             n: None,
             h: Some(digest_hex(body.digest)),
         }),
+        shape: if matches!(frozen_write, FrozenWrite::Write) && wrote_frozen {
+            Some(encoded.shape.clone())
+        } else {
+            stored_index.and_then(|i| i.shape.clone())
+        },
     };
     if wrote || stored_index != Some(&index) || stored_sv == 0 {
         index.sv = stored_sv + 1;

@@ -364,3 +364,69 @@ The known 96-versus-97 context-schema pin failure in `move_inventory` is not a
 finding. The full workspace suite was not rerun for this review; the relevant
 S2, provider, and store targets above were selected instead. No package manifest,
 lockfile, generated artifact, or schema file was changed.
+
+## Implementation response and resolution verification
+
+This section records the implementation follow-up, not a second independent review.
+The original report and regression expectations above are preserved. At review commit
+`ed08506cb2411e2093c5712e36aadac1b6c61329`, the worker reproduced all six named
+failures and both passing controls before editing implementation code.
+
+- **Final-page gaps:** `commit_provider_status_page` validates the admitted page's
+  contiguous frontier inside the same rollback transaction as ordinal/byte conflicts,
+  before acknowledgement, burns or promotion. A refused final page commits nothing,
+  including its new messages. Intermediate pages admit bytes without acknowledgement.
+  A new store regression also checks the conversation, pending answers and tag rows
+  are unchanged, and that conflicts still take precedence over the gap check.
+- **First publication:** host engine runs now have an internal host pass kind, rather
+  than the Broca `compaction.step` first-fold suppression. The owner's ruling preserves
+  the real full-request engine's eager first-publication HARD, including sequence zero;
+  no fourth A3 exception is introduced. The 40-case oracle now calls the real
+  `transform_with_projection` full-request entry point in a separately prepared store.
+- **SOFT+ switching:** a pipeline switch does not increment the rebuild epoch. Normal
+  host adoption preserves the namespace's observed provider/system/upgrade inputs and
+  does not change render identity merely to adopt provider-plan serialization. Explicit
+  cold/flush/revert rebuilds still use the normal identity-change lane. The original
+  split-m0/m1 review regression and an additional nonempty provider/system-identity
+  regression pass.
+- **Cached-head repair and fast path:** the metadata preflight invokes the existing
+  concrete shape predicates and `mc_core::classify`. A bounded, serde-defaulted shape
+  summary is recorded in `section_index` only on writes already changing frozen chunks.
+  Missing legacy summaries always run the engine. The accessor reads only the small row,
+  never chunk payloads. Shape/classifier HARD and SOFT trigger cases are enumerated.
+  Content-dependent replay repairs and document inputs conservatively run the engine.
+  A produced cached-head repair remains outstanding until acknowledgement, so a lost
+  repair answer can still be reproduced after its engine state has committed.
+- **Structural rejection:** a matching structural rejection records `not_applied`
+  through the immutable view-state API. Its terminal guard refuses a later application.
+- **Acknowledgement identity:** both id and version are checked against a held view
+  before admission writes. A foreign/unknown acknowledgement refuses by field name.
+
+The two original gap fixtures were updated only in their inputs, not their assertions:
+resends include the bytes from the refused final page, and a partial transcript is held
+through an intermediate `more` page rather than by relying on a refused page's writes.
+That fixture change follows the stronger rollback contract instead of weakening it.
+The review tests were not edited. The original test-helper arity warning was fixed by
+bundling its target tuple, with no lint suppression.
+
+Resolution gates on Cargo/rustc 1.99.0:
+
+- The independent review's six failures each changed to **green**; both controls remain
+  green, including the 32 pressure/flush/model/cold/historian comparisons.
+- All existing provider and S2 compaction tests remain green.
+- The codec round-trip, chunk diff/unchanged-write, hash, fingerprint and migration
+  tests remain green. New tests compare stored chunk bytes with the old serializer,
+  preserve all existing index digest fields and versions, decode a summary-bearing
+  index with the old struct shape, and verify scalar updates leave legacy indexes
+  and chunk bytes untouched. `SectionIndex` has no `deny_unknown_fields`.
+- A staged `NON-VACUITY BREAK` adding a full-state load to the metadata accessor made
+  only `shape_accessor_reads_only_header_metadata_not_frozen_chunk_payloads` fail
+  (decode count 2 instead of 1); the old-reader/chunk-byte/hash control stayed green.
+  The mutant was restored from the staged live state and the unstaged diff was empty.
+- Strict package Clippy, including tests and without the earlier arity allowance,
+  passes. The repository formatter and JavaScript gates are recorded in the delivery.
+
+The follow-up preflight is intentionally conservative for content-dependent treatments;
+this resolution claims sound skips and byte stability, not a new rebuild-time performance
+measurement or completion of the future real-host corpus. A second independent review
+is still required by the integration owner.

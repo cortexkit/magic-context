@@ -2256,6 +2256,70 @@ pub mod compaction {
     use super::*;
 
     pub(super) const PASS_KIND: &str = "compaction.step";
+    pub(super) const HOST_PASS_KIND: &str = "compaction.host";
+    pub(super) const HOST_REBUILD_KIND: &str = "compaction.host.rebuild";
+    pub(super) fn host_pass(req: &TransformRequest) -> bool {
+        req.serializer_profile == "opencode-aisdk"
+            && matches!(req.kind.as_str(), HOST_PASS_KIND | HOST_REBUILD_KIND)
+    }
+
+    /// Share the engine's classifier and concrete shape predicates. Unknown
+    /// legacy summaries must run the engine; pending deltas alone remain deferred.
+    pub fn can_skip_classified(input: &ClassifierInput) -> bool {
+        !input.reconcile_pending && classify(input) == PassPlan::Defer
+    }
+
+    pub fn skip_facts(
+        store: &McStore,
+        namespace: &str,
+        ctx: &ProducerContext<'_>,
+        model: &str,
+        window: u64,
+    ) -> Result<Option<ClassifierInput>, TransformError> {
+        let Some(core) = store.load_compaction_trigger_core(namespace)? else {
+            return Ok(None);
+        };
+        let meta = store.load_meta(namespace)?.meta;
+        let signal = crate::m1_compose::m1_revision_signal_parts_for_pass(
+            store,
+            ctx.project_path,
+            ctx.note_project_path,
+            namespace,
+            meta.user_profile_version,
+            ctx.memory_enabled,
+            ctx.now_ms,
+        )?;
+        let first_fold = core.boundary_id.is_empty() && store.has_compartments(namespace)?;
+        let external =
+            meta.m1_external_revision != 0 && meta.m1_external_revision != signal.external_revision;
+        let protection = meta
+            .protected_tokens_effective
+            .is_some_and(|n| n != ctx.protected_tokens_floor)
+            || (meta.protected_tokens_effective.is_none()
+                && crate::protection_window::pre_snapshot_inputs_changed(
+                    store.tag_cache_namespace(),
+                    namespace,
+                    ctx.protected_tokens_floor,
+                    window,
+                ));
+        Ok(Some(ClassifierInput {
+            initialized: meta.initialized,
+            is_legacy_baseline: is_legacy_baseline(&core),
+            valid_m0m1_shape: valid_m0m1_shape(&core),
+            cached_m1_missing: cached_m1_missing(&core),
+            render_config_changed: meta.last_model_key != model,
+            hard_fold_requested: first_fold || external || protection || meta.project_memory_epoch_pending || meta.bootstrap_seed_fold_pending || meta.pending_rewrite.is_some()
+                // Replay treatments can need content-dependent repair. Without
+                // decoding content a preflight cannot prove them safe to skip.
+                || core.frozen_units.iter().any(|u| !matches!(u.key.as_str(), "m0" | "m1" | "m0-mural"))
+                || ctx.inject_docs,
+            boundary_present: true,
+            reconcile_pending: core.reconcile_pending,
+            m1_revision_changed: signal.revision != meta.m1_revision,
+            reductions_pending: false,
+            bust_opportunity: meta.soft_refresh_pending,
+        }))
+    }
     pub use crate::memory_render::{
         M0_EMPTY_BODY as M0_EMPTY_PLACEHOLDER, M1_PLACEHOLDER as M1_EMPTY_PLACEHOLDER,
     };
@@ -2285,6 +2349,7 @@ pub mod compaction {
         pub request_tokens: u64,
         pub context_window: u64,
         pub prefix_rebuilding: bool,
+        pub pipeline_switch: bool,
         pub last_applied_version: Option<u64>,
         pub last_not_applied: Option<NotApplied>,
     }
@@ -2488,14 +2553,25 @@ pub mod compaction {
             >= status.context_window as f64 * ctx.execute_threshold_percentage;
         // A cold prefix, or an unapplied view on an execute opportunity, is concrete
         // rebuild work. Retain the epoch on later calls so it causes only one HARD.
-        if status.prefix_rebuilding || (rejected.is_some() && execute_due) {
+        let host = template.serializer_profile == "opencode-aisdk";
+        if (status.prefix_rebuilding && !(host && status.pipeline_switch))
+            || (rejected.is_some() && execute_due)
+        {
             state.rebuild_epoch = state.rebuild_epoch.checked_add(1).ok_or_else(|| {
                 TransformError::LineageProtocol("compaction rebuild epoch exhausted".to_string())
             })?;
         }
         let mut req = template.clone();
-        req.kind = PASS_KIND.to_string();
-        let host = template.serializer_profile == "opencode-aisdk";
+        req.kind = if host {
+            if state.rebuild_epoch == 0 {
+                HOST_PASS_KIND
+            } else {
+                HOST_REBUILD_KIND
+            }
+        } else {
+            PASS_KIND
+        }
+        .to_string();
         if !host {
             req.serializer_profile = "owned-broca".to_string();
         }
@@ -4775,8 +4851,7 @@ fn apply_once(
     // output; create the corresponding caveman units only during a bust pass.
     let caveman_tagging_requested = req.caveman_enabled && !req.is_subagent;
     if (tagging_active || caveman_tagging_requested)
-        && !(req.kind == compaction::PASS_KIND
-            && serializer_profile == Some(SerializerProfile::OpencodeAiSdk))
+        && !compaction::host_pass(req)
         && !loaded.core.reconcile_pending
         && (loaded.meta.pending_rewrite.is_none() || clear_pending_rewrite_on_present)
     {
@@ -4839,7 +4914,7 @@ fn apply_once(
         Some(&mut m1_revision_read_timings),
     )?;
     let effective_usage = effective_usage(req.usage.as_ref(), loaded.meta.last_usage.as_ref());
-    let context_limit_tokens = if req.kind == compaction::PASS_KIND {
+    let context_limit_tokens = if req.kind == compaction::PASS_KIND || compaction::host_pass(req) {
         effective_usage.context_limit_tokens as f64
     } else {
         effective_context_limit_tokens(&effective_usage, req.geometry.as_ref())
@@ -6916,10 +6991,7 @@ fn apply_once(
         }
     }
 
-    if tagging_active
-        && !(req.kind == compaction::PASS_KIND
-            && serializer_profile == Some(SerializerProfile::OpencodeAiSdk))
-    {
+    if tagging_active && !compaction::host_pass(req) {
         if let Some((row, unit)) = maybe_append_channel1_nudge(
             Channel1NudgeInputs {
                 ctx,
@@ -8254,6 +8326,15 @@ fn render_config_change(
         } else {
             effective_render_config != meta.last_render_config
         };
+    // Switching transports must replay the existing identity and frozen head,
+    // not fold an m1 delta merely to adopt provider-plan serialization. Explicit
+    // cold/flush/revert events use HOST_REBUILD_KIND and retain normal policy.
+    let changed = changed
+        && !(req.kind == compaction::HOST_PASS_KIND
+            && req.serializer_profile == "opencode-aisdk"
+            && meta.last_model_key == req.model_key.as_deref().unwrap_or("")
+            && meta.last_provider_id == req.provider_id.as_deref().unwrap_or("")
+            && meta.last_system_prompt_hash == req.system_prompt_hash);
     #[cfg(feature = "drive-fault")]
     tracing::debug!(
         "mc-module: render identity session={} changed={} observed={} coordinator={} transition={} tool_present={} profile={} effective={:?} persisted={:?}",
@@ -16759,6 +16840,7 @@ pub(crate) mod tests {
                 request_tokens: 90_000,
                 context_window: 100_000,
                 prefix_rebuilding: false,
+                pipeline_switch: false,
                 last_applied_version: None,
                 last_not_applied: None,
             }
