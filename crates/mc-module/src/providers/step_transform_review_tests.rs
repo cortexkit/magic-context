@@ -547,3 +547,280 @@ async fn review_burning_an_earlier_answer_removes_its_inherited_cadence_effect()
     );
     assert!(answer[0].contains("<system-reminder>"), "no surviving answer carried a reminder, but the burned answer's fire still suppresses cadence");
 }
+
+#[tokio::test]
+async fn r2_temporal_plan_must_belong_to_the_current_hook_pass() {
+    let host_dir = tempfile::tempdir().unwrap();
+    let full_dir = tempfile::tempdir().unwrap();
+    let h = handler(host_dir.path());
+    let mut binding = h.facade_binding(7).unwrap();
+    binding.config.temporal_awareness = true;
+    h.bind_route(7, binding);
+    admit(&h, 7).await;
+    let full = handler(full_dir.path());
+    let mut first = text("u1", "user", "first");
+    first["info"]["time"] = json!({"created":1000});
+    let mut second = text("u2", "user", "second");
+    second["info"]["time"] = json!({"created":301000});
+    sync_pass(&h, &[(1, first.clone())]).await;
+    response(
+        dispatch(
+            &h,
+            7,
+            "transform.hook",
+            hook("u1", 1, "pre_user", &["first"], first.clone()),
+        )
+        .await,
+    );
+    h.store
+        .get()
+        .unwrap()
+        .commit_provider_status(
+            &key(&h).store_key(),
+            &mc_store::provider_records::ProviderLineage {
+                lineage_id: "L".into(),
+                first_ordinal: 1,
+                descends_from: None,
+                through_ordinal: None,
+            },
+            &[],
+            Some(1),
+            &[],
+        )
+        .unwrap();
+    let mut ctx = engine_context("git:review", "/nonexistent-docs");
+    ctx.temporal_awareness = true;
+    for _ in 0..2 {
+        transform::transform(
+            full.store.get().unwrap(),
+            &engine_request(&[first.clone()], false),
+            &ctx,
+        )
+        .unwrap();
+        transform::transform(
+            h.store.get().unwrap(),
+            &engine_request(&[first.clone()], false),
+            &ctx,
+        )
+        .unwrap();
+    }
+    let expected = transform::transform(
+        full.store.get().unwrap(),
+        &engine_request(&[first, second.clone()], false),
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(expected.decision, "SOFT+", "warmed engine selects a defer");
+    let expected = engine_text(&expected, "u2", 0);
+    assert_eq!(expected, "§2§ second");
+    // No exact plan was synchronized for u2. The prior HARD covered u1 only.
+    let p = hook("u2", 2, "pre_user", &["second"], second);
+    let actual = rendered(
+        &p,
+        response(dispatch(&h, 7, "transform.hook", p.clone()).await),
+    );
+    assert_eq!(actual[0], expected);
+}
+
+#[tokio::test]
+async fn r2_three_tool_appends_use_full_pass_protection_and_carrier() {
+    let host_dir = tempfile::tempdir().unwrap();
+    let full_dir = tempfile::tempdir().unwrap();
+    let h = handler(host_dir.path());
+    let full = handler(full_dir.path());
+    admit(&h, 7).await;
+    let base = text("u", "user", "baseline");
+    let mut ctx = engine_context("git:review", "/nonexistent-docs");
+    ctx.protected_tokens_floor = 16000;
+    ctx.history_budget_tokens = 2_000_000.0;
+    let mut binding = h.facade_binding(7).unwrap();
+    binding.config.protected_tokens_user = Some(16000);
+    binding.history_budget_tokens = 2_000_000.0;
+    h.bind_route(7, binding);
+    for _ in 0..2 {
+        transform::transform(
+            full.store.get().unwrap(),
+            &engine_request(std::slice::from_ref(&base), false),
+            &ctx,
+        )
+        .unwrap();
+        transform::transform(
+            h.store.get().unwrap(),
+            &engine_request(std::slice::from_ref(&base), false),
+            &ctx,
+        )
+        .unwrap();
+    }
+    let output = "spent payload ".repeat(30000);
+    let a = tool("a", &output);
+    let b = tool("b", &output);
+    let c = tool("c", &output);
+    sync_pass(&h, &[(2, a.clone()), (3, b.clone()), (4, c.clone())]).await;
+    let mut req = engine_request(&[base, a.clone(), b.clone(), c.clone()], false);
+    req.render_config = "r2-hard".into();
+    let expected = transform::transform(full.store.get().unwrap(), &req, &ctx).unwrap();
+    assert_eq!(expected.decision, "HARD");
+    let mut pa = hook("a", 2, "post_tool", &[&output], a);
+    pa["subject_part"] = json!("part");
+    let aa = rendered(
+        &pa,
+        response(dispatch(&h, 7, "transform.hook", pa.clone()).await),
+    );
+    let mut pb = hook("b", 3, "post_tool", &[&output], b);
+    pb["subject_part"] = json!("part");
+    let ab = rendered(
+        &pb,
+        response(dispatch(&h, 7, "transform.hook", pb.clone()).await),
+    );
+    assert_eq!(
+        aa[0],
+        engine_text(&expected, "a", 1),
+        "earlier tool cannot carry the reminder"
+    );
+    assert_eq!(
+        ab[0],
+        engine_text(&expected, "b", 1),
+        "middle tool cannot carry the reminder"
+    );
+    let mut pc = hook("c", 4, "post_tool", &[&output], c);
+    pc["subject_part"] = json!("part");
+    let ac = rendered(
+        &pc,
+        response(dispatch(&h, 7, "transform.hook", pc.clone()).await),
+    );
+    let suffix = |s: &str| s.find("<system-reminder>").map(|n| s[n..].to_owned());
+    let expected = engine_text(&expected, "c", 1);
+    assert!(
+        suffix(&expected).is_some(),
+        "full engine reminder positive control"
+    );
+    assert_eq!(
+        suffix(&ac[0]),
+        suffix(&expected),
+        "last tool reminder must use full-pass accounting"
+    );
+}
+
+#[tokio::test]
+async fn r2_model_switch_reminder_uses_the_exact_pass_calibration() {
+    let host_dir = tempfile::tempdir().unwrap();
+    let full_dir = tempfile::tempdir().unwrap();
+    let h = handler(host_dir.path());
+    let full = handler(full_dir.path());
+    admit(&h, 7).await;
+    let base = text("u", "user", "baseline");
+    let mut ctx = engine_context("git:review", "/nonexistent-docs");
+    ctx.protected_tokens_floor = 16000;
+    ctx.history_budget_tokens = 2_000_000.0;
+    let mut binding = h.facade_binding(7).unwrap();
+    binding.config.protected_tokens_user = Some(16000);
+    binding.history_budget_tokens = 2_000_000.0;
+    h.bind_route(7, binding.clone());
+    for _ in 0..2 {
+        transform::transform(
+            full.store.get().unwrap(),
+            &engine_request(std::slice::from_ref(&base), false),
+            &ctx,
+        )
+        .unwrap();
+        transform::transform(
+            h.store.get().unwrap(),
+            &engine_request(std::slice::from_ref(&base), false),
+            &ctx,
+        )
+        .unwrap();
+    }
+    let output = "spent payload ".repeat(20000);
+    let a = tool("a", &output);
+    binding.model_key = Some("anthropic/claude-fable-5-1".into());
+    h.bind_route(7, binding);
+    sync_pass(&h, &[(2, a.clone())]).await;
+    let mut req = engine_request(&[base, a.clone()], false);
+    req.model_key = Some("anthropic/claude-fable-5-1".into());
+    let expected = transform::transform(full.store.get().unwrap(), &req, &ctx).unwrap();
+    assert_eq!(expected.decision, "HARD");
+    assert!(expected.prefix_bust_permitted);
+    let mut pa = hook("a", 2, "post_tool", &[&output], a);
+    pa["subject_part"] = json!("part");
+    let actual = rendered(
+        &pa,
+        response(dispatch(&h, 7, "transform.hook", pa.clone()).await),
+    );
+    let expected = engine_text(&expected, "a", 1);
+    let suffix = |s: &str| s.find("<system-reminder>").map(|n| s[n..].to_owned());
+    assert!(
+        suffix(&expected).is_some(),
+        "full engine reminder positive control"
+    );
+    assert_eq!(
+        suffix(&actual[0]),
+        suffix(&expected),
+        "reminder must use the calibration adopted by this exact pass"
+    );
+}
+
+#[tokio::test]
+async fn r2_replayed_served_hook_does_not_resurrect_a_consumed_drop() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = handler(dir.path());
+    admit(&h, 7).await;
+    let message = text("u1", "user", "first");
+    sync_pass(&h, &[(1, message.clone())]).await;
+    let mut p = hook("u1", 1, "pre_user", &["first"], message);
+    let first = rendered(
+        &p,
+        response(dispatch(&h, 7, "transform.hook", p.clone()).await),
+    );
+    assert_eq!(first, ["§1§ first"]);
+    let next = text("u2", "user", "second");
+    sync_pass(&h, &[(2, next.clone())]).await;
+    let mut next_hook = hook("u2", 2, "pre_user", &["second"], next);
+    next_hook["served_through_ordinal"] = json!(1);
+    response(dispatch(&h, 7, "transform.hook", next_hook).await);
+    let key = key(&h);
+    h.provider_host_reduce(key.clone(), &[1]).await.unwrap();
+    let store = h.store.get().unwrap();
+    let namespace = store
+        .load_provider_conversation(&key.store_key())
+        .unwrap()
+        .unwrap()
+        .engine_namespace;
+    store
+        .append_pending_agent_drops(&namespace, &["u1#0".into()], 1)
+        .unwrap();
+    let id = store.load_pending_agent_drops(&namespace).unwrap()[0].id;
+    let row = store.load(&namespace).unwrap();
+    store
+        .commit_with_consumed_drops(
+            &namespace,
+            row.row_version,
+            &row.core,
+            &row.meta,
+            &[id],
+            None,
+        )
+        .unwrap();
+    assert!(store
+        .load_provider_pending_drops(&key.store_key())
+        .unwrap()
+        .is_empty());
+    assert!(!store
+        .provider_answer_tag_known(&key.store_key(), 1)
+        .unwrap());
+    // This is a transport replay of an acknowledged hook, not a new native message.
+    p["served_through_ordinal"] = json!(1);
+    let replay = rendered(
+        &p,
+        response(dispatch(&h, 7, "transform.hook", p.clone()).await),
+    );
+    assert_eq!(
+        replay, first,
+        "a served subject must not receive a fresh live tag after its release committed"
+    );
+    let requeue = store.queue_provider_drops(&key.store_key(), &[1]);
+    assert!(
+        requeue.is_err(),
+        "transport replay re-enabled consumed tag 1: requeue={requeue:?}, pending={:?}",
+        store.load_provider_pending_drops(&key.store_key()).unwrap()
+    );
+}
