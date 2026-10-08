@@ -2302,7 +2302,7 @@ pub mod compaction {
             .protected_tokens_effective
             .is_some_and(|n| n != ctx.protected_tokens_floor)
             || (meta.protected_tokens_effective.is_none()
-                && crate::protection_window::pre_snapshot_inputs_changed(
+                && crate::protection_window::pre_snapshot_inputs_would_change(
                     store.tag_cache_namespace(),
                     namespace,
                     ctx.protected_tokens_floor,

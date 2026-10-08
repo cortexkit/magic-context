@@ -430,3 +430,112 @@ The follow-up preflight is intentionally conservative for content-dependent trea
 this resolution claims sound skips and byte stability, not a new rebuild-time performance
 measurement or completion of the future real-host corpus. A second independent review
 is still required by the integration owner.
+
+## Exact-plan and temporal follow-up
+
+The integration owner clarified that a hook without an exact engine pass plan must
+withhold an idle-gap marker. A conservative preflight candidate is not permission.
+The standalone prerequisite commit `4b512a2b68d91da79af18bf9b298ca70eafd8dd1` exposes:
+
+```rust
+pub fn pass_plan_permits_prefix_mutation(
+    plan: &mc_core::PassPlan,
+    marker_hard_serves_frozen_prefix: bool,
+) -> bool
+```
+
+The exact engine permission expression now lives in that helper. The engine calls
+it before discarding temporal candidates on defer; the preflight uses its negative
+result only after proving a defer. Its doc comment explicitly forbids using a
+conservative candidate to authorize a hook mutation. The standalone test compares
+its HARD/defer result with the full engine and covers marker-only HARD, SOFT,
+migration and rejection plans.
+
+Commit `64dbbf2f93a7099c94b4a7b1dfa3d6b19be09c22` restores host temporal candidate
+computation while continuing to suppress engine tag allocation and Channel 1
+cadence. The new fallback regression was red before the change: a late HARD
+replacement omitted both the +2h and +1h markers. It is now green for both HARD
+and SOFT against an independently prepared full-request engine. It holds all new
+hook answers unmarked during a real defer, then compares the entire native
+replacement through `newest + 1`, checks each marker appears once, and checks
+that view rendering creates no extra tags.
+
+### Concrete rebuild-trigger evidence map
+
+These are actual store/request mutations, not merely synthetic classifier booleans.
+Each test invokes the same metadata-only skip function as the handler, then invokes
+the real full-request engine. Non-bootstrap cases first prove the clean baseline
+is skip-eligible. The existing independent comparison controls remain unchanged.
+
+| Test suffix (`real_state_trigger_`) | Real input/state change | Engine result |
+| --- | --- | --- |
+| `bootstrap` | No initialized namespace row | HARD |
+| `legacy_migration` | Replace frozen head with a legacy `baseline` unit | HARD |
+| `cached_m1_repair` | Remove only frozen m1 through the codec writer | HARD |
+| `unknown_shape_refusal` | Persist an unrecognized frozen head | Reject; unknown unit retained |
+| `model_identity` | Change the actual request model | HARD |
+| `first_publication` | Publish sequence-zero history after empty bootstrap | HARD |
+| `reconcile_rematerialization` | Revert away the boundary, then recut surviving history | HARD |
+| `soft_m1_delta` | Publish later history and cross execute threshold | SOFT |
+| `soft_reduction` | Queue a live block reduction and arm durable refresh | SOFT |
+| `durable_flush` | Arm durable refresh with pending published history | SOFT |
+| `idle_expiry` | Explicit host cold signal and real oracle response/TTL expiry | HARD |
+| `external_revision` | Rewrite the existing compartment body | HARD |
+| `project_memory_epoch` | Change the actual project-state epoch | HARD |
+| `protection_snapshot_survives_preflight` | Remove the floor snapshot and change the observed floor tuple | HARD after preflight |
+| `force_band` | Cross force pressure with pending history | Mutation permitted |
+| `emergency_band` | Cross emergency pressure with pending history | Mutation permitted |
+
+### `skip_facts` side-effect audit
+
+The concrete protection case exposed a real defect in the earlier preflight:
+`pre_snapshot_inputs_changed` records the tuple, so inspecting it could consume the
+change before the engine evaluated it. The owner authorized a read-only peek.
+`pre_snapshot_inputs_would_change` now reads without inserting; both peek and engine
+recorder share one private tuple comparison, including the absent-entry semantics.
+The engine retains sole ownership of recording. The regression runs preflight first
+and requires the following full engine pass to remain HARD.
+
+Every other call in `skip_facts` was inspected:
+
+- `load_compaction_trigger_core`: reads the small cache row/index and decodes only
+  header metadata. It does not read chunks, increment full-decode counters or write.
+- `load_meta`: reads the small row and, when installed, the user-profile version.
+  `user_profile_version` is a SELECT through `context_read`; it does not update state.
+- `m1_revision_signal_parts_for_pass`: reads a single context snapshot and hashes
+  the returned watermarks locally. Its timing measurement is local; no timing sink
+  is supplied by preflight.
+- `load_m1_revision_snapshot`: reads workspace membership, memory/mutation/note/profile
+  watermarks, project epoch and compartment-history revision. Its callbacks contain
+  SELECTs only. `compartment_history_revision_tx` also only checks table presence and
+  reads revision fields; it does not create or refresh a revision.
+- `workspace_fingerprint_for_membership`: hashes already-read membership; no cache
+  insert, database write or lifecycle observation.
+- `has_compartments`: a SELECT EXISTS, including correct sequence-zero handling.
+- `tag_cache_namespace`: an atomic load of the store's existing identity, not a new
+  identity allocation.
+- Shape predicates and `mc_core::classify`: pure evaluation of the supplied metadata.
+- `pre_snapshot_inputs_would_change`: read-only cache lookup; the corrected call no
+  longer records or consumes a cache, latch, counter or pending rebuild observation.
+
+No other state-recording or consuming call was found in the preflight. Cargo run
+location and the final trigger/mutation results are recorded in the delivery.
+
+### Follow-up verification outcome
+
+The protection preflight regression was proven non-vacuous by staging the live
+implementation, temporarily restoring the old consuming call with the explicit
+`NON-VACUITY BREAK` marker, and running all 16 concrete trigger tests. Exactly
+`real_state_trigger_protection_snapshot_survives_preflight` failed: the full engine
+returned SOFT+ instead of the required HARD. The other 15 trigger tests stayed green.
+Restoring the staged implementation left an empty unstaged diff. The restored
+Linux suite is green: 76 provider tests, 9 protection-window tests, 12 S2/evaluator
+tests, 17 provider-log tests and 34 codec tests (plus one existing ignored profile
+benchmark), with package compilation and strict Clippy passing.
+
+One initial 16-trigger test command requested Linux but was automatically executed
+on macOS when the runner replied `runner_draining`. Later attempts used a uname
+guard and performed no local Cargo work. Background retries during the runner swap
+were watched before results were reported; the final mutation proof and final Rust
+gates executed on Linux after service resumed. No throttled local fallback was
+needed after the owner imposed the remote-only policy.

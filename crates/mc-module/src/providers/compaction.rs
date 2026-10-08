@@ -336,6 +336,57 @@ struct Work {
     note_project_path: String,
 }
 
+/// Metadata-only skip check shared by the handler and real-state comparison
+/// tests. A false result requires the engine; it grants no mutation permission.
+fn can_skip_host_step(
+    store: &McStore,
+    work: &Work,
+    namespace: &str,
+    model: &str,
+    status: &transform::compaction::Status,
+    relevant_not_applied: bool,
+) -> Result<bool, HandlerOutcome> {
+    let meta = store.load_meta(namespace).map_err(transient)?.meta;
+    let usage =
+        status.usage().current_total_input_tokens as f64 * 100.0 / status.context_window as f64;
+    Ok(can_skip_engine(FastPathInputs {
+        prefix_rebuilding: status.prefix_rebuilding,
+        relevant_not_applied,
+        execute_due: usage
+            >= work
+                .binding
+                .config
+                .resolve_execute_threshold(Some(model))
+                .percentage,
+        force_band: usage >= 85.0,
+        emergency: usage >= 95.0 || meta.emergency_drain_active,
+        forced_work: !meta.initialized
+            || meta.soft_refresh_pending
+            || meta.project_memory_epoch_pending
+            || meta.pending_rewrite.is_some()
+            || meta.bootstrap_seed_fold_pending
+            || meta.deferred_execute_state.is_some()
+            || meta.pending_compaction_marker.is_some()
+            || meta.boundary_divergence_pending_count > 0
+            || !meta.reasoning_clear_initialized
+            || meta.last_model_key != model,
+    }) && transform::compaction::skip_facts(
+        store,
+        namespace,
+        &producer_context(
+            work,
+            model,
+            status.context_window,
+            meta.historian.state != mc_store::HistorianPhase::Idle,
+        ),
+        model,
+        status.context_window,
+    )
+    .map_err(transient)?
+    .as_ref()
+    .is_some_and(transform::compaction::can_skip_classified))
+}
+
 fn producer_context<'a>(
     work: &'a Work,
     model: &str,
@@ -1054,12 +1105,6 @@ impl McHandler {
                 gap_answer(&request.request_id, frontier)
             }
         } else {
-            let meta = store
-                .load_meta(&conversation.engine_namespace)
-                .map_err(transient)?
-                .meta;
-            let usage = normalized.usage().current_total_input_tokens as f64 * 100.0
-                / normalized.context_window as f64;
             let relevant = normalized.last_not_applied.is_some_and(|n| {
                 setup
                     .produced
@@ -1067,42 +1112,14 @@ impl McHandler {
                     .is_some_and(|v| v.version == n.version)
                     && setup.applied.as_ref().is_none_or(|v| v.version < n.version)
             });
-            let skip = can_skip_engine(FastPathInputs {
-                prefix_rebuilding: normalized.prefix_rebuilding,
-                relevant_not_applied: relevant,
-                execute_due: usage
-                    >= work
-                        .binding
-                        .config
-                        .resolve_execute_threshold(Some(&request.model))
-                        .percentage,
-                force_band: usage >= 85.0,
-                emergency: usage >= 95.0 || meta.emergency_drain_active,
-                forced_work: !meta.initialized
-                    || meta.soft_refresh_pending
-                    || meta.project_memory_epoch_pending
-                    || meta.pending_rewrite.is_some()
-                    || meta.bootstrap_seed_fold_pending
-                    || meta.deferred_execute_state.is_some()
-                    || meta.pending_compaction_marker.is_some()
-                    || meta.boundary_divergence_pending_count > 0
-                    || !meta.reasoning_clear_initialized
-                    || meta.last_model_key != request.model,
-            }) && transform::compaction::skip_facts(
+            let skip = can_skip_host_step(
                 store,
+                work,
                 &conversation.engine_namespace,
-                &producer_context(
-                    work,
-                    &request.model,
-                    normalized.context_window,
-                    meta.historian.state != mc_store::HistorianPhase::Idle,
-                ),
                 &request.model,
-                normalized.context_window,
-            )
-            .map_err(transient)?
-            .as_ref()
-            .is_some_and(transform::compaction::can_skip_classified);
+                &normalized,
+                relevant,
+            )?;
             if skip {
                 json!({"answer":"noop","request_id":request.request_id})
             } else {
@@ -2052,6 +2069,271 @@ mod host_tests {
                 "unsafe hard-fold skip: {cause}"
             );
         }
+    }
+
+    fn real_state_trigger_comparison(cause: &str, expected_action: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let (h, b, s, k) = handler(dir.path(), Arc::new(NoReads::default()));
+        let mut work = h.provider_work(&s, b, k).unwrap();
+        let baseline = mc_store::StoredCompartment {
+            sequence: 0,
+            start_message: 1,
+            end_message: 1,
+            end_message_id: "m1#0".into(),
+            title: "baseline".into(),
+            content: "BASE".into(),
+            p1: Some("BASE".into()),
+            importance: 50,
+            ..Default::default()
+        };
+        let delta = mc_store::StoredCompartment {
+            sequence: 1,
+            start_message: 2,
+            end_message: 2,
+            end_message_id: "m2#0".into(),
+            title: "delta".into(),
+            content: "DELTA".into(),
+            p1: Some("DELTA".into()),
+            importance: 50,
+            ..Default::default()
+        };
+        if !matches!(cause, "bootstrap" | "first_publication") {
+            let compartments = if cause == "reconcile" {
+                vec![baseline.clone(), delta.clone()]
+            } else {
+                vec![baseline.clone()]
+            };
+            s.replace_compartments("s", &compartments).unwrap();
+        }
+        let mut req: TransformRequest = decode(&json!({"v":2,"kind":"transform","session_id":"s","serializer_profile":"opencode-aisdk","render_config":"real-trigger-proof","model_key":"fixture","messages":[],"tool_present":false,"auto_search_enabled":false,"usage":{"current_total_input_tokens":1000,"context_limit_tokens":100000}})).unwrap();
+        let initial = [message(1), message(2), message(3)]
+            .into_iter()
+            .map(|v| serde_json::from_value(v).unwrap())
+            .collect::<Vec<_>>();
+        Codec::OpencodeAiSdk
+            .prepare_request(&mut req, &initial)
+            .unwrap();
+        let mut params = step("probe", vec![], 3);
+        let warm_time = {
+            let mut ctx = producer_context(&work, "fixture", 100000, false);
+            ctx.observed_last_response_at_ms = Some(ctx.now_ms);
+            if cause != "bootstrap" {
+                transform::transform_with_projection(&s, &req, &ctx).unwrap();
+                assert_eq!(
+                    transform::transform_with_projection(&s, &req, &ctx)
+                        .unwrap()
+                        .response
+                        .action,
+                    "SOFT+"
+                );
+                let status = status(&params, &Record::default()).unwrap();
+                assert!(
+                    can_skip_host_step(&s, &work, "s", "fixture", &status, false).unwrap(),
+                    "clean baseline must be skip eligible: {cause}"
+                );
+            }
+            ctx.now_ms
+        };
+        match cause {
+            "bootstrap" => {}
+            "legacy" | "unknown_shape" => {
+                let mut loaded = s.load("s").unwrap();
+                loaded.core.frozen_units = vec![mc_core::FrozenUnit {
+                    key: if cause == "legacy" {
+                        "baseline"
+                    } else {
+                        "unknown"
+                    }
+                    .into(),
+                    kind: "synthesized-region".into(),
+                    frozen_payload: "OLD".into(),
+                    durability_class: mc_core::DurabilityClass::Lineage,
+                    reset_rule: String::new(),
+                }];
+                loaded.core.pending_changes.clear();
+                s.commit("s", loaded.row_version, &loaded.core, &loaded.meta)
+                    .unwrap();
+            }
+            "cached_m1" => {
+                let mut loaded = s.load("s").unwrap();
+                loaded.core.frozen_units.retain(|u| u.key != "m1");
+                s.commit("s", loaded.row_version, &loaded.core, &loaded.meta)
+                    .unwrap();
+            }
+            "model" => {
+                req.model_key = Some("changed-model".into());
+            }
+            "first_publication" => {
+                s.replace_compartments("s", std::slice::from_ref(&baseline))
+                    .unwrap();
+            }
+            "reconcile" => {
+                let mut replacement = message(2);
+                replacement["mid"] = json!("replacement");
+                replacement["message"]["info"]["id"] = json!("replacement");
+                let reverted = [message(1), replacement]
+                    .into_iter()
+                    .map(|v| serde_json::from_value(v).unwrap())
+                    .collect::<Vec<_>>();
+                Codec::OpencodeAiSdk
+                    .prepare_request(&mut req, &reverted)
+                    .unwrap();
+                let mut ctx = producer_context(&work, "fixture", 100000, false);
+                ctx.observed_last_response_at_ms = Some(ctx.now_ms);
+                let revert = transform::transform_with_projection(&s, &req, &ctx).unwrap();
+                assert_eq!(revert.response.action, "SOFT+");
+                assert!(revert.response.reconcile_pending);
+                s.replace_compartments("s", std::slice::from_ref(&baseline))
+                    .unwrap();
+                params["newest"]["ordinal"] = json!(2);
+            }
+            "soft_delta" | "force" | "emergency" => {
+                s.replace_compartments("s", &[baseline.clone(), delta.clone()])
+                    .unwrap();
+                let tokens = match cause {
+                    "force" => 85000,
+                    "emergency" => 95000,
+                    _ => 75000,
+                };
+                req.usage.as_mut().unwrap().current_total_input_tokens = tokens;
+                params["estimate"]["request_tokens"] = json!(tokens);
+            }
+            "soft_reduction" => {
+                s.append_pending_agent_drops("s", &["m2#0".into()], 1)
+                    .unwrap();
+                s.arm_soft_refresh("s").unwrap();
+            }
+            "flush" => {
+                s.replace_compartments("s", &[baseline.clone(), delta.clone()])
+                    .unwrap();
+                s.arm_soft_refresh("s").unwrap();
+            }
+            "cold" => {
+                params["prefix_rebuilding"] = json!({"reason":"cold"});
+            }
+            "external_revision" => {
+                let mut changed = baseline.clone();
+                changed.content = "UPDATED".into();
+                changed.p1 = Some("UPDATED".into());
+                s.replace_compartments("s", &[changed]).unwrap();
+            }
+            "memory_epoch" => {
+                s.set_project_memory_epoch_for_test(&work.project_path, 7)
+                    .unwrap();
+            }
+            "protection" => {
+                let mut loaded = s.load_meta("s").unwrap();
+                loaded.meta.protected_tokens_effective = None;
+                s.commit_meta("s", loaded.row_version, &loaded.meta)
+                    .unwrap();
+                crate::protection_window::pre_snapshot_inputs_changed(
+                    s.tag_cache_namespace(),
+                    "s",
+                    0,
+                    100000,
+                );
+                work.binding.config.protected_tokens_user = Some(4000);
+            }
+            _ => panic!("unknown real trigger: {cause}"),
+        }
+        let model = req.model_key.as_deref().unwrap();
+        let status = status(&params, &Record::default()).unwrap();
+        assert!(
+            !can_skip_host_step(&s, &work, "s", model, &status, false).unwrap(),
+            "preflight skipped a concrete {cause} trigger"
+        );
+        let mut ctx = producer_context(&work, model, 100000, false);
+        ctx.observed_last_response_at_ms = Some(ctx.now_ms);
+        if cause == "cold" {
+            ctx.now_ms = warm_time + 300002;
+            ctx.observed_last_response_at_ms = Some(warm_time + 1);
+        }
+        let result = transform::transform_with_projection(&s, &req, &ctx);
+        if cause == "unknown_shape" {
+            assert!(matches!(
+                result,
+                Err(transform::TransformError::UnknownShape(_))
+            ));
+            assert_eq!(s.load("s").unwrap().core.frozen_units[0].key, "unknown");
+        } else {
+            let engine = result.unwrap();
+            if expected_action == "MUTATION" {
+                assert!(
+                    engine.response.prefix_bust_permitted,
+                    "real {cause} must permit mutation"
+                );
+            } else {
+                assert_eq!(
+                    engine.response.action, expected_action,
+                    "real engine {cause} result"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn real_state_trigger_bootstrap() {
+        real_state_trigger_comparison("bootstrap", "HARD");
+    }
+    #[test]
+    fn real_state_trigger_legacy_migration() {
+        real_state_trigger_comparison("legacy", "HARD");
+    }
+    #[test]
+    fn real_state_trigger_cached_m1_repair() {
+        real_state_trigger_comparison("cached_m1", "HARD");
+    }
+    #[test]
+    fn real_state_trigger_unknown_shape_refusal() {
+        real_state_trigger_comparison("unknown_shape", "REJECT");
+    }
+    #[test]
+    fn real_state_trigger_model_identity() {
+        real_state_trigger_comparison("model", "HARD");
+    }
+    #[test]
+    fn real_state_trigger_first_publication() {
+        real_state_trigger_comparison("first_publication", "HARD");
+    }
+    #[test]
+    fn real_state_trigger_reconcile_rematerialization() {
+        real_state_trigger_comparison("reconcile", "HARD");
+    }
+    #[test]
+    fn real_state_trigger_soft_m1_delta() {
+        real_state_trigger_comparison("soft_delta", "SOFT");
+    }
+    #[test]
+    fn real_state_trigger_soft_reduction() {
+        real_state_trigger_comparison("soft_reduction", "SOFT");
+    }
+    #[test]
+    fn real_state_trigger_durable_flush() {
+        real_state_trigger_comparison("flush", "SOFT");
+    }
+    #[test]
+    fn real_state_trigger_idle_expiry() {
+        real_state_trigger_comparison("cold", "HARD");
+    }
+    #[test]
+    fn real_state_trigger_external_revision() {
+        real_state_trigger_comparison("external_revision", "HARD");
+    }
+    #[test]
+    fn real_state_trigger_project_memory_epoch() {
+        real_state_trigger_comparison("memory_epoch", "HARD");
+    }
+    #[test]
+    fn real_state_trigger_protection_snapshot_survives_preflight() {
+        real_state_trigger_comparison("protection", "HARD");
+    }
+    #[test]
+    fn real_state_trigger_force_band() {
+        real_state_trigger_comparison("force", "MUTATION");
+    }
+    #[test]
+    fn real_state_trigger_emergency_band() {
+        real_state_trigger_comparison("emergency", "MUTATION");
     }
 
     #[tokio::test]
