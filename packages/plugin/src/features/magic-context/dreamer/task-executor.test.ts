@@ -23,6 +23,7 @@ import { getUserMemoryCandidates } from "../user-memory/storage-user-memory";
 import { recordCurateSafetyRefusal } from "./curate-memory-safety";
 import { acquireLease, acquireLeaseWithAcquisition, releaseLease } from "./lease";
 import { MAP_BATCH_FLOOR_MS } from "./map-memories";
+import { recordedGeminiQuotaMessages } from "./provider-output-failure.test-support";
 import { applyRetrospectiveLearnings } from "./retrospective-learnings";
 import {
     PRIVACY_SENSITIVE_CHILD_TITLE_MATCHES,
@@ -977,6 +978,49 @@ describe("createDreamTaskExecutor — structured failure telemetry", () => {
 });
 
 describe("createDreamTaskExecutor — verify-broad disposition", () => {
+    test("persists the recorded Gemini quota exhaustion as a transient provider error", async () => {
+        db = freshDb();
+        const project = "git:recorded-gemini-quota";
+        const memory = insertMemory(db, {
+            projectPath: project,
+            category: "ARCHITECTURE",
+            content: "Mapped fact.",
+        });
+        recordMemoryVerifications(db, memory.id, ["src/fact.ts"], 1_000);
+        const client = {
+            session: {
+                list: async () => ({ data: [{ id: "ses-parent", title: "ordinary session" }] }),
+                create: async () => ({ data: { id: "quota-child" } }),
+                prompt: async () => ({}),
+                messages: async () => ({ data: recordedGeminiQuotaMessages() }),
+                delete: async () => ({}),
+            },
+        };
+        const executor = createDreamTaskExecutor({
+            client: client as never,
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+        });
+        const leaseKey = leaseKeyFor("verify", project);
+        const holderId = "quota-holder";
+        expect(acquireLease(db, holderId, leaseKey)).toBe(true);
+        const outcome = await executor(
+            {
+                task: "verify",
+                schedule: "0 3 * * *",
+                timeoutMinutes: 20,
+                model: "google/antigravity-gemini-3.8-flash",
+            },
+            { db, projectIdentity: project, holderId, leaseKey },
+        );
+        expect(outcome).toMatchObject({ status: "failed", transient: true });
+        expect(outcome.error).toContain("primary quota exhausted until");
+        expect(outcome.failureDetail).toContain("primary quota exhausted until");
+        const task = JSON.parse(getDreamRuns(db, project)[0].tasks_json)[0];
+        expect(task.failure.failure_class).toBe("provider_error");
+        expect(task.failure.provider_error).toContain("primary quota exhausted until");
+        expect(task.error).not.toContain("manifest missing");
+    });
     test("keeps a textless assistant completion without a row error as empty_completion", async () => {
         db = freshDb();
         const project = "/repo/verify-plain-empty";

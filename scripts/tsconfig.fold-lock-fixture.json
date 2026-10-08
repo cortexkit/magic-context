@@ -1,0 +1,14 @@
+{
+	"extends": "../packages/pi-plugin/tsconfig.json",
+	"compilerOptions": {
+		"typeRoots": ["../packages/plugin/node_modules/@types"],
+		"types": ["node", "bun"]
+	},
+	"include": [
+		"fold-lock-fixture.ts",
+		"../packages/plugin/src/hooks/magic-context/locked-m1-render.test.ts",
+		"../packages/pi-plugin/src/locked-m1-render-pi.test.ts"
+	],
+	"exclude": [],
+	"references": []
+}

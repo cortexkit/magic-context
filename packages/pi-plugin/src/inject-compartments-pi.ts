@@ -69,9 +69,11 @@ import {
 	decodeCachedM0UpgradeIdentity,
 	encodeCachedM0UpgradeIdentity,
 	MEMORY_RENDER_FORMAT_EPOCH,
+	readCachedM0MemoryIds,
 	renderBudgetIdentityChanged,
 	renderedBudgetShrinkReason,
 	renderedBudgetSnapshot,
+	withCachedM0MemoryIds,
 } from "@magic-context/core/hooks/magic-context/compartment-render-epoch";
 import {
 	DEFAULT_HISTORY_BUDGET_TOKENS,
@@ -96,7 +98,10 @@ import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-ses
 import { renderUserProfileContent } from "@magic-context/core/hooks/magic-context/user-profile-render";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { sessionLog as logSession } from "@magic-context/core/shared/logger";
-import { logSlowWriteTransaction } from "@magic-context/core/shared/write-transaction-timing";
+import {
+	logSlowWriteTransaction,
+	WriteTransactionSteps,
+} from "@magic-context/core/shared/write-transaction-timing";
 import { resolvePiStableId, SYNTH_USER_ID_PREFIX } from "./read-session-pi";
 import {
 	isPiSystemEntry,
@@ -396,6 +401,8 @@ function safeGetActiveUserMemoriesPi(db: ContextDatabase): UserMemory[] {
 }
 
 export interface PiM0M1State {
+	/** Test hook before writer admission, before any m[1] render reads. */
+	beforeCacheCommitForTest?: () => void;
 	/** These delivery fields are scoped to one context pass, never persisted. */
 	freezePrefixForPass?: boolean;
 	allowFreshContentionFallback?: boolean;
@@ -1658,8 +1665,8 @@ export function materializeM0Pi(
 	snapshotMarkers: PiM0SnapshotMarkers;
 	renderedMemoryIds: number[];
 } {
-	// Phase 1 (no lock): read markers + render. Rendering can be slow, so we do
-	// it OUTSIDE the write lock to keep the BEGIN IMMEDIATE critical section tiny.
+	// Phase 1 (no lock): freeze and render m[0]. The m[1] delta is read and
+	// rendered under the writer so its selection and history match the commit.
 	const docs = passSnapshot?.projectDocs ?? readProjectDocsForPiM0(state);
 	if (passSnapshot && passSnapshot.projectDocs === undefined) {
 		passSnapshot.projectDocs = docs;
@@ -1740,10 +1747,22 @@ export function materializeM0Pi(
 	}
 	const m0Bytes = Buffer.from(m0, "utf8");
 
-	// Phase 2 + 3 (locked): re-read markers under BEGIN IMMEDIATE; if anything
-	// changed since Phase 1, the rendered bytes are stale — roll back and let the
-	// caller retry. m[1] is rendered and persisted INSIDE the same transaction as
-	// m[0] so cached_m0_bytes/cached_m1_bytes/markers/memory_block_ids stay paired.
+	const steps = new WriteTransactionSteps();
+	snapshotMarkers.materializedAt = foldMaterializedAt;
+	const upgradeIdentity = withCachedM0MemoryIds(
+		encodeCachedM0UpgradeIdentity(
+			snapshotMarkers.upgradeState,
+			snapshotMarkers.compartmentRenderEpoch,
+			snapshotMarkers.muralEnabled,
+			snapshotMarkers.renderBudgetIdentity,
+			snapshotMarkers.memoryRenderEpoch,
+			snapshotMarkers.renderedBudgets ?? null,
+		),
+		renderedMemoryIds,
+	);
+	steps.mark("pre_metadata");
+	state.beforeCacheCommitForTest?.();
+	// Validate the m[0] snapshot, render m[1], and persist the pair atomically.
 	try {
 		db.exec("BEGIN IMMEDIATE");
 	} catch (error) {
@@ -1753,6 +1772,7 @@ export function materializeM0Pi(
 		throw error;
 	}
 	const transactionStartedAt = performance.now();
+	steps.reset();
 	try {
 		// The lock-time marker check must describe the bytes rendered above. Reusing
 		// that HARD-fold document snapshot avoids a second stat/read pair and prevents
@@ -1786,8 +1806,7 @@ export function materializeM0Pi(
 			db.exec("ROLLBACK");
 			throw new PiMaterializeContentionError("snapshot changed before persist");
 		}
-		snapshotMarkers.materializedAt = foldMaterializedAt;
-
+		steps.mark("staleCheck");
 		const m1Render = renderM1PiWithMetadata(
 			state,
 			db,
@@ -1795,7 +1814,11 @@ export function materializeM0Pi(
 			renderedMemoryIds,
 		);
 		const m1Bytes = Buffer.from(m1Render.text, "utf8");
-
+		const visibleMemoryIds = [
+			...new Set([...renderedMemoryIds, ...m1Render.renderedMemoryIds]),
+		];
+		const visibleIdsJson = JSON.stringify(visibleMemoryIds);
+		steps.mark("m1Render");
 		persistCachedM0(db, state.sessionId, {
 			m0Bytes,
 			muralDataUrl: frozenMuralDataUrl,
@@ -1811,18 +1834,12 @@ export function materializeM0Pi(
 			projectDocsHash: snapshotMarkers.projectDocsHash,
 			materializedAt: snapshotMarkers.materializedAt,
 			sessionFactsVersion: snapshotMarkers.sessionFactsVersion,
-			upgradeState: encodeCachedM0UpgradeIdentity(
-				snapshotMarkers.upgradeState,
-				snapshotMarkers.compartmentRenderEpoch,
-				snapshotMarkers.muralEnabled,
-				snapshotMarkers.renderBudgetIdentity,
-				snapshotMarkers.memoryRenderEpoch,
-				snapshotMarkers.renderedBudgets ?? null,
-			),
+			upgradeState: upgradeIdentity,
 			systemHash: snapshotMarkers.systemHash,
 			modelKey: snapshotMarkers.modelKey,
 			projectIdentity: snapshotMarkers.projectIdentity,
 		});
+		steps.mark("persistCachedM0");
 		// Persist the rendered-memory identity in the SAME transaction as the m[0]
 		// snapshot (parity with OpenCode materializeM0). `memory_block_ids` /
 		// `memory_block_count` are otherwise written only by the dead legacy v1
@@ -1830,10 +1847,11 @@ export function materializeM0Pi(
 		// "Injected" count AND a stale ctx_search hide-already-visible filter after
 		// any memory change (e.g. migration delete+reinserts with new ids).
 		db.prepare(
-			"UPDATE session_meta SET memory_block_count = ?, memory_block_ids = ? WHERE session_id = ?",
+			"UPDATE session_meta SET memory_block_count = ?, memory_block_ids = ?, cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
 		).run(
-			renderedMemoryIds.length,
-			JSON.stringify(renderedMemoryIds),
+			visibleMemoryIds.length,
+			visibleIdsJson,
+			snapshotMarkers.lastBaselineEndMessageId,
 			state.sessionId,
 		);
 
@@ -1842,14 +1860,16 @@ export function materializeM0Pi(
 		// fresh m[0]/maxCompartmentSeq paired with a stale (or null) boundary, so
 		// the next pass trims against the wrong point (under/over-trim). Atomic
 		// with the m[0] bytes + markers + m[1] bytes is the only correct placement.
-		setCachedBoundary(
-			db,
-			state.sessionId,
-			snapshotMarkers.lastBaselineEndMessageId,
-		);
-
+		steps.mark("sessionMeta");
 		db.exec("COMMIT");
-		logSlowWriteTransaction("pi_materialize_cache", transactionStartedAt);
+		steps.mark("commit");
+		logSlowWriteTransaction(
+			"pi_materialize_cache",
+			transactionStartedAt,
+			undefined,
+			performance.now(),
+			steps.durations,
+		);
 		rememberPiMuralPayload(
 			state.sessionId,
 			frozenMuralDataUrl,
@@ -2000,6 +2020,7 @@ function renderMemoryUpdatesBlockPi(args: {
 interface RenderM1PiResult {
 	text: string;
 	memoryUpdateCount: number;
+	renderedMemoryIds: number[];
 }
 
 function renderM1PiWithMetadata(
@@ -2131,6 +2152,7 @@ function renderM1PiWithMetadata(
 		return {
 			text: PI_M1_PLACEHOLDER,
 			memoryUpdateCount: memoryUpdates.count,
+			renderedMemoryIds: [],
 		};
 	}
 	// Join with "\n" (single newline) to match OpenCode renderM1 exactly — the
@@ -2140,6 +2162,9 @@ function renderM1PiWithMetadata(
 			? `<knowledge-updates>\n${sections.join("\n")}\n</knowledge-updates>`
 			: `<session-history-since>\n${sections.join("\n")}\n</session-history-since>`,
 		memoryUpdateCount: memoryUpdates.count,
+		renderedMemoryIds: newMemoriesBlock
+			? deltaMemories.map((memory) => memory.id)
+			: [],
 	};
 }
 
@@ -2433,8 +2458,11 @@ function softRefreshCachedM1Pi(args: {
 	memoryUpdateCount: number;
 	recomputed: boolean;
 } {
+	const steps = new WriteTransactionSteps();
+	args.state.beforeCacheCommitForTest?.();
 	args.db.exec("BEGIN IMMEDIATE");
 	const transactionStartedAt = performance.now();
+	steps.reset();
 	try {
 		const row = readCachedPiM0M1Row(args.db, args.state.sessionId);
 		if (
@@ -2468,49 +2496,65 @@ function softRefreshCachedM1Pi(args: {
 			};
 		}
 
+		steps.mark("staleCheck");
 		const markers = markersFromCachedPiRow(
 			row,
 			args.compartmentsForNormalization,
 		);
-		if (!markers) {
+		if (!markers)
 			throw new PiMaterializeContentionError(
 				`invalid cached m[0] markers for ${args.state.sessionId}`,
 			);
-		}
+		// Read the delta and its trim boundary together under the writer. A pass
+		// snapshot taken before admission may have stale in-place history ranges.
+		const compartments = getRenderableCompartmentsPi(args.db, args.state);
+		const renderedM0Ids = readCachedM0MemoryIds(
+			row.cached_m0_upgrade_state,
+			parseMemoryBlockIds(row.memory_block_ids),
+			markers.maxMemoryId,
+		);
 		const rendered = renderM1PiWithMetadata(
 			args.state,
 			args.db,
 			markers,
-			parseMemoryBlockIds(row.memory_block_ids),
-			// Render new compartments from the SAME snapshot the boundary advances
-			// from below, so a concurrent sibling publish can't put a compartment
-			// in m[1] while its raw messages stay in the tail.
-			args.compartmentsForNormalization,
+			renderedM0Ids,
+			compartments,
 		);
 		const m1Bytes = Buffer.from(rendered.text, "utf8");
-		// Advance the persisted trim boundary to the latest compartment now rendered
-		// in m[1]. renderM1 covers compartments seq > cachedM0Seq up to the current
-		// latest, so the visible-message trim must move with it — otherwise the newly
-		// summarized compartment's raw messages stay in the tail (duplication) on
-		// this and every subsequent replay pass. Persisted in the SAME transaction as
-		// cached_m1_bytes so replay passes (which read the boundary from this row)
-		// trim consistently. Mirrors OpenCode caching prepared.compartmentEndMessageId
-		// on each cache-busting pass. Boundary is NOT part of the m[0] CAS identity
-		// (cachedPiRowMatchesSnapshot excludes it), so advancing it cannot spuriously
-		// invalidate a sibling's cached m[0].
-		const latestCompartment = args.compartmentsForNormalization.at(-1);
+		const visibleMemoryIds = [
+			...new Set([...renderedM0Ids, ...rendered.renderedMemoryIds]),
+		];
+		const visibleIdsJson = JSON.stringify(visibleMemoryIds);
+		const latest = compartments.at(-1);
 		const advancedBoundary =
-			latestCompartment?.endMessageId &&
-			latestCompartment.endMessageId.length > 0
-				? latestCompartment.endMessageId
+			latest?.endMessageId && latest.endMessageId.length > 0
+				? latest.endMessageId
 				: markers.lastBaselineEndMessageId;
+		steps.mark("m1Render");
+
 		args.db
 			.prepare(
-				"UPDATE session_meta SET cached_m1_bytes = ?, cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
+				`UPDATE session_meta SET cached_m1_bytes = ?, cached_m0_last_baseline_end_message_id = ?,
+				 memory_block_count = ?, memory_block_ids = ?, cached_m0_upgrade_state = ? WHERE session_id = ?`,
 			)
-			.run(m1Bytes, advancedBoundary, args.state.sessionId);
+			.run(
+				m1Bytes,
+				advancedBoundary,
+				visibleMemoryIds.length,
+				visibleIdsJson,
+				withCachedM0MemoryIds(row.cached_m0_upgrade_state, renderedM0Ids),
+				args.state.sessionId,
+			);
+		steps.mark("sessionMeta");
 		args.db.exec("COMMIT");
-		logSlowWriteTransaction("pi_soft_refresh_cache", transactionStartedAt);
+		steps.mark("commit");
+		logSlowWriteTransaction(
+			"pi_soft_refresh_cache",
+			transactionStartedAt,
+			undefined,
+			performance.now(),
+			steps.durations,
+		);
 		return {
 			m0: decodeCachedM0(row.cached_m0_bytes) ?? "",
 			m1: rendered.text,

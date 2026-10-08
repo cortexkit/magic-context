@@ -62,6 +62,8 @@ import type {
 	MemoryImportanceHistogram,
 	TailHygieneStatus,
 } from "@magic-context/core/shared/rpc-types";
+import type { Statement } from "@magic-context/core/shared/sqlite";
+import { isKnownAutocommit } from "@magic-context/core/shared/sqlite-helpers";
 import { renderUserStatusSummary } from "@magic-context/core/shared/status-summary";
 import {
 	buildStatusViewFor,
@@ -87,8 +89,9 @@ import { resolvePiWindowGeometry } from "../pi-context-limit";
 import { resolvePiStatusPressureSnapshot } from "../pi-pressure";
 import { isPiRecompInFlight } from "../pi-recomp-runner";
 
-/** Refresh cadence while dialog is open. */
+/** Countdown/usage cadence while dialog is open. */
 const REFRESH_INTERVAL_MS = 1000;
+const DETAIL_REFRESH_INTERVAL_MS = 10_000;
 
 // Top/bottom borders, and one border plus one padding column on each side.
 const BORDER_ROWS = 2;
@@ -258,7 +261,7 @@ interface StatusDialogProps {
  * Custom Component implementation:
  *  - implements its own handleInput so Escape / Enter / Ctrl+C close cleanly
  *  - draws a Unicode rounded-corner border using theme borderMuted color
- *  - rebuilds detail and re-renders on a 1s timer so live values stay current
+ *  - updates countdowns/usage each second; refreshes stored detail on changes
  *  - cleans up timer on close
  */
 const openStatusDialogs = new Set<StatusDialogComponent>();
@@ -270,6 +273,7 @@ export function stopStatusDialogRefresh(): void {
 class StatusDialogComponent implements Component {
 	private readonly props: StatusDialogProps;
 	private detail: StatusDialogDetail;
+	private readonly detailRefresh: PiStatusDetailRefresh;
 	private refreshTimer: ReturnType<typeof setInterval> | null = null;
 	private closed = false;
 	private scrollOffset = 0;
@@ -278,22 +282,18 @@ class StatusDialogComponent implements Component {
 
 	constructor(props: StatusDialogProps) {
 		this.props = props;
-		this.detail = buildPiStatusDetail(
+		this.detailRefresh = new PiStatusDetailRefresh(
 			props.pi,
 			props.ctx,
 			props.deps,
 			props.sessionId,
 		);
+		this.detail = this.detailRefresh.refresh();
 		openStatusDialogs.add(this);
 		this.refreshTimer = setInterval(() => {
 			if (this.closed) return;
 			try {
-				this.detail = buildPiStatusDetail(
-					this.props.pi,
-					this.props.ctx,
-					this.props.deps,
-					this.props.sessionId,
-				);
+				this.detail = this.detailRefresh.refresh();
 				this.props.tui.requestRender();
 			} catch {
 				// best effort; keep previous detail
@@ -689,11 +689,279 @@ export function deriveDefaultProtectedTokensFloor(usableSoft?: number): number {
 	return Math.max(low, Math.min(64_000, val));
 }
 
+interface StatusHostBytes {
+	modelKey: string | undefined;
+	modelBytes: string;
+	system: string | undefined;
+	tools: string[];
+}
+
+function readStatusHostBytes(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+): StatusHostBytes {
+	// Match the previous structural estimate: name, description and the exact
+	// JSON serialization of each schema (not just tool names or object identity).
+	return {
+		modelKey: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+		modelBytes: safeStringify(ctx.model),
+		system: safeRead(() => readHostSystemPrompt(ctx), undefined),
+		tools: safeRead(
+			() =>
+				(pi.getAllTools?.() ?? []).map(
+					(tool) =>
+						`${tool.name ?? ""}\n${tool.description ?? ""}\n${safeStringify(tool.parameters)}`,
+				),
+			[],
+		),
+	};
+}
+
+/** One bounded entry, keyed by model and exact prompt/schema bytes, not object identity. */
+export class PiStatusTokenCache {
+	private systemKey: string | undefined;
+	private systemTokens = 0;
+	private toolsKey: string | undefined;
+	private toolTokens = 0;
+
+	constructor(private readonly estimate = estimateTokens) {}
+
+	estimates(host: StatusHostBytes, fallbackSystemTokens: number) {
+		if (host.system !== undefined) {
+			const key = JSON.stringify([host.modelKey, host.system]);
+			if (this.systemKey !== key) {
+				this.systemTokens = this.estimate(host.system);
+				this.systemKey = key;
+			}
+		}
+		const key = JSON.stringify([host.modelKey, host.tools]);
+		if (this.toolsKey !== key) {
+			this.toolTokens = host.tools.reduce(
+				(sum, bytes) => sum + this.estimate(bytes),
+				0,
+			);
+			this.toolsKey = key;
+		}
+		return {
+			systemPromptTokens:
+				host.system === undefined ? fallbackSystemTokens : this.systemTokens,
+			toolDefinitionTokens: this.toolTokens,
+		};
+	}
+}
+
+interface StatusBuildState {
+	tokens: PiStatusTokenCache;
+	live?: {
+		persistedInputTokens: number;
+		persistedPercentage: number;
+		detectedContextLimit: number | undefined;
+	};
+}
+
+/** The same refresh controller is used by the dialog and fixture measurements. */
+export class PiStatusDetailRefresh {
+	private detail: StatusDialogDetail | undefined;
+	private readonly state: StatusBuildState;
+	private lastBuildAt = 0;
+	private detailKey = "";
+	private storeRevision: string | undefined;
+	private revisionDb: ContextDatabase | undefined;
+	private revisionStatement: Statement | undefined;
+
+	constructor(
+		private readonly pi: ExtensionAPI,
+		private readonly ctx: ExtensionCommandContext,
+		private readonly deps: StatusDialogDeps,
+		private readonly initialSessionId: string,
+		tokens = new PiStatusTokenCache(),
+	) {
+		this.state = { tokens };
+	}
+
+	private readStoreRevision(): string | undefined {
+		// A rollback does not advance SQLite's change clocks. Never reuse a
+		// snapshot read inside a transaction (or when its state is unknown).
+		if (!isKnownAutocommit(this.deps.db)) return undefined;
+		try {
+			if (this.revisionDb !== this.deps.db) {
+				this.revisionStatement = this.deps.db.prepare(
+					"SELECT total_changes() AS changes, data_version AS version FROM pragma_data_version",
+				);
+				this.revisionDb = this.deps.db;
+			}
+			const row = this.revisionStatement?.get() as
+				| { changes: number; version: number }
+				| undefined;
+			return row ? `${row.changes}/${row.version}` : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	refresh(now = Date.now()): StatusDialogDetail {
+		const sessionId = resolveSessionId(this.ctx) ?? this.initialSessionId;
+		const host = readStatusHostBytes(this.pi, this.ctx);
+		const usage = this.ctx.getContextUsage?.();
+		const { db: _db, ...config } = this.deps;
+		const key = JSON.stringify([sessionId, host, usage?.contextWindow, config]);
+		const databaseChanged = this.revisionDb !== this.deps.db;
+		const revision = this.readStoreRevision();
+		if (
+			!this.detail ||
+			key !== this.detailKey ||
+			revision === undefined ||
+			revision !== this.storeRevision ||
+			databaseChanged ||
+			now - this.lastBuildAt >= DETAIL_REFRESH_INTERVAL_MS
+		) {
+			this.detail = buildStatusDetail(
+				this.pi,
+				this.ctx,
+				this.deps,
+				sessionId,
+				this.state,
+				host,
+			);
+			this.detailKey = key;
+			this.lastBuildAt = now;
+			// Building a fresh session may insert metadata. Record the clock
+			// after that work so our own INSERT does not cause a second rebuild.
+			this.storeRevision = this.readStoreRevision();
+		}
+		this.detail = refreshLiveStatus(
+			this.detail,
+			this.state,
+			this.ctx,
+			usage,
+			now,
+		);
+		return this.detail;
+	}
+}
+
+function conversationTokensFor(
+	detail: Pick<
+		StatusDialogDetail,
+		| "inputTokens"
+		| "systemPromptTokens"
+		| "compartmentTokens"
+		| "factTokens"
+		| "memoryTokens"
+		| "docsTokens"
+		| "profileTokens"
+		| "toolCallTokens"
+		| "toolDefinitionTokens"
+	>,
+): number {
+	return Math.max(
+		0,
+		detail.inputTokens -
+			detail.systemPromptTokens -
+			detail.compartmentTokens -
+			detail.factTokens -
+			detail.memoryTokens -
+			detail.docsTokens -
+			detail.profileTokens -
+			detail.toolCallTokens -
+			detail.toolDefinitionTokens,
+	);
+}
+
+function refreshLiveStatus(
+	detail: StatusDialogDetail,
+	state: StatusBuildState,
+	ctx: ExtensionCommandContext,
+	usage: ReturnType<ExtensionCommandContext["getContextUsage"]>,
+	now: number,
+): StatusDialogDetail {
+	const live = state.live;
+	if (!live) return detail;
+	const windowGeometry = resolvePiWindowGeometry({
+		rawContextWindow: usage?.contextWindow ?? ctx.model?.contextWindow,
+		rawContextWindowSource: "catalog",
+		model: ctx.model,
+		...live,
+	});
+	const pressure = resolvePiStatusPressureSnapshot({
+		sessionId: detail.sessionId,
+		persistedPercentage: live.persistedPercentage,
+		persistedInputTokens: live.persistedInputTokens,
+		liveInputTokens: usage?.tokens,
+		usableContextLimit: windowGeometry?.usableSoft,
+	});
+	const cacheRemainingMs = cacheRemaining(
+		detail.cacheTtl,
+		detail.lastResponseTime,
+		now,
+	);
+	const embeddingRunState = getEmbedDrainUiStatus(
+		detail.sessionId,
+		undefined,
+	).status;
+	const current = {
+		...detail,
+		inputTokens: pressure.inputTokens,
+		usagePercentage: pressure.percentage,
+		contextLimit: pressure.contextLimit ?? 0,
+		windowGeometry,
+		cacheRemainingMs,
+		cacheExpired: detail.lastResponseTime > 0 && cacheRemainingMs === 0,
+		recompInFlight: isPiRecompInFlight(detail.sessionId),
+		tailHygiene: resolveTailHygieneStatus(
+			getPiChannel1Baseline(detail.sessionId),
+		),
+		embedding: {
+			...detail.embedding,
+			state:
+				detail.embedding.state === "off"
+					? ("off" as const)
+					: embeddingRunState !== "idle"
+						? embeddingRunState
+						: detail.embedding.total > 0 &&
+								detail.embedding.indexed >= detail.embedding.total
+							? ("ready" as const)
+							: ("waiting" as const),
+		},
+	};
+	return { ...current, conversationTokens: conversationTokensFor(current) };
+}
+
+function cacheRemaining(
+	cacheTtl: string,
+	lastResponseTime: number,
+	now: number,
+): number {
+	let ttlMs: number;
+	try {
+		ttlMs = parseCacheTtl(cacheTtl);
+	} catch {
+		ttlMs = 5 * 60 * 1000;
+	}
+	if (ttlMs === Number.POSITIVE_INFINITY) return ttlMs;
+	return lastResponseTime > 0
+		? Math.max(0, ttlMs - (now - lastResponseTime))
+		: ttlMs;
+}
+
 export function buildPiStatusDetail(
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
 	deps: StatusDialogDeps,
 	sessionId: string,
+): StatusDialogDetail {
+	return buildStatusDetail(pi, ctx, deps, sessionId, {
+		tokens: new PiStatusTokenCache(),
+	});
+}
+
+function buildStatusDetail(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	deps: StatusDialogDeps,
+	sessionId: string,
+	state: StatusBuildState,
+	host = readStatusHostBytes(pi, ctx),
 ): StatusDialogDetail {
 	const usage = ctx.getContextUsage?.();
 	const meta = getOrCreateSessionMeta(deps.db, sessionId);
@@ -704,6 +972,11 @@ export function buildPiStatusDetail(
 	} catch {
 		// Status remains available when overflow metadata cannot be read.
 	}
+	state.live = {
+		persistedInputTokens: meta.lastInputTokens,
+		persistedPercentage: meta.lastContextPercentage,
+		detectedContextLimit,
+	};
 	const windowGeometry = resolvePiWindowGeometry({
 		rawContextWindow: usage?.contextWindow ?? ctx.model?.contextWindow,
 		rawContextWindowSource: "catalog",
@@ -757,15 +1030,10 @@ export function buildPiStatusDetail(
 	// experimental.chat.system.transform hook). Compute it on demand from
 	// ctx.getSystemPrompt() when available; fall back to the stored value
 	// so the dialog still has a sensible number outside command context.
-	let systemPromptTokens = meta.systemPromptTokens;
-	try {
-		const sysPrompt = readHostSystemPrompt(ctx);
-		if (sysPrompt !== undefined && sysPrompt.length > 0) {
-			systemPromptTokens = estimateTokens(sysPrompt);
-		}
-	} catch {
-		// best effort; fall back to stored
-	}
+	const { systemPromptTokens, toolDefinitionTokens } = state.tokens.estimates(
+		host,
+		meta.systemPromptTokens,
+	);
 
 	const tags = getTagsBySession(deps.db, sessionId);
 	const activeTags = tags.filter((tag) => tag.status === "active");
@@ -789,34 +1057,17 @@ export function buildPiStatusDetail(
 	// authoritative source for what the LLM receives.
 	const toolCallTokens = meta.toolCallTokens;
 
-	// Tool definition tokens: serialize each registered tool the way Pi sends
-	// them to providers — name + description + JSON-stringified parameter
-	// schema. This is a structural estimate (not the exact wire payload), but
-	// matches OpenCode's calibrated bucket within a reasonable margin.
-	let toolDefinitionTokens = 0;
-	try {
-		const tools = pi.getAllTools?.() ?? [];
-		for (const tool of tools) {
-			toolDefinitionTokens += estimateTokens(
-				`${tool.name ?? ""}\n${tool.description ?? ""}\n${safeStringify(tool.parameters)}`,
-			);
-		}
-	} catch {
-		// best effort
-	}
-
-	const conversationTokens = Math.max(
-		0,
-		inputTokens -
-			systemPromptTokens -
-			compartmentTokens -
-			factTokens -
-			memoryTokens -
-			docsTokens -
-			profileTokens -
-			toolCallTokens -
-			toolDefinitionTokens,
-	);
+	const conversationTokens = conversationTokensFor({
+		inputTokens,
+		systemPromptTokens,
+		compartmentTokens,
+		factTokens,
+		memoryTokens,
+		docsTokens,
+		profileTokens,
+		toolCallTokens,
+		toolDefinitionTokens,
+	});
 	const workMetrics = getSessionWorkMetrics(deps.db, sessionId);
 	const tailHygiene = resolveTailHygieneStatus(
 		getPiChannel1Baseline(sessionId),
@@ -844,20 +1095,11 @@ export function buildPiStatusDetail(
 		sessionModelKey: meta.lastObservedModelKey,
 	});
 	const cacheTtl = cacheTtlDisplay.value;
-	let cacheTtlMs: number;
-	try {
-		cacheTtlMs = parseCacheTtl(cacheTtl);
-	} catch {
-		cacheTtlMs = 5 * 60 * 1000;
-	}
-	const neverExpires = cacheTtlMs === Number.POSITIVE_INFINITY;
-	const elapsed =
-		meta.lastResponseTime > 0 ? Date.now() - meta.lastResponseTime : 0;
-	const cacheRemainingMs = neverExpires
-		? Number.POSITIVE_INFINITY
-		: meta.lastResponseTime > 0
-			? Math.max(0, cacheTtlMs - elapsed)
-			: cacheTtlMs;
+	const cacheRemainingMs = cacheRemaining(
+		cacheTtl,
+		meta.lastResponseTime,
+		Date.now(),
+	);
 	const cacheExpired = meta.lastResponseTime > 0 && cacheRemainingMs === 0;
 	const historyBlockTokens = compartmentTokens + factTokens;
 	const embeddingCoverage = safeRead(

@@ -2,6 +2,7 @@ import { isDroppedToolOutput } from "../../hooks/magic-context/ctx-reduce-nudge"
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import { log, sessionLog } from "../../shared/logger";
 import { hostMediaAsset } from "../fold/host-media";
+import { isToolError, toolErrorText, toolStateContent } from "../tool-result";
 import type { SessionContext, V2Message } from "./types";
 
 export const HEAD_IDS = ["__magic_context_v2_m0__", "__magic_context_v2_m1__"] as const;
@@ -147,23 +148,6 @@ function rebuildFileContent(value: Part[], output: string): Part {
     return { type: "content", value: rebuilt };
 }
 
-function toolStateContent(state: Part): string {
-    if (typeof state.output === "string") return state.output;
-    if (typeof state.content === "string") return state.content;
-    if (!Array.isArray(state.content)) return "";
-    return state.content
-        .map((part) => {
-            if (typeof part === "string") return part;
-            if (!part || typeof part !== "object") return "";
-            const value = part as Part;
-            if (typeof value.text === "string") return value.text;
-            if (typeof value.value === "string") return value.value;
-            return "";
-        })
-        .filter(Boolean)
-        .join("\n");
-}
-
 /** Project the host's split call/result pair into the TS pipeline's native tool part.
  * Only native tool parts allocate tags; feeding a bare tool_result can replay an
  * existing tag but cannot create one. The inverse projection preserves host metadata.
@@ -218,22 +202,26 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
         result: { part: Part; message: V2Message } | undefined,
     ): Part => {
         const hostResult = result?.part.result as Part | undefined;
+        const failed = result !== undefined && isToolError(result.part);
         const value = hostResult?.value;
         const files = fileContentValue(hostResult);
-        const output = files
-            ? contentValueText(files)
-            : typeof value === "string"
-              ? value
-              : value === undefined
-                ? ""
-                : JSON.stringify(value);
+        const output =
+            failed && hostResult
+                ? toolErrorText(hostResult)
+                : files
+                  ? contentValueText(files)
+                  : typeof value === "string"
+                    ? value
+                    : value === undefined
+                      ? ""
+                      : JSON.stringify(value);
         const part = {
             type: "tool",
             callID: call?.id ?? result?.part.id,
             tool: call?.name ?? result?.part.name,
             state: {
                 input: structuredClone(call?.input ?? {}),
-                status: result ? "completed" : "running",
+                status: failed ? "error" : result ? "completed" : "running",
                 ...(result ? { output } : {}),
                 // OpenCode 2 omits the user's answers in state.metadata.answers from its
                 // LLM context event. Mark built-in question results as answers until the
@@ -444,7 +432,10 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                                         type: "tool-result",
                                         id: callID,
                                         name,
-                                        result: { type: "text", value: state.output },
+                                        result: {
+                                            type: state.status === "error" ? "error" : "text",
+                                            value: state.output,
+                                        },
                                     },
                                 ],
                             });
@@ -460,7 +451,10 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                                     ? bridge.result.result
                                     : bridge.files && typeof state.output === "string"
                                       ? rebuildFileContent(bridge.files, state.output)
-                                      : { type: "text", value: state.output },
+                                      : {
+                                            type: state.status === "error" ? "error" : "text",
+                                            value: state.output,
+                                        },
                         };
                         if (bridge.resultMessage === original) content.push(result);
                         else following.push({ ...bridge.resultMessage, content: [result] });

@@ -45,6 +45,7 @@ import {
 import {
     DreamerProviderOutputFailureError,
     providerOutputFailureFromInvalidManifest,
+    withDreamerModelCooldown,
 } from "./provider-output-failure";
 import { getTaskScheduleState, writeTaskScheduleState } from "./storage-task-schedule";
 import { DreamTokenBudgetExceeded } from "./token-budget";
@@ -178,6 +179,10 @@ function closeBroadCycle(args: VerifyArgs, cycleStartAt: number | undefined): vo
 }
 
 export async function runVerify(args: VerifyArgs): Promise<VerifyResult> {
+    return withDreamerModelCooldown(() => runVerifyWithCooldown(args));
+}
+
+async function runVerifyWithCooldown(args: VerifyArgs): Promise<VerifyResult> {
     const runStartedAt = Date.now();
     const result: VerifyResult = {
         verified: 0,
@@ -354,8 +359,11 @@ async function verifyOneBatch(
                 language: args.language,
                 timeoutMs: sliceMs,
                 signal,
-                parse: (text) => {
-                    const providerFailure = providerOutputFailureFromInvalidManifest([], text);
+                parse: (text, completion) => {
+                    const providerFailure = providerOutputFailureFromInvalidManifest(
+                        completion.messages ?? [],
+                        text,
+                    );
                     if (providerFailure) throw providerFailure;
                     return validateVerifyManifest(text, new Set(batch.map((memory) => memory.id)));
                 },

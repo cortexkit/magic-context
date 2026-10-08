@@ -99,6 +99,8 @@ const DEDUP_SAFE_TOOLS = new Set([
 ]);
 
 export interface PiHeuristicCleanupConfig {
+	/** Bulk-freeze native removal decisions before measuring the active wire tools. */
+	prepareToolRemovalMeasurements?: (callIds: readonly string[]) => void;
 	protectedTools?: Readonly<Record<string, number>>;
 	protectedToolTags?: ReadonlySet<number>;
 	protectedTags: number;
@@ -325,6 +327,11 @@ export function applyPiHeuristicCleanup(
 	// When omitted (older tests), falls back to the legacy index-based pi-msg-* id.
 	resolveId?: (msg: unknown, index: number) => string | undefined,
 ): PiHeuristicCleanupResult {
+	const logStep = (stage: string, start: number, extra = "") =>
+		sessionLog(
+			sessionId,
+			`heuristic cleanup stage: stage=${stage} elapsed=${(performance.now() - start).toFixed(1)}ms${extra ? ` ${extra}` : ""}`,
+		);
 	// Resolve owner/stable ids the same way the transcript tagged messages, so the
 	// ids built here key into messageIdToMaxTag (= target.message.info.id) correctly.
 	// Legacy fallback (no resolver) keeps the old index-based pi-msg-* scheme.
@@ -340,7 +347,13 @@ export function applyPiHeuristicCleanup(
 
 	// All work in this function short-circuits on `tag.status !== "active"`.
 	// See OpenCode `applyHeuristicCleanup` for the full P0 perf rationale.
+	const tTags = performance.now();
 	const tags = preloadedTags ?? getActiveTagsBySession(db, sessionId);
+	logStep(
+		"tagLoad",
+		tTags,
+		`tags=${tags.length} preloaded=${preloadedTags !== undefined}`,
+	);
 	const protectedTools =
 		config.protectedToolTags ??
 		protectedToolTagNumbers(tags, config.protectedTools);
@@ -392,6 +405,22 @@ export function applyPiHeuristicCleanup(
 				.map((tag) => tag.tagNumber),
 		);
 		const calibration = sessionDecisionCalibration(db, sessionId);
+		const tPrepare = performance.now();
+		// Measurement requests removal authorization even for retained skeletons.
+		// Prepare precisely those active, visible calls, preserving tag order and
+		// the existing freeze-before-wire-edit rule without per-call envelope CAS.
+		config.prepareToolRemovalMeasurements?.(
+			tags.flatMap((tag) =>
+				tag.status === "active" &&
+				tag.type === "tool" &&
+				tag.messageId &&
+				targets.get(tag.tagNumber)?.measureReclaim
+					? [tag.messageId]
+					: [],
+			),
+		);
+		logStep("prepareNativeRemovals", tPrepare);
+		const tMeasure = performance.now();
 		const activeTags = tags
 			.filter((t) => t.status === "active")
 			.map((tag) =>
@@ -412,10 +441,16 @@ export function applyPiHeuristicCleanup(
 				return measured ? [measured] : [];
 			})
 			.filter((tag) => (tag.reclaimableTokens ?? 0) > 0);
+		logStep(
+			"measureEmergencyTags",
+			tMeasure,
+			`active=${activeTags.length} candidates=${droppableTags.length}`,
+		);
 		sessionLog(
 			sessionId,
 			`emergency candidates: loaded=${tags.length} active=${activeTags.length} activeTools=${activeTags.filter((tag) => tag.type === "tool").length} visibleCompleteTools=${droppableTags.length} windowYields=${(emergency.usagePercentage ?? 0) >= 95} cutoff=${protectedCutoff}`,
 		);
+		const tPlan = performance.now();
 		const plan = planEmergencyDrop({
 			tags: droppableTags as readonly EmergencyDropTag[],
 			floorTags: activeTags as readonly EmergencyDropTag[],
@@ -429,7 +464,9 @@ export function applyPiHeuristicCleanup(
 			passAlreadyPriced: emergency.passAlreadyPriced === true,
 			protectedToolTags: protectedTools,
 		});
+		logStep("planEmergencyDrop", tPlan);
 		if (plan.shouldDrop) {
+			const tPersist = performance.now();
 			const toDrop = new Set(plan.tagNumbers);
 			const newestEmergencyTags = recentTags;
 			db.transaction(() => {
@@ -461,6 +498,11 @@ export function applyPiHeuristicCleanup(
 					}
 				}
 			}).immediate();
+			logStep(
+				"applyEmergencyDrops",
+				tPersist,
+				`dropped=${emergencyDroppedTools}`,
+			);
 			sessionLog(sessionId, `emergency tiered drop: ${plan.reason}`);
 		} else {
 			sessionLog(sessionId, `emergency tiered drop skipped: ${plan.reason}`);

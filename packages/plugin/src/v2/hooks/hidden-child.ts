@@ -54,6 +54,48 @@ export function hiddenToolLoop(identity: HiddenRunIdentity): boolean {
     return identity.kind === "dreamer-task" && AGENT_STEPS[identity.agent] !== undefined;
 }
 
+/**
+ * The tools a Magic Context hidden agent may call, or undefined when `agent` is
+ * not one of the hidden agents this plugin registers. Every id registered by
+ * `registerHiddenChildAgents` is a Magic Context carrier: the registration
+ * overwrites any agent of the same name, so a session running one of these ids
+ * is always running this plugin's carrier.
+ */
+export function hiddenAgentAllowedTools(agent: string | undefined): readonly string[] | undefined {
+    return agent !== undefined && Object.hasOwn(AGENT_TOOLS, agent)
+        ? AGENT_TOOLS[agent]
+        : undefined;
+}
+
+/** One OpenCode 2 permission rule: the action is the tool id, the resource a pattern. */
+export interface HiddenPermissionRule {
+    action: string;
+    resource: string;
+    effect: "allow" | "deny";
+}
+
+/**
+ * Deny everything, then allow exactly the agent's own tools.
+ *
+ * OpenCode 2 evaluates a tool call against the agent's rules followed by the
+ * session's rules, and the LAST matching rule wins. Its config loader appends
+ * the user's global `permissions` to every agent after plugins have set theirs,
+ * so on the agent alone a user's `edit: allow` lands after this deny and wins.
+ * The same list is therefore also written onto each hidden child session when
+ * it is created: session rules come after every agent rule, which is the one
+ * place where these rules are guaranteed to be evaluated last.
+ */
+export function hiddenChildPermissions(agent: string): HiddenPermissionRule[] {
+    return [
+        { action: "*", resource: "*", effect: "deny" },
+        ...(AGENT_TOOLS[agent] ?? []).map((tool) => ({
+            action: tool,
+            resource: "*",
+            effect: "allow" as const,
+        })),
+    ];
+}
+
 export async function registerHiddenChildAgents(
     agent: Pick<V2AgentDomain, "transform">,
 ): Promise<void> {
@@ -71,17 +113,37 @@ export async function registerHiddenChildAgents(
                 // OpenCode 2.0.15's tool permission action is the tool id, not "tool".
                 // See @opencode/schema/dist/permission.d.ts (Request.action/resources)
                 // and the host's session request tool filtering; resource is "*".
-                config.permissions = [
-                    { action: "*", resource: "*", effect: "deny" },
-                    ...(AGENT_TOOLS[id] ?? []).map((tool) => ({
-                        action: tool,
-                        resource: "*",
-                        effect: "allow" as const,
-                    })),
-                ];
+                // The host appends the user's own rules after these; see
+                // hiddenChildPermissions for where they are made to win.
+                config.permissions = hiddenChildPermissions(id);
             });
         }
     });
+}
+
+/**
+ * Why a tool call must not run, or undefined when it may. A call is refused
+ * when it comes from a Magic Context hidden child (a session this instance
+ * registered, or any session running one of the hidden agent ids) and the tool
+ * is not on that agent's allowlist. The user's own permission settings do not
+ * enter into it: these agents are unattended and their allowlists are fixed.
+ */
+export function hiddenToolCallRefusal(
+    call: { tool: string; sessionID: string; agent?: string },
+    hook: Pick<HiddenChildHook, "owns" | "agentFor">,
+): string | undefined {
+    const owned = hook.owns(call.sessionID);
+    const agent = owned ? (hook.agentFor(call.sessionID) ?? call.agent) : call.agent;
+    const allowed = hiddenAgentAllowedTools(agent);
+    if (allowed === undefined) {
+        // A session this instance registered whose agent cannot be resolved has
+        // no known allowlist; nothing is allowed rather than everything.
+        return owned
+            ? `Magic Context hidden child ${call.sessionID} has no tool allowlist; ${call.tool} refused`
+            : undefined;
+    }
+    if (allowed.includes(call.tool)) return undefined;
+    return `Magic Context hidden agent ${agent} may only use ${allowed.length > 0 ? allowed.join(", ") : "no tools"}; ${call.tool} refused`;
 }
 
 export class HiddenAgentStepLimit extends Error {
@@ -283,14 +345,21 @@ function firstDifference(
  * child's privileged internal identity.
  */
 export class HiddenChildHook {
-    private readonly childIDs = new Set<string>();
+    /** Each child this instance created, with the agent it was created to run. */
+    private readonly childIDs = new Map<string, string | undefined>();
     private readonly attempts = new Map<string, HiddenChildAttempt>();
     private readonly active = new Map<string, HiddenChildAttempt>();
 
     constructor(private readonly note: (message: string) => void = log) {}
 
-    registerChild(sessionID: string): void {
-        this.childIDs.add(sessionID);
+    registerChild(sessionID: string, agent?: string): void {
+        if (agent !== undefined || !this.childIDs.has(sessionID))
+            this.childIDs.set(sessionID, agent ?? this.childIDs.get(sessionID));
+    }
+
+    /** The agent a registered child was created to run, when it is known. */
+    agentFor(sessionID: string): string | undefined {
+        return this.childIDs.get(sessionID);
     }
 
     registerAttempt(marker: string, attempt: HiddenChildAttempt): void {
@@ -322,8 +391,19 @@ export class HiddenChildHook {
      * An owned child with no run in flight, or with more than one, is refused
      * here exactly as the context guard would refuse its prompt.
      */
-    compactionSummary(sessionID: string): string | undefined {
-        if (!this.owns(sessionID)) return undefined;
+    compactionSummary(sessionID: string, agent?: string): string | undefined {
+        if (!this.owns(sessionID)) {
+            // Another instance's hidden child: refused here exactly as `apply`
+            // refuses its turn, rather than summarized as a user conversation.
+            if (hiddenAgentAllowedTools(agent) !== undefined) {
+                this.refuse(
+                    "Refusing to compact a Magic Context hidden-agent session this instance did not register",
+                    { sessionID, messages: [] },
+                    undefined,
+                );
+            }
+            return undefined;
+        }
         const active = this.active.get(sessionID);
         const pending = [...this.attempts.values()].filter(
             (attempt) => attempt.childSessionId === sessionID && !attempt.shaped,
@@ -399,9 +479,28 @@ export class HiddenChildHook {
         return parts;
     }
 
-    /** Returns false only for an ordinary user session that this bridge does not own. */
+    /**
+     * Returns false only for an ordinary user session that this bridge does not own.
+     *
+     * A session running one of the hidden agent ids that this instance did not
+     * register is refused, not passed through. OpenCode 2 runs each session's
+     * hooks in the plugin instance of that session's location, so a hidden child
+     * created by another instance (another directory, or this directory before a
+     * restart) arrives here unshaped: its user message is a bare run marker, and
+     * passing it on would send the marker to the model with whatever tools the
+     * user's own permissions allow.
+     */
     apply(draft: SessionContext): boolean {
-        if (!this.owns(draft.sessionID)) return false;
+        if (!this.owns(draft.sessionID)) {
+            if (hiddenAgentAllowedTools(draft.agent) !== undefined) {
+                this.refuse(
+                    "Refusing a Magic Context hidden-agent turn this instance did not register",
+                    draft,
+                    newestUserText(draft),
+                );
+            }
+            return false;
+        }
 
         const raw = newestUserText(draft);
         let attempt: HiddenChildAttempt | undefined;

@@ -9,7 +9,7 @@
  * Nothing here opens a live store. The caller prepares PROBE_RUN with:
  *   data/cortexkit/magic-context/{store.db,context.db}   clones of the stores
  *   oc/opencode.db                                        clone of the OpenCode store
- *   bin/{ck-mc,ck-subc}                                   the binaries under test
+ *   bin/{ckdev-mc,ckdev-subc}                             dev-named copies under test
  * See README.md in this directory for the exact preparation commands.
  *
  * Environment:
@@ -237,7 +237,7 @@ async function main(): Promise<void> {
         await waitFor(() => existsSync(join(RUN, "pin.ready")), "pinned reader");
     }
 
-    const daemon = startProcess("daemon", join(RUN, "bin", "ck-subc"), [], {
+    const daemon = startProcess("daemon", join(RUN, "bin", "ckdev-subc"), [], {
         HOME,
         XDG_RUNTIME_DIR: RUNTIME_DIR,
         XDG_CONFIG_HOME: daemonConfig,
@@ -250,7 +250,7 @@ async function main(): Promise<void> {
     await waitFor(() => existsSync(CONNECTION_FILE), "daemon connection file");
     await Bun.sleep(200);
     const moduleStartFrames = frames();
-    const module = startProcess("module", join(RUN, "bin", "ck-mc"), ["--subc", CONNECTION_FILE], {
+    const module = startProcess("module", join(RUN, "bin", "ckdev-mc"), ["--subc", CONNECTION_FILE], {
         HOME,
         NO_COLOR: "1",
         SUBC_MODULE_ID: "magic-context",

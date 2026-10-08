@@ -23,6 +23,7 @@ Keys listed below apply from the next historian or dreamer run (or dream-timer t
 - `cache_ttl`
 - `commit_cluster_trigger.enabled`
 - `commit_cluster_trigger.min_clusters`
+- `dreamer.disable`
 - `dreamer.maxTokens`
 - `dreamer.omp.fallback_models`
 - `dreamer.omp.model`

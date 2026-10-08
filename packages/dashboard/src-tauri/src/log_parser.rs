@@ -2,6 +2,8 @@ use regex::Regex;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 /// Harness identifier — must match the strings used by the TypeScript-side
 /// `HarnessId` type (`packages/plugin/src/shared/harness.ts`) and by the
@@ -926,23 +928,133 @@ fn detect_bust_cause(entries: &[LogEntry], event_idx: usize) -> String {
     }
 }
 
-/// Read the last N lines from the log file using seek-from-end
-/// to avoid loading the entire file into memory.
+#[derive(Clone, PartialEq, Eq)]
+struct LogFileStamp {
+    identity: (u64, u64),
+    len: u64,
+    modified: SystemTime,
+}
+
+impl LogFileStamp {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Option<Self> {
+        // Without a reliable file identity, do not risk serving a rotated file's
+        // old contents merely because its size and timestamp happen to match.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Some(Self {
+                identity: (metadata.dev(), metadata.ino()),
+                len: metadata.len(),
+                modified: metadata.modified().ok()?,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = metadata;
+            None
+        }
+    }
+}
+
+struct CachedLogTail {
+    stamp: LogFileStamp,
+    max_lines: usize,
+    entries: Vec<LogEntry>,
+    accessed: u64,
+}
+
+#[derive(Default)]
+struct LogTailWork {
+    #[cfg(test)]
+    reads: u64,
+    #[cfg(test)]
+    parses: u64,
+    #[cfg(test)]
+    bytes: u64,
+}
+
+#[derive(Default)]
+struct LogTailCache {
+    files: HashMap<PathBuf, CachedLogTail>,
+    clock: u64,
+    work: LogTailWork,
+}
+
+impl LogTailCache {
+    fn read(&mut self, path: &PathBuf, max_lines: usize) -> Vec<LogEntry> {
+        self.clock += 1;
+        let stamp = std::fs::metadata(path)
+            .ok()
+            .and_then(|metadata| LogFileStamp::from_metadata(&metadata));
+        if let (Some(stamp), Some(cached)) = (&stamp, self.files.get_mut(path)) {
+            if cached.stamp == *stamp && cached.max_lines == max_lines {
+                cached.accessed = self.clock;
+                return cached.entries.clone();
+            }
+        }
+        self.files.remove(path);
+        let Ok((entries, read_stamp)) = read_log_tail_uncached(path, max_lines, &mut self.work)
+        else {
+            return Vec::new();
+        };
+        // A writer can append/truncate/rotate while we read. Return this pass,
+        // but only memoize a complete read of an unchanged file at this path.
+        let after = std::fs::metadata(path)
+            .ok()
+            .and_then(|metadata| LogFileStamp::from_metadata(&metadata));
+        if let Some(stamp) = read_stamp.filter(|value| Some(value) == after.as_ref()) {
+            // Discovery normally yields ten paths. Bound retention even when
+            // callers change overrides or ask for different sources over time.
+            if self.files.len() >= 16 {
+                if let Some(oldest) = self
+                    .files
+                    .iter()
+                    .min_by_key(|(_, tail)| tail.accessed)
+                    .map(|(path, _)| path.clone())
+                {
+                    self.files.remove(&oldest);
+                }
+            }
+            self.files.insert(
+                path.clone(),
+                CachedLogTail {
+                    stamp,
+                    max_lines,
+                    entries: entries.clone(),
+                    accessed: self.clock,
+                },
+            );
+        }
+        entries
+    }
+}
+
+/// Read the last N lines, reusing parsed tails only while file identity, length
+/// and mtime are unchanged. A single latch also prevents concurrent IPC reads
+/// from parsing the same unchanged tail twice.
 pub fn read_log_tail(path: &PathBuf, max_lines: usize) -> Vec<LogEntry> {
+    static CACHE: OnceLock<Mutex<LogTailCache>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| Mutex::new(LogTailCache::default()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .read(path, max_lines)
+}
+
+/// Seek from the end rather than loading the entire log into memory.
+fn read_log_tail_uncached(
+    path: &PathBuf,
+    max_lines: usize,
+    work: &mut LogTailWork,
+) -> std::io::Result<(Vec<LogEntry>, Option<LogFileStamp>)> {
     use std::io::{Read, Seek, SeekFrom};
 
-    let mut file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-
-    let file_len = match file.seek(SeekFrom::End(0)) {
-        Ok(len) => len,
-        Err(_) => return Vec::new(),
-    };
+    let mut file = std::fs::File::open(path)?;
+    let stamp = LogFileStamp::from_metadata(&file.metadata()?);
+    let file_len = file.seek(SeekFrom::End(0))?;
 
     if file_len == 0 {
-        return Vec::new();
+        return Ok((Vec::new(), stamp));
     }
 
     // Read backwards in 64KB chunks until we have enough newlines
@@ -954,12 +1066,13 @@ pub fn read_log_tail(path: &PathBuf, max_lines: usize) -> Vec<LogEntry> {
     while pos > 0 && newline_count <= max_lines {
         let read_size = std::cmp::min(chunk_size, pos);
         pos -= read_size;
-        if file.seek(SeekFrom::Start(pos)).is_err() {
-            break;
-        }
+        file.seek(SeekFrom::Start(pos))?;
         let mut buf = vec![0u8; read_size as usize];
-        if file.read_exact(&mut buf).is_err() {
-            break;
+        file.read_exact(&mut buf)?;
+        #[cfg(test)]
+        {
+            work.reads += 1;
+            work.bytes += read_size;
         }
         // Count newlines in this chunk
         newline_count += buf.iter().filter(|&&b| b == b'\n').count();
@@ -978,10 +1091,17 @@ pub fn read_log_tail(path: &PathBuf, max_lines: usize) -> Vec<LogEntry> {
         0
     };
 
-    lines[start..]
+    #[cfg(not(test))]
+    let _ = work;
+    #[cfg(test)]
+    {
+        work.parses += (lines.len() - start) as u64;
+    }
+    let entries = lines[start..]
         .iter()
         .filter_map(|line| parse_log_line(line))
-        .collect()
+        .collect();
+    Ok((entries, stamp))
 }
 
 /// Read recent entries from every harness log, retaining the newest entries
@@ -1002,9 +1122,10 @@ pub fn read_log_tails(paths: &[PathBuf], max_lines: usize) -> Vec<LogEntry> {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_bust_cause, extract_cache_events, log_spec_admits, parse_log_line, parse_log_record, read_log_tail,
-        read_log_tails, resolve_log_path_for, resolve_log_path_from_temp_dir, resolve_log_paths,
-        Harness, LogEntry, LogGrammar, Regex,
+        detect_bust_cause, extract_cache_events, log_spec_admits, parse_log_line, parse_log_record,
+        read_log_tail, read_log_tail_uncached, read_log_tails, resolve_log_path_for,
+        resolve_log_path_from_temp_dir, resolve_log_paths, Harness, LogEntry, LogGrammar,
+        LogTailCache, LogTailWork, Regex,
     };
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -1515,6 +1636,122 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].session_id, "opencode-session");
         assert_eq!(entries[1].session_id, "pi-session");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unchanged_log_tails_measure_reads_and_parses_per_minute() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths: Vec<_> = (0..10)
+            .map(|source| {
+                let path = directory.path().join(format!("{source}.log"));
+                let text: String = (0..500)
+                    .map(|line| {
+                        format!(
+                "[2026-01-01T00:00:00.000Z] [magic-context][source-{source}] line {line} {}\n",
+                "x".repeat(160),
+            )
+                    })
+                    .collect();
+                std::fs::write(&path, text).unwrap();
+                path
+            })
+            .collect();
+        let mut before = LogTailWork::default();
+        let mut after = LogTailCache::default();
+        for _ in 0..20 {
+            for path in &paths {
+                let (expected, _) = read_log_tail_uncached(path, 500, &mut before).unwrap();
+                let actual = after.read(path, 500);
+                assert_eq!(
+                    serde_json::to_value(actual).unwrap(),
+                    serde_json::to_value(expected).unwrap()
+                );
+            }
+        }
+        assert_eq!(before.reads, 400);
+        assert_eq!(before.parses, 100_000);
+        assert_eq!(after.work.reads, 20);
+        assert_eq!(after.work.parses, 5_000);
+        assert_eq!(before.bytes, after.work.bytes * 20);
+        println!("Log work/minute, 10 unchanged 500-line files, 20 polls: before reads={} parses={} bytes={}; after reads={} parses={} bytes={}",
+            before.reads, before.parses, before.bytes, after.work.reads, after.work.parses, after.work.bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cached_log_tail_invalidates_on_rewrite_rotation_truncation_and_removal() {
+        use std::fs::{File, FileTimes};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("current.log");
+        let line =
+            |message: &str| format!("[2026-01-01T00:00:00.000Z] [magic-context][s] {message}\n");
+        std::fs::write(&path, line("first")).unwrap();
+        let mut cache = LogTailCache::default();
+        assert_eq!(cache.read(&path, 10)[0].message, "first");
+        let original_time = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, line("other")).unwrap(); // Same size, new mtime.
+        File::open(&path)
+            .unwrap()
+            .set_times(
+                FileTimes::new().set_modified(original_time + std::time::Duration::from_secs(1)),
+            )
+            .unwrap();
+        assert_eq!(cache.read(&path, 10)[0].message, "other");
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::rename(&path, directory.path().join("rotated.log")).unwrap();
+        std::fs::write(&path, line("third")).unwrap(); // Same size AND mtime; inode must invalidate.
+        File::open(&path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert_eq!(cache.read(&path, 10)[0].message, "third");
+        std::fs::write(&path, "").unwrap();
+        assert!(cache.read(&path, 10).is_empty());
+        std::fs::write(&path, format!("{}{}", line("again"), line("newer"))).unwrap();
+        assert_eq!(cache.read(&path, 1)[0].message, "newer");
+        assert_eq!(cache.read(&path, 2).len(), 2); // A different limit must not reuse a shorter tail.
+        std::fs::remove_file(&path).unwrap();
+        assert!(cache.read(&path, 2).is_empty());
+        std::fs::write(&path, line("fresh")).unwrap();
+        assert_eq!(cache.read(&path, 2)[0].message, "fresh");
+    }
+
+    #[test]
+    fn merged_cached_tails_keep_stable_ties_and_newest_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths: Vec<_> = ["a", "b", "c"].iter().map(|source| {
+            let path = directory.path().join(source);
+            std::fs::write(&path, format!(
+                "[2026-01-01T00:00:00.000Z] [magic-context][{source}] old\n[2026-01-01T00:00:01.000Z] [magic-context][{source}] tied\n"
+            )).unwrap();
+            path
+        }).collect();
+        for _ in 0..2 {
+            let actual: Vec<_> = read_log_tails(&paths, 4)
+                .iter()
+                .map(|entry| (entry.session_id.clone(), entry.message.clone()))
+                .collect();
+            assert_eq!(
+                actual,
+                [("c", "old"), ("a", "tied"), ("b", "tied"), ("c", "tied")]
+                    .map(|(source, message)| (source.to_string(), message.to_string()))
+            );
+        }
+        std::fs::write(
+            &paths[1],
+            "[2026-01-01T00:00:02.000Z] [magic-context][b] rotated\n",
+        )
+        .unwrap();
+        let actual: Vec<_> = read_log_tails(&paths, 3)
+            .iter()
+            .map(|entry| (entry.session_id.clone(), entry.message.clone()))
+            .collect();
+        assert_eq!(
+            actual,
+            [("a", "tied"), ("c", "tied"), ("b", "rotated")]
+                .map(|(source, message)| (source.to_string(), message.to_string()))
+        );
     }
 
     #[test]

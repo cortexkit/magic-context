@@ -78,7 +78,8 @@ export interface V2CommandDomain {
 }
 
 export interface V2Context {
-    location: { directory: string };
+    /** OpenCode 2 keys a location by directory and, when one is set, workspace. */
+    location: { directory: string; workspaceID?: string };
     agent: V2AgentDomain;
     /** Absent on hosts predating the command domain; registration is then skipped. */
     command?: V2CommandDomain;
@@ -142,6 +143,8 @@ export interface V2Context {
             callback: (draft: {
                 tool: string;
                 sessionID: string;
+                /** The agent the calling session runs. */
+                agent?: string;
                 input: unknown;
                 status?: string;
                 result?: { content?: unknown };
@@ -157,12 +160,14 @@ export interface V2Context {
             metadata: { magic_context: "hidden-run"; role: "historian" | "dreamer" };
             /** Kept only by hosts that also have the optional `session.remove` declared below. */
             parentID?: string;
+            /** Session rules, evaluated after every rule of the session's agent. */
+            permissions?: Array<{ action: string; resource: string; effect: "allow" | "deny" }>;
         }): Promise<{ id: string }>;
         get(input: { sessionID: string }): Promise<{
             model?: { providerID: string; id: string; variant?: string };
             parentID?: string;
-            /** The directory the host bound the session to when it was created. */
-            location?: { directory?: string };
+            /** The location the host bound the session to when it was created. */
+            location?: { directory?: string; workspaceID?: string };
         }>;
         switchModel(input: {
             sessionID: string;

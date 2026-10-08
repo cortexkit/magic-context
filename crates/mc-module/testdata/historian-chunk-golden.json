@@ -168,7 +168,10 @@
           }
         ],
         "commitClusterCount": 0,
-        "toolOnlyRanges": []
+        "toolOnlyRanges": [],
+        "completedToolArcs": [],
+        "toolResultBoundaries": [],
+        "inputSource": "Messages 1-4:\n\n[1-3] A: I will inspect / TC: read(src/lib.rs)\n[4] U: continue"
       }
     },
     {
@@ -307,7 +310,10 @@
             "start": 2,
             "end": 2
           }
-        ]
+        ],
+        "completedToolArcs": [],
+        "toolResultBoundaries": [],
+        "inputSource": "Messages 2-3:\n\n[2] A: TC: read(src/lib.rs)\n[3] U: after"
       }
     },
     {
@@ -442,7 +448,10 @@
           }
         ],
         "commitClusterCount": 0,
-        "toolOnlyRanges": []
+        "toolOnlyRanges": [],
+        "completedToolArcs": [],
+        "toolResultBoundaries": [],
+        "inputSource": "Messages 1-1:\n\n[1] U: short"
       }
     },
     {
@@ -582,7 +591,10 @@
             "start": 1,
             "end": 2
           }
-        ]
+        ],
+        "completedToolArcs": [],
+        "toolResultBoundaries": [],
+        "inputSource": "Messages 1-3:\n\n[1-2] A: TC: read(one) / TC: read(two)\n[3] U: narrative"
       }
     },
     {
@@ -729,7 +741,10 @@
           }
         ],
         "commitClusterCount": 2,
-        "toolOnlyRanges": []
+        "toolOnlyRanges": [],
+        "completedToolArcs": [],
+        "toolResultBoundaries": [],
+        "inputSource": "Messages 1-4:\n\n[1] U: go\n[2] A: commits: abcdef1 committed with fix\n[3] U: again\n[4] A: commits: abcdef2 commit with more"
       }
     },
     {
@@ -841,7 +856,10 @@
           }
         ],
         "commitClusterCount": 0,
-        "toolOnlyRanges": []
+        "toolOnlyRanges": [],
+        "completedToolArcs": [],
+        "toolResultBoundaries": [],
+        "inputSource": "Messages 1-3:\n\n[1] U: hello\n[2-3] A: done"
       }
     },
     {
@@ -928,7 +946,10 @@
           }
         ],
         "commitClusterCount": 0,
-        "toolOnlyRanges": []
+        "toolOnlyRanges": [],
+        "completedToolArcs": [],
+        "toolResultBoundaries": [],
+        "inputSource": "Messages 1-2:\n\n[1-2] U: real user text"
       }
     },
     {
@@ -1003,7 +1024,100 @@
           }
         ],
         "commitClusterCount": 0,
-        "toolOnlyRanges": []
+        "toolOnlyRanges": [],
+        "completedToolArcs": [],
+        "toolResultBoundaries": [],
+        "inputSource": "Messages 1-2:\n\n[1-2] U: real user text"
+      }
+    },
+    {
+      "label": "omitted-background-notice-gap",
+      "budget": 10000,
+      "offset": 1,
+      "eligibleEnd": 4,
+      "exercises": [
+        "ordinal_gap"
+      ],
+      "ts": [
+        {
+          "ordinal": 1,
+          "id": "u1",
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "text": "start"
+            }
+          ]
+        },
+        {
+          "ordinal": 3,
+          "id": "a3",
+          "role": "assistant",
+          "parts": [
+            {
+              "type": "text",
+              "text": "continued"
+            }
+          ]
+        }
+      ],
+      "ck": [
+        {
+          "mid": "u1",
+          "ordinal": 1,
+          "ck": {
+            "role": "user",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "start"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "mid": "a3",
+          "ordinal": 3,
+          "ck": {
+            "role": "assistant",
+            "content": [
+              {
+                "kind": {
+                  "type": "text",
+                  "text": "continued"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expected": {
+        "startIndex": 1,
+        "endIndex": 3,
+        "startMessageId": "u1",
+        "endMessageId": "a3",
+        "messageCount": 2,
+        "tokenEstimate": 12,
+        "hasMore": false,
+        "text": "[1] U: start\n[3] A: continued",
+        "lines": [
+          {
+            "ordinal": 1,
+            "messageId": "u1"
+          },
+          {
+            "ordinal": 3,
+            "messageId": "a3"
+          }
+        ],
+        "commitClusterCount": 0,
+        "toolOnlyRanges": [],
+        "completedToolArcs": [],
+        "toolResultBoundaries": [],
+        "inputSource": "Messages 1-3:\n\n[1] U: start\n[3] A: continued"
       }
     },
     {
@@ -1197,7 +1311,10 @@
             "start": 1,
             "end": 4
           }
-        ]
+        ],
+        "completedToolArcs": [],
+        "toolResultBoundaries": [],
+        "inputSource": "Messages 1-4:\n\n[1-4] A: TC: read(one.rs) / TC: read(one.rs) / TC: read(two.rs) / TC: read(two.rs)"
       }
     },
     {
@@ -1254,7 +1371,10 @@
           }
         ],
         "commitClusterCount": 1,
-        "toolOnlyRanges": []
+        "toolOnlyRanges": [],
+        "completedToolArcs": [],
+        "toolResultBoundaries": [],
+        "inputSource": "Messages 1-1:\n\n[1] A: commits: 1111111, 2222222, 3333333, 4444444, 5555555 committed with cap"
       }
     },
     {
@@ -1311,7 +1431,10 @@
           }
         ],
         "commitClusterCount": 1,
-        "toolOnlyRanges": []
+        "toolOnlyRanges": [],
+        "completedToolArcs": [],
+        "toolResultBoundaries": [],
+        "inputSource": "Messages 1-1:\n\n[1] A: commits: abcdef1 committed, cleanup"
       }
     },
     {
@@ -1420,7 +1543,10 @@
           }
         ],
         "commitClusterCount": 0,
-        "toolOnlyRanges": []
+        "toolOnlyRanges": [],
+        "completedToolArcs": [],
+        "toolResultBoundaries": [],
+        "inputSource": "Messages 1-1:\n\n[1] U: short"
       }
     }
   ],

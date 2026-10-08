@@ -393,6 +393,7 @@ export async function createV2HiddenCompletionExecutor(
             keepSubagents: options.keepSubagents === true,
             log: note,
             removalTimeoutMs: options.removalTimeoutMs,
+            directory: options.directory,
         },
     );
 

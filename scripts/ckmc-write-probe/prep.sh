@@ -28,8 +28,8 @@ run)
     rm -rf "$R"; mkdir -p "$R/data/cortexkit/magic-context" "$R/oc" "$R/bin"
     cp -c "$G/mc/store.db" "$G/mc/context.db" "$R/data/cortexkit/magic-context/"
     cp -c "$G/oc/opencode.db" "$R/oc/"
-    cp "${CKMC_PROBE_CK_MC:-$HOME/.local/share/cortexkit/bin/ck-mc}" "$R/bin/ck-mc"
-    cp "${CKMC_PROBE_CK_SUBC:-$HOME/.local/share/cortexkit/bin/ck-subc}" "$R/bin/ck-subc"
+    cp "${CKMC_PROBE_CK_MC:-$HOME/.local/share/cortexkit/bin/ck-mc}" "$R/bin/ckdev-mc"
+    cp "${CKMC_PROBE_CK_SUBC:-$HOME/.local/share/cortexkit/bin/ck-subc}" "$R/bin/ckdev-subc"
     # The clone sits at a new path, so its lease file starts at epoch 1; reset the copied
     # writer fence so the probe module is not fenced out by the live writer's epoch.
     sqlite3 "$R/data/cortexkit/magic-context/store.db" "update cortexkit_fence set epoch = 0;"

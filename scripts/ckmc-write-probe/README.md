@@ -17,7 +17,7 @@ python3 summarize.py $TMPDIR/magic-context/ckmc-writes/run1/passes.jsonl
 python3 walcommits.py $TMPDIR/magic-context/ckmc-writes/run1/data/cortexkit/magic-context/store.db
 ```
 
-`drive.ts` starts a private `ck-subc` and `ck-mc` (copies of the installed binaries, or `CKMC_PROBE_CK_MC` / `CKMC_PROBE_CK_SUBC`), the hermetic historian producer when `PROBE_BROCA=1`, and drives the plugin's real Rust-mode transform with the session's messages since its newest compaction. `PROBE_PLAN` lists the passes: `first`, `defer` (no new message), `newmsg` (one new agent step), `execute` (usage above the threshold), `hard` (model switch, which changes the render identity), `historian` (usage high enough to fire the historian), `wait_historian` (let a historian run publish, then pass).
+`drive.ts` starts a private `ckdev-subc` and `ckdev-mc` (dev-named copies of the installed binaries, or inputs from `CKMC_PROBE_CK_MC` / `CKMC_PROBE_CK_SUBC`), the hermetic historian producer when `PROBE_BROCA=1`, and drives the plugin's real Rust-mode transform with the session's messages since its newest compaction. `PROBE_PLAN` lists the passes: `first`, `defer` (no new message), `newmsg` (one new agent step), `execute` (usage above the threshold), `hard` (model switch, which changes the render identity), `historian` (usage high enough to fire the historian), `wait_historian` (let a historian run publish, then pass).
 
 Per pass it records the module's disk-write counter (`rusage.py`, macOS `proc_pid_rusage`), the WAL frames appended to each store (`walattr.py`), the owning table of every written `store.db` page, the session's row sizes (`rowinfo.py`) and the SHA-256 of the served messages.
 
@@ -30,7 +30,7 @@ Confirm isolation with `lsof -p <pid>` on the probe's `ck-mc` and `ck-subc`: eve
 
 ## The proposed migration 63
 
-`migcheck/` holds the exact migration text (`migration63.sql`) and a Rust probe that runs it with the SQLite ck-mc links (3.46.0, through `rusqlite =0.32.1` with `bundled`). The crate is outside the repository's Cargo workspace; build it from a copy so no `Cargo.lock` or `target/` lands here:
+`migcheck/` holds the exact migration text (`migration63.sql`) and a Rust probe that runs it with the SQLite ck-mc links (3.46.0, through `rusqlite =0.32.1` with `bundled`). The crate is outside the repository's Cargo workspace, and its committed `Cargo.lock` pins that dependency resolution. Build it from a copy so no build output lands here:
 
 ```sh
 W=$TMPDIR/magic-context/ckmc-writes-r2

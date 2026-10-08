@@ -34,7 +34,11 @@ import type { SubagentRunOptions } from "@magic-context/core/shared/subagent-run
 import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
-import { __test, PiSubagentRunner } from "./subagent-runner";
+import {
+	__test,
+	configurePiSubagentHostTools,
+	PiSubagentRunner,
+} from "./subagent-runner";
 
 const baseOptions: SubagentRunOptions = {
 	agent: "historian",
@@ -3214,6 +3218,67 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		expect(spawnImpl.mock.calls[1]?.[1]).toEqual(
 			expect.arrayContaining(["--model", "openai-codex/fallback"]),
 		);
+	});
+
+	it("plain Pi never reads a loading-phase host tool registry", async () => {
+		const getTools = mock(() => {
+			throw new Error(
+				"Extension runtime not initialized. Action methods cannot be called during extension loading.",
+			);
+		});
+		configurePiSubagentHostTools(getTools);
+		for (const agent of [
+			"historian",
+			"historian-recomp",
+			"dreamer-memory-mapper",
+		]) {
+			const child = createMockChild();
+			const { runner, spawnImpl } = runnerWith(child, {
+				invocation: { command: "pi-test", prefixArgs: [], targetHarness: "pi" },
+				getHostToolNames: getTools,
+			});
+			const result = runner.run({ ...baseOptions, agent });
+			child.writeStdoutLine(
+				agentEnd([
+					{ role: "assistant", content: [{ type: "text", text: "done" }] },
+				]),
+			);
+			child.emitClose(0);
+			expect((await result).ok).toBe(true);
+			expect(spawnImpl).toHaveBeenCalledTimes(1);
+			if (agent === "dreamer-memory-mapper") {
+				const args = spawnImpl.mock.calls[0]?.[1] as string[];
+				expect(args[args.indexOf("--tools") + 1]).toBe(
+					"read,grep,find,ls,aft_outline,aft_zoom,aft_search",
+				);
+			}
+		}
+		expect(getTools).not.toHaveBeenCalled();
+	});
+
+	it("OMP launches with its normal tools when the host registry is not initialized", async () => {
+		configurePiSubagentHostTools(() => {
+			throw new Error(
+				"Extension runtime not initialized. Action methods cannot be called during extension loading.",
+			);
+		});
+		const child = createMockChild();
+		const { runner, spawnImpl } = runnerWith(child, {
+			invocation: { command: "omp-test", prefixArgs: [], targetHarness: "omp" },
+		});
+		const result = runner.run({
+			...baseOptions,
+			agent: "dreamer-memory-mapper",
+		});
+		child.writeStdoutLine(
+			agentEnd([
+				{ role: "assistant", content: [{ type: "text", text: "done" }] },
+			]),
+		);
+		child.emitClose(0);
+		expect((await result).ok).toBe(true);
+		const args = spawnImpl.mock.calls[0]?.[1] as string[];
+		expect(args[args.indexOf("--tools") + 1]).toBe("read,grep,glob");
 	});
 
 	it("applies the host tool intersection to fallback child invocations", async () => {

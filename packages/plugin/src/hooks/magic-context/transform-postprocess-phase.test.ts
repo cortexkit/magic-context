@@ -11831,3 +11831,107 @@ it("a rotated held drop strips newer signed reasoning on its priced application"
 });
 
 import { planEmergencyDrop } from "./emergency-drop";
+
+it("logs the executed pressure fold reason instead of the earlier soft decision", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "ses-fold-log-reason";
+    const projectPath = "git:fold-log-reason";
+    const state = getOrCreateSessionMeta(db, sessionId);
+    const m0M1 = {
+        projectPath,
+        projectDirectory: "/missing-fold-log-project",
+        injectDocs: false,
+        historyBudgetTokens: 1000,
+    };
+    injectM0M1({ db, sessionId, state, ...m0M1 });
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 0,
+            startMessage: 0,
+            endMessage: 1,
+            startMessageId: "fold-log-start",
+            endMessageId: "fold-log-end",
+            title: "Large delta",
+            content: "Large delta",
+            p1: "substantive history ".repeat(600),
+            p2: "summary",
+            p3: "outcome",
+            p4: "anchor",
+            importance: 70,
+            legacy: 0,
+        },
+    ]);
+    const log = spyOn(loggerModule, "sessionLog").mockImplementation(() => {});
+    try {
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, [], { schedulerDecision: "execute", m0M1 }),
+        );
+        const lines = log.mock.calls.map((call) => call[1]);
+        expect(lines).toContain(
+            "m[0] HARD fold decision: reason=drift executed=true bustsServedPrefix=true",
+        );
+        expect(lines.some((line) => line.includes("reason=unknown"))).toBe(false);
+    } finally {
+        log.mockRestore();
+    }
+});
+
+it("fold preparation retries rather than overwriting a changed legacy tool tag", async () => {
+    db = new Database(":memory:");
+    initializeDatabase(db);
+    const sessionId = "ses-fold-tag-snapshot";
+    getOrCreateSessionMeta(db, sessionId);
+    db.prepare(
+        "INSERT INTO tags (session_id, tag_number, type, status, drop_mode) VALUES (?, 1, 'tool', 'dropped', 'truncated')",
+    ).run(sessionId);
+    const targets = new Map<number, TagTarget>([
+        [
+            1,
+            {
+                canDrop: () => true,
+                inputStringBytes: () => 10,
+                cannotRemove: () => false,
+                wouldStrandConversationEnd: () => false,
+                drop: () => "absent",
+                skeletonReal: () => "absent",
+            } as TagTarget,
+        ],
+    ]);
+    const original = compartmentInjection.injectM0M1;
+    let attempts = 0;
+    const inject = spyOn(compartmentInjection, "injectM0M1").mockImplementation((options) =>
+        original({
+            ...options,
+            beforeCacheCommitForTest: () => {
+                attempts++;
+                if (attempts === 1)
+                    db.prepare(
+                        "UPDATE tags SET status = 'active', drop_mode = 'full' WHERE session_id = ? AND tag_number = 1",
+                    ).run(sessionId);
+            },
+        }),
+    );
+    try {
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, [], {
+                targets,
+                m0M1: {
+                    projectPath: "git:fold-tag-snapshot",
+                    projectDirectory: "/missing-fold-tag-project",
+                    injectDocs: false,
+                },
+            }),
+        );
+        expect(attempts).toBe(2);
+        expect(
+            db
+                .prepare(
+                    "SELECT status, drop_mode FROM tags WHERE session_id = ? AND tag_number = 1",
+                )
+                .get(sessionId),
+        ).toEqual({ status: "active", drop_mode: "full" });
+    } finally {
+        inject.mockRestore();
+    }
+});

@@ -228,9 +228,9 @@ import { handlePiProviderFailure } from "./provider-error-recovery-pi";
 import { bindStaleBuildNotice } from "./stale-build-notice";
 import { registerStatusLine, updateStatusLine } from "./status-line";
 import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
+import { registerPiSubagentHostTools } from "./subagent-host-tools";
 import {
 	configurePiSubagentExtensions,
-	configurePiSubagentHostTools,
 	MAGIC_CONTEXT_PI_SUBAGENT_ENV,
 	PiSubagentRunner,
 } from "./subagent-runner";
@@ -1175,13 +1175,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		);
 		return;
 	}
-	configurePiSubagentHostTools(() => {
-		if (typeof pi.getAllTools === "function") {
-			return pi.getAllTools().map((tool) => tool.name);
-		}
-		if (typeof pi.getActiveTools === "function") return pi.getActiveTools();
-		return undefined;
-	});
+	registerPiSubagentHostTools(pi, PI_HARNESS_KIND);
 	const unregisterPiSubagentInitContext = registerPiSubagentInitContext(pi);
 	registerPiSubagentInitContextCleanup(pi, unregisterPiSubagentInitContext);
 

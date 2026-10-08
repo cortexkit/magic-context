@@ -312,6 +312,11 @@ export function checkStatusViewSource(candidate: unknown):
         lastDreamerRunAt: optional.read("lastDreamerRunAt", isNullableNumber),
         dreamerUnsupportedTasks: optional.readArray("dreamerUnsupportedTasks", isString),
         dreamerSkipped: optional.readArray("dreamerSkipped", isString),
+        dreamerFailures: optional.readArray(
+            "dreamerFailures",
+            (value): value is { task: string; error: string } =>
+                isRecord(value) && isString(value.task) && isString(value.error),
+        ),
         dreamerTickFailure: optional.read(
             "dreamerTickFailure",
             (value): value is NonNullable<StatusViewSource["dreamerTickFailure"]> | null =>

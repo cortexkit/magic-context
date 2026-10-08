@@ -13,6 +13,7 @@ import {
     type StoreRow,
     type V2StoreReader,
 } from "../store-reader";
+import { toolStateContent } from "../tool-result";
 
 const rawMessageTypes = new Set<MessageType>(RAW_MESSAGE_TYPES);
 const isRawRow = (row: StoreRow) => rawMessageTypes.has(row.type);
@@ -58,10 +59,12 @@ function projectRawMessages(
                               state: {
                                   ...state,
                                   output:
-                                      content
-                                          ?.filter((p) => p.type === "text")
-                                          .map((p) => p.text)
-                                          .join("\n") ?? "",
+                                      state.status === "error"
+                                          ? toolStateContent(state)
+                                          : (content
+                                                ?.filter((p) => p.type === "text")
+                                                .map((p) => p.text)
+                                                .join("\n") ?? ""),
                               },
                           };
                       })

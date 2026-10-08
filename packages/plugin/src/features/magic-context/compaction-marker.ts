@@ -335,12 +335,18 @@ export function findBoundaryUserMessage(
 
     // Match the raw-message reader's canonical ASC order
     // (time_created ASC, id ASC). "At or before target" is therefore
-    // time_created < target.time_created OR the same timestamp with id <= target.id.
+    // the inclusive row-value upper bound (time_created, id) <= target's key.
+    // Unlike the equivalent OR expression, this lets SQLite seek directly to
+    // the target in OpenCode's (session_id, time_created, id) index, then walk
+    // backwards until LIMIT 1. The OR form can scan the entire session suffix,
+    // or choose multiple index walks and sort all qualifying rows after parsing
+    // their JSON. Both do work unrelated to the nearest qualifying user.
     // Push role='user' into SQL so a long assistant/tool span before the target
     // cannot exhaust a JS scan window and miss the prior user.
     // Disqualify the session-only part index with unary +, just as lineage
     // cleanup does. A session may have a million parts; each EXISTS must inspect
-    // only this message's parts. The session identity is still checked.
+    // only this message's parts. The session identity is still checked. The
+    // selectivity hint also avoids full part scans with stale host statistics.
     const boundary = db
         .prepare(
             `SELECT id, time_created, data
@@ -349,13 +355,13 @@ export function findBoundaryUserMessage(
                AND NOT (COALESCE(json_extract(data, '$.summary'), 0) = 1
                         AND COALESCE(json_extract(data, '$.finish'), '') = 'stop')
                AND COALESCE(json_extract(data, '$.role'), '') = 'user'
-               AND (time_created < ? OR (time_created = ? AND id <= ?))
+               AND (time_created, id) <= (?, ?)
                 AND NOT (
                     EXISTS (SELECT 1 FROM part p
-                            WHERE p.message_id = message.id AND +p.session_id = message.session_id
+                            WHERE likelihood(p.message_id = message.id, 0.000001) AND +p.session_id = message.session_id
                               AND COALESCE(json_extract(p.data, '$.type'), '') <> 'compaction')
                     AND NOT EXISTS (SELECT 1 FROM part p
-                                    WHERE p.message_id = message.id AND +p.session_id = message.session_id
+                                    WHERE likelihood(p.message_id = message.id, 0.000001) AND +p.session_id = message.session_id
                                       AND COALESCE(json_extract(p.data, '$.type'), '') <> 'compaction'
                                       AND COALESCE(json_extract(p.data, '$.synthetic'), 0) <> 1
                                       AND COALESCE(json_extract(p.data, '$.syntheticTodoMarker'), 0) <> 1)
@@ -363,7 +369,7 @@ export function findBoundaryUserMessage(
               ORDER BY time_created DESC, id DESC
              LIMIT 1`,
         )
-        .get(sessionId, target.timeCreated, target.timeCreated, target.id) as
+        .get(sessionId, target.timeCreated, target.id) as
         | { id?: unknown; time_created?: unknown; data?: unknown }
         | undefined;
 
@@ -412,29 +418,22 @@ export function isOpenCodeGapHistorianAbsent(
     )
         return false;
     // Keep these correlated probes on the message_id index too, rather than
-    // rescanning all session parts for every message in the gap.
+    // rescanning all session parts for every message in the gap. Row-value
+    // bounds let the message index seek to the gap rather than scan the session.
     const row = getWritableOpenCodeDb()
         .prepare(`SELECT 1 FROM message m
         WHERE m.session_id=?
-          AND (m.time_created>? OR (m.time_created=? AND m.id>?))
-          AND (m.time_created<? OR (m.time_created=? AND m.id<?))
+          AND (m.time_created, m.id) > (?, ?)
+          AND (m.time_created, m.id) < (?, ?)
           AND NOT (COALESCE(json_type(m.data,'$.summary'),'')='true' AND COALESCE(json_extract(m.data,'$.finish'),'')='stop')
           AND NOT (
-            EXISTS (SELECT 1 FROM part p WHERE p.message_id=m.id AND +p.session_id=m.session_id AND COALESCE(json_extract(p.data,'$.type'),'')<>'compaction')
-            AND NOT EXISTS (SELECT 1 FROM part p WHERE p.message_id=m.id AND +p.session_id=m.session_id
+            EXISTS (SELECT 1 FROM part p WHERE likelihood(p.message_id=m.id, 0.000001) AND +p.session_id=m.session_id AND COALESCE(json_extract(p.data,'$.type'),'')<>'compaction')
+            AND NOT EXISTS (SELECT 1 FROM part p WHERE likelihood(p.message_id=m.id, 0.000001) AND +p.session_id=m.session_id
                 AND COALESCE(json_extract(p.data,'$.type'),'')<>'compaction'
                 AND COALESCE(json_type(p.data,'$.synthetic'),'')<>'true'
                 AND COALESCE(json_type(p.data,'$.syntheticTodoMarker'),'')<>'true')
           ) LIMIT 1`)
-        .get(
-            sessionId,
-            end.timeCreated,
-            end.timeCreated,
-            end.id,
-            next.timeCreated,
-            next.timeCreated,
-            next.id,
-        );
+        .get(sessionId, end.timeCreated, end.id, next.timeCreated, next.id);
     return !row;
 }
 

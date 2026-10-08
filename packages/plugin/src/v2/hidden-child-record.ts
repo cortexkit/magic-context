@@ -3,7 +3,9 @@ import {
     HIDDEN_CURATE_AGENT,
     HIDDEN_DREAMER_AGENT,
     HIDDEN_HISTORIAN_AGENT,
+    type HiddenPermissionRule,
     hiddenAgentFor,
+    hiddenChildPermissions,
     hiddenToolLoop,
 } from "./hooks/hidden-child";
 import type { StoreRow } from "./store-reader";
@@ -45,6 +47,8 @@ export interface HiddenChildHost {
         metadata: { magic_context: "hidden-run"; role: HiddenChildRole };
         /** A child inherits this parent's location. */
         parentID?: string;
+        /** Session rules; the host evaluates them after every rule of the agent. */
+        permissions?: HiddenPermissionRule[];
     }): Promise<{ id: string }>;
     get(input: { sessionID: string }): Promise<{
         model?: { providerID: string; id: string; variant?: string };
@@ -52,6 +56,8 @@ export interface HiddenChildHost {
         error?: unknown;
         /** The parent the host stored for the session, on hosts that keep one. */
         parentID?: string;
+        /** The location the host bound the session to; a child takes its parent's. */
+        location?: { directory?: string; workspaceID?: string };
     }>;
     /** Optional event-backed error lookup for hosts that do not retain the reason on session.get. */
     terminalError?(input: { sessionID: string }): Promise<unknown>;
@@ -129,9 +135,10 @@ export function childCreateInput(
     role: HiddenChildRole,
     model: HiddenChildModel,
 ): Parameters<HiddenChildHost["create"]>[0] {
+    const agent = hiddenToolLoop(identity) ? hiddenAgentFor(identity) : roleAgent(role);
     return {
         title: roleTitle(role),
-        agent: hiddenToolLoop(identity) ? hiddenAgentFor(identity) : roleAgent(role),
+        agent,
         model: {
             providerID: model.providerID,
             id: model.modelID,
@@ -139,6 +146,10 @@ export function childCreateInput(
         },
         location: { directory: identity.directory },
         metadata: { magic_context: "hidden-run", role },
+        // The agent's own allowlist again, as session rules: the host evaluates
+        // these after the agent's rules (which end with the user's global ones),
+        // so here the allowlist is the last word on what the child may call.
+        permissions: hiddenChildPermissions(agent),
     };
 }
 

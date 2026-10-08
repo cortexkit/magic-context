@@ -42,7 +42,7 @@ sha2 = "0.10"
 [patch."https://github.com/cortexkit/subconscious"]
 subc-cgroup = { version = "=0.1.5" }
 subc-control = { version = "=0.28.0" }
-subc-daemon = { version = "=0.31.1" }
+subc-daemon = { version = "=0.31.2" }
 subc-jobobject = { version = "=0.2.0" }
 subc-jsonc = { version = "=0.1.2" }
 subc-os = { version = "=0.1.5" }

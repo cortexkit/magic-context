@@ -41,7 +41,10 @@ import {
     getCurrentToolSetHash,
     recordToolDefinition,
 } from "../../features/magic-context/tool-definition-tokens";
-import type { HiddenCompletionExecutor } from "../../hooks/magic-context/compartment-runner-types";
+import {
+    type HiddenCompletionExecutor,
+    HiddenCompletionRefusal,
+} from "../../hooks/magic-context/compartment-runner-types";
 import { resolveCtxReduceAvailabilityFromMessages } from "../../hooks/magic-context/ctx-reduce-availability";
 import { DegradedPassRefusalError } from "../../hooks/magic-context/degraded-pass-refusal";
 import {
@@ -141,7 +144,7 @@ import { resolveManualDreamTask, runManualDreamNow } from "./dream-manual";
 import { registerV2DreamScheduleTimer } from "./dream-timer";
 import { startDreamTrigger } from "./dream-trigger";
 import { V2GenerateReplay } from "./generate";
-import { HiddenChildHook, registerHiddenChildAgents } from "./hidden-child";
+import { HiddenChildHook, hiddenToolCallRefusal, registerHiddenChildAgents } from "./hidden-child";
 import { hiddenTerminalError } from "./hidden-terminal-error";
 import { V2LkgSystemReplay } from "./lkg-system";
 import { modelLimitCacheWarm, warmModelLimitCacheFromCatalog } from "./model-limit-cache";
@@ -735,6 +738,19 @@ export async function registerContext(context: V2Context) {
         }
     });
     await registerHiddenChildAgents(context.agent);
+    // Registered before anything can start a hidden run. A hidden child's tool
+    // call is checked against that agent's fixed allowlist whatever the user's
+    // permissions allow: the host appends the user's rules after the agent's
+    // own, so the agent registration alone cannot keep edit or shell away.
+    await context.tool.hook("execute.before", (draft) => {
+        const refusal = hiddenToolCallRefusal(draft, hiddenChildHook);
+        if (refusal === undefined) return;
+        sessionLog(draft.sessionID, "hidden child tool call refused", {
+            tool: draft.tool,
+            agent: draft.agent ?? null,
+        });
+        throw new HiddenCompletionRefusal("hidden_prompt_unrecognized", refusal, true);
+    });
     let hiddenAgentsReady: Promise<void> | undefined;
     const readerPool = new V2StoreReaderPool();
     const openStoreReader = () =>
@@ -778,12 +794,20 @@ export async function registerContext(context: V2Context) {
         );
     };
     const dreamerAtBoot = config.dreamer;
+    /**
+     * Whether the user's current config turns the dreamer off. `dreamer.disable`
+     * is a live key: the trigger, the schedule timer and `/ctx-dream` re-read it
+     * before every run, and a dreamer turned on after boot is started by the
+     * next context pass (see `runManagedContext`).
+     */
+    const dreamerDisabledNow = (): boolean =>
+        dreamerRunConfig(config, liveConfigReader.poll().effective).dreamer?.disable === true;
     const startDreamer = (executor: HiddenCompletionExecutor) => {
         const projectIdentity = resolveProjectIdentityForSession(
             directory,
             config.allow_home_project,
         );
-        if (!projectIdentity || !dreamerAtBoot || dreamerAtBoot.disable) return undefined;
+        if (!projectIdentity || !dreamerAtBoot || dreamerDisabledNow()) return undefined;
         const cappedExecutor = withLiveDreamerOutputCap(
             executor,
             config,
@@ -915,6 +939,18 @@ export async function registerContext(context: V2Context) {
         }
     });
     const pagedRead = createV2RawMessageReader(openStoreReader);
+    // Commands can precede the first context pass after a restart. Their background
+    // historian reads need the same durable v2 source as automatic historian work.
+    const prepareHistorySession = (sessionID: string): void => {
+        if (!rawProviders.has(sessionID))
+            rawProviders.set(
+                sessionID,
+                setBoundedRawMessageProvider(
+                    sessionID,
+                    createV2RawMessageProvider(pagedRead, sessionID),
+                ),
+            );
+    };
     if (db && isDatabasePersisted(db)) {
         const backfillDb = db;
         scheduleAfterBootQuiet(() => {
@@ -1219,7 +1255,7 @@ export async function registerContext(context: V2Context) {
         // checkpoint recognizable to the hidden-child guard. This holds even with
         // Magic Context's compaction off, where the host would otherwise summarize
         // the child with a model call and lose the marker.
-        const hiddenSummary = hiddenChildHook.compactionSummary(draft.sessionID);
+        const hiddenSummary = hiddenChildHook.compactionSummary(draft.sessionID, draft.agent);
         if (hiddenSummary !== undefined) {
             draft.result = { summary: hiddenSummary };
             return;
@@ -1284,6 +1320,10 @@ export async function registerContext(context: V2Context) {
         // after a host checkpoint can be rebuilt in the host's own shape.
         rememberHostMedia(draft.messages);
         if (hiddenChildHook.apply(draft)) return;
+        // A dreamer that was off at boot and has since been turned on in the
+        // config starts here; startDreamer stays a no-op while it is off.
+        if (dreamTrigger === undefined && hiddenCompletionExecutor !== undefined)
+            dreamTrigger = startDreamer(hiddenCompletionExecutor);
         removeDreamerOnlyTools(draft);
         // A deletion that races an in-flight pass must not let that pass rebuild
         // the state just cleared by the one deletion event.
@@ -1461,14 +1501,7 @@ export async function registerContext(context: V2Context) {
             await cacheV2SessionDirectory(context.session, draft.sessionID, sessionDirectories);
             // Background historian reads outlive the context callback. Keep its source
             // registered until plugin disposal, rather than falling back to the v1 store.
-            if (!rawProviders.has(draft.sessionID))
-                rawProviders.set(
-                    draft.sessionID,
-                    setBoundedRawMessageProvider(
-                        draft.sessionID,
-                        createV2RawMessageProvider(pagedRead, draft.sessionID),
-                    ),
-                );
+            prepareHistorySession(draft.sessionID);
             transform ??= createTransform({
                 cacheTtlConfig: config.cache_ttl,
                 cacheTtlConfigured: config.cacheTtlConfigured,
@@ -1939,16 +1972,18 @@ export async function registerContext(context: V2Context) {
         hiddenCompletionExecutor: storageOpenedAtBoot
             ? hiddenCompletionExecutor
             : lateHiddenExecutor,
+        compactionMarkerStrategy: v2CompactionMarkerStrategy,
+        prepareHistorySession,
         storageDir,
     });
     // The v2 TUI reaches manual dreaming through RPC because this host has no
     // command-template path. The run continues in the background and reports its
     // result through the notification socket.
-    const manualDreamer =
-        config.dreamer && config.dreamer.disable !== true ? config.dreamer : undefined;
     rpcServer.handle("dream", async (params) => {
         const sessionId = String(params.sessionId ?? "");
         if (!sessionId) return { ok: false, error: "no session" };
+        // Read per request: `dreamer.disable` takes effect without a restart.
+        const manualDreamer = config.dreamer && !dreamerDisabledNow() ? config.dreamer : undefined;
         if (!manualDreamer || !hiddenCompletionExecutor) {
             pushNotification(
                 "toast",

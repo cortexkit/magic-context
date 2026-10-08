@@ -1214,9 +1214,9 @@ dependencies = [
 
 [[package]]
 name = "subc-daemon"
-version = "0.31.1"
+version = "0.31.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ff5d93c76142b5fec55a55189a823d53d7610d36f7f2b6fd1ef38efdec44fb0"
+checksum = "f360da598a27fe62013728b3f7672cfb702ce811ca03fb3d4f2487e9a24d8acd"
 dependencies = [
  "cortexkit-log",
  "cortexkit-paths",

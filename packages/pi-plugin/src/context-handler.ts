@@ -288,6 +288,7 @@ import {
 	applyNativeReasoningReplayPi,
 	applyNativeToolInputReplayPi,
 	authorizePiToolRemoval,
+	preparePiToolRemovalMeasurements,
 } from "./native-replay-state-pi";
 import { hasVisibleNoteReadCallPi } from "./note-visibility-pi";
 import {
@@ -5662,6 +5663,14 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					saved: nativeRemovalInputs,
 					canApply: isCacheBustingPass,
 				}),
+			authorizeToolRemovals: (callIds) =>
+				preparePiToolRemovalMeasurements({
+					db: args.db,
+					sessionId: args.sessionId,
+					callIds,
+					saved: nativeRemovalInputs,
+					canApply: isCacheBustingPass,
+				}),
 		},
 	);
 	logTransformTiming(args.sessionId, "transcriptBuild", tTranscriptBuild);
@@ -5881,7 +5890,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			: "";
 		sessionLog(
 			args.sessionId,
-			`pi m[0] HARD fold decision: reason=${foldDueDecision.reason ?? "unknown"}${mismatch} executed=${foldExecutedThisPass} bustsServedPrefix=${foldBustsServedPrefixThisPass}`,
+			`pi m[0] HARD fold decision: reason=${preFoldInjectionResult?.m0Reason ?? foldDueDecision.reason ?? "soft_refresh"}${mismatch} executed=${foldExecutedThisPass} bustsServedPrefix=${foldBustsServedPrefixThisPass}`,
 		);
 	}
 	// Primary sessions run routine age-sensitive cleanup only once during an
@@ -6482,6 +6491,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.messages,
 				{
 					protectedTags: args.protectedTags,
+					prepareToolRemovalMeasurements:
+						transcript.prepareToolRemovalMeasurements,
 					protectedToolTags,
 					protectedCutoff: usesTokenProtection
 						? protectionWindowForPass.cutoff

@@ -17,13 +17,18 @@ import { startDreamTrigger } from "./dream-trigger";
  * `handled` resolves when the trigger asks for the next event, which it does
  * only after its scheduler pass for the first one has returned.
  */
-function contextWithOneExecution(directory: string) {
+function contextWithOneExecution(
+    directory: string,
+    /** Where the host says the finished session lives; defaults to this context's own location. */
+    sessionLocation: { directory: string; workspaceID?: string } = { directory },
+) {
     let markHandled: () => void = () => undefined;
     const handled = new Promise<void>((resolve) => {
         markHandled = resolve;
     });
     const context = {
         location: { directory },
+        session: { get: async () => ({ location: sessionLocation }) },
         event: {
             subscribe: ({ signal }: { signal: AbortSignal }) =>
                 (async function* () {
@@ -110,3 +115,71 @@ for (const projectMemoryEnabled of [false, true]) {
         }
     });
 }
+
+// OpenCode 2 delivers every location's events to every plugin instance. A run
+// started here for another location's session would hang its child under that
+// session; the child takes that location, so its turns reach a plugin instance
+// that never registered the run, and run there unshaped with the user's tools.
+test("OpenCode 2 starts no dream run for a session in another directory or another workspace", async () => {
+    const db = openDatabase();
+    if (!db) throw new Error("test database unavailable");
+    for (const [label, foreign] of [
+        ["directory", { directory: "/tmp/v2-other-project" }],
+        ["workspace", { directory: "/tmp/v2-project", workspaceID: "wrk_1" }],
+    ] as const) {
+        const projectIdentity = `git:v2-trigger-foreign-${label}`;
+        insertMemory(db, { projectPath: projectIdentity, category: "PROJECT_RULES", content: "r" });
+        const readTasks = () =>
+            (
+                db
+                    .prepare("SELECT task FROM task_schedule_state WHERE project_path = ?")
+                    .all(projectIdentity) as Array<{ task: string }>
+            ).map((row) => row.task);
+        const { context, handled } = contextWithOneExecution("/tmp/v2-project", foreign);
+        const trigger = startDreamTrigger(context, {
+            config: DreamerConfigSchema.parse({}),
+            executor: { capabilities: { tools: false } } as never,
+            projectIdentity: () => projectIdentity,
+            projectMemoryEnabled: true,
+            openReader: () => ({ rootSessionActivity: () => new Map(), close() {} }),
+        });
+        try {
+            await handled;
+            // The pass never reached the scheduler: it seeded no task rows.
+            expect({ label, tasks: readTasks() }).toEqual({ label, tasks: [] });
+        } finally {
+            await trigger.dispose();
+            deleteTaskScheduleRowsForProject(db, projectIdentity);
+        }
+    }
+});
+
+test("OpenCode 2 starts no dream run while the live config disables the dreamer", async () => {
+    const db = openDatabase();
+    if (!db) throw new Error("test database unavailable");
+    const projectIdentity = "git:v2-trigger-live-disable";
+    insertMemory(db, { projectPath: projectIdentity, category: "PROJECT_RULES", content: "r" });
+    const readTasks = () =>
+        (
+            db
+                .prepare("SELECT task FROM task_schedule_state WHERE project_path = ?")
+                .all(projectIdentity) as Array<{ task: string }>
+        ).map((row) => row.task);
+    const { context, handled } = contextWithOneExecution("/tmp/v2-project");
+    const trigger = startDreamTrigger(context, {
+        // Enabled at boot; the user has since set `dreamer.disable: true`.
+        config: DreamerConfigSchema.parse({}),
+        sample: () => ({ config: DreamerConfigSchema.parse({ disable: true }) }),
+        executor: { capabilities: { tools: false } } as never,
+        projectIdentity: () => projectIdentity,
+        projectMemoryEnabled: true,
+        openReader: () => ({ rootSessionActivity: () => new Map(), close() {} }),
+    });
+    try {
+        await handled;
+        expect(readTasks()).toEqual([]);
+    } finally {
+        await trigger.dispose();
+        deleteTaskScheduleRowsForProject(db, projectIdentity);
+    }
+});

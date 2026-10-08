@@ -98,12 +98,12 @@ jobs:
       # Packaged-install import — the only check that exercises the published
       # node_modules load path (the v0.31.1 failure class).
       - name: Smoke (TUI packaged install import)
-        run: bun packages/plugin/scripts/smoke-tui-pack-install.ts
+        run: bun packages/plugin/scripts/smoke-tui-pack-install.ts --skip-build
 
       # Exercise the lazy token-estimate path from the real tarball inside the
       # same compiled-Bun module shape used by OpenCode.
       - name: Smoke (tokenizer packaged install estimate)
-        run: bun packages/plugin/scripts/smoke-tokenizer-pack-install.ts
+        run: bun packages/plugin/scripts/smoke-tokenizer-pack-install.ts --skip-build
 
   test-pi:
     name: Test (pi-plugin)
@@ -405,7 +405,7 @@ jobs:
           CARGO_TARGET_DIR="$target" cargo build --release -p mc-module --features drive-fault
           cp "$target/release/ck-mc" "$target/prebuilt/ckdev-mc-e2e-drive-fault"
           (cd "$GITHUB_WORKSPACE/.siblings/subconscious" && CARGO_TARGET_DIR="$target" cargo build --release -p subc-core --bins)
-          cp "$target/release/ck-subc" "$target/prebuilt/ck-subc"
+          cp "$target/release/ck-subc" "$target/prebuilt/ckdev-subc"
       - uses: actions/upload-artifact@v4
         with:
           name: rust-hermetic-binaries
@@ -438,7 +438,7 @@ jobs:
           name: rust-hermetic-binaries
           path: packages/e2e-tests/.cache/prebuilt
       - name: Make downloaded binaries executable
-        run: chmod +x packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e-drive-fault packages/e2e-tests/.cache/prebuilt/ck-subc
+        run: chmod +x packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e-drive-fault packages/e2e-tests/.cache/prebuilt/ckdev-subc
       - name: Install pinned OpenCode
         run: |
           OPENCODE_VERSION=1.18.32 bash tests/docker/install-opencode.sh
@@ -452,7 +452,7 @@ jobs:
           MC_E2E_SHARD: ${{ matrix.shard }}/4
           MC_E2E_CK_MC_PREBUILT_BIN: ${{ github.workspace }}/packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e
           MC_E2E_CK_MC_DRIVE_FAULT_BIN: ${{ github.workspace }}/packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e-drive-fault
-          MC_E2E_CK_SUBC_BIN: ${{ github.workspace }}/packages/e2e-tests/.cache/prebuilt/ck-subc
+          MC_E2E_CK_SUBC_BIN: ${{ github.workspace }}/packages/e2e-tests/.cache/prebuilt/ckdev-subc
         run: scripts/run-rust-hermetic-e2e.sh
   publish-npm:
     name: Publish plugin to npm

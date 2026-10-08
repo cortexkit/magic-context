@@ -1,4 +1,5 @@
 import { formatCacheTtlDisplay } from "./cache-ttl-display";
+import { primaryQuotaDiagnostic } from "./quota-diagnostic";
 import type { RunnerStatus, StatusDetail } from "./rpc-types";
 import { renderUserFacingFailure, type UserFacingFailureKey } from "./user-facing-codes";
 
@@ -37,6 +38,7 @@ export interface UserStatusSummary {
     warnings: UserFacingFailureKey[];
     hiddenVariantWarnings?: string[];
     dreamerSkipped?: readonly string[];
+    dreamerQuotas?: readonly string[];
 }
 
 /**
@@ -129,6 +131,14 @@ export function statusSummaryFromDetail(detail: StatusDetail): UserStatusSummary
         warnings: statusWarningsFromDetail(detail),
         hiddenVariantWarnings: detail.hiddenVariantWarnings ?? [],
         dreamerSkipped: detail.dreamerSkipped,
+        dreamerQuotas: [
+            ...new Set(
+                (detail.dreamerFailures ?? []).flatMap((failure) => {
+                    const quota = primaryQuotaDiagnostic(failure.error);
+                    return quota ? [quota] : [];
+                }),
+            ),
+        ],
     };
 }
 
@@ -221,6 +231,7 @@ export function renderUserStatusSummary(
         values.push(["Dreamer runner", runnerText(summary.dreamerRunner)]);
     }
     for (const skipped of summary.dreamerSkipped ?? []) values.push(["Dreamer skipped", skipped]);
+    for (const quota of summary.dreamerQuotas ?? []) values.push(["Dreamer quota", quota]);
     if (summary.historianRefusal) {
         values.push([
             "Historian refusal",

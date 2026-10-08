@@ -45,6 +45,8 @@ export interface ManagedRecompContext {
     client: PluginContext["client"];
     /** Optional executor for hosts that cannot issue hidden completions through the v1 SDK. */
     hiddenCompletionExecutor?: HiddenCompletionExecutor;
+    /** Host-owned checkpoints must not use OpenCode 1's synthetic marker writer. */
+    compactionMarkerStrategy?: CompartmentRunnerDeps["compactionMarkerStrategy"];
     db: Database;
     liveSessionState: LiveSessionState;
     /** Plugin-startup directory — last-resort fallback for session-dir resolution. */
@@ -189,6 +191,7 @@ export function buildRecompDeps(
     return {
         client: ctx.client,
         hiddenCompletionExecutor: ctx.hiddenCompletionExecutor,
+        compactionMarkerStrategy: ctx.compactionMarkerStrategy,
         db: ctx.db,
         sessionId,
         historianChunkTokens: ctx.historianChunkTokens,

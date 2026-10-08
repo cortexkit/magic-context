@@ -64,6 +64,17 @@ function makeCtx(
 }
 
 describe("managed recomp completion executor", () => {
+    it("forwards the host checkpoint strategy without selecting the v1 writer", () => {
+        useTempDataHome("recomp-orch-marker-");
+        const db = openDatabase();
+        const compactionMarkerStrategy = { setPending: () => {}, publish: () => false };
+        const deps = buildRecompDeps(
+            makeCtx(db, "/tmp/recomp-orch-marker", { compactionMarkerStrategy }),
+            "ses-marker",
+        );
+        expect(deps.compactionMarkerStrategy).toBe(compactionMarkerStrategy);
+    });
+
     it("forwards a host executor when no SDK client is available", () => {
         useTempDataHome("recomp-orch-executor-");
         const db = openDatabase();

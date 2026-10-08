@@ -365,12 +365,10 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             // behind — recomp now owns the boundary.
             if (lastCompartmentEnd > 0) {
                 afterPublish("compaction-marker", () => {
-                    const markerUpdated = updateCompactionMarkerAfterPublication(
-                        db,
-                        sessionId,
-                        lastCompartmentEnd,
-                        deps.directory,
-                    );
+                    const markerUpdated = (
+                        deps.compactionMarkerStrategy?.publish ??
+                        updateCompactionMarkerAfterPublication
+                    )(db, sessionId, lastCompartmentEnd, deps.directory);
                     // Only CAS-clear a stale pending marker blob when the direct
                     // update actually advanced the boundary. If the update failed
                     // (transient OpenCode DB write error on removal/injection), keep
@@ -741,12 +739,9 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         // next incremental run may reprocess already-compartmentalized messages.
         if (lastCompartmentEnd > 0) {
             afterPublish("compaction-marker", () => {
-                const markerUpdated = updateCompactionMarkerAfterPublication(
-                    db,
-                    sessionId,
-                    lastCompartmentEnd,
-                    deps.directory,
-                );
+                const markerUpdated = (
+                    deps.compactionMarkerStrategy?.publish ?? updateCompactionMarkerAfterPublication
+                )(db, sessionId, lastCompartmentEnd, deps.directory);
                 // Only clear the stale pending blob when the boundary actually
                 // advanced — preserve it for the deferred-drain retry on failure.
                 if (markerUpdated) {

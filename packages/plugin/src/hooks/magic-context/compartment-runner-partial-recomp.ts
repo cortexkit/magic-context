@@ -372,12 +372,9 @@ export async function executePartialRecompInternal(
             // prior in-flight incremental publish may have left behind — partial
             // recomp now owns the boundary up to lastEnd.
             if (lastEnd > 0) {
-                const markerUpdated = updateCompactionMarkerAfterPublication(
-                    db,
-                    sessionId,
-                    lastEnd,
-                    deps.directory,
-                );
+                const markerUpdated = (
+                    deps.compactionMarkerStrategy?.publish ?? updateCompactionMarkerAfterPublication
+                )(db, sessionId, lastEnd, deps.directory);
                 // Only clear the stale pending blob when the boundary actually
                 // advanced — preserve it for the deferred-drain retry on failure.
                 if (markerUpdated) {

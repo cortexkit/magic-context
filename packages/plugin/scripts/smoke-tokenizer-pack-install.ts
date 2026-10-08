@@ -72,7 +72,9 @@ async function readLog(logPath: string): Promise<string> {
 }
 
 try {
-    run("bun", ["run", "build"], pluginRoot);
+    // Reuse the build whose freshness CI checked instead of replacing it before
+    // the packaged-install probe. Standalone runs keep their build prerequisite.
+    if (!process.argv.includes("--skip-build")) run("bun", ["run", "build"], pluginRoot);
 
     const packStdout = run(
         "npm",
