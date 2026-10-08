@@ -2356,6 +2356,36 @@ pub mod compaction {
             }
         }
 
+        /// Rebase the served prefix onto a proved descendant. A cut inside the
+        /// applied range invalidates that prefix and requires a replacement;
+        /// an unobserved produced view above the cut must never be retried.
+        pub fn descend(
+            &mut self,
+            lineage_id: &str,
+            parent: &str,
+            through_ordinal: u64,
+        ) -> Result<bool, TransformError> {
+            let mut rebuild = false;
+            if let Some(applied) = &mut self.last_applied {
+                if applied.range.lineage_id != parent {
+                    return Err(TransformError::LineageProtocol(
+                        "compaction lineage changed without a held ancestor".into(),
+                    ));
+                }
+                rebuild = applied.range.to > 0 && through_ordinal < applied.range.to - 1;
+                applied.range.lineage_id = lineage_id.into();
+            }
+            if self.last_produced.as_ref().is_some_and(|view| {
+                view.range.lineage_id != parent
+                    || (view.range.to > 0 && through_ordinal < view.range.to - 1)
+            }) {
+                self.last_produced = None;
+            } else if let Some(produced) = &mut self.last_produced {
+                produced.range.lineage_id = lineage_id.into();
+            }
+            Ok(rebuild)
+        }
+
         fn allocate(&mut self, mut view: View) -> Result<View, TransformError> {
             self.version_high_water = self.version_high_water.checked_add(1).ok_or_else(|| {
                 TransformError::LineageProtocol("compaction version exhausted".to_string())
@@ -2465,16 +2495,23 @@ pub mod compaction {
         }
         let mut req = template.clone();
         req.kind = PASS_KIND.to_string();
-        req.serializer_profile = "owned-broca".to_string();
+        let host = template.serializer_profile == "opencode-aisdk";
+        if !host {
+            req.serializer_profile = "owned-broca".to_string();
+        }
         req.is_subagent = state.preset != Preset::Head;
         req.usage = Some(usage);
         req.geometry = None;
-        req.serve_native = false;
-        req.native_messages = None;
+        if !host {
+            req.serve_native = false;
+            req.native_messages = None;
+        }
         req.tail_delta = None;
         // Step hooks own appends and tags. Compaction must not first tag raw content
         // that the runner already served while compaction calls were gated off.
-        req.tool_present = false;
+        // Host hooks own minting; the engine still renders the durable tag
+        // overlay, including tags minted before a pipeline switch.
+        req.tool_present = host;
         req.auto_search_enabled = false;
         req.todo_tool_present = Some(false);
         req.render_config = format!(
@@ -4738,6 +4775,8 @@ fn apply_once(
     // output; create the corresponding caveman units only during a bust pass.
     let caveman_tagging_requested = req.caveman_enabled && !req.is_subagent;
     if (tagging_active || caveman_tagging_requested)
+        && !(req.kind == compaction::PASS_KIND
+            && serializer_profile == Some(SerializerProfile::OpencodeAiSdk))
         && !loaded.core.reconcile_pending
         && (loaded.meta.pending_rewrite.is_none() || clear_pending_rewrite_on_present)
     {
@@ -6877,7 +6916,10 @@ fn apply_once(
         }
     }
 
-    if tagging_active {
+    if tagging_active
+        && !(req.kind == compaction::PASS_KIND
+            && serializer_profile == Some(SerializerProfile::OpencodeAiSdk))
+    {
         if let Some((row, unit)) = maybe_append_channel1_nudge(
             Channel1NudgeInputs {
                 ctx,

@@ -381,6 +381,46 @@ fn acknowledgement_decreases_only_in_the_transaction_creating_a_descent() {
 }
 
 #[test]
+fn view_state_changes_only_state_and_refuses_missing_or_illegal_transitions() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    let original = ProviderView {
+        version: 7,
+        lineage_id: "L".into(),
+        range_from: 4000,
+        range_to: 4001,
+        replacement_json: "[ { \"text\" : \"résumé \\u0061\" } ]".into(),
+        state: "produced".into(),
+    };
+    store.save_provider_view(&key(), &original).unwrap();
+    for state in ["applied", "applied", "not_applied", "not_applied"] {
+        store.set_provider_view_state(&key(), 7, state).unwrap();
+        let mut expected = original.clone();
+        expected.state = state.into();
+        assert_eq!(store.load_provider_views(&key()).unwrap(), vec![expected]);
+    }
+    assert!(store
+        .set_provider_view_state(&key(), 7, "produced")
+        .unwrap_err()
+        .to_string()
+        .contains("state"));
+    assert!(store
+        .set_provider_view_state(&key(), 7, "applied")
+        .unwrap_err()
+        .to_string()
+        .contains("state"));
+    assert!(store
+        .set_provider_view_state(&key(), 8, "applied")
+        .unwrap_err()
+        .to_string()
+        .contains("version"));
+    assert_eq!(
+        store.load_provider_views(&key()).unwrap()[0].replacement_json,
+        original.replacement_json
+    );
+}
+
+#[test]
 fn descent_shares_prefix_without_copying_and_burns_module_ahead_allocations() {
     let dir = tempfile::tempdir().unwrap();
     let store = store(dir.path());

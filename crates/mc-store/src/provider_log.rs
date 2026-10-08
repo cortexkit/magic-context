@@ -493,7 +493,43 @@ impl McStore {
             .inner
             .with_conn(|conn| lineage_tx(conn, &key.conversation_key(), lineage_id))?)
     }
-
+    /// Advance a frozen view's application state without reading or rewriting
+    /// replacement bytes. An invalidated/rejected view cannot become applied.
+    pub fn set_provider_view_state(
+        &self,
+        key: &ProviderSessionKey,
+        version: u64,
+        state: &str,
+    ) -> Result<(), McStoreError> {
+        if !matches!(state, "applied" | "not_applied") {
+            return Err(McStoreError::Serde("invalid_params: state".into()));
+        }
+        let refusal = self.inner.with_conn_fenced(|conn| {
+            let conv = key.conversation_key();
+            let held: Option<String> = conn
+                .query_row(
+                    "SELECT state FROM mc_provider_views_v1 WHERE conv_key=?1 AND version=?2",
+                    params![conv, as_i64(version)?],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(held) = held else {
+                return Ok(Some("version"));
+            };
+            if held == "not_applied" && state == "applied" {
+                return Ok(Some("state"));
+            }
+            conn.execute(
+                "UPDATE mc_provider_views_v1 SET state=?3 WHERE conv_key=?1 AND version=?2",
+                params![conv, as_i64(version)?, state],
+            )?;
+            Ok(None)
+        })?;
+        if let Some(field) = refusal {
+            return Err(McStoreError::Serde(format!("invalid_params: {field}")));
+        }
+        Ok(())
+    }
     pub fn save_provider_conversation(
         &self,
         key: &ProviderSessionKey,
