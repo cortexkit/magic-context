@@ -47,10 +47,9 @@ describe("migration 96", () => {
             expect(saveLkgSlotToDb(db, "legacy", slot)).toBe(true);
             const before = db.prepare("SELECT * FROM lkg_slot_chunks").all();
             runMigrations(db);
-            expect(LATEST_SUPPORTED_VERSION).toBe(96);
-            expect(LATEST_MIGRATION_VERSION).toBe(96);
+            expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
             expect(db.prepare("SELECT MAX(version) AS v FROM schema_migrations").get()).toEqual({
-                v: 96,
+                v: LATEST_MIGRATION_VERSION,
             });
             expect(db.prepare("SELECT * FROM lkg_slot_chunks").all()).toEqual(before);
             expect(loadPersistedLkgSlot(db, "legacy")).toEqual(slot);

@@ -7,6 +7,7 @@ import { splitLkgSlotPrefixes, splitReplayDecisions } from "./migration-v94-writ
 import { installV95PerfSchema } from "./migration-v95-perf-indexes";
 import { repairOpenCode2HarnessLabels } from "./opencode2-relabel";
 import { installCompartmentHistoryVersions } from "./storage-compartment-history-version";
+import { installHostRunnerSchema } from "./storage-host-runner";
 import { ensureColumn, healAllNullColumns } from "./storage-schema-helpers";
 import { bumpEpochsForWorkspaceMemberSet } from "./workspaces";
 
@@ -91,6 +92,10 @@ export const V85_OPENCODE2_RELABEL_TABLES = [
     "transform_decisions",
     "recomp_compartments",
     "recomp_facts",
+    "host_runner_entries",
+    "host_runner_ids",
+    "host_runner_views",
+    "host_runner_state",
 ] as const;
 
 /**
@@ -3223,6 +3228,13 @@ export const MIGRATIONS: Migration[] = [
                 full_coverage INTEGER NOT NULL CHECK (full_coverage IN (0, 1)),
                 slot_state TEXT NOT NULL
             )`);
+        },
+    },
+    {
+        version: 97,
+        description: "durable append-only host runner entries, ids, views and pass state",
+        up(db: Database): void {
+            installHostRunnerSchema(db);
         },
     },
 ];

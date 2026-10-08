@@ -764,6 +764,29 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
             ).toEqual({ served_capture_id: 1 });
             populateModuleOwnedRows(db, version, state);
             return;
+        case 97:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            expect(
+                db
+                    .prepare(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'host_runner_%' ORDER BY name",
+                    )
+                    .all(),
+            ).toEqual([
+                { name: "host_runner_entries" },
+                { name: "host_runner_ids" },
+                { name: "host_runner_state" },
+                { name: "host_runner_views" },
+            ]);
+            db.prepare(`INSERT INTO host_runner_ids (session_id, harness, lineage_id, message_id, ordinal)
+                VALUES ('armed-v97', 'opencode', 'lineage', 'marker', NULL)`).run();
+            expect(
+                db
+                    .prepare("SELECT ordinal FROM host_runner_ids WHERE session_id='armed-v97'")
+                    .get(),
+            ).toEqual({ ordinal: null });
+            populateModuleOwnedRows(db, version, state);
+            return;
         default:
             throw new Error(`populateForVersion has no arm for migration v${version}`);
     }
