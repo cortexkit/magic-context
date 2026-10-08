@@ -2,7 +2,7 @@
 use super::*;
 use mc_store::provider_records::{
     ProviderAnswerTag, ProviderHookAnswer, ProviderHookRequest, ProviderHookWrite, ProviderLineage,
-    ProviderMessage, ProviderPolicyTotals, ProviderSubject,
+    ProviderMessage, ProviderPolicyPart, ProviderPolicyTotals, ProviderSubject,
 };
 use serde::Deserialize;
 
@@ -34,6 +34,70 @@ struct HostSubject {
     subject_part: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct ProviderPassInput {
+    lineage_id: String,
+    descends_from: Option<HostDescent>,
+    appended: Vec<compact::status::StatusMessage>,
+    physical_tail: Option<ProviderTail>,
+}
+#[derive(Deserialize, Serialize)]
+struct ProviderTail {
+    mid: String,
+    ordinal: u64,
+}
+
+fn provider_policy_error(error: mc_store::provider_records::ProviderError) -> HandlerOutcome {
+    match error {
+        mc_store::provider_records::ProviderError::InvalidParams { field } => {
+            invalid_field(field, "conflicting provider policy")
+        }
+        error => transient(error),
+    }
+}
+
+fn admission_policy_parts(
+    req: &TransformRequest,
+    projection: &ck_wire::FlatProjection,
+) -> Vec<ProviderPolicyPart> {
+    let tags = projection
+        .blocks
+        .iter()
+        .filter_map(|b| {
+            transform::taggable_source(b).map(|(kind, source)| McTagRow {
+                tag_number: b.block_index as i64 + 1,
+                block_id: b.id.clone(),
+                kind: kind.as_store_kind().into(),
+                token_count: mc_tokenizer::estimate_tokens(&source) as i64,
+                created_at_ms: 0,
+                source_bytes: Arc::from([]),
+            })
+        })
+        .collect::<Vec<_>>();
+    let empty = crate::protection_window::ProtectionWindow::from_persisted_rows(&[], 0);
+    let measured = crate::tail_hygiene::measure_tail_hygiene_with_pending_drops(
+        projection,
+        &Default::default(),
+        None,
+        &tags,
+        &empty.tag_numbers,
+        &Default::default(),
+        &Default::default(),
+    );
+    let mut parts = transform::capture_provider_parts(
+        req,
+        projection,
+        &Default::default(),
+        &measured.parts,
+        &tags,
+        false,
+    );
+    for part in &mut parts {
+        part.tag_number = None;
+    }
+    parts
+}
+
 fn checked_part(part: Option<&str>) -> Result<&str, HandlerOutcome> {
     if part.is_some_and(|part| part.is_empty() || part.len() > 256) {
         return Err(invalid_field(
@@ -45,50 +109,42 @@ fn checked_part(part: Option<&str>) -> Result<&str, HandlerOutcome> {
 }
 
 fn host_channel1(
-    totals: &ProviderPolicyTotals,
-    metrics: &ProviderPolicyTotals,
+    inputs: &transform::Channel1PolicyInputs,
     state: &Value,
 ) -> (Vec<hooks::answer::Operation>, Value) {
     let mut meta = channel1_meta(state);
-    let baseline = mc_store::TailHygieneBaseline {
-        baseline_t: totals.text_tokens
-            + totals.tool_tokens
-            + metrics.text_tokens
-            + metrics.tool_tokens,
-        baseline_u: totals.reclaimable_tokens + metrics.reclaimable_tokens,
-        evaluable: true,
-        ..Default::default()
-    };
-    let users = (totals.real_users + metrics.real_users).max(0) as u64;
-    let decision = transform::decide_channel1(Some(&baseline), &meta, users);
-    if !decision.fire || metrics.tool_outputs > 0 {
-        transform::apply_channel1_decision_state(&mut meta, &decision);
-    }
+    let before = (
+        meta.channel1_last_nudge_undropped,
+        meta.channel1_last_nudge_level.clone(),
+    );
+    let decision = transform::decide_channel1(Some(&inputs.baseline), &meta, inputs.users);
     let mut ops = Vec::new();
-    if decision.fire && metrics.tool_outputs > 0 {
-        let reminder = transform::build_channel1_reminder(
-            decision.level,
-            decision.reclaimable_tokens,
-            (totals.tool_outputs + metrics.tool_outputs).max(0) as usize,
-            &[],
-            decision.sticky,
+    let fire = decision.fire && inputs.carrier;
+    if fire {
+        let text = transform::commit_channel1_fire(
+            &decision,
+            &mut meta,
+            inputs.users,
+            inputs.tool_outputs,
+            &inputs.hint,
         );
-        meta.channel1_last_fire_level = decision.next_last_level.clone();
-        meta.channel1_last_fire_ordinal = users;
         ops.push(hooks::answer::Operation::Append {
             block: 0,
-            text: reminder,
+            text,
             note: None,
         });
+    } else if !decision.fire {
+        transform::apply_channel1_decision_state(&mut meta, &decision);
     }
+    let changed = before
+        != (
+            meta.channel1_last_nudge_undropped,
+            meta.channel1_last_nudge_level.clone(),
+        );
     (
         ops,
-        json!({"channel1":{
-            "channel1_last_nudge_undropped":meta.channel1_last_nudge_undropped,
-            "channel1_last_nudge_level":meta.channel1_last_nudge_level,
-            "channel1_last_fire_level":meta.channel1_last_fire_level,
-            "channel1_last_fire_ordinal":meta.channel1_last_fire_ordinal
-        }}),
+        json!({"cadence_event":if fire || changed {Some(json!({"fire":fire,"nudge":meta.channel1_last_nudge_undropped,"level":meta.channel1_last_nudge_level,"users":inputs.users}))} else {None},
+        "channel1":{"channel1_last_nudge_undropped":meta.channel1_last_nudge_undropped,"channel1_last_nudge_level":meta.channel1_last_nudge_level,"channel1_last_fire_level":meta.channel1_last_fire_level,"channel1_last_fire_ordinal":meta.channel1_last_fire_ordinal}}),
     )
 }
 
@@ -192,9 +248,10 @@ impl McHandler {
         store: &McStore,
         chain: Option<&[String]>,
         pass_complete: bool,
+        pass: Option<&Value>,
     ) -> Result<(), HandlerOutcome> {
         let Some((key, _)) = self.host_provider_conversation(binding) else {
-            return if pass_complete {
+            return if pass_complete || pass.is_some() {
                 Err(invalid_field(
                     "pass_complete",
                     "pass barrier requires an admitted host conversation",
@@ -207,11 +264,109 @@ impl McHandler {
             .provider_serial
             .try_lock_for(&key)
             .map_err(|_| transient("provider conversation is busy"))?;
+        self.sync_provider_pass_inputs_locked(binding, store, chain, pass_complete, pass)
+    }
+
+    pub(crate) fn sync_provider_pass_inputs_locked(
+        &self,
+        binding: &SessionBinding,
+        store: &McStore,
+        chain: Option<&[String]>,
+        pass_complete: bool,
+        pass: Option<&Value>,
+    ) -> Result<(), HandlerOutcome> {
+        let Some((key, _)) = self.host_provider_conversation(binding) else {
+            return Ok(());
+        };
         let mut c = store
             .load_provider_conversation(&key.store_key())
             .map_err(transient)?
             .ok_or_else(|| transient("provider conversation disappeared"))?;
+        if let Some(pass) = pass {
+            let pass: ProviderPassInput = decode(pass)?;
+            let first = pass.appended.first().map_or(0, |m| m.ordinal);
+            let lineage = store
+                .load_provider_lineage(&key.store_key(), &pass.lineage_id)
+                .map_err(transient)?
+                .unwrap_or(ProviderLineage {
+                    lineage_id: pass.lineage_id.clone(),
+                    first_ordinal: pass
+                        .descends_from
+                        .as_ref()
+                        .map_or(first, |d| d.through_ordinal.saturating_add(1)),
+                    descends_from: pass.descends_from.as_ref().map(|d| d.lineage_id.clone()),
+                    through_ordinal: pass.descends_from.as_ref().map(|d| d.through_ordinal),
+                });
+            let decoded = super::codec_opencode::decode_messages(&pass.appended)?;
+            let mut req: TransformRequest = decode(
+                &json!({"v":2,"session_id":c.engine_namespace,"render_config":"provider-policy","serializer_profile":"opencode-aisdk","messages":decoded.messages}),
+            )?;
+            req.tool_present = true;
+            let projection = ck_wire::project_messages(&req.messages).map_err(transient)?;
+            let mut parts = admission_policy_parts(&req, &projection);
+            for part in &mut parts {
+                if part.kind == "tool_result" {
+                    part.subject_part = decoded
+                        .sidecar
+                        .messages
+                        .get(&part.mid)
+                        .and_then(|m| {
+                            m.blocks
+                                .iter()
+                                .find(|b| b.block_index == part.block_index as usize)
+                        })
+                        .and_then(|b| b.raw.get("id"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .into();
+                }
+            }
+            let eligible_user = pass
+                .physical_tail
+                .as_ref()
+                .and_then(|tail| {
+                    parts.iter().find(|p| {
+                        p.mid == tail.mid
+                            && p.ordinal == tail.ordinal
+                            && p.kind == "header"
+                            && p.real_user
+                    })
+                })
+                .map(|p| p.mid.clone());
+            let eligible_tool = parts
+                .iter()
+                .rev()
+                .find(|p| p.tag_kind.as_deref() == Some("tool_result"))
+                .map(|p| p.block_id.clone());
+            let context = json!({"lineage_id":pass.lineage_id,"appended_ids":pass.appended.iter().map(|m|&m.mid).collect::<Vec<_>>(),"physical_tail":pass.physical_tail,"eligible_user_mid":eligible_user,"eligible_tool_block":eligible_tool});
+            let messages = pass
+                .appended
+                .iter()
+                .map(|m| {
+                    Ok(ProviderMessage {
+                        mid: m.mid.clone(),
+                        ordinal: m.ordinal,
+                        message_bytes: serde_json::to_vec(&m.message).map_err(transient)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, HandlerOutcome>>()?;
+            store
+                .admit_provider_pass(&key.store_key(), &lineage, &messages, &parts, &context)
+                .map_err(provider_policy_error)?;
+            c = store
+                .load_provider_conversation(&key.store_key())
+                .map_err(transient)?
+                .ok_or_else(|| transient("provider conversation disappeared"))?;
+        }
         let mut counters: Value = serde_json::from_str(&c.hook_counters_json).map_err(transient)?;
+        if counters.get("engine_policy").is_none() {
+            counters["engine_policy"] = transform::provider_engine_settings(
+                &store
+                    .load_meta(&c.engine_namespace)
+                    .map_err(transient)?
+                    .meta,
+            );
+        }
         if let Some(chain) = chain {
             let chain = serde_json::to_string(chain).map_err(invalid)?;
             if c.historian_model_chain_json != chain {
@@ -465,7 +620,28 @@ impl McHandler {
                 }
             }
         }
-        let hint = if hook == Hook::PreUser {
+        let synced: Value = serde_json::from_str(&c.hook_counters_json).map_err(transient)?;
+        let eligible_hint = synced
+            .pointer("/pass_context/lineage_id")
+            .and_then(Value::as_str)
+            == Some(lineage_id)
+            && synced
+                .pointer("/pass_context/eligible_user_mid")
+                .and_then(Value::as_str)
+                == Some(mid);
+        if hook == Hook::PreUser && synced.get("pass_context").is_none() {
+            tracing::warn!(session=%key.session,"host hint suppressed: no synchronized pass policy");
+        }
+        let rendered_memory_ids = synced
+            .pointer("/engine_policy/rendered_memory_ids")
+            .and_then(|v| serde_json::from_value::<Vec<i64>>(v.clone()).ok())
+            .unwrap_or_else(|| {
+                store
+                    .load_meta(&c.engine_namespace)
+                    .map(|s| s.meta.rendered_memory_ids)
+                    .unwrap_or_default()
+            });
+        let hint = if hook == Hook::PreUser && eligible_hint {
             self.host_user_hint(
                 &store,
                 &binding,
@@ -473,6 +649,7 @@ impl McHandler {
                 &decoded.messages,
                 &projection,
                 &plan,
+                &rendered_memory_ids,
             )?
         } else {
             None
@@ -482,10 +659,26 @@ impl McHandler {
             ordinal,
             message_bytes: serde_json::to_vec(message).map_err(transient)?,
         };
+        let policy_request: TransformRequest = decode(
+            &json!({"v":2,"kind":"transform.hook","session_id":c.engine_namespace,"render_config":"provider-policy","serializer_profile":"opencode-aisdk","messages":decoded.messages}),
+        )?;
+        let mut policy_parts = admission_policy_parts(&policy_request, &projection);
+        for p in &mut policy_parts {
+            if p.kind == "tool_result" {
+                p.subject_part = shell
+                    .blocks
+                    .iter()
+                    .find(|b| b.block_index == p.block_index as usize)
+                    .and_then(|b| b.raw.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .into();
+            }
+        }
         // The store owns P1's newest-held/monotonic confirmation check. Descent,
         // message admission and the revert clamp share that transaction.
         let answer = store
-            .commit_provider_hook(
+            .commit_provider_hook_with_parts(
                 &key.store_key(),
                 ProviderHookRequest {
                     lineage: &lineage,
@@ -494,6 +687,7 @@ impl McHandler {
                     unserved_subjects: &unserved,
                     repeat_subject: Some(&subject),
                 },
+                &policy_parts,
                 |ctx| {
                     let mut counters = ctx.counters.clone();
                     let mut ops = Vec::new();
@@ -502,9 +696,7 @@ impl McHandler {
                     let state = &ctx.counters["policy_state"];
                     for (index, target) in targets.iter().enumerate() {
                         if let Some((kind, source)) = transform::taggable_source(target) {
-                            let number = ctx
-                                .tag_high_water
-                                .checked_add(tags.len() as i64 + 1)
+                            let number = ctx.parts.iter().find(|p|p.block_id==target.id).and_then(|p|p.tag_number).or_else(||ctx.tag_high_water.checked_add(tags.len() as i64+1))
                                 .ok_or_else(|| {
                                     mc_store::provider_records::ProviderError::Transient(
                                         "tag numbers exhausted".into(),
@@ -526,14 +718,7 @@ impl McHandler {
                                 && index == 0
                                 && binding.config.temporal_awareness
                             {
-                                if let Some(prefix) = ingress
-                                    .ck
-                                    .meta
-                                    .created_at_ms
-                                    .zip(state.get("last_response_at_ms").and_then(Value::as_i64))
-                                    .and_then(|(now, previous)| {
-                                        transform::temporal_gap_prefix(now.saturating_sub(previous))
-                                    })
+                                if let Some(prefix) = ctx.parts.iter().filter(|p|p.kind=="header" && p.ordinal<ordinal).max_by_key(|p|p.ordinal).and_then(|p|transform::temporal_marker_from_timestamps(p.created_at_ms,p.completed_at_ms,ingress.ck.meta.created_at_ms)).filter(|p|!p.is_empty())
                                 {
                                     let op = Operation::Prepend {
                                         block: 0,
@@ -570,7 +755,17 @@ impl McHandler {
                             non_tag_ops.push(op);
                         }
                     }
-                    let (mut cadence_ops, mut policy) = host_channel1(&ctx.policy, &metrics, state);
+                    let carrier=hook==Hook::PostTool && targets.iter().any(|t|ctx.counters.pointer("/pass_context/eligible_tool_block").and_then(Value::as_str)==Some(t.id.as_str()));
+                    let inputs=transform::channel1_inputs_from_parts(&ctx.parts,&ctx.counters["engine_policy"],binding.config.resolve_protected_tokens(100_000).floor,&binding.config.protected_tools,carrier);
+                    if ctx.counters.pointer("/engine_policy/baseline/baseline_generation").and_then(Value::as_u64)!=Some(inputs.baseline.baseline_generation) {
+                        counters["policy_baseline_updates"]=json!(inputs.baseline.baseline_parts.iter().map(|m|json!({"block_id":m.key.split('\0').next().unwrap_or(""),"measurement":m})).collect::<Vec<_>>());
+                        let mut baseline=inputs.baseline.clone();baseline.baseline_parts.clear();
+                        if !counters["engine_policy"].is_object() {counters["engine_policy"]=json!({});}
+                        counters["engine_policy"]["baseline"]=serde_json::to_value(baseline).expect("baseline JSON");
+                        counters["engine_policy"]["baseline_len"]=json!(inputs.baseline.baseline_parts.len());
+                    }
+                    let (mut cadence_ops, mut policy) = host_channel1(&inputs,state);
+                    policy.as_object_mut().expect("policy object").remove("channel1");
                     if hook == Hook::PostTool {
                         ops.append(&mut cadence_ops.clone());
                         non_tag_ops.append(&mut cadence_ops);
@@ -627,8 +822,14 @@ impl McHandler {
         messages: &[ck_wire::CkIngressMessage],
         projection: &ck_wire::FlatProjection,
         plan: &Value,
+        rendered_memory_ids: &[i64],
     ) -> Result<Option<mc_store::UserHintDecisionInput>, HandlerOutcome> {
         let config = &binding.config;
+        if !config.auto_search.enabled
+            || plan.get("auto_search_enabled") == Some(&Value::Bool(false))
+        {
+            return Ok(None);
+        }
         let directory = binding.project_root.to_string_lossy();
         let project = self.route_project(store, binding)?.key;
         let mut request: TransformRequest = decode(
@@ -686,7 +887,7 @@ impl McHandler {
             None,
             None,
             None,
-            &[],
+            rendered_memory_ids,
         )
         .map_err(transient)
     }
@@ -1059,6 +1260,12 @@ mod host_tests {
     }
     pub(super) async fn admit(h: &McHandler, ch: u16) {
         response(dispatch(h, ch, "transform.declare", json!({"params":plan()})).await);
+    }
+    pub(super) async fn sync_pass(h: &McHandler, appended: &[(u64, Value)]) {
+        let tail = appended
+            .last()
+            .map(|(ordinal, message)| json!({"mid":message["info"]["id"],"ordinal":ordinal}));
+        response(h.dispatch_value(7,json!({"method":"state_sync","session_id":"s","provider_pass":{"lineage_id":"L","appended":appended.iter().map(|(ordinal,message)|json!({"mid":message["info"]["id"],"ordinal":ordinal,"message":message})).collect::<Vec<_>>(),"physical_tail":tail}})).await);
     }
     pub(super) fn text(mid: &str, role: &str, value: &str) -> Value {
         json!({"info":{"id":mid,"role":role},"parts":[{"id":format!("{mid}-text"),"type":"text","text":value}]})
@@ -1452,7 +1659,14 @@ mod host_tests {
                 ..Default::default()
             };
             let decision = transform::decide_channel1(Some(&baseline), &meta, users as u64);
-            let (ops, next) = host_channel1(&totals, &metrics, &state);
+            let inputs = transform::Channel1PolicyInputs {
+                baseline: baseline.clone(),
+                users: users as u64,
+                tool_outputs: (totals.tool_outputs + metrics.tool_outputs) as usize,
+                hint: vec![],
+                carrier: true,
+            };
+            let (ops, next) = host_channel1(&inputs, &state);
             if decision.fire {
                 assert_eq!(
                     ops,
@@ -1637,6 +1851,7 @@ mod overlay_parity_tests {
         let mut message = text("u", "user", "rust ownership beta");
         message["info"]["time"] = json!({"created":301000});
         let mut p = hook("u", 2, "pre_user", &["rust ownership beta"], message);
+        super::host_tests::sync_pass(&h, &[(2, p["message"].clone())]).await;
         p["params"] = params.take();
         let answer: hooks::answer::HookAnswer = decode(&response(
             dispatch(&h, 7, "transform.hook", p.clone()).await,

@@ -1583,6 +1583,8 @@ struct ModuleStateSyncWire {
     historian_model_chain: Option<Vec<String>>,
     #[serde(default)]
     pass_complete: Option<bool>,
+    #[serde(default)]
+    provider_pass: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -10976,7 +10978,8 @@ impl McHandler {
     fn handle_state_sync_value(&self, channel: u16, request: Value) -> HandlerOutcome {
         // A provider pass without appends still has a barrier, even when all
         // synchronized watermarks are unchanged. This carries no message data.
-        if request.get("pass_complete") == Some(&Value::Bool(true))
+        if (request.get("pass_complete") == Some(&Value::Bool(true))
+            || request.get("provider_pass").is_some())
             && request.get("shadow_generation").is_none()
         {
             let binding = match self
@@ -10988,7 +10991,13 @@ impl McHandler {
             let Some(store) = self.store.get() else {
                 return self.store_refusal();
             };
-            return match self.sync_provider_pass_inputs(&binding, store, None, true) {
+            return match self.sync_provider_pass_inputs(
+                &binding,
+                store,
+                None,
+                request.get("pass_complete") == Some(&Value::Bool(true)),
+                request.get("provider_pass"),
+            ) {
                 Ok(()) => respond(json!({"ok":true})),
                 Err(error) => error,
             };
@@ -11537,8 +11546,21 @@ impl McHandler {
         store: &McStore,
         parsed: ModuleStateSyncWire,
     ) -> HandlerOutcome {
+        // Refuse contention before any authority or provider input is committed.
+        // Keep the same lock until both synchronized stores have been updated.
+        let _provider_serial = match self.host_provider_conversation(binding) {
+            Some((key, _)) => match self.provider_serial.try_lock_for(&key) {
+                Ok(guard) => Some(guard),
+                Err(_) => return providers::transient("provider conversation is busy"),
+            },
+            None => None,
+        };
+        if parsed.provider_pass.is_some() && _provider_serial.is_none() {
+            return providers::invalid("provider_pass requires an admitted host conversation");
+        }
         let chain = parsed.historian_model_chain.clone();
         let pass_complete = parsed.pass_complete == Some(true);
+        let provider_pass = parsed.provider_pass.as_ref();
         let note_evaluation_available = parsed.note_evaluation_available.unwrap_or(false);
         #[cfg(test)]
         if !parsed.compartments.is_empty() {
@@ -11650,9 +11672,13 @@ impl McHandler {
             acked_watermarks,
         }) {
             Ok(result) => {
-                if let Err(error) =
-                    self.sync_provider_pass_inputs(binding, store, chain.as_deref(), pass_complete)
-                {
+                if let Err(error) = self.sync_provider_pass_inputs_locked(
+                    binding,
+                    store,
+                    chain.as_deref(),
+                    pass_complete,
+                    provider_pass,
+                ) {
                     return error;
                 }
                 self.set_note_evaluation_capability(
@@ -16456,6 +16482,7 @@ fn assemble_state_sync_seed(
             .or(batched_note_evaluation_available),
         historian_model_chain: final_batch.historian_model_chain,
         pass_complete: final_batch.pass_complete,
+        provider_pass: final_batch.provider_pass,
     }
 }
 

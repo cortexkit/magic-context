@@ -64,6 +64,18 @@ CREATE TABLE mc_provider_hook_answers_v1 (
 CREATE INDEX mc_provider_answers_subject ON mc_provider_hook_answers_v1
     (conv_key, lineage_id, subject_mid, hook, subject_part, state);
 CREATE INDEX mc_provider_answers_pending ON mc_provider_hook_answers_v1(conv_key, lineage_id, state, ordinal);
+-- Admission-time policy metadata, never transcript or operation content. Keeping
+-- it with the lineage makes protection, time and sibling releases restart-safe.
+CREATE TABLE mc_provider_policy_parts_v1 (
+    conv_key TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    block_id TEXT NOT NULL,
+    policy_json TEXT NOT NULL,
+    session TEXT NOT NULL CHECK(session = json_extract(conv_key, '$[1]')),
+    PRIMARY KEY(conv_key, lineage_id, block_id)
+);
+CREATE INDEX mc_provider_policy_parts_ordinal ON mc_provider_policy_parts_v1(conv_key,lineage_id,ordinal);
 CREATE TABLE mc_provider_views_v1 (
     conv_key TEXT NOT NULL,
     version INTEGER NOT NULL,

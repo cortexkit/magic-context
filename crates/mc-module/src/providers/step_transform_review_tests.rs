@@ -1,6 +1,6 @@
 //! Independent M3 regression cases. Expectations come from the full engine or
 //! the durable host contract, not the incremental aggregate under review.
-use super::host_tests::{admit, dispatch, handler, hook, key, response, text};
+use super::host_tests::{admit, dispatch, handler, hook, key, response, sync_pass, text};
 use super::*;
 use crate::config::CacheTtlProvenance;
 use hooks::{answer::HookAnswer, hook::HookCall};
@@ -160,7 +160,14 @@ fn review_channel1_aggregate_respects_the_engine_protected_token_window() {
         tool_outputs: 1,
         ..Default::default()
     };
-    let (ops, _) = host_channel1(&totals, &metrics, &json!({}));
+    let inputs = transform::Channel1PolicyInputs {
+        baseline: baseline.clone(),
+        users: 1,
+        tool_outputs: (totals.tool_outputs + metrics.tool_outputs) as usize,
+        hint: vec![],
+        carrier: true,
+    };
+    let (ops, _) = host_channel1(&inputs, &json!({}));
     assert!(
         ops.is_empty(),
         "the aggregate treats the protected tool arc as reclaimable and emits a reminder"
@@ -195,7 +202,14 @@ fn review_channel1_reminder_keeps_the_engine_oldest_tag_hint() {
         &[(1, "read".into())],
         decision.sticky,
     );
-    let (ops, _) = host_channel1(&totals, &metrics, &json!({}));
+    let inputs = transform::Channel1PolicyInputs {
+        baseline,
+        users: 1,
+        tool_outputs: (totals.tool_outputs + metrics.tool_outputs) as usize,
+        hint: vec![(1, "read".into())],
+        carrier: true,
+    };
+    let (ops, _) = host_channel1(&inputs, &json!({}));
     let actual = hooks::answer::apply_ops(&["result".into()], &ops).unwrap();
     assert_eq!(
         actual[0],
@@ -216,6 +230,7 @@ async fn review_disabled_auto_search_produces_no_hint_like_full_engine() {
         "auto_search_enabled":false,"auto_search_min_prompt_chars":0,"auto_search_score_threshold":0.0});
     response(dispatch(&h, 7, "transform.declare", json!({"params":plan})).await);
     let message = text("u", "user", "rust ownership borrowing");
+    sync_pass(&h, &[(1, message.clone())]).await;
     let request = engine_request(&[message.clone()], false);
     let ctx = engine_context(&project, "/nonexistent-docs");
     let store = h.store.get().unwrap();
@@ -252,6 +267,7 @@ async fn review_hint_only_targets_the_physical_user_tail_of_a_multi_append_pass(
         text("u1", "user", "rust ownership borrowing"),
         text("u2", "user", "rust ownership borrowing"),
     ];
+    sync_pass(&h, &[(1, messages[0].clone()), (2, messages[1].clone())]).await;
     let req = engine_request(&messages, true);
     let ctx = engine_context(&project, "/nonexistent-docs");
     transform::transform(full.store.get().unwrap(), &req, &ctx).unwrap();
@@ -339,6 +355,7 @@ async fn review_temporal_gap_uses_previous_created_time_when_no_completion_exist
     first["info"]["time"] = json!({"created":1000});
     let mut second = text("u2", "user", "second");
     second["info"]["time"] = json!({"created":301000});
+    sync_pass(&h, &[(1, first.clone()), (2, second.clone())]).await;
     let req = engine_request(&[first.clone(), second.clone()], false);
     let mut ctx = engine_context("git:review", "/nonexistent-docs");
     ctx.temporal_awareness = true;
@@ -394,6 +411,7 @@ async fn review_hint_excludes_fragments_already_rendered_in_the_memory_head() {
         transform::transform(h.store.get().unwrap(), &baseline_req, &host_ctx).unwrap();
     }
     let message = text("u", "user", "rust ownership borrowing");
+    sync_pass(&h, &[(2, message.clone())]).await;
     let req = engine_request(&[baseline, message.clone()], true);
     let expected = transform::transform(full.store.get().unwrap(), &req, &ctx).unwrap();
     assert!(
@@ -485,6 +503,7 @@ async fn review_burning_an_earlier_answer_removes_its_inherited_cadence_effect()
     admit(&h, 7).await;
     let output = "spent payload ".repeat(30000);
     for (mid, ordinal) in [("a", 1), ("b", 2)] {
+        sync_pass(&h, &[(ordinal, tool(mid, &output))]).await;
         let mut p = hook(mid, ordinal, "post_tool", &[&output], tool(mid, &output));
         p["subject_part"] = json!("part");
         let answer = rendered(
@@ -500,6 +519,7 @@ async fn review_burning_an_earlier_answer_removes_its_inherited_cadence_effect()
     // a timed out at the host after committing. b was served successfully. The
     // next answered call burns a; b's snapshot must not preserve a's lost fire.
     let mut p = hook("c", 3, "post_tool", &["next"], tool("c", "next"));
+    sync_pass(&h, &[(3, tool("c", "next"))]).await;
     p["subject_part"] = json!("part");
     p["unserved_subjects"] = json!([{"subject_mid":"a","hook":"post_tool","subject_part":"part"}]);
     let answer = rendered(

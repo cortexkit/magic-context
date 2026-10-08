@@ -2218,6 +2218,28 @@ pub const TABLES: &[TableInventory] = &[
         Some(KeyPolicy::PreserveOrRefuseCollision),
         None
     ),
+    // Must move: these content-free estimates and timestamps are the policy
+    // lineage, not a cache that can be rebuilt by reading known messages.
+    table!(
+        Module,
+        "mc_provider_policy_parts_v1",
+        Ship,
+        RowSelector::Predicate(
+            "conv_key IN (SELECT conv_key FROM mc_provider_conversations_v2 WHERE session = ?1)"
+        ),
+        &["conv_key", "lineage_id", "block_id"],
+        &[
+            "conv_key",
+            "lineage_id",
+            "ordinal",
+            "block_id",
+            "policy_json",
+            "session"
+        ],
+        &[],
+        Some(KeyPolicy::PreserveOrRefuseCollision),
+        None
+    ),
     table!(
         Module,
         "mc_provider_views_v1",
