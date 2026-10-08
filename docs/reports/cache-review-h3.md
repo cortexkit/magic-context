@@ -206,3 +206,138 @@ Additional gates:
 No live stores were opened, read, written or migrated. No live config was read.
 No campaign mutation was applied to production code, and no changes were made
 outside the two requested review deliverables.
+
+
+## Implementation response and resolution
+
+The independent review above is retained unchanged. Its commit
+`859c48b9a0617f27d42c174ac9c05e6f6e2a821b` was imported on the implementation
+branch as `a4a3171999`. The supplied review test file is unchanged: no assertion,
+expectation, skip, test name or compatibility shim was altered.
+
+### Resolved findings
+
+- **R1:** the client's shared page-answer path rejects a `compaction_message`
+  when the encoded status has `more: true`, before either an ordinary step's
+  return value or bootstrap's `onPage` callback can expose an accepted candidate.
+  It logs the protocol violation and returns `unavailable/unexpected_compaction`
+  without retaining an applicable answer. The code comment explains why a fence
+  alone is insufficient: even the first page's fence covers the whole record's
+  newest ordinal. Bootstrap fails this attempt without completing it or
+  acknowledging its missing pages. It neither retries the offending page in a
+  loop nor advances the durable cursor. A new regression retries on a later pass,
+  resends the missing first page under a fresh fence, reaches the final page, and
+  only then applies its valid view. Another regression checks the same guard on
+  ordinary multi-page status calls.
+- **R2:** paging removes `prefix_rebuilding {reason: "pipeline_switch"}` from
+  continuation controls, retaining it on the final page, including a single-page
+  bootstrap. Planning reserves the larger controls before omission, so the size
+  cap is not weakened.
+- **R3:** a shared burn-list snapshot helper omits an empty `unserved_subjects`
+  list on hooks and steps. Non-empty lists retain their identities unchanged.
+- **R4:** hooks and burn-list entries share a present-part validator: non-empty
+  and at most 256 UTF-8 bytes. Hook controls and status metadata are validated
+  before fence persistence or transport dispatch. Tests cover invalid top-level
+  parts, invalid hook/status burn-list parts, and unchanged 256-byte identities.
+  Status validation uses an empty message list and never inspects known ingest or
+  served bytes; the independent A2 control remains green.
+- **R5:** all shared numeric `u64` fields accept only non-negative safe JavaScript
+  integers, through `2^53 - 1`. This rejects both `2^64` and exactly represented
+  but unsafe values at or above `2^53`. Thirty-five field cases exercise ordinal,
+  watermark, ancestry, time, window, token, version, range, coverage, wait and
+  budget shapes at zero, the safe maximum, and six invalid values. Frozen and
+  outbound budgets/status metadata also reject unsafe values locally.
+
+The owner explicitly approved one correction to the original vector test. The
+unchanged Rust fixture literal `18446744073709551615` is a valid Rust `u64`, but
+JavaScript's `JSON.parse` silently rounds it to the out-of-domain endpoint
+`2^64`. Its former expected successful decode was a lossy assertion. The test
+now verifies that exact rounding and expects local refusal; copied fixtures and
+all review expectations remain unchanged. No BigInt API was introduced.
+
+### Red-to-green evidence
+
+With the review imported and production code untouched, this command ran on
+Bun **1.4.2**:
+
+```sh
+bun test packages/plugin/src/hooks/magic-context/host-runner/provider-client-review.test.ts
+```
+
+It produced **10 pass, 9 fail, 82 assertions**. After the fixes, the exact same
+command produced **19 pass, 0 fail, 83 assertions**. Every supplied finding
+changed from red to green:
+
+| Unchanged review test | Before | After |
+| --- | --- | --- |
+| R1: a continuation-page view cannot reach durable application | failed: applied premature view | passed |
+| R2: pipeline_switch is reserved for the final bootstrap page | failed: switch flag on first page | passed |
+| R3: hook omits an empty unserved_subjects list | failed: property present | passed |
+| R3: step omits an empty unserved_subjects list | failed: property present | passed |
+| R4: hook does not send a subject_part that is empty | failed: one request sent | passed |
+| R4: step does not send an unserved subject_part that is empty | failed: one request sent | passed |
+| R4: hook does not send a subject_part that is 258 UTF-8 bytes | failed: one request sent | passed |
+| R4: step does not send an unserved subject_part that is 258 UTF-8 bytes | failed: one request sent | passed |
+| R5: the exactly representable value 2^64 is not a wire u64 | failed: decoded out-of-range value | passed |
+
+The delivered provider tests, new resolution regressions and both H1 record
+suites produced **224 pass, 0 fail, 100,295 assertions** across three files.
+All 139 original provider test cases remain green, with only the approved
+lossy-maximum expectation correction described above. A separate strict
+TypeScript **5.9.3** no-emit check covers both provider tests, the unchanged
+review test and their implementation imports.
+
+### Restored non-vacuity control
+
+After staging the live implementation/test files and confirming an empty
+`git diff --stat`, a **NON-VACUITY BREAK** disabled only the continuation-view
+rejection. The mutated diff was **1 file changed, 1 insertion(+)** in
+`provider-client.ts`. Running the review file with
+`--test-name-pattern 'R1:|H3 review controls'` failed exactly
+`H3 review findings > R1: a continuation-page view cannot reach durable application`:
+expected `[]`, received `[{applied: true}]`. The result was **10 pass, 1 fail**;
+all these controls remained green:
+
+- final wait and all-continuation waits terminate without same-page retry;
+- late transport resolution is not delivered to bootstrap's application callback;
+- mismatched, superseded and duplicate step answers cannot apply a view;
+- encoded pages include escaped ids, non-ASCII, burn lists, cursors and more within 3 MiB;
+- ordinary status neither reads nor reserializes ingested known messages;
+- hook watermark stays at the prior durable commit and descends with the revert clamp;
+- transport failures and generation changes are unavailable, with recovery evidence retained;
+- runner-principal host-plan refusal remains visible and is not retried as declaration;
+- copied commons request payloads survive compact encoding byte for byte without schema reordering;
+- 256 UTF-8 byte subject_part is transmitted unchanged.
+
+The mutation was restored using `git checkout -- <path> && touch <path>`;
+`git diff --stat` was empty afterwards. No mutation is included in the delivery.
+
+All five findings are resolved. The independent report's remaining module/host
+integration obligations (authenticated admission, store-ahead turn refusal,
+pass identity and actual durable writes) still belong to their owning slices;
+this response does not claim that fake transport tests prove them.
+
+### Final repository gates
+
+After restoring the mutation:
+
+- `npm run typecheck`: passed all four package scripts, TypeScript **5.9.3**.
+- `npm run build`: passed the three package builds, Bun **1.4.2**, including the
+  plugin's four server-loader tests.
+- `npm run lint`: passed the four package checks, Biome **2.5.1**; existing
+  warnings outside the changed provider files remain.
+- `npm run test`: **7,550 passed, 6 skipped, 2 failed** over 7,558 plugin tests
+  across 712 files. All nine review findings and the provider/record suites
+  passed in this run. The failures were unrelated: the existing migration-v87
+  harness-table inventory assertion on `host_runner_entries`, and a 30-second
+  timeout in `readGitCommits (smoke) > returns empty array for a non-git directory
+  without throwing`. The latter passed in isolation (one test, one assertion,
+  16.54 ms). These files are unchanged. The chained Pi/CLI/Retina suites were not
+  reached after the plugin gate failed; no whole-repository pass is claimed.
+- `cargo fmt --all`: passed with cargo **1.99.0**, with no Rust diff.
+- Scoped AFT inspection remains partial because checkout graph and Biome
+  producers are unavailable; compiler and repository linter gates are used as
+  the authoritative checks instead.
+
+No package manifest, lockfile, copied fixture, storage table or migration was
+changed to resolve these findings.

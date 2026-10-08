@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { sessionLog } from "../../../shared/logger";
 import type { RustModeModuleClient } from "../rust-mode-transform";
 import {
     checkAnswerFence,
@@ -20,9 +21,22 @@ export type ProviderMethod =
     | "compaction.setup"
     | "compaction.step";
 
-// Wire u64s can exceed JavaScript's exact integer range. Decoding is not permission
-// to apply them: the record's safe-integer, version and structural checks still run.
-const u64 = z.number().refine((n) => Number.isInteger(n) && n >= 0 && n <= 2 ** 64);
+// JavaScript numbers cannot losslessly represent the full Rust u64 domain. Reject
+// unsafe integers rather than silently rounding them; real ordinals, timestamps,
+// versions and budgets stay far below 2^53. Decoding is still not permission to
+// apply a view: the record's fence, version and structural checks must also pass.
+const u64 = z.number().refine((n) => Number.isSafeInteger(n) && n >= 0);
+// Part identities are opaque UTF-8 bytes, not a character-count or JSON-escape budget.
+const subjectPartSchema = z.string().refine((part) => part.length > 0 && encodedBytes(part) <= 256);
+const unservedSubjectsSchema = z.array(
+    z
+        .object({
+            subject_mid: z.string(),
+            hook: z.enum(["pre_user", "post_assistant", "post_tool"]),
+            subject_part: subjectPartSchema.optional(),
+        })
+        .passthrough(),
+);
 const u32 = z.number().int().min(0).max(0xffff_ffff);
 const object = z.record(z.string(), z.unknown());
 const phase = z.enum(["mutate", "validate", "approve"]);
@@ -58,19 +72,9 @@ const commonHook = {
     subject_ordinal: u64.optional(),
     message: z.unknown().optional(),
     descends_from: descentSchema.optional(),
-    subject_part: z.string().optional(),
+    subject_part: subjectPartSchema.optional(),
     served_through_ordinal: u64.optional(),
-    unserved_subjects: z
-        .array(
-            z
-                .object({
-                    subject_mid: z.string(),
-                    hook: z.enum(["pre_user", "post_assistant", "post_tool"]),
-                    subject_part: z.string().optional(),
-                })
-                .passthrough(),
-        )
-        .optional(),
+    unserved_subjects: unservedSubjectsSchema.optional(),
     pass_complete: z.boolean().optional(),
 };
 const hookSchema = z.discriminatedUnion("hook", [
@@ -152,6 +156,8 @@ const stepSchema = z
         request_id: z.string(),
         lineage_id: z.string(),
         descends_from: descentSchema.optional(),
+        served_through_ordinal: u64.optional(),
+        unserved_subjects: unservedSubjectsSchema.optional(),
         step_id: z.string(),
         step_kind: z.string(),
         ...modelFields,
@@ -319,6 +325,8 @@ export function freezeProviderPlan(
     declaration: ProviderAnswers["transform.declare"],
     item: { preset?: string; params: Record<string, unknown>; compaction_budget_ms?: number },
 ): FrozenProviderPlan {
+    declarationSchema.parse(declaration);
+    u64.parse(item.compaction_budget_ms ?? 2000);
     const plan: FrozenProviderPlan = JSON.parse(
         JSON.stringify({
             ...item,
@@ -364,6 +372,7 @@ export type ProviderResult<A> =
               | "superseded_request"
               | "oversize"
               | "unexpected_wait"
+              | "unexpected_compaction"
               | "in_flight";
           error?: unknown;
           on_unavailable?: "pass" | "refuse";
@@ -437,9 +446,22 @@ export class ProviderClient {
             throw new Error("Invalid request id byte budget");
     }
     private budget(ms: number): number {
-        const budget = Math.min(ms, this.options.engineBudgetMs ?? 2000);
-        if (!Number.isFinite(budget) || budget <= 0) throw new Error("Invalid provider budget");
-        return budget;
+        const engineBudget = this.options.engineBudgetMs ?? 2000;
+        if (
+            !Number.isSafeInteger(ms) ||
+            ms <= 0 ||
+            !Number.isSafeInteger(engineBudget) ||
+            engineBudget <= 0
+        )
+            throw new Error("Invalid provider budget");
+        return Math.min(ms, engineBudget);
+    }
+    private unservedSubjects<M>(record: RunnerRecord<M>) {
+        // Validate and snapshot the burn identities without touching message content.
+        // An absent list names no burns; empty lists are omitted from encoded calls.
+        return record.unserved_subjects.length
+            ? unservedSubjectsSchema.parse(record.unserved_subjects)
+            : undefined;
     }
     private id(): string {
         const id = this.newId();
@@ -632,7 +654,7 @@ export class ProviderClient {
                 preset: record.plan.preset,
                 params: record.plan.params,
                 served_through_ordinal: record.served_through_ordinal,
-                unserved_subjects: record.unserved_subjects,
+                unserved_subjects: this.unservedSubjects(record),
                 descends_from: record.descends_from,
                 pass_complete: passComplete,
                 budget_ms: budget,
@@ -678,7 +700,7 @@ export class ProviderClient {
         record: RunnerRecord<M, FrozenProviderPlan>,
         inputs: StepInputs,
     ): StatusRequestControl {
-        return {
+        const control = {
             ...inputs,
             session: this.options.sessionId,
             harness: this.options.harness,
@@ -693,15 +715,38 @@ export class ProviderClient {
             },
             last_not_applied: record.last_not_applied,
             descends_from: record.descends_from,
-            unserved_subjects: record.unserved_subjects.map((subject) => ({ ...subject })),
+            unserved_subjects: this.unservedSubjects(record),
         };
+        // Validate status metadata alone: known ingest and served content must never
+        // be read or reserialized just to check identities, numbers or extensions.
+        decodeProviderRequest("compaction.step", {
+            ...control,
+            lineage_id: record.lineage_id,
+            served_through_ordinal: record.served_through_ordinal,
+            after_ordinal: record.after_ordinal,
+            messages: [],
+        });
+        return control;
     }
     private planPages<M>(
         record: RunnerRecord<M, FrozenProviderPlan>,
         inputs: StepInputs,
     ): StatusPage[] | Extract<ProviderResult<never>, { status: "unavailable" }> {
         try {
-            return statusPages(record, this.controls(record, inputs));
+            const pages = statusPages(record, this.controls(record, inputs));
+            return pages.map((page) => {
+                if (
+                    page.control.more === true &&
+                    inputs.prefix_rebuilding?.reason === "pipeline_switch"
+                ) {
+                    // Only the completed bootstrap may request the switch rebuild.
+                    // Planning reserves the larger final-page controls before omission.
+                    const control = { ...page.control };
+                    delete control.prefix_rebuilding;
+                    return { ...page, control };
+                }
+                return page;
+            });
         } catch (error) {
             if (
                 error instanceof Error &&
@@ -735,6 +780,25 @@ export class ProviderClient {
         );
         if (
             result.status === "answered" &&
+            result.answer.answer === "compaction_message" &&
+            page.control.more === true
+        ) {
+            // The first page's fence already covers the record's whole newest ordinal,
+            // not just this page. Fence/range checks cannot make an intermediate view
+            // safe: only the page completing the history may offer an applicable view.
+            sessionLog(
+                this.options.sessionId,
+                "compaction.step refused a view on a continuation page",
+                {
+                    request_id: id,
+                    lineage_id: fence.lineage_id,
+                    newest: fence.newest,
+                },
+            );
+            return { status: "unavailable", request_id: id, reason: "unexpected_compaction", page };
+        }
+        if (
+            result.status === "answered" &&
             result.answer.answer === "wait" &&
             page.control.more !== true
         )
@@ -756,6 +820,8 @@ export class ProviderClient {
     /**
      * Only a continuation wait authorizes the next bootstrap page. onPage must
      * persist the answer and cursor before resolving; a failed write propagates.
+     * A protocol violation fails this attempt without completing bootstrap or
+     * acknowledging its missing pages; a later pass resumes the durable cursor.
      * No ready notification, bound timer, polling or same-page resend is involved.
      */
     bootstrap<M>(

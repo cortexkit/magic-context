@@ -106,9 +106,25 @@ for (const [method, lane, file] of [
     const data = vectors(lane, file);
     describe(`commons answer vectors: ${method}`, () => {
         for (const vector of [...data.answers, ...data.tolerated]) {
-            test(vector.name, () =>
-                expect<unknown>(decodeProviderAnswer(method, vector.answer)).toEqual(vector.answer),
-            );
+            test(vector.name, () => {
+                if (
+                    method === "compaction.step" &&
+                    vector.name === "opaque ids and any u64 version are the provider's to choose"
+                ) {
+                    // The unchanged Rust fixture's 18446744073709551615 is legal on
+                    // its wire, but JSON.parse rounds it to the illegal endpoint 2^64.
+                    // The numeric client must refuse that lossy value, not assert a
+                    // successful decode that silently changes the provider's version.
+                    const version = (vector.answer.compaction as { version: number }).version;
+                    expect(version).toBe(2 ** 64);
+                    expect(Number.isSafeInteger(version)).toBe(false);
+                    expect(() => decodeProviderAnswer(method, vector.answer)).toThrow();
+                } else {
+                    expect<unknown>(decodeProviderAnswer(method, vector.answer)).toEqual(
+                        vector.answer,
+                    );
+                }
+            });
         }
         for (const vector of data.undecodable) {
             test(`rejects ${vector.name}`, () =>
@@ -852,5 +868,325 @@ describe("host provider transport", () => {
             ),
         ).toEqual({ applied: true });
         expect(assemble(state)[0].parts[0].text).toBe("summary");
+    });
+});
+
+describe("H3 review resolution regressions", () => {
+    test("a continuation-page view fails the attempt without applying or acknowledging missing pages, then resumes", async () => {
+        const state = record();
+        append(state, "m1", "x".repeat(1_600_000));
+        append(state, "m2", "y".repeat(1_600_000));
+        const before = assemble(state);
+        let violation = true;
+        const h = harness(({ params }) => {
+            if (violation) {
+                violation = false;
+                return {
+                    answer: "compaction_message",
+                    request_id: params.request_id,
+                    compaction: {
+                        compaction_id: "premature",
+                        version: 1,
+                        range: { from: 0, to: 3 },
+                        replacement: [],
+                    },
+                };
+            }
+            return params.more
+                ? { answer: "wait", request_id: params.request_id, reason: "more", bound_ms: 0 }
+                : {
+                      answer: "compaction_message",
+                      request_id: params.request_id,
+                      compaction: {
+                          compaction_id: "complete",
+                          version: 2,
+                          range: { from: 0, to: 3 },
+                          replacement: [],
+                      },
+                  };
+        });
+        const received: string[] = [];
+        const inputs = {
+            ...step,
+            newest: { ordinal: 2, mid: "m2" },
+            prefix_rebuilding: { reason: "pipeline_switch" },
+        };
+        const first = await h.client.bootstrap(state, inputs, async (result) => {
+            received.push(result.status);
+            expect(result).toMatchObject({
+                status: "unavailable",
+                reason: "unexpected_compaction",
+            });
+            expect(Object.hasOwn(result, "answer")).toBe(false);
+        });
+        expect(first).toMatchObject({ status: "unavailable", reason: "unexpected_compaction" });
+        expect(h.calls).toHaveLength(1);
+        expect(received).toEqual(["unavailable"]);
+        expect(state.after_ordinal).toBe(0);
+        expect(state.entries.every((entry) => !entry.ingested)).toBe(true);
+        expect(state.view.compaction_id).toBe("setup");
+        expect(assemble(state)[0]).toBe(before[0]);
+        const resumed = await h.client.bootstrap(state, inputs, async (result) => {
+            if (result.status !== "answered") throw new Error("unexpected failure");
+            if (result.answer.answer === "wait") {
+                expect(
+                    commitNonViewAnswer(state, result.request_id, result.arrived_ms, "wait"),
+                ).toBeUndefined();
+                acknowledgeStatus(state, new Set(result.page.messages.map((entry) => entry.id)));
+            } else if (result.answer.answer === "compaction_message") {
+                expect(result.page.control.more).toBeUndefined();
+                expect(
+                    applyCompaction(
+                        state,
+                        {
+                            request_id: result.request_id,
+                            arrived_ms: result.arrived_ms,
+                            compaction: result.answer.compaction as unknown as typeof state.view,
+                        },
+                        () => true,
+                    ),
+                ).toEqual({ applied: true });
+            }
+        });
+        expect(resumed.status).toBe("answered");
+        expect(state.view.compaction_id).toBe("complete");
+        expect(h.calls.map((call) => call.wire.params.request_id)).toEqual(["r1", "r2", "r3"]);
+        expect(h.calls.map((call) => call.wire.params.after_ordinal)).toEqual([0, 0, 1]);
+        expect(h.calls.map((call) => call.wire.params.prefix_rebuilding)).toEqual([
+            undefined,
+            undefined,
+            { reason: "pipeline_switch" },
+        ]);
+    });
+    test("ordinary step cannot expose a continuation-page view either", async () => {
+        const state = record();
+        append(state, "m1", "x".repeat(1_600_000));
+        append(state, "m2", "y".repeat(1_600_000));
+        const h = harness(({ params }) => ({
+            answer: "compaction_message",
+            request_id: params.request_id,
+            compaction: {
+                compaction_id: "premature",
+                version: 1,
+                range: { from: 0, to: 3 },
+                replacement: [],
+            },
+        }));
+        const result = await h.client.step(state, { ...step, newest: { ordinal: 2, mid: "m2" } });
+        expect(result).toMatchObject({ status: "unavailable", reason: "unexpected_compaction" });
+        expect(Object.hasOwn(result, "answer")).toBe(false);
+        expect(h.calls).toHaveLength(1);
+        expect(state.after_ordinal).toBe(0);
+        expect(state.view.compaction_id).toBe("setup");
+    });
+    test("a single-page switch keeps its rebuild flag and only known content is omitted", async () => {
+        const state = record();
+        append(state, "m1", "known", true);
+        state.after_ordinal = 1;
+        const h = harness(({ params }) => ({ answer: "noop", request_id: params.request_id }));
+        await h.client.bootstrap(
+            state,
+            {
+                ...step,
+                newest: { ordinal: 1, mid: "m1" },
+                prefix_rebuilding: { reason: "pipeline_switch" },
+            },
+            async () => {},
+        );
+        expect(h.calls).toHaveLength(1);
+        expect(h.calls[0].wire.params).toMatchObject({
+            messages: [],
+            prefix_rebuilding: { reason: "pipeline_switch" },
+        });
+        expect(Object.hasOwn(h.calls[0].wire.params, "more")).toBe(false);
+        expect(Object.hasOwn(h.calls[0].wire.params, "unserved_subjects")).toBe(false);
+    });
+    for (const part of ["", "漢".repeat(86)]) {
+        test(`hook validates a burn-list part before installing its fence (${encodedBytes(part)} bytes)`, async () => {
+            const state = record();
+            state.unserved_subjects = [
+                { subject_mid: "m0", hook: "post_tool", subject_part: part },
+            ];
+            const h = harness(() => ({ answer: "pass" }));
+            await expect(h.client.hook(state, hook, "{}")).rejects.toThrow();
+            expect(h.calls).toHaveLength(0);
+            expect(h.fences).toHaveLength(0);
+            expect(state.issued).toBeUndefined();
+        });
+    }
+    test("256-byte burn-list part identities survive hooks and steps without normalization", async () => {
+        const state = record();
+        const part = `${"漢".repeat(85)}a`;
+        state.unserved_subjects = [{ subject_mid: "m0", hook: "post_tool", subject_part: part }];
+        const h = harness(({ method, params }) => ({
+            answer: method === "transform.hook" ? "pass" : "noop",
+            request_id: params.request_id,
+        }));
+        expect((await h.client.hook(state, hook, "{}")).status).toBe("answered");
+        expect((await h.client.step(state, step)).status).toBe("answered");
+        expect(h.calls.map((call) => call.wire.params.unserved_subjects)).toEqual([
+            state.unserved_subjects,
+            state.unserved_subjects,
+        ]);
+    });
+
+    const status = vectors("compaction", "status").requests[0].request;
+    const setup = vectors("compaction", "setup").requests[0].request;
+    const view = vectors("compaction", "answers").answers[1].answer;
+    const ready = vectors("compaction", "setup").answers[0].answer;
+    const ask = vectors("step-transform", "hook-answers").answers[6].answer;
+    const samples: {
+        method: ProviderMethod;
+        kind: "request" | "answer";
+        base: Record<string, unknown>;
+        fields: string[];
+    }[] = [
+        {
+            method: "transform.declare",
+            kind: "answer",
+            base: { subscriptions: [{ hook: "pre_user", ops: ["prepend"], budget_ms: 1 }] },
+            fields: ["subscriptions.0.budget_ms"],
+        },
+        {
+            method: "transform.hook",
+            kind: "request",
+            base: {
+                session: "s",
+                harness: "opencode",
+                params: {},
+                ...hook,
+                served_through_ordinal: 0,
+                descends_from: { lineage_id: "parent", through_ordinal: 0 },
+            },
+            fields: ["subject_ordinal", "served_through_ordinal", "descends_from.through_ordinal"],
+        },
+        { method: "transform.hook", kind: "answer", base: ask, fields: ["ask.expires_at_ms"] },
+        {
+            method: "compaction.setup",
+            kind: "request",
+            base: { ...setup, newest: { ordinal: 1, mid: "m1" } },
+            fields: ["context_window", "output_limit", "newest.ordinal", "now"],
+        },
+        {
+            method: "compaction.setup",
+            kind: "answer",
+            base: ready,
+            fields: ["initial.version", "initial.range.from", "initial.range.to"],
+        },
+        {
+            method: "compaction.step",
+            kind: "request",
+            base: {
+                ...status,
+                after_ordinal: 0,
+                served_through_ordinal: 0,
+                descends_from: { lineage_id: "parent", through_ordinal: 0 },
+                last_not_applied: { compaction_id: "previous", version: 0, reason: "structural" },
+                previous_usage: {
+                    input: 1,
+                    cache_read: 1,
+                    cache_write: 1,
+                    output: 1,
+                    completed_at: 1,
+                    finish_reason: "stop",
+                },
+                estimate: { request_tokens: 1, previous_input: 1 },
+            },
+            fields: [
+                "context_window",
+                "output_limit",
+                "now",
+                "newest.ordinal",
+                "last_applied.version",
+                "last_not_applied.version",
+                "after_ordinal",
+                "served_through_ordinal",
+                "descends_from.through_ordinal",
+                "messages.0.ordinal",
+                "previous_usage.input",
+                "previous_usage.cache_read",
+                "previous_usage.cache_write",
+                "previous_usage.output",
+                "previous_usage.completed_at",
+                "estimate.request_tokens",
+                "estimate.previous_input",
+            ],
+        },
+        {
+            method: "compaction.step",
+            kind: "answer",
+            base: { ...view, coverage: { end_mid: "m1", ordinal: 1 } },
+            fields: [
+                "compaction.version",
+                "compaction.range.from",
+                "compaction.range.to",
+                "coverage.ordinal",
+            ],
+        },
+        {
+            method: "compaction.step",
+            kind: "answer",
+            base: { answer: "wait", request_id: "r", reason: "more", bound_ms: 1 },
+            fields: ["bound_ms"],
+        },
+        {
+            method: "compaction.step",
+            kind: "answer",
+            base: {
+                answer: "refuse",
+                request_id: "r",
+                code: "history_unreadable",
+                reason: "gap",
+                detail: { history_gap_from: 1 },
+            },
+            fields: ["detail.history_gap_from"],
+        },
+    ];
+    for (const sample of samples) {
+        for (const field of sample.fields) {
+            test(`numeric wire domain: ${sample.method} ${sample.kind} ${field}`, () => {
+                const decode = (value: number) => {
+                    const input = JSON.parse(JSON.stringify(sample.base));
+                    const path = field.split(".");
+                    let target = input;
+                    for (const key of path.slice(0, -1)) target = target[key];
+                    target[path.at(-1)!] = value;
+                    return sample.kind === "request"
+                        ? decodeProviderRequest(sample.method, input)
+                        : decodeProviderAnswer(sample.method, input);
+                };
+                // Shape decoding accepts exactly represented integers. Applying ranges,
+                // versions or watermarks still requires the record's stricter checks.
+                expect(() => decode(0)).not.toThrow();
+                expect(() => decode(Number.MAX_SAFE_INTEGER)).not.toThrow();
+                for (const invalid of [
+                    Number.MAX_SAFE_INTEGER + 1,
+                    2 ** 64,
+                    -1,
+                    0.5,
+                    Number.NaN,
+                    Number.POSITIVE_INFINITY,
+                ]) {
+                    expect(() => decode(invalid)).toThrow();
+                }
+            });
+        }
+    }
+    test("outbound status and frozen budgets reject unsafe integers before dispatch", async () => {
+        expect(() =>
+            freezeProviderPlan(
+                { subscriptions: [] },
+                { params: {}, compaction_budget_ms: Number.MAX_SAFE_INTEGER + 1 },
+            ),
+        ).toThrow();
+        const h = harness(() => ({ answer: "noop", request_id: "r1" }));
+        await expect(
+            h.client.step(record(), {
+                ...step,
+                estimate: { request_tokens: Number.MAX_SAFE_INTEGER + 1 },
+            }),
+        ).rejects.toThrow();
+        expect(h.calls).toHaveLength(0);
+        expect(h.fences).toHaveLength(0);
     });
 });
