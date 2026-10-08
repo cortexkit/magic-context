@@ -458,6 +458,10 @@ fn execute_host(
         (!meta.last_provider_id.is_empty()).then(|| meta.last_provider_id.clone());
     template.system_prompt_hash = meta.last_system_prompt_hash.clone();
     template.upgrade_state = meta.last_upgrade_state.clone();
+    // Status has no tool-array observation. Keep the head's advertised tagger
+    // surface during transport adoption; the host overlay renders live hook
+    // tags independently, without inventing a new tagger epoch on the switch.
+    template.tool_present = !meta.initialized || meta.tagging_surface_active || meta.cc_u1_active;
     let mut context = producer_context(
         work,
         &setup.setup.request.model,

@@ -2593,7 +2593,7 @@ pub mod compaction {
         // that the runner already served while compaction calls were gated off.
         // Host hooks own minting; the engine still renders the durable tag
         // overlay, including tags minted before a pipeline switch.
-        req.tool_present = host;
+        req.tool_present = host && template.tool_present;
         req.auto_search_enabled = false;
         req.todo_tool_present = Some(false);
         req.render_config = format!(
@@ -4548,7 +4548,10 @@ fn apply_once(
     let bootstrap_tagging_active = !loaded.meta.initialized;
     let suppress_bootstrap_reduction_tag_overlay = bootstrap_tagging_active
         && serializer_profile == Some(SerializerProfile::ClaudeCodeAnthropic);
-    let tagging_active = tagging_surface_requested;
+    // Host views render live hook tags even when the adopted full-request head
+    // did not advertise the tagger. Rendering is not a change of that frozen
+    // advertised surface or its versioned identity.
+    let tagging_active = tagging_surface_requested || compaction::host_pass(req);
     profile_end!(perf_render_context);
     // Previously stored overlay rows may still replay when boundary-lineage validation
     // later forces pass-through. Decisions from this request stay in memory until the
@@ -8358,7 +8361,11 @@ fn render_config_change(
             && req.serializer_profile == "opencode-aisdk"
             && meta.last_model_key == req.model_key.as_deref().unwrap_or("")
             && meta.last_provider_id == req.provider_id.as_deref().unwrap_or("")
-            && meta.last_system_prompt_hash == req.system_prompt_hash);
+            && meta.last_system_prompt_hash == req.system_prompt_hash
+            && meta.last_upgrade_state == req.upgrade_state
+            && versioned_render_epochs(&meta.last_render_config).is_some_and(|old| {
+                versioned_render_epochs(effective_render_config).as_ref() == Some(&old)
+            }));
     #[cfg(feature = "drive-fault")]
     tracing::debug!(
         "mc-module: render identity session={} changed={} observed={} coordinator={} transition={} tool_present={} profile={} effective={:?} persisted={:?}",
@@ -8401,6 +8408,49 @@ fn render_epoch_suffix(render_config: &str, ignore_upgrade: bool) -> String {
         .filter(|part| !part.starts_with("upg:"))
         .collect::<Vec<_>>()
         .join(";")
+}
+
+/// Decode the engine's length-prefixed epoch fields, not delimiter fragments
+/// inside an opaque plan or field value. Only a complete suffix is accepted.
+fn versioned_render_epochs(config: &str) -> Option<BTreeMap<String, String>> {
+    for (at, _) in config.match_indices("|m0epoch[") {
+        let mut rest = &config[at + "|m0epoch[".len()..];
+        let mut fields = BTreeMap::new();
+        loop {
+            let Some(colon) = rest.find(':') else { break };
+            let key = &rest[..colon];
+            if key.is_empty() || !key.bytes().all(|b| b.is_ascii_alphanumeric()) {
+                break;
+            }
+            rest = &rest[colon + 1..];
+            let Some(colon) = rest.find(':') else { break };
+            let Ok(length) = rest[..colon].parse::<usize>() else {
+                break;
+            };
+            rest = &rest[colon + 1..];
+            let Some(value) = rest.get(..length) else {
+                break;
+            };
+            if fields.insert(key.to_string(), value.to_string()).is_some() {
+                break;
+            }
+            rest = &rest[length..];
+            if rest == "]" {
+                if ["ws", "upg", "mem"]
+                    .iter()
+                    .all(|key| fields.contains_key(*key))
+                {
+                    return Some(fields);
+                }
+                break;
+            }
+            let Some(next) = rest.strip_prefix(';') else {
+                break;
+            };
+            rest = next;
+        }
+    }
+    None
 }
 
 fn scheduler_config(execute_threshold_percentage: f64) -> SchedulerConfig {
@@ -16917,6 +16967,24 @@ pub(crate) mod tests {
                 &PassPlan::Reject("unsafe shape"),
                 false
             ));
+        }
+
+        #[test]
+        fn versioned_epoch_metadata_decodes_values_not_opaque_delimiters() {
+            let epoch = M0ContentEpoch {
+                workspace_fingerprint: "workspace;:[]".into(),
+                upgrade_state: "rélease;|m0epoch[not-an-epoch]".into(),
+                memory_render_epoch: "mre3".into(),
+                profile_render_epoch: "mpe2".into(),
+                ..Default::default()
+            };
+            let config = fold_m0_content_epoch("opaque|m0epoch[forged]", &epoch);
+            let fields = versioned_render_epochs(&config).unwrap();
+            assert_eq!(fields["upg"], epoch.upgrade_state);
+            assert_eq!(fields["ws"], epoch.workspace_fingerprint);
+            assert_eq!(fields["mre"], "mre3");
+            assert_eq!(fields["mpe"], "mpe2");
+            assert!(versioned_render_epochs("opaque|m0epoch[ws:100:short]").is_none());
         }
 
         #[test]
