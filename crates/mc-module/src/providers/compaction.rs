@@ -1007,6 +1007,20 @@ impl McHandler {
             .load_provider_conversation(&work.key.store_key())
             .map_err(transient)?
             .expect("committed conversation");
+        if params.get("more").and_then(Value::as_bool) == Some(true) {
+            // Paging is an execution fence, not a statement about held bytes.
+            // Hooks may already cover newest, but only the final page may render
+            // a view or acknowledge the pass's hook answers.
+            conversation.cursor_frontier = store
+                .provider_frontier(&work.key.store_key(), &lineage.lineage_id)
+                .map_err(transient)?;
+            conversation.wait_request = None;
+            let answer = json!({"answer":"wait","request_id":request.request_id,"reason":"Awaiting the next host status page","bound_ms":1});
+            conversation.last_answer_json = Some(answer.to_string());
+            save_host_setup(store, &work.key, &mut conversation, &setup)?;
+            fault("AnswerRecorded");
+            return bytes(&answer);
+        }
         let frontier = store
             .provider_frontier(&work.key.store_key(), &lineage.lineage_id)
             .map_err(transient)?;
