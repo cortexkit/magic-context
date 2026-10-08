@@ -679,6 +679,7 @@ fn frozen_reductions_coverage_and_calibration_reuse_the_engine_measurement() {
         16000,
         &Default::default(),
         true,
+        false,
     );
     assert_eq!(
         crate::tail_hygiene::effective_tail_hygiene(&actual.baseline),

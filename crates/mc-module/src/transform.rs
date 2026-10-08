@@ -6790,24 +6790,13 @@ fn apply_once(
         .has_provider_namespace(&req.session_id)?
         .then(|| hygiene_measurement.clone());
     let mut current_hygiene_baseline = if is_bust_pass {
-        let refreshed = refresh_tail_hygiene_baseline_calibrated(
+        let refreshed = refresh_channel1_baseline(
             hygiene_measurement,
             true,
             meta.tail_hygiene_baseline.as_ref(),
             ctx.now_ms,
-            HygieneCalibration {
-                units_version: meta.hygiene_units_version.max(1),
-                tools_ratio: if meta.hygiene_units_version >= 2 {
-                    active_calibration.tools_ratio
-                } else {
-                    1.0
-                },
-                prose_ratio: if meta.hygiene_units_version >= 2 {
-                    active_calibration.prose_ratio
-                } else {
-                    1.0
-                },
-            },
+            meta.hygiene_units_version,
+            active_calibration,
         );
         meta.tail_hygiene_baseline = Some(refreshed.baseline.clone());
         Some(refreshed.baseline)
@@ -6817,24 +6806,13 @@ fn apply_once(
             .tail_hygiene_baseline
             .as_ref()
             .map(|previous| {
-                refresh_tail_hygiene_baseline_calibrated(
+                refresh_channel1_baseline(
                     hygiene_measurement,
                     false,
                     Some(previous),
                     ctx.now_ms,
-                    HygieneCalibration {
-                        units_version: meta.hygiene_units_version.max(1),
-                        tools_ratio: if meta.hygiene_units_version >= 2 {
-                            active_calibration.tools_ratio
-                        } else {
-                            1.0
-                        },
-                        prose_ratio: if meta.hygiene_units_version >= 2 {
-                            active_calibration.prose_ratio
-                        } else {
-                            1.0
-                        },
-                    },
+                    meta.hygiene_units_version,
+                    active_calibration,
                 )
             })
             .map(|refreshed| {
@@ -10848,6 +10826,37 @@ pub(crate) struct Channel1PolicyInputs {
     pub carrier: bool,
 }
 
+/// Both lanes freeze the prefix before the newest message on a bust, and use
+/// the frozen-prefix delta path on a defer. Calibration epoch handling is shared.
+fn refresh_channel1_baseline(
+    measured: crate::tail_hygiene::TailHygieneMeasurement,
+    cache_busting: bool,
+    previous: Option<&TailHygieneBaseline>,
+    now_ms: i64,
+    units_version: u8,
+    calibration: crate::decision_calibration::DecisionCalibration,
+) -> crate::tail_hygiene::TailHygieneRefresh {
+    refresh_tail_hygiene_baseline_calibrated(
+        measured,
+        cache_busting,
+        previous,
+        now_ms,
+        HygieneCalibration {
+            units_version: units_version.max(1),
+            tools_ratio: if units_version >= 2 {
+                calibration.tools_ratio
+            } else {
+                1.0
+            },
+            prose_ratio: if units_version >= 2 {
+                calibration.prose_ratio
+            } else {
+                1.0
+            },
+        },
+    )
+}
+
 /// Project stored measurements through the same protection, selection, calibrated
 /// refresh and oldest-tag functions as a full engine pass. No content is fetched.
 /// This correctness-stage projector walks the full active metadata lineage; it
@@ -10858,6 +10867,7 @@ pub(crate) fn channel1_inputs_from_parts(
     protected_floor: u64,
     protected_tools: &BTreeMap<String, usize>,
     carrier: bool,
+    cache_busting: bool,
 ) -> Channel1PolicyInputs {
     use crate::protection_window::ProtectionWindow;
     use crate::selection::{SelItem, SelKind, SelMessageRole};
@@ -11001,7 +11011,7 @@ pub(crate) fn channel1_inputs_from_parts(
             .map(|p| p.measurement.clone())
             .collect();
     }
-    let baseline = crate::tail_hygiene::refresh_tail_hygiene_baseline_calibrated(
+    let baseline = refresh_channel1_baseline(
         crate::tail_hygiene::TailHygieneMeasurement {
             u: 0,
             t: 0,
@@ -11009,14 +11019,11 @@ pub(crate) fn channel1_inputs_from_parts(
             parts: measurements,
             newest_message_part_start: newest_start,
         },
-        false,
+        cache_busting,
         previous.as_ref(),
         0,
-        crate::tail_hygiene::HygieneCalibration {
-            units_version: 2,
-            tools_ratio: calibration.tools_ratio,
-            prose_ratio: calibration.prose_ratio,
-        },
+        2,
+        calibration,
     )
     .baseline;
     let active = parts

@@ -821,7 +821,8 @@ impl McHandler {
                     let new_ids=ctx.counters.pointer("/pass_context/appended_ids").and_then(Value::as_array);
                     let carrier_block=ctx.parts.iter().filter(|p|p.tag_kind.as_deref()==Some("tool_result") && new_ids.is_some_and(|ids|ids.iter().any(|id|id.as_str()==Some(p.mid.as_str())))).max_by_key(|p|(p.ordinal,p.block_index));
                     let carrier=hook==Hook::PostTool && targets.iter().any(|t|carrier_block.is_some_and(|p|p.block_id==t.id));
-                    let inputs=transform::channel1_inputs_from_parts(&ctx.parts,&ctx.counters["engine_policy"],binding.config.resolve_protected_tokens(100_000).floor,&binding.config.protected_tools,carrier);
+                    let cache_busting=temporal_permitted && !matches!(c.preset.as_deref(),Some("worker"|"subagent"|"reader"));
+                    let inputs=transform::channel1_inputs_from_parts(&ctx.parts,&ctx.counters["engine_policy"],binding.config.resolve_protected_tokens(100_000).floor,&binding.config.protected_tools,carrier,cache_busting);
                     if ctx.counters.pointer("/engine_policy/baseline/baseline_generation").and_then(Value::as_u64)!=Some(inputs.baseline.baseline_generation) {
                         counters["policy_baseline_updates"]=json!(inputs.baseline.baseline_parts.iter().map(|m|json!({"block_id":m.key.split('\0').next().unwrap_or(""),"measurement":m})).collect::<Vec<_>>());
                         let mut baseline=inputs.baseline.clone();baseline.baseline_parts.clear();
