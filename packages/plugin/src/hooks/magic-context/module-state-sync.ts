@@ -363,8 +363,8 @@ export function moduleWatermarksEqual(
         left.project_user_profile_version === right.project_user_profile_version &&
         (left.workspace_fingerprint ?? null) === (right.workspace_fingerprint ?? null) &&
         (left.reasoning_cleared_through_tag ?? 0) === (right.reasoning_cleared_through_tag ?? 0) &&
-        (left.note_evaluation_available ?? false) === (right.note_evaluation_available ?? false)
-        && (left.historian_model_chain_hash ?? null) === (right.historian_model_chain_hash ?? null)
+        (left.note_evaluation_available ?? false) === (right.note_evaluation_available ?? false) &&
+        (left.historian_model_chain_hash ?? null) === (right.historian_model_chain_hash ?? null)
     );
 }
 
@@ -762,7 +762,8 @@ export function buildPagedModuleStateSyncPayloads(
         params: {
             shadow_generation: args.moduleGeneration,
             ...(input.complete && args.historianModelChain !== undefined
-                ? { historian_model_chain: args.historianModelChain } : {}),
+                ? { historian_model_chain: args.historianModelChain }
+                : {}),
             ...(input.complete && args.passComplete ? { pass_complete: true as const } : {}),
             expected_shadow_seq: args.expectedShadowSeq,
             seed_id: args.seedId,
@@ -1173,7 +1174,8 @@ async function collectModuleStateSyncPayload(args: {
         params: {
             shadow_generation: args.state.moduleGeneration,
             ...(args.pass.historianModelChain !== undefined
-                ? { historian_model_chain: args.pass.historianModelChain } : {}),
+                ? { historian_model_chain: args.pass.historianModelChain }
+                : {}),
             ...(args.options?.passComplete ? { pass_complete: true as const } : {}),
             expected_shadow_seq: args.state.lastAckedSeq,
             last_todo_state: effectiveLastTodoState(args.pass.sessionId, sessionMeta),
@@ -1304,9 +1306,15 @@ export async function syncModuleState(args: {
         const noChange = async (): Promise<ModuleStateSyncResult> => {
             if (args.options?.passComplete) {
                 await args.client.call({
-                    sessionId: args.pass.sessionId, projectRoot: args.projectRoot,
-                    method: "state_sync", generationSensitive: true,
-                    body: { method: "state_sync", session_id: args.pass.sessionId, pass_complete: true },
+                    sessionId: args.pass.sessionId,
+                    projectRoot: args.projectRoot,
+                    method: "state_sync",
+                    generationSensitive: true,
+                    body: {
+                        method: "state_sync",
+                        session_id: args.pass.sessionId,
+                        pass_complete: true,
+                    },
                 });
             }
             return { status: "no_change" };
@@ -1334,8 +1342,8 @@ export async function syncModuleState(args: {
             !force &&
             args.options?.knownWatermarksUnchanged === true &&
             args.state.lastAckedWatermarks !== null &&
-            args.state.lastAckedWatermarks.note_evaluation_available === true
-            && (args.pass.historianModelChain === undefined ||
+            args.state.lastAckedWatermarks.note_evaluation_available === true &&
+            (args.pass.historianModelChain === undefined ||
                 args.state.lastAckedWatermarks.historian_model_chain_hash ===
                     stableHash(JSON.stringify(args.pass.historianModelChain)))
         ) {

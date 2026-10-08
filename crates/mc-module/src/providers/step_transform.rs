@@ -625,7 +625,8 @@ impl McHandler {
         plan: &Value,
     ) -> Result<Option<mc_store::UserHintDecisionInput>, HandlerOutcome> {
         let config = &binding.config;
-        let project = binding.project_root.to_string_lossy();
+        let directory = binding.project_root.to_string_lossy();
+        let project = self.route_project(store, binding)?.key;
         let mut request: TransformRequest = decode(
             &json!({"v":2,"kind":"transform.hook","session_id":namespace,"serializer_profile":"opencode-aisdk","render_config":"host-hook","messages":messages}),
         )?;
@@ -644,7 +645,7 @@ impl McHandler {
         let context = transform::ProducerContext {
             project_path: &project,
             note_project_path: &project,
-            project_directory: &project,
+            project_directory: &directory,
             history_budget_tokens: binding.history_budget_tokens,
             memory_budget_tokens: config.memory_budget_tokens,
             user_profile_budget_tokens: config.user_profile_budget_tokens,
@@ -1000,7 +1001,7 @@ mod host_tests {
             panic!("answer observation must never issue {method}");
         }
     }
-    fn handler(dir: &Path) -> McHandler {
+    pub(super) fn handler(dir: &Path) -> McHandler {
         let descriptor = StorageDescriptor {
             module_id: DEFAULT_MODULE_ID.into(),
             storage_namespace: "mc_cache".into(),
@@ -1037,23 +1038,34 @@ mod host_tests {
     fn plan() -> Value {
         json!({"serializer_profile":"opencode-aisdk","observation":"answer"})
     }
-    async fn dispatch(h: &McHandler, ch: u16, method: &str, params: Value) -> HandlerOutcome {
+    pub(super) async fn dispatch(
+        h: &McHandler,
+        ch: u16,
+        method: &str,
+        params: Value,
+    ) -> HandlerOutcome {
         h.dispatch_value(ch, json!({"method":method,"params":params}))
             .await
     }
-    fn response(outcome: HandlerOutcome) -> Value {
+    pub(super) fn response(outcome: HandlerOutcome) -> Value {
         match outcome {
             HandlerOutcome::Response(b) => serde_json::from_slice(&b).unwrap(),
             error => panic!("{error:?}"),
         }
     }
-    async fn admit(h: &McHandler, ch: u16) {
+    pub(super) async fn admit(h: &McHandler, ch: u16) {
         response(dispatch(h, ch, "transform.declare", json!({"params":plan()})).await);
     }
-    fn text(mid: &str, role: &str, value: &str) -> Value {
+    pub(super) fn text(mid: &str, role: &str, value: &str) -> Value {
         json!({"info":{"id":mid,"role":role},"parts":[{"id":format!("{mid}-text"),"type":"text","text":value}]})
     }
-    fn hook(mid: &str, ordinal: u64, kind: &str, blocks: &[&str], message: Value) -> Value {
+    pub(super) fn hook(
+        mid: &str,
+        ordinal: u64,
+        kind: &str,
+        blocks: &[&str],
+        message: Value,
+    ) -> Value {
         let mut p = json!({"session":"s","harness":"opencode","params":plan(),"lineage_id":"L","subject_mid":mid,"subject_ordinal":ordinal,"message":message,"hook":kind,"blocks":blocks,"step_id":"step"});
         if kind == "post_tool" {
             p["tool"] = json!("read");
@@ -1073,7 +1085,7 @@ mod host_tests {
             _ => panic!("not text"),
         }
     }
-    fn key(h: &McHandler) -> Key {
+    pub(super) fn key(h: &McHandler) -> Key {
         Key::new(&h.facade_binding(7).unwrap(), "s", "opencode").unwrap()
     }
 
@@ -1464,6 +1476,187 @@ mod host_tests {
         assert_eq!(
             transform::temporal_gap_prefix(2 * 60 * 60 * 1000 + 4 * 60 * 1000),
             Some("<!-- +2h 4m -->\n".into())
+        );
+    }
+}
+
+#[cfg(test)]
+mod confirmation_tests {
+    use super::host_tests::*;
+    use super::*;
+    #[tokio::test]
+    async fn host_confirmation_is_newest_bounded_monotonic_and_only_descent_clamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = handler(dir.path());
+        admit(&h, 7).await;
+        response(
+            dispatch(
+                &h,
+                7,
+                "transform.hook",
+                hook("u1", 1, "pre_user", &["one"], text("u1", "user", "one")),
+            )
+            .await,
+        );
+        let mut p = hook("u2", 2, "pre_user", &["two"], text("u2", "user", "two"));
+        p["served_through_ordinal"] = json!(5);
+        assert!(
+            matches!(dispatch(&h,7,"transform.hook",p.clone()).await,HandlerOutcome::ErrorWithDetail {code,detail,..} if code=="invalid_params" && detail["field"]=="served_through_ordinal")
+        );
+        p["served_through_ordinal"] = json!(1);
+        response(dispatch(&h, 7, "transform.hook", p).await);
+        let mut p = hook("u3", 3, "pre_user", &["three"], text("u3", "user", "three"));
+        p["served_through_ordinal"] = json!(0);
+        assert!(
+            matches!(dispatch(&h,7,"transform.hook",p.clone()).await,HandlerOutcome::ErrorWithDetail {detail,..} if detail["field"]=="served_through_ordinal")
+        );
+        p.as_object_mut().unwrap().remove("served_through_ordinal");
+        response(dispatch(&h, 7, "transform.hook", p).await);
+        let store = h.store.get().unwrap();
+        let c = store
+            .load_provider_conversation(&key(&h).store_key())
+            .unwrap()
+            .unwrap();
+        assert_eq!(c.served_through_ordinal, Some(1));
+        assert_eq!(store.load_tags_for_session("s").unwrap().len(), 1);
+        let mut p = hook("u4", 4, "pre_user", &["four"], text("u4", "user", "four"));
+        p["served_through_ordinal"] = json!(3);
+        response(dispatch(&h, 7, "transform.hook", p).await);
+        let mut p = hook(
+            "branch",
+            3,
+            "pre_user",
+            &["branch"],
+            text("branch", "user", "branch"),
+        );
+        p["lineage_id"] = json!("B");
+        p["descends_from"] = json!({"lineage_id":"L","through_ordinal":2});
+        p["served_through_ordinal"] = json!(2);
+        response(dispatch(&h, 7, "transform.hook", p).await);
+        assert_eq!(
+            store
+                .load_provider_conversation(&key(&h).store_key())
+                .unwrap()
+                .unwrap()
+                .served_through_ordinal,
+            Some(2)
+        );
+        let mut p = hook("b4", 4, "pre_user", &["four"], text("b4", "user", "four"));
+        p["lineage_id"] = json!("B");
+        p["served_through_ordinal"] = json!(1);
+        assert!(
+            matches!(dispatch(&h,7,"transform.hook",p).await,HandlerOutcome::ErrorWithDetail {detail,..} if detail["field"]=="served_through_ordinal")
+        );
+    }
+}
+
+#[cfg(test)]
+mod golden_tests {
+    use super::host_tests::*;
+    use super::*;
+    #[tokio::test]
+    async fn owned_broca_declaration_and_hook_corpus_remain_byte_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = handler(dir.path());
+        let mut binding = h.facade_binding(7).unwrap();
+        binding.harness = "runner".into();
+        h.bind_route(7, binding);
+        let params = json!({"params":{"serializer_profile":"owned-broca"}});
+        let expected=br#"{"subscriptions":[{"hook":"pre_user","ops":["append"],"on_unavailable":"pass","budget_ms":1500},{"hook":"post_tool","ops":["prepend","append"],"on_unavailable":"pass","budget_ms":1500},{"hook":"post_assistant","ops":["replace"],"on_unavailable":"pass","budget_ms":1500}]}"#;
+        let HandlerOutcome::Response(declared) = dispatch(&h, 7, "transform.declare", params).await
+        else {
+            panic!()
+        };
+        assert_eq!(
+            String::from_utf8_lossy(&declared),
+            String::from_utf8_lossy(expected)
+        );
+        let corpus = [
+            (
+                json!({"session":"s","harness":"broca","hook":"pre_user","blocks":[]}),
+                r#"{"answer":"pass"}"#,
+            ),
+            (
+                json!({"session":"s","harness":"broca","lineage_id":"L","hook":"post_tool","step_id":"step","tool":"read","tool_call_id":"id","blocks":["output"],"is_error":false,"params":{"reminder_every":100}}),
+                r#"{"answer":"ops","ops":[{"op":"prepend","block":0,"text":"§1§ "}]}"#,
+            ),
+            (
+                json!({"session":"s","harness":"broca","lineage_id":"L","hook":"post_assistant","step_id":"step","blocks":["§1§ alpha"]}),
+                r#"{"answer":"ops","ops":[{"op":"replace","block":0,"value":"alpha"}]}"#,
+            ),
+        ];
+        for (params, expected) in corpus {
+            let HandlerOutcome::Response(actual) = dispatch(&h, 7, "transform.hook", params).await
+            else {
+                panic!()
+            };
+            assert_eq!(String::from_utf8_lossy(&actual), expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod overlay_parity_tests {
+    use super::host_tests::*;
+    use super::*;
+    #[tokio::test]
+    async fn host_temporal_prefix_and_user_hint_match_engine_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = handler(dir.path());
+        let mut binding = h.facade_binding(7).unwrap();
+        binding.config.memory_enabled = true;
+        h.bind_route(7, binding.clone());
+        let mut params = json!({"serializer_profile":"opencode-aisdk","observation":"answer","auto_search_min_prompt_chars":0,"auto_search_score_threshold":0.0});
+        response(dispatch(&h, 7, "transform.declare", json!({"params":params})).await);
+        let store = h.store.get().unwrap();
+        let project = h.route_project(store, &binding).unwrap().key;
+        for n in 1..=30 {
+            store
+                .seed_memory(
+                    n,
+                    &project,
+                    "CONSTRAINTS",
+                    if n == 1 {
+                        "rust ownership beta"
+                    } else {
+                        "unrelated archive material"
+                    },
+                    20,
+                )
+                .unwrap();
+        }
+        let mut message = text("a", "assistant", "reply");
+        message["info"]["time"] = json!({"created":0,"completed":1000});
+        let mut p = hook("a", 1, "post_assistant", &["reply"], message);
+        p["params"] = params.clone();
+        response(dispatch(&h, 7, "transform.hook", p).await);
+        let mut message = text("u", "user", "rust ownership beta");
+        message["info"]["time"] = json!({"created":301000});
+        let mut p = hook("u", 2, "pre_user", &["rust ownership beta"], message);
+        p["params"] = params.take();
+        let answer: hooks::answer::HookAnswer = decode(&response(
+            dispatch(&h, 7, "transform.hook", p.clone()).await,
+        ))
+        .unwrap();
+        let hooks::answer::HookAnswer::Ops { ops } = answer else {
+            panic!()
+        };
+        let hint = ops
+            .iter()
+            .find_map(|op| {
+                if let hooks::answer::Operation::Append { text, .. } = op {
+                    Some(text)
+                } else {
+                    None
+                }
+            })
+            .expect("seeded lexical fixture must yield a nonempty hint");
+        assert_eq!(hint,"\n\n<ctx-search-hint>\nYour memory may contain 1 related fragment:\n- rust ownership beta\nIf the fragments above seem relevant to the current request, you may run ctx_search to retrieve full context. Otherwise ignore.\n</ctx-search-hint>");
+        let call: hooks::hook::HookCall = decode(&p).unwrap();
+        let rendered = hooks::answer::apply_ops(call.subject.blocks().unwrap(), &ops).unwrap();
+        assert_eq!(
+            rendered,
+            [format!("§2§ <!-- +5m -->\nrust ownership beta{hint}")]
         );
     }
 }

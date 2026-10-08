@@ -1367,32 +1367,79 @@ describe("provider historian chain watermarks", () => {
         const calls: Record<string, unknown>[] = [];
         const client = {
             getCachedStateSyncCapabilities: () => ({ state_sync_deltas: true }),
-            async call(args: { body: Record<string, unknown> }) { calls.push(args.body); return { ok: true }; },
+            async call(args: { body: Record<string, unknown> }) {
+                calls.push(args.body);
+                return { ok: true };
+            },
         };
         const pass = { db, sessionId, nowMs: 1, historianModelChain: ["provider/a"] };
-        expect((await syncModuleState({ client, state, pass, projectRoot: "/project", force: false })).status).toBe("acked");
+        expect(
+            (await syncModuleState({ client, state, pass, projectRoot: "/project", force: false }))
+                .status,
+        ).toBe("acked");
         const firstHash = state.lastAckedWatermarks?.historian_model_chain_hash;
         expect(calls.at(-1)?.historian_model_chain).toEqual(["provider/a"]);
         calls.length = 0;
         pass.historianModelChain = ["provider/b"];
-        expect((await syncModuleState({ client, state, pass, projectRoot: "/project", force: false, options: { knownWatermarksUnchanged: true } })).status).toBe("acked");
+        expect(
+            (
+                await syncModuleState({
+                    client,
+                    state,
+                    pass,
+                    projectRoot: "/project",
+                    force: false,
+                    options: { knownWatermarksUnchanged: true },
+                })
+            ).status,
+        ).toBe("acked");
         expect(state.lastAckedWatermarks?.historian_model_chain_hash).not.toBe(firstHash);
         expect(calls.at(-1)?.historian_model_chain).toEqual(["provider/b"]);
         calls.length = 0;
         let reads = 0;
         let knownSerializations = 0;
-        const guardedDb = new Proxy(db, { get(target, property, receiver) {
-            if (property === "prepare") return () => { reads++; throw new Error("unchanged chain read the own store"); };
-            return Reflect.get(target, property, receiver);
-        } });
+        const guardedDb = new Proxy(db, {
+            get(target, property, receiver) {
+                if (property === "prepare")
+                    return () => {
+                        reads++;
+                        throw new Error("unchanged chain read the own store");
+                    };
+                return Reflect.get(target, property, receiver);
+            },
+        });
         const stringify = JSON.stringify;
         JSON.stringify = ((value: unknown, ...rest: unknown[]) => {
-            if (value && typeof value === "object" && (value as { info?: { id?: string } }).info?.id === "known-message") knownSerializations++;
-            return Reflect.apply(stringify, JSON, [value, ...rest]);
+            // The replacer observes nested messages too: serializing a served
+            // array must not evade the counter by wrapping its known entries.
+            const observe = function (this: unknown, key: string, nested: unknown): unknown {
+                if (
+                    nested &&
+                    typeof nested === "object" &&
+                    ((nested as { info?: { id?: string } }).info?.id === "known-message" ||
+                        (nested as { id?: string }).id === "known-message")
+                )
+                    knownSerializations++;
+                return typeof rest[0] === "function"
+                    ? Reflect.apply(rest[0], this, [key, nested])
+                    : nested;
+            };
+            return Reflect.apply(stringify, JSON, [value, observe, rest[1]]);
         }) as typeof JSON.stringify;
         try {
-            expect(await syncModuleState({ client, state, pass: { ...pass, db: guardedDb }, projectRoot: "/project", force: false, options: { knownWatermarksUnchanged: true } })).toEqual({ status: "no_change" });
-        } finally { JSON.stringify = stringify; }
+            expect(
+                await syncModuleState({
+                    client,
+                    state,
+                    pass: { ...pass, db: guardedDb },
+                    projectRoot: "/project",
+                    force: false,
+                    options: { knownWatermarksUnchanged: true },
+                }),
+            ).toEqual({ status: "no_change" });
+        } finally {
+            JSON.stringify = stringify;
+        }
         expect(reads).toBe(0);
         expect(knownSerializations).toBe(0);
         expect(calls).toEqual([]);
@@ -1404,10 +1451,26 @@ describe("provider historian chain watermarks", () => {
         const state: ModuleStateSyncState = syncState();
         const pass = { db, sessionId: "barrier-session", nowMs: 1, historianModelChain: [] };
         const calls: Record<string, unknown>[] = [];
-        const client = { async call(args: { body: Record<string, unknown> }) { calls.push(args.body); return { ok: true }; } };
+        const client = {
+            async call(args: { body: Record<string, unknown> }) {
+                calls.push(args.body);
+                return { ok: true };
+            },
+        };
         await syncModuleState({ client, state, pass, projectRoot: "/project", force: false });
         calls.length = 0;
-        expect(await syncModuleState({ client, state, pass, projectRoot: "/project", force: false, options: { knownWatermarksUnchanged: true, passComplete: true } })).toEqual({ status: "no_change" });
-        expect(calls).toEqual([{ method: "state_sync", session_id: "barrier-session", pass_complete: true }]);
+        expect(
+            await syncModuleState({
+                client,
+                state,
+                pass,
+                projectRoot: "/project",
+                force: false,
+                options: { knownWatermarksUnchanged: true, passComplete: true },
+            }),
+        ).toEqual({ status: "no_change" });
+        expect(calls).toEqual([
+            { method: "state_sync", session_id: "barrier-session", pass_complete: true },
+        ]);
     });
 });
