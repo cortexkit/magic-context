@@ -43,6 +43,15 @@
         "rust"
       ]
     },
+    "rust_pipeline": {
+      "default": "full_request",
+      "description": "Experimental, not for production use: off by default (full_request). The provider pipeline applies only with transform_mode: \"rust\" on OpenCode; full_request keeps the legacy request adapter.",
+      "type": "string",
+      "enum": [
+        "full_request",
+        "provider"
+      ]
+    },
     "auto_update": {
       "description": "Enable automatic npm self-update checks for the OpenCode plugin. Security: USER-only in config loader, so hostile project configs cannot suppress updates.",
       "type": "boolean"

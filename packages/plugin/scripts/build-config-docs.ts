@@ -203,6 +203,7 @@ const DEV_ONLY_KEYS = new Set<string>([
     // subc daemon no public install has, and documenting it would let the dev
     // gate calcify into a de-facto public mode before the cutover release.
     "transform_mode",
+    "rust_pipeline",
 ]);
 
 export function buildConfigDocs(): string {

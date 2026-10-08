@@ -931,6 +931,8 @@ export interface MagicContextConfig {
     mural: MuralConfig;
     /** Selects the runtime implementation for this project. Rust mode is experimental and requires user-level subc configuration. */
     transform_mode: "ts" | "rust";
+    /** Opt-in host provider pipeline; full_request preserves the existing Rust adapter. */
+    rust_pipeline?: "full_request" | "provider";
     /** Auto-update the cached OpenCode plugin wrapper when a newer npm version is available.
      *  USER config only; project configs cannot disable it. Default: true. */
     auto_update?: boolean;
@@ -1137,6 +1139,12 @@ export const MagicContextConfigSchema = z
             .default("ts")
             .describe(
                 'Experimental: routes the entire Magic Context runtime for the project through the ck-mc Rust module over subc (requires user-level `subc` config); "ts" is the current TypeScript pipeline.',
+            ),
+        rust_pipeline: z
+            .enum(["full_request", "provider"])
+            .default("full_request")
+            .describe(
+                'Experimental, not for production use: off by default (full_request). The provider pipeline applies only with transform_mode: "rust" on OpenCode; full_request keeps the legacy request adapter.',
             ),
         auto_update: z
             .boolean()

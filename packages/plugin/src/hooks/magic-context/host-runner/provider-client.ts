@@ -212,7 +212,16 @@ const operationSchema = z.discriminatedUnion("op", [
         })
         .passthrough(),
 ]);
+const hookRefusalSchema = z
+    .object({
+        answer: z.literal("refuse"),
+        code: z.string(),
+        reason: z.string().optional(),
+        detail: z.record(z.string(), z.unknown()).optional(),
+    })
+    .passthrough();
 const hookAnswerSchema = z.discriminatedUnion("answer", [
+    hookRefusalSchema,
     z.object({ answer: z.literal("pass") }).passthrough(),
     z.object({ answer: z.literal("ops"), ops: z.array(operationSchema) }).passthrough(),
     z
@@ -674,6 +683,9 @@ export class ProviderClient {
                 signal,
             );
             if (result.status === "unavailable") return { ...result, on_unavailable: policy };
+            // Ordinal conflicts are recoverable by lineage descent, not raw freeze.
+            // Keep the named refusal intact so the host can distinguish the two.
+            if (result.answer.answer === "refuse") return result;
             if (result.answer.answer !== "pass" && result.answer.answer !== "ops")
                 return {
                     status: "unavailable",
