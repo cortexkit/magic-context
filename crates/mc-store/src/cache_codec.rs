@@ -1005,12 +1005,21 @@ pub(crate) fn write_sections(
             n: None,
             h: Some(digest_hex(body.digest)),
         }),
-        shape: if matches!(frozen_write, FrozenWrite::Write) && wrote_frozen {
+        // A cleared base is a full rewrite even when the new frozen set is
+        // empty. Recomp may already have deleted the old chunks before reaching
+        // this writer, so no local upsert/delete can witness that reset.
+        shape: if matches!(frozen_write, FrozenWrite::Write)
+            && (wrote_frozen || matches!(base, WriteBase::Cleared)) {
             Some(encoded.shape.clone())
         } else {
             stored_index.and_then(|i| i.shape.clone())
         },
     };
+    if matches!(frozen_write, FrozenWrite::Write) {
+        if let Some(shape) = &index.shape {
+            debug_assert_eq!(shape, &encoded.shape, "written shape must describe the full encoded core");
+        }
+    }
     if wrote || stored_index != Some(&index) || stored_sv == 0 {
         index.sv = stored_sv + 1;
     }

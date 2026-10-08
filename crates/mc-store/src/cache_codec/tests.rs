@@ -355,6 +355,36 @@ fn shape_accessor_reads_only_header_metadata_not_frozen_chunk_payloads() {
 }
 
 #[test]
+fn shape_summary_agrees_with_full_core_after_every_cache_write_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(dir.path());
+    let check = || {
+        let actual = store.load(SESSION).unwrap();
+        let expected = encode_row(&actual.core,&actual.meta).unwrap().shape;
+        let index = SectionIndex::parse(snapshot(&store).section_index.as_ref().unwrap()).unwrap();
+        assert_eq!(index.shape.as_ref(),Some(&expected));
+        let summary = store.load_compaction_trigger_core(SESSION).unwrap().unwrap();
+        assert_eq!(summary.frozen_units.iter().map(|u| u.key.clone()).collect::<Vec<_>>(),expected);
+        assert_eq!(summary.boundary_id,actual.core.boundary_id);
+    };
+    let mut core = CoreState::default();
+    core.frozen_units = ["m0","m1"].into_iter().map(|key| FrozenUnit {key:key.into(),kind:"synthesized-region".into(),frozen_payload:format!("{key} bytes"),durability_class:cortexkit_cache_core::DurabilityClass::Lineage,reset_rule:String::new()}).collect();
+    let meta = ModuleMeta {initialized:true,..Default::default()};
+    store.commit(SESSION,None,&core,&meta).unwrap();check();
+    let mut loaded = store.load(SESSION).unwrap();loaded.core.frozen_units.push(unit(7));
+    commit_over(&store,&loaded,&loaded.core,&loaded.meta,crate::FrozenClear::Refuse).unwrap();check();
+    let mut scalar = store.load_meta(SESSION).unwrap();scalar.meta.last_model_key = "scalar-only".into();
+    store.commit_meta(SESSION,scalar.row_version,&scalar.meta).unwrap();check();
+    let version = store.load_meta(SESSION).unwrap().row_version;
+    store.reset_session_for_recomp(SESSION,version).unwrap();check();
+    assert!(store.load(SESSION).unwrap().core.frozen_units.is_empty());
+    let empty = store.load(SESSION).unwrap();
+    store.commit(SESSION,empty.row_version,&empty.core,&empty.meta).unwrap();check();
+    let version = store.load_meta(SESSION).unwrap().row_version;
+    store.commit(SESSION,version,&core,&meta).unwrap();check();
+}
+
+#[test]
 fn edit_sequences_round_trip_through_the_store() {
     let dir = tempfile::tempdir().unwrap();
     let store = open_store(dir.path());
