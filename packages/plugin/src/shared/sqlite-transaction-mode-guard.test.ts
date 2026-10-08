@@ -29,6 +29,8 @@ const READ_ONLY_DEFERRED_TRANSACTIONS: Record<string, string> = {
         "pins one read snapshot so the session's rowid coverage proof and the filtered message search see the same rows; never writes (read-only connections use it too)",
     "packages/plugin/src/hooks/magic-context/lkg-persist.ts#loadPersistedLkgSlot":
         "reads an LKG slot row and its prefix slices as one consistent snapshot; never writes (a failed verification clears the slot afterwards, outside this transaction)",
+    "packages/plugin/src/features/magic-context/storage-host-runner.ts#loadHostRunnerRecord":
+        "reads runner state, entries, ids and views in one coherent cold-path snapshot; never repairs or writes",
 };
 
 const REPOSITORY_ROOT = resolve(import.meta.dir, "../../../..");

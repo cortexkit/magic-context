@@ -95,9 +95,18 @@ describe("storage-meta", () => {
             // statements read its state and sweep the session's unmapped
             // legacy FTS rows.
             expect(db.transaction).toHaveBeenCalledTimes(1);
-            // The indexed temporal choices are session-owned too; adding their
-            // deletion must not split cleanup across separate transactions.
-            expect(db.prepare).toHaveBeenCalledTimes(40);
+            // The runner's four tables are session-owned too; their deletion
+            // must stay inside the same transaction as the other session state.
+            expect(db.prepare).toHaveBeenCalledTimes(44);
+            const sqls = db.prepare.mock.calls.map(([sql]) => sql);
+            for (const table of [
+                "host_runner_entries",
+                "host_runner_ids",
+                "host_runner_views",
+                "host_runner_state",
+            ]) {
+                expect(sqls.some((sql) => sql.startsWith(`DELETE FROM ${table} `))).toBe(true);
+            }
         });
     });
 });

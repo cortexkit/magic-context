@@ -72,6 +72,7 @@ import {
     runMigrations,
 } from "./migrations";
 import { installCompartmentHistoryVersions } from "./storage-compartment-history-version";
+import { installHostRunnerSchema } from "./storage-host-runner";
 import { ensureColumn, healAllNullColumns } from "./storage-schema-helpers";
 import {
     loadToolDefinitionMeasurements,
@@ -161,7 +162,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastUnconfirmedMigrationHolders = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 96;
+export const LATEST_SUPPORTED_VERSION = 97;
 
 /**
  * Every runtime backend receives the same finite wait before the first schema
@@ -1133,6 +1134,7 @@ export function initializeDatabase(
     db.exec("PRAGMA foreign_keys=ON");
     configureContextDatabasePragmas(db);
     applySqliteTuningPragmas(db);
+    installHostRunnerSchema(db);
     db.exec(`
     CREATE TABLE IF NOT EXISTS tags (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
