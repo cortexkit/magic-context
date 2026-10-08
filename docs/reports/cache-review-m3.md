@@ -218,3 +218,20 @@ A real-shaped fixture has 5,560 native messages, each with text and three comple
 5. Maintain own-fire/reset event indexes and invalidate only burned events. Never propagate a predecessor's fire as another answer's state.
 6. Rebuild the summary on lineage revert or an engine rebuild, not an ordinary append. Engine rebuilds capture the authoritative frozen reduction, coverage, calibration and head-memory inputs.
 7. Differentially check the bounded summary against this full metadata walk across the complete corpus, random burns/queues/consumes and 1k/8k/50k-part retained tails. Add content-read, metadata-row, serialized-byte and durable-write counters plus staged mutation controls before reopening A2/P1/P3 or enabling the host lane.
+
+## Final train integration and Linux verification
+
+The parent-directed merge of `origin/train/agent-move` at `14cdb5cf93ccdc65530e301ba3a3ee7786c0b440` brings the schema-97 move inventory and four host-runner classifications, plus the approved commons host-runner pin. This is upstream integration, not additional M3-authored feature work. Frozen-lockfile installation succeeded without further dependency changes.
+
+The two migration-63 reopen cases passed on a separate pure-train branch, then failed with M3: their synthetic downgrade fixture left the newly introduced policy-parts table behind, so migration66 refused with `table mc_provider_policy_parts_v1 already exists`. Adding that table to the fixture's downgrade DROP list fixed both without changing assertions or weakening the production migration. The schema-ceiling unit's stale `context.db=96` expectation was updated to the already-authoritative upstream ceiling97, preserving its exact ceiling assertion.
+
+Final authoritative Linux gates (cargo/rustc1.99.0):
+
+- `cargo check --locked -p mc-module`: passed.
+- `cargo test --locked -p mc-module --lib -- --test-threads=4`: **1713 passed, 26 ignored, zero failures**.
+- `cargo test --locked -p mc-store --lib -- --test-threads=4`: **284 passed, four ignored, zero failures**. The twelve inventory failures disappeared after train integration.
+- The pure-train and M3 migration-63 differential was run with full errors captured before correction.
+
+Final repository `npm run test`, `npm run build`, `npm run typecheck` and `npm run lint` all passed after the merge. The earlier registered-temp-dir review-fixture failure was corrected using the repository helper, and the former migration-v87 baseline is fixed on the merged train. TypeScript5.9.3 also explicitly checked the independent review test and imported runtime. Expanding tsc over the older entire state-sync test file exposed four pre-existing test-only typing gaps (memoryMutations, two missing nowMs fixtures, one missing inventory sequence); the M3-added client signatures were corrected, and runtime/package tsc is green.
+
+One earlier requested-Linux run was automatically executed on the Mac when the executor returned `runner_draining`: its module suite passed535 tests, while store fixtures failed. Subsequent Linux commands include an explicit `uname` guard, preventing any further automatic local Cargo execution. Two background five-minute retry slots used `bash_watch`; Linux recovered, and the final gates above are genuine Linux runs. The performance and late temporal-view integration gates remain closed exactly as described above; routine ignored tests do not certify them.
