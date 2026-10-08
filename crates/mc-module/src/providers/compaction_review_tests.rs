@@ -787,3 +787,284 @@ async fn r3_upgrade_epoch_cannot_be_skipped_by_host_preflight() {
 async fn r3_pipeline_switch_does_not_exempt_module_render_epoch() {
     r3_old_render_epoch_comparison(true).await;
 }
+
+// Passing randomized control preserved from the independent round-3 report.
+fn r3_hook_entry(store: &McStore, key: &Key, entry: &Value) {
+    let mut req = engine_request(1000);
+    let status_entry = serde_json::from_value(entry.clone()).unwrap();
+    Codec::OpencodeAiSdk
+        .prepare_request(&mut req, &[status_entry])
+        .unwrap();
+    let message = ProviderMessage {
+        ordinal: entry["ordinal"].as_u64().unwrap(),
+        mid: entry["mid"].as_str().unwrap().into(),
+        message_bytes: serde_json::to_vec(&entry["message"]).unwrap(),
+    };
+    let tool = entry["message"]["parts"][0]["type"] == "tool";
+    store
+        .commit_provider_hook(
+            &key.store_key(),
+            ProviderHookRequest {
+                lineage: &root(),
+                message: Some(&message),
+                served_through_ordinal: None,
+                unserved_subjects: &[],
+                repeat_subject: None,
+            },
+            |ctx| {
+                Ok((
+                    ProviderHookWrite {
+                        answer: Some(ProviderHookAnswer {
+                            subject: ProviderSubject {
+                                subject_mid: message.mid.clone(),
+                                hook: if tool {
+                                    "post_tool"
+                                } else if entry["message"]["info"]["role"] == "assistant" {
+                                    "post_assistant"
+                                } else {
+                                    "pre_user"
+                                }
+                                .into(),
+                                subject_part: if tool {
+                                    entry["message"]["parts"][0]["id"].as_str().unwrap()
+                                } else {
+                                    ""
+                                }
+                                .into(),
+                            },
+                            ordinal: message.ordinal,
+                            ops_json: "[]".into(),
+                            tags: req.messages[0]
+                                .ck
+                                .content
+                                .iter()
+                                .enumerate()
+                                .map(|(i, block)| ProviderAnswerTag {
+                                    number: ctx.tag_high_water + 1 + i as i64,
+                                    block_id: format!("{}#{i}", message.mid),
+                                    kind: match block.kind {
+                                        crate::ck_wire::CkKind::ToolCall { .. } => "tool_call",
+                                        crate::ck_wire::CkKind::ToolResult { .. } => "tool_result",
+                                        _ => "message",
+                                    }
+                                    .into(),
+                                    source: serde_json::to_string(block).unwrap(),
+                                    token_count: 2,
+                                    created_at_ms: 1,
+                                })
+                                .collect(),
+                        }),
+                        counters: ctx.counters.clone(),
+                    },
+                    (),
+                ))
+            },
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn r3_randomized_host_full_engine_240_passes() {
+    let mut rng = 0x4d34_5233_u64;
+    let mut draw = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+    let mut mismatches = Vec::new();
+    let mut events = [0usize; 8];
+    let mut passes = 0;
+    for case in 0..30 {
+        let ad = tempfile::tempdir().unwrap();
+        let od = tempfile::tempdir().unwrap();
+        let (h, mut b, s, k, _) = fixture(ad.path());
+        let (oh, mut ob, os, ok, _) = fixture(od.path());
+        b.config.memory_enabled = true;
+        ob.config.memory_enabled = true;
+        let w = h.provider_work(&s, b.clone(), k.clone()).unwrap();
+        let ow = oh.provider_work(&os, ob.clone(), ok.clone()).unwrap();
+        let n = 4 + draw() % 7;
+        let mut time = 1000_i64;
+        let mut entries = Vec::new();
+        for ordinal in 1..=n {
+            time += if draw() % 3 == 0 { 3_600_000 } else { 1000 };
+            let mut entry = message(ordinal);
+            entry["message"]["info"]["time"]["created"] = json!(time);
+            if ordinal % 2 == 0 {
+                entry["message"]["info"]["role"] = json!("assistant");
+                entry["message"]["info"]["time"]["completed"] = json!(time + 100);
+                if draw() % 2 == 0 {
+                    entry["message"]["parts"] = json!([{"id":format!("p{ordinal}"),"type":"tool","callID":format!("call-{ordinal}"),"tool":"read","state":{"status":"completed","input":{"path":"fixture.txt"},"output":format!("result case {case} ordinal {ordinal}"),"time":{"start":time,"end":time+100}}}]);
+                }
+            }
+            entries.push(entry);
+        }
+        for (hh, bb, ss, kk) in [(&h, &b, &s, &k), (&oh, &ob, &os, &ok)] {
+            response(hh.provider_setup(bb.clone(), &setup_request()).await);
+            publication(ss, 0, 1, "BASE");
+            for entry in &entries {
+                r3_hook_entry(ss, kk, entry);
+            }
+        }
+        let mut boot = step("boot", vec![], n);
+        boot["served_through_ordinal"] = json!(n);
+        boot["prefix_rebuilding"] = json!({"reason":"pipeline_switch"});
+        let initial = response(h.provider_step(b.clone(), &boot).await);
+        os.commit_provider_status_page(
+            &ok.store_key(),
+            mc_store::provider_records::ProviderStatusPage {
+                lineage: &root(),
+                messages: &[],
+                served: Some(n),
+                unserved: &[],
+                newest: Some(n),
+                more: false,
+            },
+        )
+        .unwrap();
+        let mut applied = initial["compaction"].clone();
+        let mut req = engine_request(1000);
+        req.tool_present = true;
+        req.render_config = format!("{}|broca-compaction:0", setup_request()["params"]);
+        let decoded = entries
+            .iter()
+            .cloned()
+            .map(|v| serde_json::from_value(v).unwrap())
+            .collect::<Vec<_>>();
+        Codec::OpencodeAiSdk
+            .prepare_request(&mut req, &decoded)
+            .unwrap();
+        let mut ctx = producer_context(&ow, "fixture", 100000, false);
+        ctx.observed_last_response_at_ms = Some(ctx.now_ms);
+        let oracle_boot = transform::transform_with_projection(&os, &req, &ctx).unwrap();
+        assert_eq!(
+            initial["compaction"]["replacement"],
+            r3_native(&oracle_boot, &req, n),
+            "initial full-request oracle differs: case={case}"
+        );
+        let mut epoch = 0;
+        let mut sequence = 0;
+        let mut trace = Vec::new();
+        let mut queued = std::collections::HashSet::new();
+        for pass in 0..8 {
+            let event = (draw() % 8) as usize;
+            events[event] += 1;
+            let tokens = [1000, 74999, 75000, 84999, 85000, 95000][(draw() % 6) as usize];
+            let mut params = step(&format!("case-{case}-pass-{pass}"), vec![], n);
+            params["last_applied"] = applied.clone();
+            params["served_through_ordinal"] = json!(n);
+            params["estimate"]["request_tokens"] = json!(tokens);
+            match event {
+                0 => {}
+                1 => {
+                    if sequence < n as i64 - 2 {
+                        sequence += 1;
+                        let ordinal = sequence as u64 + 1;
+                        for store in [&s, &os] {
+                            publication(
+                                store,
+                                sequence,
+                                ordinal,
+                                &format!("HISTORY-{case}-{pass}"),
+                            );
+                        }
+                    }
+                }
+                2 => {
+                    let tags = s
+                        .load_tags_for_session("s")
+                        .unwrap()
+                        .into_iter()
+                        .filter(|t| !queued.contains(&t.tag_number))
+                        .collect::<Vec<_>>();
+                    if !tags.is_empty() {
+                        let tag = &tags[(draw() as usize) % tags.len()];
+                        queued.insert(tag.tag_number);
+                        s.queue_provider_drops(&k.store_key(), &[tag.tag_number])
+                            .unwrap();
+                        os.append_pending_agent_drops("s", std::slice::from_ref(&tag.block_id), 1)
+                            .unwrap();
+                    }
+                }
+                3 => {
+                    for store in [&s, &os] {
+                        store.arm_soft_refresh("s").unwrap();
+                    }
+                }
+                4 => {
+                    params["prefix_rebuilding"] = json!({"reason":"cold"});
+                    epoch += 1;
+                    req.render_config =
+                        format!("{}|broca-compaction:{epoch}", setup_request()["params"]);
+                    ctx.now_ms += 300002;
+                    ctx.observed_last_response_at_ms = Some(ctx.now_ms - 300001);
+                }
+                5 => {
+                    let content = format!("MEMORY-{case}-{pass}");
+                    for (store, work) in [(&s, &w), (&os, &ow)] {
+                        store
+                            .insert_memory(mc_store::InsertMemoryInput {
+                                project_path: &work.project_path,
+                                route_project_root: None,
+                                category: "architecture",
+                                content: &content,
+                                source_session_id: Some("s"),
+                                source_type: Some("historian"),
+                                importance: Some(50),
+                                expires_at: None,
+                                metadata_json: None,
+                                now_ms: 1,
+                            })
+                            .unwrap();
+                    }
+                }
+                6 => {
+                    for (store, work) in [(&s, &w), (&os, &ow)] {
+                        store
+                            .set_project_memory_epoch_for_test(
+                                &work.project_path,
+                                (pass + 1) as i64,
+                            )
+                            .unwrap();
+                    }
+                }
+                7 => {
+                    for store in [&s, &os] {
+                        let mut c = store.load_compartments("s").unwrap();
+                        c[0].content = format!("EDIT-{pass}");
+                        c[0].p1 = Some(c[0].content.clone());
+                        store.replace_compartments("s", &c).unwrap();
+                    }
+                }
+                _ => unreachable!(),
+            }
+            req.usage.as_mut().unwrap().current_total_input_tokens = tokens;
+            let expected = transform::transform_with_projection(&os, &req, &ctx).unwrap();
+            ctx.observed_last_response_at_ms = Some(ctx.now_ms);
+            let actual = response(h.provider_step(b.clone(), &params).await);
+            if actual["answer"] == "compaction_message" {
+                applied = actual["compaction"].clone();
+            }
+            let want = r3_native(&expected, &req, n);
+            trace.push(format!(
+                "event={event} tokens={tokens} engine={}",
+                expected.response.action
+            ));
+            if serde_json::to_vec(&applied["replacement"]).unwrap()
+                != serde_json::to_vec(&want).unwrap()
+            {
+                mismatches.push(format!(
+                    "case={case} pass={pass} n={n} trace={trace:?}\nexpected={want}\nactual={}",
+                    applied["replacement"]
+                ));
+            }
+            passes += 1;
+        }
+    }
+    println!(
+        "random seed=0x4d345233 passes={passes} event counts={events:?} mismatches={}",
+        mismatches.len()
+    );
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}

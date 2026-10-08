@@ -1102,3 +1102,28 @@ full-decode counter. A staged `NON-VACUITY BREAK` disabling the versioned identi
 comparison made exactly this seventeenth test fail (`preflight skipped a concrete
 module_epoch trigger`); all prior sixteen tests stayed green. Restoring the staged
 implementation left an empty unstaged diff, and all seventeen then passed on Linux.
+
+### Third-review regression and randomized rerun record
+
+All five committed regressions were red at `d3b3517d99` before product edits and
+are now green without changing their expectations:
+`r3_upgrade_epoch_cannot_be_skipped_by_host_preflight`,
+`r3_pipeline_switch_does_not_exempt_module_render_epoch`,
+`r3_upgrade_identity_change_is_not_transport_adoption`,
+`r3_nonfinal_bootstrap_with_hook_complete_history_waits_without_engine`, and
+`r3_recomp_reset_summary_agrees_with_full_core`.
+
+The report appendix's independently bootstrapped randomized control is now also
+preserved in the test file for reproducible future reruns. Its generator, event
+selection, seed and real full-request oracle are unchanged; the comparison uses
+serialized JSON bytes rather than allocating strings solely for comparison. The
+borrowed tag-id slice avoids a Clippy-only clone. The rerun printed:
+
+```text
+random seed=0x4d345233 passes=240 event counts=[24, 32, 34, 35, 37, 32, 22, 24] mismatches=0
+```
+
+That is 240 transitions plus 30 independent bootstrap comparisons. The final
+provider selection passed all 83 tests and the S2/evaluator selection passed all
+13 tests on Linux. Strict package Clippy passes. The original regression bodies
+and their assertions are unchanged; only the passing appendix control was appended.
