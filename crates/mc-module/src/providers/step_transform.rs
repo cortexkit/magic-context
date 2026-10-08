@@ -45,7 +45,8 @@ struct ProviderPassInput {
     descends_from: Option<HostDescent>,
     appended: Vec<compact::status::StatusMessage>,
     physical_tail: Option<ProviderTail>,
-    prefix_mutation_permitted: Option<bool>,
+    exact_pass_plan: Option<String>,
+    marker_hard_serves_frozen_prefix:Option<bool>,
 }
 #[derive(Deserialize, Serialize)]
 struct ProviderTail {
@@ -362,7 +363,8 @@ impl McHandler {
             let pass_id = pass.pass_id.unwrap_or_else(|| {
                 sha256_hex(&serde_json::to_vec(&(&pass.lineage_id, &ids)).expect("pass identity"))
             });
-            let context = json!({"pass_id":pass_id,"lineage_id":pass.lineage_id,"appended_ids":ids,"physical_tail":pass.physical_tail,"eligible_user_mid":eligible_user,"eligible_tool_block":eligible_tool,"prefix_mutation_permitted":pass.prefix_mutation_permitted});
+            if pass.exact_pass_plan.as_deref().is_some_and(|p|!matches!(p,"hard"|"migrate_hard"|"soft"|"defer"|"reject")) {return Err(invalid_field("provider_pass.exact_pass_plan","unknown exact engine plan"));}
+            let context = json!({"pass_id":pass_id,"lineage_id":pass.lineage_id,"appended_ids":ids,"physical_tail":pass.physical_tail,"eligible_user_mid":eligible_user,"eligible_tool_block":eligible_tool,"exact_pass_plan":pass.exact_pass_plan,"marker_hard_serves_frozen_prefix":pass.marker_hard_serves_frozen_prefix});
             let messages = pass
                 .appended
                 .iter()
@@ -720,6 +722,12 @@ impl McHandler {
                     let mut policy_state=ctx.counters["policy_state"].clone();
                     policy_state["reduce_pending"]=ctx.counters.pointer("/engine_policy/reduce_suppressed").cloned().unwrap_or(json!(false));
                     let state=&policy_state;
+                    // A conservative preflight is not permission. With no exact
+                    // engine plan, the hook is a defer; the rebuild owns its overlay.
+                    let exact_plan=match ctx.counters.pointer("/pass_context/exact_pass_plan").and_then(Value::as_str) {
+                        Some("hard")=>Some(mc_core::PassPlan::Hard),Some("migrate_hard")=>Some(mc_core::PassPlan::MigrateHard),Some("soft")=>Some(mc_core::PassPlan::Soft),Some("defer")=>Some(mc_core::PassPlan::Defer),_=>None,
+                    };
+                    let temporal_permitted=exact_plan.as_ref().is_some_and(|plan|transform::pass_plan_permits_prefix_mutation(plan,ctx.counters.pointer("/pass_context/marker_hard_serves_frozen_prefix").and_then(Value::as_bool).unwrap_or(false)));
                     for (index, target) in targets.iter().enumerate() {
                         if let Some((kind, source)) = transform::taggable_source(target) {
                             let number = ctx.parts.iter().find(|p|p.block_id==target.id).and_then(|p|p.tag_number).or_else(||ctx.tag_high_water.checked_add(tags.len() as i64+1))
@@ -743,7 +751,7 @@ impl McHandler {
                             if hook == Hook::PreUser
                                 && index == 0
                                 && binding.config.temporal_awareness
-                                && ctx.counters.pointer("/pass_context/prefix_mutation_permitted").and_then(Value::as_bool)==Some(true)
+                                && temporal_permitted
                                 && ctx.counters.pointer("/pass_context/lineage_id").and_then(Value::as_str)==Some(lineage_id)
                             {
                                 if let Some(prefix) = ctx.parts.iter().filter(|p|p.kind=="header" && p.ordinal<ordinal).max_by_key(|p|p.ordinal).and_then(|p|transform::temporal_marker_from_timestamps(p.created_at_ms,p.completed_at_ms,ingress.ck.meta.created_at_ms)).filter(|p|!p.is_empty())
@@ -1293,7 +1301,7 @@ mod host_tests {
         let tail = appended
             .last()
             .map(|(ordinal, message)| json!({"mid":message["info"]["id"],"ordinal":ordinal}));
-        response(h.dispatch_value(7,json!({"method":"state_sync","session_id":"s","provider_pass":{"lineage_id":"L","appended":appended.iter().map(|(ordinal,message)|json!({"mid":message["info"]["id"],"ordinal":ordinal,"message":message})).collect::<Vec<_>>(),"physical_tail":tail,"prefix_mutation_permitted":true}})).await);
+        response(h.dispatch_value(7,json!({"method":"state_sync","session_id":"s","provider_pass":{"lineage_id":"L","appended":appended.iter().map(|(ordinal,message)|json!({"mid":message["info"]["id"],"ordinal":ordinal,"message":message})).collect::<Vec<_>>(),"physical_tail":tail,"exact_pass_plan":"hard"}})).await);
     }
     pub(super) fn text(mid: &str, role: &str, value: &str) -> Value {
         json!({"info":{"id":mid,"role":role},"parts":[{"id":format!("{mid}-text"),"type":"text","text":value}]})

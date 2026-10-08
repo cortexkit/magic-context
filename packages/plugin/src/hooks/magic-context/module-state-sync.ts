@@ -199,8 +199,9 @@ export interface ModuleProviderPass {
     descends_from?: { lineage_id: string; through_ordinal: number };
     appended: readonly { ordinal: number; mid: string; message: unknown }[];
     physical_tail: { ordinal: number; mid: string } | null;
-    /** From the shared engine pass-plan evaluator; absence never permits a marker. */
-    prefix_mutation_permitted?: boolean;
+    /** Exact shared engine plan only, never a conservative preflight candidate. */
+    exact_pass_plan?: "hard" | "migrate_hard" | "soft" | "defer" | "reject";
+    marker_hard_serves_frozen_prefix?: boolean;
 }
 
 /** Internal pass metadata is paged independently of reusable seed data. */

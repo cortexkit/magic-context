@@ -192,7 +192,7 @@ The ordinary corpus also compares full-engine output digests against a frozen 96
 
 ### Temporal integration remains open in M4
 
-The real corpus exposed another shared input: today's engine discards *new* temporal markers on a warmed defer (`prefix_replay_must_be_preserved`). Hooks therefore require an explicitly synchronized `prefix_mutation_permitted`; absent permission never guesses a marker. Cold/HARD and warmed-defer arms are tested.
+The real corpus exposed another shared input: today's engine discards *new* temporal markers on a warmed defer (`prefix_replay_must_be_preserved`). Hooks therefore require an explicitly synchronized **exact engine plan** (`exact_pass_plan`) and use `pass_plan_permits_prefix_mutation` from M4 commit `4b512a2b68d91da79af18bf9b298ca70eafd8dd1`. A conservative preflight candidate, skip-facts result or bare permission boolean never authorizes a marker; absent plan means defer. Cold/HARD, warmed-defer and no-plan/cautious-candidate arms are tested. The cherry-pick kept the shared predicate, full-engine wiring and test; M4's preflight context was absent from this branch and remains M4-owned.
 
 The parent ruled that a late HARD view must render the engine's temporal overlay for everything it covers. `late_hard_view_covers_new_users_and_renders_full_engine_temporal_marker` is deliberately committed red until M4's template/evaluator change lands. Its full HARD positive control produces `<!-- +5m -->`; the current S3 adapter returns noop instead of a marker-changing covering view. M3 does **not** claim late-HARD temporal acceptance or complete host-pipeline enablement at this tip.
 
