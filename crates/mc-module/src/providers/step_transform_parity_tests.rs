@@ -680,6 +680,7 @@ fn frozen_reductions_coverage_and_calibration_reuse_the_engine_measurement() {
         &Default::default(),
         true,
         false,
+        None,
     );
     assert_eq!(
         crate::tail_hygiene::effective_tail_hygiene(&actual.baseline),
@@ -874,4 +875,101 @@ async fn no_exact_plan_is_defer_even_if_a_preflight_candidate_claims_hard() {
         actual["parts"][0]["text"].as_str().unwrap(),
         expected["m2"][0].1
     );
+}
+
+async fn exact_hard_model_case(
+    old: Option<&str>,
+    new: Option<&str>,
+    tools: &[&str],
+    repeats: usize,
+    temporal: bool,
+) -> (usize, usize) {
+    let hd = tempfile::tempdir().unwrap();
+    let fd = tempfile::tempdir().unwrap();
+    let (host, hp) = fixture(hd.path(), 0.0, temporal);
+    let (full, fp) = fixture(fd.path(), 0.0, temporal);
+    let plan = json!({"serializer_profile":"opencode-aisdk","observation":"answer","auto_search_min_prompt_chars":0,"auto_search_score_threshold":0.0});
+    super::host_tests::response(
+        super::host_tests::dispatch(&host, 7, "transform.declare", json!({"params":plan})).await,
+    );
+    let mut old_req = request(&[baseline()], false);
+    old_req.model_key = old.map(str::to_owned);
+    for _ in 0..2 {
+        transform::transform(
+            full.store.get().unwrap(),
+            &old_req,
+            &context(&fp, 0.0, temporal, 1),
+        )
+        .unwrap();
+        transform::transform(
+            host.store.get().unwrap(),
+            &old_req,
+            &context(&hp, 0.0, temporal, 1),
+        )
+        .unwrap();
+    }
+    let mut binding = host.facade_binding(7).unwrap();
+    binding.model_key = new.map(str::to_owned);
+    binding.config.auto_search.enabled = false;
+    host.bind_route(7, binding);
+    let appended=tools.iter().enumerate().map(|(i,tool)| {let ordinal=i as u64+2;let mid=format!("hard-{ordinal}");message(&mid,"assistant",json!([{"id":"part","type":"tool","tool":tool,"callID":format!("call-{mid}"),"state":{"status":"completed","input":{},"output":"spent payload ".repeat(repeats)}}]),ordinal,false)}).collect::<Vec<_>>();
+    super::host_tests::sync_pass(
+        &host,
+        &appended
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (i as u64 + 2, m.clone()))
+            .collect::<Vec<_>>(),
+    )
+    .await;
+    let raw = std::iter::once(baseline())
+        .chain(appended.iter().cloned())
+        .collect::<Vec<_>>();
+    let mut req = request(&raw, false);
+    req.model_key = new.map(str::to_owned);
+    req.render_config = "exact-HARD-switch".into();
+    let expected = transform::transform(
+        full.store.get().unwrap(),
+        &req,
+        &context(&fp, 0.0, temporal, 2),
+    )
+    .unwrap();
+    assert_eq!(expected.decision, "HARD");
+    assert!(expected.prefix_bust_permitted);
+    let mids = appended
+        .iter()
+        .map(|m| m["info"]["id"].as_str().unwrap().to_owned())
+        .collect();
+    let expected = scalars(&expected, &mids);
+    let mut reminders = 0;
+    for (i, m) in appended.iter().enumerate() {
+        let actual = host_message(&host, m, i as u64 + 2, 1).await;
+        let text = actual["parts"][0]["state"]["output"].as_str().unwrap();
+        let want = &expected[m["info"]["id"].as_str().unwrap()][0].1;
+        assert!(text==want,"exact HARD {old:?}->{new:?}, tools={tools:?}, repeats={repeats}, index={i}; actual suffix {:?}, expected suffix {:?}",text.find("<system-reminder>").map(|n|&text[n..]),want.find("<system-reminder>").map(|n|&want[n..]));
+        reminders += usize::from(want.contains("<system-reminder>"));
+    }
+    (appended.len(), reminders)
+}
+
+#[tokio::test]
+async fn exact_hard_model_adoption_shows_and_omits_reminders_like_full_engine() {
+    let (_, shown) = exact_hard_model_case(
+        None,
+        Some("anthropic/claude-fable-5-1"),
+        &["read"],
+        20000,
+        false,
+    )
+    .await;
+    assert_eq!(shown, 1, "new model calibration crosses the floor");
+    let (_, omitted) = exact_hard_model_case(
+        Some("anthropic/claude-fable-5-1"),
+        None,
+        &["read"],
+        20000,
+        false,
+    )
+    .await;
+    assert_eq!(omitted, 0, "neutral model calibration is below the floor");
 }

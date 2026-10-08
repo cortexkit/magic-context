@@ -393,7 +393,7 @@ impl McHandler {
                     "unknown exact engine plan",
                 ));
             }
-            let context = json!({"pass_id":pass_id,"lineage_id":pass.lineage_id,"appended_ids":ids,"physical_tail":pass.physical_tail,"eligible_user_mid":eligible_user,"eligible_tool_block":eligible_tool,"exact_pass_plan":pass.exact_pass_plan,"marker_hard_serves_frozen_prefix":pass.marker_hard_serves_frozen_prefix});
+            let context = json!({"pass_id":pass_id,"lineage_id":pass.lineage_id,"appended_ids":ids,"physical_tail":pass.physical_tail,"eligible_user_mid":eligible_user,"eligible_tool_block":eligible_tool,"exact_pass_plan":pass.exact_pass_plan,"marker_hard_serves_frozen_prefix":pass.marker_hard_serves_frozen_prefix,"model_key":binding.model_key});
             let messages = pass
                 .appended
                 .iter()
@@ -822,7 +822,9 @@ impl McHandler {
                     let carrier_block=ctx.parts.iter().filter(|p|p.tag_kind.as_deref()==Some("tool_result") && new_ids.is_some_and(|ids|ids.iter().any(|id|id.as_str()==Some(p.mid.as_str())))).max_by_key(|p|(p.ordinal,p.block_index));
                     let carrier=hook==Hook::PostTool && targets.iter().any(|t|carrier_block.is_some_and(|p|p.block_id==t.id));
                     let cache_busting=temporal_permitted && !matches!(c.preset.as_deref(),Some("worker"|"subagent"|"reader"));
-                    let inputs=transform::channel1_inputs_from_parts(&ctx.parts,&ctx.counters["engine_policy"],binding.config.resolve_protected_tokens(100_000).floor,&binding.config.protected_tools,carrier,cache_busting);
+                    let pass_model=ctx.counters.pointer("/pass_context/model_key").and_then(Value::as_str);
+                    let inputs=transform::channel1_inputs_from_parts(&ctx.parts,&ctx.counters["engine_policy"],binding.config.resolve_protected_tokens(100_000).floor,&binding.config.protected_tools,carrier,cache_busting,pass_model);
+                    if cache_busting {counters["engine_policy"]["calibration"]=serde_json::to_value(crate::decision_calibration::DecisionCalibration::freeze_for_model(pass_model)).expect("calibration JSON");}
                     if ctx.counters.pointer("/engine_policy/baseline/baseline_generation").and_then(Value::as_u64)!=Some(inputs.baseline.baseline_generation) {
                         counters["policy_baseline_updates"]=json!(inputs.baseline.baseline_parts.iter().map(|m|json!({"block_id":m.key.split('\0').next().unwrap_or(""),"measurement":m})).collect::<Vec<_>>());
                         let mut baseline=inputs.baseline.clone();baseline.baseline_parts.clear();

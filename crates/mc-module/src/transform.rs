@@ -5233,16 +5233,11 @@ fn apply_once(
     let calibration_candidate = crate::decision_calibration::DecisionCalibration::freeze_for_model(
         req.model_key.as_deref(),
     );
-    let frozen_calibration = loaded
-        .meta
-        .decision_calibration
-        .as_ref()
-        .and_then(crate::decision_calibration::DecisionCalibration::from_frozen);
-    let active_calibration = if pass_already_busting {
-        crate::decision_calibration::DecisionCalibration::for_model(req.model_key.as_deref())
-    } else {
-        frozen_calibration.unwrap_or_else(crate::decision_calibration::DecisionCalibration::neutral)
-    };
+    let active_calibration = calibration_for_prefix_pass(
+        req.model_key.as_deref(),
+        loaded.meta.decision_calibration.as_ref(),
+        pass_already_busting,
+    );
     let calibration_changed = pass_already_busting
         && loaded
             .meta
@@ -10857,6 +10852,22 @@ fn refresh_channel1_baseline(
     )
 }
 
+/// A real prefix rebuild adopts this pass's model; defers preserve the epoch
+/// already priced into the cached prefix. Neither lane guesses from old ratios.
+fn calibration_for_prefix_pass(
+    model_key: Option<&str>,
+    frozen: Option<&mc_store::FrozenDecisionCalibration>,
+    cache_busting: bool,
+) -> crate::decision_calibration::DecisionCalibration {
+    if cache_busting {
+        crate::decision_calibration::DecisionCalibration::for_model(model_key)
+    } else {
+        frozen
+            .and_then(crate::decision_calibration::DecisionCalibration::from_frozen)
+            .unwrap_or_else(crate::decision_calibration::DecisionCalibration::neutral)
+    }
+}
+
 /// Project stored measurements through the same protection, selection, calibrated
 /// refresh and oldest-tag functions as a full engine pass. No content is fetched.
 /// This correctness-stage projector walks the full active metadata lineage; it
@@ -10868,16 +10879,16 @@ pub(crate) fn channel1_inputs_from_parts(
     protected_tools: &BTreeMap<String, usize>,
     carrier: bool,
     cache_busting: bool,
+    model_key: Option<&str>,
 ) -> Channel1PolicyInputs {
     use crate::protection_window::ProtectionWindow;
     use crate::selection::{SelItem, SelKind, SelMessageRole};
     let coverage = settings.get("coverage").and_then(Value::as_u64);
-    let calibration = settings
-        .get("calibration")
-        .and_then(|v| serde_json::from_value::<mc_store::FrozenDecisionCalibration>(v.clone()).ok())
-        .as_ref()
-        .and_then(crate::decision_calibration::DecisionCalibration::from_frozen)
-        .unwrap_or_else(crate::decision_calibration::DecisionCalibration::neutral);
+    let frozen_calibration = settings.get("calibration").and_then(|v| {
+        serde_json::from_value::<mc_store::FrozenDecisionCalibration>(v.clone()).ok()
+    });
+    let calibration =
+        calibration_for_prefix_pass(model_key, frozen_calibration.as_ref(), cache_busting);
     let floor = settings
         .get("protected_tokens")
         .and_then(Value::as_u64)
