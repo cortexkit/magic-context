@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 pub const INVENTORY_VERSION: u32 = 3;
 pub const CONTEXT_SCHEMA_VERSION: u32 = 96;
-pub const STORE_SCHEMA_VERSION: u32 = 65;
+pub const STORE_SCHEMA_VERSION: u32 = 66;
 pub const GLOBAL_USER_PROFILE_PROJECT_PATH: &str = "__global__";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2118,6 +2118,152 @@ pub const TABLES: &[TableInventory] = &[
         &["project_root", "session", "catalog"],
         &[],
         Some(KeyPolicy::Preserve),
+        None
+    ),
+    table!(
+        Module,
+        "mc_provider_conversations_v2",
+        Ship,
+        RowSelector::Predicate("session = ?1"),
+        &["conv_key"],
+        &[
+            "conv_key",
+            "project_root",
+            "session",
+            "harness",
+            "lineage_id",
+            "preset",
+            "params_json",
+            "setup_json",
+            "engine_namespace",
+            "version_high_water",
+            "rebuild_epoch",
+            "hook_counters_json",
+            "last_answer_json",
+            "wait_request",
+            "cursor_frontier",
+            "served_through_ordinal",
+            "historian_model_chain_json",
+            "record_json",
+            "legacy_shape_json"
+        ],
+        &[],
+        Some(KeyPolicy::PreserveOrRefuseCollision),
+        None
+    ),
+    table!(
+        Module,
+        "mc_provider_lineages_v1",
+        Ship,
+        RowSelector::Predicate(
+            "conv_key IN (SELECT conv_key FROM mc_provider_conversations_v2 WHERE session = ?1)"
+        ),
+        &["conv_key", "lineage_id"],
+        &[
+            "conv_key",
+            "lineage_id",
+            "first_ordinal",
+            "descends_from",
+            "through_ordinal",
+            "session"
+        ],
+        &[],
+        Some(KeyPolicy::PreserveOrRefuseCollision),
+        None
+    ),
+    table!(
+        Module,
+        "mc_provider_messages_v1",
+        Ship,
+        RowSelector::Predicate(
+            "conv_key IN (SELECT conv_key FROM mc_provider_conversations_v2 WHERE session = ?1)"
+        ),
+        &["conv_key", "lineage_id", "ordinal"],
+        &[
+            "conv_key",
+            "lineage_id",
+            "ordinal",
+            "mid",
+            "message_bytes",
+            "session"
+        ],
+        &[],
+        Some(KeyPolicy::PreserveOrRefuseCollision),
+        None
+    ),
+    table!(
+        Module,
+        "mc_provider_hook_answers_v1",
+        Ship,
+        RowSelector::Predicate(
+            "conv_key IN (SELECT conv_key FROM mc_provider_conversations_v2 WHERE session = ?1)"
+        ),
+        &["conv_key", "answer_seq"],
+        &[
+            "conv_key",
+            "answer_seq",
+            "lineage_id",
+            "subject_mid",
+            "hook",
+            "subject_part",
+            "ordinal",
+            "ops_json",
+            "tags_json",
+            "state",
+            "legacy_json",
+            "session"
+        ],
+        &[],
+        Some(KeyPolicy::PreserveOrRefuseCollision),
+        None
+    ),
+    table!(
+        Module,
+        "mc_provider_views_v1",
+        Ship,
+        RowSelector::Predicate(
+            "conv_key IN (SELECT conv_key FROM mc_provider_conversations_v2 WHERE session = ?1)"
+        ),
+        &["conv_key", "version"],
+        &[
+            "conv_key",
+            "version",
+            "lineage_id",
+            "range_from",
+            "range_to",
+            "replacement_json",
+            "state",
+            "view_json",
+            "session"
+        ],
+        &[],
+        Some(KeyPolicy::PreserveOrRefuseCollision),
+        None
+    ),
+    table!(
+        Module,
+        "mc_provider_legacy_tags_v1",
+        Ship,
+        RowSelector::Predicate(
+            "conv_key IN (SELECT conv_key FROM mc_provider_conversations_v2 WHERE session = ?1)"
+        ),
+        &["conv_key", "tag_number", "state"],
+        &["conv_key", "tag_number", "state", "tag_json", "session"],
+        &[],
+        Some(KeyPolicy::PreserveOrRefuseCollision),
+        None
+    ),
+    table!(
+        Module,
+        "mc_provider_pending_drops_v1",
+        Ship,
+        RowSelector::Predicate(
+            "conv_key IN (SELECT conv_key FROM mc_provider_conversations_v2 WHERE session = ?1)"
+        ),
+        &["conv_key", "tag_number"],
+        &["conv_key", "tag_number", "session"],
+        &[],
+        Some(KeyPolicy::PreserveOrRefuseCollision),
         None
     ),
     table!(

@@ -168,6 +168,25 @@ impl Storage {
             })
     }
 
+    /// The host lane decides cadence after burns and promotion, inside the store
+    /// transaction. It never hydrates the legacy whole-record compatibility view.
+    #[allow(dead_code)] // The host request handlers opt into this adapter separately.
+    pub fn commit_hook<T>(
+        &self,
+        key: &Key,
+        request: mc_store::provider_records::ProviderHookRequest<'_>,
+        decide: impl FnOnce(
+            &mc_store::provider_records::ProviderHookContext,
+        ) -> Result<
+            (mc_store::provider_records::ProviderHookWrite, T),
+            mc_store::provider_records::ProviderError,
+        >,
+    ) -> Result<T, HandlerOutcome> {
+        self.store()?
+            .commit_provider_hook(&key.store_key(), request, decide)
+            .map_err(provider_error)
+    }
+
     pub fn save(&self, key: &Key, record: &Record) -> Result<(), HandlerOutcome> {
         let tags = record
             .hook
@@ -249,12 +268,25 @@ impl Storage {
 }
 
 impl Key {
-    fn store_key(&self) -> mc_store::ProviderSessionKey {
+    pub fn store_key(&self) -> mc_store::ProviderSessionKey {
         mc_store::ProviderSessionKey {
             project_root: self.project.to_string_lossy().into_owned(),
             session: self.session.clone(),
             harness: self.harness.clone(),
         }
+    }
+}
+
+fn provider_error(error: mc_store::provider_records::ProviderError) -> HandlerOutcome {
+    match error {
+        mc_store::provider_records::ProviderError::InvalidParams { field } => {
+            HandlerOutcome::ErrorWithDetail {
+                code: "invalid_params".into(),
+                message: format!("conflicting provider {field}"),
+                detail: json!({"field": field}),
+            }
+        }
+        error => transient(error),
     }
 }
 
@@ -286,10 +318,24 @@ pub fn ingest(
     for entry in messages {
         let held = record.messages.entry(lineage.into()).or_default();
         if let Some(previous) = held.get(&entry.ordinal) {
+            if previous.mid != entry.mid {
+                return Err(provider_error(
+                    mc_store::provider_records::ProviderError::InvalidParams {
+                        field: "subject_ordinal",
+                    },
+                ));
+            }
             if previous != entry {
                 return Err(transient("an ingested ordinal changed"));
             }
             continue;
+        }
+        if held.values().any(|previous| previous.mid == entry.mid) {
+            return Err(provider_error(
+                mc_store::provider_records::ProviderError::InvalidParams {
+                    field: "subject_mid",
+                },
+            ));
         }
         let message = decode_message(entry)?;
         if let Some(hook) = &mut record.hook {
@@ -354,7 +400,7 @@ pub fn frontier(record: &Record, lineage: &str) -> u64 {
     let Some(messages) = record.messages.get(lineage) else {
         return 0;
     };
-    let mut next = 0;
+    let mut next = messages.keys().next().copied().unwrap_or(0);
     for ordinal in messages.keys() {
         if *ordinal != next {
             break;
@@ -455,5 +501,49 @@ pub async fn scan(
         }
         storage.save(key, record)?;
         return Ok(());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn held_ordinal_with_another_mid_refuses_by_field() {
+        let mut record = Record::default();
+        let entry: compact::status::StatusMessage =
+            decode(&json!({"ordinal":4000,"mid":"held","message":{"role":"user","content":[]}}))
+                .unwrap();
+        record
+            .messages
+            .entry("L".into())
+            .or_default()
+            .insert(4000, entry.clone());
+        let mut conflict = entry;
+        conflict.mid = "different".into();
+        match ingest(&mut record, "L", &[conflict]) {
+            Err(HandlerOutcome::ErrorWithDetail { code, detail, .. }) => {
+                assert_eq!(code, "invalid_params");
+                assert_eq!(detail, json!({"field":"subject_ordinal"}));
+            }
+            _ => panic!("held ordinal conflict was ignored or refused without its field"),
+        }
+        assert_eq!(record.messages["L"][&4000].mid, "held");
+    }
+
+    #[test]
+    fn frontier_starts_at_the_absolute_bootstrap_ordinal() {
+        let mut record = Record::default();
+        for ordinal in 4000..=4010 {
+            let entry=decode(&json!({"ordinal":ordinal,"mid":format!("m{ordinal}"),"message":{"role":"user","content":[]}})).unwrap();
+            record
+                .messages
+                .entry("L".into())
+                .or_default()
+                .insert(ordinal, entry);
+        }
+        assert_eq!(frontier(&record, "L"), 4011);
+        record.messages.get_mut("L").unwrap().remove(&4005);
+        assert_eq!(frontier(&record, "L"), 4005);
     }
 }

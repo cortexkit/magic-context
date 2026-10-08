@@ -25,7 +25,9 @@ pub mod move_inventory;
 pub mod move_snapshot;
 pub mod move_store;
 pub mod private_permissions;
-mod provider_records;
+mod provider_legacy;
+mod provider_log;
+pub mod provider_records;
 pub use provider_records::ProviderSessionKey;
 pub mod single_store_domain;
 pub mod single_store_schema;
@@ -3241,6 +3243,10 @@ const MIGRATIONS: &[Migration] = &[
         // Provider answers, version/tag high-water marks and catalog admission
         // are session-owned state, so migrate and classify them before serving.
         statements: include_str!("migrations/store_065_provider_records.sql"),
+    },
+    Migration {
+        version: 66,
+        statements: include_str!("migrations/store_066_provider_log.sql"),
     },
 ];
 
@@ -7627,6 +7633,7 @@ fn materialize_strip_seed_units(
 /// tables and their triggers, so the functions only ever answer "no caller", an empty
 /// string.
 fn register_legacy_trigger_functions(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+    provider_records::register_migration_functions(conn)?;
     for name in [
         "mc_note_caller_project",
         "mc_facade_authority_domain",
