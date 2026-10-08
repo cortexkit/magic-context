@@ -17,7 +17,10 @@ import {
 } from "./migrations";
 import {
     OPENCODE2_RELABEL_STATE_KEY,
+    type RelabelHarness,
     readUnresolvedOpenCode2Relabel,
+    repairOpenCode2HarnessLabels,
+    V87_HARNESS_AGGREGATE_RULES,
     V87_HARNESS_TWIN_RULES,
 } from "./opencode2-relabel";
 import { initializeDatabase, LATEST_SUPPORTED_VERSION } from "./storage-db";
@@ -157,6 +160,110 @@ function seedSessionRows(db: Database, sessionId: string, harness: string): void
     db.prepare(
         "INSERT INTO tags (session_id, message_id, type, byte_size, tag_number, harness) VALUES (?, ?, 'message', 10, 1, ?)",
     ).run(sessionId, `${sessionId}-msg`, harness);
+}
+
+// Independent of the relabel rules so the behavioral checks cannot silently
+// omit a runner table if the rule's membership is accidentally shortened.
+const RUNNER_TABLES = [
+    "host_runner_entries",
+    "host_runner_ids",
+    "host_runner_views",
+    "host_runner_state",
+] as const;
+const REPAIR_TABLES = [...V85_OPENCODE2_RELABEL_TABLES, ...V85_OPTIONAL_OPENCODE2_RELABEL_TABLES];
+
+function seedRunnerRows(
+    db: Database,
+    sessionId: string,
+    harness: string,
+    marker: string,
+    timestamp: number,
+): void {
+    const lineage = `${marker}-lineage`;
+    for (const lineageId of [lineage, `${marker}-old-lineage`]) {
+        for (const ordinal of [1, 2]) {
+            const messageId = `${lineageId}-m${ordinal}`;
+            db.prepare(`INSERT INTO host_runner_entries
+                (session_id, harness, lineage_id, ordinal, message_id, ingest_json, hook_json,
+                 op_version, ingested, race, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, 0, ?)`).run(
+                sessionId,
+                harness,
+                lineageId,
+                ordinal,
+                messageId,
+                `"${marker}"`,
+                "[]",
+                timestamp,
+            );
+            db.prepare(`INSERT INTO host_runner_ids
+                (session_id, harness, lineage_id, message_id, ordinal) VALUES (?, ?, ?, ?, ?)`).run(
+                sessionId,
+                harness,
+                lineageId,
+                messageId,
+                ordinal,
+            );
+        }
+    }
+    db.prepare(`INSERT INTO host_runner_ids
+        (session_id, harness, lineage_id, message_id, ordinal) VALUES (?, ?, ?, ?, NULL)`).run(
+        sessionId,
+        harness,
+        lineage,
+        `${marker}-elided`,
+    );
+    for (const version of [1, 2]) {
+        db.prepare(`INSERT INTO host_runner_views
+            (session_id, harness, lineage_id, compaction_id, version, range_from, range_to,
+             replacement_json, coverage_json, state, applied_at)
+            VALUES (?, ?, ?, ?, ?, 1, 2, ?, '[]', 'applied', ?)`).run(
+            sessionId,
+            harness,
+            lineage,
+            `${marker}-c${version}`,
+            version,
+            `"${marker}"`,
+            timestamp,
+        );
+    }
+    db.prepare(`INSERT INTO host_runner_state
+        (session_id, harness, lineage_id, ancestry_json, plan_json, setup_json,
+         next_ordinal, cursor, served_through_ordinal, issued_request_id, issued_newest,
+         wait_json, bootstrap_cursor, unserved_json, record_version)
+        VALUES (?, ?, ?, '[]', ?, ?, 3, 2, 2, ?, 2, ?, 1, '[2]', 7)`).run(
+        sessionId,
+        harness,
+        lineage,
+        `"${marker}-plan"`,
+        `"${marker}-setup"`,
+        `${marker}-fence`,
+        `"${marker}-wait"`,
+    );
+}
+
+function runnerRows(db: Database, sessionId: string, harness: string) {
+    return Object.fromEntries(
+        RUNNER_TABLES.map((table) => [
+            table,
+            db
+                .prepare(
+                    `SELECT * FROM ${table} WHERE session_id = ? AND harness = ? ORDER BY rowid`,
+                )
+                .all(sessionId, harness) as Array<Record<string, unknown>>,
+        ]),
+    );
+}
+
+function runnerEvidence(sessionId: string, target: RelabelHarness): void {
+    const host = createHostStore(target === "opencode" ? "fresh_v1" : "fresh_v2");
+    try {
+        if (target === "opencode") insertV1Session(host.db, sessionId, 9_000);
+        else insertV2Session(host.db, sessionId, 9_000);
+    } finally {
+        host.db.close();
+    }
+    useHostStore(host.path);
 }
 
 describe("migration v87: harness labels follow host-store evidence", () => {
@@ -426,7 +533,165 @@ describe("migration v87: harness labels follow host-store evidence", () => {
         }
     });
 
-    test("every harness-keyed table is covered by a twin rule or is a per-harness cursor", () => {
+    test.each([
+        "opencode",
+        "opencode2",
+    ] as const)("a non-twin runner record moves all four tables together to %s", (target) => {
+        const source = target === "opencode" ? "opencode2" : "opencode";
+        const sessionId = "ses-runner-only";
+        const db = new Database(":memory:");
+        try {
+            runnerEvidence(sessionId, target);
+            initializeDatabase(db);
+            seedAppliedVersion(db, 86);
+            seedRunnerRows(db, sessionId, source, "incoming", 100);
+            const before = runnerRows(db, sessionId, source);
+
+            // Exercise the nested transaction used during migration replay,
+            // with the runner tables as the only session candidates.
+            runMigrations(db);
+
+            for (const table of RUNNER_TABLES) {
+                expect(runnerRows(db, sessionId, target)[table]).toEqual(
+                    before[table]?.map((row) => ({ ...row, harness: target })),
+                );
+                expect(harnessOf(db, table, sessionId)).toEqual(before[table]?.map(() => target));
+            }
+            const replay = repairOpenCode2HarnessLabels(db, { tables: REPAIR_TABLES });
+            expect(replay.relabelledSessions).toEqual([]);
+            expect(replay.discardedRunnerRecords).toEqual([]);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test.each([
+        "opencode",
+        "opencode2",
+    ] as const)("a runner twin keeps the resolved %s record intact and discards all incoming rows", (target) => {
+        const source = target === "opencode" ? "opencode2" : "opencode";
+        const sessionId = "ses-runner-twin";
+        const db = new Database(":memory:");
+        try {
+            runnerEvidence(sessionId, target);
+            initializeDatabase(db);
+            seedSessionRows(db, sessionId, source);
+            // The resolved record is older, and the two records have different
+            // lineages/message ids: neither timestamps nor per-row collisions
+            // may choose survivors from the incoming record.
+            seedRunnerRows(db, sessionId, target, "kept", 100);
+            seedRunnerRows(db, sessionId, source, "discarded", 9_000);
+            seedRunnerRows(db, sessionId, "pi", "pi", 10_000);
+            seedRunnerRows(db, "ses-unrelated", source, "unrelated", 10_000);
+            const kept = runnerRows(db, sessionId, target);
+            const pi = runnerRows(db, sessionId, "pi");
+            const unrelated = runnerRows(db, "ses-unrelated", source);
+
+            const report = repairOpenCode2HarnessLabels(db, { tables: REPAIR_TABLES });
+
+            expect(report.status).toBe("resolved");
+            expect(report.discardedRunnerRecords).toEqual([sessionId]);
+            expect(report.relabelledSessions).toEqual([{ sessionId, harness: target }]);
+            expect(runnerRows(db, sessionId, target)).toEqual(kept);
+            for (const table of RUNNER_TABLES) {
+                expect(runnerRows(db, sessionId, source)[table]).toEqual([]);
+            }
+            expect(runnerRows(db, sessionId, "pi")).toEqual(pi);
+            expect(runnerRows(db, "ses-unrelated", source)).toEqual(unrelated);
+            expect(harnessOf(db, "tags", sessionId)).toEqual([target]);
+            const replay = repairOpenCode2HarnessLabels(db, { tables: REPAIR_TABLES });
+            expect(replay.discardedRunnerRecords).toEqual([]);
+            expect(replay.relabelledSessions).toEqual([]);
+            expect(runnerRows(db, sessionId, target)).toEqual(kept);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test.each([
+        "opencode",
+        "opencode2",
+    ] as const)("split runner entries and state never form a hybrid under %s", (target) => {
+        const source = target === "opencode" ? "opencode2" : "opencode";
+        const sessionIds = ["ses-entries-target", "ses-state-target"];
+        const host = createHostStore(target === "opencode" ? "fresh_v1" : "fresh_v2");
+        for (const sessionId of sessionIds) {
+            if (target === "opencode") insertV1Session(host.db, sessionId, 9_000);
+            else insertV2Session(host.db, sessionId, 9_000);
+        }
+        host.db.close();
+        useHostStore(host.path);
+        const db = new Database(":memory:");
+        try {
+            initializeDatabase(db);
+            const kept = sessionIds.map((sessionId) => {
+                seedRunnerRows(db, sessionId, source, "source", 9_000);
+                seedRunnerRows(db, sessionId, target, "target", 100);
+                for (const table of RUNNER_TABLES) {
+                    const stateOnTarget = sessionId === "ses-state-target";
+                    const keepOnTarget = (table === "host_runner_state") === stateOnTarget;
+                    db.prepare(`DELETE FROM ${table} WHERE session_id = ? AND harness = ?`).run(
+                        sessionId,
+                        keepOnTarget ? source : target,
+                    );
+                }
+                return runnerRows(db, sessionId, target);
+            });
+
+            const report = repairOpenCode2HarnessLabels(db, { tables: REPAIR_TABLES });
+
+            expect(report.discardedRunnerRecords).toEqual(sessionIds);
+            expect(report.relabelledSessions).toEqual([]);
+            for (const [index, sessionId] of sessionIds.entries()) {
+                expect(runnerRows(db, sessionId, target)).toEqual(kept[index]);
+                for (const table of RUNNER_TABLES) {
+                    expect(runnerRows(db, sessionId, source)[table]).toEqual([]);
+                }
+            }
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test.each([
+        "non-twin",
+        "twin",
+    ])("runner relabel and the rest of the session roll back together on failure (%s)", (kind) => {
+        const twin = kind === "twin";
+        const sessionId = "ses-runner-rollback";
+        const db = new Database(":memory:");
+        try {
+            runnerEvidence(sessionId, "opencode2");
+            initializeDatabase(db);
+            seedSessionRows(db, sessionId, "opencode");
+            seedRunnerRows(db, sessionId, "opencode", "source", 9_000);
+            if (twin) seedRunnerRows(db, sessionId, "opencode2", "target", 100);
+            db.prepare(`INSERT INTO session_projects (session_id, harness, project_path, updated_at)
+                VALUES (?, 'opencode', '/newer', 9000), (?, 'opencode2', '/older', 100)`).run(
+                sessionId,
+                sessionId,
+            );
+            const source = runnerRows(db, sessionId, "opencode");
+            const target = runnerRows(db, sessionId, "opencode2");
+            // Fail after entries/ids/views have moved or been discarded.
+            db.exec(`CREATE TRIGGER fail_runner_relabel BEFORE ${twin ? "DELETE" : "UPDATE"}
+                    ON host_runner_state BEGIN SELECT RAISE(ABORT, 'runner relabel failed'); END`);
+
+            expect(() => repairOpenCode2HarnessLabels(db, { tables: REPAIR_TABLES })).toThrow(
+                "runner relabel failed",
+            );
+
+            expect(runnerRows(db, sessionId, "opencode")).toEqual(source);
+            expect(runnerRows(db, sessionId, "opencode2")).toEqual(target);
+            expect(harnessOf(db, "session_meta", sessionId)).toEqual(["opencode"]);
+            expect(harnessOf(db, "tags", sessionId)).toEqual(["opencode"]);
+            expect(harnessOf(db, "session_projects", sessionId)).toEqual(["opencode", "opencode2"]);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("every harness-keyed table is covered by a twin rule, an aggregate group or is a per-harness cursor", () => {
         const db = new Database(":memory:");
         try {
             initializeDatabase(db);
@@ -439,7 +704,10 @@ describe("migration v87: harness labels follow host-store evidence", () => {
                 );
             `);
 
-            const ruled = new Set(V87_HARNESS_TWIN_RULES.map((rule) => rule.table));
+            const ruled = new Set([
+                ...V87_HARNESS_TWIN_RULES.map((rule) => rule.table),
+                ...V87_HARNESS_AGGREGATE_RULES.flatMap((rule) => rule.tables),
+            ]);
             for (const table of [
                 ...V85_OPENCODE2_RELABEL_TABLES,
                 ...V85_OPTIONAL_OPENCODE2_RELABEL_TABLES,
@@ -466,7 +734,9 @@ describe("migration v87: harness labels follow host-store evidence", () => {
                     ).some((column) => column.name === "harness"),
                 );
                 if (!harnessInPrimaryKey && !harnessInUniqueIndex) {
-                    expect(ruled.has(table), `${table} needs no twin rule`).toBe(false);
+                    expect(ruled.has(table), `${table} needs no twin or aggregate rule`).toBe(
+                        false,
+                    );
                     continue;
                 }
                 const isPerHarnessCursor = !(
@@ -474,7 +744,7 @@ describe("migration v87: harness labels follow host-store evidence", () => {
                 ).some((column) => column.name === "session_id");
                 expect(
                     ruled.has(table) || isPerHarnessCursor,
-                    `${table} keys rows by harness but has no v87 twin rule`,
+                    `${table} keys rows by harness but has no v87 twin or aggregate rule`,
                 ).toBe(true);
             }
         } finally {
