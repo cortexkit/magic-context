@@ -15,6 +15,20 @@ draft: these vectors change with the contract until it is reviewed.
 | `grants.json` | plans whose user-tier `replace` grants are read only from the dedicated `user_grants` field (a grant in an item's params, the composition or another field grants nothing; a grant on another hook or with no tools allows nothing), and malformed `user_grants` fields | the wire crate's grant test |
 | `errors.json` | every refusal code a provider answers with, plus one it does not, with whether it is retried, and the tool-result reasons the runner writes | the wire crate's error test |
 | `host-runner.json` | optional whole message and paired subject identity, inclusive ancestry, pairing validation failures, history-gap hints and named refusals; existing vectors still pin absent-field bytes | the wire crate's host-runner tests |
+| `host-runner-lane.json` | optional service/burn fields absent and present, part byte limits, named lower-watermark refusal, route/principal admission and runner-principal plan-value refusals; hook part identity and pass scheduling | proposed host-lane conformance cases; not exercised by the current wire suite |
+
+`host-runner-lane.json` follows the named `requests` and stateful-check format.
+Its `requests` are concrete wire params; `checks` and `admission` attach fixture
+metadata outside the wire object: `route` is the authenticated principal and
+bind, `frozen_plan_params` comes from the admitted plan, and `provider_state`
+is pre-call durable state. `host_records` is host-local, never a wire field.
+Expected answers/refusals and effects are literal expectations, not codec
+round-trips. `plan_value_refusals` carries `{method, params}` envelopes.
+Admission cases test the runner-group/ready decision separately from those
+provider refusals. The proposed host cases require a host-aware implementation;
+older types may decode the extra fields but cannot round-trip or execute their
+semantics. Existing canonical vectors remain unchanged. Version/type/setter
+and conformance updates belong to the contract owner's implementation revision.
 
 Every request vector carries `harness`, the harness named in the session's
 key, which identifies the caller (for example `broca`). The wire crate's

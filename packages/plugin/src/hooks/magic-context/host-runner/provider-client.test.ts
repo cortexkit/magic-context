@@ -36,7 +36,7 @@ function vectors(lane: string, file: string): Record<string, Vector[]> {
     return JSON.parse(
         readFileSync(
             new URL(
-                `./__fixtures__/commons-c1591d4a/${lane}-provider-v1/${file}.json`,
+                `./__fixtures__/commons-85c105df/${lane}-provider-v1/${file}.json`,
                 import.meta.url,
             ),
             "utf8",
@@ -44,8 +44,7 @@ function vectors(lane: string, file: string): Record<string, Vector[]> {
     );
 }
 
-// These fixtures are copied verbatim from commons c1591d4a76fa3d3a7367237922b0bca5214dbf11.
-// Expectations come from the fixtures, not from the client or its schemas.
+// These are protocol vectors copied unchanged from cortexkit/commons at 85c105dfc10dfcd02360ef31b07b4bc67dea41f8; using upstream fixtures keeps expectations independent of this client's schemas.
 for (const [method, lane, file, answerField] of [
     ["transform.declare", "step-transform", "declare", "declaration"],
     ["transform.hook", "step-transform", "hook-requests", "answer"],

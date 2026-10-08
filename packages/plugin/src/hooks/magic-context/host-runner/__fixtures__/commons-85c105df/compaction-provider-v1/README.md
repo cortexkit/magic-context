@@ -15,6 +15,20 @@ draft: these vectors change with the contract until it is reviewed.
 | `ready.json` | the `compaction.ready` request, extras the runner ignores, requests that do not decode, and the runner's check: call again, ignored, or refused `not_session_compaction_provider` by the provider at `plan.compaction_item.provider` | the wire crate's ready test, through `llm-runner/v1`'s check |
 | `errors.json` | every refusal code a provider answers with, plus one it does not, with whether it is retried; the four role `refuse` codes with their fixed retryability, and a code the role does not name, which decodes and is never retried; the `provider_code`s the runner writes itself (`compaction_unavailable`, `compaction_wait_exceeded`), taken from `llm-runner/v1`; and every named code's fixed retryability (`true` means the runner may retry without the user acting) and the calls after which it may end a run, the same table as CONTRACT.md §14.3 | the wire crate's error test |
 | `host-runner.json` | optional inclusive ancestry, the `coverage` field on a `compaction_message` answer (the newest message a summary covers) and retryable history-gap detail, plus malformed new fields; existing vectors still pin absent-field bytes | the wire crate's host-runner tests |
+| `host-runner-lane.json` | optional service/burn fields absent and present, part byte limits, named lower-watermark refusal, route/principal admission and runner-principal plan-value refusals; sparse pre-op status, held-history gaps/conflicts and final-page wait handling | proposed host-lane conformance cases; not exercised by the current wire suite |
+
+`host-runner-lane.json` follows the named `requests` and stateful-check format.
+Its `requests` are concrete wire params; `checks` and `admission` attach fixture
+metadata outside the wire object: `route` is the authenticated principal and
+bind, `frozen_plan_params` comes from the admitted plan, and `provider_state`
+is pre-call durable state. `host_records` is host-local, never a wire field.
+Expected answers/refusals and effects are literal expectations, not codec
+round-trips. `plan_value_refusals` carries `{method, params}` envelopes.
+Admission cases test the runner-group/ready decision separately from those
+provider refusals. The proposed host cases require a host-aware implementation;
+older types may decode the extra fields but cannot round-trip or execute their
+semantics. Existing canonical vectors remain unchanged. Version/type/setter
+and conformance updates belong to the contract owner's implementation revision.
 
 Every request vector carries `harness`, the harness named in the session's
 key, which identifies the caller (for example `broca`). The wire crate's

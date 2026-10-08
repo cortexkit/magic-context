@@ -461,7 +461,7 @@ describe("H3 review controls", () => {
             const data = JSON.parse(
                 readFileSync(
                     new URL(
-                        `./__fixtures__/commons-c1591d4a/${lane}-provider-v1/${file}.json`,
+                        `./__fixtures__/commons-85c105df/${lane}-provider-v1/${file}.json`,
                         import.meta.url,
                     ),
                     "utf8",
