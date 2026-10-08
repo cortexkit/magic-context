@@ -1049,3 +1049,27 @@ fn r3_repeated_skip_facts_does_not_consume_snapshot_observation() {
 ```
 
 </details>
+
+## Implementation follow-up (not an independent re-review)
+
+The implementation worker reproduced all five new regressions unchanged before
+editing product code. Each finding is committed separately.
+
+### Non-final execution fence
+
+`r3_nonfinal_bootstrap_with_hook_complete_history_waits_without_engine` is now
+green. Every `more:true` page returns `wait` immediately after admission and cursor
+recording, before view acknowledgements or engine evaluation, regardless of held
+frontier completeness. The existing paging/lock-release control remains green.
+
+### Recomp shape reset
+
+`r3_recomp_reset_summary_agrees_with_full_core` is now green. A codec write with a
+cleared base is a full rewrite, even when the new frozen set is empty and an outer
+reset already deleted the old chunks. It writes the new shape rather than copying
+the retired index's shape. A debug assertion checks every known full-write summary
+against the encoded core. The new write-path test independently compares the stored
+summary with a loaded full core after bootstrap, append, scalar update, recomp,
+empty rewrite and rebootstrap. All 35 codec tests pass, with the one pre-existing
+profile benchmark ignored; package compilation passes. Existing chunk/hash and
+unchanged-write controls remain green.
