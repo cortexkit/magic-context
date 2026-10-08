@@ -14,7 +14,7 @@ instruction is to preserve that truthful state and take this note to SUBC and
 BROCA for rulings. No supplied evidence establishes approval of the eight new
 items. Lenient decoding is not semantic acceptance.
 
-**M3 and M4 merge gate: CLOSED.** Before either merges, record SUBC's disposition
+**M3 and M4 merge gate: OPEN behind the host-lane opt-in** (SUBC ruled all eight items on 2026-10-08; BROCA confirmed compatibility with the D1 and D2 conditions in the ledger). **Host-lane enablement gate: CLOSED** until a commons revision adds a "host runner lane" section to both role CONTRACT.md files carrying P1–P4 and D1–D4 as ruled, with vectors for each new field absent and present plus a D4 sparse-status vector; MC drafts it, SUBC reviews and merges. Previous gate text, kept for the record: Before either merges, record SUBC's disposition
 of each P1–P4 and D1–D4 item in the ledger, with response provenance and any
 conditions. A pending item is not approval. A rejection or conditional response
 that changes the reviewed design must be resolved by ALF with the owners before
@@ -27,14 +27,14 @@ the checks below are requirements for later slices, not claims of executed tests
 | L2: `descends_from` | Landed | Reviewed spec, Contract rulings §2; same commons commit | B-L2 below |
 | L3: `coverage` | Landed | Reviewed spec, Contract rulings §3; same commons commit | B-L3 below |
 | L4: step `detail.history_gap_from` | Landed | Reviewed spec, Contract rulings §4; same commons commit | B-L4 below |
-| P1: `served_through_ordinal` | **Pending** | No owner response supplied | B-P1 below |
-| P2: `unserved_subjects` | **Pending** | No owner response supplied | B-P2 below |
-| P3: `subject_part` | **Pending** | No owner response supplied | B-P3 below |
-| P4: `pass_complete` | **Pending** | No owner response supplied; `state_sync` use is MC-internal | B-P4 below |
-| D1: capability admission | **Pending** | No owner response supplied | B-D1 below |
-| D2: observation | **Pending** | No owner response supplied | B-D2 below |
-| D3: paging and `wait` | **Pending** | No owner response supplied | B-D3 below |
-| D4: status content | **Pending** | No owner response supplied | B-D4 below |
+| P1: `served_through_ordinal` | **Accepted with conditions** | SUBC pm_11d8fb5279e7ca29 and BROCA pm_8431d0b84664aa93, 2026-10-08: Promotion never passes the newest ordinal held for the lineage; per lineage it only moves forward except the same-transaction revert clamp; a lower value without a revert refuses by name, never un-promotes. | B-P1 below |
+| P2: `unserved_subjects` | **Accepted** | SUBC pm_11d8fb5279e7ca29 and BROCA pm_8431d0b84664aa93, 2026-10-08: Burning is idempotent; an entry naming a subject never answered is ignored; the list counts toward the 3 MiB request cap. | B-P2 below |
+| P3: `subject_part` | **Accepted** | SUBC pm_11d8fb5279e7ca29 and BROCA pm_8431d0b84664aa93, 2026-10-08: Opaque, non-empty when present, at most 256 bytes, compared byte for byte. | B-P3 below |
+| P4: `pass_complete` | **Accepted** | SUBC pm_11d8fb5279e7ca29 and BROCA pm_8431d0b84664aa93, 2026-10-08: Omitted unless true; a scheduling hint, never an acknowledgement; `state_sync` use is MC-internal. | B-P4 below |
+| D1: capability admission | **Accepted with conditions** | SUBC pm_11d8fb5279e7ca29 and BROCA pm_8431d0b84664aa93, 2026-10-08: Keyed only on the frozen plan params plus the route's bind (project_root, session) with bind harness `opencode` or `opencode2` under the route's authenticated principal, never on the body `harness` field or body params. Grants no runner-only operation and no other session. No stronger than today's direct-caller trust; requires the daemon caller-identity stamp once it lands. Negative test (BROCA): a runner-principal call with body harness `opencode` and host params gets full runner admission, not this exception. | B-D1 below |
+| D2: observation | **Accepted with conditions** | SUBC pm_11d8fb5279e7ca29 and BROCA pm_8431d0b84664aa93, 2026-10-08: Needs both opt-ins; missing acknowledgement never promotes; the host lane makes zero `session.read`. From a runner principal, `observation: "answer"` or `serializer_profile: "opencode-aisdk"` on `transform.declare` or `compaction.setup` refuses `invalid_params` naming the field (BROCA). | B-D2 below |
+| D3: paging and `wait` | **Accepted with conditions** | SUBC pm_11d8fb5279e7ca29 and BROCA pm_8431d0b84664aa93, 2026-10-08: The host re-pages only on `more: true`; `wait` on a final page is an unavailable call, never a retry loop; an incomplete final page refuses with `history_gap_from`. | B-D3 below |
+| D4: status content | **Accepted with conditions** | SUBC pm_11d8fb5279e7ca29 and BROCA pm_8431d0b84664aa93, 2026-10-08: Admitted host lane only; gaps are detected from held history; conflicts refuse before promote-and-burn. Departs from compaction-provider §6, so it must land in commons. | B-D4 below |
 
 ## Authority and frozen evidence
 
@@ -222,7 +222,7 @@ extra-field decoding. ALF must not rely on mere decode success for cutover.
   tags and observation as the baseline. No ordinal-promotion lane activates.
   An older decoder ignores the member. Host crash-before-append and revert
   controls must prove uncommitted tags are not promoted (A6/A9).
-- **Disposition:** pending; SUBC response/provenance not supplied.
+- **Disposition:** ruled; see the ledger above (SUBC pm_11d8fb5279e7ca29 and BROCA pm_8431d0b84664aa93, 2026-10-08).
 
 ### P2. `unserved_subjects`
 
@@ -248,7 +248,7 @@ extra-field decoding. ALF must not rely on mere decode success for cutover.
   no host burn lane runs. Older decoding ignores the list. Host partial-failure
   and timeout-after-commit controls must show all named answers burned and the
   resend list cleared only after an answered call.
-- **Disposition:** pending; SUBC response/provenance not supplied.
+- **Disposition:** ruled; see the ledger above (SUBC pm_11d8fb5279e7ca29 and BROCA pm_8431d0b84664aa93, 2026-10-08).
 
 ### P3. `subject_part`
 
@@ -270,7 +270,7 @@ extra-field decoding. ALF must not rely on mere decode success for cutover.
   preserves its old vectors. Older decoding ignores the member. Host controls
   cover duplicate `tool_call_id` with distinct part ids and identical user text
   on different mids (A9).
-- **Disposition:** pending; SUBC response/provenance not supplied.
+- **Disposition:** ruled; see the ledger above (SUBC pm_11d8fb5279e7ca29 and BROCA pm_8431d0b84664aa93, 2026-10-08).
 
 ### P4. `pass_complete`
 
@@ -293,7 +293,7 @@ extra-field decoding. ALF must not rely on mere decode success for cutover.
   barrier scheduling runs. Older decoding ignores the member. Host forced
   interleaving tests cover state sync, the first hook of a multi-message pass,
   and the no-append internal-sync barrier (M3/M5).
-- **Disposition:** pending for the external hook field; internal-sync use is
+- **Disposition:** ruled: accepted (see the ledger above). Internal-sync use is
   recorded here for coordination, not asserted as commons approval.
 
 ## D1.6 departures — all pending SUBC disposition
@@ -321,7 +321,7 @@ extra-field decoding. ALF must not rely on mere decode success for cutover.
   missing `transcript_reads` does not become generally acceptable. Test admitted
   bound host direct calls and denied unbound, other-session and runner-targeting
   direct calls (M3). Do not globally publish empty runner requirements.
-- **Disposition:** pending; SUBC response/provenance not supplied.
+- **Disposition:** ruled; see the ledger above (SUBC pm_11d8fb5279e7ca29 and BROCA pm_8431d0b84664aa93, 2026-10-08).
 
 ### D2. Answer observation instead of `session.read`
 
@@ -342,7 +342,7 @@ extra-field decoding. ALF must not rely on mere decode success for cutover.
   its transcript-based observation and answer/cadence bytes. Extra optional
   acknowledgement fields must not switch it to host observation. Host tests
   assert zero `session.read` calls even across restart and bootstrap (M3/M4).
-- **Disposition:** pending; SUBC response/provenance not supplied.
+- **Disposition:** ruled; see the ledger above (SUBC pm_11d8fb5279e7ca29 and BROCA pm_8431d0b84664aa93, 2026-10-08).
 
 ### D3. Paging and `wait` without scans or ready callbacks
 
@@ -373,7 +373,7 @@ extra-field decoding. ALF must not rely on mere decode success for cutover.
   pages must not accidentally activate immediate host retry. Host tests assert
   no scan, no lock retained between pages, refusal for an incomplete final
   page, and no retry on an unexpected wait (M4/H3).
-- **Disposition:** pending; SUBC response/provenance not supplied.
+- **Disposition:** ruled; see the ledger above (SUBC pm_11d8fb5279e7ca29 and BROCA pm_8431d0b84664aa93, 2026-10-08).
 
 ### D4. Status content omits messages already hook-ingested
 
@@ -402,7 +402,7 @@ extra-field decoding. ALF must not rely on mere decode success for cutover.
   `owned-broca` status/answer corpus is unchanged. Host controls assert empty
   status after N fully answered passes, exactly the timed-out message after
   one unavailable hook, and named gap/conflict refusals (A9/A10, H1/M4).
-- **Disposition:** pending; SUBC response/provenance not supplied.
+- **Disposition:** ruled; see the ledger above (SUBC pm_11d8fb5279e7ca29 and BROCA pm_8431d0b84664aa93, 2026-10-08).
 
 ## Cross-item limits and disposition handoff
 
