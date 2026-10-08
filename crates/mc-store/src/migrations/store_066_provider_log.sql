@@ -23,6 +23,7 @@ CREATE TABLE mc_provider_conversations_v2 (
     UNIQUE(project_root, session, harness)
 );
 CREATE INDEX mc_provider_conversations_session ON mc_provider_conversations_v2(session);
+CREATE INDEX mc_provider_conversations_engine_namespace ON mc_provider_conversations_v2(engine_namespace);
 
 CREATE TABLE mc_provider_lineages_v1 (
     conv_key TEXT NOT NULL,
@@ -56,6 +57,7 @@ CREATE TABLE mc_provider_hook_answers_v1 (
     tags_json TEXT NOT NULL,
     state TEXT NOT NULL CHECK(state IN ('pending', 'live', 'burned')),
     legacy_json TEXT,
+    policy_json TEXT NOT NULL DEFAULT '{}',
     session TEXT NOT NULL CHECK(session = json_extract(conv_key, '$[1]')),
     PRIMARY KEY(conv_key, answer_seq)
 );
@@ -131,6 +133,8 @@ FROM mc_provider_conversations_v2 c
 JOIN mc_provider_sessions_v1 s USING(project_root, session, harness),
     json_each(s.record, '$.messages') l, json_each(l.value) m;
 INSERT INTO mc_provider_hook_answers_v1
+    (conv_key, answer_seq, lineage_id, subject_mid, hook, subject_part, ordinal,
+     ops_json, tags_json, state, legacy_json, session)
 SELECT c.conv_key, CAST(a.key AS INTEGER), coalesce(json_extract(a.value, '$.lineage'), ''),
     json_extract(a.value, '$.subject'), 'legacy', CAST(a.key AS TEXT), NULL,
     json_extract(a.value, '$.answer'), json_extract(a.value, '$.tags'),

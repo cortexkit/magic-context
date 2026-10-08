@@ -144,6 +144,17 @@ fn v65_blob_round_trips_messages_answers_views_pending_drops_and_empty_lineages(
     let c = store.load_provider_conversation(&key()).unwrap().unwrap();
     assert!(c.engine_namespace.starts_with("mc-provider:"));
     assert_eq!(c.version_high_water, 9);
+    store
+        .inner
+        .with_conn(|conn| {
+            let policies: Vec<String> = conn
+                .prepare("SELECT policy_json FROM mc_provider_hook_answers_v1 WHERE conv_key=?1")?
+                .query_map([key().conversation_key()], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            assert_eq!(policies, vec!["{}".to_string(); 2]);
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(store.provider_frontier(&key(), "L").unwrap(), 4001);
     store
         .save_provider_record(&key(), &record.to_string(), &c.engine_namespace, &[])
