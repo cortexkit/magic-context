@@ -1,0 +1,89 @@
+{
+  "requests": [
+    {
+      "name": "whole host message on the first hook of a descendant lineage",
+      "request": {
+        "session": "s",
+        "harness": "host",
+        "lineage_id": "new-lineage",
+        "subject_mid": "host-m3",
+        "subject_ordinal": 3,
+        "message": {
+          "speaker": "human",
+          "parts": [{"kind": "text", "value": "hi"}, {"kind": "opaque", "data": [1, 2]}]
+        },
+        "descends_from": {"lineage_id": "old-lineage", "through_ordinal": 2},
+        "params": {"serializer_profile": {"schema": "host-message", "version": 1}},
+        "hook": "pre_user",
+        "blocks": ["hi"]
+      }
+    },
+    {
+      "name": "reserved identity without a whole message",
+      "request": {
+        "session": "s", "harness": "host", "lineage_id": "l",
+        "subject_mid": "m0", "subject_ordinal": 0,
+        "params": {}, "hook": "post_assistant", "step_id": "step", "blocks": ["done"]
+      }
+    },
+    {
+      "name": "explicit null is a present opaque message",
+      "request": {
+        "session": "s", "harness": "host", "lineage_id": "l",
+        "subject_mid": "m0", "subject_ordinal": 0, "message": null,
+        "params": {}, "hook": "pre_user", "blocks": []
+      }
+    },
+    {
+      "name": "ancestry without a whole message",
+      "request": {
+        "session": "s", "harness": "host", "lineage_id": "l",
+        "descends_from": {"lineage_id": "old", "through_ordinal": 0},
+        "params": {}, "hook": "pre_user", "blocks": ["hi"]
+      }
+    }
+  ],
+  "invalid_pairs": [
+    {
+      "name": "message without either identity field",
+      "request": {"session": "s", "harness": "host", "params": {}, "hook": "pre_user", "blocks": [], "message": {}},
+      "field": "message"
+    },
+    {
+      "name": "null message without either identity field",
+      "request": {"session": "s", "harness": "host", "params": {}, "hook": "pre_user", "blocks": [], "message": null},
+      "field": "message"
+    },
+    {
+      "name": "message and ordinal without mid",
+      "request": {"session": "s", "harness": "host", "params": {}, "hook": "pre_user", "blocks": [], "subject_ordinal": 0, "message": {}},
+      "field": "message"
+    },
+    {
+      "name": "message and mid without ordinal",
+      "request": {"session": "s", "harness": "host", "params": {}, "hook": "pre_user", "blocks": [], "subject_mid": "m", "message": {}},
+      "field": "message"
+    },
+    {
+      "name": "mid without ordinal",
+      "request": {"session": "s", "harness": "host", "params": {}, "hook": "pre_user", "blocks": [], "subject_mid": "m"},
+      "field": "subject_ordinal"
+    },
+    {
+      "name": "ordinal without mid",
+      "request": {"session": "s", "harness": "host", "params": {}, "hook": "pre_user", "blocks": [], "subject_ordinal": 0},
+      "field": "subject_mid"
+    }
+  ],
+  "refusals": [
+    {"name": "missing inherited history", "refusal": {"code": "transient", "message": "history is missing", "detail": {"history_gap_from": 1}}},
+    {"name": "conflicting subject", "refusal": {"code": "invalid_params", "message": "the message id already has different input", "detail": {"field": "subject_mid"}}},
+    {"name": "unknown required serializer profile", "refusal": {"code": "invalid_params", "message": "cannot read this message schema", "detail": {"field": "params.serializer_profile"}}},
+    {"name": "whole-message request exceeds cap", "refusal": {"code": "invalid_params", "message": "hook request exceeds 4194304 bytes", "detail": {"field": "message"}}}
+  ],
+  "undecodable": [
+    {"name": "negative subject ordinal", "request": {"session": "s", "harness": "host", "hook": "pre_user", "blocks": [], "subject_mid": "m", "subject_ordinal": -1}},
+    {"name": "ancestry missing lineage id", "request": {"session": "s", "harness": "host", "hook": "pre_user", "blocks": [], "descends_from": {"through_ordinal": 0}}},
+    {"name": "negative inherited ordinal", "request": {"session": "s", "harness": "host", "hook": "pre_user", "blocks": [], "descends_from": {"lineage_id": "old", "through_ordinal": -1}}}
+  ]
+}

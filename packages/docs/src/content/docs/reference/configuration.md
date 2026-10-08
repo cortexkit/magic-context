@@ -176,7 +176,7 @@ Off-hours maintenance through Dreamer.
 | `dreamer.top_p` | number (0–1) | — | Nucleus sampling top_p (0-1) |
 | `dreamer.prompt` | string | — | Additional system prompt text |
 | `dreamer.tools` | map<string, boolean> | — | Tool enable/disable overrides |
-| `dreamer.disable` | boolean | — | Disable this agent |
+| `dreamer.disable` **Live** | boolean | — | Disable this agent |
 | `dreamer.description` | string | — | Agent description |
 | `dreamer.mode` | `"subagent"` \| `"primary"` \| `"all"` | — | Agent mode (subagent, primary, or all) |
 | `dreamer.color` | string | — | Hex color for the agent (e.g. '#a1b2c3') |

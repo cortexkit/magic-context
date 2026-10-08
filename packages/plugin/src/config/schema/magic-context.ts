@@ -641,6 +641,10 @@ const AgentMetadataSchema = AgentOverrideConfigSchema.pick({
 
 /** Combined dreamer metadata plus independent strict execution blocks. */
 export const DreamerConfigSchema = AgentMetadataSchema.extend({
+    // Its own node rather than the one shared with the historian through
+    // AgentMetadataSchema: `dreamer.disable` is a live-reload key and the
+    // historian's is not, and the live marker is set on the schema node.
+    disable: z.boolean().optional().describe("Disable this agent"),
     runner: z
         .enum(["broca", "host"])
         .optional()
@@ -1603,6 +1607,7 @@ export const LIVE_RELOAD_CONFIG_PATHS = [
     "commit_cluster_trigger.enabled",
     "commit_cluster_trigger.min_clusters",
     "memory.auto_promote",
+    "dreamer.disable",
     "dreamer.maxTokens",
     "dreamer.opencode.model",
     "dreamer.opencode.fallback_models",

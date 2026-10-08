@@ -1,0 +1,89 @@
+{
+  "canonical": [
+    {
+      "name": "required ops, no runner group",
+      "answer": {
+        "majors": [
+          {"version": "compaction-provider/v1", "ops": ["role.describe", "compaction.setup", "compaction.step"], "stability": "alpha"}
+        ],
+        "implementation_version": "0.1.0",
+        "capabilities": []
+      }
+    },
+    {
+      "name": "needs transcript reads from the runner",
+      "answer": {
+        "majors": [
+          {"version": "compaction-provider/v1", "ops": ["role.describe", "compaction.setup", "compaction.step"], "stability": "alpha"}
+        ],
+        "implementation_version": "0.1.0",
+        "capabilities": [],
+        "runner_groups": ["transcript_reads"]
+      }
+    }
+  ],
+  "accepted": [
+    {
+      "name": "missing stability is alpha",
+      "answer": {
+        "majors": [{"version": "compaction-provider/v1", "ops": ["role.describe", "compaction.setup", "compaction.step"]}],
+        "implementation_version": "0.1.0"
+      },
+      "stability": "alpha"
+    },
+    {
+      "name": "unknown fields, majors, ops and stability are tolerated",
+      "answer": {
+        "majors": [
+          {"version": "compaction-provider/v1", "ops": ["role.describe", "compaction.setup", "compaction.step", "vendor.extra"], "stability": "experimental"},
+          {"version": "compaction-provider/v2", "ops": ["role.describe"], "stability": "alpha"}
+        ],
+        "implementation_version": "0.1.0",
+        "capabilities": ["vendor_capability"],
+        "future_field": {"x": 1}
+      },
+      "stability": "experimental"
+    },
+    {
+      "name": "runner declares what the provider needs",
+      "answer": {
+        "majors": [{"version": "compaction-provider/v1", "ops": ["role.describe", "compaction.setup", "compaction.step"], "stability": "alpha"}],
+        "implementation_version": "0.1.0",
+        "runner_groups": ["transcript_reads", "model_view"]
+      },
+      "stability": "alpha",
+      "runner_declares": ["compaction", "transcript_reads", "model_view", "steer"],
+      "unmet_runner_groups": []
+    },
+    {
+      "name": "runner lacks a group the provider needs",
+      "answer": {
+        "majors": [{"version": "compaction-provider/v1", "ops": ["role.describe", "compaction.setup", "compaction.step"], "stability": "alpha"}],
+        "implementation_version": "0.1.0",
+        "runner_groups": ["transcript_reads", "model_view"]
+      },
+      "stability": "alpha",
+      "runner_declares": ["compaction", "model_view"],
+      "unmet_runner_groups": ["transcript_reads"]
+    }
+  ],
+  "refused": [
+    {"name": "not an object", "answer": ["compaction-provider/v1"], "problem": "not_an_object"},
+    {"name": "no majors", "answer": {"implementation_version": "0.1.0"}, "problem": "undecodable"},
+    {
+      "name": "another role only",
+      "answer": {"majors": [{"version": "tool-provider/v1", "ops": ["role.describe", "tool.catalog"], "stability": "alpha"}], "implementation_version": "0.1.0"},
+      "problem": "missing_major"
+    },
+    {
+      "name": "no setup op",
+      "answer": {"majors": [{"version": "compaction-provider/v1", "ops": ["role.describe", "compaction.step"], "stability": "alpha"}], "implementation_version": "0.1.0"},
+      "problem": "missing_op"
+    },
+    {
+      "name": "no step op",
+      "answer": {"majors": [{"version": "compaction-provider/v1", "ops": ["role.describe", "compaction.setup"], "stability": "alpha"}], "implementation_version": "0.1.0"},
+      "problem": "missing_op"
+    }
+  ]
+}

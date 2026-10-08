@@ -80,8 +80,8 @@ import { isRecord } from "../../shared/record-type-guard";
 import { stableStringify } from "../../shared/stable-json";
 import {
     type ConvertedToolDropMode,
-    convertLegacyToolSkeletons,
     foldBustsServedPrefix,
+    prepareLegacyToolSkeletonConversions,
     renderConvertedToolSkeletons,
 } from "./apply-operations";
 import { runAutoSearchHint } from "./auto-search-runner";
@@ -126,6 +126,7 @@ import {
     injectM0M1,
     type M0HardSignals,
     type M0M1State,
+    MaterializeContentionError,
     type MaterializeDecision,
     mustMaterialize,
     type PrefixTrimSourceOrder,
@@ -2022,20 +2023,31 @@ export async function runPostTransformPhase(
                 hardSignals: args.m0M1.hardSignals,
                 muralEnabled: args.m0M1.muralEnabled,
                 compactionOff,
-                onFoldCommit: (db, rendered) => {
-                    committedFoldBustsServedPrefix = foldBustsServedPrefix(
-                        foldDueDecision.reason,
-                        servedPrefixBeforeFold,
-                        rendered,
-                    );
-                    if (!committedFoldBustsServedPrefix) return;
-                    for (const [tagNumber, mode] of convertLegacyToolSkeletons(
-                        db,
+                onFoldPrepare: () => {
+                    const conversions = prepareLegacyToolSkeletonConversions(
+                        args.db,
                         args.sessionId,
                         args.targets,
-                    )) {
-                        convertedToolSkeletons.set(tagNumber, mode);
-                    }
+                    );
+                    return (db, rendered) => {
+                        const bustsPrefix = foldBustsServedPrefix(
+                            foldDueDecision.reason,
+                            servedPrefixBeforeFold,
+                            rendered,
+                        );
+                        if (bustsPrefix) {
+                            if (!conversions.isCurrent(db)) {
+                                throw new MaterializeContentionError({
+                                    reason: "fold conversion snapshot changed",
+                                });
+                            }
+                            conversions.persist(db);
+                            for (const [tagNumber, mode] of conversions.converted) {
+                                convertedToolSkeletons.set(tagNumber, mode);
+                            }
+                        }
+                        committedFoldBustsServedPrefix = bustsPrefix;
+                    };
                 },
             });
             preparedPrefix = foldResult;
@@ -2091,14 +2103,15 @@ export async function runPostTransformPhase(
                 getErrorMessage(error),
             );
         }
+        // A pressure-backstop refold can execute after a SOFT preflight whose
+        // reason is null. That is the drift path, not an unknown HARD trigger.
         sessionLog(
             args.sessionId,
-            `m[0] HARD fold decision: reason=${foldDueDecision.reason ?? "unknown"} executed=${foldExecutedThisPass} bustsServedPrefix=${foldBustsServedPrefixThisPass}`,
+            `m[0] HARD fold decision: reason=${m0MaterializeReason ?? foldDueDecision.reason ?? (foldExecutedThisPass ? "drift" : "soft_refresh")} executed=${foldExecutedThisPass} bustsServedPrefix=${foldBustsServedPrefixThisPass}`,
         );
     }
-    // Fold decision, cached-prefix capture and the m[1] soft refresh (one write
-    // transaction that renders m[1]) all run above; time them as one stage so
-    // pp.setupAndOperations has no untimed stretch.
+    // Fold decision, cached-prefix capture and the m[1] soft refresh run above;
+    // time precomputation and commit together so setup has no untimed stretch.
     logTransformTiming(
         args.sessionId,
         "pp.prefixPreflight",

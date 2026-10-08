@@ -1,4 +1,10 @@
 import type { createOpencodeClient } from "@opencode-ai/sdk";
+import {
+    DreamerProviderOutputFailureError,
+    primaryQuotaFailure,
+    providerOutputFailureFromInvalidManifest,
+    rememberPrimaryQuota,
+} from "../features/magic-context/dreamer/provider-output-failure";
 import { DreamTokenBudgetExceeded } from "../features/magic-context/dreamer/token-budget";
 import { detectOverflow } from "../features/magic-context/overflow-detection";
 import { HiddenCompletionRefusal } from "../hooks/magic-context/compartment-runner-types";
@@ -59,6 +65,8 @@ export interface PromptAttemptInfo {
     totalAttempts: number;
     /** Explicit model override for this attempt, when one was supplied. */
     model?: { providerID: string; modelID: string };
+    /** A run-local quota deadline prevented dispatch; not an actual model call. */
+    skipped?: boolean;
 }
 
 export interface PromptRetryOptions {
@@ -436,14 +444,25 @@ function throwWithPromptFailure(
         legacyError instanceof Error ? legacyError : new Error(extractMessage(legacyError));
     const last = failedAttempts.at(-1);
     const failureClass = last?.failureClass ?? "unknown";
+    const quota = failedAttempts.find(
+        (failure) =>
+            failure.error instanceof DreamerProviderOutputFailureError &&
+            failure.error.quotaResetAt !== undefined,
+    )?.error as DreamerProviderOutputFailureError | undefined;
+    if (quota && error !== quota && !error.message.includes(quota.message))
+        error.message = `${quota.message}; ${error.message}`;
     const providerError =
-        failureClass === "provider_error"
-            ? sanitizeDiagnosticText(shortErr(last?.error ?? legacyError)).slice(0, 500)
+        failureClass === "provider_error" || quota
+            ? sanitizeDiagnosticText(
+                  `${quota ? `${quota.message}; ` : ""}${shortErr(last?.error ?? legacyError)}`,
+              ).slice(0, 500)
             : null;
     promptFailureDetails.set(error, {
         failureClass,
         modelAttempted: last?.attempt.label ?? null,
-        modelsTried: failedAttempts.map((failure) => failure.attempt.label),
+        modelsTried: failedAttempts
+            .filter((failure) => !failure.attempt.skipped)
+            .map((failure) => failure.attempt.label),
         providerError,
         timeoutMs: failureClass === "provider_timeout" ? timeoutMs : null,
         childSessionId: transport ? (transport.childSessionId ?? null) : args.path.id || null,
@@ -667,6 +686,16 @@ async function attemptAndValidate<TOutput, TValidated>(
     }
 
     try {
+        // Only the structured account-pool notice bypasses caller validation.
+        // The near-zero-token heuristic remains owned by manifest callers.
+        const messages = Array.isArray(output)
+            ? output
+            : (output as { messages?: unknown } | null)?.messages;
+        const text = extractLatestAssistantText(messages);
+        if (text) {
+            const failure = providerOutputFailureFromInvalidManifest(messages, text);
+            if (failure?.quotaResetAt !== undefined) throw failure;
+        }
         if (!extractLatestAssistantText(output)) {
             const assistantFailure = extractLatestAssistantFailure(output);
             if (assistantFailure) {
@@ -721,8 +750,22 @@ export async function promptSyncWithValidatedOutputRetry<TOutput, TValidated = T
     const failedAttempts: FailedAttempt[] = [];
     let firstError: unknown = null;
     let lastError: unknown = null;
+    const cooledPrimary = primaryQuotaFailure(explicitPrimaryLabel);
 
     try {
+        if (cooledPrimary)
+            throw {
+                error: cooledPrimary,
+                failureClass: "provider_error",
+                attempt: {
+                    label: explicitPrimaryLabel,
+                    attemptIndex: 0,
+                    isFallback: false,
+                    totalAttempts,
+                    model: baseBody.model,
+                    skipped: true,
+                },
+            } satisfies FailedAttempt;
         return await attemptAndValidate(
             client,
             baseArgs,
@@ -743,6 +786,19 @@ export async function promptSyncWithValidatedOutputRetry<TOutput, TValidated = T
         failedAttempts.push(failure);
         firstError = failure.error;
         lastError = failure.error;
+        if (
+            failure.error instanceof DreamerProviderOutputFailureError &&
+            failure.error.quotaResetAt !== undefined
+        )
+            failure.error.message = failure.error.message.replace(
+                /^provider quota exhausted/,
+                "primary quota exhausted",
+            );
+        const quota = !cooledPrimary && rememberPrimaryQuota(explicitPrimaryLabel, failure.error);
+        if (quota)
+            log(
+                `[${callContext}] ${quota.message}; skipping ${explicitPrimaryLabel} for this run until reset`,
+            );
         if (isNonRetryable(failure.error, options.signal)) {
             throwWithPromptFailure(
                 failure.error,
@@ -763,9 +819,10 @@ export async function promptSyncWithValidatedOutputRetry<TOutput, TValidated = T
             );
         }
 
-        log(
-            `[${callContext}] primary (${explicitPrimaryLabel}) failed validation/prompt: ${shortErr(failure.error)}; trying ${fallbacks.length} fallback(s)`,
-        );
+        if (!cooledPrimary && !quota)
+            log(
+                `[${callContext}] primary (${explicitPrimaryLabel}) failed validation/prompt: ${shortErr(failure.error)}; trying ${fallbacks.length} fallback(s)`,
+            );
     }
 
     for (let i = 0; i < fallbacks.length; i += 1) {

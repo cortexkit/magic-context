@@ -239,6 +239,7 @@ export class PiTestHarness implements PiHostHarness {
       magicContextConfig: options.magicContextConfig,
       piSettingsExtra: options.piSettingsExtra,
       modelContextLimit: options.modelContextLimit,
+      extensionsBeforeMagicContext: options.extensionsBeforeMagicContext,
     });
 
     try {

@@ -1065,6 +1065,7 @@
         },
         "disable": {
           "description": "Disable this agent",
+          "x-mc-live-reload": true,
           "type": "boolean"
         },
         "description": {

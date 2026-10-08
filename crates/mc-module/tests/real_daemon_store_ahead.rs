@@ -115,6 +115,35 @@ impl Drop for Process {
     }
 }
 
+#[cfg(unix)]
+fn assert_dev_process_name(pid: u32) {
+    let output = Command::new("ps")
+        .args(["-axo", "pid,comm"])
+        .output()
+        .expect("ps must be available to verify the test process name");
+    assert!(output.status.success(), "ps -axo pid,comm failed");
+    let pid_text = pid.to_string();
+    let process_line = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find(|line| line.split_whitespace().next() == Some(pid_text.as_str()))
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("ps -axo pid,comm did not list test PID {pid}"));
+    let executable = process_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|command| Path::new(command).file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    assert!(
+        executable.starts_with("ckdev-"),
+        "test PID {pid} must not look like a production fleet binary: {process_line}"
+    );
+    println!("ps -axo pid,comm: {process_line}");
+}
+
+#[cfg(not(unix))]
+fn assert_dev_process_name(_: u32) {}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_module_on_a_store_ahead_of_it_refuses_on_health_and_on_transform() {
     std::env::remove_var(subc_protocol::SUBC_MODULE_ID_ENV);
@@ -128,7 +157,11 @@ async fn a_module_on_a_store_ahead_of_it_refuses_on_health_and_on_transform() {
         subconscious.join("target/debug/ck-subc"),
         &["build", "-p", "subc-core", "--bins"],
     );
-    let ck_bin = subconscious.join("target/debug/ck");
+    let ck_bin = dev_named_binary(
+        &std::env::var_os("MC_TEST_CK_BIN")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| subconscious.join("target/debug/ck")),
+    );
     assert!(ck_bin.exists(), "expected ck at {}", ck_bin.display());
     let module_bin = ensure_binary(
         &workspace,
@@ -166,6 +199,7 @@ async fn a_module_on_a_store_ahead_of_it_refuses_on_health_and_on_transform() {
             .spawn()
             .unwrap_or_else(|e| panic!("failed to spawn daemon {}: {e}", daemon_bin.display())),
     );
+    assert_dev_process_name(_daemon.0.id());
     wait_for_path(&isolation.connection_file(), START_TIMEOUT).await;
 
     let mut module_command = Command::new(&module_bin);
@@ -179,6 +213,7 @@ async fn a_module_on_a_store_ahead_of_it_refuses_on_health_and_on_transform() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn module {}: {e}", module_bin.display()));
+    assert_dev_process_name(module_child.id());
     // Drain stderr so the module never blocks on a full pipe, and forward it so a failing run
     // keeps the module's output.
     if let Some(stderr) = module_child.stderr.take() {
@@ -377,6 +412,17 @@ fn call_options() -> CallOptions {
 }
 
 fn ensure_binary(manifest_dir: &Path, path: PathBuf, cargo_args: &[&str]) -> PathBuf {
+    if path.file_name().is_some_and(|name| name == "ck-subc") {
+        if let Some(binary) = std::env::var_os("MC_TEST_CK_SUBC_BIN") {
+            let binary = PathBuf::from(binary);
+            assert!(
+                binary.is_file(),
+                "test daemon binary is missing: {}",
+                binary.display()
+            );
+            return dev_named_binary(&binary);
+        }
+    }
     static BUILD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     let _guard = BUILD_LOCK
         .get_or_init(|| Mutex::new(()))
@@ -394,7 +440,44 @@ fn ensure_binary(manifest_dir: &Path, path: PathBuf, cargo_args: &[&str]) -> Pat
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(path.exists(), "expected binary at {}", path.display());
-    path
+    dev_named_binary(&path)
+}
+
+/// Keep test daemon and module process names distinct from installed fleet binaries.
+fn dev_named_binary(path: &Path) -> PathBuf {
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("test binary must have a UTF-8 filename");
+    let suffix = if filename == "ck" {
+        "cli"
+    } else {
+        filename
+            .strip_prefix("ckdev-")
+            .or_else(|| filename.strip_prefix("ck-"))
+            .unwrap_or_else(|| panic!("expected a ck, ck-* or ckdev-* test binary, got {filename}"))
+    };
+    let dev_dir = std::env::temp_dir()
+        .join("magic-context/mc-module-test-binaries")
+        .join(std::process::id().to_string());
+    fs::create_dir_all(&dev_dir).expect("create isolated binary staging directory");
+    let dev_path = dev_dir.join(format!("ckdev-{suffix}"));
+    if path == dev_path.as_path() {
+        return dev_path;
+    }
+    let _ = fs::remove_file(&dev_path);
+    // A copy, never a hard link: on macOS a daemon exec'd through a hard link to
+    // cargo's output was occasionally SIGKILLed at startup, while a copy never was.
+    fs::copy(path, &dev_path)
+        .map(|_| ())
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to stage test binary {} as {}: {error}",
+                path.display(),
+                dev_path.display()
+            )
+        });
+    dev_path
 }
 
 fn workspace_root() -> PathBuf {

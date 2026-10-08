@@ -161,6 +161,39 @@ export function applyNativeReasoningReplayPi(
 	return nextIds.size;
 }
 
+/**
+ * Freeze the same removal decisions that emergency measurement would request,
+ * merging the replay envelope once instead of once per visible call. Publish
+ * the in-memory markers only after commit; a failed batch leaves the ordinary
+ * per-call authorization path (including its fail-closed behavior) unchanged.
+ */
+export function preparePiToolRemovalMeasurements(args: {
+	db: ContextDatabase;
+	sessionId: string;
+	callIds: readonly string[];
+	saved: Map<string, string> | undefined;
+	canApply: boolean;
+}): void {
+	if (!args.saved || !args.canApply) return;
+	const requested = new Map<string, string>();
+	for (const callId of args.callIds) {
+		if (args.saved.get(callId) !== NATIVE_TOOL_REMOVAL_MARKER)
+			requested.set(callId, NATIVE_TOOL_REMOVAL_MARKER);
+	}
+	if (requested.size === 0) return;
+	try {
+		args.db
+			.transaction(() => {
+				saveNativeToolInputs(args.db, args.sessionId, requested);
+			})
+			.immediate();
+		for (const [callId, marker] of requested) args.saved.set(callId, marker);
+	} catch {
+		// The per-call path still distinguishes a prior skeleton from a new drop
+		// and may retry if a competing writer has released the lock meanwhile.
+	}
+}
+
 /** Freeze structural removal before touching either half of a Pi tool arc. */
 export function authorizePiToolRemoval(args: {
 	db: ContextDatabase;

@@ -130,3 +130,4 @@ packages/*/.cortexkit/
 
 # Build residue from a sibling toolchain (Xcode/SwiftPM), never a project artifact
 .build/
+/scripts/ckmc-write-probe/migcheck/target

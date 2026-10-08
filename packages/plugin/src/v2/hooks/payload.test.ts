@@ -13,7 +13,10 @@ import {
 } from "../../hooks/magic-context/tool-drop-target";
 import * as logger from "../../shared/logger";
 import { rememberHostMedia, resetHostMediaForTests } from "../fold/host-media";
+import { restoreRow } from "../fold/restore";
+import type { StoreRow } from "../store-reader";
 import { adaptPayload } from "./payload";
+import { rawMessages } from "./store";
 import type { SessionContext, V2Message } from "./types";
 
 // Content part types the OpenCode 2 request schema accepts (LLM.Content.*).
@@ -87,6 +90,128 @@ function callsAndResults(messages: V2Message[]) {
 }
 
 describe("adaptPayload", () => {
+    it("preserves restored and normalized tool errors as errors with identical tagged text", () => {
+        const failure = {
+            error: { type: "tool.execution", message: "File not found: missing.txt" },
+            content: [],
+        };
+        for (const result of [
+            { result: failure, resultType: "error" },
+            { result: { type: "error", value: failure } },
+        ]) {
+            const context = draft(toolTurn("msg-error", "call-error", "read", ""));
+            Object.assign(context.messages[1].content[0], result);
+            const payload = adaptPayload(context);
+            const state = payload.messages[0].parts[1].state as Record<string, unknown>;
+            expect(state.status).toBe("error");
+            expect(state.output).toBe(JSON.stringify(failure));
+            state.output = `§2§ ${state.output}`;
+            payload.commit();
+            expect(callsAndResults(context.messages).results[0].result).toEqual({
+                type: "error",
+                value: `§2§ ${JSON.stringify(failure)}`,
+            });
+            expect(() => Message.make(context.messages[1])).not.toThrow();
+        }
+    });
+
+    it("preserves converted store errors and unbridged replay errors", () => {
+        const failure = { error: { type: "tool.execution", message: "missing" }, content: [] };
+        const context = draft([
+            {
+                id: "converted",
+                role: "assistant",
+                content: [
+                    {
+                        type: "tool",
+                        id: "call-error",
+                        name: "read",
+                        state: { status: "error", input: { path: "missing" }, ...failure },
+                    },
+                ],
+            },
+        ]);
+        const payload = adaptPayload(context);
+        const state = payload.messages[0].parts[0].state as Record<string, unknown>;
+        expect(state.status).toBe("error");
+        expect(state.output).toBe(JSON.stringify(failure));
+        state.output = `§2§ ${state.output}`;
+        payload.messages.push({
+            info: { role: "assistant", id: "replay" },
+            parts: [
+                {
+                    type: "tool",
+                    tool: "read",
+                    callID: "replay-call",
+                    state: { status: "error", input: {}, output: "§3§ replay error" },
+                },
+            ],
+        });
+        payload.commit();
+        expect(callsAndResults(context.messages).results.map((part) => part.result)).toEqual([
+            { type: "error", value: `§2§ ${JSON.stringify(failure)}` },
+            { type: "error", value: "§3§ replay error" },
+        ]);
+    });
+
+    it("store-reader projection and checkpoint replay retain error text and status", () => {
+        const failure = {
+            error: { type: "tool.execution", message: "missing" },
+            content: [{ type: "text", text: "details" }],
+        };
+        const row: StoreRow = {
+            id: "error-owner",
+            session_id: "ses-1",
+            type: "assistant",
+            seq: 2,
+            data: {
+                model: { providerID: "provider", id: "model" },
+                content: [
+                    {
+                        type: "tool",
+                        id: "call-error",
+                        name: "read",
+                        state: { status: "error", input: { path: "missing" }, ...failure },
+                    },
+                ],
+            },
+        };
+        expect(rawMessages([row])[0].parts[0]).toMatchObject({
+            state: { status: "error", output: JSON.stringify(failure) },
+        });
+        const context = draft(restoreRow(row, { providerID: "provider", id: "model" }));
+        const payload = adaptPayload(context);
+        expect(payload.messages[0].parts[0]).toMatchObject({
+            state: { status: "error", output: JSON.stringify(failure) },
+        });
+        payload.commit();
+        expect(callsAndResults(context.messages).results[0]).toMatchObject({
+            resultType: "error",
+            result: failure,
+        });
+    });
+
+    it("keeps error drop marker bytes and call pairing", () => {
+        const context = draft(toolTurn("msg-error", "call-error", "read", ""));
+        Object.assign(context.messages[1].content[0], {
+            resultType: "error",
+            result: { error: "missing", content: [] },
+        });
+        const payload = adaptPayload(context);
+        const owner = payload.messages[0];
+        const target = createToolDropTarget(
+            "call-error",
+            [],
+            indexMessage(owner),
+            new ToolMutationBatch(payload.messages),
+            7,
+        );
+        expect(target.truncate()).toBe("truncated");
+        payload.commit();
+        const { calls, results } = callsAndResults(context.messages);
+        expect(calls[0].input).toEqual({ dropped: "[dropped §7§]" });
+        expect(results[0].result).toEqual({ type: "error", value: "[dropped §7§]" });
+    });
     describe("#given a tool arc that the drop pipeline truncates", () => {
         it("#then commit() maps the cloned tool part back to a V2 tool-call/tool-result pair", () => {
             const context = draft(toolTurn("msg-1", "call-1", "shell", "a very long output"));

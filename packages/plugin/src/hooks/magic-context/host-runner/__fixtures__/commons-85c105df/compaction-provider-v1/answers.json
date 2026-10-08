@@ -1,0 +1,348 @@
+{
+  "answers": [
+    {
+      "name": "noop",
+      "answer": {
+        "answer": "noop",
+        "request_id": "cr-000042"
+      }
+    },
+    {
+      "name": "replace a middle range, keep a raw tail",
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-000042",
+        "compaction": {
+          "compaction_id": "mc:snap-118",
+          "version": 7,
+          "range": {
+            "from": 3,
+            "to": 41
+          },
+          "replacement": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "<m0>"
+                }
+              ]
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "<m1>"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "reshaped turn"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "replace through the newest message, no raw tail",
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-000043",
+        "compaction": {
+          "compaction_id": "summary-2",
+          "version": 8,
+          "range": {
+            "from": 0,
+            "to": 51
+          },
+          "replacement": [
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "summary"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "wait",
+      "answer": {
+        "answer": "wait",
+        "request_id": "cr-000044",
+        "reason": "historian is compressing 40 messages",
+        "bound_ms": 30000
+      }
+    },
+    {
+      "name": "refuse, retryable",
+      "answer": {
+        "answer": "refuse",
+        "request_id": "cr-000045",
+        "code": "provider_busy",
+        "reason": "history is being rewritten; try again shortly"
+      },
+      "retryable": true
+    },
+    {
+      "name": "refuse, user must act",
+      "answer": {
+        "answer": "refuse",
+        "request_id": "cr-000046",
+        "code": "window_too_small",
+        "reason": "this model's window cannot hold the session's head; switch to a larger model"
+      },
+      "retryable": false
+    },
+    {
+      "name": "refuse with the provider's own reason in provider_code",
+      "answer": {
+        "answer": "refuse",
+        "request_id": "cr-000047",
+        "code": "history_unreadable",
+        "reason": "the transcript before ordinal 40 could not be read",
+        "provider_code": "mc:transcript_gap"
+      },
+      "retryable": true
+    },
+    {
+      "name": "refuse with a code the role does not name: decodes, never retried",
+      "answer": {
+        "answer": "refuse",
+        "request_id": "cr-000048",
+        "code": "acme_own_code",
+        "reason": "x"
+      },
+      "retryable": false
+    },
+    {
+      "name": "opaque ids and any u64 version are the provider's to choose",
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "any opaque string, spaces included",
+        "compaction": {
+          "compaction_id": "",
+          "version": 18446744073709551615,
+          "range": {
+            "from": 0,
+            "to": 0
+          },
+          "replacement": []
+        }
+      }
+    }
+  ],
+  "tolerated": [
+    {
+      "name": "unknown fields beside a known answer",
+      "answer": {
+        "answer": "noop",
+        "request_id": "cr-000042",
+        "diagnostics": {
+          "pressure": 0.4
+        }
+      }
+    },
+    {
+      "name": "refuse still carrying the removed retryable member: ignored, code decides",
+      "answer": {
+        "answer": "refuse",
+        "request_id": "cr-000049",
+        "code": "window_too_small",
+        "reason": "x",
+        "retryable": true
+      },
+      "retryable": false
+    }
+  ],
+  "undecodable": [
+    {
+      "name": "unknown answer value",
+      "answer": {
+        "answer": "skip",
+        "request_id": "cr-000042"
+      }
+    },
+    {
+      "name": "uppercase answer value",
+      "answer": {
+        "answer": "NOOP",
+        "request_id": "cr-000042"
+      }
+    },
+    {
+      "name": "no answer member",
+      "answer": {
+        "request_id": "cr-000042"
+      }
+    },
+    {
+      "name": "no request id",
+      "answer": {
+        "answer": "noop"
+      }
+    },
+    {
+      "name": "compaction without a version",
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-000042",
+        "compaction": {
+          "compaction_id": "c",
+          "range": {
+            "from": 0,
+            "to": 1
+          },
+          "replacement": []
+        }
+      }
+    },
+    {
+      "name": "a range named by message ids",
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-000042",
+        "compaction": {
+          "compaction_id": "c",
+          "version": 2,
+          "range": {
+            "from": "m3",
+            "to": "m41"
+          },
+          "replacement": []
+        }
+      }
+    },
+    {
+      "name": "a negative version",
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-000042",
+        "compaction": {
+          "compaction_id": "c",
+          "version": -1,
+          "range": {
+            "from": 0,
+            "to": 1
+          },
+          "replacement": []
+        }
+      }
+    },
+    {
+      "name": "wait without a bound",
+      "answer": {
+        "answer": "wait",
+        "request_id": "cr-000042",
+        "reason": "busy"
+      }
+    },
+    {
+      "name": "refuse without a code",
+      "answer": {
+        "answer": "refuse",
+        "request_id": "cr-000050",
+        "reason": "x"
+      }
+    }
+  ],
+  "malformed_messages": [
+    {
+      "name": "inverted range",
+      "compaction": {
+        "compaction_id": "c",
+        "version": 1,
+        "range": {
+          "from": 9,
+          "to": 4
+        },
+        "replacement": []
+      },
+      "problem": "range_inverted"
+    }
+  ],
+  "model_view": [
+    {
+      "name": "a non-empty range keeps its half-open ends",
+      "compaction": {
+        "compaction_id": "mc:snap-118",
+        "version": 7,
+        "range": {
+          "from": 3,
+          "to": 41
+        },
+        "replacement": []
+      },
+      "source": {
+        "kind": "replacement",
+        "compaction_id": "mc:snap-118",
+        "version": 7,
+        "from_ordinal": 3,
+        "to_ordinal": 41
+      }
+    },
+    {
+      "name": "setup's head: an empty range at 0 is an insertion before every message",
+      "compaction": {
+        "compaction_id": "mc:head-1",
+        "version": 1,
+        "range": {
+          "from": 0,
+          "to": 0
+        },
+        "replacement": []
+      },
+      "source": {
+        "kind": "replacement",
+        "compaction_id": "mc:head-1",
+        "version": 1,
+        "from_ordinal": 0,
+        "to_ordinal": 0
+      }
+    },
+    {
+      "name": "an empty range later in the lineage inserts before its ordinal",
+      "compaction": {
+        "compaction_id": "mc:note-4",
+        "version": 4,
+        "range": {
+          "from": 12,
+          "to": 12
+        },
+        "replacement": []
+      },
+      "source": {
+        "kind": "replacement",
+        "compaction_id": "mc:note-4",
+        "version": 4,
+        "from_ordinal": 12,
+        "to_ordinal": 12
+      }
+    },
+    {
+      "name": "an inverted range is never applied, so it has no source",
+      "compaction": {
+        "compaction_id": "c",
+        "version": 1,
+        "range": {
+          "from": 9,
+          "to": 4
+        },
+        "replacement": []
+      },
+      "source": null
+    }
+  ]
+}

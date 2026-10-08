@@ -256,9 +256,6 @@ run_package_tests "pi-plugin" "$PI_DIR"
 echo "  [pi-plugin] bun build..."
 bun run --cwd "$PI_DIR" build 2>&1 || { echo "Error: Pi-plugin build failed"; exit 1; }
 
-echo "  [packages] auditing packed consumer dependency graphs..."
-bun run --cwd "$REPO_ROOT" audit:packed-packages 2>&1 || { echo "Error: Packed-package audit failed"; exit 1; }
-
 echo "  [cli] bun lint..."
 bun run --cwd "$CLI_DIR" lint 2>&1 || { echo "Error: CLI lint failed"; exit 1; }
 
@@ -269,6 +266,9 @@ run_package_tests "cli" "$CLI_DIR"
 
 echo "  [cli] bun build..."
 bun run --cwd "$CLI_DIR" build 2>&1 || { echo "Error: CLI build failed"; exit 1; }
+
+echo "  [packages] auditing packed consumer dependency graphs..."
+bun run --cwd "$REPO_ROOT" audit:packed-packages 2>&1 || { echo "Error: Packed-package audit failed"; exit 1; }
 
 # Host behavior E2E suite (packages/e2e-tests). This is the deep suite that
 # spawns a real `opencode serve` (and resolves Pi from node_modules) against a

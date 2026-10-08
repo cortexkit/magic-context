@@ -56,7 +56,7 @@ export type RelabelHarness = "opencode" | "opencode2";
 export const OPENCODE2_RELABEL_STATE_KEY = "v87_opencode2_relabel";
 
 /**
- * Tables whose harness twin cannot simply be relabelled: their PRIMARY KEY or
+ * Independent rows whose harness twin cannot simply be relabelled: their PRIMARY KEY or
  * UNIQUE key contains `harness`, so the same natural key can hold one row per
  * label. v85 resolved these by keeping the newer row; v87 applies the SAME rule
  * in whichever direction the session resolves, with a tie keeping the row that
@@ -100,6 +100,31 @@ export const V87_HARNESS_TWIN_RULES: ReadonlyArray<{
     },
 ];
 
+/**
+ * These tables form one runner record per (session_id, harness), including all
+ * lineages. Entries, ids, views and state share ordinals and fences, so choosing
+ * newer rows independently could splice incompatible records together.
+ *
+ * Any row in the group counts as a record, even if its state row is missing. If
+ * both labels have a record, keep the resolved label's record unchanged and
+ * discard every row under the other label. The discarded record is rebuildable
+ * from the host store; report it as one declared prefix rebuild, not one per table.
+ */
+export const V87_HARNESS_AGGREGATE_RULES: ReadonlyArray<{
+    record: "host_runner";
+    tables: readonly string[];
+}> = [
+    {
+        record: "host_runner",
+        tables: [
+            "host_runner_entries",
+            "host_runner_ids",
+            "host_runner_views",
+            "host_runner_state",
+        ],
+    },
+];
+
 export interface OpenCode2RelabelReport {
     /**
      * `no_candidates` — nothing in this database carries an opencode/opencode2 label.
@@ -113,6 +138,8 @@ export interface OpenCode2RelabelReport {
     candidateSessionIds: string[];
     /** Sessions whose rows moved, with the label they moved to. */
     relabelledSessions: Array<{ sessionId: string; harness: RelabelHarness }>;
+    /** One declared prefix rebuild per discarded host-runner twin, not per table or row. */
+    discardedRunnerRecords: string[];
 }
 
 /** The unresolved report doctor reads back out of `schema_migrations_meta`. */
@@ -309,6 +336,23 @@ function prepareTwinResolver(
     };
 }
 
+function prepareAggregateResolver(db: MinimalDb, tables: readonly string[]) {
+    const records = tables.map((table) => ({
+        exists: db.prepare(`SELECT 1 FROM ${table} WHERE session_id = ? AND harness = ? LIMIT 1`),
+        drop: db.prepare(`DELETE FROM ${table} WHERE session_id = ? AND harness = ?`),
+    }));
+    return {
+        /** Return true only when an entire incoming twin record was discarded. */
+        run(sessionId: string, target: RelabelHarness, source: RelabelHarness): boolean {
+            const hasTarget = records.some(({ exists }) => Boolean(exists.get(sessionId, target)));
+            const hasSource = records.some(({ exists }) => Boolean(exists.get(sessionId, source)));
+            if (!hasTarget || !hasSource) return false;
+            for (const { drop } of records) drop.run(sessionId, source);
+            return true;
+        },
+    };
+}
+
 function readState(db: MinimalDb): UnresolvedOpenCode2Relabel | null {
     if (!tableExists(db, "schema_migrations_meta")) return null;
     const row = db
@@ -403,6 +447,7 @@ export function repairOpenCode2HarnessLabels(
             storePath: null,
             candidateSessionIds,
             relabelledSessions: [],
+            discardedRunnerRecords: [],
         };
     }
 
@@ -445,10 +490,12 @@ export function repairOpenCode2HarnessLabels(
             storePath: null,
             candidateSessionIds,
             relabelledSessions: [],
+            discardedRunnerRecords: [],
         };
     }
 
     const relabelledSessions: OpenCode2RelabelReport["relabelledSessions"] = [];
+    const discardedRunnerRecords: string[] = [];
     try {
         const updates = shapes
             .filter((shape) => shape.hasSessionId)
@@ -461,19 +508,36 @@ export function repairOpenCode2HarnessLabels(
         const twinResolvers = V87_HARNESS_TWIN_RULES.filter((rule) =>
             presentTables.has(rule.table),
         ).map((rule) => prepareTwinResolver(db, rule.table, rule.keyColumns, rule.incomingIsNewer));
+        const aggregateResolvers = V87_HARNESS_AGGREGATE_RULES.map((rule) =>
+            prepareAggregateResolver(
+                db,
+                rule.tables.filter((table) => presentTables.has(table)),
+            ),
+        );
 
         for (const sessionId of candidateSessionIds) {
             const target = resolveHarnessFromEvidence(evidence, sessionId);
             if (target === null) continue;
             const source: RelabelHarness = target === "opencode" ? "opencode2" : "opencode";
 
-            for (const resolver of twinResolvers) resolver.run(sessionId, target, source);
-
-            let moved = 0;
-            for (const update of updates) {
-                moved += Number(update.run(target, sessionId, source).changes ?? 0);
-            }
+            // The repair also runs outside migration replay. Keep aggregate
+            // discards and all other rows for this session in one transaction.
+            const { moved, discardedRunnerRecord } = db
+                .transaction(() => {
+                    for (const resolver of twinResolvers) resolver.run(sessionId, target, source);
+                    let discardedRunnerRecord = false;
+                    for (const resolver of aggregateResolvers) {
+                        if (resolver.run(sessionId, target, source)) discardedRunnerRecord = true;
+                    }
+                    let moved = 0;
+                    for (const update of updates) {
+                        moved += Number(update.run(target, sessionId, source).changes ?? 0);
+                    }
+                    return { moved, discardedRunnerRecord };
+                })
+                .immediate();
             if (moved > 0) relabelledSessions.push({ sessionId, harness: target });
+            if (discardedRunnerRecord) discardedRunnerRecords.push(sessionId);
         }
     } finally {
         evidence.close();
@@ -490,10 +554,17 @@ export function repairOpenCode2HarnessLabels(
                 `${relabelledSessions.length - toOpenCode2} session(s) set to opencode.`,
         );
     }
+    if (discardedRunnerRecords.length > 0) {
+        log(
+            `[migration] Discarded ${discardedRunnerRecords.length} host-runner twin record(s): ` +
+                `one declared prefix rebuild per session (${discardedRunnerRecords.join(", ")}).`,
+        );
+    }
     return {
         status: "resolved",
         storePath: resolution.path,
         candidateSessionIds,
         relabelledSessions,
+        discardedRunnerRecords,
     };
 }

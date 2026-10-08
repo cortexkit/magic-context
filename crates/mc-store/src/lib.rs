@@ -17854,6 +17854,19 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn bundled_sqlite_disables_global_memory_status() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let enabled: i64 = conn
+            .query_row(
+                "SELECT sqlite_compileoption_used('DEFAULT_MEMSTATUS=0')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(enabled, 1);
+    }
+
     fn descriptor(dir: &std::path::Path) -> StorageDescriptor {
         StorageDescriptor {
             module_id: "magic-context-test".to_string(),

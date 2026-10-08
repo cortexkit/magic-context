@@ -475,6 +475,9 @@ describe("OpenCode 2 hidden child completion", () => {
                     model: { providerID: "mock", id: "cheap" },
                     parentID: "user-session",
                     metadata: { magic_context: "hidden-run", role: "historian" },
+                    // The historian has no tools: the session rules deny everything,
+                    // and the host evaluates them after the user's own rules.
+                    permissions: [{ action: "*", resource: "*", effect: "deny" }],
                 },
             ]);
             expect(state.requests).toHaveLength(1);

@@ -528,8 +528,12 @@ async function runProjectMaintenance(
     origin: "startup" | "interval",
     db: Database,
 ): Promise<void> {
+    // Sampled before the gate, so a dreamer turned on or off in the live config
+    // (`dreamer.disable` is a live key) is honoured on this tick.
+    const sampled = reg.sampleDreamRun?.();
+    const current = sampled ? { ...reg, ...sampled } : reg;
     const projectMaintenanceEnabled =
-        Boolean(reg.dreamerConfig && reg.dreamerConfig.disable !== true) ||
+        Boolean(current.dreamerConfig && current.dreamerConfig.disable !== true) ||
         reg.memoryEnabled === true ||
         reg.gitCommitIndexing?.enabled === true ||
         reg.historianChildSweep !== undefined;
@@ -547,8 +551,7 @@ async function runProjectMaintenance(
         // Compartment-chunk backfill remains demand-driven to avoid bursty
         // requests to local embedding endpoints.
     }
-    const sampled = reg.sampleDreamRun?.();
-    await sweepProject(sampled ? { ...reg, ...sampled } : reg, origin, db);
+    await sweepProject(current, origin, db);
 }
 
 /**

@@ -1,14 +1,26 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { replaceAllCompartments } from "../../features/magic-context/compartment-storage";
 import { insertMemory } from "../../features/magic-context/memory";
+import { supersededMemory } from "../../features/magic-context/memory/storage-memory";
 import { indexMessagesAfterOrdinal } from "../../features/magic-context/message-index";
 import { runMigrations } from "../../features/magic-context/migrations";
 import type { UnifiedSearchResult } from "../../features/magic-context/search";
 import * as searchModule from "../../features/magic-context/search";
 import { MAX_UNIFIED_SEARCH_LIMIT } from "../../features/magic-context/search";
+import { getOrCreateSessionMeta, queueMemoryMutation } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import {
+    injectM0M1,
+    materializeM0,
+    renderMemoryBlockV2,
+} from "../../hooks/magic-context/inject-compartments";
+import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { createCtxSearchTools } from "./tools";
 
 const toolContext = (sessionID = "ses-search", directory?: string) =>
@@ -148,6 +160,71 @@ describe("createCtxSearchTools", () => {
         expect(result).toContain(
             `Memories: 2 additional matches suppressed because they are already visible in your project-memory block (ids ${memories[0]?.id}, ${memories[1]?.id}).`,
         );
+    });
+
+    it("hides a forced m[1] memory using the persisted visible manifest", async () => {
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-search-m1-"));
+        try {
+            const projectPath = "git:search-m1";
+            const sessionId = "ses-search-m1";
+            const original = insertMemory(db, {
+                projectPath,
+                category: "ARCHITECTURE",
+                content: "original memory ".repeat(40),
+                importance: 100,
+            });
+            const replacement = insertMemory(db, {
+                projectPath,
+                category: "ARCHITECTURE",
+                content: "M1SearchToken replacement ".repeat(40),
+                importance: 1,
+            });
+            const options = {
+                db,
+                sessionId,
+                projectPath,
+                projectDirectory: dir,
+                injectDocs: false,
+                memoryInjectionBudgetTokens: estimateTokens(renderMemoryBlockV2([original])) + 2,
+            };
+            materializeM0({ ...options, state: getOrCreateSessionMeta(db, sessionId) });
+            supersededMemory(db, original.id, replacement.id);
+            queueMemoryMutation(db, {
+                projectPath,
+                mutationType: "superseded",
+                targetMemoryId: original.id,
+                supersededById: replacement.id,
+            });
+            const refreshed = injectM0M1({
+                ...options,
+                state: getOrCreateSessionMeta(db, sessionId),
+                isCacheBustingPass: true,
+            });
+            expect(refreshed.m1Text).toContain(`#${replacement.id}: M1SearchToken`);
+            const hidden = insertMemory(db, {
+                projectPath,
+                category: "ARCHITECTURE",
+                content: "M1SearchToken hidden memory",
+            });
+            const tools = createCtxSearchTools({
+                db,
+                resolveProjectPath: () => projectPath,
+                memoryEnabled: true,
+                embeddingEnabled: false,
+                readMessages: () => [],
+            });
+            const result = await tools.ctx_search.execute(
+                { query: "M1SearchToken", sources: ["memory"] },
+                toolContext(sessionId),
+            );
+            expect(result).toContain(`id=${hidden.id}`);
+            expect(result).not.toContain(`id=${replacement.id} `);
+            expect(result).toContain(
+                `Memories: 1 additional match suppressed because it is already visible in your project-memory block (ids ${replacement.id}).`,
+            );
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
     });
 
     it("explains when matching raw messages are still in the live tail", async () => {

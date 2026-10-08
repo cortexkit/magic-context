@@ -210,6 +210,24 @@ const cases: Array<{
         ],
     },
     {
+        label: "omitted-background-notice-gap",
+        budget: 10_000,
+        offset: 1,
+        eligibleEnd: 4,
+        exercises: ["ordinal_gap"],
+        // Background notices can be absent from the historian input while later
+        // messages retain their original raw ordinals. The header names that raw
+        // span rather than the number of rendered transcript lines.
+        ts: [
+            { ordinal: 1, id: "u1", role: "user", parts: [text("start")] },
+            { ordinal: 3, id: "a3", role: "assistant", parts: [text("continued")] },
+        ],
+        ck: [
+            { mid: "u1", ordinal: 1, ck: { role: "user", content: [ckText("start")] } },
+            { mid: "a3", ordinal: 3, ck: { role: "assistant", content: [ckText("continued")] } },
+        ],
+    },
+    {
         label: "duplicate-call-id-results-use-paired-arc",
         budget: 10_000,
         offset: 1,
@@ -310,6 +328,11 @@ function assertNonVacuous(label: string, expected: SessionChunk, exercises: stri
                     throw new Error(`${label}: system ordinal must ride coverage line meta without a gap`);
                 }
                 break;
+            case "ordinal_gap":
+                if (expected.startIndex !== 1 || expected.endIndex !== 3) {
+                    throw new Error(`${label}: raw ordinal gap was not retained in the chunk range`);
+                }
+                break;
             case "commit_cap":
                 if (!expected.text.includes("commits: 1111111, 2222222, 3333333, 4444444, 5555555")) throw new Error(`${label}: commit cap did not keep the first five hashes`);
                 if (expected.text.includes("6666666")) throw new Error(`${label}: commit cap leaked the sixth hash`);
@@ -367,11 +390,20 @@ const truncationCases = [
 const outCases = cases.map((c) => {
     const expected = withRawMessageProvider(
         c.label,
-        { readMessages: () => c.ts, getMessageCount: () => c.ts.length },
+        {
+            readMessages: () => c.ts,
+            getMessageCount: () => Math.max(0, ...c.ts.map((message) => message.ordinal)),
+        },
         () => readSessionChunk(c.label, c.budget, c.offset, c.eligibleEnd),
     );
     assertNonVacuous(c.label, expected, c.exercises, c.ts.length);
-    return { ...c, expected };
+    return {
+        ...c,
+        expected: {
+            ...expected,
+            inputSource: `Messages ${expected.startIndex}-${expected.endIndex}:\n\n${expected.text}`,
+        },
+    };
 });
 
 const out = JSON.stringify({ generatedBy: "gen-historian-chunk-golden.ts", cases: outCases, truncationCases }, null, 2) + "\n";

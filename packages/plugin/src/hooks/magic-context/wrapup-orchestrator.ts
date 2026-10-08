@@ -230,6 +230,7 @@ async function runOneWrapupIteration(args: {
     const runnerPromise = runCompartmentAgentForWrapup({
         client: ctx.client,
         hiddenCompletionExecutor: ctx.hiddenCompletionExecutor,
+        compactionMarkerStrategy: ctx.compactionMarkerStrategy,
         db: ctx.db,
         sessionId,
         historianChunkTokens: ctx.historianChunkTokens,

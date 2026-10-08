@@ -1,7 +1,8 @@
-# A throwaway probe, deliberately outside the repository's Cargo workspace. Build it from a copy
-# outside the repository so no Cargo.lock or target directory lands here; README.md has the
+# A throwaway probe, deliberately outside the repository's Cargo workspace; README.md has the
 # exact commands. rusqlite 0.32.1 with `bundled` pulls in libsqlite3-sys 0.30.1, the same
-# SQLite (3.46.0) that ck-mc links.
+# SQLite (3.46.0) that ck-mc links. The committed Cargo.lock pins that resolution, so the
+# probe stays reproducible and `cargo check --locked` works on it; its target directory is
+# ignored by git.
 [package]
 name = "migcheck"
 version = "0.0.0"

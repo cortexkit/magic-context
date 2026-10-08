@@ -489,6 +489,7 @@ impl McHandler {
                 compact::answer::StepAnswer::CompactionMessage {
                     request_id: request.request_id,
                     compaction: checked_view(&view, &record)?,
+                    coverage: None,
                 }
             }
         };

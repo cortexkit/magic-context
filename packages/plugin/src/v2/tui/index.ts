@@ -1,4 +1,4 @@
-import { jsx } from "@opentui/solid/jsx-runtime";
+import { createElement, spread } from "@opentui/solid";
 import { COMPACTION_ENABLED_PATH } from "../../config/agent-disable";
 import { flushLogger, log } from "../../shared/logger";
 import { pluginPackageVersion } from "../../shared/plugin-package-version";
@@ -575,7 +575,14 @@ export async function setupWithJsx(context: V2TuiContext, jsx: JsxFactory): Prom
 }
 
 export async function setup(context: V2TuiContext): Promise<() => void> {
-    return setupWithJsx(context, jsx);
+    // The host publishes @opentui/solid in its runtime registry, but not the
+    // jsx-runtime subpath. Use its renderer directly for the text fallback so
+    // an installed plugin does not need a private copy of OpenTUI.
+    return setupWithJsx(context, (type, props) => {
+        const element = createElement(type);
+        spread(element, props);
+        return element;
+    });
 }
 
 export default { id: "opencode-magic-context", setup };

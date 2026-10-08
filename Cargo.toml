@@ -10,7 +10,7 @@ exclude = ["packages/dashboard/src-tauri"]
 [workspace.dependencies]
 # Published commons crates use their current lockfile versions from crates.io.
 # cache-core is not published, so pin the source to an immutable commit.
-cortexkit-cache-core = { git = "https://github.com/cortexkit/commons", rev = "067701f1ab61cd2c81aa58fb66b0cb65fbaef9e7" }
+cortexkit-cache-core = { git = "https://github.com/cortexkit/commons", rev = "85c105dfc10dfcd02360ef31b07b4bc67dea41f8" }
 cortexkit-store = "=0.2.1"
 cortexkit-store-types = "=0.2.2"
 cortexkit-lease = "=0.1.0"
@@ -42,7 +42,7 @@ sha2 = "0.10"
 [patch."https://github.com/cortexkit/subconscious"]
 subc-cgroup = { version = "=0.1.5" }
 subc-control = { version = "=0.28.0" }
-subc-daemon = { version = "=0.31.1" }
+subc-daemon = { version = "=0.31.2" }
 subc-jobobject = { version = "=0.2.0" }
 subc-jsonc = { version = "=0.1.2" }
 subc-os = { version = "=0.1.5" }

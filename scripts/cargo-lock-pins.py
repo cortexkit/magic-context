@@ -6,7 +6,10 @@ import re
 import sys
 from pathlib import Path
 
-EXPECTED_GIT_CRATES = {"cortexkit-cache-core", "subc-core"}
+# subc-core must come from git: CI builds the test daemon from its locked revision.
+# Other CortexKit crates may also be git-pinned (unpublished commons role crates), as
+# long as each one resolves to a single locked revision.
+REQUIRED_GIT_CRATES = {"subc-core"}
 PACKAGE_FIELDS = re.compile(r'^(name|version|source) = "([^"]*)"$', re.MULTILINE)
 
 
@@ -39,13 +42,12 @@ def lock_pins(lock_text: str) -> tuple[str, str]:
         else:
             pinned.append(f"{name}={package['version']}")
 
-    if set(git_revisions) != EXPECTED_GIT_CRATES or any(
-        len(revisions) != 1 for revisions in git_revisions.values()
-    ):
-        raise ValueError(
-            f"expected one locked revision each for {sorted(EXPECTED_GIT_CRATES)}, "
-            f"got {git_revisions}"
-        )
+    missing = REQUIRED_GIT_CRATES - set(git_revisions)
+    if missing:
+        raise ValueError(f"expected a locked git revision for {sorted(missing)}, got {git_revisions}")
+    split = {name: revisions for name, revisions in git_revisions.items() if len(revisions) != 1}
+    if split:
+        raise ValueError(f"expected one locked git revision per crate, got {split}")
     subc_revision = next(iter(git_revisions["subc-core"]))
     return subc_revision, ",".join(sorted(pinned))
 
@@ -53,6 +55,7 @@ def lock_pins(lock_text: str) -> tuple[str, str]:
 def run_self_test() -> int:
     subc_revision = "1a14993c120725fa1dce7267b6e7d0823835930c"
     commons_revision = "067701f1ab61cd2c81aa58fb66b0cb65fbaef9e7"
+    role_revision = "9abd24916a087162b7650ad7db71cf287be1330c"
     fixture = f'''[[package]]
 name = "subc-core"
 version = "0.20.55"
@@ -62,6 +65,11 @@ source = "git+https://github.com/cortexkit/subconscious?rev={subc_revision}#{sub
 name = "cortexkit-cache-core"
 version = "0.1.0"
 source = "git+https://github.com/cortexkit/commons?rev={commons_revision}#{commons_revision}"
+
+[[package]]
+name = "cortexkit-role-step-transform-provider"
+version = "0.1.1"
+source = "git+https://github.com/cortexkit/commons?rev={role_revision}#{role_revision}"
 
 [[package]]
 name = "subc-protocol"
@@ -74,6 +82,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             sorted(
                 [
                     f"cortexkit-cache-core=0.1.0@{commons_revision}",
+                    f"cortexkit-role-step-transform-provider=0.1.1@{role_revision}",
                     f"subc-core=0.20.55@{subc_revision}",
                     "subc-protocol=0.29.1",
                 ]
@@ -87,12 +96,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             pass
         else:
             raise AssertionError("invalid subc-core git revision was accepted")
+        try:
+            lock_pins(fixture.replace('name = "subc-core"', 'name = "subc-core-renamed"'))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a lockfile without a git-pinned subc-core was accepted")
+        try:
+            lock_pins(
+                fixture
+                + f'''
+[[package]]
+name = "cortexkit-cache-core"
+version = "0.1.1"
+source = "git+https://github.com/cortexkit/commons?rev={role_revision}#{role_revision}"
+'''
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a crate locked at two git revisions was accepted")
     except (KeyError, ValueError, AssertionError) as error:
         print(f"FAIL test_locked_crate_outputs: {error}", file=sys.stderr)
         return 1
     print("PASS test_locked_crate_outputs")
     print("PASS test_invalid_git_revision_refused")
-    print("All 2 Cargo.lock pin self-tests passed.")
+    print("PASS test_missing_subc_core_refused")
+    print("PASS test_split_git_revision_refused")
+    print("All 4 Cargo.lock pin self-tests passed.")
     return 0
 
 

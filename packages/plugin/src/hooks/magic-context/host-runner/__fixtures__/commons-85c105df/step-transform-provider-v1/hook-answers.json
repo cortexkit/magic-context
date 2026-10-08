@@ -1,0 +1,744 @@
+{
+  "answers": [
+    {
+      "name": "pass",
+      "answer": {
+        "answer": "pass"
+      }
+    },
+    {
+      "name": "ops: tag prefix and recall append",
+      "answer": {
+        "answer": "ops",
+        "ops": [
+          {
+            "op": "prepend",
+            "block": 0,
+            "text": "\u00a712\u00a7 ",
+            "note": "tag"
+          },
+          {
+            "op": "append",
+            "block": 0,
+            "text": "\n<recall>\u2026</recall>"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ops: cleanup replace",
+      "answer": {
+        "answer": "ops",
+        "ops": [
+          {
+            "op": "replace",
+            "block": 0,
+            "value": "Done."
+          }
+        ]
+      }
+    },
+    {
+      "name": "ops on different text blocks of one message",
+      "answer": {
+        "answer": "ops",
+        "ops": [
+          {
+            "op": "prepend",
+            "block": 0,
+            "text": "\u00a713\u00a7 "
+          },
+          {
+            "op": "append",
+            "block": 1,
+            "text": "\n<recall>\u2026</recall>"
+          }
+        ]
+      }
+    },
+    {
+      "name": "mutate",
+      "answer": {
+        "answer": "mutate",
+        "input": {
+          "command": "ls",
+          "timeout": 120
+        },
+        "note": "added the default timeout"
+      }
+    },
+    {
+      "name": "deny",
+      "answer": {
+        "answer": "deny",
+        "text": "bash may not write outside the worktree"
+      }
+    },
+    {
+      "name": "ask",
+      "answer": {
+        "answer": "ask",
+        "ask": {
+          "prompt": "Run `rm -rf build`?",
+          "expires_at_ms": 1790000723000,
+          "on_expiry": "deny",
+          "material_damage": true,
+          "late_execution": "notify_only"
+        }
+      }
+    },
+    {
+      "name": "ask with options",
+      "answer": {
+        "answer": "ask",
+        "ask": {
+          "prompt": "Run `rm -rf build`?",
+          "expires_at_ms": 1790000723000,
+          "on_expiry": "deny",
+          "material_damage": true,
+          "late_execution": "notify_only",
+          "options": [
+            "run",
+            "skip"
+          ]
+        }
+      }
+    }
+  ],
+  "tolerated": [
+    {
+      "name": "unknown fields beside a known answer",
+      "answer": {
+        "answer": "pass",
+        "took_ms": 3
+      }
+    }
+  ],
+  "undecodable": [
+    {
+      "name": "unknown answer",
+      "answer": {
+        "answer": "block"
+      }
+    },
+    {
+      "name": "unknown op",
+      "answer": {
+        "answer": "ops",
+        "ops": [
+          {
+            "op": "wrap",
+            "block": 0,
+            "text": "x"
+          }
+        ]
+      }
+    },
+    {
+      "name": "replace carrying text instead of value",
+      "answer": {
+        "answer": "ops",
+        "ops": [
+          {
+            "op": "replace",
+            "block": 0,
+            "text": "x"
+          }
+        ]
+      }
+    },
+    {
+      "name": "deny without text",
+      "answer": {
+        "answer": "deny"
+      }
+    },
+    {
+      "name": "ask without expiry",
+      "answer": {
+        "answer": "ask",
+        "ask": {
+          "prompt": "x",
+          "on_expiry": "deny",
+          "material_damage": false,
+          "late_execution": "execute"
+        }
+      }
+    },
+    {
+      "name": "operation without a block",
+      "answer": {
+        "answer": "ops",
+        "ops": [
+          {
+            "op": "append",
+            "text": "x"
+          }
+        ]
+      }
+    },
+    {
+      "name": "operation with a negative block",
+      "answer": {
+        "answer": "ops",
+        "ops": [
+          {
+            "op": "append",
+            "block": -1,
+            "text": "x"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ask with the removed relative expiry_ms",
+      "answer": {
+        "answer": "ask",
+        "ask": {
+          "prompt": "x",
+          "expiry_ms": 600000,
+          "on_expiry": "deny",
+          "material_damage": false,
+          "late_execution": "execute"
+        }
+      }
+    },
+    {
+      "name": "ask with an unknown on_expiry",
+      "answer": {
+        "answer": "ask",
+        "ask": {
+          "prompt": "x",
+          "expires_at_ms": 1790000723000,
+          "on_expiry": "approve",
+          "material_damage": false,
+          "late_execution": "execute"
+        }
+      },
+      "unknown_value": "approve"
+    },
+    {
+      "name": "ask with an unknown late_execution",
+      "answer": {
+        "answer": "ask",
+        "ask": {
+          "prompt": "x",
+          "expires_at_ms": 1790000723000,
+          "on_expiry": "deny",
+          "material_damage": false,
+          "late_execution": "queue"
+        }
+      },
+      "unknown_value": "queue"
+    },
+    {
+      "name": "ask with options that are not strings",
+      "answer": {
+        "answer": "ask",
+        "ask": {
+          "prompt": "x",
+          "options": [
+            {
+              "id": "run"
+            }
+          ],
+          "expires_at_ms": 1790000723000,
+          "on_expiry": "deny",
+          "material_damage": false,
+          "late_execution": "execute"
+        }
+      }
+    }
+  ],
+  "checks": [
+    {
+      "name": "pre_user ops within the subscription",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "lineage_id": "lin_7",
+        "preset": "head",
+        "params": {},
+        "hook": "pre_user",
+        "blocks": [
+          "hi"
+        ]
+      },
+      "answer": {
+        "answer": "ops",
+        "ops": [
+          {
+            "op": "append",
+            "block": 0,
+            "text": "x"
+          }
+        ]
+      },
+      "subscribed_ops": [
+        "append"
+      ],
+      "problem": null
+    },
+    {
+      "name": "pre_user op outside the subscription",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "lineage_id": "lin_7",
+        "preset": "head",
+        "params": {},
+        "hook": "pre_user",
+        "blocks": [
+          "hi"
+        ]
+      },
+      "answer": {
+        "answer": "ops",
+        "ops": [
+          {
+            "op": "replace",
+            "block": 0,
+            "value": "x"
+          }
+        ]
+      },
+      "subscribed_ops": [
+        "append"
+      ],
+      "problem": "op_not_subscribed"
+    },
+    {
+      "name": "pass is always allowed",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "lineage_id": "lin_7",
+        "preset": "head",
+        "params": {},
+        "hook": "pre_tool",
+        "step_id": "st_1",
+        "phase": "validate",
+        "tool": "bash",
+        "tool_call_id": "call_0",
+        "input": {
+          "command": "ls"
+        }
+      },
+      "answer": {
+        "answer": "pass"
+      },
+      "subscribed_ops": [],
+      "problem": null
+    },
+    {
+      "name": "post_assistant replace by the reduction owner",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "lineage_id": "lin_7",
+        "preset": "head",
+        "params": {},
+        "hook": "post_assistant",
+        "step_id": "st_1",
+        "blocks": [
+          "ok"
+        ]
+      },
+      "answer": {
+        "answer": "ops",
+        "ops": [
+          {
+            "op": "replace",
+            "block": 0,
+            "value": "ok"
+          }
+        ]
+      },
+      "subscribed_ops": [
+        "prepend",
+        "replace"
+      ],
+      "problem": null
+    },
+    {
+      "name": "deny on post_tool",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "lineage_id": "lin_7",
+        "preset": "head",
+        "params": {},
+        "hook": "post_tool",
+        "step_id": "st_1",
+        "tool": "read",
+        "tool_call_id": "call_1",
+        "call_key": "lin_7:9",
+        "blocks": [
+          "x"
+        ],
+        "is_error": false
+      },
+      "answer": {
+        "answer": "deny",
+        "text": "no"
+      },
+      "subscribed_ops": [
+        "append"
+      ],
+      "problem": "answer_not_allowed"
+    },
+    {
+      "name": "post_tool op the tool does not accept",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "lineage_id": "lin_7",
+        "preset": "head",
+        "params": {},
+        "hook": "post_tool",
+        "step_id": "st_1",
+        "tool": "read",
+        "tool_call_id": "call_1",
+        "call_key": "lin_7:9",
+        "blocks": [
+          "x"
+        ],
+        "is_error": false
+      },
+      "answer": {
+        "answer": "ops",
+        "ops": [
+          {
+            "op": "replace",
+            "block": 0,
+            "value": "short"
+          }
+        ]
+      },
+      "subscribed_ops": [
+        "append",
+        "replace"
+      ],
+      "tool_result_ops": [
+        "prepend",
+        "append"
+      ],
+      "problem": "op_not_accepted_by_tool"
+    },
+    {
+      "name": "post_tool op the tool accepts",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "lineage_id": "lin_7",
+        "preset": "head",
+        "params": {},
+        "hook": "post_tool",
+        "step_id": "st_1",
+        "tool": "read",
+        "tool_call_id": "call_1",
+        "call_key": "lin_7:9",
+        "blocks": [
+          "x"
+        ],
+        "is_error": false
+      },
+      "answer": {
+        "answer": "ops",
+        "ops": [
+          {
+            "op": "append",
+            "block": 0,
+            "text": "\nreminder"
+          }
+        ]
+      },
+      "subscribed_ops": [
+        "append"
+      ],
+      "tool_result_ops": [
+        "prepend",
+        "append"
+      ],
+      "problem": null
+    },
+    {
+      "name": "mutate in mutate",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "lineage_id": "lin_7",
+        "preset": "head",
+        "params": {},
+        "hook": "pre_tool",
+        "step_id": "st_1",
+        "phase": "mutate",
+        "tool": "bash",
+        "tool_call_id": "call_0",
+        "input": {
+          "command": "ls"
+        }
+      },
+      "answer": {
+        "answer": "mutate",
+        "input": {
+          "command": "ls -la"
+        }
+      },
+      "subscribed_ops": [],
+      "problem": null
+    },
+    {
+      "name": "mutate in validate",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "lineage_id": "lin_7",
+        "preset": "head",
+        "params": {},
+        "hook": "pre_tool",
+        "step_id": "st_1",
+        "phase": "validate",
+        "tool": "bash",
+        "tool_call_id": "call_0",
+        "input": {
+          "command": "ls"
+        }
+      },
+      "answer": {
+        "answer": "mutate",
+        "input": {}
+      },
+      "subscribed_ops": [],
+      "problem": "answer_not_allowed"
+    },
+    {
+      "name": "deny in validate",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "lineage_id": "lin_7",
+        "preset": "head",
+        "params": {},
+        "hook": "pre_tool",
+        "step_id": "st_1",
+        "phase": "validate",
+        "tool": "bash",
+        "tool_call_id": "call_0",
+        "input": {
+          "command": "ls"
+        }
+      },
+      "answer": {
+        "answer": "deny",
+        "text": "no"
+      },
+      "subscribed_ops": [],
+      "problem": null
+    },
+    {
+      "name": "deny in mutate",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "lineage_id": "lin_7",
+        "preset": "head",
+        "params": {},
+        "hook": "pre_tool",
+        "step_id": "st_1",
+        "phase": "mutate",
+        "tool": "bash",
+        "tool_call_id": "call_0",
+        "input": {
+          "command": "ls"
+        }
+      },
+      "answer": {
+        "answer": "deny",
+        "text": "no"
+      },
+      "subscribed_ops": [],
+      "problem": "answer_not_allowed"
+    },
+    {
+      "name": "ask in approve",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "lineage_id": "lin_7",
+        "preset": "head",
+        "params": {},
+        "hook": "pre_tool",
+        "step_id": "st_1",
+        "phase": "approve",
+        "tool": "bash",
+        "tool_call_id": "call_0",
+        "input": {
+          "command": "ls"
+        }
+      },
+      "answer": {
+        "answer": "ask",
+        "ask": {
+          "prompt": "Run `rm -rf build`?",
+          "expires_at_ms": 1790000723000,
+          "on_expiry": "deny",
+          "material_damage": true,
+          "late_execution": "notify_only"
+        }
+      },
+      "subscribed_ops": [],
+      "problem": null
+    },
+    {
+      "name": "ask in validate",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "lineage_id": "lin_7",
+        "preset": "head",
+        "params": {},
+        "hook": "pre_tool",
+        "step_id": "st_1",
+        "phase": "validate",
+        "tool": "bash",
+        "tool_call_id": "call_0",
+        "input": {
+          "command": "ls"
+        }
+      },
+      "answer": {
+        "answer": "ask",
+        "ask": {
+          "prompt": "Run `rm -rf build`?",
+          "expires_at_ms": 1790000723000,
+          "on_expiry": "deny",
+          "material_damage": true,
+          "late_execution": "notify_only"
+        }
+      },
+      "subscribed_ops": [],
+      "problem": "answer_not_allowed"
+    },
+    {
+      "name": "ops on pre_tool",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "lineage_id": "lin_7",
+        "preset": "head",
+        "params": {},
+        "hook": "pre_tool",
+        "step_id": "st_1",
+        "phase": "mutate",
+        "tool": "bash",
+        "tool_call_id": "call_0",
+        "input": {
+          "command": "ls"
+        }
+      },
+      "answer": {
+        "answer": "ops",
+        "ops": [
+          {
+            "op": "append",
+            "block": 0,
+            "text": "x"
+          }
+        ]
+      },
+      "subscribed_ops": [
+        "append"
+      ],
+      "problem": "answer_not_allowed"
+    },
+    {
+      "name": "an operation on the second of two text blocks",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "lineage_id": "lin_7",
+        "preset": "head",
+        "params": {},
+        "hook": "post_assistant",
+        "step_id": "st_1",
+        "blocks": [
+          "first",
+          "second"
+        ]
+      },
+      "answer": {
+        "answer": "ops",
+        "ops": [
+          {
+            "op": "append",
+            "block": 1,
+            "text": "x"
+          }
+        ]
+      },
+      "subscribed_ops": [
+        "append"
+      ],
+      "problem": null
+    },
+    {
+      "name": "an operation past the last text block",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "lineage_id": "lin_7",
+        "preset": "head",
+        "params": {},
+        "hook": "post_assistant",
+        "step_id": "st_1",
+        "blocks": [
+          "first",
+          "second"
+        ]
+      },
+      "answer": {
+        "answer": "ops",
+        "ops": [
+          {
+            "op": "append",
+            "block": 2,
+            "text": "x"
+          }
+        ]
+      },
+      "subscribed_ops": [
+        "append"
+      ],
+      "problem": "block_out_of_range"
+    },
+    {
+      "name": "a block index on a subject with one text block",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "lineage_id": "lin_7",
+        "preset": "head",
+        "params": {},
+        "hook": "pre_user",
+        "blocks": [
+          "hi"
+        ]
+      },
+      "answer": {
+        "answer": "ops",
+        "ops": [
+          {
+            "op": "replace",
+            "block": 1,
+            "value": "x"
+          }
+        ]
+      },
+      "subscribed_ops": [
+        "replace"
+      ],
+      "problem": "block_out_of_range"
+    }
+  ]
+}

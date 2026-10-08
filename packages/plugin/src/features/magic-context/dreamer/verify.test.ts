@@ -29,6 +29,7 @@ import { initializeDatabase } from "../storage-db";
 import { getSubagentInvocations } from "../storage-subagent-invocations";
 import { acquireLease } from "./lease";
 import { DreamerProviderOutputFailureError } from "./provider-output-failure";
+import { RECORDED_GEMINI_QUOTA_NOTICE } from "./provider-output-failure.test-support";
 import { getTaskScheduleState, seedTaskScheduleState } from "./storage-task-schedule";
 import {
     applyVerifyManifest,
@@ -56,12 +57,31 @@ function tempProject(): string {
     return dir;
 }
 
+/**
+ * Git run for fixtures only, isolated from the caller's git setup. Agent shells
+ * inject `core.hooksPath` through GIT_CONFIG_* and some users sign commits; a
+ * fixture commit that runs hooks or a signer can stall past its timeout under
+ * load, so both are switched off here.
+ */
+function fixtureGit(dir: string, args: string[], extraEnv: Record<string, string> = {}): void {
+    const env: Record<string, string | undefined> = { ...process.env, ...extraEnv };
+    for (const key of Object.keys(env)) {
+        if (key.startsWith("GIT_CONFIG_")) delete env[key];
+    }
+    execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", ...args], {
+        windowsHide: true,
+        cwd: dir,
+        timeout: 10_000,
+        env,
+    });
+}
+
 function gitProject(): string {
     const dir = tempProject();
-    execFileSync("git", ["init", "--quiet"], { windowsHide: true, cwd: dir, timeout: 10_000 });
-    execFileSync("git", ["add", "."], { windowsHide: true, cwd: dir, timeout: 10_000 });
-    execFileSync(
-        "git",
+    fixtureGit(dir, ["init", "--quiet"]);
+    fixtureGit(dir, ["add", "."]);
+    fixtureGit(
+        dir,
         [
             "-c",
             "user.name=Magic Context Tests",
@@ -72,16 +92,7 @@ function gitProject(): string {
             "-m",
             "Initial source",
         ],
-        {
-            windowsHide: true,
-            cwd: dir,
-            timeout: 10_000,
-            env: {
-                ...process.env,
-                GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z",
-                GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z",
-            },
-        },
+        { GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z", GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z" },
     );
     return dir;
 }
@@ -148,10 +159,12 @@ function scriptedVerifyClient(
     client: unknown;
     promptCalls: () => number;
     promptIds: () => number[][];
+    promptModels: () => string[];
 } {
     let promptCalls = 0;
     let childCount = 0;
     const promptedIds: number[][] = [];
+    const promptedModels: string[] = [];
     const messages = new Map<string, unknown[]>();
     return {
         client: {
@@ -159,9 +172,15 @@ function scriptedVerifyClient(
                 create: async () => ({ data: { id: `verify-child-${++childCount}` } }),
                 prompt: async (args: {
                     path?: { id?: string };
-                    body?: { parts?: Array<{ text?: string }> };
+                    body?: {
+                        parts?: Array<{ text?: string }>;
+                        model?: { providerID: string; modelID: string };
+                    };
                 }) => {
                     promptCalls += 1;
+                    promptedModels.push(
+                        `${args.body?.model?.providerID}/${args.body?.model?.modelID}`,
+                    );
                     const prompt = args.body?.parts?.[0]?.text ?? "";
                     const ids = [...prompt.matchAll(/^\[(\d+)\]/gm)].map((match) =>
                         Number(match[1]),
@@ -192,6 +211,7 @@ function scriptedVerifyClient(
         },
         promptCalls: () => promptCalls,
         promptIds: () => promptedIds,
+        promptModels: () => promptedModels,
     };
 }
 
@@ -238,6 +258,51 @@ test("production verification paths normalize tracked files in a real git projec
 });
 
 describe("runVerify disposition", () => {
+    test("uses configured fallback after the recorded quota notice and skips the primary in later batches", async () => {
+        const db = freshDb();
+        const log = spyOn(logger, "log").mockImplementation(() => {});
+        try {
+            const project = "git:verify-quota-cooldown";
+            addMappedMemories(db, project, 45);
+            const client = scriptedVerifyClient((call) =>
+                call === 1
+                    ? {
+                          kind: "text",
+                          text: RECORDED_GEMINI_QUOTA_NOTICE,
+                          tokens: { output: 33, reasoning: 0 },
+                      }
+                    : { kind: "manifest" },
+            );
+            const args = verifyArgs(db, tempProject(), project);
+            args.client = client.client as never;
+            args.model = "google/antigravity-gemini-3.8-flash";
+            args.fallbackModels = ["deepseek/deepseek-flash"];
+            args.deadline = Date.now() + 10 * 60_000;
+            const result = await runVerify(args);
+            expect(result).toMatchObject({
+                verified: 45,
+                batches: 3,
+                remaining: 0,
+                complete: true,
+            });
+            expect(client.promptCalls()).toBe(4);
+            expect(client.promptModels()).toEqual([
+                "google/antigravity-gemini-3.8-flash",
+                "deepseek/deepseek-flash",
+                "deepseek/deepseek-flash",
+                "deepseek/deepseek-flash",
+            ]);
+            expect(
+                log.mock.calls.filter(([line]) => String(line).includes("skipping google/")),
+            ).toHaveLength(1);
+            expect(args.model).toBe("google/antigravity-gemini-3.8-flash");
+            expect(args.fallbackModels).toEqual(["deepseek/deepseek-flash"]);
+        } finally {
+            log.mockRestore();
+            closeQuietly(db);
+        }
+    });
+
     test("banks a completed batch and reports the deadline remainder", async () => {
         const db = freshDb();
         try {

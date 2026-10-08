@@ -1136,6 +1136,19 @@ export class PiSubagentRunner implements SubagentRunner {
 		);
 	}
 
+	private readHostToolNames(): readonly string[] | undefined {
+		// Only OMP rejects disabled built-ins in --tools. Pi must keep its normal
+		// allow-list and must not consult a possibly unbound host action API.
+		if (this.invocation.targetHarness !== "omp") return undefined;
+		try {
+			return this.getHostToolNames?.() ?? configuredHostToolNames?.();
+		} catch {
+			// SDK loaders can evaluate an extension without binding a runner. An
+			// unavailable registry is not an empty registry: retain the normal tools.
+			return undefined;
+		}
+	}
+
 	private async runOnce(
 		options: SubagentRunOptions,
 		runMode: PiRunMode,
@@ -1337,7 +1350,7 @@ export class PiSubagentRunner implements SubagentRunner {
 			targetHarness: this.invocation.targetHarness,
 			disableDiscoveredExtensions: runMode.disableDiscoveredExtensions,
 			subagentExtensions: this.subagentExtensions,
-			hostToolNames: this.getHostToolNames?.() ?? configuredHostToolNames?.(),
+			hostToolNames: this.readHostToolNames(),
 			omitPositionalMessage: deliverViaStdin || rpcBudget,
 			systemPromptPath,
 			modelRef: modelRefOverride,

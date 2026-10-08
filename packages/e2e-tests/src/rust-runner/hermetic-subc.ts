@@ -30,7 +30,6 @@ import {
     appendFileSync,
     copyFileSync,
     existsSync,
-    linkSync,
     mkdirSync,
     readdirSync,
     readFileSync,
@@ -157,6 +156,7 @@ const RUST_E2E_CARGO_TARGET_DIR = join(
     REPO_ROOT,
     "packages/e2e-tests/.cache/rust-e2e-cargo-target",
 );
+const RUST_E2E_DEV_BIN_DIR = join(RUST_E2E_CARGO_TARGET_DIR, "dev-bin");
 
 /** ck-mc lives in THIS workspace; the lock-pinned ck-subc source is built separately. */
 const CK_MC_RELEASE = join(RUST_E2E_CARGO_TARGET_DIR, "release/ck-mc");
@@ -168,6 +168,25 @@ const CK_MC_RELEASE = join(RUST_E2E_CARGO_TARGET_DIR, "release/ck-mc");
  */
 function currentTreeCkMcBinary(_configuredBinary: string | undefined): string {
     return CK_MC_RELEASE;
+}
+
+/** Give every test executable a distinct process name, regardless of its source path. */
+function stageDevBinary(
+    source: string,
+    filename: string,
+    targetDir = RUST_E2E_DEV_BIN_DIR,
+): string {
+    if (!filename.startsWith("ckdev-")) {
+        throw new Error(`test binary name must start with ckdev-: ${filename}`);
+    }
+    mkdirSync(targetDir, { recursive: true });
+    const destination = join(targetDir, filename);
+    if (resolve(source) === resolve(destination)) return destination;
+    rmSync(destination, { force: true });
+    // A copy, never a hard link: on macOS a daemon exec'd through a hard link to
+    // cargo's output was occasionally SIGKILLed at startup, while a copy never was.
+    copyFileSync(source, destination);
+    return destination;
 }
 
 /**
@@ -340,7 +359,10 @@ export async function buildHermeticBinaries(
             if (!prebuiltModule || !prebuiltDaemon || !existsSync(prebuiltModule) || !existsSync(prebuiltDaemon)) {
                 throw new Error(`incomplete hermetic prebuilt binary pair for ${buildKey}`);
             }
-            return { ckMcBin: prebuiltModule, ckSubcBin: prebuiltDaemon };
+            return {
+                ckMcBin: stageDevBinary(prebuiltModule, `ckdev-mc-e2e-${buildKey}`),
+                ckSubcBin: stageDevBinary(prebuiltDaemon, "ckdev-subc"),
+            };
         }
         if (!subconsciousRoot) {
             throw new Error("subconscious source is required to build the lock-pinned ck-subc daemon");
@@ -356,23 +378,8 @@ export async function buildHermeticBinaries(
             );
         }
 
-        // Run the module under a dev-distinct process name so a test binary is
-        // never mistaken for the production ck-mc in Activity Monitor / ps.
-        // A hardlink shares the inode (no copy cost, always current build);
-        // fall back to a copy across filesystems.
-        const devNamed = join(dirname(ckMcBin), `ckdev-mc-e2e-${buildKey}`);
-        try {
-            rmSync(devNamed, { force: true });
-            linkSync(ckMcBin, devNamed);
-            ckMcBin = devNamed;
-        } catch {
-            try {
-                copyFileSync(ckMcBin, devNamed);
-                ckMcBin = devNamed;
-            } catch {
-                // Keep the original path; naming is cosmetic, never a test failure.
-            }
-        }
+        // Keep the dev name even when linking across filesystems is unavailable.
+        ckMcBin = stageDevBinary(ckMcBin, `ckdev-mc-e2e-${buildKey}`);
 
         const ckSubcRelease = join(RUST_E2E_CARGO_TARGET_DIR, "release/ck-subc");
         const daemonSource = committedSiblingSource(subconsciousRoot);
@@ -387,7 +394,7 @@ export async function buildHermeticBinaries(
             );
         }
 
-        return { ckMcBin, ckSubcBin: ckSubcRelease };
+        return { ckMcBin, ckSubcBin: stageDevBinary(ckSubcRelease, "ckdev-subc") };
     })();
     buildPromises.set(buildKey, buildPromise);
     return buildPromise;
@@ -1130,5 +1137,6 @@ export const __hermeticSubcTest = {
     isStaleRustE2ePidRecord,
     rustE2eCargoEnv,
     rustE2eCargoTargetDir: RUST_E2E_CARGO_TARGET_DIR,
+    stageDevBinary,
     stalePidAgeMs: RUST_E2E_STALE_PID_AGE_MS,
 };

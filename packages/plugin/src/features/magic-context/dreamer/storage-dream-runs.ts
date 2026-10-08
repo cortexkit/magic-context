@@ -1,3 +1,4 @@
+import { primaryQuotaDiagnostic } from "../../../shared/quota-diagnostic";
 import type { Database, Statement as PreparedStatement } from "../../../shared/sqlite";
 import { renderDreamFailure } from "../../../shared/user-facing-codes";
 import type { DreamTaskRunBacklog } from "./task-registry";
@@ -46,7 +47,8 @@ export interface DreamRunTaskSummary {
 }
 
 export function formatDreamRunFailure(failure: DreamRunFailureDetail): string {
-    return renderDreamFailure(failure.failure_class, "markdown", failure.refusal_reason);
+    const quota = primaryQuotaDiagnostic(failure.provider_error);
+    return `${renderDreamFailure(failure.failure_class, "markdown", failure.refusal_reason)}${quota ? ` ${quota}.` : ""}`;
 }
 
 export interface DreamRunMemoryChanges {

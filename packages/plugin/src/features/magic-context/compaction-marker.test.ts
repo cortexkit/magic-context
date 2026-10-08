@@ -8,6 +8,7 @@ import * as logger from "../../shared/logger";
 import { Database, withSqliteTransformPass } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
+import { OPENCODE1_MESSAGE_PART_SCHEMA } from "./__tests__/opencode1-query-fixture";
 import {
     closeCompactionMarkerDb,
     findBoundaryUserMessage,
@@ -34,16 +35,7 @@ function useTempDataHome(prefix: string): string {
 function createOpenCodeDb(dataHome: string): Database {
     const db = new Database(join(dataHome, "opencode", "opencode.db"));
     db.exec("PRAGMA journal_mode=WAL");
-    db.exec(
-        "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
-    );
-    db.exec(
-        "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)",
-    );
-    // Exact message/part index definitions from a fresh OpenCode 1.18.30 store.
-    db.exec(`CREATE INDEX message_session_time_created_id_idx ON message(session_id, time_created, id);
-        CREATE INDEX part_message_id_id_idx ON part(message_id, id);
-        CREATE INDEX part_session_idx ON part(session_id);`);
+    db.exec(OPENCODE1_MESSAGE_PART_SCHEMA);
     return db;
 }
 
@@ -184,7 +176,7 @@ afterEach(() => {
 });
 
 describe("findBoundaryUserMessage", () => {
-    it("uses message-indexed part probes for boundary and gap lookups on OpenCode 1.18.30", () => {
+    it("uses bounded message walks without sorting and message-indexed part probes on OpenCode 1.18.30", () => {
         const dataHome = useTempDataHome("marker-indexed-probes-");
         const db = createOpenCodeDb(dataHome);
         insertMessage(db, "msg_prior", "user", 100);
@@ -195,6 +187,15 @@ describe("findBoundaryUserMessage", () => {
             "msg_synthetic",
             '{"type":"text","synthetic":true}',
         );
+        db.transaction(() => {
+            for (let index = 0; index < 1024; index++) {
+                insertMessage(db, `msg_later_${index}`, "assistant", 1000 + index);
+                db.prepare("INSERT INTO part VALUES (?, ?, 'ses-1', 1000, 1000, '{}')").run(
+                    `prt_later_${index}`,
+                    `msg_later_${index}`,
+                );
+            }
+        })();
         const prepare = spyOn(Database.prototype, "prepare");
         try {
             expect(findBoundaryUserMessage("ses-1", "msg_target")?.id).toBe("msg_prior");
@@ -204,20 +205,36 @@ describe("findBoundaryUserMessage", () => {
                 .filter((sql) => sql.includes("EXISTS (SELECT 1 FROM part p"));
             expect(queries).toHaveLength(2);
             const binds = [
-                ["ses-1", 300, 300, "msg_target"],
-                ["ses-1", 100, 100, "msg_prior", 300, 300, "msg_target"],
+                ["ses-1", 300, "msg_target"],
+                ["ses-1", 100, "msg_prior", 300, "msg_target"],
             ];
-            for (const [index, query] of queries.entries()) {
-                const plan = db
-                    .prepare(`EXPLAIN QUERY PLAN ${query}`)
-                    .all(...binds[index]) as Array<{ detail: string }>;
-                const partProbes = plan.filter((row) => /SEARCH p /.test(row.detail));
-                expect(partProbes).toHaveLength(2);
-                expect(
-                    partProbes.every((row) =>
-                        row.detail.includes("part_message_id_id_idx (message_id=?)"),
-                    ),
-                ).toBe(true);
+            for (const statistics of ["absent", "analyzed", "adversarial"]) {
+                if (statistics !== "absent") db.exec("ANALYZE");
+                if (statistics === "adversarial") {
+                    db.exec(`UPDATE sqlite_stat1 SET stat='1000000 1' WHERE idx='part_session_idx';
+                        UPDATE sqlite_stat1 SET stat='1000000 1000000 1' WHERE idx='part_message_id_id_idx';
+                        ANALYZE sqlite_schema;`);
+                }
+                for (const [index, query] of queries.entries()) {
+                    const plan = db
+                        .prepare(`EXPLAIN QUERY PLAN ${query}`)
+                        .all(...binds[index]) as Array<{ detail: string }>;
+                    const details = plan.map((row) => row.detail).join(" | ");
+                    expect(details).not.toMatch(/TEMP B-TREE|SCAN /);
+                    expect(details).toContain("message_session_time_created_id_idx");
+                    expect(details).toContain(
+                        index === 0
+                            ? "(time_created,id)<(?,?)"
+                            : "(time_created,id)>(?,?) AND (time_created,id)<(?,?)",
+                    );
+                    const partProbes = plan.filter((row) => /SEARCH p /.test(row.detail));
+                    expect(partProbes).toHaveLength(2);
+                    expect(
+                        partProbes.every((row) =>
+                            row.detail.includes("part_message_id_id_idx (message_id=?)"),
+                        ),
+                    ).toBe(true);
+                }
             }
         } finally {
             prepare.mockRestore();

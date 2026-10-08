@@ -556,3 +556,134 @@ fn the_command_line_needs_a_backup_dir_to_apply() {
     assert_eq!(options.sessions, vec!["x".to_string()]);
     assert!(options.apply);
 }
+
+/// The session_meta columns the repair clears: upgrade state, m[0] and m[1] bytes,
+/// and the visible-memory manifest (ids and count).
+type ClearedCachedPair = (
+    Option<String>,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    String,
+    i64,
+);
+
+#[test]
+fn repair_discards_typescript_memory_ids_with_the_cached_pair() {
+    let fixture = Fixture::new();
+    let live = fixture.live();
+    live.execute(
+        "UPDATE session_meta SET cached_m0_upgrade_state = ?2, memory_block_ids = '[1,2]', memory_block_count = 2 WHERE session_id = ?1",
+        params![SESSION, "ready|compartment-render:cre2|memory-render:mre3|m0-memory-ids:[1]"],
+    ).unwrap();
+    drop(live);
+
+    fixture.apply();
+    let live = fixture.live();
+    let cleared: ClearedCachedPair = live.query_row(
+        "SELECT cached_m0_upgrade_state, cached_m0_bytes, cached_m1_bytes, memory_block_ids, memory_block_count FROM session_meta WHERE session_id = ?1",
+        params![SESSION],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    ).unwrap();
+    assert_eq!(cleared, (None, None, None, String::new(), 0));
+    let store = open_rw(&fixture.live_store);
+    let meta: String = store
+        .query_row(
+            "SELECT meta FROM mc_cache_state WHERE session_id = ?1",
+            params![SESSION],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&meta).unwrap()["project_memory_epoch_pending"],
+        true
+    );
+}
+
+#[test]
+fn rust_module_keeps_typescript_upgrade_metadata_out_of_render_identity() {
+    use syn::visit::{self, Visit};
+
+    // Inspect literals and macro tokens, not comments. The sole permitted reference
+    // is the cache-clear constant; a SQL reader in any other production item fails.
+    #[derive(Default)]
+    struct References {
+        constant: String,
+        sites: Vec<String>,
+    }
+    impl<'ast> Visit<'ast> for References {
+        fn visit_attribute(&mut self, _attribute: &'ast syn::Attribute) {}
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            if item.attrs.iter().any(|attr| {
+                attr.path().is_ident("cfg")
+                    && attr
+                        .parse_args::<syn::Path>()
+                        .is_ok_and(|path| path.is_ident("test"))
+            }) {
+                return;
+            }
+            visit::visit_item_mod(self, item);
+        }
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            if item.attrs.iter().any(|attr| attr.path().is_ident("test")) {
+                return;
+            }
+            visit::visit_item_fn(self, item);
+        }
+        fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
+            let previous = std::mem::replace(&mut self.constant, item.ident.to_string());
+            visit::visit_item_const(self, item);
+            self.constant = previous;
+        }
+        fn visit_lit_str(&mut self, literal: &'ast syn::LitStr) {
+            for _ in literal.value().matches("cached_m0_upgrade_state") {
+                self.sites.push(self.constant.clone());
+            }
+        }
+        fn visit_macro(&mut self, value: &'ast syn::Macro) {
+            for _ in value.tokens.to_string().matches("cached_m0_upgrade_state") {
+                self.sites.push(self.constant.clone());
+            }
+        }
+    }
+    fn sources(directory: &Path, output: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                if path.file_name().unwrap() != "tests" {
+                    sources(&path, output);
+                }
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let name = path.file_name().unwrap().to_str().unwrap();
+                if !name.ends_with("_test.rs") && !name.ends_with("_tests.rs") {
+                    output.push(path);
+                }
+            }
+        }
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut paths = Vec::new();
+    sources(&root, &mut paths);
+    assert!(
+        paths.len() > 20,
+        "the production-source scan must not be empty"
+    );
+    let mut found = Vec::new();
+    for path in paths {
+        let parsed = syn::parse_file(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let mut references = References::default();
+        references.visit_file(&parsed);
+        found.extend(
+            references
+                .sites
+                .into_iter()
+                .map(|site| (path.strip_prefix(&root).unwrap().to_path_buf(), site)),
+        );
+    }
+    assert_eq!(
+        found,
+        vec![(
+            PathBuf::from("single_store_repair.rs"),
+            "SESSION_META_RESETS".to_string()
+        )]
+    );
+}

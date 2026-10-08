@@ -14,6 +14,7 @@ import {
     reacquireOwnedLease,
     releaseLease,
 } from "./lease";
+import { withDreamerModelCooldown } from "./provider-output-failure";
 import { getDreamState } from "./storage-dream-state";
 import {
     getTaskScheduleState,
@@ -384,6 +385,14 @@ const LEASE_WAIT_POLL_MS = 2_000;
 export const MANUAL_RUN_LEASE_WAIT_MS = 60_000;
 
 async function runDomainGroup(
+    deps: RunDueTasksDeps,
+    group: DueTask[],
+    cb?: DomainGroupCallbacks,
+): Promise<void> {
+    return withDreamerModelCooldown(() => runDomainGroupWithCooldown(deps, group, cb));
+}
+
+async function runDomainGroupWithCooldown(
     deps: RunDueTasksDeps,
     group: DueTask[],
     cb?: DomainGroupCallbacks,

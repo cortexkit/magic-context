@@ -6,6 +6,7 @@ const MEMORY_EPOCH_COMPONENT_PREFIX = "|memory-render:";
 const MURAL_COMPONENT_PREFIX = "|mural-enabled:";
 const BUDGET_COMPONENT_PREFIX = "|render-budgets:";
 const RENDERED_BUDGETS_COMPONENT_PREFIX = "|rendered-budgets:";
+const M0_MEMORY_IDS_COMPONENT_PREFIX = "|m0-memory-ids:";
 
 export interface CachedM0UpgradeIdentity {
     upgradeState: string | null;
@@ -73,6 +74,7 @@ export function decodeCachedM0UpgradeIdentity(value: string | null): CachedM0Upg
         value.indexOf(MURAL_COMPONENT_PREFIX),
         value.indexOf(BUDGET_COMPONENT_PREFIX),
         value.indexOf(RENDERED_BUDGETS_COMPONENT_PREFIX),
+        value.indexOf(M0_MEMORY_IDS_COMPONENT_PREFIX),
     ].filter((index) => index >= 0);
     const identityEnd = componentIndexes.length > 0 ? Math.min(...componentIndexes) : value.length;
     const upgradeState = value.slice(0, identityEnd);
@@ -85,6 +87,38 @@ export function decodeCachedM0UpgradeIdentity(value: string | null): CachedM0Upg
         renderBudgetIdentity: component(value, BUDGET_COMPONENT_PREFIX),
         renderedBudgets: component(value, RENDERED_BUDGETS_COMPONENT_PREFIX),
     };
+}
+
+/**
+ * Keep the frozen m[0] selection separate from the visible m[0]+m[1] manifest.
+ * A forced replacement in m[1] can be below the baseline id watermark, so the
+ * watermark alone cannot recover m[0]'s ids on the next refresh. Recording them
+ * in the existing snapshot metadata avoids parsing ids out of memory content.
+ */
+export function withCachedM0MemoryIds(identity: string | null, ids: readonly number[]): string {
+    const withoutIds = (identity ?? "").replace(/\|m0-memory-ids:[^|]*/g, "");
+    return `${withoutIds}${M0_MEMORY_IDS_COMPONENT_PREFIX}${JSON.stringify(ids)}`;
+}
+
+export function readCachedM0MemoryIds(
+    identity: string | null,
+    legacyVisibleIds: readonly number[],
+    maxMemoryId: number,
+): number[] {
+    const encoded = component(identity ?? "", M0_MEMORY_IDS_COMPONENT_PREFIX);
+    if (encoded !== null) {
+        try {
+            const ids: unknown = JSON.parse(encoded);
+            if (Array.isArray(ids) && ids.every((id) => Number.isSafeInteger(id) && id > 0)) {
+                return ids;
+            }
+        } catch {
+            // Malformed metadata must not invent visible ids.
+        }
+    }
+    // Before the full visible manifest was recorded, Pi stored only m[0] ids;
+    // OpenCode also stored additive m[1] ids, all above this watermark.
+    return legacyVisibleIds.filter((id) => id <= maxMemoryId);
 }
 
 /** Compare recorded render budgets while lazily adopting older numeric history identities. */

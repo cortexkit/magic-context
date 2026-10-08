@@ -9,6 +9,7 @@ import {
 } from "solid-js";
 import { getLogEntries, getLogPaths, truncate } from "../../lib/api";
 import { formatLogTimestamp } from "../../lib/log-format";
+import { createLogPoll } from "../../lib/log-poll";
 import FilterSelect from "../shared/FilterSelect";
 
 export default function LogViewer() {
@@ -20,18 +21,37 @@ export default function LogViewer() {
 
   const [entries, { refetch }] = createResource(
     () => maxLines(),
-    (lines) => getLogEntries(lines),
+    (lines) => (document.visibilityState === "hidden" ? [] : getLogEntries(lines)),
   );
-  const [logPaths] = createResource(getLogPaths);
+  const [logPaths, { refetch: refetchPaths }] = createResource(() =>
+    document.visibilityState === "hidden" ? [] : getLogPaths(),
+  );
 
-  // Auto-refresh every 3 seconds when not paused
-  let refreshInterval: ReturnType<typeof setInterval>;
+  // Keep foreground updates at 3s; stop hidden reads and back off unfocused.
   onMount(() => {
-    refreshInterval = setInterval(() => {
-      if (!paused()) refetch();
-    }, 3000);
+    let disposed = false;
+    const tick = createLogPoll(
+      () => ({
+        hidden: document.visibilityState === "hidden",
+        focused: document.hasFocus(),
+        paused: paused() || disposed,
+        loading: entries.loading,
+      }),
+      async () => {
+        await Promise.all([refetch(), logPaths()?.length ? undefined : refetchPaths()]);
+      },
+    );
+    const refreshInterval = setInterval(() => void tick(), 3000);
+    const refreshOnReturn = () => void tick(true);
+    document.addEventListener("visibilitychange", refreshOnReturn);
+    window.addEventListener("focus", refreshOnReturn);
+    onCleanup(() => {
+      disposed = true;
+      clearInterval(refreshInterval);
+      document.removeEventListener("visibilitychange", refreshOnReturn);
+      window.removeEventListener("focus", refreshOnReturn);
+    });
   });
-  onCleanup(() => clearInterval(refreshInterval));
 
   // Auto-scroll log container to bottom on new data when not paused
   let logContainerRef: HTMLDivElement | undefined;

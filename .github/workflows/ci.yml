@@ -11,12 +11,19 @@ on:
     - cron: "17 3 * * *"
   workflow_dispatch:
 
+# A train branch gets pushed again with each merge, and every run is about twenty
+# jobs against a shared runner limit, so a new push cancels the train's older run.
+# master keeps every run, so a failure still names the commit that broke it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' && github.ref != 'refs/heads/main' }}
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 # Pipeline shape on every push to master/main:
 #
-#   check-plugin, check-pi-plugin                          (unit tests + lint + typecheck, parallel)
+#   check-plugin (plugin, CLI, retina), check-pi-plugin     (unit tests + lint + typecheck, parallel)
 #                  ↓
 #   e2e-opencode, e2e-opencode2, e2e-pi, e2e-omp           (Docker install + smoke, parallel — gated by unit)
 #   e2e-host-opencode, e2e-host-opencode2, e2e-host-pi, e2e-host-omp (host-behavior lanes from the mode manifest)
@@ -64,13 +71,21 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: TypeScript typecheck
-        run: bun run typecheck
+        run: |
+          bun run --cwd packages/plugin typecheck
+          bun run --cwd packages/cli typecheck
+          bun run --cwd packages/retina-local-fs typecheck
 
       - name: Lint
-        run: bun run lint
+        run: |
+          bun run --cwd packages/plugin lint
+          bun run --cwd packages/cli lint
+          bun run --cwd packages/retina-local-fs lint
 
       - name: Build
-        run: bun run build
+        run: |
+          bun run --cwd packages/plugin build
+          bun run --cwd packages/cli build
 
       - name: Check compiled TUI freshness
         run: bun run --cwd packages/plugin check:tui-compiled
@@ -84,14 +99,22 @@ jobs:
         run: bun crates/mc-module/gen/gen-historian-prompt-golden.ts --check
 
       - name: Test
-        run: bun run test
+        # Keep CLI and retina coverage here, but let check-pi-plugin own Pi's
+        # normal/assertion pair rather than fanning out through the root script.
+        run: |
+          bun run --cwd packages/plugin test
+          bun run --cwd packages/cli test
+          bun run --cwd packages/retina-local-fs test
 
       - name: Test (debug assertions)
         env:
           MAGIC_CONTEXT_DEBUG_ASSERTIONS: "1"
-        # Full-content assertion walks can push the largest transform fixtures
-        # past the production suite's 30s timeout; keep the longer budget isolated here.
-        run: bun run test --timeout=60000
+        # Keep each package's existing assertion-lane timeout; the root command
+        # previously forwarded --timeout=60000 only to the final retina suite.
+        run: |
+          bun run --cwd packages/plugin test
+          bun run --cwd packages/cli test
+          bun run --cwd packages/retina-local-fs test --timeout=60000
 
       # Exercise the node:sqlite branch of shared/sqlite.ts under REAL Node —
       # bun test only covers the bun:sqlite branch, so the transaction() shim,
@@ -119,13 +142,13 @@ jobs:
       # exercises the resolution path OpenCode's plugin cache uses (v0.31.1
       # shipped without runtime deps and passed every dev-path check).
       - name: Smoke (TUI packaged install import)
-        run: bun packages/plugin/scripts/smoke-tui-pack-install.ts
+        run: bun packages/plugin/scripts/smoke-tui-pack-install.ts --skip-build
 
       # Tokenizer loading is lazy, so an import-only smoke misses resolution
       # failures. Pack + npm-install prod deps, then exercise an estimate from a
       # compiled Bun host matching OpenCode's /$bunfs/root runtime.
       - name: Smoke (tokenizer packaged install estimate)
-        run: bun packages/plugin/scripts/smoke-tokenizer-pack-install.ts
+        run: bun packages/plugin/scripts/smoke-tokenizer-pack-install.ts --skip-build
 
   check-pi-plugin:
     name: Check (pi-plugin)
@@ -719,7 +742,7 @@ jobs:
           CARGO_TARGET_DIR="$target" cargo build --release -p mc-module --features drive-fault
           cp "$target/release/ck-mc" "$target/prebuilt/ckdev-mc-e2e-drive-fault"
           (cd "$GITHUB_WORKSPACE/.siblings/subconscious" && CARGO_TARGET_DIR="$target" cargo build --release -p subc-core --bins)
-          cp "$target/release/ck-subc" "$target/prebuilt/ck-subc"
+          cp "$target/release/ck-subc" "$target/prebuilt/ckdev-subc"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -752,7 +775,7 @@ jobs:
           name: rust-hermetic-binaries
           path: packages/e2e-tests/.cache/prebuilt
       - name: Make downloaded binaries executable
-        run: chmod +x packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e-drive-fault packages/e2e-tests/.cache/prebuilt/ck-subc
+        run: chmod +x packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e-drive-fault packages/e2e-tests/.cache/prebuilt/ckdev-subc
       - name: Install pinned OpenCode
         run: |
           OPENCODE_VERSION=1.18.32 bash tests/docker/install-opencode.sh
@@ -766,5 +789,5 @@ jobs:
           MC_E2E_SHARD: ${{ matrix.shard }}/4
           MC_E2E_CK_MC_PREBUILT_BIN: ${{ github.workspace }}/packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e
           MC_E2E_CK_MC_DRIVE_FAULT_BIN: ${{ github.workspace }}/packages/e2e-tests/.cache/prebuilt/ckdev-mc-e2e-drive-fault
-          MC_E2E_CK_SUBC_BIN: ${{ github.workspace }}/packages/e2e-tests/.cache/prebuilt/ck-subc
+          MC_E2E_CK_SUBC_BIN: ${{ github.workspace }}/packages/e2e-tests/.cache/prebuilt/ckdev-subc
         run: scripts/run-rust-hermetic-e2e.sh

@@ -1,0 +1,1 @@
+Copied verbatim from cortexkit/commons at 85c105dfc10dfcd02360ef31b07b4bc67dea41f8, test-vectors/{step-transform-provider-v1,compaction-provider-v1}. Do not edit; re-copy from commons to update.

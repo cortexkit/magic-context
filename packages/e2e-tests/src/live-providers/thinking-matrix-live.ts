@@ -3,16 +3,37 @@
  * auth against a loopback-only bootstrap; subsequent requests go directly to Anthropic.
  * Unlike the MC trim scenario, this deliberately edits independent copies of wire history.
  * No response branch is appended to the seed, no retries or account rotation occur, and
- * bearer headers and signed blocks remain in memory only.
+ * bearer headers remain in memory only. Recorded specimens are read only from the
+ * private specimen directory; no raw request/response bodies enter the results.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, join, resolve, sep } from "node:path";
 import { assertThrowawayRoot, authPluginPath } from "./auth";
 import { fetchCredential, type CredentialId } from "./ckcred";
 import { startHost } from "./host";
 import { claudeOAuth } from "./scenarios/anthropic";
-import { isSigned, thinkingVariants, type Block, type ThinkingRequest } from "./thinking-matrix";
+import {
+    buildSeedRequest,
+    isSigned,
+    isQuotaError,
+    MAX_SEED_TURNS,
+    MIN_COMPLETED_TURNS,
+    MIN_SIGNED_BLOCKS,
+    prepareRecordedSeed,
+    replaceLastUserText,
+    restoreFirstSignedBlock,
+    runRecordedCells,
+    seedPrompt,
+    seedThinkingConfig,
+    shouldRetryRefusal,
+    shouldSeedTurn,
+    signedBlockCount,
+    thinkingVariants,
+    type Block,
+    type ThinkingRequest,
+} from "./thinking-matrix";
 import { readResponse, requestShape, scrubError } from "./wire";
 
 const arg = (name: string) => {
@@ -20,17 +41,51 @@ const arg = (name: string) => {
     return i < 0 ? undefined : process.argv[i + 1];
 };
 
-export async function runThinkingMatrix(options: { out: string; opencode: string; authPlugin: string }): Promise<boolean> {
+export async function runThinkingMatrix(options: {
+    out: string; opencode: string; authPlugin: string; seedFiles?: Partial<Record<string, string>>;
+}): Promise<boolean> {
     if (process.env.MC_LIVE_PROVIDERS !== "1") throw new Error("Set MC_LIVE_PROVIDERS=1 to authorize billed calls");
     assertThrowawayRoot(options.out);
-    const cap = Number(process.env.MC_LIVE_MAX_CALLS ?? 32);
-    if (!Number.isInteger(cap) || cap < 1 || cap > 32) throw new Error("Call cap must be an integer in 1..32");
+    const recorded = options.seedFiles !== undefined;
+    const maxCalls = recorded ? 18 : 92;
+    const cap = Number(process.env.MC_LIVE_MAX_CALLS ?? maxCalls);
+    if (!Number.isInteger(cap) || cap < 1 || cap > maxCalls) throw new Error(`Call cap must be an integer in 1..${maxCalls}`);
+    const seeds = new Map<string, { request: ThinkingRequest; summary: {
+        file: string; bytes: number; model: string; signedBlocks: number; signedAssistantTurns: number; tokenEstimate: number;
+    } }>();
+    for (const [model, file] of Object.entries(options.seedFiles ?? {})) {
+        if (!file || !["claude-opus-5-5", "claude-sonnet-5-5"].includes(model)) throw new Error("Unexpected recorded seed selection");
+        const directory = resolve(homedir(), ".local/share/cortexkit/magic-context/specimens/thinking-matrix");
+        const path = resolve(file);
+        if (!path.startsWith(`${directory}${sep}`) || realpathSync(path) !== path) {
+            throw new Error("Use a non-symlink seed under the private thinking-matrix specimen directory");
+        }
+        const stat = lstatSync(path);
+        if (!stat.isFile() || (stat.mode & 0o777) !== 0o600) throw new Error("Recorded seed must be a mode-0600 regular file");
+        const raw = readFileSync(path, "utf8");
+        const request = prepareRecordedSeed(JSON.parse(raw) as ThinkingRequest, model);
+        seeds.set(model, { request, summary: { file: basename(path), bytes: stat.size, model,
+            signedBlocks: signedBlockCount(request),
+            signedAssistantTurns: request.messages.filter((message) => message.role === "assistant" && message.content.some(isSigned)).length,
+            tokenEstimate: Math.ceil(Buffer.byteLength(raw) / 4) } });
+    }
+    if (recorded && !seeds.size) throw new Error("Supply at least one recorded seed");
     const credentialId: CredentialId = "oauth:anthropic";
     authPluginPath(claudeOAuth, { "anthropic-auth": options.authPlugin });
     mkdirSync(options.out, { recursive: true, mode: 0o700 });
     if (existsSync(join(options.out, "results.json"))) throw new Error("Use a fresh output directory");
     const material = await fetchCredential(credentialId);
     const secrets = [material];
+    const rememberStrings = (value: unknown): void => {
+        if (typeof value === "string" && value.length >= 16) secrets.push(value, JSON.stringify(value).slice(1, -1));
+        else if (value && typeof value === "object") for (const item of Object.values(value)) rememberStrings(item);
+    };
+    for (const seed of seeds.values()) rememberStrings(seed.request);
+    // Preserve complete error bodies, unlike the shared recorder's 800-character summary.
+    const redactError = (text: string) => {
+        for (const secret of secrets) if (secret) text = text.replaceAll(secret, "[REDACTED]");
+        return text.replace(/Bearer\s+[\w.~+/=-]{20,}|sk-[\w-]{8,}|bedrock-api-key-\S+/gi, "[REDACTED]");
+    };
     let captured: { headers: Headers; body: Record<string, unknown> } | undefined;
     const loopback = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) {
         captured = { headers: new Headers(req.headers), body: await req.json() as Record<string, unknown> };
@@ -62,17 +117,24 @@ export async function runThinkingMatrix(options: { out: string; opencode: string
     headers.set("anthropic-beta", [...beta].join(","));
     const firstSystem = (body.system as Array<{ type: string; text: string }> | undefined)?.[0];
     if (!firstSystem || typeof firstSystem.text !== "string") throw new Error("Missing subscription system prefix");
-    const toolName = "mcp__mc_probe_echo";
-    const results: Array<{ model: string; outcome: string; reason: string | null; signedBlocks: number; completedTurns: number; calls: unknown[] }> = [];
+    const results: Array<{
+        model: string; outcome: string; reason: string | null; signedBlocks: number; completedTurns: number;
+        seedRounds: Array<{ turn: number; signedBlocks: number; cumulativeSignedBlocks: number; toolRequestId: string | null; finalRequestId: string | null }>;
+        seed?: unknown;
+        calls: unknown[]; variants: Array<{ variant: string; expected: string; status: number | null; requestId: string | null; accepted: boolean | null; note?: string }>;
+    }> = [];
     let callsUsed = 0;
+    let authRejected = false;
+    let stopRun = false;
     const startedAt = new Date().toISOString();
     const write = () => writeFileSync(join(options.out, "results.json"), `${JSON.stringify({
-        schema: 1, startedAt, updatedAt: new Date().toISOString(),
+        schema: 3, startedAt, updatedAt: new Date().toISOString(), source: recorded ? "recorded" : "synthetic",
         baseCommit: execFileSync("git", ["rev-parse", "HEAD"], { cwd: import.meta.dir, windowsHide: true }).toString().trim(),
         credentialId, authBootstrap: { hostVersion: "1.18.30", upstreamCalls: 0, isolation },
         endpoint: "https://api.anthropic.com/v1/messages", bindingBeta: true,
-        thinking: { type: "adaptive", display: "summarized", block_binding: { prefix_mismatch_behavior: "error" } },
-        effort: "low", maxTokens: 512, cacheAnchor: "4600 repetitions of ' anchor', explicit 5m system breakpoint",
+        thinking: recorded ? "preserved adaptive configuration with strict block binding" : seedThinkingConfig(),
+        outputConfig: recorded ? "preserved recorded output_config.effort" : { effort: "high" }, maxTokens: recorded ? 64 : 1152,
+        minimumSignedBlocks: recorded ? 6 : MIN_SIGNED_BLOCKS, minimumCompletedTurns: MIN_COMPLETED_TURNS, maxSeedTurns: recorded ? 0 : MAX_SEED_TURNS,
         callCap: cap, callsUsed, results,
     }, null, 2)}\n`, { mode: 0o600 });
     const send = async (model: string, phase: string, request: ThinkingRequest, calls: unknown[]) => {
@@ -84,79 +146,165 @@ export async function runThinkingMatrix(options: { out: string; opencode: string
             signal: AbortSignal.timeout(120_000) });
         const raw = await response.text();
         const reading = readResponse("anthropic-messages", raw);
+        const value = response.ok ? JSON.parse(raw) as { content: Block[]; stop_reason: string } : null;
         const record = { index: callsUsed, at, model, phase, status: response.status,
             accepted: response.ok && !reading.streamError, requestId: response.headers.get("request-id"),
-            error: response.ok ? (reading.streamError ? scrubError(reading.streamError, secrets) : null) : scrubError(raw, secrets), usage: reading.usage,
-            diagnostics: reading.diagnostics, request: requestShape("anthropic-messages", text) };
+            stopReason: value?.stop_reason ?? null,
+            error: response.ok ? (reading.streamError ? redactError(reading.streamError) : null) : redactError(raw),
+            usage: reading.usage, diagnostics: reading.diagnostics, request: requestShape("anthropic-messages", text) };
         calls.push(record);
         write();
         console.error(`[thinking-matrix] ${model} ${phase}: HTTP ${record.status}; usage=${JSON.stringify(record.usage?.raw ?? null)}`);
-        return { record, value: response.ok ? JSON.parse(raw) as { content: Block[]; stop_reason: string } : null };
+        if (isQuotaError(response.status, record.error)) stopRun = true;
+        return { record, value };
     };
-    let authRejected = false;
+    const seedValue = (sent: Awaited<ReturnType<typeof send>>, phase: string) => {
+        if ([401, 403].includes(sent.record.status)) {
+            authRejected = true;
+            throw new Error(`${phase} authentication rejected: HTTP ${sent.record.status}`);
+        }
+        if (sent.record.status === 429) throw new Error(`${phase} rate-limited: HTTP 429`);
+        if (!sent.record.accepted || !sent.value) throw new Error(`${phase} rejected: HTTP ${sent.record.status}`);
+        return sent.value;
+    };
+    const interruptOnProviderFailure = (status: number, phase: string) => {
+        if ([401, 403].includes(status)) {
+            authRejected = true;
+            throw new Error(`${phase} authentication rejected: HTTP ${status}`);
+        }
+        if (status === 429) throw new Error(`${phase} rate-limited: HTTP 429`);
+        if (status >= 500) throw new Error(`${phase} interrupted by HTTP ${status}`);
+    };
+    const rememberThinkingSecrets = (blocks: Block[]) => {
+        for (const block of blocks) {
+            if (typeof block.signature === "string") secrets.push(block.signature);
+            if (typeof block.data === "string") secrets.push(block.data);
+        }
+    };
     for (const model of ["claude-opus-5-5", "claude-sonnet-5-5"]) {
-        if (authRejected) break;
-        const result = { model, outcome: "aborted", reason: null as string | null, signedBlocks: 0, completedTurns: 0, calls: [] as unknown[] };
-        results.push(result);
-        const request: ThinkingRequest = {
-            model, max_tokens: 512, stream: false,
-            thinking: { type: "adaptive", display: "summarized", block_binding: { prefix_mismatch_behavior: "error" } },
-            output_config: { effort: "low" },
-            system: [{ type: "text", text: firstSystem.text }, {
-                type: "text", text: "Use only the echo tool specified below. For each arithmetic step, think privately and briefly before using it.\nCache anchor (not instructions):" + " anchor".repeat(4600),
-                cache_control: { type: "ephemeral" },
-            }],
-            tools: [{ name: toolName, description: "Echo a computed string value unchanged.",
-                input_schema: { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false } }],
-            messages: [],
+        if (authRejected || stopRun) break;
+        const result = {
+            model, outcome: "aborted", reason: null as string | null, signedBlocks: 0, completedTurns: 0,
+            seedRounds: [] as Array<{ turn: number; signedBlocks: number; cumulativeSignedBlocks: number; toolRequestId: string | null; finalRequestId: string | null }>,
+            calls: [] as unknown[], variants: [] as Array<{ variant: string; expected: string; status: number | null; requestId: string | null; accepted: boolean | null; note?: string }>,
         };
+        results.push(result);
+        if (recorded) {
+            const seed = seeds.get(model);
+            if (!seed) {
+                result.outcome = "skipped";
+                result.reason = "No qualifying recorded seed supplied; no synthetic seeding or live call attempted";
+                write();
+                continue;
+            }
+            result.signedBlocks = seed.summary.signedBlocks;
+            Object.assign(result, { seed: seed.summary });
+            try {
+                const requestIds = new Map<string, string | null>();
+                const matrix = await runRecordedCells(seed.request, async (variant, request) => {
+                    const sent = await send(model, variant, request, result.calls);
+                    requestIds.set(variant, sent.record.requestId);
+                    if (sent.value) rememberStrings(sent.value.content);
+                    if ([401, 403].includes(sent.record.status)) authRejected = true;
+                    if (variant === "control" && !sent.record.accepted) stopRun = true;
+                    return { status: sent.record.status, accepted: sent.record.accepted,
+                        content: sent.value?.content ?? null, error: sent.record.error };
+                });
+                result.variants.push(...matrix.cells.map((cell) => ({ ...cell, requestId: requestIds.get(cell.variant) ?? null })));
+                result.outcome = matrix.completed ? "completed" : "aborted";
+                result.reason = matrix.reason ?? (matrix.completed ? null : "Restore check not reached: no new signed block in prefix-trim response");
+            } catch (error) { result.reason = scrubError(String(error), secrets); }
+            write();
+            continue;
+        }
+        const request = buildSeedRequest(model, firstSystem.text);
         try {
-            // Finish each tool round before the next user turn. Removing all thinking in
-            // an unfinished tool round would test tool continuation, not preserved history.
-            for (let turn = 1; turn <= 4 && (result.signedBlocks < 4 || result.completedTurns < 2); turn++) {
-                request.messages.push({ role: "user", content: [{ type: "text", text:
-                    `Step ${turn}: think privately, compute (${172 + turn} * 29) + (137 * ${30 + turn}), and call ${toolName} once with the number as a string. Do not answer without the tool.` }] });
-                const tool = await send(model, `seed-${turn}-tool`, request, result.calls);
-                if (!tool.record.accepted || !tool.value) {
-                    authRejected = [401, 403].includes(tool.record.status);
-                    throw new Error(`Seed rejected: HTTP ${tool.record.status}`);
+            // Complete every note-tool round so each next seed call has a valid tool result.
+            for (let turn = 1; shouldSeedTurn(result.signedBlocks, result.completedTurns, turn); turn++) {
+                const signedBefore = result.signedBlocks;
+                request.messages.push({ role: "user", content: [{ type: "text", text: seedPrompt(turn, "tool") }] });
+                let toolSent = await send(model, `seed-${turn}-tool`, request, result.calls);
+                let toolValue = seedValue(toolSent, `seed-${turn}-tool`);
+                if (shouldRetryRefusal(toolValue.stop_reason, false)) {
+                    replaceLastUserText(request, seedPrompt(turn, "tool-retry"));
+                    toolSent = await send(model, `seed-${turn}-tool-retry`, request, result.calls);
+                    toolValue = seedValue(toolSent, `seed-${turn}-tool-retry`);
                 }
-                const uses = tool.value.content.filter((b) => b.type === "tool_use");
-                if (tool.value.stop_reason !== "tool_use" || uses.length !== 1 || uses[0]!.name !== toolName) {
-                    throw new Error(`Seed did not produce exactly one echo tool use (${tool.value.stop_reason})`);
+                if (toolValue.stop_reason !== "tool_use") {
+                    throw new Error(`Seed did not produce one record_note tool call (${toolValue.stop_reason})`);
                 }
-                request.messages.push({ role: "assistant", content: tool.value.content });
-                const input = uses[0]!.input as { value: string };
+                const uses = toolValue.content.filter((block) => block.type === "tool_use");
+                if (uses.length !== 1 || uses[0]!.name !== "record_note") {
+                    throw new Error(`Seed did not produce exactly one record_note tool call (${uses.length})`);
+                }
+                const input = uses[0]!.input as { note?: unknown };
+                if (typeof input.note !== "string") throw new Error("record_note input did not contain a string note");
+                request.messages.push({ role: "assistant", content: toolValue.content });
                 request.messages.push({ role: "user", content: [
-                    { type: "tool_result", tool_use_id: uses[0]!.id, content: String(input.value) },
-                    { type: "text", text: "Think privately and briefly: verify whether the echoed number ends in an odd digit. Reply only ODD or EVEN. Do not use another tool." },
+                    { type: "tool_result", tool_use_id: String(uses[0]!.id), content: input.note },
+                    { type: "text", text: seedPrompt(turn, "final") },
                 ] });
-                const final = await send(model, `seed-${turn}-final`, request, result.calls);
-                if (!final.record.accepted || !final.value) throw new Error(`Tool completion rejected: HTTP ${final.record.status}`);
-                if (final.value.stop_reason !== "end_turn") throw new Error(`Incomplete tool round (${final.value.stop_reason})`);
-                request.messages.push({ role: "assistant", content: final.value.content });
-                result.completedTurns++;
-                result.signedBlocks = request.messages.flatMap((m) => m.content).filter(isSigned).length;
-                for (const b of [...tool.value.content, ...final.value.content]) {
-                    if (typeof b.signature === "string") secrets.push(b.signature);
-                    if (typeof b.data === "string") secrets.push(b.data);
+
+                let finalSent = await send(model, `seed-${turn}-final`, request, result.calls);
+                let finalValue = seedValue(finalSent, `seed-${turn}-final`);
+                if (shouldRetryRefusal(finalValue.stop_reason, false)) {
+                    replaceLastUserText(request, seedPrompt(turn, "final-retry"));
+                    finalSent = await send(model, `seed-${turn}-final-retry`, request, result.calls);
+                    finalValue = seedValue(finalSent, `seed-${turn}-final-retry`);
                 }
+                if (finalValue.stop_reason !== "end_turn") throw new Error(`Incomplete note-tool round (${finalValue.stop_reason})`);
+                request.messages.push({ role: "assistant", content: finalValue.content });
+                result.completedTurns++;
+                result.signedBlocks = signedBlockCount(request);
+                result.seedRounds.push({ turn, signedBlocks: result.signedBlocks - signedBefore,
+                    cumulativeSignedBlocks: result.signedBlocks, toolRequestId: toolSent.record.requestId,
+                    finalRequestId: finalSent.record.requestId });
+                rememberThinkingSecrets(toolValue.content);
+                rememberThinkingSecrets(finalValue.content);
+            }
+            if (result.signedBlocks < MIN_SIGNED_BLOCKS || result.completedTurns < MIN_COMPLETED_TURNS) {
+                throw new Error(`Need ${MIN_SIGNED_BLOCKS} signed blocks across ${MIN_COMPLETED_TURNS} completed turns; got ${result.signedBlocks} across ${result.completedTurns}`);
             }
             request.messages.push({ role: "user", content: [{ type: "text", text: "Think briefly: what is 7 times 8? Reply only with the number. Do not use tools." }] });
-            const variants = thinkingVariants(request).filter((v) => model === "claude-opus-5-5" || ["control", "oldest-1", "middle-kept"].includes(v.variant));
+            const variants = thinkingVariants(request);
+            let oldestPrefix: { request: ThinkingRequest; content: Block[]; stopReason: string } | undefined;
             for (const variant of variants) {
                 const sent = await send(model, variant.variant, variant.request, result.calls);
-                if ([401, 403, 429].includes(sent.record.status) || sent.record.status >= 500) {
-                    authRejected = [401, 403].includes(sent.record.status);
-                    throw new Error(`Variant interrupted by HTTP ${sent.record.status}`);
+                result.variants.push({ variant: variant.variant, expected: variant.expected, status: sent.record.status,
+                    requestId: sent.record.requestId, accepted: sent.record.accepted });
+                interruptOnProviderFailure(sent.record.status, variant.variant);
+                if (variant.variant === "control" && !sent.record.accepted) {
+                    throw new Error("Unchanged control rejected; variants would be inconclusive");
                 }
-                if (variant.variant === "control" && !sent.record.accepted) throw new Error("Unchanged control rejected; variants would be inconclusive");
+                if (variant.variant === "oldest-1" && sent.record.accepted && sent.value?.stop_reason === "end_turn") {
+                    oldestPrefix = { request: variant.request, content: sent.value.content, stopReason: sent.value.stop_reason };
+                    rememberThinkingSecrets(sent.value.content);
+                }
             }
-            result.outcome = "completed";
+            let restorationReached = false;
+            if (oldestPrefix && oldestPrefix.content.some(isSigned)) {
+                const whileAbsent = structuredClone(oldestPrefix.request);
+                whileAbsent.messages.push({ role: "assistant", content: oldestPrefix.content });
+                whileAbsent.messages.push({ role: "user", content: [{ type: "text", text: seedPrompt(0, "final") }] });
+                const restored = restoreFirstSignedBlock(request, whileAbsent);
+                const sent = await send(model, "restore-removed-prefix", restored, result.calls);
+                restorationReached = true;
+                result.variants.push({ variant: "restore-removed-prefix",
+                    expected: "400/signature error after restoring a removed prefix", status: sent.record.status,
+                    requestId: sent.record.requestId, accepted: sent.record.accepted });
+                interruptOnProviderFailure(sent.record.status, "restore-removed-prefix");
+            } else {
+                result.variants.push({ variant: "restore-removed-prefix",
+                    expected: "400/signature error after restoring a removed prefix", status: null,
+                    requestId: null, accepted: null,
+                    note: "Not reached: oldest-prefix response did not include a signed block generated while the prefix was absent" });
+            }
+            if (restorationReached) result.outcome = "completed";
+            else result.reason = "Restore check was not reached because no signed response was generated while the prefix was absent";
         } catch (error) { result.reason = scrubError(String(error), secrets); }
         write();
     }
-    return results.length === 2 && results.every((r) => r.outcome === "completed");
+    return results.length === 2 && results.every((result) => result.outcome === "completed" || (recorded && result.outcome === "skipped"));
 }
 
 if (import.meta.main) {
@@ -165,7 +313,13 @@ if (import.meta.main) {
         const authPlugin = arg("anthropic-auth") ?? process.env.MC_LIVE_ANTHROPIC_AUTH_PLUGIN;
         const opencode = arg("opencode") ?? process.env.MC_LIVE_OPENCODE;
         if (!out || !authPlugin || !opencode) throw new Error("Supply --out, --opencode and --anthropic-auth");
-        process.exitCode = await runThinkingMatrix({ out, opencode, authPlugin }) ? 0 : 1;
+        const opusSeed = arg("opus-seed");
+        const sonnetSeed = arg("sonnet-seed");
+        const seedFiles = opusSeed || sonnetSeed ? {
+            ...(opusSeed ? { "claude-opus-5-5": opusSeed } : {}),
+            ...(sonnetSeed ? { "claude-sonnet-5-5": sonnetSeed } : {}),
+        } : undefined;
+        process.exitCode = await runThinkingMatrix({ out, opencode, authPlugin, seedFiles }) ? 0 : 1;
     } catch {
         // Unexpected library exceptions may contain request headers. Do not log them.
         console.error("Thinking matrix setup/network failure; no credential diagnostics are printed.");

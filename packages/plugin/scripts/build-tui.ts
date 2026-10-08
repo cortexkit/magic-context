@@ -1,8 +1,9 @@
-import { copyFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { readdir, readFile, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { basename, dirname, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { runtimeModuleId, TUI_RUNTIME_SPECIFIERS } from "../src/shared/tui-runtime-specifiers";
+import { writeIfChanged } from "./write-if-changed";
 
 const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const sourceRoot = join(pluginRoot, "src/tui");
@@ -170,9 +171,8 @@ async function listSourceFiles(dir: string): Promise<string[]> {
     return files;
 }
 
-async function copyPlainTypeScript(sourceFile: string, outputFile: string): Promise<void> {
-    await mkdir(dirname(outputFile), { recursive: true });
-    await copyFile(sourceFile, outputFile);
+async function copyPlainTypeScript(sourceFile: string, outputFile: string): Promise<boolean> {
+    return writeIfChanged(outputFile, await readFile(sourceFile));
 }
 
 async function compileTsx(
@@ -180,7 +180,7 @@ async function compileTsx(
     sourceFile: string,
     outputFile: string,
     exportSets: { openTui: Set<string>; solid: Set<string> },
-): Promise<void> {
+): Promise<boolean> {
     const code = await readFile(sourceFile, "utf8");
     const compiled = await transformSolidSource(code, {
         filename: sourceFile,
@@ -189,8 +189,7 @@ async function compileTsx(
             runtimeSpecifiers.has(specifier) ? runtimeModuleId(specifier) : null,
     });
 
-    await mkdir(dirname(outputFile), { recursive: true });
-    await writeFile(outputFile, redirectBuiltinImports(compiled, exportSets, sourceFile));
+    return writeIfChanged(outputFile, redirectBuiltinImports(compiled, exportSets, sourceFile));
 }
 
 const transformSolidSource = await loadTransformSolidSource();
@@ -204,6 +203,7 @@ const files = await listSourceFiles(sourceRoot);
 // the host). Overwriting keeps the directory inode and every unchanged file's
 // inode; only outputs whose source is gone are removed.
 const expectedOutputs = new Set<string>();
+let written = 0;
 
 for (const sourceFile of files) {
     const relativePath = relative(sourceRoot, sourceFile);
@@ -217,9 +217,9 @@ for (const sourceFile of files) {
         // the sidebar freezes on its first paint. The virtual ids are required so
         // the compiled package binds the host process's single OpenTUI/Solid
         // runtime instead of loading a second copy from the plugin package.
-        await compileTsx(transformSolidSource, sourceFile, outputFile, runtimeExportSets);
+        if (await compileTsx(transformSolidSource, sourceFile, outputFile, runtimeExportSets)) written++;
     } else {
-        await copyPlainTypeScript(sourceFile, outputFile);
+        if (await copyPlainTypeScript(sourceFile, outputFile)) written++;
     }
 }
 
@@ -231,5 +231,5 @@ for (const existing of await listSourceFiles(outputRoot)) {
 }
 
 console.log(
-    `build-tui: wrote ${files.length} file(s) to ${relative(pluginRoot, outputRoot)}${stale ? ` (removed ${stale} stale)` : ""}`,
+    `build-tui: checked ${files.length} file(s), wrote ${written}, unchanged ${files.length - written} in ${relative(pluginRoot, outputRoot)}${stale ? ` (removed ${stale} stale)` : ""}`,
 );

@@ -1452,6 +1452,9 @@ export function registerRpcHandlers(
         liveSessionState: LiveSessionState;
         rustModeModuleClient?: RustModeModuleClient;
         hiddenCompletionExecutor?: HiddenCompletionExecutor;
+        compactionMarkerStrategy?: ManagedRecompContext["compactionMarkerStrategy"];
+        /** Install the host's history source even before a reopened session's first pass. */
+        prepareHistorySession?: (sessionId: string) => void;
         storageDir?: string;
         getDebugMemoryHolders?: () => RuntimeDebugMemoryHolders | undefined;
         getDatabase?: () => Database | null;
@@ -1638,6 +1641,7 @@ export function registerRpcHandlers(
         return {
             client: args.client as ManagedRecompContext["client"],
             hiddenCompletionExecutor: args.hiddenCompletionExecutor,
+            compactionMarkerStrategy: args.compactionMarkerStrategy,
             db,
             liveSessionState,
             directory,
@@ -1691,6 +1695,7 @@ export function registerRpcHandlers(
             };
         }
         const ctx = await buildManagedCtx(db);
+        args.prepareHistorySession?.(sessionId);
         // Fire-and-forget. OpenCode 1 force-persists the outcome as a chat row so a
         // multi-minute recomp's result stays in scrollback instead of a 5s toast.
         // OpenCode 2 has no SDK client to write that row with, so the outcome goes
@@ -1801,6 +1806,7 @@ export function registerRpcHandlers(
                 liveSessionState.pendingMaterializationSessions.has(sid),
         };
         log(`[rpc] wrapup requested for session ${sessionId} (keep ${messagesToKeep})`);
+        args.prepareHistorySession?.(sessionId);
         // Fire-and-forget: a wrapup runs the historian over the live tail and can
         // take minutes, which is far longer than an RPC caller can wait.
         void runManagedWrapup(ctx, sessionId, { messagesToKeep })

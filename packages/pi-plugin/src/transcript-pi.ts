@@ -165,6 +165,8 @@ export function createPiTranscript(
 		preserveReasoningToolArcs?: boolean;
 		/** Gate first structural application for every arc, including calls without native envelopes. */
 		authorizeToolRemoval?: (callId: string) => boolean | "defer";
+		/** Optional bulk persistence of the same decisions requested during measurement. */
+		authorizeToolRemovals?: (callIds: readonly string[]) => void;
 	} = {},
 ): Transcript & {
 	/**
@@ -198,6 +200,8 @@ export function createPiTranscript(
 	getToolInputChanges(): ReadonlyMap<number, ReadonlySet<string>>;
 	/** Splice emptied tool messages only after the caller captures positional stable IDs. */
 	finalizeToolRemovals(): void;
+	/** Prepare native removal decisions with one message walk, in tag order. */
+	prepareToolRemovalMeasurements(callIds: readonly string[]): void;
 } {
 	const working = source.slice() as unknown as PiAgentMessage[];
 	const dirtyMessages = new Set<number>();
@@ -236,6 +240,28 @@ export function createPiTranscript(
 	return {
 		messages: transcriptMessages,
 		harness: resolvePiHarnessKind(),
+		prepareToolRemovalMeasurements(callIds): void {
+			if (!options.authorizeToolRemovals || callIds.length === 0) return;
+			const requested = new Set(callIds);
+			const eligible = new Set<string>();
+			// Match canRemove() exactly. Do not freeze calls whose native envelope
+			// cannot be structurally edited, even if they are selected for a skeleton.
+			for (const message of working) {
+				if (message.role !== "assistant" || !Array.isArray(message.content))
+					continue;
+				for (const part of message.content) {
+					if (
+						part.type === "toolCall" &&
+						requested.has(part.id) &&
+						canRemoveNativeToolCall(message, part.id)
+					)
+						eligible.add(part.id);
+				}
+			}
+			options.authorizeToolRemovals(
+				callIds.filter((callId) => eligible.has(callId)),
+			);
+		},
 		commit(): void {
 			if (committed) return;
 			committed = true;

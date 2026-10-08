@@ -1,0 +1,206 @@
+{
+  "plans": [
+    {
+      "name": "a grant in the dedicated user_grants field",
+      "plan": {
+        "user_grants": [
+          {
+            "module": "acme-trim",
+            "hook": "post_tool",
+            "tools": [
+              "read",
+              "grep"
+            ]
+          }
+        ],
+        "step_transform_items": [
+          {
+            "provider": "acme-trim",
+            "preset": "default",
+            "params": {}
+          }
+        ]
+      },
+      "checks": [
+        {
+          "module": "acme-trim",
+          "tool": "read",
+          "allowed": true
+        },
+        {
+          "module": "acme-trim",
+          "tool": "bash",
+          "allowed": false
+        },
+        {
+          "module": "acme-tags",
+          "tool": "read",
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "name": "no user_grants field: nothing is granted",
+      "plan": {
+        "step_transform_items": [
+          {
+            "provider": "acme-trim",
+            "preset": "default",
+            "params": {}
+          }
+        ]
+      },
+      "checks": [
+        {
+          "module": "acme-trim",
+          "tool": "read",
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "name": "a grant-shaped value in an item's params is not a grant",
+      "plan": {
+        "step_transform_items": [
+          {
+            "provider": "acme-trim",
+            "preset": "default",
+            "params": {
+              "user_grants": [
+                {
+                  "module": "acme-trim",
+                  "hook": "post_tool",
+                  "tools": [
+                    "read",
+                    "grep"
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "checks": [
+        {
+          "module": "acme-trim",
+          "tool": "read",
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "name": "a grant-shaped value under another top-level field is not a grant",
+      "plan": {
+        "grants": [
+          {
+            "module": "acme-trim",
+            "hook": "post_tool",
+            "tools": [
+              "read",
+              "grep"
+            ]
+          }
+        ],
+        "composition": {
+          "user_grants": [
+            {
+              "module": "acme-trim",
+              "hook": "post_tool",
+              "tools": [
+                "read",
+                "grep"
+              ]
+            }
+          ]
+        },
+        "step_transform_items": []
+      },
+      "checks": [
+        {
+          "module": "acme-trim",
+          "tool": "read",
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "name": "a grant on another hook allows no post_tool replace",
+      "plan": {
+        "user_grants": [
+          {
+            "module": "acme-trim",
+            "hook": "pre_user",
+            "tools": [
+              "read"
+            ]
+          }
+        ]
+      },
+      "checks": [
+        {
+          "module": "acme-trim",
+          "tool": "read",
+          "allowed": false
+        }
+      ]
+    },
+    {
+      "name": "an empty tool list allows nothing",
+      "plan": {
+        "user_grants": [
+          {
+            "module": "acme-trim",
+            "hook": "post_tool",
+            "tools": []
+          }
+        ]
+      },
+      "checks": [
+        {
+          "module": "acme-trim",
+          "tool": "read",
+          "allowed": false
+        }
+      ]
+    }
+  ],
+  "malformed": [
+    {
+      "name": "user_grants not an array",
+      "plan": {
+        "user_grants": {
+          "module": "acme-trim",
+          "hook": "post_tool",
+          "tools": [
+            "read"
+          ]
+        }
+      }
+    },
+    {
+      "name": "a grant without tools",
+      "plan": {
+        "user_grants": [
+          {
+            "module": "acme-trim",
+            "hook": "post_tool"
+          }
+        ]
+      }
+    },
+    {
+      "name": "a grant on an unknown hook",
+      "plan": {
+        "user_grants": [
+          {
+            "module": "acme-trim",
+            "hook": "post_model",
+            "tools": [
+              "read"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

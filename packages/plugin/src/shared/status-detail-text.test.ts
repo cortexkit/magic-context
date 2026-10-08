@@ -148,6 +148,23 @@ describe("status detail text", () => {
         ).not.toContain("MC-S05");
     });
 
+    test("shows the primary quota deadline without exposing surrounding account diagnostics", () => {
+        const summary = formatStatusDetailMarkdown({
+            ...STATUS_FIXTURE,
+            dreamerFailures: [
+                {
+                    task: "verify",
+                    error: "primary quota exhausted until 2026-10-08T03:40:04.275Z; account=private@example.com",
+                    lastSucceededAt: null,
+                    retryCount: 1,
+                },
+            ],
+        });
+        expect(summary).toContain("primary quota exhausted until 2026-10-08T03:40:04.275Z");
+        expect(summary).not.toContain("private@example.com");
+        expect(summary).not.toContain("manifest missing");
+    });
+
     test("keeps internal vocabulary and identifiers out of the summary", () => {
         const summary = formatStatusDetailMarkdown({
             ...STATUS_FIXTURE,

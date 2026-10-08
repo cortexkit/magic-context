@@ -13,6 +13,10 @@ const PACKAGES = [
         name: "@cortexkit/pi-magic-context",
         directory: join(REPO_ROOT, "packages/pi-plugin"),
     },
+    {
+        name: "@cortexkit/magic-context",
+        directory: join(REPO_ROOT, "packages/cli"),
+    },
 ] as const;
 
 type AuditReport = {

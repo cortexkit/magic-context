@@ -1,14 +1,14 @@
-//! Verify that adding durable session fields leaves the historian request and
-//! folded response unchanged. The request digest covers the system prompt, user
-//! prompt, and model sent to the completion provider; the served digest covers
-//! the response array. The metadata checks allow only the expected new fields.
+//! Verify that adding durable session fields leaves the served response unchanged, and pin
+//! the default historian request including its raw ordinal range header. The request digest
+//! covers the system prompt, user prompt, and model sent to the completion provider; the
+//! served digest covers the response array. The metadata checks allow only expected fields.
 
 use super::*;
 use sha2::{Digest, Sha256};
 
 /// Digest of the system prompt, user prompt, and model sent to the provider.
 const EXPECTED_REQUEST_DIGEST: &str =
-    "a2e70c1e70fd85b1b442c69a6e312a3595b2f97953f2de01ab64b892dd914320";
+    "297ecdb7d65bd894b72d532032378d5c808e37e838fbd5209b01d5d9d4ab343b";
 
 /// Digest of the message array returned by a fold pass.
 const BASELINE_SERVED_DIGEST: &str =

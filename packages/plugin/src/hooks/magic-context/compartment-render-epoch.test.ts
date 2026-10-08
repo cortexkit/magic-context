@@ -3,8 +3,10 @@ import { describe, expect, test } from "bun:test";
 import {
     decodeCachedM0UpgradeIdentity,
     encodeCachedM0UpgradeIdentity,
+    readCachedM0MemoryIds,
     renderedBudgetShrinkReason,
     renderedBudgetSnapshot,
+    withCachedM0MemoryIds,
 } from "./compartment-render-epoch";
 
 describe("legacy upgrade-identity crossing (R3 F7)", () => {
@@ -67,5 +69,35 @@ describe("rendered budget contraction", () => {
         expect(renderedBudgetShrinkReason(null, "m1-h1")).toBeNull();
         expect(renderedBudgetShrinkReason("mNaN-h12000", "m1-h1")).toBeNull();
         expect(renderedBudgetShrinkReason(baseline, "m1-hInfinity")).toBeNull();
+    });
+});
+
+describe("frozen m[0] memory selection metadata", () => {
+    test("round-trips an empty or populated selection without changing render identity", () => {
+        const identity = encodeCachedM0UpgradeIdentity(
+            "ready",
+            "cre2",
+            true,
+            "m4000-h60000",
+            "mre3",
+            "m4000-h60000",
+        );
+        for (const ids of [[], [3, 1]]) {
+            const recorded = withCachedM0MemoryIds(identity, ids);
+            expect(readCachedM0MemoryIds(recorded, [1, 2, 3, 4], 4)).toEqual(ids);
+            expect(decodeCachedM0UpgradeIdentity(recorded)).toEqual(
+                decodeCachedM0UpgradeIdentity(identity),
+            );
+            expect(withCachedM0MemoryIds(recorded, ids)).toBe(recorded);
+        }
+        expect(
+            decodeCachedM0UpgradeIdentity(withCachedM0MemoryIds(null, [])).upgradeState,
+        ).toBeNull();
+    });
+
+    test("adopts legacy baseline ids before the first complete visible manifest is written", () => {
+        const identity = encodeCachedM0UpgradeIdentity("ready");
+        expect(readCachedM0MemoryIds(identity, [1, 3, 5], 3)).toEqual([1, 3]);
+        expect(readCachedM0MemoryIds(`${identity}|m0-memory-ids:invalid`, [1, 5], 3)).toEqual([1]);
     });
 });
