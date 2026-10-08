@@ -1,0 +1,15 @@
+{
+  "codes": [
+    {"code": "invalid_params", "retryable": false},
+    {"code": "not_subscribed", "retryable": false},
+    {"code": "transient", "retryable": true},
+    {"code": "a_code_this_role_does_not_define", "retryable": false}
+  ],
+  "tool_result_reasons": [
+    "pre_tool_denied",
+    "pre_tool_unavailable",
+    "pre_tool_declined",
+    "pre_tool_expired",
+    "post_tool_unavailable"
+  ]
+}

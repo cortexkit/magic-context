@@ -1,0 +1,1224 @@
+{
+  "declaration": {
+    "subscriptions": [
+      {
+        "hook": "pre_user",
+        "ops": [
+          "prepend",
+          "append",
+          "replace"
+        ],
+        "on_unavailable": "pass",
+        "budget_ms": 1500
+      },
+      {
+        "hook": "post_tool",
+        "tools": [
+          "read",
+          "bash"
+        ],
+        "ops": [
+          "append"
+        ],
+        "budget_ms": 500
+      },
+      {
+        "hook": "post_tool",
+        "ops": [
+          "prepend"
+        ],
+        "budget_ms": 500
+      },
+      {
+        "hook": "pre_tool",
+        "phase": "validate",
+        "tools": [
+          "bash"
+        ],
+        "ops": [],
+        "budget_ms": 200
+      }
+    ]
+  },
+  "planned": [
+    {
+      "name": "pre_user append, with the declared policy and budget",
+      "subscription": {
+        "hook": "pre_user",
+        "ops": [
+          "append"
+        ],
+        "on_unavailable": "pass",
+        "budget_ms": 1500
+      },
+      "bound_by": 0
+    },
+    {
+      "name": "pre_user tightened: refuse where the declaration passes, and a smaller budget",
+      "subscription": {
+        "hook": "pre_user",
+        "ops": [
+          "append"
+        ],
+        "on_unavailable": "refuse",
+        "budget_ms": 1000
+      },
+      "bound_by": 0
+    },
+    {
+      "name": "post_tool append on read, refuse as the absent declared policy means",
+      "subscription": {
+        "hook": "post_tool",
+        "tools": [
+          "read"
+        ],
+        "ops": [
+          "append"
+        ],
+        "on_unavailable": "refuse",
+        "budget_ms": 500
+      },
+      "bound_by": 1
+    },
+    {
+      "name": "post_tool prepend on every tool, a smaller budget",
+      "subscription": {
+        "hook": "post_tool",
+        "ops": [
+          "prepend"
+        ],
+        "on_unavailable": "refuse",
+        "budget_ms": 300
+      },
+      "bound_by": 2
+    },
+    {
+      "name": "pre_tool validate on bash: ops empty",
+      "subscription": {
+        "hook": "pre_tool",
+        "phase": "validate",
+        "tools": [
+          "bash"
+        ],
+        "ops": [],
+        "on_unavailable": "refuse",
+        "budget_ms": 200
+      },
+      "bound_by": 3
+    },
+    {
+      "name": "a hook the provider no longer declares",
+      "subscription": {
+        "hook": "post_assistant",
+        "ops": [
+          "append"
+        ],
+        "on_unavailable": "pass",
+        "budget_ms": 500
+      },
+      "problem": "subscription_missing"
+    },
+    {
+      "name": "a phase the provider no longer declares",
+      "subscription": {
+        "hook": "pre_tool",
+        "phase": "mutate",
+        "tools": [
+          "bash"
+        ],
+        "ops": [],
+        "on_unavailable": "refuse",
+        "budget_ms": 200
+      },
+      "problem": "subscription_missing"
+    },
+    {
+      "name": "a tool outside the declared list",
+      "subscription": {
+        "hook": "pre_tool",
+        "phase": "validate",
+        "tools": [
+          "edit"
+        ],
+        "ops": [],
+        "on_unavailable": "refuse",
+        "budget_ms": 200
+      },
+      "problem": "subscription_loosened",
+      "field": "tools"
+    },
+    {
+      "name": "every tool, where the declaration lists some",
+      "subscription": {
+        "hook": "pre_tool",
+        "phase": "validate",
+        "ops": [],
+        "on_unavailable": "refuse",
+        "budget_ms": 200
+      },
+      "problem": "subscription_loosened",
+      "field": "tools"
+    },
+    {
+      "name": "an op the declaration does not name",
+      "subscription": {
+        "hook": "post_tool",
+        "tools": [
+          "read"
+        ],
+        "ops": [
+          "replace"
+        ],
+        "on_unavailable": "refuse",
+        "budget_ms": 500
+      },
+      "problem": "subscription_loosened",
+      "field": "ops"
+    },
+    {
+      "name": "append on every tool: only the per-tool entry has append",
+      "subscription": {
+        "hook": "post_tool",
+        "ops": [
+          "append"
+        ],
+        "on_unavailable": "refuse",
+        "budget_ms": 500
+      },
+      "problem": "subscription_loosened",
+      "field": "ops"
+    },
+    {
+      "name": "loosened: pass where the declaration's absent policy means refuse",
+      "subscription": {
+        "hook": "post_tool",
+        "tools": [
+          "read"
+        ],
+        "ops": [
+          "append"
+        ],
+        "on_unavailable": "pass",
+        "budget_ms": 500
+      },
+      "problem": "subscription_loosened",
+      "field": "on_unavailable"
+    },
+    {
+      "name": "loosened: a budget above the declared one",
+      "subscription": {
+        "hook": "pre_tool",
+        "phase": "validate",
+        "tools": [
+          "bash"
+        ],
+        "ops": [],
+        "on_unavailable": "refuse",
+        "budget_ms": 250
+      },
+      "problem": "subscription_loosened",
+      "field": "budget_ms"
+    },
+    {
+      "name": "loosened on both fields: on_unavailable is named first",
+      "subscription": {
+        "hook": "post_tool",
+        "tools": [
+          "read"
+        ],
+        "ops": [
+          "append"
+        ],
+        "on_unavailable": "pass",
+        "budget_ms": 900
+      },
+      "problem": "subscription_loosened",
+      "field": "on_unavailable"
+    },
+    {
+      "name": "pre_tool with ops, as an older fetch-plan-v1 wrote it",
+      "subscription": {
+        "hook": "pre_tool",
+        "phase": "validate",
+        "ops": [
+          "append"
+        ],
+        "on_unavailable": "refuse",
+        "budget_ms": 200
+      },
+      "problem": "ops_on_pre_tool"
+    },
+    {
+      "name": "pre_tool without a phase",
+      "subscription": {
+        "hook": "pre_tool",
+        "ops": [],
+        "on_unavailable": "refuse",
+        "budget_ms": 200
+      },
+      "problem": "missing_phase"
+    },
+    {
+      "name": "refuse frozen on post_assistant, which always passes",
+      "subscription": {
+        "hook": "post_assistant",
+        "ops": [
+          "append"
+        ],
+        "on_unavailable": "refuse",
+        "budget_ms": 500
+      },
+      "problem": "refuse_on_post_assistant"
+    },
+    {
+      "name": "a zero budget",
+      "subscription": {
+        "hook": "pre_user",
+        "ops": [
+          "append"
+        ],
+        "on_unavailable": "pass",
+        "budget_ms": 0
+      },
+      "problem": "zero_budget"
+    }
+  ],
+  "undecodable": [
+    {
+      "name": "unknown hook",
+      "subscription": {
+        "hook": "on_compaction",
+        "ops": [
+          "append"
+        ],
+        "on_unavailable": "pass",
+        "budget_ms": 500
+      }
+    },
+    {
+      "name": "unknown op",
+      "subscription": {
+        "hook": "pre_user",
+        "ops": [
+          "wrap"
+        ],
+        "on_unavailable": "pass",
+        "budget_ms": 500
+      }
+    },
+    {
+      "name": "no ops member",
+      "subscription": {
+        "hook": "pre_user",
+        "on_unavailable": "pass",
+        "budget_ms": 500
+      }
+    },
+    {
+      "name": "no on_unavailable member: the plan freezes it",
+      "subscription": {
+        "hook": "pre_user",
+        "ops": [
+          "append"
+        ],
+        "budget_ms": 500
+      }
+    },
+    {
+      "name": "no budget_ms member: the plan freezes it",
+      "subscription": {
+        "hook": "pre_user",
+        "ops": [
+          "append"
+        ],
+        "on_unavailable": "pass"
+      }
+    },
+    {
+      "name": "unknown on_unavailable",
+      "subscription": {
+        "hook": "pre_user",
+        "ops": [
+          "append"
+        ],
+        "on_unavailable": "retry",
+        "budget_ms": 500
+      }
+    }
+  ],
+  "reduction": [
+    {
+      "name": "the reduction owner may replace on pre_user",
+      "subscription": {
+        "hook": "pre_user",
+        "ops": [
+          "append",
+          "replace"
+        ],
+        "on_unavailable": "pass",
+        "budget_ms": 500
+      },
+      "provider": "magic-context",
+      "reduction_owner": "magic-context",
+      "problem": null
+    },
+    {
+      "name": "another provider may not replace on pre_user",
+      "subscription": {
+        "hook": "pre_user",
+        "ops": [
+          "replace"
+        ],
+        "on_unavailable": "pass",
+        "budget_ms": 500
+      },
+      "provider": "acme-tags",
+      "reduction_owner": "magic-context",
+      "problem": "replace_not_reduction_owner"
+    },
+    {
+      "name": "no reduction owner: nobody replaces on post_assistant",
+      "subscription": {
+        "hook": "post_assistant",
+        "ops": [
+          "replace"
+        ],
+        "on_unavailable": "pass",
+        "budget_ms": 500
+      },
+      "provider": "magic-context",
+      "reduction_owner": null,
+      "problem": "replace_not_reduction_owner"
+    },
+    {
+      "name": "preserving ops need no ownership",
+      "subscription": {
+        "hook": "post_assistant",
+        "ops": [
+          "prepend",
+          "append"
+        ],
+        "on_unavailable": "pass",
+        "budget_ms": 500
+      },
+      "provider": "acme-tags",
+      "reduction_owner": "magic-context",
+      "problem": null
+    },
+    {
+      "name": "replace on post_tool is the user grant's business, not ownership",
+      "subscription": {
+        "hook": "post_tool",
+        "tools": [
+          "read"
+        ],
+        "ops": [
+          "replace"
+        ],
+        "on_unavailable": "pass",
+        "budget_ms": 500
+      },
+      "provider": "acme-cap",
+      "reduction_owner": "magic-context",
+      "problem": null
+    }
+  ],
+  "order": [
+    {
+      "name": "plan order: the composer placed the reduction owner first",
+      "providers": [
+        "magic-context",
+        "acme-tags",
+        "acme-recall"
+      ],
+      "reduction_owner": "magic-context",
+      "order": [
+        0,
+        1,
+        2
+      ],
+      "reduction_owner_first": true
+    },
+    {
+      "name": "plan order even when the composer broke its obligation: the runner does not move the owner",
+      "providers": [
+        "acme-tags",
+        "magic-context",
+        "acme-recall"
+      ],
+      "reduction_owner": "magic-context",
+      "order": [
+        0,
+        1,
+        2
+      ],
+      "reduction_owner_first": false
+    },
+    {
+      "name": "no reduction owner: plan order",
+      "providers": [
+        "acme-tags",
+        "acme-recall"
+      ],
+      "reduction_owner": null,
+      "order": [
+        0,
+        1
+      ],
+      "reduction_owner_first": true
+    },
+    {
+      "name": "a reduction owner with no step transforms: plan order",
+      "providers": [
+        "acme-tags",
+        "acme-recall"
+      ],
+      "reduction_owner": "magic-context",
+      "order": [
+        0,
+        1
+      ],
+      "reduction_owner_first": true
+    }
+  ],
+  "items": [
+    {
+      "name": "every subscription bound",
+      "declaration": "file",
+      "provider": "magic-context",
+      "reduction_owner": "magic-context",
+      "subscriptions": [
+        {
+          "hook": "pre_user",
+          "ops": [
+            "append"
+          ],
+          "on_unavailable": "pass",
+          "budget_ms": 1500
+        },
+        {
+          "hook": "pre_tool",
+          "phase": "validate",
+          "tools": [
+            "bash"
+          ],
+          "ops": [],
+          "on_unavailable": "refuse",
+          "budget_ms": 200
+        }
+      ],
+      "expected": {
+        "bounds": [
+          0,
+          3
+        ]
+      },
+      "preset": "default"
+    },
+    {
+      "name": "the preset is gone: one preset_missing per item",
+      "declaration": null,
+      "provider": "magic-context",
+      "reduction_owner": null,
+      "subscriptions": [
+        {
+          "hook": "pre_user",
+          "ops": [
+            "append"
+          ],
+          "on_unavailable": "pass",
+          "budget_ms": 1500
+        },
+        {
+          "hook": "pre_tool",
+          "phase": "validate",
+          "tools": [
+            "bash"
+          ],
+          "ops": [],
+          "on_unavailable": "refuse",
+          "budget_ms": 200
+        }
+      ],
+      "expected": {
+        "code": "plan_stale",
+        "detail": {
+          "differences": [
+            {
+              "kind": "preset_missing",
+              "provider": "magic-context",
+              "preset": "default"
+            }
+          ]
+        }
+      },
+      "preset": "default"
+    },
+    {
+      "name": "every stale subscription is listed",
+      "declaration": "file",
+      "provider": "acme-tags",
+      "reduction_owner": null,
+      "subscriptions": [
+        {
+          "hook": "post_assistant",
+          "ops": [
+            "append"
+          ],
+          "on_unavailable": "pass",
+          "budget_ms": 500
+        },
+        {
+          "hook": "post_tool",
+          "tools": [
+            "read"
+          ],
+          "ops": [
+            "append"
+          ],
+          "on_unavailable": "pass",
+          "budget_ms": 500
+        },
+        {
+          "hook": "pre_tool",
+          "phase": "validate",
+          "tools": [
+            "bash"
+          ],
+          "ops": [],
+          "on_unavailable": "refuse",
+          "budget_ms": 250
+        }
+      ],
+      "expected": {
+        "code": "plan_stale",
+        "detail": {
+          "differences": [
+            {
+              "kind": "subscription_missing",
+              "provider": "acme-tags",
+              "hook": "post_assistant",
+              "phase": null
+            },
+            {
+              "kind": "subscription_loosened",
+              "provider": "acme-tags",
+              "hook": "post_tool",
+              "field": "on_unavailable",
+              "phase": null
+            },
+            {
+              "kind": "subscription_loosened",
+              "provider": "acme-tags",
+              "hook": "pre_tool",
+              "field": "budget_ms",
+              "phase": "validate"
+            }
+          ]
+        }
+      },
+      "preset": "default"
+    },
+    {
+      "name": "invalid_params wins over staleness, naming the first",
+      "declaration": "file",
+      "provider": "acme-tags",
+      "reduction_owner": "magic-context",
+      "subscriptions": [
+        {
+          "hook": "pre_tool",
+          "phase": "validate",
+          "tools": [
+            "bash"
+          ],
+          "ops": [],
+          "on_unavailable": "refuse",
+          "budget_ms": 250
+        },
+        {
+          "hook": "post_tool",
+          "tools": [
+            "read"
+          ],
+          "ops": [
+            "replace"
+          ],
+          "on_unavailable": "refuse",
+          "budget_ms": 500
+        },
+        {
+          "hook": "pre_user",
+          "ops": [
+            "replace"
+          ],
+          "on_unavailable": "pass",
+          "budget_ms": 500
+        }
+      ],
+      "expected": {
+        "code": "invalid_params",
+        "detail": {
+          "field": "plan.step_transform_items",
+          "item": 2,
+          "subscription": 2,
+          "problem": "replace_not_reduction_owner"
+        }
+      },
+      "item": 2,
+      "preset": "default"
+    },
+    {
+      "name": "a forbidden replace on a stale subscription is reported as invalid",
+      "declaration": null,
+      "provider": "acme-tags",
+      "reduction_owner": "magic-context",
+      "subscriptions": [
+        {
+          "hook": "pre_user",
+          "ops": [
+            "replace"
+          ],
+          "on_unavailable": "pass",
+          "budget_ms": 500
+        }
+      ],
+      "expected": {
+        "code": "invalid_params",
+        "detail": {
+          "field": "plan.step_transform_items",
+          "item": 0,
+          "subscription": 0,
+          "problem": "replace_not_reduction_owner"
+        }
+      },
+      "preset": "default"
+    },
+    {
+      "name": "the preset is gone on an empty item",
+      "declaration": null,
+      "provider": "magic-context",
+      "preset": "empty",
+      "subscriptions": [],
+      "expected": {
+        "code": "plan_stale",
+        "detail": {
+          "differences": [
+            {
+              "kind": "preset_missing",
+              "provider": "magic-context",
+              "preset": "empty"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "fetch_plan_v1": [
+    {
+      "name": "admit-pre-tool-declared",
+      "source": "prefrontal 3e69ed9d4a048a458db54203bd93a1069598222e test-vectors/fetch-plan-v1/admission/admit-pre-tool-declared.json with plans/pre-tool-declared.json",
+      "provider": "magic-context",
+      "preset": "default",
+      "subscriptions": [
+        {
+          "hook": "pre_tool",
+          "phase": "validate",
+          "ops": [],
+          "on_unavailable": "pass",
+          "budget_ms": 1000
+        }
+      ],
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "pre_tool",
+            "phase": "validate",
+            "ops": [],
+            "on_unavailable": "pass",
+            "budget_ms": 1000
+          }
+        ]
+      },
+      "expected": {
+        "admitted": true,
+        "frozen_step_transform_items": [
+          {
+            "provider": "magic-context",
+            "preset": "default",
+            "params": {},
+            "subscriptions": [
+              {
+                "hook": "pre_tool",
+                "phase": "validate",
+                "ops": [],
+                "on_unavailable": "pass",
+                "budget_ms": 1000
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "admit-pre-tool-tightened",
+      "source": "prefrontal 3e69ed9d4a048a458db54203bd93a1069598222e test-vectors/fetch-plan-v1/admission/admit-pre-tool-tightened.json with plans/pre-tool-tightened.json",
+      "provider": "magic-context",
+      "preset": "default",
+      "subscriptions": [
+        {
+          "hook": "pre_tool",
+          "phase": "validate",
+          "ops": [],
+          "on_unavailable": "refuse",
+          "budget_ms": 500
+        }
+      ],
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "pre_tool",
+            "phase": "validate",
+            "ops": [],
+            "on_unavailable": "pass",
+            "budget_ms": 1000
+          }
+        ]
+      },
+      "expected": {
+        "admitted": true,
+        "frozen_step_transform_items": [
+          {
+            "provider": "magic-context",
+            "preset": "default",
+            "params": {},
+            "subscriptions": [
+              {
+                "hook": "pre_tool",
+                "phase": "validate",
+                "ops": [],
+                "on_unavailable": "refuse",
+                "budget_ms": 500
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "refuse-declared-hook-gone",
+      "source": "prefrontal 3e69ed9d4a048a458db54203bd93a1069598222e test-vectors/fetch-plan-v1/admission/refuse-declared-hook-gone.json with plans/pre-tool-declared.json",
+      "provider": "magic-context",
+      "preset": "default",
+      "subscriptions": [
+        {
+          "hook": "pre_tool",
+          "phase": "validate",
+          "ops": [],
+          "on_unavailable": "pass",
+          "budget_ms": 1000
+        }
+      ],
+      "declaration": {
+        "subscriptions": []
+      },
+      "expected": {
+        "admitted": false,
+        "code": "plan_stale",
+        "detail": {
+          "differences": [
+            {
+              "kind": "subscription_missing",
+              "provider": "magic-context",
+              "hook": "pre_tool",
+              "phase": "validate"
+            }
+          ]
+        },
+        "writes": "nothing"
+      }
+    },
+    {
+      "name": "refuse-declared-preset-gone",
+      "source": "prefrontal 3e69ed9d4a048a458db54203bd93a1069598222e test-vectors/fetch-plan-v1/admission/refuse-declared-preset-gone.json with plans/pre-tool-declared.json",
+      "provider": "magic-context",
+      "preset": "default",
+      "subscriptions": [
+        {
+          "hook": "pre_tool",
+          "phase": "validate",
+          "ops": [],
+          "on_unavailable": "pass",
+          "budget_ms": 1000
+        }
+      ],
+      "declaration": null,
+      "expected": {
+        "admitted": false,
+        "code": "plan_stale",
+        "detail": {
+          "differences": [
+            {
+              "kind": "preset_missing",
+              "provider": "magic-context",
+              "preset": "default"
+            }
+          ]
+        },
+        "writes": "nothing"
+      }
+    },
+    {
+      "name": "refuse-declared-preset-gone-two-subscriptions",
+      "source": "prefrontal 3e69ed9d4a048a458db54203bd93a1069598222e test-vectors/fetch-plan-v1/admission/refuse-declared-preset-gone-two-subscriptions.json with plans/broca-head.json",
+      "provider": "magic-context",
+      "preset": "default",
+      "subscriptions": [
+        {
+          "hook": "pre_user",
+          "ops": [
+            "append"
+          ],
+          "on_unavailable": "refuse",
+          "budget_ms": 1000
+        },
+        {
+          "hook": "post_tool",
+          "tools": [
+            "read"
+          ],
+          "ops": [
+            "append"
+          ],
+          "on_unavailable": "refuse",
+          "budget_ms": 1000
+        }
+      ],
+      "declaration": null,
+      "expected": {
+        "admitted": false,
+        "code": "plan_stale",
+        "detail": {
+          "differences": [
+            {
+              "kind": "preset_missing",
+              "provider": "magic-context",
+              "preset": "default"
+            }
+          ]
+        },
+        "writes": "nothing"
+      }
+    },
+    {
+      "name": "refuse-subscription-loosened-budget_ms",
+      "source": "prefrontal 3e69ed9d4a048a458db54203bd93a1069598222e test-vectors/fetch-plan-v1/admission/refuse-subscription-loosened-budget_ms.json with plans/pre-tool-declared.json",
+      "provider": "magic-context",
+      "preset": "default",
+      "subscriptions": [
+        {
+          "hook": "pre_tool",
+          "phase": "validate",
+          "ops": [],
+          "on_unavailable": "pass",
+          "budget_ms": 1000
+        }
+      ],
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "pre_tool",
+            "phase": "validate",
+            "ops": [],
+            "on_unavailable": "pass",
+            "budget_ms": 500
+          }
+        ]
+      },
+      "expected": {
+        "admitted": false,
+        "code": "plan_stale",
+        "detail": {
+          "differences": [
+            {
+              "kind": "subscription_loosened",
+              "provider": "magic-context",
+              "hook": "pre_tool",
+              "phase": "validate",
+              "field": "budget_ms"
+            }
+          ]
+        },
+        "writes": "nothing"
+      }
+    },
+    {
+      "name": "refuse-subscription-loosened-on_unavailable",
+      "source": "prefrontal 3e69ed9d4a048a458db54203bd93a1069598222e test-vectors/fetch-plan-v1/admission/refuse-subscription-loosened-on_unavailable.json with plans/pre-tool-declared.json",
+      "provider": "magic-context",
+      "preset": "default",
+      "subscriptions": [
+        {
+          "hook": "pre_tool",
+          "phase": "validate",
+          "ops": [],
+          "on_unavailable": "pass",
+          "budget_ms": 1000
+        }
+      ],
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "pre_tool",
+            "phase": "validate",
+            "ops": [],
+            "on_unavailable": "refuse",
+            "budget_ms": 1000
+          }
+        ]
+      },
+      "expected": {
+        "admitted": false,
+        "code": "plan_stale",
+        "detail": {
+          "differences": [
+            {
+              "kind": "subscription_loosened",
+              "provider": "magic-context",
+              "hook": "pre_tool",
+              "phase": "validate",
+              "field": "on_unavailable"
+            }
+          ]
+        },
+        "writes": "nothing"
+      }
+    },
+    {
+      "name": "refuse-subscription-loosened-tools",
+      "source": "prefrontal 3e69ed9d4a048a458db54203bd93a1069598222e test-vectors/fetch-plan-v1/admission/refuse-subscription-loosened-tools.json with plans/broca-head.json",
+      "provider": "magic-context",
+      "preset": "default",
+      "subscriptions": [
+        {
+          "hook": "pre_user",
+          "ops": [
+            "append"
+          ],
+          "on_unavailable": "refuse",
+          "budget_ms": 1000
+        },
+        {
+          "hook": "post_tool",
+          "tools": [
+            "read"
+          ],
+          "ops": [
+            "append"
+          ],
+          "on_unavailable": "refuse",
+          "budget_ms": 1000
+        }
+      ],
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "pre_user",
+            "ops": [
+              "append"
+            ],
+            "on_unavailable": "refuse",
+            "budget_ms": 1000
+          },
+          {
+            "hook": "post_tool",
+            "tools": [
+              "edit"
+            ],
+            "ops": [
+              "append"
+            ],
+            "on_unavailable": "refuse",
+            "budget_ms": 1000
+          }
+        ]
+      },
+      "expected": {
+        "admitted": false,
+        "code": "plan_stale",
+        "detail": {
+          "differences": [
+            {
+              "kind": "subscription_loosened",
+              "provider": "magic-context",
+              "hook": "post_tool",
+              "phase": null,
+              "field": "tools"
+            }
+          ]
+        },
+        "writes": "nothing"
+      }
+    },
+    {
+      "name": "refuse-subscription-loosened-ops",
+      "source": "prefrontal 3e69ed9d4a048a458db54203bd93a1069598222e test-vectors/fetch-plan-v1/admission/refuse-subscription-loosened-ops.json with plans/broca-head.json",
+      "provider": "magic-context",
+      "preset": "default",
+      "subscriptions": [
+        {
+          "hook": "pre_user",
+          "ops": [
+            "append"
+          ],
+          "on_unavailable": "refuse",
+          "budget_ms": 1000
+        },
+        {
+          "hook": "post_tool",
+          "tools": [
+            "read"
+          ],
+          "ops": [
+            "append"
+          ],
+          "on_unavailable": "refuse",
+          "budget_ms": 1000
+        }
+      ],
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "pre_user",
+            "ops": [
+              "append"
+            ],
+            "on_unavailable": "refuse",
+            "budget_ms": 1000
+          },
+          {
+            "hook": "post_tool",
+            "tools": [
+              "read"
+            ],
+            "ops": [
+              "prepend"
+            ],
+            "on_unavailable": "refuse",
+            "budget_ms": 1000
+          }
+        ]
+      },
+      "expected": {
+        "admitted": false,
+        "code": "plan_stale",
+        "detail": {
+          "differences": [
+            {
+              "kind": "subscription_loosened",
+              "provider": "magic-context",
+              "hook": "post_tool",
+              "phase": null,
+              "field": "ops"
+            }
+          ]
+        },
+        "writes": "nothing"
+      }
+    },
+    {
+      "name": "refuse-subscription-loosened-validate-phase",
+      "source": "prefrontal 3e69ed9d4a048a458db54203bd93a1069598222e test-vectors/fetch-plan-v1/admission/refuse-subscription-loosened-validate-phase.json with plans/pre-tool-two-phase.json",
+      "provider": "magic-context",
+      "preset": "default",
+      "subscriptions": [
+        {
+          "hook": "pre_tool",
+          "phase": "mutate",
+          "ops": [],
+          "on_unavailable": "pass",
+          "budget_ms": 1000
+        },
+        {
+          "hook": "pre_tool",
+          "phase": "validate",
+          "ops": [],
+          "on_unavailable": "pass",
+          "budget_ms": 1000
+        }
+      ],
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "pre_tool",
+            "phase": "mutate",
+            "ops": [],
+            "on_unavailable": "pass",
+            "budget_ms": 1000
+          },
+          {
+            "hook": "pre_tool",
+            "phase": "validate",
+            "ops": [],
+            "on_unavailable": "pass",
+            "budget_ms": 500
+          }
+        ]
+      },
+      "expected": {
+        "admitted": false,
+        "code": "plan_stale",
+        "detail": {
+          "differences": [
+            {
+              "kind": "subscription_loosened",
+              "provider": "magic-context",
+              "hook": "pre_tool",
+              "phase": "validate",
+              "field": "budget_ms"
+            }
+          ]
+        },
+        "writes": "nothing"
+      }
+    },
+    {
+      "name": "refuse-pre-tool-append",
+      "source": "prefrontal 3e69ed9d4a048a458db54203bd93a1069598222e test-vectors/fetch-plan-v1/admission/refuse-pre-tool-append.json",
+      "provider": "magic-context",
+      "preset": "default",
+      "subscriptions": [
+        {
+          "hook": "pre_tool",
+          "phase": "validate",
+          "ops": [
+            "append"
+          ],
+          "on_unavailable": "pass",
+          "budget_ms": 1000
+        }
+      ],
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "pre_tool",
+            "phase": "validate",
+            "ops": [],
+            "on_unavailable": "pass",
+            "budget_ms": 1000
+          }
+        ]
+      },
+      "expected": {
+        "admitted": false,
+        "code": "invalid_params",
+        "detail": {
+          "field": "plan.step_transform_items",
+          "item": 0,
+          "subscription": 0,
+          "problem": "ops_on_pre_tool"
+        },
+        "writes": "nothing"
+      }
+    }
+  ]
+}

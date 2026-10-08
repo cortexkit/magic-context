@@ -1,0 +1,131 @@
+{
+  "requests": [
+    {
+      "name": "a fresh session, nothing written yet",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "request_id": "cr-000001",
+        "preset": "head",
+        "params": {},
+        "composition": {"providers": [{"provider": "aft", "tools": [{"name": "read", "capabilities": ["code.read/v1"]}]}, {"provider": "magic-context", "tools": []}]},
+        "model": "anthropic/claude-opus-4-5",
+        "context_window": 200000,
+        "output_limit": 64000,
+        "now": 1790000000000
+      }
+    },
+    {
+      "name": "the first user message is already written",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "request_id": "cr-000001",
+        "lineage_id": "lin_7",
+        "params": {"historian": "off"},
+        "composition": {"providers": []},
+        "model": "openai/gpt-5",
+        "variant": "high",
+        "newest": {"ordinal": 1, "mid": "m1"},
+        "now": 1790000000000
+      }
+    }
+  ],
+  "answers": [
+    {
+      "name": "a head of two messages before every message",
+      "answer": {
+        "answer": "ready",
+        "request_id": "cr-000001",
+        "initial": {
+          "compaction_id": "mc:ses_01J9Z:head-1",
+          "version": 1,
+          "range": {"from": 0, "to": 0},
+          "replacement": [
+            {"role": "user", "content": [{"type": "text", "text": "<m0: project docs and memories>"}]},
+            {"role": "user", "content": [{"type": "text", "text": "<m1: session history>"}]}
+          ]
+        },
+        "stability": [{"index": 0, "rank": 2}, {"index": 1, "rank": 1}],
+        "call_when": {"default": 0.8, "models": {"openai/gpt-5*": 0.7}}
+      }
+    },
+    {
+      "name": "no head and no conditions: an empty view, called every step",
+      "answer": {
+        "answer": "ready",
+        "request_id": "cr-000001",
+        "initial": {"compaction_id": "empty", "version": 1, "range": {"from": 0, "to": 0}, "replacement": []}
+      }
+    },
+    {
+      "name": "a condition kind this crate does not know",
+      "answer": {
+        "answer": "ready",
+        "request_id": "cr-000001",
+        "initial": {"compaction_id": "empty", "version": 1, "range": {"from": 0, "to": 0}, "replacement": []},
+        "call_when": {"default": 0.85, "every_n_steps": 10}
+      },
+      "unknown_conditions": true
+    },
+    {
+      "name": "setup refused",
+      "answer": {"answer": "refuse", "request_id": "cr-000001", "code": "misconfigured", "reason": "preset 'head' needs a memory store, and none is configured"},
+      "retryable": false
+    },
+    {
+      "name": "setup refused with the provider's own reason in provider_code",
+      "answer": {"answer": "refuse", "request_id": "cr-000001", "code": "misconfigured", "reason": "preset 'head' needs a memory store, and none is configured", "provider_code": "mc:no_memory_store"},
+      "retryable": false
+    },
+    {
+      "name": "setup refused with a code the role does not name: decodes, never retried",
+      "answer": {"answer": "refuse", "request_id": "cr-000001", "code": "acme_own_code", "reason": "x"},
+      "retryable": false
+    }
+  ],
+  "tolerated": [
+    {"name": "refuse still carrying the removed retryable member: ignored, code decides", "answer": {"answer": "refuse", "request_id": "cr-000001", "code": "misconfigured", "reason": "x", "retryable": true}, "retryable": false}
+  ],
+  "undecodable": [
+    {"name": "unknown answer", "answer": {"answer": "maybe", "request_id": "cr-000001"}},
+    {"name": "ready without an initial message", "answer": {"answer": "ready", "request_id": "cr-000001"}},
+    {"name": "no request id", "answer": {"answer": "ready", "initial": {"compaction_id": "x", "version": 1, "range": {"from": 0, "to": 0}, "replacement": []}}},
+    {"name": "refuse without a code", "answer": {"answer": "refuse", "request_id": "cr-000001", "reason": "x"}},
+    {"name": "a negative stability rank", "answer": {"answer": "ready", "request_id": "cr-000001", "initial": {"compaction_id": "x", "version": 1, "range": {"from": 0, "to": 0}, "replacement": []}, "stability": [{"index": 0, "rank": -1}]}}
+  ],
+  "model_matching": [
+    {
+      "name": "exact over the longest trailing star over the default",
+      "call_when": {"default": 0.8, "models": {"anthropic/*": 0.6, "anthropic/claude-*": 0.65, "anthropic/claude-opus-4-5": 0.7}},
+      "expected": [
+        {"model": "anthropic/claude-opus-4-5", "share": 0.7},
+        {"model": "anthropic/claude-sonnet-4", "share": 0.65},
+        {"model": "anthropic/haiku", "share": 0.6},
+        {"model": "openai/gpt-5", "share": 0.8}
+      ]
+    },
+    {
+      "name": "a bare star matches every model but loses to any longer pattern",
+      "call_when": {"default": 0.8, "models": {"*": 0.9, "openai/*": 0.5}},
+      "expected": [
+        {"model": "openai/gpt-5", "share": 0.5},
+        {"model": "local/llama", "share": 0.9}
+      ]
+    },
+    {
+      "name": "a star inside a key is literal: it matches only exactly",
+      "call_when": {"default": 0.8, "models": {"a*b": 0.4}},
+      "expected": [
+        {"model": "a*b", "share": 0.4},
+        {"model": "axb", "share": 0.8},
+        {"model": "a*bc", "share": 0.8}
+      ]
+    }
+  ],
+  "shares_out_of_range": [
+    {"name": "zero default", "call_when": {"default": 0.0}},
+    {"name": "default above one", "call_when": {"default": 1.2}},
+    {"name": "a model override above one", "call_when": {"default": 0.8, "models": {"m": 1.5}}}
+  ]
+}

@@ -1,0 +1,551 @@
+{
+  "requests": [
+    {
+      "name": "first step call in the lineage: no cursor, every message",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "request_id": "cr-000042",
+        "lineage_id": "lin_7",
+        "step_id": "st_88",
+        "step_kind": "user_turn",
+        "model": "anthropic/claude-opus-4-5",
+        "context_window": 200000,
+        "output_limit": 64000,
+        "estimate": {
+          "request_tokens": 152000
+        },
+        "newest": {
+          "ordinal": 2,
+          "mid": "m2"
+        },
+        "last_applied": {
+          "compaction_id": "mc:head-1",
+          "version": 1
+        },
+        "messages": [
+          {
+            "ordinal": 1,
+            "mid": "m1",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "hello"
+                }
+              ]
+            }
+          },
+          {
+            "ordinal": 2,
+            "mid": "m2",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "again"
+                }
+              ]
+            }
+          }
+        ],
+        "now": 1790000123000
+      },
+      "provider_counter": null,
+      "next_version": 2
+    },
+    {
+      "name": "a tool step after the cursor, with usage",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "request_id": "cr-000042",
+        "lineage_id": "lin_7",
+        "step_id": "st_88",
+        "step_kind": "tool_step",
+        "model": "anthropic/claude-opus-4-5",
+        "variant": "thinking",
+        "context_window": 200000,
+        "output_limit": 64000,
+        "previous_usage": {
+          "input": 151000,
+          "cache_read": 148000,
+          "cache_write": 3000,
+          "output": 900,
+          "completed_at": 1790000120000,
+          "finish_reason": "tool_use"
+        },
+        "estimate": {
+          "request_tokens": 152000,
+          "previous_input": 151000
+        },
+        "newest": {
+          "ordinal": 44,
+          "mid": "m44"
+        },
+        "last_applied": {
+          "compaction_id": "mc:snap-118",
+          "version": 7
+        },
+        "after_ordinal": 42,
+        "messages": [
+          {
+            "ordinal": 43,
+            "mid": "m43",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "tool result"
+                }
+              ]
+            }
+          },
+          {
+            "ordinal": 44,
+            "mid": "m44",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "assistant text"
+                }
+              ]
+            }
+          }
+        ],
+        "now": 1790000123000
+      },
+      "provider_counter": 7,
+      "next_version": 8
+    },
+    {
+      "name": "after an overflow: a provider code and no usage",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "request_id": "cr-000042",
+        "lineage_id": "lin_7",
+        "step_id": "st_88",
+        "step_kind": "user_turn",
+        "model": "anthropic/claude-opus-4-5",
+        "previous_provider_code": "context_length_exceeded",
+        "estimate": {
+          "request_tokens": 152000
+        },
+        "newest": {
+          "ordinal": 44,
+          "mid": "m44"
+        },
+        "last_applied": {
+          "compaction_id": "mc:snap-118",
+          "version": 7
+        },
+        "after_ordinal": 44,
+        "messages": [],
+        "now": 1790000123000
+      },
+      "provider_counter": null,
+      "next_version": 8
+    },
+    {
+      "name": "a prefix rebuild on a model switch, window unresolved",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "request_id": "cr-000042",
+        "lineage_id": "lin_7",
+        "step_id": "st_88",
+        "step_kind": "user_turn",
+        "model": "vendor/new-model",
+        "estimate": {
+          "request_tokens": 152000
+        },
+        "prefix_rebuilding": {
+          "reason": "model_switch"
+        },
+        "newest": {
+          "ordinal": 44,
+          "mid": "m44"
+        },
+        "last_applied": {
+          "compaction_id": "mc:snap-118",
+          "version": 7
+        },
+        "after_ordinal": 44,
+        "messages": [],
+        "now": 1790000123000
+      },
+      "provider_counter": 3,
+      "next_version": 8
+    },
+    {
+      "name": "the provider's last answer was not applied",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "request_id": "cr-000042",
+        "lineage_id": "lin_7",
+        "step_id": "st_88",
+        "step_kind": "user_turn",
+        "model": "anthropic/claude-opus-4-5",
+        "estimate": {
+          "request_tokens": 152000
+        },
+        "newest": {
+          "ordinal": 44,
+          "mid": "m44"
+        },
+        "last_applied": {
+          "compaction_id": "mc:snap-118",
+          "version": 7
+        },
+        "last_not_applied": {
+          "compaction_id": "mc:snap-119",
+          "version": 8,
+          "reason": "structural"
+        },
+        "after_ordinal": 44,
+        "messages": [],
+        "now": 1790000123000
+      },
+      "provider_counter": 8,
+      "next_version": 9
+    },
+    {
+      "name": "messages capped by bytes: more follow",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "request_id": "cr-000042",
+        "lineage_id": "lin_7",
+        "step_id": "st_88",
+        "step_kind": "user_turn",
+        "model": "anthropic/claude-opus-4-5",
+        "estimate": {
+          "request_tokens": 152000
+        },
+        "newest": {
+          "ordinal": 900,
+          "mid": "m900"
+        },
+        "last_applied": {
+          "compaction_id": "mc:snap-118",
+          "version": 7
+        },
+        "after_ordinal": 10,
+        "messages": [
+          {
+            "ordinal": 11,
+            "mid": "m11",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "a"
+                }
+              ]
+            }
+          },
+          {
+            "ordinal": 12,
+            "mid": "m12",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "b"
+                }
+              ]
+            }
+          }
+        ],
+        "more": true,
+        "now": 1790000123000
+      },
+      "provider_counter": null,
+      "next_version": 8
+    }
+  ],
+  "tolerated": [
+    {
+      "name": "runner extras on the status and on a message",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "request_id": "cr-000042",
+        "lineage_id": "lin_7",
+        "step_id": "st_88",
+        "step_kind": "user_turn",
+        "model": "anthropic/claude-opus-4-5",
+        "estimate": {
+          "request_tokens": 152000
+        },
+        "newest": {
+          "ordinal": 2,
+          "mid": "m2"
+        },
+        "last_applied": {
+          "compaction_id": "h",
+          "version": 1
+        },
+        "messages": [
+          {
+            "ordinal": 2,
+            "mid": "m2",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "x"
+                }
+              ]
+            },
+            "run": {
+              "run_id": "r1",
+              "episode": "e1",
+              "final": false
+            }
+          }
+        ],
+        "now": 1790000123000,
+        "runner_pressure": 0.91
+      }
+    },
+    {
+      "name": "an unknown step kind decodes",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "request_id": "cr-000042",
+        "lineage_id": "lin_7",
+        "step_id": "st_88",
+        "step_kind": "compaction_retry",
+        "model": "anthropic/claude-opus-4-5",
+        "estimate": {
+          "request_tokens": 152000
+        },
+        "last_applied": {
+          "compaction_id": "h",
+          "version": 1
+        },
+        "messages": [],
+        "now": 1790000123000
+      }
+    }
+  ],
+  "undecodable": [
+    {
+      "name": "no request id",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "lineage_id": "lin_7",
+        "step_id": "st_88",
+        "step_kind": "user_turn",
+        "model": "anthropic/claude-opus-4-5",
+        "estimate": {
+          "request_tokens": 152000
+        },
+        "messages": [],
+        "now": 1790000123000
+      }
+    },
+    {
+      "name": "no lineage",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "request_id": "cr-000042",
+        "step_id": "st_88",
+        "step_kind": "user_turn",
+        "model": "anthropic/claude-opus-4-5",
+        "estimate": {
+          "request_tokens": 152000
+        },
+        "messages": [],
+        "now": 1790000123000
+      }
+    },
+    {
+      "name": "no messages member",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "request_id": "cr-000042",
+        "lineage_id": "lin_7",
+        "step_id": "st_88",
+        "step_kind": "user_turn",
+        "model": "anthropic/claude-opus-4-5",
+        "estimate": {
+          "request_tokens": 152000
+        },
+        "now": 1790000123000
+      }
+    },
+    {
+      "name": "a cursor that is not a number",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "request_id": "cr-000042",
+        "lineage_id": "lin_7",
+        "step_id": "st_88",
+        "step_kind": "user_turn",
+        "model": "anthropic/claude-opus-4-5",
+        "estimate": {
+          "request_tokens": 152000
+        },
+        "after_ordinal": "m42",
+        "messages": [],
+        "now": 1790000123000
+      }
+    }
+  ],
+  "inconsistent": [
+    {
+      "name": "a message at the cursor",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "request_id": "cr-000042",
+        "lineage_id": "lin_7",
+        "step_id": "st_88",
+        "step_kind": "user_turn",
+        "model": "anthropic/claude-opus-4-5",
+        "estimate": {
+          "request_tokens": 152000
+        },
+        "newest": {
+          "ordinal": 44,
+          "mid": "m44"
+        },
+        "after_ordinal": 43,
+        "messages": [
+          {
+            "ordinal": 43,
+            "mid": "m43",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "x"
+                }
+              ]
+            }
+          },
+          {
+            "ordinal": 44,
+            "mid": "m44",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "y"
+                }
+              ]
+            }
+          }
+        ],
+        "now": 1790000123000
+      },
+      "problem": "messages_out_of_order"
+    },
+    {
+      "name": "messages out of order",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "request_id": "cr-000042",
+        "lineage_id": "lin_7",
+        "step_id": "st_88",
+        "step_kind": "user_turn",
+        "model": "anthropic/claude-opus-4-5",
+        "estimate": {
+          "request_tokens": 152000
+        },
+        "newest": {
+          "ordinal": 44,
+          "mid": "m44"
+        },
+        "after_ordinal": 40,
+        "messages": [
+          {
+            "ordinal": 44,
+            "mid": "m44",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "y"
+                }
+              ]
+            }
+          },
+          {
+            "ordinal": 43,
+            "mid": "m43",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "x"
+                }
+              ]
+            }
+          }
+        ],
+        "now": 1790000123000
+      },
+      "problem": "messages_out_of_order"
+    },
+    {
+      "name": "a message newer than newest",
+      "request": {
+        "session": "ses_01J9Z",
+        "harness": "broca",
+        "request_id": "cr-000042",
+        "lineage_id": "lin_7",
+        "step_id": "st_88",
+        "step_kind": "user_turn",
+        "model": "anthropic/claude-opus-4-5",
+        "estimate": {
+          "request_tokens": 152000
+        },
+        "newest": {
+          "ordinal": 43,
+          "mid": "m43"
+        },
+        "after_ordinal": 40,
+        "messages": [
+          {
+            "ordinal": 44,
+            "mid": "m44",
+            "message": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "y"
+                }
+              ]
+            }
+          }
+        ],
+        "now": 1790000123000
+      },
+      "problem": "message_after_newest"
+    }
+  ]
+}

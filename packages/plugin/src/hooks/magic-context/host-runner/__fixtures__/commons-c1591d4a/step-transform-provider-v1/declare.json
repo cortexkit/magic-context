@@ -1,0 +1,335 @@
+{
+  "requests": [
+    {
+      "name": "a plan item with a preset and the composition",
+      "request": {
+        "preset": "head",
+        "params": {},
+        "composition": {
+          "providers": [
+            {
+              "provider": "aft",
+              "tools": [
+                {
+                  "name": "read",
+                  "capabilities": [
+                    "code.read/v1"
+                  ]
+                },
+                {
+                  "name": "bash",
+                  "capabilities": [
+                    "shell.exec/v1"
+                  ]
+                }
+              ]
+            },
+            {
+              "provider": "magic-context",
+              "tools": []
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "a preflight call before the composition exists",
+      "request": {
+        "params": {
+          "tags": "off"
+        }
+      }
+    }
+  ],
+  "declarations": [
+    {
+      "name": "tags, recall and cleanup, with the reduction owner's replace",
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "pre_user",
+            "ops": [
+              "prepend",
+              "append",
+              "replace"
+            ],
+            "on_unavailable": "pass",
+            "budget_ms": 1500
+          },
+          {
+            "hook": "post_assistant",
+            "ops": [
+              "prepend",
+              "replace"
+            ],
+            "budget_ms": 500
+          },
+          {
+            "hook": "post_tool",
+            "ops": [
+              "prepend",
+              "append"
+            ],
+            "on_unavailable": "pass",
+            "budget_ms": 500
+          }
+        ]
+      },
+      "effective_on_unavailable": [
+        "pass",
+        "pass",
+        "pass"
+      ]
+    },
+    {
+      "name": "a guard in every pre_tool phase; absent on_unavailable is refuse",
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "pre_tool",
+            "phase": "mutate",
+            "tools": [
+              "bash"
+            ],
+            "ops": [],
+            "budget_ms": 200
+          },
+          {
+            "hook": "pre_tool",
+            "phase": "validate",
+            "ops": [],
+            "on_unavailable": "refuse",
+            "budget_ms": 200
+          },
+          {
+            "hook": "pre_tool",
+            "phase": "approve",
+            "tools": [
+              "bash",
+              "edit"
+            ],
+            "ops": [],
+            "budget_ms": 200
+          },
+          {
+            "hook": "post_tool",
+            "tools": [
+              "bash"
+            ],
+            "ops": [
+              "append"
+            ],
+            "budget_ms": 300
+          }
+        ]
+      },
+      "effective_on_unavailable": [
+        "refuse",
+        "refuse",
+        "refuse",
+        "refuse"
+      ]
+    },
+    {
+      "name": "nothing to declare",
+      "declaration": {
+        "subscriptions": []
+      },
+      "effective_on_unavailable": []
+    }
+  ],
+  "malformed": [
+    {
+      "name": "phase on post_tool",
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "post_tool",
+            "phase": "validate",
+            "ops": [
+              "append"
+            ],
+            "budget_ms": 100
+          }
+        ]
+      },
+      "problem": "phase_outside_pre_tool"
+    },
+    {
+      "name": "pre_tool without a phase",
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "pre_tool",
+            "ops": [],
+            "budget_ms": 100
+          }
+        ]
+      },
+      "problem": "missing_phase"
+    },
+    {
+      "name": "ops on pre_tool",
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "pre_tool",
+            "phase": "mutate",
+            "ops": [
+              "append"
+            ],
+            "budget_ms": 100
+          }
+        ]
+      },
+      "problem": "ops_on_pre_tool"
+    },
+    {
+      "name": "no ops on pre_user",
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "pre_user",
+            "ops": [],
+            "budget_ms": 100
+          }
+        ]
+      },
+      "problem": "no_ops"
+    },
+    {
+      "name": "tools on pre_user",
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "pre_user",
+            "tools": [
+              "read"
+            ],
+            "ops": [
+              "append"
+            ],
+            "budget_ms": 100
+          }
+        ]
+      },
+      "problem": "tools_outside_tool_hooks"
+    },
+    {
+      "name": "refuse on post_assistant",
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "post_assistant",
+            "ops": [
+              "append"
+            ],
+            "on_unavailable": "refuse",
+            "budget_ms": 100
+          }
+        ]
+      },
+      "problem": "refuse_on_post_assistant"
+    },
+    {
+      "name": "zero budget",
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "post_tool",
+            "ops": [
+              "append"
+            ],
+            "budget_ms": 0
+          }
+        ]
+      },
+      "problem": "zero_budget"
+    }
+  ],
+  "undecodable": [
+    {
+      "name": "unknown hook",
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "pre_model",
+            "ops": [
+              "append"
+            ],
+            "budget_ms": 100
+          }
+        ]
+      }
+    },
+    {
+      "name": "camel-case hook",
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "PreUser",
+            "ops": [
+              "append"
+            ],
+            "budget_ms": 100
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown phase",
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "pre_tool",
+            "phase": "audit",
+            "ops": [],
+            "budget_ms": 100
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown op",
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "post_tool",
+            "ops": [
+              "insert"
+            ],
+            "budget_ms": 100
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown on_unavailable",
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "post_tool",
+            "ops": [
+              "append"
+            ],
+            "on_unavailable": "skip",
+            "budget_ms": 100
+          }
+        ]
+      }
+    },
+    {
+      "name": "no budget",
+      "declaration": {
+        "subscriptions": [
+          {
+            "hook": "post_tool",
+            "ops": [
+              "append"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

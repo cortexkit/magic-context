@@ -1,0 +1,89 @@
+{
+  "canonical": [
+    {
+      "name": "required ops, no runner group",
+      "answer": {
+        "majors": [
+          {"version": "step-transform-provider/v1", "ops": ["role.describe", "transform.declare", "transform.hook"], "stability": "alpha"}
+        ],
+        "implementation_version": "0.1.0",
+        "capabilities": []
+      }
+    },
+    {
+      "name": "needs transcript reads from the runner",
+      "answer": {
+        "majors": [
+          {"version": "step-transform-provider/v1", "ops": ["role.describe", "transform.declare", "transform.hook"], "stability": "alpha"}
+        ],
+        "implementation_version": "0.1.0",
+        "capabilities": [],
+        "runner_groups": ["transcript_reads"]
+      }
+    }
+  ],
+  "accepted": [
+    {
+      "name": "missing stability is alpha",
+      "answer": {
+        "majors": [{"version": "step-transform-provider/v1", "ops": ["role.describe", "transform.declare", "transform.hook"]}],
+        "implementation_version": "0.1.0"
+      },
+      "stability": "alpha"
+    },
+    {
+      "name": "unknown fields, majors, ops and stability are tolerated",
+      "answer": {
+        "majors": [
+          {"version": "step-transform-provider/v1", "ops": ["role.describe", "transform.declare", "transform.hook", "vendor.extra"], "stability": "experimental"},
+          {"version": "step-transform-provider/v2", "ops": ["role.describe"], "stability": "alpha"}
+        ],
+        "implementation_version": "0.1.0",
+        "capabilities": ["vendor_capability"],
+        "future_field": {"x": 1}
+      },
+      "stability": "experimental"
+    },
+    {
+      "name": "runner declares what the provider needs",
+      "answer": {
+        "majors": [{"version": "step-transform-provider/v1", "ops": ["role.describe", "transform.declare", "transform.hook"], "stability": "alpha"}],
+        "implementation_version": "0.1.0",
+        "runner_groups": ["transcript_reads", "model_view"]
+      },
+      "stability": "alpha",
+      "runner_declares": ["transcript_reads", "model_view", "steer"],
+      "unmet_runner_groups": []
+    },
+    {
+      "name": "runner lacks a group the provider needs",
+      "answer": {
+        "majors": [{"version": "step-transform-provider/v1", "ops": ["role.describe", "transform.declare", "transform.hook"], "stability": "alpha"}],
+        "implementation_version": "0.1.0",
+        "runner_groups": ["transcript_reads", "model_view"]
+      },
+      "stability": "alpha",
+      "runner_declares": ["model_view"],
+      "unmet_runner_groups": ["transcript_reads"]
+    }
+  ],
+  "refused": [
+    {"name": "not an object", "answer": ["step-transform-provider/v1"], "problem": "not_an_object"},
+    {"name": "no majors", "answer": {"implementation_version": "0.1.0"}, "problem": "undecodable"},
+    {
+      "name": "another role only",
+      "answer": {"majors": [{"version": "tool-provider/v1", "ops": ["role.describe", "tool.catalog"], "stability": "alpha"}], "implementation_version": "0.1.0"},
+      "problem": "missing_major"
+    },
+    {
+      "name": "no declare op",
+      "answer": {"majors": [{"version": "step-transform-provider/v1", "ops": ["role.describe", "transform.hook"], "stability": "alpha"}], "implementation_version": "0.1.0"},
+      "problem": "missing_op"
+    },
+    {
+      "name": "no hook op",
+      "answer": {"majors": [{"version": "step-transform-provider/v1", "ops": ["role.describe", "transform.declare"], "stability": "alpha"}], "implementation_version": "0.1.0"},
+      "problem": "missing_op"
+    }
+  ]
+}

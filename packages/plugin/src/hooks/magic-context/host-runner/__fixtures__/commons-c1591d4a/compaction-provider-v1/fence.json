@@ -1,0 +1,470 @@
+{
+  "cases": [
+    {
+      "name": "setup's initial message on an empty lineage",
+      "state": {
+        "newest_request_id": "cr-1"
+      },
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-1",
+        "compaction": {
+          "compaction_id": "head",
+          "version": 1,
+          "range": {
+            "from": 0,
+            "to": 0
+          },
+          "replacement": []
+        }
+      },
+      "disposition": "act"
+    },
+    {
+      "name": "a higher version answering the newest request",
+      "state": {
+        "newest_request_id": "cr-9",
+        "last_applied_version": 6,
+        "newest_ordinal": 50
+      },
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-9",
+        "compaction": {
+          "compaction_id": "snap",
+          "version": 7,
+          "range": {
+            "from": 3,
+            "to": 41
+          },
+          "replacement": []
+        }
+      },
+      "disposition": "act"
+    },
+    {
+      "name": "a range through the newest message",
+      "state": {
+        "newest_request_id": "cr-9",
+        "last_applied_version": 6,
+        "newest_ordinal": 50
+      },
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-9",
+        "compaction": {
+          "compaction_id": "snap",
+          "version": 7,
+          "range": {
+            "from": 0,
+            "to": 51
+          },
+          "replacement": []
+        }
+      },
+      "disposition": "act"
+    },
+    {
+      "name": "a version jump is fine",
+      "state": {
+        "newest_request_id": "cr-9",
+        "last_applied_version": 6,
+        "newest_ordinal": 50
+      },
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-9",
+        "compaction": {
+          "compaction_id": "snap",
+          "version": 900,
+          "range": {
+            "from": 3,
+            "to": 41
+          },
+          "replacement": []
+        }
+      },
+      "disposition": "act"
+    },
+    {
+      "name": "noop answering the newest request",
+      "state": {
+        "newest_request_id": "cr-9",
+        "last_applied_version": 6,
+        "newest_ordinal": 50
+      },
+      "answer": {
+        "answer": "noop",
+        "request_id": "cr-9"
+      },
+      "disposition": "act"
+    },
+    {
+      "name": "wait answering the newest request",
+      "state": {
+        "newest_request_id": "cr-9",
+        "last_applied_version": 6,
+        "newest_ordinal": 50
+      },
+      "answer": {
+        "answer": "wait",
+        "request_id": "cr-9",
+        "reason": "busy",
+        "bound_ms": 1000
+      },
+      "disposition": "act"
+    },
+    {
+      "name": "refuse answering the newest request",
+      "state": {
+        "newest_request_id": "cr-9",
+        "last_applied_version": 6,
+        "newest_ordinal": 50
+      },
+      "answer": {
+        "answer": "refuse",
+        "request_id": "cr-9",
+        "code": "provider_busy",
+        "reason": "busy"
+      },
+      "disposition": "act"
+    },
+    {
+      "name": "stale: the same version as the last applied",
+      "state": {
+        "newest_request_id": "cr-9",
+        "last_applied_version": 7,
+        "newest_ordinal": 50
+      },
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-9",
+        "compaction": {
+          "compaction_id": "snap",
+          "version": 7,
+          "range": {
+            "from": 3,
+            "to": 41
+          },
+          "replacement": []
+        }
+      },
+      "disposition": "stale_version"
+    },
+    {
+      "name": "stale: a lower version",
+      "state": {
+        "newest_request_id": "cr-9",
+        "last_applied_version": 7,
+        "newest_ordinal": 50
+      },
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-9",
+        "compaction": {
+          "compaction_id": "snap",
+          "version": 5,
+          "range": {
+            "from": 3,
+            "to": 41
+          },
+          "replacement": []
+        }
+      },
+      "disposition": "stale_version"
+    },
+    {
+      "name": "fence: a delayed answer to an earlier request, with a higher version",
+      "state": {
+        "newest_request_id": "cr-10",
+        "last_applied_version": 5,
+        "newest_ordinal": 40
+      },
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-9",
+        "compaction": {
+          "compaction_id": "old",
+          "version": 9,
+          "range": {
+            "from": 0,
+            "to": 30
+          },
+          "replacement": []
+        }
+      },
+      "disposition": "superseded_request"
+    },
+    {
+      "name": "fence: a delayed noop never moves the cursor",
+      "state": {
+        "newest_request_id": "cr-10",
+        "last_applied_version": 5,
+        "newest_ordinal": 40
+      },
+      "answer": {
+        "answer": "noop",
+        "request_id": "cr-9"
+      },
+      "disposition": "superseded_request"
+    },
+    {
+      "name": "late: an answer to the newest request after its deadline, with a higher version",
+      "state": {
+        "newest_request_id": "cr-10",
+        "last_applied_version": 5,
+        "newest_ordinal": 40,
+        "newest_deadline_ms": 1727780402000
+      },
+      "arrived_at_ms": 1727780402600,
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-10",
+        "compaction": {
+          "compaction_id": "c-late",
+          "version": 6,
+          "range": {
+            "from": 0,
+            "to": 30
+          },
+          "replacement": []
+        }
+      },
+      "disposition": "late"
+    },
+    {
+      "name": "late: an answer arriving exactly at the deadline is late",
+      "state": {
+        "newest_request_id": "cr-10",
+        "last_applied_version": 5,
+        "newest_ordinal": 40,
+        "newest_deadline_ms": 1727780402000
+      },
+      "arrived_at_ms": 1727780402000,
+      "answer": {
+        "answer": "noop",
+        "request_id": "cr-10"
+      },
+      "disposition": "late"
+    },
+    {
+      "name": "in time: the same answer before the deadline applies",
+      "state": {
+        "newest_request_id": "cr-10",
+        "last_applied_version": 5,
+        "newest_ordinal": 40,
+        "newest_deadline_ms": 1727780402000
+      },
+      "arrived_at_ms": 1727780401999,
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-10",
+        "compaction": {
+          "compaction_id": "c-late",
+          "version": 6,
+          "range": {
+            "from": 0,
+            "to": 30
+          },
+          "replacement": []
+        }
+      },
+      "disposition": "act"
+    },
+    {
+      "name": "fence before deadline: an older request's answer after the deadline is superseded",
+      "state": {
+        "newest_request_id": "cr-10",
+        "last_applied_version": 5,
+        "newest_ordinal": 40,
+        "newest_deadline_ms": 1727780402000
+      },
+      "arrived_at_ms": 1727780402600,
+      "answer": {
+        "answer": "noop",
+        "request_id": "cr-9"
+      },
+      "disposition": "superseded_request"
+    },
+    {
+      "name": "fence: an answer naming a request never issued is recorded, not applied",
+      "state": {
+        "newest_request_id": "cr-10",
+        "last_applied_version": 5,
+        "newest_ordinal": 40
+      },
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-11",
+        "compaction": {
+          "compaction_id": "c-ahead",
+          "version": 6,
+          "range": {
+            "from": 0,
+            "to": 30
+          },
+          "replacement": []
+        }
+      },
+      "disposition": "superseded_request"
+    },
+    {
+      "name": "fence: a delayed refuse never ends a run that moved on",
+      "state": {
+        "newest_request_id": "cr-10",
+        "last_applied_version": 5,
+        "newest_ordinal": 40
+      },
+      "answer": {
+        "answer": "refuse",
+        "request_id": "cr-9",
+        "code": "provider_busy",
+        "reason": "busy"
+      },
+      "disposition": "superseded_request"
+    },
+    {
+      "name": "fence: a delayed wait never holds a step",
+      "state": {
+        "newest_request_id": "cr-10",
+        "last_applied_version": 5,
+        "newest_ordinal": 40
+      },
+      "answer": {
+        "answer": "wait",
+        "request_id": "cr-9",
+        "reason": "busy",
+        "bound_ms": 1000
+      },
+      "disposition": "superseded_request"
+    },
+    {
+      "name": "fence before version: a stale answer to an old request is superseded",
+      "state": {
+        "newest_request_id": "cr-10",
+        "last_applied_version": 5,
+        "newest_ordinal": 40
+      },
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-9",
+        "compaction": {
+          "compaction_id": "old",
+          "version": 2,
+          "range": {
+            "from": 0,
+            "to": 30
+          },
+          "replacement": []
+        }
+      },
+      "disposition": "superseded_request"
+    },
+    {
+      "name": "a range past the newest message",
+      "state": {
+        "newest_request_id": "cr-9",
+        "last_applied_version": 6,
+        "newest_ordinal": 50
+      },
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-9",
+        "compaction": {
+          "compaction_id": "snap",
+          "version": 7,
+          "range": {
+            "from": 3,
+            "to": 52
+          },
+          "replacement": []
+        }
+      },
+      "disposition": "range_beyond_newest"
+    },
+    {
+      "name": "a non-empty range on an empty lineage",
+      "state": {
+        "newest_request_id": "cr-1"
+      },
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-1",
+        "compaction": {
+          "compaction_id": "head",
+          "version": 1,
+          "range": {
+            "from": 0,
+            "to": 1
+          },
+          "replacement": []
+        }
+      },
+      "disposition": "range_beyond_newest"
+    },
+    {
+      "name": "version zero on a session with nothing applied",
+      "state": {
+        "newest_request_id": "cr-1"
+      },
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-1",
+        "compaction": {
+          "compaction_id": "head",
+          "version": 0,
+          "range": {
+            "from": 0,
+            "to": 0
+          },
+          "replacement": []
+        }
+      },
+      "disposition": "act"
+    },
+    {
+      "name": "malformed: inverted range",
+      "state": {
+        "newest_request_id": "cr-9",
+        "last_applied_version": 6,
+        "newest_ordinal": 50
+      },
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-9",
+        "compaction": {
+          "compaction_id": "snap",
+          "version": 7,
+          "range": {
+            "from": 41,
+            "to": 3
+          },
+          "replacement": []
+        }
+      },
+      "disposition": "range_inverted"
+    },
+    {
+      "name": "after version zero applied, zero again is stale",
+      "state": {
+        "newest_request_id": "cr-2",
+        "last_applied_version": 0,
+        "newest_ordinal": 3
+      },
+      "answer": {
+        "answer": "compaction_message",
+        "request_id": "cr-2",
+        "compaction": {
+          "compaction_id": "c",
+          "version": 0,
+          "range": {
+            "from": 0,
+            "to": 0
+          },
+          "replacement": []
+        }
+      },
+      "disposition": "stale_version"
+    }
+  ]
+}
