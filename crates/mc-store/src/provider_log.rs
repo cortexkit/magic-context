@@ -444,6 +444,18 @@ impl McStore {
     ) -> Result<Option<ProviderConversation>, McStoreError> {
         Ok(self.inner.with_conn(|conn| conversation_tx(conn, key))?)
     }
+    /// Read only the lineage's ordinal origin and ancestry. Sparse status pages
+    /// need this metadata even when they carry no messages; hydrating the message
+    /// log to recover it would turn a noop into whole-history work.
+    pub fn load_provider_lineage(
+        &self,
+        key: &ProviderSessionKey,
+        lineage_id: &str,
+    ) -> Result<Option<ProviderLineage>, McStoreError> {
+        Ok(self
+            .inner
+            .with_conn(|conn| lineage_tx(conn, &key.conversation_key(), lineage_id))?)
+    }
     pub fn save_provider_conversation(
         &self,
         key: &ProviderSessionKey,
@@ -650,3 +662,58 @@ impl McStore {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod lineage_metadata_tests {
+    use super::*;
+    use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
+
+    #[test]
+    fn lineage_metadata_reads_origin_and_ancestry_without_message_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&StorageDescriptor {
+            module_id: "magic-context".into(),
+            storage_namespace: crate::NS.into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: dir.path().join("store.db").to_string_lossy().into_owned(),
+            },
+        })
+        .unwrap();
+        let key = ProviderSessionKey {
+            project_root: "/project".into(),
+            session: "session".into(),
+            harness: "opencode".into(),
+        };
+        let root = ProviderLineage {
+            lineage_id: "root".into(),
+            first_ordinal: 4_000,
+            descends_from: None,
+            through_ordinal: None,
+        };
+        let child = ProviderLineage {
+            lineage_id: "child".into(),
+            first_ordinal: 4_001,
+            descends_from: Some("root".into()),
+            through_ordinal: Some(4_000),
+        };
+        store.inner.with_conn_fenced(|conn| {
+            let conv = key.conversation_key();
+            conn.execute("INSERT INTO mc_provider_lineages_v1 VALUES (?1,'root',4000,NULL,NULL,'session')", [&conv])?;
+            conn.execute("INSERT INTO mc_provider_lineages_v1 VALUES (?1,'child',4001,'root',4000,'session')", [&conv])?;
+            // Deliberately unreadable JSON proves this query cannot be satisfied
+            // by decoding a compatibility record or a message payload.
+            conn.execute("INSERT INTO mc_provider_messages_v1 VALUES (?1,'root',4000,'m4000',x'ff','session')", [&conv])?;
+            Ok(())
+        }).unwrap();
+        assert_eq!(
+            store.load_provider_lineage(&key, "root").unwrap(),
+            Some(root)
+        );
+        assert_eq!(
+            store.load_provider_lineage(&key, "child").unwrap(),
+            Some(child)
+        );
+        assert_eq!(store.load_provider_lineage(&key, "absent").unwrap(), None);
+    }
+}
