@@ -456,7 +456,8 @@ fn late_hard_view_covers_new_users_and_renders_full_engine_temporal_marker() {
         last_applied_version: None,
         last_not_applied: None,
     };
-    let mut setup_template=request(&[first.clone()],false);setup_template.kind="compaction.host".into();
+    let mut setup_template = request(&[first.clone()], false);
+    setup_template.kind = "compaction.host".into();
     transform::compaction::setup(
         late.store.get().unwrap(),
         &setup_template,
@@ -488,7 +489,8 @@ fn late_hard_view_covers_new_users_and_renders_full_engine_temporal_marker() {
     );
     status.newest_ordinal = Some(2);
     status.prefix_rebuilding = true;
-    let mut late_template=request(&[first,second],false);late_template.kind="compaction.host".into();
+    let mut late_template = request(&[first, second], false);
+    late_template.kind = "compaction.host".into();
     let output = transform::compaction::step(
         late.store.get().unwrap(),
         &late_template,
@@ -828,15 +830,47 @@ async fn bounded_policy_summary_does_not_return_the_entire_known_metadata_lineag
 
 #[tokio::test]
 async fn no_exact_plan_is_defer_even_if_a_preflight_candidate_claims_hard() {
-    let hdir=tempfile::tempdir().unwrap();let fdir=tempfile::tempdir().unwrap();let (h,hproject)=fixture(hdir.path(),0.0,true);let (full,fproject)=fixture(fdir.path(),0.0,true);
-    let plan=json!({"serializer_profile":"opencode-aisdk","observation":"answer","auto_search_min_prompt_chars":0,"auto_search_score_threshold":0.0});
-    super::host_tests::response(super::host_tests::dispatch(&h,7,"transform.declare",json!({"params":plan})).await);
-    for _ in 0..2 {transform::transform(h.store.get().unwrap(),&request(&[baseline()],false),&context(&hproject,0.0,true,1)).unwrap();transform::transform(full.store.get().unwrap(),&request(&[baseline()],false),&context(&fproject,0.0,true,1)).unwrap();}
-    let raw=message("m2","user",json!([{"id":"text","type":"text","text":"second"}]),2,false);
+    let hdir = tempfile::tempdir().unwrap();
+    let fdir = tempfile::tempdir().unwrap();
+    let (h, hproject) = fixture(hdir.path(), 0.0, true);
+    let (full, fproject) = fixture(fdir.path(), 0.0, true);
+    let plan = json!({"serializer_profile":"opencode-aisdk","observation":"answer","auto_search_min_prompt_chars":0,"auto_search_score_threshold":0.0});
+    super::host_tests::response(
+        super::host_tests::dispatch(&h, 7, "transform.declare", json!({"params":plan})).await,
+    );
+    for _ in 0..2 {
+        transform::transform(
+            h.store.get().unwrap(),
+            &request(&[baseline()], false),
+            &context(&hproject, 0.0, true, 1),
+        )
+        .unwrap();
+        transform::transform(
+            full.store.get().unwrap(),
+            &request(&[baseline()], false),
+            &context(&fproject, 0.0, true, 1),
+        )
+        .unwrap();
+    }
+    let raw = message(
+        "m2",
+        "user",
+        json!([{"id":"text","type":"text","text":"second"}]),
+        2,
+        false,
+    );
     super::host_tests::response(h.dispatch_value(7,json!({"method":"state_sync","session_id":"s","provider_pass":{"pass_id":"no-plan","lineage_id":"L","appended":[{"mid":"m2","ordinal":2,"message":raw}],"physical_tail":{"mid":"m2","ordinal":2},"prefix_mutation_permitted":true,"preflight_candidate":"hard","skip_facts":{"hard":true}}})).await);
-    let actual=host_message(&h,&raw,2,1).await;
-    let expected=transform::transform(full.store.get().unwrap(),&request(&[baseline(),raw],false),&context(&fproject,0.0,true,2)).unwrap();
-    let expected=scalars(&expected,&BTreeSet::from(["m2".into()]));
+    let actual = host_message(&h, &raw, 2, 1).await;
+    let expected = transform::transform(
+        full.store.get().unwrap(),
+        &request(&[baseline(), raw], false),
+        &context(&fproject, 0.0, true, 2),
+    )
+    .unwrap();
+    let expected = scalars(&expected, &BTreeSet::from(["m2".into()]));
     assert!(!expected["m2"][0].1.contains("<!--"));
-    assert_eq!(actual["parts"][0]["text"].as_str().unwrap(),expected["m2"][0].1);
+    assert_eq!(
+        actual["parts"][0]["text"].as_str().unwrap(),
+        expected["m2"][0].1
+    );
 }

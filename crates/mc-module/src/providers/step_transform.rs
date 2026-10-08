@@ -46,7 +46,7 @@ struct ProviderPassInput {
     appended: Vec<compact::status::StatusMessage>,
     physical_tail: Option<ProviderTail>,
     exact_pass_plan: Option<String>,
-    marker_hard_serves_frozen_prefix:Option<bool>,
+    marker_hard_serves_frozen_prefix: Option<bool>,
 }
 #[derive(Deserialize, Serialize)]
 struct ProviderTail {
@@ -363,7 +363,14 @@ impl McHandler {
             let pass_id = pass.pass_id.unwrap_or_else(|| {
                 sha256_hex(&serde_json::to_vec(&(&pass.lineage_id, &ids)).expect("pass identity"))
             });
-            if pass.exact_pass_plan.as_deref().is_some_and(|p|!matches!(p,"hard"|"migrate_hard"|"soft"|"defer"|"reject")) {return Err(invalid_field("provider_pass.exact_pass_plan","unknown exact engine plan"));}
+            if pass.exact_pass_plan.as_deref().is_some_and(|p| {
+                !matches!(p, "hard" | "migrate_hard" | "soft" | "defer" | "reject")
+            }) {
+                return Err(invalid_field(
+                    "provider_pass.exact_pass_plan",
+                    "unknown exact engine plan",
+                ));
+            }
             let context = json!({"pass_id":pass_id,"lineage_id":pass.lineage_id,"appended_ids":ids,"physical_tail":pass.physical_tail,"eligible_user_mid":eligible_user,"eligible_tool_block":eligible_tool,"exact_pass_plan":pass.exact_pass_plan,"marker_hard_serves_frozen_prefix":pass.marker_hard_serves_frozen_prefix});
             let messages = pass
                 .appended
