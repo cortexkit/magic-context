@@ -23,6 +23,7 @@ CREATE TABLE mc_provider_conversations_v2 (
     UNIQUE(project_root, session, harness)
 );
 CREATE INDEX mc_provider_conversations_session ON mc_provider_conversations_v2(session);
+CREATE INDEX mc_provider_conversations_engine_namespace ON mc_provider_conversations_v2(engine_namespace);
 
 CREATE TABLE mc_provider_lineages_v1 (
     conv_key TEXT NOT NULL,

@@ -216,6 +216,60 @@ fn surviving_policy_state_tx(
         .transpose()
         .map(|p| p.unwrap_or_else(|| json!({})))
 }
+
+/// Consume releases on the caller's transaction, so a rebuild and its queue
+/// drain cannot become separately durable. Repeated consumption is a no-op.
+pub fn consume_provider_drops_tx(
+    conn: &Connection,
+    key: &ProviderSessionKey,
+    numbers: &[i64],
+) -> rusqlite::Result<()> {
+    let conv = key.conversation_key();
+    for number in numbers {
+        if conn.execute(
+            "DELETE FROM mc_provider_pending_drops_v1 WHERE conv_key=?1 AND tag_number=?2",
+            params![conv, number],
+        )? == 0
+        {
+            continue;
+        }
+        let mut q=conn.prepare("SELECT a.answer_seq,a.policy_json,t.key,json_extract(t.value,'$.kind'),coalesce(json_extract(t.value,'$.token_count'),0) FROM mc_provider_hook_answers_v1 a,json_each(a.tags_json) t WHERE a.conv_key=?1 AND a.state IN ('pending','live') AND json_extract(t.value,'$.number')=?2")?;
+        let rows = q
+            .query_map(params![conv, number], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (seq, raw, index, kind, tokens) in rows {
+            let mut policy = parse(&raw)?;
+            let mut metrics: ProviderPolicyTotals =
+                serde_json::from_value(policy.get("metrics").cloned().unwrap_or_else(|| json!({})))
+                    .map_err(sql_json)?;
+            let delta = if kind == "tool_result" {
+                ProviderPolicyTotals {
+                    tool_tokens: metrics.tool_tokens,
+                    ..Default::default()
+                }
+            } else {
+                ProviderPolicyTotals {
+                    text_tokens: tokens.min(metrics.text_tokens).max(0),
+                    ..Default::default()
+                }
+            };
+            adjust_policy_tx(conn, &conv, &delta, -1)?;
+            metrics.tool_tokens -= delta.tool_tokens;
+            metrics.text_tokens -= delta.text_tokens;
+            policy["metrics"] = serde_json::to_value(metrics).map_err(sql_json)?;
+            conn.execute("UPDATE mc_provider_hook_answers_v1 SET policy_json=?3,tags_json=json_set(tags_json,?4,true) WHERE conv_key=?1 AND answer_seq=?2",params![conv,seq,policy.to_string(),format!("$[{index}].consumed")])?;
+        }
+    }
+    Ok(())
+}
 pub struct ProviderHookWrite {
     pub answer: Option<ProviderHookAnswer>,
     pub counters: Value,
@@ -605,7 +659,7 @@ impl McStore {
         Ok(self.inner.with_conn(|conn| {
             let Some(c)=conversation_tx(conn,key)? else {return Ok(false)};
             for (ancestor,cut) in ancestry_tx(conn,&key.conversation_key(),&c.lineage_id)? {
-                let known:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM mc_provider_hook_answers_v1 a,json_each(a.tags_json) t WHERE a.conv_key=?1 AND a.lineage_id=?2 AND a.ordinal<=?3 AND a.state IN ('pending','live') AND a.legacy_json IS NULL AND json_extract(t.value,'$.number')=?4)",params![key.conversation_key(),ancestor.lineage_id,as_i64(cut)?,number],|r|r.get(0))?;
+                let known:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM mc_provider_hook_answers_v1 a,json_each(a.tags_json) t WHERE a.conv_key=?1 AND a.lineage_id=?2 AND a.ordinal<=?3 AND a.state IN ('pending','live') AND a.legacy_json IS NULL AND json_extract(t.value,'$.number')=?4 AND NOT coalesce(json_extract(t.value,'$.consumed'),false))",params![key.conversation_key(),ancestor.lineage_id,as_i64(cut)?,number],|r|r.get(0))?;
                 if known {return Ok(true)}
             }
             Ok(false)
@@ -826,7 +880,7 @@ impl McStore {
         self.inner.with_conn_fenced(|conn| {
             let conv=key.conversation_key();
             for number in numbers {
-                let known:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM mc_provider_hook_answers_v1 a,json_each(a.tags_json) t WHERE a.conv_key=?1 AND a.state IN ('pending','live') AND a.legacy_json IS NULL AND json_extract(t.value,'$.number')=?2)",params![conv,number],|r|r.get(0))?;
+                let known:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM mc_provider_hook_answers_v1 a,json_each(a.tags_json) t WHERE a.conv_key=?1 AND a.state IN ('pending','live') AND a.legacy_json IS NULL AND json_extract(t.value,'$.number')=?2 AND NOT coalesce(json_extract(t.value,'$.consumed'),false))",params![conv,number],|r|r.get(0))?;
                 if !known {return Err(rusqlite::Error::InvalidQuery)}
                 conn.execute("INSERT INTO mc_provider_pending_drops_v1 VALUES (?1,?2,json_extract(?1,'$[1]')) ON CONFLICT DO NOTHING",params![conv,number])?;
                 let mut q=conn.prepare("SELECT a.answer_seq,a.policy_json FROM mc_provider_hook_answers_v1 a,json_each(a.tags_json) t WHERE a.conv_key=?1 AND a.state IN ('pending','live') AND json_extract(t.value,'$.number')=?2")?;
@@ -843,6 +897,15 @@ impl McStore {
             }
             Ok(())
         })?;
+        Ok(())
+    }
+    pub fn consume_provider_drops(
+        &self,
+        key: &ProviderSessionKey,
+        numbers: &[i64],
+    ) -> Result<(), McStoreError> {
+        self.inner
+            .with_conn_fenced(|conn| consume_provider_drops_tx(conn, key, numbers))?;
         Ok(())
     }
     pub fn load_provider_pending_drops(
@@ -1077,5 +1140,113 @@ mod policy_tests {
             Ok(totals)
         }).unwrap();
         assert_eq!(recomputed, expected);
+    }
+
+    #[test]
+    fn provider_drop_consumption_is_atomic_with_engine_commit_and_never_requeues() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, key, l) = fixture(dir.path());
+        let core = crate::CoreState::default();
+        let meta = crate::ModuleMeta::default();
+        let version = store.commit("s", None, &core, &meta).unwrap();
+        let metrics = ProviderPolicyTotals {
+            tool_tokens: 80,
+            reclaimable_tokens: 80,
+            tool_outputs: 1,
+            ..Default::default()
+        };
+        allocate(
+            &store,
+            &key,
+            &l,
+            1,
+            metrics.clone(),
+            &[],
+            false,
+            ProviderPolicyTotals::default(),
+        );
+        store
+            .commit_provider_status(&key, &l, &[], Some(1), &[])
+            .unwrap();
+        store.queue_provider_drops(&key, &[1]).unwrap();
+        store
+            .append_pending_agent_drops("s", &["m1#0".into()], 1)
+            .unwrap();
+        let id = store.load_pending_agent_drops("s").unwrap()[0].id;
+        store.inner.with_conn(|conn|conn.execute_batch("CREATE TRIGGER fail_engine_drop_commit BEFORE DELETE ON pending_agent_drops BEGIN SELECT RAISE(ABORT,'injected failure before commit'); END;")).unwrap();
+        assert!(store
+            .commit_with_consumed_drops("s", Some(version), &core, &meta, &[id], None)
+            .is_err());
+        assert_eq!(store.load_provider_pending_drops(&key).unwrap(), [1]);
+        assert_eq!(store.load_pending_agent_drops("s").unwrap().len(), 1);
+        assert_eq!(
+            store.load_provider_policy_totals(&key).unwrap(),
+            ProviderPolicyTotals {
+                tool_tokens: 80,
+                ..Default::default()
+            }
+        );
+        assert_eq!(store.load_meta("s").unwrap().row_version, Some(version));
+        store
+            .inner
+            .with_conn(|conn| conn.execute_batch("DROP TRIGGER fail_engine_drop_commit"))
+            .unwrap();
+        let next = store
+            .commit_with_consumed_drops("s", Some(version), &core, &meta, &[id], None)
+            .unwrap();
+        assert!(store.load_provider_pending_drops(&key).unwrap().is_empty());
+        assert!(store.load_pending_agent_drops("s").unwrap().is_empty());
+        assert_eq!(
+            store.load_provider_policy_totals(&key).unwrap(),
+            ProviderPolicyTotals::default()
+        );
+        assert!(!store.provider_answer_tag_known(&key, 1).unwrap());
+        assert!(store.queue_provider_drops(&key, &[1]).is_err());
+        store.consume_provider_drops(&key, &[1, 1, 999]).unwrap();
+        store
+            .commit_with_consumed_drops("s", Some(next), &core, &meta, &[id], None)
+            .unwrap();
+        assert!(store.load_provider_pending_drops(&key).unwrap().is_empty());
+        assert_eq!(
+            store.load_provider_policy_totals(&key).unwrap(),
+            ProviderPolicyTotals::default()
+        );
+    }
+
+    #[test]
+    fn non_provider_consumption_uses_namespace_index_and_changes_no_provider_rows_or_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, key, _) = fixture(dir.path());
+        let before = store
+            .load_provider_conversation(&key)
+            .unwrap()
+            .unwrap()
+            .hook_counters_json;
+        store.inner.with_conn(|conn| {
+            for table in ["mc_provider_conversations_v2","mc_provider_hook_answers_v1","mc_provider_pending_drops_v1"] {
+                for op in ["INSERT","UPDATE","DELETE"] {conn.execute_batch(&format!("CREATE TRIGGER guard_{table}_{op} BEFORE {op} ON {table} BEGIN SELECT RAISE(ABORT,'non-provider commit wrote provider state'); END;"))?;}
+            }
+            let plan: String=conn.query_row("EXPLAIN QUERY PLAN SELECT project_root,session,harness FROM mc_provider_conversations_v2 WHERE engine_namespace=?1",["not-provider"],|r|r.get(3))?;
+            assert!(plan.contains("mc_provider_conversations_engine_namespace"),"{plan}");
+            Ok(())
+        }).unwrap();
+        let core = crate::CoreState::default();
+        let meta = crate::ModuleMeta::default();
+        store
+            .commit_with_consumed_drops("not-provider", None, &core, &meta, &[999], None)
+            .unwrap();
+        store.commit("control", None, &core, &meta).unwrap();
+        let encoded = |namespace: &str| {
+            store.inner.with_conn(|conn|conn.query_row("SELECT core_state,meta,section_index FROM mc_cache_state WHERE session_id=?1",[namespace],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))).unwrap()
+        };
+        assert_eq!(encoded("not-provider"), encoded("control"));
+        assert_eq!(
+            store
+                .load_provider_conversation(&key)
+                .unwrap()
+                .unwrap()
+                .hook_counters_json,
+            before
+        );
     }
 }
