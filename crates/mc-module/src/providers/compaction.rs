@@ -1,6 +1,9 @@
 //! Setup, step and durable wait work through the compaction engine adapter.
 use super::codec::Codec;
 use super::*;
+#[cfg(test)]
+#[path = "compaction_review_tests.rs"]
+mod compaction_review_tests;
 use mc_store::provider_records::{
     ProviderConversation, ProviderError, ProviderLineage, ProviderMessage, ProviderSubject,
     ProviderView,
