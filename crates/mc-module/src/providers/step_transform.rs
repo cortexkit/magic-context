@@ -54,6 +54,28 @@ struct ProviderTail {
     ordinal: u64,
 }
 
+/// An exact plan is scoped to the subjects synchronized for that pass. Retained
+/// context must not authorize a later, unsynchronized message in the lineage.
+fn exact_plan_for_subject(counters: &Value, lineage: &str, mid: &str) -> Option<mc_core::PassPlan> {
+    let pass = counters.get("pass_context")?;
+    if pass.get("lineage_id").and_then(Value::as_str) != Some(lineage)
+        || !pass
+            .get("appended_ids")
+            .and_then(Value::as_array)?
+            .iter()
+            .any(|id| id.as_str() == Some(mid))
+    {
+        return None;
+    }
+    match pass.get("exact_pass_plan").and_then(Value::as_str) {
+        Some("hard") => Some(mc_core::PassPlan::Hard),
+        Some("migrate_hard") => Some(mc_core::PassPlan::MigrateHard),
+        Some("soft") => Some(mc_core::PassPlan::Soft),
+        Some("defer") => Some(mc_core::PassPlan::Defer),
+        _ => None,
+    }
+}
+
 fn provider_policy_error(error: mc_store::provider_records::ProviderError) -> HandlerOutcome {
     match error {
         mc_store::provider_records::ProviderError::Transient(ref reason)
@@ -731,9 +753,7 @@ impl McHandler {
                     let state=&policy_state;
                     // A conservative preflight is not permission. With no exact
                     // engine plan, the hook is a defer; the rebuild owns its overlay.
-                    let exact_plan=match ctx.counters.pointer("/pass_context/exact_pass_plan").and_then(Value::as_str) {
-                        Some("hard")=>Some(mc_core::PassPlan::Hard),Some("migrate_hard")=>Some(mc_core::PassPlan::MigrateHard),Some("soft")=>Some(mc_core::PassPlan::Soft),Some("defer")=>Some(mc_core::PassPlan::Defer),_=>None,
-                    };
+                    let exact_plan=exact_plan_for_subject(&ctx.counters,lineage_id,mid);
                     let temporal_permitted=exact_plan.as_ref().is_some_and(|plan|transform::pass_plan_permits_prefix_mutation(plan,ctx.counters.pointer("/pass_context/marker_hard_serves_frozen_prefix").and_then(Value::as_bool).unwrap_or(false)));
                     for (index, target) in targets.iter().enumerate() {
                         if let Some((kind, source)) = transform::taggable_source(target) {
