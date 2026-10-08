@@ -1,6 +1,105 @@
-//! Strict Broca-native transcript and replacement codec.
+//! Provider codecs selected by the plan item's serializer profile.
 use super::*;
 use serde::Deserialize;
+
+/// Missing profile preserves the original Broca plan's strict native codec.
+/// Only profiles with a provider transcript codec are admitted here; accepting
+/// another engine profile would silently decode the runner's wrong schema.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // Provider handlers adopt this dispatch as their host lanes are wired.
+pub(super) enum Codec {
+    OwnedBroca,
+    OpencodeAiSdk,
+}
+
+#[allow(dead_code)]
+impl Codec {
+    /// Takes the plan item's opaque `params`, not the operation envelope.
+    pub fn from_params(params: &Value) -> Result<Self, HandlerOutcome> {
+        match params.get("serializer_profile") {
+            None => Ok(Self::OwnedBroca),
+            Some(Value::String(profile)) if profile == "owned-broca" => Ok(Self::OwnedBroca),
+            Some(Value::String(profile)) if profile == "opencode-aisdk" => Ok(Self::OpencodeAiSdk),
+            _ => Err(HandlerOutcome::ErrorWithDetail {
+                code: "invalid_params".into(),
+                message: "unknown provider serializer profile".into(),
+                detail: json!({"field":"params.serializer_profile"}),
+            }),
+        }
+    }
+
+    pub fn serializer_profile(self) -> SerializerProfile {
+        match self {
+            Self::OwnedBroca => SerializerProfile::OwnedBroca,
+            Self::OpencodeAiSdk => SerializerProfile::OpencodeAiSdk,
+        }
+    }
+
+    pub fn decode_message(
+        self,
+        message: &compact::status::StatusMessage,
+    ) -> Result<ck_wire::CkIngressMessage, HandlerOutcome> {
+        match self {
+            Self::OwnedBroca => decode_message(message),
+            Self::OpencodeAiSdk => {
+                let decoded =
+                    super::codec_opencode::decode_messages(std::slice::from_ref(message))?;
+                Ok(decoded
+                    .messages
+                    .into_iter()
+                    .next()
+                    .expect("one native message"))
+            }
+        }
+    }
+
+    /// Install CK ingress and the untouched native sidecar together. The engine
+    /// must use the same profile as native rendering so healing has one owner.
+    pub fn prepare_request(
+        self,
+        request: &mut TransformRequest,
+        messages: &[compact::status::StatusMessage],
+    ) -> Result<(), HandlerOutcome> {
+        let (ingress, native) = match self {
+            Self::OwnedBroca => (
+                messages
+                    .iter()
+                    .map(decode_message)
+                    .collect::<Result<Vec<_>, _>>()?,
+                None,
+            ),
+            Self::OpencodeAiSdk => {
+                let decoded = super::codec_opencode::decode_messages(messages)?;
+                (
+                    decoded.messages,
+                    Some(
+                        messages
+                            .iter()
+                            .map(|message| message.message.clone())
+                            .collect(),
+                    ),
+                )
+            }
+        };
+        request.messages = ingress;
+        request.native_messages = native;
+        request.serve_native = self == Self::OpencodeAiSdk;
+        request.serializer_profile = self.serializer_profile().wire_id().into();
+        Ok(())
+    }
+
+    pub fn encode_view(
+        self,
+        view: &transform::compaction::View,
+        request: &TransformRequest,
+        context: &super::codec_opencode::NativeRenderContext<'_>,
+    ) -> Result<compact::answer::CompactionMessage, HandlerOutcome> {
+        match self {
+            Self::OwnedBroca => encode_view(view),
+            Self::OpencodeAiSdk => super::codec_opencode::encode_view(view, request, context),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -363,4 +462,58 @@ pub(super) fn checked_view(
     let answer = encode_view(view)?;
     validate_replacement(&answer, record, &view.range.lineage_id)?;
     Ok(answer)
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn serializer_profile_dispatch_preserves_the_strict_broca_default() {
+        for params in [json!({}), json!({"serializer_profile":"owned-broca"})] {
+            let codec = Codec::from_params(&params).unwrap();
+            assert_eq!(codec, Codec::OwnedBroca);
+            assert_eq!(codec.serializer_profile(), SerializerProfile::OwnedBroca);
+            let entries: Vec<compact::status::StatusMessage> = serde_json::from_str(include_str!(
+                "../../../../docs/designs/mc-tool-catalog-v1/broca-session-read-messages.json"
+            ))
+            .unwrap();
+            for entry in entries {
+                let ingress = codec.decode_message(&entry).unwrap();
+                assert_eq!(
+                    bytes(&encode_message(&ingress.ck).unwrap()).unwrap(),
+                    bytes(&entry.message).unwrap()
+                );
+            }
+            let invalid_entry = compact::status::StatusMessage {
+                mid: "m".into(),
+                ordinal: 1,
+                message: json!({"role":"user","content":[{"type":"future","text":"a"}]}),
+            };
+            assert!(codec.decode_message(&invalid_entry).is_err());
+        }
+        let codec = Codec::from_params(&json!({"serializer_profile":"opencode-aisdk"})).unwrap();
+        assert_eq!(codec, Codec::OpencodeAiSdk);
+        assert_eq!(codec.serializer_profile(), SerializerProfile::OpencodeAiSdk);
+    }
+
+    #[test]
+    fn unknown_serializer_profile_refuses_invalid_params_with_field() {
+        for profile in [
+            json!("unknown"),
+            json!("pi"),
+            json!("owned-llmrunner"),
+            json!(null),
+            json!(3),
+            json!({}),
+        ] {
+            match Codec::from_params(&json!({"serializer_profile":profile})) {
+                Err(HandlerOutcome::ErrorWithDetail { code, detail, .. }) => {
+                    assert_eq!(code, "invalid_params");
+                    assert_eq!(detail, json!({"field":"params.serializer_profile"}));
+                }
+                _ => panic!("unknown profile did not refuse by field: {profile}"),
+            }
+        }
+    }
 }
