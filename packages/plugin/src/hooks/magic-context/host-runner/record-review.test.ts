@@ -13,6 +13,7 @@ import {
     createRecord,
     descendModuleAhead,
     encodedBytes,
+    encodeStatusPage,
     encodeStatusRequest,
     finishEntry,
     type HookAnswer,
@@ -181,7 +182,14 @@ describe("H1 review: status admission and paging boundary defects", () => {
         // Admission must leave a sendable record, not defer failure to a rebuild.
         let pages: string[] = [];
         expect(() => {
-            pages = statusPages(state, control);
+            pages = statusPages(state, control).map((page, index) => {
+                issueRequest(
+                    state,
+                    String(index + 1).padStart(control.request_id.length, "0"),
+                    100,
+                );
+                return encodeStatusPage(state, page);
+            });
         }).not.toThrow();
         for (const page of pages) expect(encodedBytes(page)).toBeLessThanOrEqual(MAX_REQUEST_BYTES);
         expect(
@@ -415,7 +423,10 @@ describe("H1 review: passing controls and record-only coverage", () => {
             ["A", "B", "C"].map((id) => incoming(id, "é".repeat(600000))),
             unavailable,
         );
-        const pages = statusPages(state, control);
+        const pages = statusPages(state, control).map((page, index) => {
+            issueRequest(state, String(index + 1).padStart(control.request_id.length, "0"), 100);
+            return encodeStatusPage(state, page);
+        });
         expect(pages).toHaveLength(2);
         for (const page of pages) expect(encodedBytes(page)).toBeLessThanOrEqual(MAX_REQUEST_BYTES);
         const decoded = pages.map((page) => JSON.parse(page).params);

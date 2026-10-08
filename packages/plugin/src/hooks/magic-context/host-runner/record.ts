@@ -91,6 +91,7 @@ export interface RunnerRecord<M, P = unknown> {
         deadline_ms: number;
         lineage_id: string;
         answered?: true;
+        status_page_encoded?: true;
     };
     last_not_applied?: { compaction_id: string; version: number; reason: NotAppliedReason };
     pipeline_exit?: { reason: ExitReason; reseed_full_request: boolean };
@@ -340,17 +341,65 @@ export type Admission<M> =
     | { entry: Entry<M>; unserved_subjects: Subject[] }
     | { exit: "provider_message_too_large" };
 
+/** Required request fields; lineage, the committed watermark and paging fields are core-owned. */
+export interface StatusRequestFields extends Readonly<Record<string, unknown>> {
+    session: string;
+    harness: string;
+    model: string;
+    now: number;
+}
+export interface StatusRequestControl extends StatusRequestFields {
+    request_id: string;
+}
+interface PagingFields {
+    lineage_id: string;
+    served_through_ordinal: number;
+    after_ordinal: number;
+    more?: true;
+}
+
+/**
+ * Admission and paging must use one envelope builder: otherwise a message can
+ * pass admission but exceed the cap once the cursor or continuation flag is added.
+ */
+function statusEnvelopeControl<M>(
+    record: RunnerRecord<M>,
+    request: StatusRequestControl,
+    after: number,
+    more: boolean,
+    servedThrough = record.served_through_ordinal,
+): StatusRequestControl & PagingFields {
+    const control = { ...request };
+    delete control.more;
+    return {
+        ...control,
+        lineage_id: record.lineage_id,
+        served_through_ordinal: servedThrough,
+        after_ordinal: after,
+        ...(more ? { more: true } : {}),
+    };
+}
+
 /** Run once per unknown terminal message, before any hook is sent. */
 export function admit<M>(
     record: RunnerRecord<M>,
     candidate: WindowScan<M>["appends"][number],
-    control: Readonly<Record<string, unknown>>,
+    control: StatusRequestControl,
 ): { ingest: string; message: M } | { exit: "provider_message_too_large" } {
     record.counters.content_reads++;
     const ingest = JSON.stringify(candidate.incoming.read());
     record.counters.message_serializations++;
     const entry = { id: candidate.id, ordinal: candidate.ordinal, ingest };
-    if (encodedBytes(encodeStatusRequest(control, [entry])) > MAX_REQUEST_BYTES)
+    // Reserve the longest legal cursor/watermark and a continuation, not just
+    // this pass's final page. Later pages cannot grow these numeric fields further.
+    const worstCase = statusEnvelopeControl(
+        record,
+        control,
+        Number.MAX_SAFE_INTEGER,
+        true,
+        Number.MAX_SAFE_INTEGER,
+    );
+    if (encodedBytes(encodeStatusRequest(worstCase, [entry])) > MAX_REQUEST_BYTES)
         return { exit: "provider_message_too_large" };
     // Own an immutable admission snapshot, independent of later host edits.
     return { ingest, message: JSON.parse(ingest) as M };
@@ -465,25 +514,41 @@ export function statusContent<M>(record: RunnerRecord<M>): {
     };
 }
 
-/** Page the missing ingest bytes, measuring the complete encoded envelope. */
+export interface StatusPage {
+    /** Request fields frozen at planning, without a request id or encoded fence. */
+    control: StatusRequestFields & PagingFields;
+    messages: readonly Pick<Entry<unknown>, "ordinal" | "id" | "ingest">[];
+    /** Encoded JSON-string budget, including quotes/escaping, for each fresh id. */
+    request_id_bytes: number;
+}
+
+/**
+ * Plan missing ingest pages; these descriptors cannot be transmitted as requests.
+ * The client generates a globally fresh id for EACH page, persists its fence,
+ * calls issueRequest, then encodeStatusPage, and awaits that page's answer before
+ * issuing the next fence. Fresh ids must fit the supplied request-id byte budget
+ * (fixed-width UUIDs work). Other request controls stay frozen across the pages.
+ */
 export function statusPages<M>(
     record: RunnerRecord<M>,
-    control: Readonly<Record<string, unknown>>,
-): string[] {
+    control: StatusRequestControl,
+): StatusPage[] {
     if ("more" in control || "after_ordinal" in control)
         throw new Error("Paging owns more and after_ordinal");
     const content = statusContent(record);
-    const fragments = content.messages.map((entry) => {
-        const encoded = encodeStatusEntry(entry);
-        return { encoded, bytes: encodedBytes(encoded), ordinal: entry.ordinal };
-    });
-    const pages: string[] = [];
+    const fragments = content.messages.map((entry) => ({
+        entry,
+        bytes: encodedBytes(encodeStatusEntry(entry)),
+    }));
+    const pages: StatusPage[] = [];
     let index = 0;
     let after = content.after_ordinal;
     do {
-        const pageControl = { ...control, after_ordinal: after };
+        const pageControl = statusEnvelopeControl(record, control, after, false);
         const base = encodedBytes(encodeStatusRequest(pageControl, []));
-        const withMore = encodedBytes(encodeStatusRequest({ ...pageControl, more: true }, []));
+        const withMore = encodedBytes(
+            encodeStatusRequest(statusEnvelopeControl(record, control, after, true), []),
+        );
         if (base > MAX_REQUEST_BYTES) throw new Error("Status control exceeds request cap");
         let count = 0;
         let bytes = 0;
@@ -498,21 +563,48 @@ export function statusPages<M>(
         if (index < fragments.length && !count)
             throw new Error("Single-entry status exceeds request cap");
         const more = index + count < fragments.length;
-        pages.push(
-            encodeRequest(
-                "compaction.step",
-                { ...pageControl, ...(more ? { more: true } : {}) },
-                `"messages":[${fragments
-                    .slice(index, index + count)
-                    .map((entry) => entry.encoded)
-                    .join(",")}]`,
-            ),
-        );
+        const fields: StatusRequestFields & PagingFields & { request_id?: string } =
+            statusEnvelopeControl(record, control, after, more);
+        delete fields.request_id;
+        pages.push({
+            control: fields,
+            messages: fragments.slice(index, index + count).map((fragment) => fragment.entry),
+            request_id_bytes: encodedBytes(JSON.stringify(control.request_id)),
+        });
         if (!count) break;
-        after = fragments[index + count - 1].ordinal;
+        after = fragments[index + count - 1].entry.ordinal;
         index += count;
     } while (index < fragments.length);
     return pages;
+}
+
+/** Encode one planned page only after the client has persisted a fresh fence. */
+export function encodeStatusPage<M>(record: RunnerRecord<M>, page: StatusPage): string {
+    const fence = record.issued;
+    if (
+        record.pipeline_exit ||
+        !fence ||
+        fence.answered ||
+        fence.status_page_encoded ||
+        fence.lineage_id !== record.lineage_id ||
+        page.control.lineage_id !== record.lineage_id
+    ) {
+        throw new Error("Status page requires a fresh durable request fence");
+    }
+    if (encodedBytes(JSON.stringify(fence.request_id)) > page.request_id_bytes) {
+        throw new Error("Fresh request id exceeds the planned byte budget");
+    }
+    const control = statusEnvelopeControl(
+        record,
+        { ...page.control, request_id: fence.request_id },
+        page.control.after_ordinal,
+        page.control.more === true,
+    );
+    const encoded = encodeStatusRequest(control, page.messages);
+    if (encodedBytes(encoded) > MAX_REQUEST_BYTES)
+        throw new Error("Encoded status page exceeds request cap");
+    fence.status_page_encoded = true;
+    return encoded;
 }
 
 /** After the page answer is durable, ck-mc holds even previously frozen-raw bytes. */

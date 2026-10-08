@@ -127,3 +127,40 @@ The review-only command is `bun test src/hooks/magic-context/host-runner/record-
 TypeScript 5.9.3: `bun run typecheck` passed. Because the package tsconfig excludes test files, the new review test and its imported core also passed an explicit strict `tsc --noEmit --emitDeclarationOnly false --target ESNext --module ESNext --moduleResolution bundler --strict --skipLibCheck --types node,bun-types src/hooks/magic-context/host-runner/record-review.test.ts` check. Biome 2.5.1 checked the single new TypeScript file after import ordering was corrected. AFT inspection was partial (no checkout call-graph view and its Biome producer unavailable); the local compiler/linter commands are the authoritative checks.
 
 No live OpenCode or Magic Context stores/configuration were opened, read, written or migrated. No provider process was started. Tests import only `bun:test` and the pure `record.ts`; all fixtures are in memory. The implementation and its original tests are unchanged.
+
+
+## Implementation response and resolution
+
+This addendum is the implementer's response, not a replacement for the independent review above.
+
+- **R1 resolved:** `admit` and page planning/encoding share `statusEnvelopeControl`. The core supplies lineage, the committed served watermark, the paging cursor and continuation flag; the request control type requires session, harness, model, time and the request-id sizing budget. Admission does not trust caller-supplied cursor/continuation values.
+- **R2 resolved:** admission measures the complete encoded `compaction.step` envelope with `more: true` and the longest safe-integer cursor and served watermark. A message above that bound returns `provider_message_too_large` before hooks or entry commit. The adapter must persist that exit before calling `commitExit`. Two messages exactly at this conservative bound now produce legal continuation/final requests; a separate test checks one byte above it takes the exit.
+- **Per-page fences resolved in H1:** `statusPages` now returns non-encoded descriptors with no request id. The client generates a globally fresh id per page, durably persists that fence, calls `issueRequest`, then `encodeStatusPage`, and waits for its answer before issuing the next fence. Encoding requires a matching, unused fence, checks the actual encoded request (including that fresh id) against 3 MiB, and refuses a second page under the same fence. Fresh ids must fit the encoded JSON-string budget used during planning/admission; fixed-width UUIDs satisfy this rule. Non-id request controls remain frozen across the planned pages. Descent invalidates outstanding page descriptors.
+
+The parent approved changing the paging API to descriptors without a compatibility shim. Only the paging call sites were adapted in the original `status pages preserve exact ingest and cap the whole envelope` test and in the review's R2 reproduction and `ordinary-sized pages cap bytes and mark only continuation pages with more` control. Each now explicitly issues and encodes a fresh fence per page. No assertion, byte expectation or R1/R2 expectation changed.
+
+### Captured red-to-green results
+
+Before fixing the imported review commit, Bun 1.4.2 ran **38 tests: 36 pass, 2 fail**. Only the following tests failed:
+
+- `H1 review: status admission and paging boundary defects > R1 admission counts the paging-owned after_ordinal in the single-entry cap`: expected `true`, received `false`.
+- `H1 review: status admission and paging boundary defects > R2 a cap-sized message either exits at admission or has sendable status pages`: `not.toThrow()` failed with `Single-entry status exceeds request cap`.
+
+After the fix, the same 27 original tests, both reproductions and all nine passing review controls are green. Five additional tests cover exact worst-envelope cap entries, the admission-time exit one byte above the bound, core-owned control fields, per-page fence/id-budget enforcement and stale page rejection after descent. The combined suite runs **43 tests, all passing**. The cap checks in these tests measure complete encoded requests, never descriptors or ingest alone.
+
+### Restored mutation controls
+
+The live revision was staged before mutation, with an empty working `git diff --stat`. Temporarily replacing admission's complete envelope with the old caller-only control made R1 fail with `Expected: true / Received: false`; in a separate filtered run it made R2 fail with `Single-entry status exceeds request cap`. All nine review controls passed in each run. The mutation's diff was `1 file changed, 2 insertions(+), 1 deletion(-)` in `record.ts`; checkout from the staged live state plus `touch` restored an empty working diff.
+
+A second staged mutation disabled the used-page-fence check. Only `status sizing and per-page fence regressions > encoding requires one fresh persisted fence per page and respects its id budget` failed (`Received function did not throw`); the other 42 tests, including R1/R2, passed. Its diff was `1 file changed, 1 insertion(+), 1 deletion(-)` in `record.ts`; restoring the staged live state again left an empty working diff. After both restores, all 43 tests passed. No mutant is retained.
+
+### Revision gates
+
+- Bun 1.4.2: the combined H1 suite passed 43/43 tests (99,479 assertions). The required `npm run test` passed the plugin package (7,337 pass, six skip, zero fail), then stopped on the unrelated Pi `removal markers survive a separate-process restart (native=true)` nested-child timeout (1,603 pass, three skip, one fail). That test passed an isolated retry. Separately invoked CLI tests reported 610 pass, two skip and two unrelated 5-second timeouts (`host process probe > finds a real process holding the database open and not after it exits`; `reports directory data after the first commit before a git session binding exists`). Retina reported 26 pass and one unrelated 5-second timeout (`git predicates > git_tag_matching tracks new matching tags and semver thresholds`). None of these packages' implementation/tests changed in this revision.
+- TypeScript 5.9.3: `npm run typecheck` passed all four package scripts. The explicit strict no-emit check also passed for the core, original tests and review tests.
+- Bun 1.4.2: `npm run build` passed all three package builds and all four server-loader tests.
+- Biome 2.5.1: `npm run lint` passed, checking 1,650 files with existing warnings outside the changed files. The changed TypeScript files also passed their scoped check.
+- Cargo 1.99.0: `cargo fmt --all` passed without modifying Rust files.
+- AFT inspection was partial because its checkout graph/Biome producer was unavailable; the compiler and repository linter are the authoritative gates.
+
+The dependency manifests and lockfile are unchanged. Repository test scripts' frozen-lockfile installs reported no changes. The unrelated process timeout failures are recorded rather than repaired outside H1's scope.

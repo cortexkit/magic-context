@@ -15,6 +15,7 @@ import {
     descendModuleAhead,
     encodedBytes,
     encodeHookRequest,
+    encodeStatusPage,
     encodeStatusRequest,
     finishEntry,
     type HookAnswer,
@@ -547,7 +548,10 @@ describe("status and encoded request caps", () => {
             ["A", "B", "C"].map((id) => incoming(id, "é".repeat(600000))),
             (id) => [{ subject: subject(id), unavailable: true }],
         );
-        const pages = statusPages(state, control);
+        const pages = statusPages(state, control).map((page, index) => {
+            issueRequest(state, String(index + 1).padStart(control.request_id.length, "0"), 100);
+            return encodeStatusPage(state, page);
+        });
         expect(pages).toHaveLength(2);
         for (const page of pages) expect(encodedBytes(page)).toBeLessThanOrEqual(MAX_REQUEST_BYTES);
         const decoded = pages.map((page) => JSON.parse(page).params);
@@ -774,5 +778,143 @@ describe("fence, version, structural and exit rules", () => {
         pass(state, [incoming("foreign")]);
         expect(state.pipeline_exit?.reason).toBe("provider_foreign_history");
         expect(state.ids.has("foreign")).toBe(false);
+    });
+});
+
+describe("status sizing and per-page fence regressions", () => {
+    // Independent envelope: reserve continuation and the longest legal numeric fields.
+    function boundaryText(extra = 0): string {
+        const request = {
+            method: "compaction.step",
+            params: {
+                ...control,
+                lineage_id: "L",
+                served_through_ordinal: Number.MAX_SAFE_INTEGER,
+                after_ordinal: Number.MAX_SAFE_INTEGER,
+                more: true,
+                messages: [
+                    {
+                        ordinal: 1,
+                        mid: "A",
+                        message: { id: "A", text: "", untouched: { signature: "signed" } },
+                    },
+                ],
+            },
+        };
+        return "x".repeat(
+            MAX_REQUEST_BYTES - Buffer.byteLength(JSON.stringify(request), "utf8") + extra,
+        );
+    }
+
+    test("two worst-envelope cap entries fit continuation and final requests with fresh fences", () => {
+        const state = record();
+        const text = boundaryText();
+        const scan = scanWindow(state, [incoming("A", text), incoming("B", text)]);
+        const admissions = scan.appends.map((candidate) => {
+            const admitted = admit(state, candidate, control);
+            if ("exit" in admitted) throw new Error(admitted.exit);
+            const worst = {
+                ...control,
+                served_through_ordinal: Number.MAX_SAFE_INTEGER,
+                after_ordinal: Number.MAX_SAFE_INTEGER,
+                more: true,
+            };
+            expect(
+                encodedBytes(
+                    encodeStatusRequest(worst, [
+                        { id: candidate.id, ordinal: candidate.ordinal, ingest: admitted.ingest },
+                    ]),
+                ),
+            ).toBe(MAX_REQUEST_BYTES);
+            return finishEntry(
+                candidate,
+                admitted,
+                [{ subject: subject(candidate.id), unavailable: true }],
+                functions,
+            );
+        });
+        commitEntries(state, admissions);
+        const pages = statusPages(state, control);
+        expect(pages).toHaveLength(2);
+        expect(state.issued).toBeUndefined();
+        expect(pages.map((page) => page.control.request_id)).toEqual([undefined, undefined]);
+        const requests = pages.map((page, index) => {
+            issueRequest(state, String(index + 1), 100);
+            const encoded = encodeStatusPage(state, page);
+            expect(encodedBytes(encoded)).toBeLessThanOrEqual(MAX_REQUEST_BYTES);
+            expect(
+                commitNonViewAnswer(state, String(index + 1), 1, index === 0 ? "wait" : "noop"),
+            ).toBeUndefined();
+            acknowledgeStatus(state, new Set(page.messages.map((entry) => entry.id)));
+            return JSON.parse(encoded).params;
+        });
+        expect(requests.map((request) => request.request_id)).toEqual(["1", "2"]);
+        expect(requests.map((request) => request.after_ordinal)).toEqual([0, 1]);
+        expect(requests[0].more).toBe(true);
+        expect(requests[1].more).toBeUndefined();
+        expect(
+            requests.flatMap((request) =>
+                request.messages.map((entry: { mid: string }) => entry.mid),
+            ),
+        ).toEqual(["A", "B"]);
+        expect(state.after_ordinal).toBe(2);
+    });
+
+    test("one byte over worst-envelope cap exits durably before any append", () => {
+        const state = record();
+        const candidate = scanWindow(state, [incoming("A", boundaryText(1))]).appends[0];
+        const admitted = admit(state, candidate, { ...control, after_ordinal: 0, more: false });
+        expect("exit" in admitted).toBe(true);
+        if (!("exit" in admitted)) throw new Error("Oversize admission unexpectedly accepted");
+        expect(admitted.exit).toBe("provider_message_too_large");
+        // The adapter persists the returned exit before this record-side commit.
+        expect(commitExit(state, admitted.exit)).toBe(true);
+        expect(state.entries).toEqual([]);
+        expect(state.ids.size).toBe(0);
+        expect(() => assemble(state)).toThrow("provider_message_too_large");
+    });
+
+    test("core derives page lineage and watermark instead of trusting incomplete request control", () => {
+        const state = record();
+        pass(state, [incoming("A"), incoming("B")]);
+        const pages = statusPages(state, {
+            ...control,
+            lineage_id: "caller-stale",
+            served_through_ordinal: 0,
+        });
+        issueRequest(state, "1", 100);
+        const request = JSON.parse(encodeStatusPage(state, pages[0])).params;
+        expect(request.lineage_id).toBe("L");
+        expect(request.served_through_ordinal).toBe(2);
+        expect(request.after_ordinal).toBe(2);
+        expect(request.messages).toEqual([]);
+    });
+
+    test("encoding requires one fresh persisted fence per page and respects its id budget", () => {
+        const state = record();
+        pass(
+            state,
+            ["A", "B", "C"].map((id) => incoming(id, "é".repeat(600000))),
+            (id) => [{ subject: subject(id), unavailable: true }],
+        );
+        const pages = statusPages(state, control);
+        expect(() => encodeStatusPage(state, pages[0])).toThrow("fresh durable request fence");
+        issueRequest(state, "1", 100);
+        const first = encodeStatusPage(state, pages[0]);
+        expect(JSON.parse(first).params.request_id).toBe("1");
+        expect(() => encodeStatusPage(state, pages[1])).toThrow("fresh durable request fence");
+        issueRequest(state, "too-long", 100);
+        expect(() => encodeStatusPage(state, pages[1])).toThrow("planned byte budget");
+        issueRequest(state, "2", 100);
+        expect(JSON.parse(encodeStatusPage(state, pages[1])).params.request_id).toBe("2");
+    });
+
+    test("descent invalidates planned pages even when a new fence is issued", () => {
+        const state = record();
+        pass(state, [incoming("A")]);
+        const page = statusPages(state, control)[0];
+        descendModuleAhead(state, "descendant");
+        issueRequest(state, "1", 100);
+        expect(() => encodeStatusPage(state, page)).toThrow("fresh durable request fence");
     });
 });
