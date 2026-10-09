@@ -1333,7 +1333,7 @@ export async function registerContext(context: V2Context) {
     const runManagedContext = async (draft: SessionContext): Promise<void> => {
         // Learn the host's message and attachment classes, so attachments on rows restored
         // after a host checkpoint can be rebuilt in the host's own shape.
-        rememberHostMedia(draft.messages);
+        rememberHostMedia(draft.messages, draft.sessionID);
         if (hiddenChildHook.apply(draft)) return;
         // A dreamer that was off at boot and has since been turned on in the
         // config starts here; startDreamer stays a no-op while it is off.
@@ -1362,8 +1362,24 @@ export async function registerContext(context: V2Context) {
             );
             throw new V2ContextRefusal(claimRefusal.message, { cause: claimRefusal });
         }
-        const systemAtEntry = structuredClone(draft.system);
-        const slotAtEntry = getSlot(draft.sessionID);
+        const durableProvider =
+            config.transform_mode === "rust" &&
+            !compactionOff &&
+            config.rust_pipeline === "provider" &&
+            db
+                ? (db
+                      .prepare(
+                          "SELECT setup_json FROM host_runner_state WHERE session_id=? AND harness='opencode2' AND pipeline_exit_json IS NULL",
+                      )
+                      .get(draft.sessionID) as { setup_json: string | null } | null)
+                : null;
+        const providerAtEntry =
+            transform?.isProviderSession(draft.sessionID) === true ||
+            (durableProvider?.setup_json
+                ? JSON.parse(durableProvider.setup_json).active === true
+                : false);
+        const systemAtEntry = providerAtEntry ? draft.system : structuredClone(draft.system);
+        const slotAtEntry = providerAtEntry ? undefined : getSlot(draft.sessionID);
         const restoreLkgSystem = () => {
             if (
                 !lkgSystems.restore(
@@ -1592,6 +1608,7 @@ export async function registerContext(context: V2Context) {
                       })
                     : v2CompactionMarkerStrategy,
                 transformMode: config.transform_mode,
+                rustPipeline: config.rust_pipeline,
                 rustModeModuleClient,
                 rustModeProjectRoot: directory,
                 rustMemorySyncRequestedSessions,
@@ -1758,6 +1775,12 @@ export async function registerContext(context: V2Context) {
             // the boundary message is already gone from the array and this is a
             // no-op. Both happen in an ordinary session.
             if (rustModeModuleClient && db) {
+                const runnerOrdinals = transform?.providerOrdinals(draft.sessionID);
+                if (runnerOrdinals) {
+                    for (const message of draft.messages) {
+                        if (message.id) message.ordinal = runnerOrdinals.get(message.id);
+                    }
+                }
                 const dropped = trimToRecordedBoundary(db, draft.sessionID, draft.messages);
                 if (dropped > 0)
                     sessionLog(
@@ -1766,11 +1789,12 @@ export async function registerContext(context: V2Context) {
                     );
             }
             const mapped = adaptPayload(draft, admitted);
-            beginV2LkgRequest(
-                draft.sessionID,
-                `${draft.model.providerID}/${draft.model.id}`,
-                latestLkgResponseIds.get(draft.sessionID),
-            );
+            if (!transform?.isProviderSession(draft.sessionID))
+                beginV2LkgRequest(
+                    draft.sessionID,
+                    `${draft.model.providerID}/${draft.model.id}`,
+                    latestLkgResponseIds.get(draft.sessionID),
+                );
             await createMessagesTransformHandler({
                 magicContext: { "experimental.chat.messages.transform": transform },
                 compactionOff,
@@ -1815,7 +1839,9 @@ export async function registerContext(context: V2Context) {
                     );
                 }
             }
-            const capturedSlot = getSlot(draft.sessionID);
+            const capturedSlot = transform?.isProviderSession(draft.sessionID)
+                ? undefined
+                : getSlot(draft.sessionID);
             if (
                 capturedSlot &&
                 (!slotAtEntry ||
@@ -1829,6 +1855,7 @@ export async function registerContext(context: V2Context) {
             if (error instanceof V2ContextRefusal) throw error;
             if (
                 !compactionOff &&
+                !transform?.isProviderSession(draft.sessionID) &&
                 (isTransientSqliteError(error) || error instanceof StorageBusyRefusalError)
             ) {
                 if (isTransientSqliteError(error)) {

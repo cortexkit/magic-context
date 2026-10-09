@@ -67,10 +67,13 @@ type MessageWithParts = {
 type MessagesTransformOutput = { messages: MessageWithParts[] };
 
 type MagicContextTransformHooks = {
-    "experimental.chat.messages.transform"?: (
+    "experimental.chat.messages.transform"?: ((
         input: Record<string, never>,
         output: MessagesTransformOutput,
-    ) => Promise<void>;
+    ) => Promise<void>) & {
+        isProviderSession?: (sessionId: string) => boolean;
+        recoverProviderOutput?: (sessionId: string, output: { messages: unknown[] }) => boolean;
+    };
 } | null;
 
 function replaceMessagesInPlace(output: MessagesTransformOutput, next: MessageWithParts[]): void {
@@ -364,7 +367,11 @@ export function createMessagesTransformHandler(args: {
         }
 
         const magicContext = args.getMagicContext ? args.getMagicContext() : args.magicContext;
-        const slotAtEntry = sessionId ? getSlot(sessionId) : undefined;
+        const provider = magicContext?.["experimental.chat.messages.transform"];
+        const providerAtEntry = sessionId
+            ? provider?.isProviderSession?.(sessionId) === true
+            : false;
+        const slotAtEntry = sessionId && !providerAtEntry ? getSlot(sessionId) : undefined;
         const entry = slotAtEntry
             ? (() => {
                   try {
@@ -419,6 +426,19 @@ export function createMessagesTransformHandler(args: {
             await magicContext?.["experimental.chat.messages.transform"]?.(input, output);
             return output.messages;
         } catch (error) {
+            if (sessionId && (providerAtEntry || provider?.isProviderSession?.(sessionId))) {
+                // The durable runner record is the provider session's only replay.
+                // Explicit turn refusals must not be bypassed by any replay.
+                if (
+                    error instanceof EmergencyFailClosedError ||
+                    (error as { code?: string })?.code === "store_ahead_of_binary"
+                )
+                    throw error;
+                if (provider?.recoverProviderOutput?.(sessionId, output)) return output.messages;
+                throw new EmergencyFailClosedError("Provider record cannot recover this turn", {
+                    cause: error,
+                });
+            }
             if (
                 error instanceof RawFallbackContextLimitError ||
                 error instanceof AssistantTerminalRetryError

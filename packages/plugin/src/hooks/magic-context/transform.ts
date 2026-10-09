@@ -115,6 +115,7 @@ import {
 } from "./final-wire-token-estimate";
 import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
 import type { LiveModelBySession } from "./hook-handlers";
+import { createOpenCodeProviderTransform } from "./host-runner/opencode-adapter";
 import {
     capturePrefixTrimSourceOrder,
     findHostCompactionWindow,
@@ -409,6 +410,7 @@ export async function sendEmergencyRefusalNotice(
 }
 
 export interface TransformDeps {
+    rustPipeline?: "full_request" | "provider";
     cacheTtlConfig?: import("../../shared/model-cache-ttl").CacheTtlConfig;
     cacheTtlConfigured?: boolean;
     sampleCacheTtlConfig?: () => {
@@ -706,6 +708,24 @@ export function createTransform(deps: TransformDeps) {
                   memorySyncRequestedSessions: deps.rustMemorySyncRequestedSessions,
               })
             : undefined;
+    let providerTransform =
+        rustModeTransform && !deps.compactionOff && deps.rustPipeline === "provider"
+            ? createOpenCodeProviderTransform(deps, rustModeTransform)
+            : undefined;
+    const providerForSession = (id: string) => {
+        if (!rustModeTransform || deps.compactionOff) return undefined;
+        if (
+            !providerTransform &&
+            deps.db
+                .prepare("SELECT 1 FROM host_runner_state WHERE session_id=? AND harness=?")
+                .get(id, deps.storeGeneration === "v2" ? "opencode2" : "opencode")
+        ) {
+            providerTransform = createOpenCodeProviderTransform(deps, rustModeTransform);
+        }
+        return deps.rustPipeline === "provider" || providerTransform?.hasRecord(id)
+            ? providerTransform
+            : undefined;
+    };
     let entryReuse: { reused: number; retained: number; retainedBytes: number } | undefined;
     const projectEntry = createLkgEntryProjector({
         onReuse: (stats) => {
@@ -745,6 +765,30 @@ export function createTransform(deps: TransformDeps) {
             return;
         }
         deps.onMessagesPassStarted?.(sessionId, messages);
+        if (
+            providerTransform &&
+            deps.rustPipeline === "provider" &&
+            !deps.internalChildSessions?.has(sessionId)
+        ) {
+            const meta = getOrCreateSessionMeta(deps.db, sessionId);
+            const ttlModel =
+                findNewestUserModel(messages) ??
+                deps.liveModelBySession?.get(sessionId) ??
+                findLastAssistantModel(messages);
+            const ttlConfig = deps.sampleCacheTtlConfig?.();
+            meta.cacheTtl = resolveSessionCacheTtl(
+                deps.db,
+                sessionId,
+                ttlConfig?.cache_ttl ?? deps.cacheTtlConfig,
+                ttlModel ? `${ttlModel.providerID}/${ttlModel.modelID}` : undefined,
+                ttlConfig?.cacheTtlConfigured ?? deps.cacheTtlConfigured,
+            ).value;
+            // Provider records own admission, replay and the id-only prefix scan.
+            // Legacy temporal, marker and commit walks must not read their prefix.
+            await providerTransform.run(sessionId, messages, output, meta);
+            withoutSqliteTransformPass(() => deps.maybeAutoEmbedSession?.(sessionId));
+            return;
+        }
         const temporalCandidates = deps.experimentalTemporalAwareness
             ? collectTemporalCandidates(messages)
             : undefined;
@@ -771,7 +815,7 @@ export function createTransform(deps: TransformDeps) {
                 ? params
                 : { ...params, toastDurationMs: historianRun.toastDurationMs };
         };
-        beginLkgPass(sessionId);
+        if (!providerTransform?.isProviderSession(sessionId)) beginLkgPass(sessionId);
         clearOpenCodePendingTransformDecision(sessionId);
 
         const db = deps.db;
@@ -1009,7 +1053,7 @@ export function createTransform(deps: TransformDeps) {
         // Rust mode is an authority adapter, not a second implementation of the
         // TypeScript renderer. Compaction-off still dispatches so the module can
         // provide the shared additive-only memory/docs contract.
-        if (deps.transformMode === "rust") {
+        if (deps.transformMode === "rust" && (!compactionOff || deps.rustPipeline !== "provider")) {
             if (!rustModeTransform) {
                 // Production wiring always builds a module client in Rust mode,
                 // so this is a wiring fault. Returning would serve the raw input.
@@ -1027,7 +1071,10 @@ export function createTransform(deps: TransformDeps) {
                     sessionMeta.isSubagent,
                 );
             }
-            await rustModeTransform.run(sessionId, messages, output, sessionMeta);
+            const sessionProvider = providerForSession(sessionId);
+            if (sessionProvider)
+                await sessionProvider.run(sessionId, messages, output, sessionMeta);
+            else await rustModeTransform.run(sessionId, messages, output, sessionMeta);
             // Rust returns before the TypeScript post-pass hook below. Run the
             // host-owned embedding trigger after either implementation publishes.
             withoutSqliteTransformPass(() => deps.maybeAutoEmbedSession?.(sessionId));
@@ -3368,6 +3415,10 @@ export function createTransform(deps: TransformDeps) {
     };
 
     return Object.assign(transform, {
+        isProviderSession: (id: string) => providerForSession(id)?.isProviderSession(id) ?? false,
+        recoverProviderOutput: (id: string, output: { messages: unknown[] }) =>
+            providerTransform?.recoverOutput(id, output) ?? false,
+        providerOrdinals: (id: string) => providerForSession(id)?.ordinals(id),
         invalidateRustWireState(sessionId: string): void {
             rustModeTransform?.invalidateWireState(sessionId);
         },
@@ -3376,6 +3427,7 @@ export function createTransform(deps: TransformDeps) {
         },
         /** The host disposed this instance; release the Rust adapter's process-wide registrations. */
         disposeRust(): void {
+            providerTransform?.dispose();
             rustModeTransform?.dispose();
         },
         /** This instance's Rust adapter, for its own messages-transform wrapper; null in TypeScript mode. */

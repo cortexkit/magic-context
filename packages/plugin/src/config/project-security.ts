@@ -382,6 +382,12 @@ function makeProjectThresholdWarning(field: string, reason: string): string {
  */
 export function stripUnsafeProjectConfigFields(projectRaw: Record<string, unknown>): string[] {
     const warnings: string[] = [];
+    if ("rust_pipeline" in projectRaw) {
+        delete projectRaw.rust_pipeline;
+        warnings.push(
+            "Ignoring rust_pipeline from project config (security: only user-level config may select the Rust provider pipeline).",
+        );
+    }
 
     if ("profiles" in projectRaw) {
         delete projectRaw.profiles;
