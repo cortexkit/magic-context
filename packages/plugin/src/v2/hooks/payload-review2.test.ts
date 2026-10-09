@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import * as configLoader from "../../config";
 import { MagicContextConfigSchema } from "../../config/schema/magic-context";
@@ -15,6 +15,7 @@ import { setRawMessageProvider } from "../../hooks/magic-context/read-session-ch
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
 import type { MessageLike } from "../../hooks/magic-context/transform-operations";
 import { Database } from "../../shared/sqlite";
+import { cleanupTestTempDir, createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { createV2RustCompactionMarkerStrategy, trimToRecordedBoundary } from "../fold/boundary";
 import { rememberHostMedia, resetHostMediaForTests } from "../fold/host-media";
 import { V2StoreReaderPool } from "../store-reader";
@@ -62,11 +63,11 @@ function revisedCapture(
     setting: "absent" | "full_request",
     lane: string,
 ): Capture[] {
-    const temp = mkdtempSync(join(root, ".h4-review2-"));
+    const temp = createTestTempDirFromPath(join(root, ".h4-review2-"));
     try {
         return childCapture(packageRoot, join(temp, "capture.json"), host, setting, lane);
     } finally {
-        rmSync(temp, { recursive: true, force: true });
+        cleanupTestTempDir(temp);
     }
 }
 
@@ -75,7 +76,7 @@ function historicalCapture(
     setting: "absent" | "full_request",
     lane: string,
 ): Capture[] {
-    const temp = mkdtempSync(join(root, ".h4-review2-"));
+    const temp = createTestTempDirFromPath(join(root, ".h4-review2-"));
     try {
         const archive = spawnSync(
             "git",
@@ -124,7 +125,7 @@ function historicalCapture(
         );
         return childCapture(historicalPackage, join(temp, "capture.json"), host, setting, lane);
     } finally {
-        rmSync(temp, { recursive: true, force: true });
+        cleanupTestTempDir(temp);
     }
 }
 
@@ -335,7 +336,7 @@ async function capture(
     let storeDirectory: string | undefined;
     let storeWriter: Database | undefined;
     if (lane.startsWith("context")) {
-        storeDirectory = mkdtempSync(join(process.env.XDG_DATA_HOME!, "h4-review2-store-"));
+        storeDirectory = createTestTempDirFromPath(join(process.env.XDG_DATA_HOME!, "h4-review2-store-"));
         const path = join(storeDirectory, "fixture.db");
         const store = (storeWriter = new Database(path));
         store.exec(
@@ -542,7 +543,7 @@ async function capture(
         await duties?.dispose();
         for (const restore of restores.reverse()) restore();
         storeWriter?.close();
-        if (storeDirectory) rmSync(storeDirectory, { recursive: true, force: true });
+        if (storeDirectory) cleanupTestTempDir(storeDirectory);
         transform.disposeRust();
         unregister();
         prepareSpy.mockRestore();
