@@ -10742,6 +10742,17 @@ impl McStore {
         session_id: &str,
         request: TransformCommit<'_>,
     ) -> Result<u64, McStoreError> {
+        self.commit_transform_with_provider_policy(session_id, request, None)
+    }
+
+    /// Freeze provider decision metadata with the same engine CAS. Ordinary
+    /// full-request callers retain the unchanged commit request and no extra writes.
+    pub fn commit_transform_with_provider_policy(
+        &self,
+        session_id: &str,
+        request: TransformCommit<'_>,
+        provider_policy: Option<&provider_records::ProviderEnginePolicy>,
+    ) -> Result<u64, McStoreError> {
         let TransformCommit {
             expected,
             core,
@@ -11195,6 +11206,9 @@ impl McStore {
                     "DELETE FROM pending_agent_drops WHERE session_id = ?1 AND id = ?2",
                     params![session_id, drop_id],
                 )?;
+            }
+            if let Some(policy)=provider_policy {
+                provider_log::save_engine_policy_tx(tx,session_id,policy)?;
             }
             Ok(CommitOutcome::Committed(accepted_version))
         })?;

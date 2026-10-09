@@ -1910,13 +1910,13 @@ pub struct TransformWithProjection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TaggableKind {
+pub(crate) enum TaggableKind {
     Message,
     ToolResult,
 }
 
 impl TaggableKind {
-    fn as_store_kind(self) -> &'static str {
+    pub(crate) fn as_store_kind(self) -> &'static str {
         match self {
             Self::Message => "message",
             Self::ToolResult => "tool_result",
@@ -1925,7 +1925,7 @@ impl TaggableKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Channel1Level {
+pub(crate) enum Channel1Level {
     Gentle,
     Firm,
     Urgent,
@@ -1967,22 +1967,22 @@ struct TagOverlayState {
 }
 
 #[derive(Debug, Clone)]
-struct ActiveTagForNudge {
-    tag_number: i64,
-    kind: String,
-    token_count: i64,
-    tool_name: String,
+pub(crate) struct ActiveTagForNudge {
+    pub(crate) tag_number: i64,
+    pub(crate) kind: String,
+    pub(crate) token_count: i64,
+    pub(crate) tool_name: String,
 }
 
 #[derive(Debug, Clone)]
-struct Channel1Decision {
-    fire: bool,
-    sticky: bool,
-    level: Channel1Level,
-    reclaimable_tokens: i64,
-    next_last_nudge: i64,
-    next_last_level: String,
-    clear_post_reduce_grace: bool,
+pub(crate) struct Channel1Decision {
+    pub(crate) fire: bool,
+    pub(crate) sticky: bool,
+    pub(crate) level: Channel1Level,
+    pub(crate) reclaimable_tokens: i64,
+    pub(crate) next_last_nudge: i64,
+    pub(crate) next_last_level: String,
+    pub(crate) clear_post_reduce_grace: bool,
 }
 
 fn scale_hygiene_watermark(value: i64, tools_ratio: f64) -> i64 {
@@ -5361,16 +5361,11 @@ fn apply_once(
     let calibration_candidate = crate::decision_calibration::DecisionCalibration::freeze_for_model(
         req.model_key.as_deref(),
     );
-    let frozen_calibration = loaded
-        .meta
-        .decision_calibration
-        .as_ref()
-        .and_then(crate::decision_calibration::DecisionCalibration::from_frozen);
-    let active_calibration = if pass_already_busting {
-        crate::decision_calibration::DecisionCalibration::for_model(req.model_key.as_deref())
-    } else {
-        frozen_calibration.unwrap_or_else(crate::decision_calibration::DecisionCalibration::neutral)
-    };
+    let active_calibration = calibration_for_prefix_pass(
+        req.model_key.as_deref(),
+        loaded.meta.decision_calibration.as_ref(),
+        pass_already_busting,
+    );
     let calibration_changed = pass_already_busting
         && loaded
             .meta
@@ -6914,25 +6909,17 @@ fn apply_once(
     );
     profile_end!(perf_hygiene_measure);
     profile_start!(perf_hygiene_refresh, "hygiene_refresh");
+    let provider_measurement = store
+        .has_provider_namespace(&req.session_id)?
+        .then(|| hygiene_measurement.clone());
     let mut current_hygiene_baseline = if is_bust_pass {
-        let refreshed = refresh_tail_hygiene_baseline_calibrated(
+        let refreshed = refresh_channel1_baseline(
             hygiene_measurement,
             true,
             meta.tail_hygiene_baseline.as_ref(),
             ctx.now_ms,
-            HygieneCalibration {
-                units_version: meta.hygiene_units_version.max(1),
-                tools_ratio: if meta.hygiene_units_version >= 2 {
-                    active_calibration.tools_ratio
-                } else {
-                    1.0
-                },
-                prose_ratio: if meta.hygiene_units_version >= 2 {
-                    active_calibration.prose_ratio
-                } else {
-                    1.0
-                },
-            },
+            meta.hygiene_units_version,
+            active_calibration,
         );
         meta.tail_hygiene_baseline = Some(refreshed.baseline.clone());
         Some(refreshed.baseline)
@@ -6942,24 +6929,13 @@ fn apply_once(
             .tail_hygiene_baseline
             .as_ref()
             .map(|previous| {
-                refresh_tail_hygiene_baseline_calibrated(
+                refresh_channel1_baseline(
                     hygiene_measurement,
                     false,
                     Some(previous),
                     ctx.now_ms,
-                    HygieneCalibration {
-                        units_version: meta.hygiene_units_version.max(1),
-                        tools_ratio: if meta.hygiene_units_version >= 2 {
-                            active_calibration.tools_ratio
-                        } else {
-                            1.0
-                        },
-                        prose_ratio: if meta.hygiene_units_version >= 2 {
-                            active_calibration.prose_ratio
-                        } else {
-                            1.0
-                        },
-                    },
+                    meta.hygiene_units_version,
+                    active_calibration,
                 )
             })
             .map(|refreshed| {
@@ -6995,29 +6971,11 @@ fn apply_once(
     rearm_channel2_after_measured_collapse(&mut meta, is_bust_pass);
     let agent_drops_applied_this_pass =
         pending_agent_drops_applied_this_pass(&pending_agent_drops, &loaded.core, &core);
-    if meta.channel1_reduce_suppressed || agent_drops_applied_this_pass {
-        if let Some(baseline) = current_hygiene_baseline
-            .as_mut()
-            .filter(|baseline| baseline.evaluable && !baseline.generation_invalidated)
-        {
-            // Measurement already excludes queued drops from U. Capturing any
-            // earlier value would make compliance grace expire immediately.
-            let post_reduce_u = effective_tail_hygiene(baseline).0;
-            baseline.channel1_post_reduce_grace_baseline_u = Some(post_reduce_u);
-            baseline.channel1_post_reduce_grace_pre_level = meta.channel1_last_nudge_level.clone();
-            meta.channel1_reduce_suppressed = false;
-            if let Some(persisted) = meta.tail_hygiene_baseline.as_mut() {
-                persisted.channel1_post_reduce_grace_baseline_u = Some(post_reduce_u);
-                persisted.channel1_post_reduce_grace_pre_level =
-                    baseline.channel1_post_reduce_grace_pre_level.clone();
-            } else {
-                meta.tail_hygiene_baseline = Some(baseline.clone());
-            }
-        } else {
-            // Keep the pending bit until a trustworthy post-drop U exists.
-            meta.channel1_reduce_suppressed = true;
-        }
-    }
+    apply_channel1_compliance_grace(
+        &mut meta,
+        &mut current_hygiene_baseline,
+        agent_drops_applied_this_pass,
+    );
 
     if tagging_active && !compaction::host_pass(req) {
         if let Some((row, unit)) = maybe_append_channel1_nudge(
@@ -7549,7 +7507,20 @@ fn apply_once(
     let row_version = if commit_required {
         #[cfg(test)]
         run_transform_attempt_hook(&req.session_id);
-        store.commit_transform(
+        let provider_policy = provider_measurement.as_ref().map(|measurement| {
+            mc_store::provider_records::ProviderEnginePolicy {
+                parts: capture_provider_parts(
+                    req,
+                    &projection,
+                    &core,
+                    &measurement.parts,
+                    &tag_rows,
+                    true,
+                ),
+                settings: provider_engine_settings(&meta),
+            }
+        });
+        store.commit_transform_with_provider_policy(
             &req.session_id,
             TransformCommit {
                 expected: commit_expected,
@@ -7588,6 +7559,7 @@ fn apply_once(
                     created_at_ms: ctx.now_ms,
                 },
             },
+            provider_policy.as_ref(),
         )?
     } else {
         loaded.row_version.unwrap_or(0)
@@ -10800,7 +10772,9 @@ fn append_tag_mint_rows(
 
 /// Return exactly the span the overlay can prefix. Mint scope and overlay scope share
 /// this predicate so every visible tag number has a renderable §N§ carrier.
-fn taggable_source(block: &FlatBlock) -> Option<(TaggableKind, std::borrow::Cow<'_, str>)> {
+pub(crate) fn taggable_source(
+    block: &FlatBlock,
+) -> Option<(TaggableKind, std::borrow::Cow<'_, str>)> {
     if block.synthetic || block.role == "system" {
         return None;
     }
@@ -10926,14 +10900,10 @@ fn timestamp_temporal_marks(
             && lineage_anchor_mid != Some(message.mid.as_str())
         {
             let marker_text = previous.and_then(|prior: &CkIngressMessage| {
-                let previous_created = prior.ck.meta.created_at_ms?;
-                let current_created = message.ck.meta.created_at_ms?;
-                let previous_end = prior.ck.meta.completed_at_ms.unwrap_or(previous_created);
-                Some(
-                    current_created
-                        .checked_sub(previous_end)
-                        .and_then(temporal_gap_prefix)
-                        .unwrap_or_default(),
+                temporal_marker_from_timestamps(
+                    prior.ck.meta.created_at_ms,
+                    prior.ck.meta.completed_at_ms,
+                    message.ck.meta.created_at_ms,
                 )
             });
             if let Some(marker_text) = marker_text {
@@ -10949,6 +10919,383 @@ fn timestamp_temporal_marks(
         previous = Some(message);
     }
     marks
+}
+
+/// The full timestamp walk and incremental admission share this exact fallback.
+pub(crate) fn temporal_marker_from_timestamps(
+    previous_created: Option<i64>,
+    previous_completed: Option<i64>,
+    created: Option<i64>,
+) -> Option<String> {
+    Some(
+        created?
+            .checked_sub(previous_completed.unwrap_or(previous_created?))
+            .and_then(temporal_gap_prefix)
+            .unwrap_or_default(),
+    )
+}
+
+/// Content-free capture of the policy facts the engine already measured. It is
+/// used for new admission and for freezing the inputs of an engine rebuild.
+pub(crate) fn capture_provider_parts(
+    req: &TransformRequest,
+    projection: &FlatProjection,
+    core: &CoreState,
+    measured: &[mc_store::TailHygienePartMeasurement],
+    tags: &[McTagRow],
+    served: bool,
+) -> Vec<mc_store::provider_records::ProviderPolicyPart> {
+    use mc_store::provider_records::ProviderPolicyPart;
+    let reduced = frozen_red_targets(core);
+    let mut parts = Vec::new();
+    for message in &req.messages {
+        parts.push(ProviderPolicyPart {
+            mid: message.mid.clone(),
+            ordinal: message.ordinal,
+            block_id: format!("{}#@message", message.mid),
+            block_index: -1,
+            kind: "header".into(),
+            role: message.ck.role.clone(),
+            measurement: mc_store::TailHygienePartMeasurement {
+                key: String::new(),
+                content_hash: String::new(),
+                kind: mc_store::TailHygienePartKind::Excluded,
+                tokens: 0,
+                u_tokens: 0,
+                tag_number: None,
+                tag_status: None,
+                protected: false,
+                queued_for_drop: false,
+            },
+            tag_kind: None,
+            tag_number: None,
+            tag_tokens: 0,
+            tool_name: String::new(),
+            arc_id: None,
+            subject_part: String::new(),
+            active: true,
+            served,
+            reduced: false,
+            queued: false,
+            real_user: is_authored_user_message(message),
+            created_at_ms: message.ck.meta.created_at_ms,
+            completed_at_ms: message.ck.meta.completed_at_ms,
+        });
+    }
+    for (block, measurement) in projection.blocks.iter().zip(measured) {
+        let tag = tags.iter().find(|tag| tag.block_id == block.id);
+        let tag_kind = taggable_source(block).map(|(kind, _)| kind.as_store_kind().to_owned());
+        let source_tokens = tag.map_or_else(
+            || {
+                taggable_source(block).map_or(0, |(_, source)| {
+                    mc_tokenizer::estimate_tokens(&source) as i64
+                })
+            },
+            |tag| tag.token_count,
+        );
+        parts.push(ProviderPolicyPart {
+            mid: block.mid.clone(),
+            ordinal: block.ordinal,
+            block_id: block.id.clone(),
+            block_index: block.block_index as i64,
+            kind: block.kind_tag.clone(),
+            role: block.role.clone(),
+            measurement: measurement.clone(),
+            tag_kind,
+            tag_number: tag.map(|tag| tag.tag_number),
+            tag_tokens: source_tokens,
+            tool_name: match &block.wire_shape().kind {
+                ck_wire::CkKind::ToolCall { name, .. } => name.clone(),
+                ck_wire::CkKind::ToolResult { tool_name, .. } => tool_name.clone(),
+                _ => String::new(),
+            },
+            arc_id: block.arc_id.clone(),
+            subject_part: String::new(),
+            active: true,
+            served,
+            reduced: reduced.contains(block.id.as_str()),
+            queued: measurement.queued_for_drop,
+            real_user: false,
+            created_at_ms: None,
+            completed_at_ms: None,
+        });
+    }
+    parts.sort_by(|a, b| {
+        a.ordinal
+            .cmp(&b.ordinal)
+            .then_with(|| a.block_index.cmp(&b.block_index))
+    });
+    parts
+}
+
+pub(crate) fn provider_engine_settings(meta: &ModuleMeta) -> Value {
+    let mut baseline = meta.tail_hygiene_baseline.clone();
+    let baseline_len = baseline.as_ref().map_or(0, |b| b.baseline_parts.len());
+    if let Some(baseline) = baseline.as_mut() {
+        baseline.baseline_parts.clear();
+    }
+    serde_json::json!({"coverage":meta.coverage_ordinal,"protected_tokens":meta.protected_tokens_effective,
+        "protected_tools":meta.tail_hygiene_baseline.as_ref().and_then(|b|b.protected_tools_policy.as_ref()),
+        "protected_blocks":meta.protected_tool_block_ids,"calibration":meta.decision_calibration,
+        "baseline":baseline,"baseline_len":baseline_len,"rendered_memory_ids":meta.rendered_memory_ids,
+        "reduce_suppressed":meta.channel1_reduce_suppressed,
+        "cadence":{"channel1_last_nudge_undropped":meta.channel1_last_nudge_undropped,"channel1_last_nudge_level":meta.channel1_last_nudge_level,
+            "channel1_last_fire_level":meta.channel1_last_fire_level,"channel1_last_fire_ordinal":meta.channel1_last_fire_ordinal}})
+}
+
+pub(crate) struct Channel1PolicyInputs {
+    pub baseline: mc_store::TailHygieneBaseline,
+    pub users: u64,
+    pub tool_outputs: usize,
+    pub hint: Vec<(i64, String)>,
+    pub carrier: bool,
+}
+
+/// Both lanes freeze the prefix before the newest message on a bust, and use
+/// the frozen-prefix delta path on a defer. Calibration epoch handling is shared.
+fn refresh_channel1_baseline(
+    measured: crate::tail_hygiene::TailHygieneMeasurement,
+    cache_busting: bool,
+    previous: Option<&TailHygieneBaseline>,
+    now_ms: i64,
+    units_version: u8,
+    calibration: crate::decision_calibration::DecisionCalibration,
+) -> crate::tail_hygiene::TailHygieneRefresh {
+    refresh_tail_hygiene_baseline_calibrated(
+        measured,
+        cache_busting,
+        previous,
+        now_ms,
+        HygieneCalibration {
+            units_version: units_version.max(1),
+            tools_ratio: if units_version >= 2 {
+                calibration.tools_ratio
+            } else {
+                1.0
+            },
+            prose_ratio: if units_version >= 2 {
+                calibration.prose_ratio
+            } else {
+                1.0
+            },
+        },
+    )
+}
+
+/// A real prefix rebuild adopts this pass's model; defers preserve the epoch
+/// already priced into the cached prefix. Neither lane guesses from old ratios.
+fn calibration_for_prefix_pass(
+    model_key: Option<&str>,
+    frozen: Option<&mc_store::FrozenDecisionCalibration>,
+    cache_busting: bool,
+) -> crate::decision_calibration::DecisionCalibration {
+    if cache_busting {
+        crate::decision_calibration::DecisionCalibration::for_model(model_key)
+    } else {
+        frozen
+            .and_then(crate::decision_calibration::DecisionCalibration::from_frozen)
+            .unwrap_or_else(crate::decision_calibration::DecisionCalibration::neutral)
+    }
+}
+
+/// Project stored measurements through the same protection, selection, calibrated
+/// refresh and oldest-tag functions as a full engine pass. No content is fetched.
+/// This correctness-stage projector walks the full active metadata lineage; it
+/// is not yet incremental. The bounded-summary integration gate remains closed.
+pub(crate) fn channel1_inputs_from_parts(
+    parts: &[mc_store::provider_records::ProviderPolicyPart],
+    settings: &Value,
+    protected_floor: u64,
+    protected_tools: &BTreeMap<String, usize>,
+    carrier: bool,
+    cache_busting: bool,
+    model_key: Option<&str>,
+) -> Channel1PolicyInputs {
+    use crate::protection_window::ProtectionWindow;
+    use crate::selection::{SelItem, SelKind, SelMessageRole};
+    let coverage = settings.get("coverage").and_then(Value::as_u64);
+    let frozen_calibration = settings.get("calibration").and_then(|v| {
+        serde_json::from_value::<mc_store::FrozenDecisionCalibration>(v.clone()).ok()
+    });
+    let calibration =
+        calibration_for_prefix_pass(model_key, frozen_calibration.as_ref(), cache_busting);
+    let floor = settings
+        .get("protected_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(protected_floor);
+    let tags = parts
+        .iter()
+        .filter(|p| p.served && p.tag_kind.as_deref() == Some("tool_result"))
+        .filter_map(|p| {
+            Some(McTagRow {
+                tag_number: p.tag_number?,
+                block_id: p.block_id.clone(),
+                kind: "tool_result".into(),
+                token_count: p.tag_tokens,
+                created_at_ms: 0,
+                source_bytes: Arc::from([]),
+            })
+        })
+        .collect::<Vec<_>>();
+    let window =
+        ProtectionWindow::from_persisted_rows_calibrated(&tags, floor, calibration.tools_ratio);
+    let frozen = parts
+        .iter()
+        .filter(|p| p.reduced)
+        .map(|p| p.block_id.clone())
+        .collect::<HashSet<_>>();
+    let counts = settings
+        .get("protected_tools")
+        .and_then(|v| serde_json::from_value::<BTreeMap<String, usize>>(v.clone()).ok())
+        .unwrap_or_else(|| protected_tools.clone());
+    let selection = parts
+        .iter()
+        .filter(|p| p.kind != "header" && is_tail(p.ordinal, coverage))
+        .map(|p| SelItem {
+            served_token_count: Some(p.measurement.tokens.max(0) as usize),
+            id: p.block_id.clone(),
+            ordinal: p.ordinal,
+            message_role: if p.role == "assistant" {
+                SelMessageRole::Assistant
+            } else {
+                SelMessageRole::NonAssistant
+            },
+            kind: match p.kind.as_str() {
+                "tool_call" => SelKind::ToolCall {
+                    name: p.tool_name.clone(),
+                    input: Value::Null,
+                },
+                "tool_result" => SelKind::ToolResult {
+                    tool_name: p.tool_name.clone(),
+                },
+                _ => SelKind::Text,
+            },
+            provider_executed: false,
+            user_answer: false,
+            byte_size: 0,
+            token_count: Some(p.tag_tokens.max(0) as usize),
+            arc_id: p.arc_id.clone(),
+        })
+        .collect::<Vec<_>>();
+    let protected = crate::selection::protected_blocks_for_policy(&selection, &frozen, &counts);
+    let protected_arcs = parts
+        .iter()
+        .filter(|p| protected.contains(&p.block_id))
+        .filter_map(|p| p.arc_id.clone())
+        .collect::<HashSet<_>>();
+    let output_tags = parts
+        .iter()
+        .filter(|p| p.tag_kind.as_deref() == Some("tool_result") && p.active)
+        .filter_map(|p| {
+            p.arc_id
+                .as_ref()
+                .zip(p.tag_number)
+                .map(|(arc, n)| (arc.clone(), n))
+        })
+        .collect::<HashMap<_, _>>();
+    let queued = parts
+        .iter()
+        .filter(|p| p.queued)
+        .filter_map(|p| p.tag_number)
+        .collect::<HashSet<_>>();
+    let mut measurements = Vec::new();
+    let newest = parts.iter().map(|p| p.ordinal).max().unwrap_or(0);
+    let mut newest_start = 0;
+    for p in parts.iter().filter(|p| p.kind != "header") {
+        if p.ordinal < newest {
+            newest_start += 1;
+        }
+        let mut m = p.measurement.clone();
+        let number = if p.tag_kind.is_some() {
+            p.tag_number.filter(|_| p.active)
+        } else {
+            p.arc_id
+                .as_ref()
+                .and_then(|arc| output_tags.get(arc).copied())
+        };
+        m.tag_number = number;
+        m.tag_status = number.map(|_| "active".into());
+        m.protected = number.is_some_and(|n| {
+            window
+                .tag_numbers
+                .tag_numbers
+                .contains(&crate::protection_window::TagNumber(n))
+        }) || protected.contains(&p.block_id)
+            || p.arc_id
+                .as_ref()
+                .is_some_and(|arc| protected_arcs.contains(arc));
+        m.queued_for_drop = number.is_some_and(|n| queued.contains(&n));
+        if p.reduced || !is_tail(p.ordinal, coverage) {
+            m.tokens = 0;
+            m.kind = mc_store::TailHygienePartKind::Excluded;
+        }
+        m.u_tokens = if number.is_some() && !m.protected && !m.queued_for_drop {
+            m.tokens
+        } else {
+            0
+        };
+        measurements.push(m);
+    }
+    let mut previous = settings
+        .get("baseline")
+        .and_then(|v| serde_json::from_value::<mc_store::TailHygieneBaseline>(v.clone()).ok());
+    if let Some(previous) = previous.as_mut() {
+        previous.baseline_parts = parts
+            .iter()
+            .filter(|p| p.kind != "header")
+            .take(
+                settings
+                    .get("baseline_len")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize,
+            )
+            .map(|p| p.measurement.clone())
+            .collect();
+    }
+    let baseline = refresh_channel1_baseline(
+        crate::tail_hygiene::TailHygieneMeasurement {
+            u: 0,
+            t: 0,
+            content_signature: String::new(),
+            parts: measurements,
+            newest_message_part_start: newest_start,
+        },
+        cache_busting,
+        previous.as_ref(),
+        0,
+        2,
+        calibration,
+    )
+    .baseline;
+    let active = parts
+        .iter()
+        .filter(|p| {
+            p.tag_kind.as_deref() == Some("tool_result")
+                && p.active
+                && !p.reduced
+                && is_tail(p.ordinal, coverage)
+        })
+        .filter_map(|p| {
+            Some(ActiveTagForNudge {
+                tag_number: p.tag_number?,
+                kind: "tool_result".into(),
+                token_count: p.tag_tokens,
+                tool_name: p.tool_name.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let hint = oldest_reclaimable_hint(&active, &window.cutoff, &queued);
+    let tool_outputs = reclaimable_tool_output_count(Some(&baseline));
+    Channel1PolicyInputs {
+        baseline,
+        users: parts
+            .iter()
+            .filter(|p| p.kind == "header" && p.real_user)
+            .count() as u64,
+        tool_outputs,
+        hint,
+        carrier,
+    }
 }
 
 /// The id of each message's first text block, in projection order. Equivalent to searching
@@ -11053,7 +11400,7 @@ fn apply_tag_overlay_to_message(
     }
 }
 
-fn apply_tag_prefix_to_block(
+pub(crate) fn apply_tag_prefix_to_block(
     role: &str,
     block: &mut CkWireBlock,
     kind: TaggableKind,
@@ -11172,7 +11519,7 @@ fn append_channel1_to_output(output: &mut ck_wire::CkToolOutput, reminder: &str)
     false
 }
 
-fn tag_prefix(tag_number: i64) -> String {
+pub(crate) fn tag_prefix(tag_number: i64) -> String {
     format!("§{tag_number}§ ")
 }
 
@@ -11195,7 +11542,7 @@ fn strip_tag_prefix(value: &str, tag_number: i64) -> &str {
 /// rewriting genuine references such as `the tag §12§ was dropped`. Code fences and
 /// inline-code lines stay verbatim, and a token must be followed by whitespace or ASCII
 /// punctuation so malformed text is never partially consumed.
-fn strip_leading_tag_imitations(value: &str) -> String {
+pub(crate) fn strip_leading_tag_imitations(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
     let mut in_fenced_code = false;
     let mut inline_code_delimiter = None;
@@ -11683,7 +12030,7 @@ fn compute_active_overlay_decisions(
 /// Decide one durable auto-search hint for a new live user tail. The caller may render the
 /// frozen decision immediately only when this request has not served the target block before.
 #[allow(clippy::too_many_arguments)]
-fn maybe_decide_live_user_hint(
+pub(crate) fn maybe_decide_live_user_hint(
     store: &McStore,
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
@@ -12163,7 +12510,7 @@ pub(crate) fn utf16_prefix(text: &str, limit: usize) -> &str {
     &text[..end]
 }
 
-fn render_user_hint(
+pub(crate) fn render_user_hint(
     results: &[crate::memory_tool::MemorySearchResult],
     english_word_rules: bool,
 ) -> Option<String> {
@@ -12270,16 +12617,13 @@ fn maybe_append_channel1_nudge(
     }
 
     let hint = oldest_reclaimable_hint(&active_tags, input.protection_cutoff, &queued_tag_numbers);
-    let reminder = build_channel1_reminder(
-        decision.level,
-        decision.reclaimable_tokens,
+    let reminder = commit_channel1_fire(
+        &decision,
+        meta,
+        current_real_user_turn_count,
         reclaimable_tool_output_count(input.baseline),
         &hint,
-        decision.sticky,
     );
-    apply_channel1_decision_state(meta, &decision);
-    meta.channel1_last_fire_level = decision.level.as_str().to_string();
-    meta.channel1_last_fire_ordinal = current_real_user_turn_count;
     let row = Channel1AppendRow {
         block_id: target.block_id.clone(),
         reminder_text: reminder.clone(),
@@ -12295,7 +12639,7 @@ fn maybe_append_channel1_nudge(
     Some((row, unit))
 }
 
-fn apply_channel1_decision_state(meta: &mut ModuleMeta, decision: &Channel1Decision) {
+pub(crate) fn apply_channel1_decision_state(meta: &mut ModuleMeta, decision: &Channel1Decision) {
     meta.channel1_last_nudge_undropped = decision.next_last_nudge;
     meta.channel1_last_nudge_level = decision.next_last_level.clone();
     if decision.clear_post_reduce_grace {
@@ -12304,6 +12648,55 @@ fn apply_channel1_decision_state(meta: &mut ModuleMeta, decision: &Channel1Decis
             baseline.channel1_post_reduce_grace_pre_level.clear();
         }
     }
+}
+
+/// One renderer and one cadence transition for both full and incremental lanes.
+pub(crate) fn apply_channel1_compliance_grace(
+    meta: &mut ModuleMeta,
+    current: &mut Option<TailHygieneBaseline>,
+    applied: bool,
+) {
+    if meta.channel1_reduce_suppressed || applied {
+        if let Some(baseline) = current
+            .as_mut()
+            .filter(|b| b.evaluable && !b.generation_invalidated)
+        {
+            let u = effective_tail_hygiene(baseline).0;
+            baseline.channel1_post_reduce_grace_baseline_u = Some(u);
+            baseline.channel1_post_reduce_grace_pre_level = meta.channel1_last_nudge_level.clone();
+            meta.channel1_reduce_suppressed = false;
+            if let Some(persisted) = meta.tail_hygiene_baseline.as_mut() {
+                persisted.channel1_post_reduce_grace_baseline_u = Some(u);
+                persisted.channel1_post_reduce_grace_pre_level =
+                    baseline.channel1_post_reduce_grace_pre_level.clone();
+            } else {
+                meta.tail_hygiene_baseline = Some(baseline.clone());
+            }
+        } else {
+            meta.channel1_reduce_suppressed = true;
+        }
+    }
+}
+
+/// One renderer and one cadence transition for both full and incremental lanes.
+pub(crate) fn commit_channel1_fire(
+    decision: &Channel1Decision,
+    meta: &mut ModuleMeta,
+    users: u64,
+    tool_outputs: usize,
+    hint: &[(i64, String)],
+) -> String {
+    let reminder = build_channel1_reminder(
+        decision.level,
+        decision.reclaimable_tokens,
+        tool_outputs,
+        hint,
+        decision.sticky,
+    );
+    apply_channel1_decision_state(meta, decision);
+    meta.channel1_last_fire_level = decision.level.as_str().into();
+    meta.channel1_last_fire_ordinal = users;
+    reminder
 }
 
 fn channel1_append_rows(
@@ -12769,7 +13162,7 @@ fn build_channel2_host_reminder(
     format!("<system-reminder>\n{text}\n</system-reminder>")
 }
 
-fn decide_channel1(
+pub(crate) fn decide_channel1(
     baseline: Option<&TailHygieneBaseline>,
     meta: &ModuleMeta,
     current_real_user_turn_count: u64,
@@ -13377,7 +13770,7 @@ fn tool_result_can_carry_channel1(block: &CkWireBlock) -> bool {
     }
 }
 
-fn oldest_reclaimable_hint(
+pub(crate) fn oldest_reclaimable_hint(
     active_tags: &[ActiveTagForNudge],
     protection_cutoff: &TagNumberCutoffProjection,
     queued_tag_numbers: &HashSet<i64>,
@@ -13427,7 +13820,7 @@ pub(crate) fn reclaimable_tool_output_count(baseline: Option<&TailHygieneBaselin
         .count()
 }
 
-fn build_channel1_reminder(
+pub(crate) fn build_channel1_reminder(
     level: Channel1Level,
     reclaimable_tokens: i64,
     reclaimable_tool_outputs: usize,

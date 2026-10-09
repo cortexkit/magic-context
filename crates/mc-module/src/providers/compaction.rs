@@ -1207,7 +1207,7 @@ impl McHandler {
             .store_for_request()
             .await
             .map_err(StoreRefusal::into_outcome)?;
-        let _serial = self.provider_serial.lock().await;
+        let _serial = self.provider_serial.lock_for(&key).await;
         if host {
             return self.host_setup(&store, binding, &key, request, chosen);
         }
@@ -1346,7 +1346,7 @@ impl McHandler {
             .store_for_request()
             .await
             .map_err(StoreRefusal::into_outcome)?;
-        let _serial = self.provider_serial.lock().await;
+        let _serial = self.provider_serial.lock_for(&key).await;
         if let Some(conversation) = store
             .load_provider_conversation(&key.store_key())
             .map_err(transient)?
@@ -1393,7 +1393,7 @@ impl McHandler {
             tokio::spawn(async move {
                 tokio::task::yield_now().await;
                 fault("WaitAnswered");
-                let _serial = serial.lock().await;
+                let _serial = serial.lock_for(&key).await;
                 let result = async {
                     let mut record = storage.load(&key)?;
                     if record.wait_request.as_deref() != Some(&request.request_id) {
