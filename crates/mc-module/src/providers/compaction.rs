@@ -232,14 +232,17 @@ fn non_tag_messages(
         // The host record keeps its earlier hook answer unchanged when a step
         // does not replace history. Remove Channel 1 Appends from live post_tool
         // answers before engine ingestion: tagged CHANNEL1_NOTE operations and
-        // legacy untagged operations, which this hook used only for reminders.
+        // legacy untagged copies of the Channel 1 system-reminder envelope.
+        // Other Appends are retained; arbitrary note-less text is not ownership.
         // The engine decides after drops and the grace that suppresses nudges
         // following a fulfilled reduction; replaying the hook text bypasses that
         // decision and can duplicate an engine-saved reminder.
         if answer.subject.hook == "post_tool" {
             ops.retain(|op| {
-                !matches!(op, hooks::answer::Operation::Append { note, .. }
-                if note.as_deref().is_none_or(|note| note == super::step_transform::CHANNEL1_NOTE))
+                !matches!(op, hooks::answer::Operation::Append { note, text, .. }
+                if note.as_deref()==Some(super::step_transform::CHANNEL1_NOTE)
+                    || (note.is_none() && text.starts_with("\n\n<system-reminder>\n")
+                        && text.contains("spent tool output") && text.ends_with("\n</system-reminder>")))
             });
         }
         let parts = message

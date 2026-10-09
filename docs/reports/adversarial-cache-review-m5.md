@@ -397,3 +397,32 @@ served-array fire/next/published comparisons. All-target strict Clippy and final
 format checking passed. The broader provider/historian/store, drive-fault and
 conformance gates remain separately recorded below; the unverified F3 checkpoint
 is now backed by the finding-specific byte, chronology and mutation checks.
+
+The expected expensive individual test was also bounded and timed separately:
+`review_m5_randomized_200_complete_inputs_and_publications` passed in **132.50 s**,
+with exactly 200 sessions, 163 publications, 117 reopens and zero mismatches.
+This is finite repeated database/codec/claim/CAS work, unlike the earlier F1
+notification hang. Its duration was reported to the parent before broader gates;
+the parent confirmed that cost is expected and authorized continuing.
+
+Per-finding commits: F1 `4b137c547a`, F2 `edbeaff652`, runner-maintenance F3 source
+checkpoint `ee1b63f141`, cost `f4a0d12540`, and verified F3 disposition
+`3c128f5c6d`. The final broad gate record follows. No mutation remains in source.
+
+The broad provider gate ran **147 tests** in **881.87 s**: 143 passed, 3 ignored,
+and one existing assertion failed. The expensive entries were the already-existing
+720-pass and randomized/adversarial parity corpora plus the 200-session review,
+not the formerly hung F1 seam. The failure was
+`rebuild_replacement_equals_hook_served_bytes_with_one_overlay_tag_per_block`:
+a generic note-less post_tool Append `\nreminder` was incorrectly treated as
+Channel 1 ownership. The legacy filter is now precise: owned notes or the actual
+spent-tool-output system-reminder envelope, not every untagged Append. No old
+assertion was rewritten. The failed test passed in **0.28 s**, the unchanged F3
+matrix in **9.03 s**, and chronology in **4.74 s** after that fix. Comment review
+found no unclear explanation. The impacted compaction and final broad gates are
+rerun rather than declaring that earlier failed provider run green.
+
+The impacted compaction rerun is green: **51 passed**, including the original
+hook-served-byte assertion and all real-state/240-pass comparisons. Strict
+all-target Clippy also passed after the precise legacy filter. This closes the
+single failure from the earlier 147-test provider run without changing a test.
