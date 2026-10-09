@@ -3257,6 +3257,15 @@ export const MIGRATIONS: Migration[] = [
             installMemoryLifecycleSchema(db);
         },
     },
+    {
+        version: 100,
+        description: "durable served thinking prefix and held release request",
+        up(db: Database): void {
+            if (!tableExists(db, "session_meta")) return;
+            ensureColumn(db, "session_meta", "served_prefix", "TEXT");
+            ensureColumn(db, "session_meta", "held_release", "TEXT");
+        },
+    },
 ];
 
 /**

@@ -3249,6 +3249,12 @@ const MIGRATIONS: &[Migration] = &[
         version: 66,
         statements: include_str!("migrations/store_066_provider_log.sql"),
     },
+    Migration {
+        version: 67,
+        // ModuleMeta::held_release records edits delayed to preserve a signed thinking prefix.
+        // Advance the fence so older binaries cannot silently discard it when rewriting meta.
+        statements: "SELECT 1;",
+    },
 ];
 
 /// The highest `mc_cache` schema migration this binary ships.
@@ -4753,6 +4759,11 @@ pub struct ModuleMeta {
     /// Set by session.flush and consumed by the next eligible transform as a SOFT refresh.
     #[serde(default)]
     pub soft_refresh_pending: bool,
+    /// Release-request JSON for edits delayed to preserve bytes before a kept signed thinking
+    /// block. Carries the original cache-bust reason and outstanding work obligations.
+    /// The JSON payload can gain optional fields without another schema migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_release: Option<serde_json::Value>,
     /// This session's `Today's date: ...` guidance line. Because it changes with the
     /// wall clock, we update it only during a pass that already rewrites cached content.
     #[serde(default)]
@@ -7898,6 +7909,14 @@ impl McStore {
         descriptor: &StorageDescriptor,
         enforce_private_permissions: bool,
     ) -> Result<Self, McStoreError> {
+        Self::open_with_migrations(descriptor, enforce_private_permissions, MIGRATIONS)
+    }
+
+    fn open_with_migrations(
+        descriptor: &StorageDescriptor,
+        enforce_private_permissions: bool,
+        migrations: &[Migration],
+    ) -> Result<Self, McStoreError> {
         let mut storage_root = None;
         let mut before = private_permissions::TightenReport::default();
         if let cortexkit_store_types::StorageBackend::Sqlite { path } = &descriptor.backend {
@@ -7950,7 +7969,7 @@ impl McStore {
                 return Err(error);
             }
         }
-        let migration = inner.migrate(NS, MIGRATIONS)?;
+        let migration = inner.migrate(NS, migrations)?;
         // A store written by a longer chain than this binary carries is refused here, before the
         // repair below or anything else reads or writes a row. On such a store the migrator has
         // applied nothing and only read the recorded version, so returning now leaves the file
@@ -20161,6 +20180,89 @@ mod tests {
     }
 
     #[test]
+    fn held_release_defaults_for_legacy_meta_and_survives_store_restart() {
+        // Serialize the pre-field shape, rather than relying on an absent field being emitted.
+        let mut legacy = serde_json::to_value(ModuleMeta::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("held_release");
+        let legacy: ModuleMeta = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.held_release, None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let descriptor = descriptor(dir.path());
+        let request = serde_json::json!({
+            "reason": "flush",
+            "obligations": [{ "lane": "flush", "pending": true }],
+        });
+        {
+            let store = McStore::open_for_test(&descriptor).unwrap();
+            let meta = ModuleMeta {
+                held_release: Some(request.clone()),
+                ..legacy
+            };
+            store
+                .commit("held-release", None, &CoreState::default(), &meta)
+                .unwrap();
+        }
+        let reopened = McStore::open_for_test(&descriptor).unwrap();
+        assert_eq!(
+            reopened.load("held-release").unwrap().meta.held_release,
+            Some(request)
+        );
+    }
+
+    #[test]
+    fn migration_67_fences_held_release_from_a_version_66_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let descriptor = descriptor(dir.path());
+        let db_path = dir.path().join("store.db");
+        let old_chain: Vec<Migration> = MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 66)
+            .cloned()
+            .collect();
+        {
+            let older = McStore::open_with_migrations(&descriptor, false, &old_chain).unwrap();
+            assert_eq!(older.module_store_schema_version().unwrap(), 66);
+            older
+                .commit(
+                    "legacy",
+                    None,
+                    &CoreState::default(),
+                    &ModuleMeta::default(),
+                )
+                .unwrap();
+        }
+        let request = serde_json::json!({ "reason": "flush", "obligations": ["flush"] });
+        {
+            let current = McStore::open_for_test(&descriptor).unwrap();
+            assert_eq!(current.module_store_schema_version().unwrap(), 67);
+            let mut loaded = current.load("legacy").unwrap();
+            assert_eq!(loaded.meta.held_release, None);
+            loaded.meta.held_release = Some(request.clone());
+            current
+                .commit("legacy", loaded.row_version, &loaded.core, &loaded.meta)
+                .unwrap();
+        }
+        let before = std::fs::read(&db_path).unwrap();
+        let Err(refusal) = McStore::open_with_migrations(&descriptor, false, &old_chain) else {
+            panic!("a version 66 binary must not open a store carrying held release requests");
+        };
+        assert!(matches!(
+            refusal,
+            McStoreError::StoreAheadOfBinary {
+                db_version: 67,
+                binary_max: 66,
+            }
+        ));
+        assert_eq!(std::fs::read(&db_path).unwrap(), before);
+        let current = McStore::open_for_test(&descriptor).unwrap();
+        assert_eq!(
+            current.load("legacy").unwrap().meta.held_release,
+            Some(request)
+        );
+    }
+
+    #[test]
     fn protected_tool_selection_snapshot_round_trips_without_a_schema_migration() {
         let dir = tempfile::tempdir().unwrap();
         let descriptor = descriptor(dir.path());
@@ -21901,20 +22003,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let descriptor = descriptor(dir.path());
         let older = open_sqlite(&descriptor).unwrap();
-        older
-            .with_conn(|conn| {
-                for name in [
-                    "mc_note_caller_project",
-                    "mc_facade_authority_domain",
-                    "mc_facade_authority_route",
-                ] {
-                    conn.create_scalar_function(name, 0, FunctionFlags::SQLITE_UTF8, |_context| {
-                        Ok(String::new())
-                    })?;
-                }
-                Ok(())
-            })
-            .unwrap();
+        older.with_conn(register_legacy_trigger_functions).unwrap();
         let behind = older
             .migrate(NS, &MIGRATIONS[..MIGRATIONS.len() - 1])
             .unwrap();

@@ -715,8 +715,8 @@ export function copySessionStateForClone(
                  stale_reduce_stripped_ids, processed_image_stripped_ids, merged_reasoning_stripped_ids,
                  pending_pi_compaction_marker_state, last_todo_state,
                  todo_synthetic_call_id, todo_synthetic_anchor_message_id,
-                 todo_synthetic_state_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 todo_synthetic_state_json, served_prefix, held_release)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
              ON CONFLICT(session_id) DO UPDATE SET
                 harness = excluded.harness,
                 counter = excluded.counter,
@@ -733,7 +733,9 @@ export function copySessionStateForClone(
                 todo_synthetic_anchor_message_id = excluded.todo_synthetic_anchor_message_id,
                 todo_synthetic_state_json = excluded.todo_synthetic_state_json,
                 cached_m0_bytes = NULL,
-                cached_m1_bytes = NULL`,
+                cached_m1_bytes = NULL,
+                served_prefix = NULL,
+                held_release = NULL`,
         ).run(
             destinationSessionId,
             getHarness(),

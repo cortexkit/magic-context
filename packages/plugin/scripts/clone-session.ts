@@ -1042,6 +1042,7 @@ function rewriteContextValue(
 }
 
 function contextMetaReset(column: ColumnInfo): unknown {
+    if (column.name === "served_prefix" || column.name === "held_release") return null;
     if (column.name.startsWith("cached_m0_") || column.name === "cached_m1_bytes") return null;
     if (!RESET_META_COLUMNS.has(column.name)) return undefined;
     return /INT|REAL/i.test(column.type) ? 0 : "";

@@ -88,7 +88,7 @@ describe("migration 99", () => {
                 expect(copy.prepare("PRAGMA quick_check").get()).toEqual({ quick_check: "ok" });
                 expect(
                     copy.prepare("SELECT MAX(version) AS version FROM schema_migrations").get(),
-                ).toEqual({ version: 99 });
+                ).toEqual({ version: LATEST_SUPPORTED_VERSION });
             } finally {
                 copy.close();
             }
@@ -106,8 +106,10 @@ describe("migration 99", () => {
             runMigrations(db);
             MIGRATIONS.find((m) => m.version === 99)!.up(db);
             expect(schema(db)).toEqual(snapshot);
-            expect(LATEST_SUPPORTED_VERSION).toBe(99);
-            expect(MIGRATIONS.slice(-3).map((m) => m.version)).toEqual([97, 98, 99]);
+            expect(LATEST_SUPPORTED_VERSION).toBeGreaterThanOrEqual(99);
+            expect(
+                MIGRATIONS.filter((m) => m.version >= 97 && m.version <= 99).map((m) => m.version),
+            ).toEqual([97, 98, 99]);
         } finally {
             db.close();
             fresh.close();

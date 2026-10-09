@@ -275,6 +275,8 @@ function makeFixture(
             emergency_drain_active INTEGER DEFAULT 0,
             cached_m0_bytes BLOB,
             cached_m1_bytes BLOB,
+            served_prefix TEXT,
+            held_release TEXT,
             nudge_anchor_message_id TEXT,
             prior_boundary_ordinal INTEGER DEFAULT 1
         );
@@ -334,6 +336,11 @@ function makeFixture(
             Buffer.from("warm"),
             "msg_source_2",
         );
+    context.prepare("UPDATE session_meta SET served_prefix = ?, held_release = ? WHERE session_id = ?").run(
+        JSON.stringify({ first_kept: { id: "msg_source_1", digest: "source-prefix" } }),
+        JSON.stringify({ reason: "flush", obligations: ["flush"] }),
+        sourceSessionId,
+    );
     context
         .prepare("INSERT INTO session_projects (session_id, harness, project_path, updated_at) VALUES (?, ?, ?, ?)")
         .run(sourceSessionId, "opencode", "/tmp/drive-project", 10);
@@ -469,13 +476,15 @@ describe("clone-session", () => {
         expect(clonedCompartment.end_message_id).toBe(clonedMessages[1].id);
         expect([clonedCompartment.start_message, clonedCompartment.end_message]).toEqual([1, 2]);
         const meta = context
-            .prepare("SELECT compaction_marker_state, channel2_nudge_state, emergency_drain_active, cached_m0_bytes, cached_m1_bytes FROM session_meta WHERE session_id = ?")
+            .prepare("SELECT compaction_marker_state, channel2_nudge_state, emergency_drain_active, cached_m0_bytes, cached_m1_bytes, served_prefix, held_release FROM session_meta WHERE session_id = ?")
             .get(destinationSessionId) as {
             compaction_marker_state: string;
             channel2_nudge_state: string;
             emergency_drain_active: number;
             cached_m0_bytes: Buffer | null;
             cached_m1_bytes: Buffer | null;
+            served_prefix: string | null;
+            held_release: string | null;
         };
         expect(JSON.parse(meta.compaction_marker_state).boundaryMessageId).toBe(clonedMessages[0].id);
         expect(JSON.parse(meta.compaction_marker_state).compactionPartId).toBe(clonedParts[0].id);
@@ -483,6 +492,8 @@ describe("clone-session", () => {
         expect(meta.emergency_drain_active).toBe(0);
         expect(meta.cached_m0_bytes).toBeNull();
         expect(meta.cached_m1_bytes).toBeNull();
+        expect(meta.served_prefix).toBeNull();
+        expect(meta.held_release).toBeNull();
         expect(
             (context.prepare("SELECT COUNT(*) AS count FROM session_projects WHERE session_id = ?").get(destinationSessionId) as { count: number }).count,
         ).toBe(1);
