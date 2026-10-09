@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import * as configLoader from "../../config";
 import { MagicContextConfigSchema } from "../../config/schema/magic-context";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
@@ -25,14 +25,17 @@ import * as rustMode from "./rust-mode";
 import * as storageGate from "./storage-gate";
 import type { SessionContext, V2Context } from "./types";
 
-const BASE = "b604dfe92cc8^";
+const baselinePath = join(import.meta.dir, "test-support/pre-h4-setting-off.json");
+const baselineRevision = "0fba6f5c7462264dedc51449dcfcb20d27a9094e";
 type Capture = { request: string; writes: string[]; methods: string[] };
 const root = resolve(import.meta.dir, "../../../../..");
 const packageRoot = join(root, "packages/plugin");
 
-// Run the same fixture in separate Bun processes. git archive extracts BASE,
-// the revision before the provider adapter was added, so expected outputs come
-// from the historical implementation rather than a rewritten model or a hash.
+// Capture the current implementation in a separate Bun process so global mocks
+// and caches cannot leak between host, setting, or request scenarios. The frozen
+// JSON fixture contains capture()'s requests and store writes from the commit
+// recorded in its source_revision, before the Rust provider-pipeline adapter
+// was added. Request and write strings are compared without normalization.
 function childCapture(
     directory: string,
     output: string,
@@ -71,62 +74,10 @@ function revisedCapture(
     }
 }
 
-function historicalCapture(
-    host: "v1" | "v2",
-    setting: "absent" | "full_request",
-    lane: string,
-): Capture[] {
-    const temp = createTestTempDirFromPath(join(root, ".h4-review2-"));
-    try {
-        const archive = spawnSync(
-            "git",
-            [
-                "archive",
-                BASE,
-                "packages/plugin",
-                "packages/retina-local-fs",
-                "scripts",
-                "package.json",
-            ],
-            { cwd: root, maxBuffer: 128 * 1024 * 1024, windowsHide: true },
-        );
-        if (archive.status !== 0) throw new Error(archive.stderr.toString());
-        let extendedPath: string | undefined;
-        for (let offset = 0; offset + 512 <= archive.stdout.length; ) {
-            const header = archive.stdout.subarray(offset, offset + 512);
-            if (header.every((byte) => byte === 0)) break;
-            const field = (from: number, to: number) =>
-                header.subarray(from, to).toString("utf8").replace(/\0.*$/s, "");
-            const size = Number.parseInt(field(124, 136).trim() || "0", 8),
-                type = field(156, 157);
-            const body = archive.stdout.subarray(offset + 512, offset + 512 + size);
-            const name = extendedPath ?? [field(345, 500), field(0, 100)].filter(Boolean).join("/");
-            if (type === "x") extendedPath = /\d+ path=([^\n]+)\n/.exec(body.toString("utf8"))?.[1];
-            else {
-                extendedPath = undefined;
-                if (type === "0" || type === "") {
-                    const destination = join(temp, name);
-                    mkdirSync(dirname(destination), { recursive: true });
-                    writeFileSync(destination, body);
-                }
-            }
-            offset += 512 + Math.ceil(size / 512) * 512;
-        }
-        symlinkSync(join(root, "node_modules"), join(temp, "node_modules"), "dir");
-        const historicalPackage = join(temp, "packages/plugin");
-        symlinkSync(
-            join(packageRoot, "node_modules"),
-            join(historicalPackage, "node_modules"),
-            "dir",
-        );
-        writeFileSync(
-            join(historicalPackage, "src/v2/hooks/payload-review2.test.ts"),
-            readFileSync(import.meta.path),
-        );
-        return childCapture(historicalPackage, join(temp, "capture.json"), host, setting, lane);
-    } finally {
-        cleanupTestTempDir(temp);
-    }
+function loadHistoricalFixture(): { source_revision: string; captures: Record<string, Capture[]> } {
+    if (!existsSync(baselinePath))
+        throw new Error(`Missing pre-H4 setting-off fixture: ${baselinePath}`);
+    return JSON.parse(readFileSync(baselinePath, "utf8"));
 }
 
 class Asset {
@@ -336,7 +287,9 @@ async function capture(
     let storeDirectory: string | undefined;
     let storeWriter: Database | undefined;
     if (lane.startsWith("context")) {
-        storeDirectory = createTestTempDirFromPath(join(process.env.XDG_DATA_HOME!, "h4-review2-store-"));
+        storeDirectory = createTestTempDirFromPath(
+            join(process.env.XDG_DATA_HOME!, "h4-review2-store-"),
+        );
         const path = join(storeDirectory, "fixture.db");
         const store = (storeWriter = new Database(path));
         store.exec(
@@ -567,18 +520,31 @@ if (process.env.H4_REVIEW2_CAPTURE) {
         expect(result).toHaveLength(3);
     });
 } else {
-    for (const host of ["v1", "v2"] as const)
-        for (const setting of ["absent", "full_request"] as const)
-            for (const lane of host === "v2"
+    const cases = (["v1", "v2"] as const).flatMap((host) =>
+        (["absent", "full_request"] as const).flatMap((setting) =>
+            (host === "v2"
                 ? ["ordinary", "checkpoint", "restored", "context", "context-checkpoint"]
-                : ["ordinary", "checkpoint", "restored"]) {
-                test(`setting-off differential ${host} ${setting} ${lane}: outgoing request and all store writes equal pre-H4`, async () => {
-                    const before = historicalCapture(host, setting, lane);
-                    const after = revisedCapture(host, setting, lane);
-                    expect(before.every((p) => p.methods.includes("transform"))).toBe(true);
-                    expect(after.every((p) => p.methods.includes("transform"))).toBe(true);
-                    expect(after.map((p) => p.writes)).toEqual(before.map((p) => p.writes));
-                    expect(after.map((p) => p.request)).toEqual(before.map((p) => p.request));
-                }, 60000);
-            }
+                : ["ordinary", "checkpoint", "restored"]
+            ).map((lane) => ({ host, setting, lane, key: `${host} ${setting} ${lane}` })),
+        ),
+    );
+    test("pre-H4 setting-off fixture exists and covers every differential lane", () => {
+        expect(existsSync(baselinePath)).toBe(true);
+        const fixture = loadHistoricalFixture();
+        expect(fixture.source_revision).toBe(baselineRevision);
+        expect(Object.keys(fixture.captures)).toEqual(cases.map(({ key }) => key));
+        for (const snapshots of Object.values(fixture.captures)) expect(snapshots).toHaveLength(3);
+    });
+    for (const { host, setting, lane, key } of cases) {
+        test(`setting-off differential ${key}: outgoing request and all store writes equal pre-H4`, () => {
+            const before = loadHistoricalFixture().captures[key];
+            const after = revisedCapture(host, setting, lane);
+            expect(before).toHaveLength(3);
+            expect(after).toHaveLength(3);
+            expect(before.every((p) => p.methods.includes("transform"))).toBe(true);
+            expect(after.every((p) => p.methods.includes("transform"))).toBe(true);
+            expect(after.map((p) => p.writes)).toEqual(before.map((p) => p.writes));
+            expect(after.map((p) => p.request)).toEqual(before.map((p) => p.request));
+        }, 60000);
+    }
 }
