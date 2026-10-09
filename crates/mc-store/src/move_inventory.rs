@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 pub const INVENTORY_VERSION: u32 = 3;
-pub const CONTEXT_SCHEMA_VERSION: u32 = 98;
+pub const CONTEXT_SCHEMA_VERSION: u32 = 99;
 pub const STORE_SCHEMA_VERSION: u32 = 66;
 pub const GLOBAL_USER_PROFILE_PROJECT_PATH: &str = "__global__";
 
@@ -922,7 +922,11 @@ pub const TABLES: &[TableInventory] = &[
             "mural_cue",
             "mural_cue_hash",
             "mural_cue_at",
-            "mural_cue_rejection_count"
+            "mural_cue_rejection_count",
+            "revision",
+            "verify_result",
+            "verify_files_json",
+            "verify_commit"
         ],
         &[],
         None,
@@ -1024,7 +1028,8 @@ pub const TABLES: &[TableInventory] = &[
             "superseded_by_id",
             "category",
             "new_content",
-            "queued_at"
+            "queued_at",
+            "adoption_class"
         ],
         &[],
         None,
@@ -2390,6 +2395,354 @@ pub const TABLES: &[TableInventory] = &[
         None,
         None
     ),
+    // Lifecycle evidence and decisions outlive their originating session and
+    // belong to the project memory graph rather than a movable session.
+    table!(
+        Context,
+        "memory_publications",
+        NotSession,
+        RowSelector::None,
+        &["publication_id"],
+        &[
+            "publication_id",
+            "project_path",
+            "source_session_id",
+            "commit_order",
+            "committed_at"
+        ],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Context,
+        "memory_fact_blocks",
+        NotSession,
+        RowSelector::None,
+        &["id"],
+        &[
+            "id",
+            "publication_id",
+            "source_session_id",
+            "start_ordinal",
+            "end_ordinal",
+            "role",
+            "parts_json",
+            "joined_text"
+        ],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Context,
+        "memory_pending_facts",
+        NotSession,
+        RowSelector::None,
+        &["id"],
+        &[
+            "id",
+            "project_path",
+            "publication_id",
+            "fact_index",
+            "compartment_id",
+            "category",
+            "content",
+            "anchor_known",
+            "state",
+            "fact_attempts",
+            "reason",
+            "reserved_stage_key",
+            "mapping_json",
+            "matched_memory_id"
+        ],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Context,
+        "memory_fact_block_links",
+        NotSession,
+        RowSelector::None,
+        &["fact_id", "block_id"],
+        &["fact_id", "block_id"],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Context,
+        "memory_history",
+        NotSession,
+        RowSelector::None,
+        &["id"],
+        &[
+            "id",
+            "memory_id",
+            "revision",
+            "previous_text",
+            "applied_at",
+            "reason",
+            "evidence_json",
+            "source_ids_json",
+            "decision_key",
+            "after_text",
+            "before_json",
+            "after_json"
+        ],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Context,
+        "memory_journal",
+        NotSession,
+        RowSelector::None,
+        &["id"],
+        &[
+            "id",
+            "project_path",
+            "decision_key",
+            "operation",
+            "receipt_json",
+            "applied_at",
+            "before_json",
+            "after_json"
+        ],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Context,
+        "memory_clause_evidence",
+        NotSession,
+        RowSelector::None,
+        &["memory_id", "revision", "clause_ordinal"],
+        &[
+            "memory_id",
+            "revision",
+            "clause_ordinal",
+            "text_hash",
+            "evidence_json"
+        ],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Context,
+        "memory_successor_links",
+        NotSession,
+        RowSelector::None,
+        &["source_id", "successor_id"],
+        &["source_id", "successor_id", "decision_key"],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Context,
+        "memory_conflict_links",
+        NotSession,
+        RowSelector::None,
+        &["left_id", "right_id"],
+        &["left_id", "right_id", "decision_key"],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Context,
+        "memory_classification_items",
+        NotSession,
+        RowSelector::None,
+        &["enqueue_sequence"],
+        &[
+            "enqueue_sequence",
+            "project_path",
+            "memory_id",
+            "saved_revision",
+            "source_session_id",
+            "tool_call_part_id",
+            "save_ordinal",
+            "state",
+            "excerpt",
+            "clipping_json",
+            "importance",
+            "proposed_class",
+            "scored_at"
+        ],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Context,
+        "memory_tool_proposals",
+        NotSession,
+        RowSelector::None,
+        &["id"],
+        &[
+            "id",
+            "project_path",
+            "source_session_id",
+            "proposal_key",
+            "writer",
+            "operation",
+            "target_ids_json",
+            "expected_revisions_json",
+            "proposal_json",
+            "reason",
+            "created_at"
+        ],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Context,
+        "memory_decision_receipts",
+        NotSession,
+        RowSelector::None,
+        &["decision_key"],
+        &[
+            "decision_key",
+            "project_path",
+            "fact_id",
+            "receipt_json",
+            "resolved_at"
+        ],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Context,
+        "memory_activity_ledger",
+        NotSession,
+        RowSelector::None,
+        &["sequence"],
+        &[
+            "sequence",
+            "project_path",
+            "publication_id",
+            "compartment_id",
+            "committed_at"
+        ],
+        &[],
+        None,
+        None
+    ),
+    // Attempt receipts and applied bytes are session-owned. Ship them with the
+    // session so retries and the last served projection retain their identity.
+    table!(
+        Context,
+        "memory_stage_attempts",
+        Ship,
+        RowSelector::Predicate("session_id = ?1"),
+        &["stage_key"],
+        &[
+            "stage_key",
+            "project_path",
+            "publication_id",
+            "run_attempt",
+            "stage",
+            "session_id",
+            "harness",
+            "child_session_id",
+            "carrier",
+            "state",
+            "classification_watermark",
+            "request_json",
+            "reply_json",
+            "reported_profile_json",
+            "usage_json",
+            "started_at"
+        ],
+        &[],
+        Some(KeyPolicy::PreserveOrRefuseCollision),
+        None
+    ),
+    table!(
+        Context,
+        "memory_check_attempts",
+        Ship,
+        RowSelector::Predicate("session_id = ?1"),
+        &["check_key"],
+        &[
+            "check_key",
+            "decision_key",
+            "session_id",
+            "harness",
+            "kind",
+            "operand_ids_json",
+            "input_hash",
+            "request_profile_hash",
+            "request_json",
+            "reply_json",
+            "reported_profile_json",
+            "usage_json",
+            "state",
+            "started_at"
+        ],
+        &[],
+        Some(KeyPolicy::PreserveOrRefuseCollision),
+        None
+    ),
+    table!(
+        Context,
+        "memory_applied_snapshots",
+        Ship,
+        RowSelector::Predicate("session_id = ?1"),
+        &["session_id", "harness", "project_path"],
+        &[
+            "session_id",
+            "harness",
+            "project_path",
+            "applied_epoch",
+            "applied_mutation_cursor",
+            "max_memory_id",
+            "generation",
+            "source_generation",
+            "m0_bytes",
+            "m1_bytes",
+            "mural_payload",
+            "mural_hash",
+            "applied_revisions_json",
+            "selection_metadata_json",
+            "activity_expiry_clocks_json",
+            "policy_budget_identity_json",
+            "text_cue_search_manifest_json",
+            "admission_ledger_json",
+            "correction_receipts_json",
+            "correction_cursors_json"
+        ],
+        &[],
+        Some(KeyPolicy::Preserve),
+        None
+    ),
+    table!(
+        Context,
+        "memory_applied_rows",
+        Ship,
+        RowSelector::Predicate("session_id = ?1"),
+        &["session_id", "harness", "project_path", "memory_id"],
+        &[
+            "session_id",
+            "harness",
+            "project_path",
+            "memory_id",
+            "applied_revision",
+            "projected_text",
+            "projected_metadata_json"
+        ],
+        &[],
+        Some(KeyPolicy::Preserve),
+        None
+    ),
     // store.db: 39 tables observed after fresh migration.
     // Provider state cannot be rebuilt: it includes allocated versions and tags,
     // frozen catalog admission, and answers that the runner may not have applied.
@@ -3321,7 +3674,7 @@ mod tests {
             import { runMigrations } from './packages/plugin/src/features/magic-context/migrations';
             const db = new Database(process.env.MOVE_TEST_CONTEXT);
             initializeDatabase(db); runMigrations(db);
-            if (LATEST_SUPPORTED_VERSION !== 98 || db.prepare('SELECT MAX(version) AS v FROM schema_migrations WHERE version < 10000').get().v !== 98) throw new Error('update the schema-pinned inventory');
+            if (LATEST_SUPPORTED_VERSION !== 99 || db.prepare('SELECT MAX(version) AS v FROM schema_migrations WHERE version < 10000').get().v !== 99) throw new Error('update the schema-pinned inventory');
             db.close();
         "#;
         let output = Command::new("bun")
@@ -3460,6 +3813,47 @@ mod tests {
     }
 
     #[test]
+    fn v99_memory_inventory_ships_session_state_and_keeps_project_history_together() {
+        for table in [
+            "memory_stage_attempts",
+            "memory_check_attempts",
+            "memory_applied_snapshots",
+            "memory_applied_rows",
+        ] {
+            let definition = entry(Store::Context, table).unwrap();
+            assert_eq!(definition.class, Class::Ship, "{table}");
+            assert_eq!(definition.session_column(), Some("session_id"), "{table}");
+            assert!(definition.key_policy.is_some(), "{table}");
+        }
+        for table in ["memory_applied_snapshots", "memory_applied_rows"] {
+            let definition = entry(Store::Context, table).unwrap();
+            assert!(definition.primary_key.contains(&"harness"), "{table}");
+            assert!(definition.primary_key.contains(&"project_path"), "{table}");
+            assert_eq!(definition.shipped_columns(), definition.columns, "{table}");
+        }
+
+        for table in [
+            "memory_publications",
+            "memory_fact_blocks",
+            "memory_pending_facts",
+            "memory_fact_block_links",
+            "memory_history",
+            "memory_journal",
+            "memory_clause_evidence",
+            "memory_successor_links",
+            "memory_conflict_links",
+            "memory_classification_items",
+            "memory_tool_proposals",
+            "memory_decision_receipts",
+            "memory_activity_ledger",
+        ] {
+            let definition = entry(Store::Context, table).unwrap();
+            assert_eq!(definition.class, Class::NotSession, "{table}");
+            assert_eq!(definition.rows, RowSelector::None, "{table}");
+        }
+    }
+
+    #[test]
     fn host_runner_inventory_ships_whole_v87_harness_aggregates() {
         let (_dir, context, _module) = fresh_stores();
         let script = r#"
@@ -3475,12 +3869,15 @@ mod tests {
         let groups: Vec<Vec<String>> = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(
             groups,
-            vec![vec![
-                "host_runner_entries",
-                "host_runner_ids",
-                "host_runner_views",
-                "host_runner_state"
-            ]]
+            vec![
+                vec![
+                    "host_runner_entries",
+                    "host_runner_ids",
+                    "host_runner_views",
+                    "host_runner_state"
+                ],
+                vec!["memory_applied_snapshots", "memory_applied_rows"]
+            ]
         );
         for table in &groups[0] {
             let definition = entry(Store::Context, table).unwrap();
@@ -3733,7 +4130,7 @@ mod tests {
             .unwrap();
         assert_bun_succeeded(&output);
         let session_tables: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(session_tables.len(), 41);
+        assert_eq!(session_tables.len(), 45);
         for table in session_tables {
             assert!(matches!(
                 entry(Store::Context, &table).unwrap().class,
