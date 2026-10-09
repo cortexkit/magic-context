@@ -20923,7 +20923,7 @@ mod tests {
         let line = supported_fences_line();
         assert_eq!(
             line,
-            format!("context.db=99 store.db={LATEST_MIGRATION_VERSION}")
+            format!("context.db=100 store.db={LATEST_MIGRATION_VERSION}")
         );
     }
 
