@@ -86,6 +86,8 @@ small, portable fixture rather than committing megabytes of repeated padding.
 | Deferred history while below threshold | `compaction::pending_history_below_threshold_preserves_last_view` |
 | Failed step retains last view | `compaction::failed_step_keeps_last_view_and_is_not_setup_compaction_unavailable` |
 | Below threshold; one crossing; history head, drops, full range; subsequent stable noops | `compaction::below_threshold_noops_crossing_once_history_drops_and_stable_prompts` |
+| Protected drops report held, survive a rebuild, and release after three newer tool groups displace them | `compaction::protected_drop_is_held_across_rebuild_until_newer_groups_displace_it` |
+| Runner routes refuse either host-only Setup setting and accept the plain request | `compaction::runner_setup_refuses_host_only_settings_but_accepts_plain_setup` |
 | Route join, isolation and real default-runner callback | `compaction::runner_join_is_project_and_session_bound_not_broca_bound` and the threshold test |
 | Kill at durable `AnswerRecorded`, retry same ID, skipped version, contiguous cursor, stale fencing | `compaction::kill_mid_request_retry_skips_reserved_version_preserves_cursor_and_fences_stale` |
 | Per-block tag strip, untouched signatures/reasoning/images/tool calls | `hooks::post_assistant_strips_only_addressed_text_preserves_signed_and_nontext_bytes` |
@@ -93,6 +95,14 @@ small, portable fixture rather than committing megabytes of repeated padding.
 | Three roles, versions, runner groups, existing tool surface | `role_describe_and_existing_tool_provider_surface` |
 | Reproducibility and shared-byte replay | `fixture::joint_fixture_committed_bytes_match_real_encoder`, `fixture::joint_fixture_replays_real_routes_and_unknown_refusal_decodes_without_retry` |
 | Claude Code legacy regression | Existing `mc-module --lib` tests, unchanged |
+
+The eligible-drop scenario uses four tool-tag groups. The newest three remain
+protected even if one result alone pays the 4,000-token floor; only the older
+fourth group can be released. The companion held-drop case starts with two
+groups and checks the reply and pending queue before and after displacement.
+The runner admission case supplies `observation: "answer"` and
+`serializer_profile: "opencode-aisdk"` in Setup's plan `params`, separately and
+together, then repeats the same request without those host-only settings.
 
 The kill harness reads the persisted answer at the marker **before killing**,
 so the skipped version is an observed allocation, not an inferred one. After

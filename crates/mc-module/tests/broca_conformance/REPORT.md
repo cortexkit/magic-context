@@ -1,6 +1,6 @@
 # Broca provider conformance delivery
 
-## Result
+## S4 baseline result (before repair)
 
 The new target compiled and ran **11 tests: 9 passed, 2 failed**. Both failures
 are retained as product-behavior regressions, as required; no product files were
@@ -51,7 +51,7 @@ reads/cache writes (40000 + 20000 + 6000), above the configured 65% threshold.
    output based on the engine's prefix-bust permission. This identifies the
    execution/permission boundary, not a proven root cause inside classification.
 
-2. **Queued eligible tool output is not released on the rebuilding pass.**
+2. **Queued tool output is not released on the rebuilding pass.**
    The threshold test observes `ctx_reduce`'s successful queue acknowledgment,
    verifies tag 1 belongs to ordinal 3 and is pending, and supplies a distinct
    newer tagged result larger than the configured protection floor. The crossing
@@ -60,8 +60,9 @@ reads/cache writes (40000 + 20000 + 6000), above the configured 65% threshold.
    product paths: `crates/mc-module/src/providers/compaction.rs:674-683` maps tags
    to pending engine targets, `:695-700` runs compaction, and `:701-708` retains
    targets left pending by the engine. The precise selection/protection cause
-   has not been localized. The assertion remains failing rather than accepting
-   a replacement that ignores the queued drop.
+    had not been localized in S4. Follow-up found that the two-group input was
+    inside the deliberate newest-three protection window, not eligible for
+    release. The input is corrected below without weakening that policy.
 
 3. **Pre-existing fence-ceiling assertion is stale.** The unchanged library test
    `tests::supported_fences_report_plugin_and_store_ceilings`, at

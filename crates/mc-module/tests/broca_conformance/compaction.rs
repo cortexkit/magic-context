@@ -71,6 +71,32 @@ pub async fn tagged_transcript(rig: &Rig, session: &str) -> Vec<Value> {
     ]
 }
 
+async fn append_newer_tool_groups(rig: &Rig, transcript: &mut Vec<Value>) {
+    for number in 3..=4 {
+        let call_id = format!("call-{number}");
+        let text = format!("NEWER GROUP {number} {}", "tail ".repeat(2000));
+        let answer = rig.method(&rig.identity(SESSION), "transform.hook", json!({
+            "session":SESSION,"harness":"broca","lineage_id":LINEAGE,"hook":"post_tool",
+            "step_id":format!("newer-{number}"),"tool":"read","tool_call_id":call_id,
+            "blocks":[text],"is_error":false
+        })).await;
+        let transform::answer::HookAnswer::Ops { ops } = serde_json::from_value(answer).unwrap()
+        else {
+            panic!("expected newer tool tag");
+        };
+        let rendered = transform::answer::apply_ops(&[text], &ops).unwrap().remove(0);
+        assert!(rendered.starts_with(&format!("§{number}§ ")));
+        let ordinal = transcript.len() as u64;
+        transcript.push(message(ordinal, "assistant", json!([{
+            "type":"tool_call","tool_call_id":call_id,"tool_name":"read","input":{"path":format!("newer-{number}")}
+        }])));
+        transcript.push(message(ordinal + 1, "tool", json!([{
+            "type":"tool_result","tool_call_id":call_id,"output":{"kind":"text","text":rendered},"is_error":false
+        }])));
+    }
+    transcript.push(user(transcript.len() as u64, "next turn after newer tools"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fresh_setup_ready_with_initial_view() {
     let rig = Rig::start(None, false).await;
@@ -108,6 +134,37 @@ async fn fresh_setup_ready_with_initial_view() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runner_setup_refuses_host_only_settings_but_accepts_plain_setup() {
+    let rig = Rig::start(None, false).await;
+    let identity = rig.identity(SESSION);
+    for settings in [
+        json!({"observation":"answer"}),
+        json!({"serializer_profile":"opencode-aisdk"}),
+        json!({"observation":"answer","serializer_profile":"opencode-aisdk"}),
+    ] {
+        let mut request = setup(SESSION);
+        request["params"]
+            .as_object_mut()
+            .unwrap()
+            .extend(settings.as_object().unwrap().clone());
+        let failure = rig
+            .try_call(
+                &identity,
+                json!({"method":"compaction.setup","params":request}),
+            )
+            .await
+            .expect_err("runner routes must not accept host-only settings");
+        assert_eq!(failure.code(), Some("invalid_params"), "{failure:?}");
+        assert!(rig.script.callbacks().is_empty());
+    }
+    let ready = rig
+        .method(&identity, "compaction.setup", setup(SESSION))
+        .await;
+    let _: compact::setup::SetupAnswer = serde_json::from_value(ready.clone()).unwrap();
+    assert_eq!(ready["answer"], "ready");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn below_threshold_noops_crossing_once_history_drops_and_stable_prompts() {
     let rig = Rig::start(None, false).await;
     let identity = rig.identity(SESSION);
@@ -124,6 +181,10 @@ async fn below_threshold_noops_crossing_once_history_drops_and_stable_prompts() 
     rig.script.calls.lock().unwrap().clear();
     let mut view = ready["initial"].clone();
     let mut transcript = tagged_transcript(&rig, SESSION).await;
+    // Protection includes the newest three tool groups as well as the token
+    // floor. Two extra groups put tag 1 outside both limits without changing
+    // the protection policy; tag 2 alone already supplies more than 4000 tokens.
+    append_newer_tool_groups(&rig, &mut transcript).await;
     transcript.insert(1, user(1, "recent history"));
     for (ordinal, message) in transcript.iter_mut().enumerate() {
         message["ordinal"] = json!(ordinal);
@@ -175,7 +236,7 @@ async fn below_threshold_noops_crossing_once_history_drops_and_stable_prompts() 
     let record = rig.record(SESSION);
     assert_eq!(
         record["messages"][LINEAGE].as_object().unwrap().len(),
-        7,
+        12,
         "repeated cursor pages are ingested once"
     );
     assert_eq!(record["pending_drops"], json!([1]));
@@ -191,7 +252,7 @@ async fn below_threshold_noops_crossing_once_history_drops_and_stable_prompts() 
     view = crossing["compaction"].clone();
     assert_eq!(
         view["range"],
-        json!({"from":0,"to":7}),
+        json!({"from":0,"to":12}),
         "replacement must be the full working range, not a delta"
     );
     let rendered = render(&view, &transcript);
@@ -206,6 +267,7 @@ async fn below_threshold_noops_crossing_once_history_drops_and_stable_prompts() 
     );
 
     assert!(text.contains("PROTECTED TAIL"), "working tail was lost");
+    assert_eq!(rig.record(SESSION)["pending_drops"], json!([]));
     for id in ["after-1", "after-2"] {
         let answer = rig
             .method(
@@ -226,6 +288,56 @@ async fn below_threshold_noops_crossing_once_history_drops_and_stable_prompts() 
         "queued drop still served; retained pending tags: {}",
         rig.record(SESSION)["pending_drops"]
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn protected_drop_is_held_across_rebuild_until_newer_groups_displace_it() {
+    let rig = Rig::start(None, false).await;
+    let identity = rig.identity(SESSION);
+    rig.publish_history(SESSION);
+    rig.script.transcript(vec![user(0, "old history")]);
+    let mut request = setup(SESSION);
+    request["newest"] = json!({"ordinal":0,"mid":"m0"});
+    let ready = rig.method(&identity, "compaction.setup", request).await;
+    let mut view = ready["initial"].clone();
+    let mut transcript = tagged_transcript(&rig, SESSION).await;
+    transcript.insert(1, user(1, "recent history"));
+    for (ordinal, message) in transcript.iter_mut().enumerate() {
+        message["ordinal"] = json!(ordinal);
+        message["mid"] = json!(format!("m{ordinal}"));
+    }
+    let observed = rig.method(&identity, "compaction.step", step(
+        SESSION, "observe-protected", &transcript, 1000, &view,
+    )).await;
+    assert_eq!(observed["answer"], "noop");
+    let held = rig.call(&identity, json!({"name":"ctx_reduce","arguments":{"drop":"1"}})).await;
+    assert_eq!(held["isError"], false, "{held}");
+    let reply = held["content"][0]["text"].as_str().unwrap();
+    assert!(reply.contains("Held:"), "{reply}");
+    assert!(reply.contains("inside the protected working set"), "{reply}");
+    assert!(!reply.contains("Queued: drop"), "{reply}");
+    assert_eq!(rig.record(SESSION)["pending_drops"], json!([1]));
+    rig.publish_more_history(SESSION);
+    let crossing = rig.method(&identity, "compaction.step", step(
+        SESSION, "protected-crossing", &transcript, 70_000, &view,
+    )).await;
+    assert_eq!(crossing["answer"], "compaction_message", "{crossing}");
+    view = crossing["compaction"].clone();
+    assert!(String::from_utf8(render(&view, &transcript)).unwrap().contains("RELEASABLE OUTPUT"));
+    assert_eq!(rig.record(SESSION)["pending_drops"], json!([1]));
+    append_newer_tool_groups(&rig, &mut transcript).await;
+    let mut rebuild = step(SESSION, "displaced-rebuild", &transcript, 70_000, &view);
+    rebuild["prefix_rebuilding"] = json!({"reason":"cold"});
+    let released = rig.method(&identity, "compaction.step", rebuild).await;
+    assert_eq!(released["answer"], "compaction_message", "{released}");
+    view = released["compaction"].clone();
+    let text = String::from_utf8(render(&view, &transcript)).unwrap();
+    assert!(!text.contains("RELEASABLE OUTPUT"));
+    assert!(text.contains("PROTECTED TAIL"));
+    assert!(text.contains("NEWER GROUP 3"));
+    assert!(text.contains("NEWER GROUP 4"));
+    assert_eq!(rig.record(SESSION)["pending_drops"], json!([]));
+    assert!(rig.store().load_pending_agent_drops(&rig.engine_key(SESSION)).unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
