@@ -595,6 +595,42 @@ it("re-fences a head cap when a recent open arc lands inside an admitted complet
     ).toEqual({ eligibleEndOrdinal: 9, oversizeAtomicUnit: false });
 });
 
+it("does not clamp a completed component back into the protected tail at ordinal 300", () => {
+    const tokens = Array(473).fill(400);
+    tokens[298] = 258;
+    const index = buildTrueRawTokenIndexFromTokenCountsForTest("edge-299", tokens);
+    const head = applyHeadCap({
+        index,
+        offset: 299,
+        protectedTailStart: 300,
+        arcs: [
+            { callId: "outer", invOrdinal: 298, resOrdinal: 301 },
+            { callId: "inner", invOrdinal: 299, resOrdinal: 302 },
+        ],
+        lastCompartmentEndOrdinal: 298,
+        capTokens: 100_000,
+        recentOpenArcCutoff: 450,
+    });
+
+    // Neither side of the component fits between the publication floor and live tail.
+    expect(head.eligibleEndOrdinal).toBe(299);
+    expect(index.rangeTokens(299, head.eligibleEndOrdinal)).toBe(0);
+});
+
+it("re-fences an open invocation inside a completed tool component", () => {
+    expect(
+        fenceBoundaryForToolArcs(
+            10,
+            [
+                { callId: "completed", invOrdinal: 7, resOrdinal: 12 },
+                { callId: "open", invOrdinal: 9, resOrdinal: null },
+            ],
+            0,
+            9,
+        ),
+    ).toBe(7);
+});
+
 it("moves a candidate boundary forward to the first later open tool invocation", () => {
     expect(
         fenceBoundaryForToolArcs(10, [{ callId: "open", invOrdinal: 20, resOrdinal: null }], 9, 10),
@@ -710,14 +746,13 @@ function pressureGateSnapshot(
     };
 }
 
-it("keeps runnable-window and no-head gates below a raised force band", () => {
+it("rejects an empty capped window at both force thresholds while keeping the raised no-head gate", () => {
     const raised = pressureGateSnapshot("ses-raised-pressure-gates", 90);
     const defaultThreshold = pressureGateSnapshot("ses-default-pressure-gates", 65);
 
-    // If the implementation incorrectly uses a literal 80% gate, the
-    // raised-threshold assertion becomes true.
+    // Token mass before capping cannot make an empty publication window runnable.
     expect(hasRunnableCompartmentWindow(raised)).toBe(false);
-    expect(hasRunnableCompartmentWindow(defaultThreshold)).toBe(true);
+    expect(hasRunnableCompartmentWindow(defaultThreshold)).toBe(false);
 
     const db = createContextDb();
     try {

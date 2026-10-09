@@ -122,10 +122,94 @@ describe("Pi protected-tail true-raw parity", () => {
 	});
 });
 
-import type { ProtectedTailBoundarySnapshot } from "@magic-context/core/hooks/magic-context/protected-tail-boundary";
+import {
+	hasRunnableCompartmentWindow,
+	type ProtectedTailBoundarySnapshot,
+	resolveProtectedTailBoundary,
+} from "@magic-context/core/hooks/magic-context/protected-tail-boundary";
+import {
+	readSessionChunk,
+	withRawMessageProvider,
+} from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import { computeRawRangeFingerprint } from "@magic-context/core/hooks/magic-context/read-session-true-raw-tokens";
 import { selectPiHistorianRunBoundarySnapshot } from "./context-handler";
 import { convertEntriesToRawMessages } from "./read-session-pi";
+
+test("Pi 473-message edge waits rather than scheduling the split 299-299 chunk", () => {
+	const entries = Array.from({ length: 473 }, (_, index) => {
+		const ordinal = index + 1;
+		return {
+			type: "message",
+			id: `m${ordinal}`,
+			message: {
+				role: ordinal === 1 || ordinal === 300 ? "user" : "assistant",
+				content: [{ type: "text", text: `Session message ${ordinal}` }],
+			} as Record<string, unknown>,
+		};
+	});
+	for (const [invocation, result, id] of [
+		[298, 301, "outer"],
+		[299, 303, "inner"],
+	] as const) {
+		entries[invocation - 1].message = {
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id,
+					name: "bash",
+					arguments: { command: "inspect history" },
+				},
+			],
+		};
+		entries[result - 1].message = {
+			role: "toolResult",
+			toolCallId: id,
+			toolName: "bash",
+			content: [{ type: "text", text: "inspection finished" }],
+		};
+	}
+	const messages = convertEntriesToRawMessages(entries);
+	expect(messages).toHaveLength(473);
+	const sessionId = "ses-pi-edge-299";
+	withRawMessageProvider(sessionId, { readMessages: () => messages }, () => {
+		const resolve = (percentage: number) =>
+			resolveProtectedTailBoundary({
+				sessionId,
+				mode: "pi-trigger",
+				contextLimit: 204_000,
+				executeThresholdPercentage: 90,
+				triggerBudget: 20_000,
+				usage: { percentage, inputTokens: 180_138 },
+				usageSource: "live",
+				lastCompartmentEndOrdinal: 298,
+				priorBoundaryOrdinal: 299,
+				protectedTailPolicyVersion: 3,
+				migrationFloorActive: false,
+				providerShapeVersion: "pi-folded-v1",
+				cacheNamespace: sessionId,
+				storedTokenTotals: new Map(
+					messages.map((message) => [
+						message.id,
+						message.ordinal === 299 ? 258 : 400,
+					]),
+				),
+			});
+		const boundary = resolve(88.3);
+		expect(boundary.offset).toBe(299);
+		expect(boundary.protectedTailStart).toBe(299);
+		expect(boundary.eligibleEndOrdinal).toBe(299);
+		expect(hasRunnableCompartmentWindow(boundary)).toBe(false);
+		expect(
+			readSessionChunk(sessionId, 20_000, 299, boundary.eligibleEndOrdinal)
+				.messageCount,
+		).toBe(0);
+		// More pressure lifts the live-prompt floor and permits the whole completed component.
+		const later = resolve(95);
+		expect(later.eligibleEndOrdinal).toBeGreaterThan(303);
+		expect(hasRunnableCompartmentWindow(later)).toBe(true);
+	});
+});
 
 test("protected-tail fingerprints are content-stable: metadata-only drift matches, content drift does not", () => {
 	// The fingerprint deliberately hashes ONLY content-bearing fields (text /

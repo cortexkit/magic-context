@@ -563,7 +563,7 @@ export function fenceBoundaryForToolArcs(
     lastCompartmentEndOrdinal: number,
     recentOpenArcCutoff: number,
 ): number {
-    const boundary = fenceBoundaryForCompletedToolArcs(
+    let boundary = fenceBoundaryForCompletedToolArcs(
         candidate,
         arcs,
         lastCompartmentEndOrdinal + 1,
@@ -583,13 +583,18 @@ export function fenceBoundaryForToolArcs(
         // dangling tool_use survives on the wire.
         if (arc.invOrdinal < recentOpenArcCutoff) continue;
         if (arc.invOrdinal >= lastCompartmentEndOrdinal + 1 && arc.invOrdinal < boundary) {
-            return arc.invOrdinal;
+            boundary = arc.invOrdinal;
+            break;
         }
         if (arc.invOrdinal >= boundary) {
-            return arc.invOrdinal;
+            boundary = arc.invOrdinal;
+            break;
         }
     }
-    return boundary;
+    // An open invocation can lie inside a completed parallel tool batch. Protect
+    // the whole batch rather than cutting it at the open invocation; never move
+    // forward through the invocation we just protected.
+    return fenceBoundaryForCompletedToolArcs(boundary, arcs, 1);
 }
 
 function tokenForMessage(
