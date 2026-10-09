@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 pub const INVENTORY_VERSION: u32 = 3;
-pub const CONTEXT_SCHEMA_VERSION: u32 = 97;
+pub const CONTEXT_SCHEMA_VERSION: u32 = 98;
 pub const STORE_SCHEMA_VERSION: u32 = 66;
 pub const GLOBAL_USER_PROFILE_PROJECT_PATH: &str = "__global__";
 
@@ -1770,6 +1770,7 @@ pub const TABLES: &[TableInventory] = &[
             "total_input_tokens",
             "deferred_execute_state",
             "cached_m0_bytes",
+            "cached_m0_score_selection_watermark",
             "cached_m0_project_memory_epoch",
             "cached_m0_workspace_fingerprint",
             "cached_m0_project_user_profile_version",
@@ -2204,6 +2205,190 @@ pub const TABLES: &[TableInventory] = &[
         &[],
         None,
         Some(RenderInput::Workspace)
+    ),
+    // Rescore jobs may span several sessions in a project. Keep their frozen
+    // inputs and provider progress together in the source database rather than
+    // exporting an incomplete job graph with any one session.
+    table!(
+        Context,
+        "rescore_snapshots",
+        NotSession,
+        RowSelector::None,
+        &["id"],
+        &[
+            "id",
+            "scope",
+            "scope_key",
+            "project_path",
+            "target_sessions",
+            "items",
+            "cutoff",
+            "rubric_version",
+            "model_profile",
+            "seed_policy",
+            "cost_estimate",
+            "created_at",
+            "superseded_at"
+        ],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Context,
+        "rescore_jobs",
+        NotSession,
+        RowSelector::None,
+        &["id"],
+        &[
+            "id",
+            "snapshot_id",
+            "originating_harness",
+            "project_path",
+            "model_profile",
+            "cutoff",
+            "rubric_version",
+            "owner_generation",
+            "heartbeat_at",
+            "consecutive_failed_batches",
+            "last_error",
+            "state",
+            "pause_reason",
+            "blocking_job_id",
+            "created_at",
+            "updated_at"
+        ],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Context,
+        "rescore_batches",
+        NotSession,
+        RowSelector::None,
+        &["id"],
+        &[
+            "id",
+            "job_id",
+            "sequence",
+            "state",
+            "current_attempt_id",
+            "created_at"
+        ],
+        &[],
+        None,
+        None
+    ),
+    table!(
+        Context,
+        "rescore_attempts",
+        NotSession,
+        RowSelector::None,
+        &["id"],
+        &[
+            "id",
+            "job_id",
+            "batch_id",
+            "state",
+            "outcome",
+            "handle_map",
+            "prompt_hash",
+            "seed_ids",
+            "model",
+            "owner_generation",
+            "admitted_at",
+            "carrier_run_id",
+            "payload",
+            "item_outcomes",
+            "settled_at"
+        ],
+        &[],
+        None,
+        None
+    ),
+    // Items have target_session_id, but belong to a project job and batches
+    // that may cover other sessions, so they are not independently movable.
+    table!(
+        Context,
+        "rescore_items",
+        NotSession,
+        RowSelector::None,
+        &["id"],
+        &[
+            "id",
+            "job_id",
+            "target_session_id",
+            "compartment_id",
+            "source_identity",
+            "state",
+            "batch_id",
+            "attempt_id",
+            "skipped_job_id"
+        ],
+        &[],
+        None,
+        None
+    ),
+    // Accepted score history affects one session's later renders and undo, so
+    // ship revisions before their session-scoped selection rows.
+    table!(
+        Context,
+        "compartment_score_revisions",
+        Ship,
+        RowSelector::Predicate("session_id = ?1"),
+        &["id"],
+        &[
+            "id",
+            "compartment_id",
+            "session_id",
+            "source_identity",
+            "old_importance",
+            "new_importance",
+            "rubric_version",
+            "prompt_hash",
+            "model",
+            "seed_ids",
+            "job_id",
+            "batch_id",
+            "attempt_id",
+            "completed_at",
+            "reason"
+        ],
+        &[],
+        Some(KeyPolicy::PreserveOrRefuseCollision),
+        None
+    ),
+    table!(
+        Context,
+        "compartment_score_selections",
+        Ship,
+        RowSelector::Predicate("session_id = ?1"),
+        &["session_id", "sequence"],
+        &[
+            "session_id",
+            "compartment_id",
+            "sequence",
+            "revision_id",
+            "origin",
+            "job_id",
+            "batch_id",
+            "attempt_id"
+        ],
+        &[],
+        Some(KeyPolicy::Preserve),
+        None
+    ),
+    table!(
+        Context,
+        "rescore_activation",
+        NotSession,
+        RowSelector::None,
+        &["id"],
+        &["id", "activated_at"],
+        &[],
+        None,
+        None
     ),
     // store.db: 39 tables observed after fresh migration.
     // Provider state cannot be rebuilt: it includes allocated versions and tags,
@@ -3136,7 +3321,7 @@ mod tests {
             import { runMigrations } from './packages/plugin/src/features/magic-context/migrations';
             const db = new Database(process.env.MOVE_TEST_CONTEXT);
             initializeDatabase(db); runMigrations(db);
-            if (LATEST_SUPPORTED_VERSION !== 97 || db.prepare('SELECT MAX(version) AS v FROM schema_migrations WHERE version < 10000').get().v !== 97) throw new Error('update the schema-pinned inventory');
+            if (LATEST_SUPPORTED_VERSION !== 98 || db.prepare('SELECT MAX(version) AS v FROM schema_migrations WHERE version < 10000').get().v !== 98) throw new Error('update the schema-pinned inventory');
             db.close();
         "#;
         let output = Command::new("bun")
@@ -3238,6 +3423,40 @@ mod tests {
         ] {
             assert!(entry(Store::Module, dropped).is_none());
         }
+    }
+
+    #[test]
+    fn v98_rescore_inventory_preserves_session_score_history_but_not_project_jobs() {
+        let revisions = entry(Store::Context, "compartment_score_revisions").unwrap();
+        assert_eq!(revisions.class, Class::Ship);
+        assert_eq!(revisions.session_column(), Some("session_id"));
+        assert_eq!(
+            revisions.key_policy,
+            Some(KeyPolicy::PreserveOrRefuseCollision)
+        );
+
+        let selections = entry(Store::Context, "compartment_score_selections").unwrap();
+        assert_eq!(selections.class, Class::Ship);
+        assert_eq!(selections.session_column(), Some("session_id"));
+        assert_eq!(selections.key_policy, Some(KeyPolicy::Preserve));
+
+        for table in [
+            "rescore_snapshots",
+            "rescore_jobs",
+            "rescore_batches",
+            "rescore_attempts",
+            "rescore_items",
+            "rescore_activation",
+        ] {
+            let definition = entry(Store::Context, table).unwrap();
+            assert_eq!(definition.class, Class::NotSession, "{table}");
+            assert_eq!(definition.rows, RowSelector::None, "{table}");
+        }
+
+        let session_meta = entry(Store::Context, "session_meta").unwrap();
+        assert!(session_meta
+            .columns
+            .contains(&"cached_m0_score_selection_watermark"));
     }
 
     #[test]
@@ -3514,7 +3733,7 @@ mod tests {
             .unwrap();
         assert_bun_succeeded(&output);
         let session_tables: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(session_tables.len(), 39);
+        assert_eq!(session_tables.len(), 41);
         for table in session_tables {
             assert!(matches!(
                 entry(Store::Context, &table).unwrap().class,

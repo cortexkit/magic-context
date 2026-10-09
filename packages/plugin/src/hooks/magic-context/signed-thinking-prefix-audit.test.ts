@@ -18,9 +18,6 @@
  * MC_AUDIT_STRICT=1 to make every exposed lane fail on its strict-binding 400.
  */
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
     appendCompartments,
     replaceAllCompartmentState,
@@ -40,6 +37,7 @@ import { getReasoningRemovalState } from "../../features/magic-context/storage-r
 import { createTagger } from "../../features/magic-context/tagger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createTestTempDir } from "../../shared/test-temp-dir";
 import {
     type Block,
     beforeLastThinking,
@@ -640,13 +638,14 @@ function withFixture(
     body: (f: Fixture) => Promise<void>,
 ) {
     return async () => {
-        const dir = mkdtempSync(join(tmpdir(), "signed-prefix-audit-"));
-        const f = await fixture(generation, subagent, lane, dir);
+        const { dir, cleanup } = createTestTempDir("signed-prefix-audit-");
+        let f: Fixture | undefined;
         try {
+            f = await fixture(generation, subagent, lane, dir);
             await body(f);
         } finally {
-            closeQuietly(f.db);
-            rmSync(dir, { recursive: true, force: true });
+            if (f) closeQuietly(f.db);
+            cleanup();
         }
     };
 }
