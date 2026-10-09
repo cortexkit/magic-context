@@ -426,3 +426,38 @@ The impacted compaction rerun is green: **51 passed**, including the original
 hook-served-byte assertion and all real-state/240-pass comparisons. Strict
 all-target Clippy also passed after the precise legacy filter. This closes the
 single failure from the earlier 147-test provider run without changing a test.
+
+### Final broad gates (Linux, serialized)
+
+- Historian-filtered module library: **253 passed, 2 ignored** of 255, **146.09 s**.
+  This includes provider history/review tests and shared producer/restart logic.
+- Full store library: **290 passed, 5 ignored** of 295, **18.84 s**.
+- The impacted compaction suite and strict all-target Clippy are green as above;
+  remaining full drive-fault library and conformance jobs run separately.
+
+- Required full module library with `--features drive-fault -- --test-threads=4`:
+  **1808 passed, 25 ignored** of **1833**, **870.76 s**. This final restored snapshot
+  includes all provider, parity and independent review assertions, closing the
+  earlier default provider run's single generic-Append failure. Six existing
+  drive-fault-only `Atomic::fetch_update` deprecation warnings were emitted by
+  Rust 1.99; they do not occur in the strict default-feature all-target Clippy gate
+  and were not refactored outside the assigned behavior.
+
+- Explicit conformance gate: **2 passed** (codec plus commons tool-provider suite),
+  **0.33 s**. The role suite runs every advertised case supported by this module.
+- Final strict `cargo clippy --locked -p mc-module -p mc-store --all-targets -- -D
+  warnings`: passed. `cargo fmt --all -- --check` and standalone unchanged-review
+  `rustfmt --edition 2021 --check .../m5_review_tests.rs`: passed; rustfmt
+  **1.10.0-stable**, Cargo/rustc **1.99.0**.
+- Every final build/test gate used a Linux uname guard, ran one Cargo invocation
+  at a time, and was collected with `bash_watch`. Runner drains and the cancelled
+  unknown/hung job are documented, not counted as passes. No local build/test
+  fallback was used; local Cargo use was formatting only.
+
+All three independent failing tests now pass unchanged. F1, F2, replay-filtering,
+engine-gate chronology and zero-row debounce have staged/restored mutation
+controls with named red and unaffected green tests. The remaining cost is the
+first eligible history reconstruction/assembly, not per-debounced-pass work;
+bounded retained summaries remain later-stage work. Paid-report reuse after a
+live publication refusal is still explicitly not implemented as explained in F2.
+No manifests, lockfiles, review assertions or independent review report changed.
