@@ -21,6 +21,7 @@ pub mod context_boundaries;
 pub use context_boundaries::ResolvedContextBoundary;
 pub mod context_writes;
 mod historian_claim;
+pub mod memory_lifecycle;
 pub mod move_inventory;
 pub mod move_snapshot;
 pub mod move_store;
@@ -6606,6 +6607,19 @@ impl std::fmt::Display for FacadeMemoryMutationError {
 
 impl std::error::Error for FacadeMemoryMutationError {}
 
+/// The `context.db` tables a facade command may write: memories and notes, plus every
+/// table the memory applier writes when a command admits a memory.
+const FACADE_COMMAND_TABLES: &[&str] = &[
+    "memories",
+    "notes",
+    "memory_embedding_watermarks",
+    "memory_decision_receipts",
+    "memory_journal",
+    "memory_pending_facts",
+    "memory_conflict_links",
+    "memory_classification_items",
+];
+
 /// Transaction-scoped ports used by the module facade. Every method operates on the
 /// `context.db` transaction owned by `with_facade_command`, so a command's writes commit
 /// together.
@@ -6614,58 +6628,25 @@ pub struct FacadeMutationTxn<'a> {
 }
 
 impl<'a> FacadeMutationTxn<'a> {
+    /// Insert a memory through the memory applier, under a fresh decision key. Returns the
+    /// row's id when the admission applied (an insert or a live same-category match).
+    /// Any other outcome is an error, which rolls back the enclosing facade transaction;
+    /// a caller that must keep the receipt uses [`FacadeMutationTxn::admit_memory`].
     pub fn insert_memory(&self, input: InsertMemoryInput<'_>) -> Result<i64, String> {
-        let normalized_hash = compute_normalized_memory_hash(input.content);
-        let existing: Option<i64> = self
-            .tx
-            .query_row(
-                "SELECT id FROM memories
-                  WHERE project_path = ?1 AND category = ?2 AND normalized_hash = ?3",
-                params![input.project_path, input.category, normalized_hash],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| error.to_string())?;
-        if let Some(id) = existing {
-            self.tx
-                .execute(
-                    "UPDATE memories
-                        SET seen_count = COALESCE(seen_count, 0) + 1,
-                            last_seen_at = ?1,
-                            updated_at = ?1
-                      WHERE id = ?2",
-                    params![input.now_ms, id],
-                )
-                .map_err(|error| error.to_string())?;
-            return Ok(id);
-        }
-        self.tx
-            .execute(
-                "INSERT INTO memories
-                   (project_path, category, content, normalized_hash, importance,
-                    source_session_id, source_type, seen_count, retrieval_count,
-                    first_seen_at, created_at, updated_at, last_seen_at, status,
-                    expires_at, verification_status, metadata_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, ?8, ?8, ?8, ?8,
-                         'active', ?9, 'unverified', ?10)",
-                params![
-                    input.project_path,
-                    input.category,
-                    input.content,
-                    normalized_hash,
-                    input.importance.map(i64::from),
-                    input.source_session_id,
-                    input.source_type.unwrap_or("historian"),
-                    input.now_ms,
-                    input.expires_at,
-                    input.metadata_json,
-                ],
-            )
-            .map_err(|error| error.to_string())?;
-        let id = self.tx.last_insert_rowid();
-        raise_embedding_watermark_tx(self.tx, input.project_path, id, input.now_ms)
-            .map_err(|error| error.to_string())?;
-        Ok(id)
+        let key = memory_lifecycle::applier::fresh_decision_key("facade-insert", input.now_ms);
+        let receipt = self.admit_memory(&admission_for_insert(&input, &key))?;
+        receipt
+            .applied_memory_id()
+            .ok_or_else(|| format!("{}: memory was not saved", receipt.reason))
+    }
+
+    /// Run one admission through the memory applier inside this facade transaction, and
+    /// raise the embedding watermark when it inserted a row.
+    pub fn admit_memory(
+        &self,
+        request: &memory_lifecycle::applier::AdmissionRequest<'_>,
+    ) -> Result<memory_lifecycle::applier::ApplierReceipt, String> {
+        admit_memory_tx(self.tx, request).map_err(|error| error.to_string())
     }
 
     pub fn update_memory_content(
@@ -8234,7 +8215,7 @@ impl McStore {
             }
         }
 
-        let response = self.context_write(&["memories", "notes"], |tx| {
+        let response = self.context_write(FACADE_COMMAND_TABLES, |tx| {
             mutation(&FacadeMutationTxn { tx }).map_err(|error| {
                 rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(error)))
             })
@@ -13139,59 +13120,31 @@ impl McStore {
         Ok(rows)
     }
 
-    /// Insert a memory row unless an existing row already matches the project, category,
-    /// and normalized content hash. Duplicate hits update only bookkeeping fields such as
-    /// `seen_count` and timestamps, and skip the mutation log because the rendered content
-    /// did not change.
+    /// Insert a memory through the memory applier, under a fresh decision key. A live row
+    /// with the same project, category and normalized content hash is seen again instead:
+    /// its `seen_count` and timestamps move and no mutation-log row is written, because the
+    /// rendered content did not change. An outcome that applies nothing (the module is not
+    /// the project's memory authority, or the text matches an archived row or a live row in
+    /// another category) commits its receipt and is returned as an error.
     pub fn insert_memory(&self, input: InsertMemoryInput<'_>) -> Result<i64, McStoreError> {
-        let memory_id = self.context_write(&["memories", "memory_embedding_watermarks"], |tx| {
-            let normalized_hash = compute_normalized_memory_hash(input.content);
-            let existing: Option<i64> = tx
-                .query_row(
-                    "SELECT id FROM memories
-                     WHERE project_path = ?1 AND category = ?2 AND normalized_hash = ?3",
-                    params![input.project_path, input.category, normalized_hash],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if let Some(id) = existing {
-                tx.execute(
-                    "UPDATE memories
-                        SET seen_count = COALESCE(seen_count, 0) + 1,
-                            last_seen_at = ?1,
-                            updated_at = ?1
-                      WHERE id = ?2",
-                    params![input.now_ms, id],
-                )?;
-                return Ok(id);
-            }
+        let key = memory_lifecycle::applier::fresh_decision_key("store-insert", input.now_ms);
+        let receipt = self.admit_memory(&admission_for_insert(&input, &key))?;
+        receipt.applied_memory_id().ok_or_else(|| {
+            single_store_domain::context_error(
+                "memory_not_admitted",
+                format!("{}: memory was not saved", receipt.reason),
+            )
+        })
+    }
 
-            tx.execute(
-                "INSERT INTO memories
-                   (project_path, category, content, normalized_hash, importance,
-                    source_session_id, source_type, seen_count, retrieval_count,
-                    first_seen_at, created_at, updated_at, last_seen_at, status,
-                    expires_at, verification_status, metadata_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, ?8, ?8, ?8, ?8,
-                         'active', ?9, 'unverified', ?10)",
-                params![
-                    input.project_path,
-                    input.category,
-                    input.content,
-                    normalized_hash,
-                    input.importance.map(i64::from),
-                    input.source_session_id,
-                    input.source_type.unwrap_or("historian"),
-                    input.now_ms,
-                    input.expires_at,
-                    input.metadata_json,
-                ],
-            )?;
-            let id = tx.last_insert_rowid();
-            raise_embedding_watermark_tx(tx, input.project_path, id, input.now_ms)?;
-            Ok(id)
-        })?;
-        Ok(memory_id)
+    /// Run one admission through the memory applier in its own `context.db` transaction.
+    pub fn admit_memory(
+        &self,
+        request: &memory_lifecycle::applier::AdmissionRequest<'_>,
+    ) -> Result<memory_lifecycle::applier::ApplierReceipt, McStoreError> {
+        self.context_write(memory_lifecycle::applier::ADMISSION_TABLES, |tx| {
+            admit_memory_tx(tx, request)
+        })
     }
 
     /// Replace an owned primary memory's content/category and append its cache-visible mutation
@@ -16443,12 +16396,60 @@ fn load_note_tx(tx: &rusqlite::Connection, id: i64) -> rusqlite::Result<StoredNo
     )
 }
 
+/// The admission a plain memory insert stands for: an agent save when the caller says
+/// the row comes from an agent, a historian admission otherwise.
+fn admission_for_insert<'a>(
+    input: &InsertMemoryInput<'a>,
+    key: &'a str,
+) -> memory_lifecycle::applier::AdmissionRequest<'a> {
+    use memory_lifecycle::applier::{AdmissionOperation, AdmissionRequest};
+    let operation = if input.source_type == Some("agent") {
+        AdmissionOperation::AgentSave
+    } else {
+        AdmissionOperation::New
+    };
+    let mut request = AdmissionRequest::new(
+        key,
+        operation,
+        input.project_path,
+        input.category,
+        input.content,
+        input.now_ms,
+    );
+    request.importance = input.importance.map(i64::from);
+    request.source_session_id = input.source_session_id;
+    request.source_type = input.source_type;
+    request.expires_at = input.expires_at;
+    request.metadata_json = input.metadata_json;
+    request
+}
+
+/// Apply one admission and, when it inserted a row, move the project's embedding
+/// watermark in the same transaction so the host's backfill sees the new row.
+fn admit_memory_tx(
+    tx: &rusqlite::Connection,
+    request: &memory_lifecycle::applier::AdmissionRequest<'_>,
+) -> rusqlite::Result<memory_lifecycle::applier::ApplierReceipt> {
+    let receipt = memory_lifecycle::applier::apply_memory_admission_tx(tx, request)?;
+    if receipt.inserted == Some(true) {
+        if let Some(id) = receipt.applied_memory_id() {
+            raise_embedding_watermark_tx(tx, request.project_path, id, request.now_ms)?;
+        }
+    }
+    Ok(receipt)
+}
+
 fn promote_facts_tx(
     tx: &rusqlite::Connection,
     project_path: &str,
     facts: &[FactCandidate],
     now_ms: i64,
 ) -> rusqlite::Result<Vec<PromotedRef>> {
+    // The module writes no memory for a project whose memories the TypeScript host owns.
+    // The rest of the fold (compartments, facts, events) still publishes.
+    if !memory_lifecycle::authority::module_owns_memory(tx, project_path)? {
+        return Ok(Vec::new());
+    }
     let mut active_content = HashSet::new();
     // Probe only this fold's exact contents. Large folds are split below SQLite's
     // parameter limit; ordinary folds make one scan without copying the project pool.

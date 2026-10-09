@@ -120,6 +120,9 @@ impl SqliteContextDomain {
             })
             .map_err(context_sql_error)?;
         set_wal_synchronous_normal(&writer).map_err(context_sql_error)?;
+        // The same memory authority guard the module's own writer carries.
+        crate::memory_lifecycle::authority::install_module_memory_authority_guard(&writer)
+            .map_err(context_sql_error)?;
         let reader = open().map_err(context_sql_error)?;
         set_wal_synchronous_normal(&reader).map_err(context_sql_error)?;
         Ok(Self {
