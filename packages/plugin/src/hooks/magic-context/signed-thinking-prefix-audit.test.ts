@@ -35,6 +35,7 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { setPersistedCompactionMarkerState } from "../../features/magic-context/storage-meta-persisted";
 import { getReasoningRemovalState } from "../../features/magic-context/storage-reasoning-removal";
 import { createTagger } from "../../features/magic-context/tagger";
 import { Database } from "../../shared/sqlite";
@@ -45,9 +46,11 @@ import {
     PREFIX_ERROR,
     STRICT_AUDIT,
     StrictBindingMock,
+    thinkingBlocks,
     type Wire,
     withoutThinking,
 } from "./__tests__/strict-binding-mock";
+import { MARKER_SUMMARY_TEXT } from "./compaction-marker-manager";
 import { clearInjectionCache } from "./inject-compartments";
 import type { MessageLike } from "./tag-messages";
 import { clearMessageTokensCache, createTransform, type TransformDeps } from "./transform";
@@ -113,6 +116,7 @@ type Lane =
     | "HARD fold after historian publication"
     | "m[0]/m[1] re-render after a recomp clears the cached pair"
     | "prefix cut moved by a compartment rewrite that keeps the cached pair"
+    | "compaction-marker summary retired by a bust"
     | "synthetic todo"
     | "caveman text compression"
     | "reasoning clearing (keep_reasoning_tokens)"
@@ -611,6 +615,8 @@ function landed(f: Fixture, lane: Lane, after: Wire): boolean {
         case "prefix cut moved by a compartment rewrite that keeps the cached pair":
             // The inclusive cut removed step-4; the partial cut serves it again.
             return text.includes(SUMMARY_TEXT);
+        case "compaction-marker summary retired by a bust":
+            return !text.includes(MARKER_SUMMARY_TEXT);
         case "synthetic todo":
             return text.includes("Repair error recovery");
         case "caveman text compression":
@@ -683,6 +689,19 @@ for (const generation of ["v1", "v2"] as const) {
                         if (lane === "emergency 95% wall")
                             expect(beforeLastThinking(after)).toBe(beforeLastThinking(before));
                         else expect(nonThinkingEdit).toBe(false);
+                        // A pass that applies nothing changes no thinking either. The strip of
+                        // older-turn thinking is the companion of an admitted edit before kept
+                        // older-turn thinking, which a pass with kept current-turn thinking never
+                        // has. Today the strip rides every bust permission of a primary session
+                        // (prefixEditBesidesReasoningTrim), so in a primary session every lane
+                        // that reaches this check strips the previous turn's blocks; a subagent
+                        // has no previous turn.
+                        if (lane !== "reasoning clearing (keep_reasoning_tokens)") {
+                            const thinkingChanged =
+                                thinkingBlocks(after) !== thinkingBlocks(before);
+                            if (STRICT_AUDIT) expect(thinkingChanged).toBe(false);
+                            else expect(thinkingChanged).toBe(!subagent);
+                        }
                         if (lane !== "reasoning clearing (keep_reasoning_tokens)")
                             expect(edit).toBe(false);
                         if (lane.startsWith("ctx_reduce") || lane === "/ctx-flush")
@@ -880,6 +899,65 @@ for (const generation of ["v1", "v2"] as const) {
                     expect(withoutThinking(after)).toBe(withoutThinking(before));
                     f.served = afterMessages;
                     await toolLoop(f, 2);
+                }),
+            );
+            // The compaction-marker summary is served between the m[0]/m[1] head and the first raw
+            // message, so it is part of the prefix. After a logical clear (for example the
+            // marker's summary message is removed) defer passes keep serving it, and the next
+            // busting pass retires it (reconcileMarkerRepresentation). Removing it then edits
+            // the request before every kept thinking block. The fix records the served summary
+            // with the head and holds its retirement until the turn keeps no signed thinking
+            // (docs/designs/signed-thinking-hold.md, section 7).
+            const MARKER_LANE: Lane = "compaction-marker summary retired by a bust";
+            it(
+                `${MARKER_LANE}: mid tool loop`,
+                withFixture(generation, false, MARKER_LANE, async (f) => {
+                    // The marker is set at the start of this turn and served on a /ctx-flush,
+                    // which strips the previous turn's thinking, so the summary lands validly.
+                    setPersistedCompactionMarkerState(f.db, f.sessionId, {
+                        boundaryMessageId: "prompt-2",
+                        summaryMessageId: "marker-summary",
+                        compactionPartId: "marker-compaction-part",
+                        summaryPartId: "marker-summary-part",
+                        boundaryOrdinal: 6,
+                        targetEndMessageId: null,
+                    });
+                    f.pendingMaterialization.add(f.sessionId);
+                    f.served = await f.pass();
+                    expect(f.mock.check(wire(f.served))).toBeNull();
+                    expect(landed(f, MARKER_LANE, wire(f.served))).toBe(false);
+                    await toolLoop(f, 4);
+                    // A logical clear keeps the summary on the wire until a busting pass.
+                    setPersistedCompactionMarkerState(f.db, f.sessionId, null);
+                    f.served = await f.pass();
+                    const before = wire(f.served);
+                    expect(f.mock.check(before)).toBeNull();
+                    expect(landed(f, MARKER_LANE, before)).toBe(false);
+                    // Offer a bust whose own work is all before the kept thinking.
+                    f.pendingMaterialization.add(f.sessionId);
+                    const afterMessages = await f.pass();
+                    const after = wire(afterMessages);
+                    const error = f.mock.check(after);
+                    const retired = landed(f, MARKER_LANE, after);
+                    debugDiff(MARKER_LANE, before, after);
+                    console.log(
+                        `AUDIT-MARKER ${host} | mid tool loop: ${error ?? "accepted"}; summaryRetired=${retired}`,
+                    );
+                    if (!STRICT_AUDIT) {
+                        expect(retired).toBe(true);
+                        expect(error).toBe(PREFIX_ERROR);
+                        return;
+                    }
+                    expect(error).toBeNull();
+                    expect(retired).toBe(false);
+                    expect(withoutThinking(after)).toBe(withoutThinking(before));
+                    expect(wire(await f.pass())).toEqual(after);
+                    f.served = afterMessages;
+                    await toolLoop(f, 2);
+                    // The retirement is held, not lost: the first pass of the next turn may
+                    // retire the summary, and must stay valid either way.
+                    await nextUserTurn(f, "prompt-release");
+                    expect(f.mock.check(wire(f.served))).toBeNull();
                 }),
             );
         });

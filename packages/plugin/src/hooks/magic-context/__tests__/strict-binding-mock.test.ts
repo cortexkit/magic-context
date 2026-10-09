@@ -7,7 +7,9 @@ import {
     ORPHAN_ERROR,
     PREFIX_ERROR,
     StrictBindingMock,
+    thinkingBlocks,
     type Wire,
+    withoutThinking,
 } from "./strict-binding-mock";
 
 // The oracle must reject exactly what the provider rejects, or every audit
@@ -151,5 +153,18 @@ describe("strict binding mock follows the documented rules", () => {
         const earlier = structuredClone(wire);
         earlier[2]!.content[0]!.content = "shortened";
         expect(beforeLastThinking(earlier)).not.toBe(beforeLastThinking(wire));
+    });
+
+    it("thinkingBlocks sees a valid removal of older-turn thinking that the other views ignore", () => {
+        const { mock, wire } = loop([2, 2]);
+        // Removing the older turn's blocks from the start is valid, and changes no byte
+        // outside thinking...
+        const stripped = strip(structuredClone(wire), thinkingIndexes(wire).slice(0, 2));
+        expect(mock.check(stripped)).toBeNull();
+        expect(withoutThinking(stripped)).toBe(withoutThinking(wire));
+        expect(beforeLastThinking(stripped)).toBe(beforeLastThinking(wire));
+        // ...but it is still a change to the request.
+        expect(thinkingBlocks(stripped)).not.toBe(thinkingBlocks(wire));
+        expect(thinkingBlocks(structuredClone(wire))).toBe(thinkingBlocks(wire));
     });
 });

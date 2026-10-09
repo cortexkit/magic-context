@@ -176,6 +176,14 @@ export function withoutThinking(wire: Wire): string {
 }
 
 /**
+ * Every thinking block of the request, in order. A pass that applies nothing must leave this
+ * unchanged too: removing older-turn thinking is valid, but it still changes the request.
+ */
+export function thinkingBlocks(wire: Wire): string {
+    return JSON.stringify(wire.flatMap((m) => m.content.filter((b) => b.type === "thinking")));
+}
+
+/**
  * When `MC_AUDIT_STRICT=1`, every audit case asserts that the request is valid
  * under strict binding, so the exposed lanes fail. By default an exposed lane
  * asserts the exact rejection it produces today, which keeps the suite green

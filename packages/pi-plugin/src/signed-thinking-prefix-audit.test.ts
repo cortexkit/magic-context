@@ -31,6 +31,7 @@ import {
 	PREFIX_ERROR,
 	STRICT_AUDIT,
 	StrictBindingMock,
+	thinkingBlocks,
 	type Wire,
 	withoutThinking,
 } from "../../plugin/src/hooks/magic-context/__tests__/strict-binding-mock";
@@ -179,6 +180,17 @@ const RESTART_LANES: Lane[] = [
  * (`signalPiPendingMaterialization`, `signalPiHistoryRefresh`).
  */
 const RESTART_GAP = new Set<Lane>(["/ctx-flush"]);
+
+/**
+ * Held primary lanes whose bust pass strips the previous turn's thinking today, although it
+ * applies nothing before the kept thinking: Pi's proactive strip rides the pass's bust
+ * permission (`cacheBustingPass`), not an admitted edit.
+ */
+const STRIPS_THINKING_WHEN_HELD = new Set<Lane>([
+	"emergency 95% wall",
+	"/ctx-flush",
+	"HARD fold after historian publication",
+]);
 
 // Pi discovers placeholder-only messages on a history refresh, which a
 // subagent (no historian) does not receive; subagents also get no synthetic
@@ -700,6 +712,19 @@ for (const subagent of [false, true]) {
 						expect(JSON.stringify(after)).toContain("[dropped §");
 						expect(beforeLastThinking(after)).toBe(beforeLastThinking(before));
 					} else expect(nonThinkingEdit).toBe(false);
+					// A pass that applies nothing before the kept thinking changes no
+					// thinking either: the strip of older-turn thinking is the companion
+					// of an admitted edit before kept older-turn thinking, which a pass
+					// with kept current-turn thinking never has.
+					if (lane !== "reasoning clearing (keep_reasoning_tokens)") {
+						const thinkingChanged =
+							thinkingBlocks(after) !== thinkingBlocks(before);
+						if (STRICT_AUDIT) expect(thinkingChanged).toBe(false);
+						else
+							expect(thinkingChanged).toBe(
+								!subagent && STRIPS_THINKING_WHEN_HELD.has(lane),
+							);
+					}
 					// A held edit is never recorded as served: repeating the pass with
 					// no new response serves exactly the same bytes.
 					expect(wire(await f.pass())).toEqual(after);
