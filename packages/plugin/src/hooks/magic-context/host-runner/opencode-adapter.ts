@@ -1211,8 +1211,10 @@ export function createOpenCodeProviderTransform(
             await sync(id, s, scan.appends.length === 0);
             const controls = inputs(id, messages, meta);
             const admissions: Admitted[] = [];
+            let completedHook = false;
             for (let attempt = 0; attempt < 2; attempt++) {
                 admissions.length = 0;
+                completedHook = false;
                 let conflict = false;
                 for (const [i, candidate] of scan.appends.entries()) {
                     const admitted = admit(s.record, candidate, {
@@ -1239,14 +1241,14 @@ export function createOpenCodeProviderTransform(
                     );
                     const outcomes: HookOutcome[] = [];
                     for (const [j, subject] of subjects.entries()) {
+                        const complete = i === scan.appends.length - 1 && j === subjects.length - 1;
                         const result = await s.client.hook(
                             s.record,
                             { ...subject, subject_ordinal: candidate.ordinal },
                             admitted.ingest,
-                            i === scan.appends.length - 1 && j === subjects.length - 1
-                                ? true
-                                : undefined,
+                            complete ? true : undefined,
                         );
+                        completedHook ||= complete;
                         checkFailure(result);
                         if (ordinalConflict(result)) {
                             conflict = true;
@@ -1294,6 +1296,9 @@ export function createOpenCodeProviderTransform(
                 admissions.map((a) => ({ ...a, unserved_subjects: [] })),
             );
             save(id, s, admissions, scan.elided);
+            // A final append without a subscribed hook still ends the pass. Signal
+            // completion after every append is recorded, not in the pre-ingest sync.
+            if (scan.appends.length && !completedHook) await sync(id, s, true);
             controls.newest = {
                 ordinal: s.record.next_ordinal - 1,
                 mid: s.metadata.newestMid ?? "empty",
