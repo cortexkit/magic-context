@@ -2621,17 +2621,15 @@ pub mod compaction {
                     .last_produced
                     .as_ref()
                     .is_some_and(|v| same_view(v, &candidate));
-            if !structural_repeat {
-                if rejected.is_some_and(|r| !r.structural) {
-                    // The engine has already frozen these bytes. A lost/late answer
-                    // must not disappear just because the subsequent pass is a replay.
-                    let view = state.last_produced.clone().expect("rejected view present");
-                    answer = Answer::Replacement(state.allocate(view)?);
-                } else if initial
-                    || !matches_served(&candidate, state.last_applied.as_ref(), &req.messages)
-                {
-                    answer = Answer::Replacement(state.allocate(candidate)?);
-                }
+            if !structural_repeat
+                && (rejected.is_some_and(|r| !r.structural)
+                    || initial
+                    || !matches_served(&candidate, state.last_applied.as_ref(), &req.messages))
+            {
+                // The runner may have missed an earlier answer, but this step may
+                // already have committed newer history or removed output. Return
+                // those current bytes; unchanged engine output is a byte-identical retry.
+                answer = Answer::Replacement(state.allocate(candidate)?);
             }
         }
         if initial {
@@ -17899,6 +17897,85 @@ pub(crate) mod tests {
             let mut past = st.clone();
             past.newest_ordinal = Some(0);
             assert!(adapter::step(&store, &request, &context(), &past, &mut state).is_err());
+        }
+
+        #[test]
+        fn lost_broca_view_cannot_hide_independent_model_rebuild() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            let mut request = req(
+                "ses",
+                "cfg0",
+                vec![
+                    item("a", 0, "raw 1"),
+                    item("b", 1, "raw 2"),
+                    item("c", 2, "raw 3"),
+                    item("d", 3, "raw 4"),
+                ],
+            );
+            request.model_key = Some("old-model".to_string());
+            store
+                .replace_compartments("ses", &[comp(1, 0, 0, "a", "BASELINE-HISTORY")])
+                .unwrap();
+            let mut st = status(&request.messages);
+            let mut state = State::new("compact".to_string(), Preset::Head);
+            let initial = view(
+                adapter::setup(&store, &request, &context(), &st, &mut state)
+                    .unwrap()
+                    .answer,
+            );
+            store
+                .replace_compartments("ses", &[comp(1, 0, 1, "b", "SECOND-HISTORY")])
+                .unwrap();
+            st.prefix_rebuilding = true;
+            let lost = view(
+                adapter::step(&store, &request, &context(), &st, &mut state)
+                    .unwrap()
+                    .answer,
+            );
+            let lost_bytes = String::from_utf8(wire_bytes(&lost.replacement)).unwrap();
+            assert!(lost_bytes.contains("SECOND-HISTORY"));
+            assert!(lost_bytes.contains("raw 4"));
+
+            store
+                .replace_compartments("ses", &[comp(1, 0, 2, "c", "NEWEST-HISTORY")])
+                .unwrap();
+            store
+                .append_pending_agent_drops("ses", &["d#0".to_string()], 1)
+                .unwrap();
+            request.model_key = Some("new-model".to_string());
+            st.prefix_rebuilding = false;
+            st.last_applied_version = Some(initial.version);
+            st.last_not_applied = Some(NotApplied {
+                version: lost.version,
+                structural: false,
+            });
+            let rebuilt = adapter::step(&store, &request, &context(), &st, &mut state).unwrap();
+            assert!(rebuilt.prefix_bust_permitted);
+            let current = view(rebuilt.answer);
+            assert!(current.version > lost.version);
+            let current_bytes = String::from_utf8(wire_bytes(&current.replacement)).unwrap();
+            assert!(current_bytes.contains("NEWEST-HISTORY"));
+            assert!(!current_bytes.contains("SECOND-HISTORY"));
+            assert!(!current_bytes.contains("raw 4"));
+            assert!(store.load_pending_agent_drops("ses").unwrap().is_empty());
+            let engine = store.load("ses").unwrap();
+            assert_eq!(engine.meta.last_model_key, "new-model");
+            assert_eq!(engine.meta.coverage_ordinal, Some(2));
+            assert!(engine
+                .core
+                .frozen_units
+                .iter()
+                .any(|u| u.key == "m0" && u.frozen_payload.contains("NEWEST-HISTORY")));
+
+            st.last_not_applied = None;
+            st.last_applied_version = Some(current.version);
+            assert_eq!(
+                adapter::step(&store, &request, &context(), &st, &mut state)
+                    .unwrap()
+                    .answer,
+                Answer::Noop
+            );
         }
 
         #[test]
