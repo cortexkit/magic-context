@@ -728,26 +728,14 @@ jobs:
           restore-keys: |
             rust-crates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
 
-      # Cargo's --tests also selects the library tests, so list the other targets
-      # explicitly to keep this lane disjoint from the library test job.
-      - name: Test mc-module integration, binary, and doc targets
-        run: >-
-          cargo test -p mc-module
-          --bin ck-mc
-          --bin mc-caveman-live-differ
-          --test boundary_counter_durability
-          --test cold_flip_adversarial
-          --test fleet_logging
-          --test launch_nonce_source_scan
-          --test protection_window_golden
-          --test real_daemon
-          --test real_daemon_store_ahead
-          --test real_store_copy_migration
-          --test scope_stamp_decode
-          --test serde_json_feature_fidelity
-          --test tag_cache_allocation
-          --test temporal_mode_switch
-          --doc
+      # `--test '*'` runs every integration target, including new test files,
+      # without the library tests, which the library job runs. Doc tests need a
+      # separate invocation because cargo refuses --doc with other target flags.
+      - name: Test mc-module integration and binary targets
+        run: cargo test -p mc-module --test '*' --bins
+
+      - name: Test mc-module doc examples
+        run: cargo test -p mc-module --doc
 
   rust-broca-conformance:
     name: Rust (Broca conformance)
@@ -796,6 +784,15 @@ jobs:
           key: rust-crates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.job }}
           restore-keys: |
             rust-crates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # mc-store's move-inventory tests read the plugin's migration sources
+      # through the root JavaScript install.
+      - name: Install CLI dependencies
+        run: bun install --frozen-lockfile
 
       - name: Test the remaining workspace crates
         run: cargo test --workspace --exclude mc-module
