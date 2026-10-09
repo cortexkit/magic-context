@@ -2353,6 +2353,19 @@ pub const TABLES: &[TableInventory] = &[
         Some(KeyPolicy::PreserveOrRefuseCollision),
         None
     ),
+    // Must move: a consumed-number fence cannot be reconstructed from replayed
+    // answers. All conversations sharing the number space share this history.
+    table!(
+        Module,
+        "mc_provider_consumed_tags_v1",
+        Ship,
+        RowSelector::Predicate("engine_namespace IN (SELECT engine_namespace FROM mc_provider_conversations_v2 WHERE session = ?1)"),
+        &["engine_namespace", "tag_number"],
+        &["engine_namespace", "tag_number", "session"],
+        &[],
+        Some(KeyPolicy::PreserveOrRefuseCollision),
+        None
+    ),
     table!(
         Module,
         "mc_provider_views_v1",

@@ -164,12 +164,16 @@ fn policy_parts_tx(
         .map(|(row, cut)| (row.lineage_id, cut))
         .chain(std::iter::once((String::new(), prefix)));
     for (lineage, cut) in sources {
-        let mut q=conn.prepare("SELECT policy_json FROM mc_provider_policy_parts_v1 WHERE conv_key=?1 AND lineage_id=?2 AND ordinal<=?3 ORDER BY ordinal,block_id")?;
+        let mut q=conn.prepare("SELECT p.policy_json,EXISTS(SELECT 1 FROM mc_provider_consumed_tags_v1 t JOIN mc_provider_conversations_v2 c ON c.engine_namespace=t.engine_namespace WHERE c.conv_key=p.conv_key AND t.tag_number=json_extract(p.policy_json,'$.tag_number')) FROM mc_provider_policy_parts_v1 p WHERE conv_key=?1 AND lineage_id=?2 AND ordinal<=?3 ORDER BY ordinal,block_id")?;
         for raw in q.query_map(
             params![conv, lineage, as_i64(cut.min(i64::MAX as u64))?],
-            |r| r.get::<_, String>(0),
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)),
         )? {
-            let part: ProviderPolicyPart = serde_json::from_str(&raw?).map_err(sql_json)?;
+            let (raw, consumed) = raw?;
+            let mut part: ProviderPolicyPart = serde_json::from_str(&raw).map_err(sql_json)?;
+            if consumed {
+                part.active = false;
+            }
             parts.entry(part.block_id.clone()).or_insert(part);
         }
     }
@@ -231,6 +235,11 @@ fn admit_policy_parts_tx(
         let held:Option<String>=conn.query_row("SELECT policy_json FROM mc_provider_policy_parts_v1 WHERE conv_key=?1 AND lineage_id=?2 AND block_id=?3",params![conv,lineage,part.block_id],|r|r.get(0)).optional()?;
         if let Some(held) = held {
             let held: ProviderPolicyPart = serde_json::from_str(&held).map_err(sql_json)?;
+            if let Some(number) = held.tag_number {
+                if tag_consumed_tx(conn, namespace, number)? {
+                    continue;
+                }
+            };
             if held.active
                 || (!rearm_all
                     && !repeat.is_some_and(|s| {
@@ -390,6 +399,9 @@ pub fn consume_provider_drops_tx(
     numbers: &[i64],
 ) -> rusqlite::Result<()> {
     let conv = key.conversation_key();
+    let Some(conversation) = conversation_tx(conn, key)? else {
+        return Ok(());
+    };
     for number in numbers {
         if conn.execute(
             "DELETE FROM mc_provider_pending_drops_v1 WHERE conv_key=?1 AND tag_number=?2",
@@ -398,6 +410,10 @@ pub fn consume_provider_drops_tx(
         {
             continue;
         }
+        conn.execute(
+            "INSERT INTO mc_provider_consumed_tags_v1 VALUES (?1,?2,?3) ON CONFLICT DO NOTHING",
+            params![conversation.engine_namespace, number, key.session],
+        )?;
         let mut q=conn.prepare("SELECT a.answer_seq,a.policy_json,t.key,json_extract(t.value,'$.kind'),coalesce(json_extract(t.value,'$.token_count'),0) FROM mc_provider_hook_answers_v1 a,json_each(a.tags_json) t WHERE a.conv_key=?1 AND a.state IN ('pending','live') AND json_extract(t.value,'$.number')=?2")?;
         let rows = q
             .query_map(params![conv, number], |r| {
@@ -453,6 +469,10 @@ fn sql_json(e: serde_json::Error) -> rusqlite::Error {
 }
 fn parse(raw: &str) -> rusqlite::Result<Value> {
     serde_json::from_str(raw).map_err(sql_json)
+}
+
+fn tag_consumed_tx(conn: &Connection, namespace: &str, number: i64) -> rusqlite::Result<bool> {
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM mc_provider_consumed_tags_v1 WHERE engine_namespace=?1 AND tag_number=?2)",params![namespace,number],|row|row.get(0))
 }
 fn as_i64(n: u64) -> rusqlite::Result<i64> {
     i64::try_from(n).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
@@ -764,6 +784,9 @@ pub(crate) fn insert_tags_tx(
     tags: &[McTagRow],
 ) -> rusqlite::Result<()> {
     for t in tags {
+        if tag_consumed_tx(conn, namespace, t.tag_number)? {
+            continue;
+        }
         conn.execute("INSERT OR IGNORE INTO mc_tags (session_id,tag_number,block_id,kind,token_count,created_at_ms,source_bytes) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![namespace,t.tag_number,t.block_id,t.kind,t.token_count,t.created_at_ms,t.source_bytes.as_ref()])?;
     }
     Ok(())
@@ -827,6 +850,7 @@ impl McStore {
     ) -> Result<bool, McStoreError> {
         Ok(self.inner.with_conn(|conn| {
             let Some(c)=conversation_tx(conn,key)? else {return Ok(false)};
+            if tag_consumed_tx(conn,&c.engine_namespace,number)? {return Ok(false);}
             for (ancestor,cut) in ancestry_tx(conn,&key.conversation_key(),&c.lineage_id)? {
                 let known:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM mc_provider_hook_answers_v1 a,json_each(a.tags_json) t WHERE a.conv_key=?1 AND a.lineage_id=?2 AND a.ordinal<=?3 AND a.state IN ('pending','live') AND a.legacy_json IS NULL AND json_extract(t.value,'$.number')=?4 AND NOT coalesce(json_extract(t.value,'$.consumed'),false))",params![key.conversation_key(),ancestor.lineage_id,as_i64(cut)?,number],|r|r.get(0))?;
                 if known {return Ok(true)}
@@ -1021,7 +1045,8 @@ impl McStore {
                     if a.subject.subject_mid != request.message.map_or(a.subject.subject_mid.as_str(),|m|m.mid.as_str()) || request.message.is_some_and(|m|m.ordinal!=a.ordinal) {return Err(ProviderError::InvalidParams {field:"subject_mid"})}
                     parse(&a.ops_json)?;
                     for t in &a.tags {
-                        if t.number<=high && !policy_parts.iter().any(|p|p.mid==a.subject.subject_mid && p.block_id==t.block_id && p.tag_number==Some(t.number) && p.active) {return Err(ProviderError::Transient("tag allocation must advance its high water".into()))}
+                        let consumed=tag_consumed_tx(conn,&c.engine_namespace,t.number)?;
+                        if t.number<=high && !policy_parts.iter().any(|p|p.mid==a.subject.subject_mid && p.block_id==t.block_id && p.tag_number==Some(t.number) && (p.active || consumed)) {return Err(ProviderError::Transient("tag allocation must advance its high water".into()))}
                         high=high.max(t.number);
                     }
                     burn_subject_tx(conn,&conv,&request.lineage.lineage_id,&a.subject)?;
@@ -1095,6 +1120,7 @@ impl McStore {
     ) -> Result<(), McStoreError> {
         self.inner.with_conn_fenced(|conn| {
             let conv=key.conversation_key();
+
             parse(&view.replacement_json)?;
             let held=conn.query_row("SELECT lineage_id,range_from,range_to,replacement_json FROM mc_provider_views_v1 WHERE conv_key=?1 AND version=?2",params![conv,as_i64(view.version)?],|r|Ok((r.get::<_,String>(0)?,r.get::<_,u64>(1)?,r.get::<_,u64>(2)?,r.get::<_,String>(3)?))).optional()?;
             if held.is_some_and(|h|h!=(view.lineage_id.clone(),view.range_from,view.range_to,view.replacement_json.clone())) {return Err(rusqlite::Error::InvalidQuery)}
@@ -1120,8 +1146,10 @@ impl McStore {
     ) -> Result<(), McStoreError> {
         self.inner.with_conn_fenced(|conn| {
             let conv=key.conversation_key();
+            let c=conversation_tx(conn,key)?.ok_or(rusqlite::Error::InvalidQuery)?;
             let mut changed=false;
             for number in numbers {
+                if tag_consumed_tx(conn,&c.engine_namespace,*number)? {return Err(rusqlite::Error::InvalidQuery);}
                 let known:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM mc_provider_hook_answers_v1 a,json_each(a.tags_json) t WHERE a.conv_key=?1 AND a.state IN ('pending','live') AND a.legacy_json IS NULL AND json_extract(t.value,'$.number')=?2 AND NOT coalesce(json_extract(t.value,'$.consumed'),false))",params![conv,number],|r|r.get(0))?;
                 if !known {return Err(rusqlite::Error::InvalidQuery)}
                 if conn.execute("INSERT INTO mc_provider_pending_drops_v1 VALUES (?1,?2,json_extract(?1,'$[1]')) ON CONFLICT DO NOTHING",params![conv,number])?==0 {continue;}

@@ -105,6 +105,14 @@ CREATE TABLE mc_provider_pending_drops_v1 (
     session TEXT NOT NULL CHECK(session = json_extract(conv_key, '$[1]')),
     PRIMARY KEY(conv_key, tag_number)
 );
+-- A release belongs to the engine's number space, not to a transport answer.
+-- Replaying that answer cannot make an already consumed number actionable.
+CREATE TABLE mc_provider_consumed_tags_v1 (
+    engine_namespace TEXT NOT NULL,
+    tag_number INTEGER NOT NULL,
+    session TEXT NOT NULL,
+    PRIMARY KEY(engine_namespace,tag_number)
+);
 
 INSERT INTO mc_provider_conversations_v2
     (conv_key, project_root, session, harness, lineage_id, preset, params_json,
