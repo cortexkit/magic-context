@@ -302,6 +302,84 @@ async fn soft_plus_pipeline_switch_preserves_the_full_request_head_bytes() {
     );
 }
 
+async fn retry_after_independent_rebuild(pipeline_switch: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let (h, b, s, k, _) = fixture(dir.path());
+    response(h.provider_setup(b.clone(), &setup_request()).await);
+    publication(&s, 0, 1, "BASELINE-HISTORY");
+    pending_hook(&s, &k, 4);
+    let mut boot = step("boot", vec![message(1), message(2), message(3)], 4);
+    boot["served_through_ordinal"] = json!(4);
+    boot["prefix_rebuilding"] = json!({"reason":"pipeline_switch"});
+    let initial = response(h.provider_step(b.clone(), &boot).await)["compaction"].clone();
+    let mut ack = step("ack", vec![], 4);
+    ack["last_applied"] = initial.clone();
+    assert_eq!(
+        response(h.provider_step(b.clone(), &ack).await)["answer"],
+        "noop"
+    );
+
+    publication(&s, 1, 2, "SECOND-HISTORY");
+    let mut cold = step("cold", vec![], 4);
+    cold["last_applied"] = initial.clone();
+    cold["prefix_rebuilding"] = json!({"reason":"cold"});
+    let lost = response(h.provider_step(b.clone(), &cold).await)["compaction"].clone();
+    assert!(lost.to_string().contains("SECOND-HISTORY"));
+    assert!(lost.to_string().contains("raw 4"));
+
+    // A lost view may be retried unchanged only while the engine still serves it.
+    // New model work must instead carry the newly frozen history and queued drop.
+    publication(&s, 2, 3, "NEWEST-HISTORY");
+    s.queue_provider_drops(&k.store_key(), &[1]).unwrap();
+    let mut next = step("new-model", vec![], 4);
+    next["model"] = json!("new-model");
+    next["last_applied"] = initial;
+    next["last_not_applied"] =
+        json!({"compaction_id":lost["compaction_id"],"version":lost["version"],"reason":"late"});
+    if pipeline_switch {
+        next["prefix_rebuilding"] = json!({"reason":"pipeline_switch"});
+    }
+    let actual = response(h.provider_step(b.clone(), &next).await);
+    assert_eq!(actual["answer"], "compaction_message");
+    assert!(actual["compaction"]["version"].as_u64().unwrap() > lost["version"].as_u64().unwrap());
+    assert!(s
+        .load_provider_pending_drops(&k.store_key())
+        .unwrap()
+        .is_empty());
+    assert!(s.load_pending_agent_drops("s").unwrap().is_empty());
+    let engine = s.load("s").unwrap();
+    assert_eq!(engine.meta.last_model_key, "new-model");
+    assert_eq!(engine.meta.coverage_ordinal, Some(3));
+    assert!(engine
+        .core
+        .frozen_units
+        .iter()
+        .any(|u| u.key == "m0" && u.frozen_payload.contains("NEWEST-HISTORY")));
+
+    let mut replay = step("ack-retry", vec![], 4);
+    replay["model"] = json!("new-model");
+    replay["last_applied"] = actual["compaction"].clone();
+    assert_eq!(
+        response(h.provider_step(b, &replay).await)["answer"],
+        "noop"
+    );
+    assert!(actual["compaction"]["replacement"].to_string().contains("NEWEST-HISTORY"),
+        "pipeline_switch={pipeline_switch}: the engine committed the new history and consumed the drop, but returned a superseded view: {actual}");
+    assert!(!actual["compaction"]["replacement"]
+        .to_string()
+        .contains("raw 4"));
+}
+
+#[tokio::test]
+async fn r73_late_transport_copy_cannot_hide_independent_model_rebuild() {
+    retry_after_independent_rebuild(true).await;
+}
+
+#[tokio::test]
+async fn r73_late_view_without_pipeline_switch_cannot_hide_independent_model_rebuild() {
+    retry_after_independent_rebuild(false).await;
+}
+
 #[tokio::test]
 async fn structural_rejected_view_cannot_be_acknowledged_on_a_later_pass() {
     let dir = tempfile::tempdir().unwrap();
