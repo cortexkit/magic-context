@@ -40,6 +40,7 @@ import {
 import { parseCacheTtl } from "@magic-context/core/features/magic-context/scheduler";
 import { readSessionCacheTtl } from "@magic-context/core/features/magic-context/session-cache-ttl";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
+import { countHistorianRuns } from "@magic-context/core/features/magic-context/storage";
 import { getOrCreateSessionMeta } from "@magic-context/core/features/magic-context/storage-meta";
 import {
 	getCompactionMarkerHealth,
@@ -53,6 +54,7 @@ import { resolveExecuteThresholdDetail } from "@magic-context/core/hooks/magic-c
 import { countCompartmentsNeedingUpgrade } from "@magic-context/core/hooks/magic-context/legacy-compartments";
 import { computeM0BlockTokens } from "@magic-context/core/hooks/magic-context/m0-token-breakdown";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
+import { reasoningBudgetStatusLine } from "@magic-context/core/hooks/magic-context/reasoning-budget-status";
 import {
 	formatCacheTtlDisplay,
 	resolveCacheTtlDisplay,
@@ -80,13 +82,23 @@ import {
 import { checkLocalStatusSource } from "@magic-context/core/shared/status-view-check";
 import { resolveTailHygieneStatus } from "@magic-context/core/shared/tail-hygiene-status";
 import type { UserFacingFailureKey } from "@magic-context/core/shared/user-facing-codes";
-import type { WindowGeometryResult } from "@magic-context/core/shared/window-geometry";
+import {
+	formatWindowSource,
+	type WindowGeometryResult,
+} from "@magic-context/core/shared/window-geometry";
 import packageJson from "../../package.json";
 import { resolveSessionId } from "../commands/pi-command-utils";
 import { getPiChannel1Baseline } from "../ctx-reduce-nudge-pi";
 import { readHostSystemPrompt } from "../host-system-prompt";
 import { resolvePiWindowGeometry } from "../pi-context-limit";
-import { resolvePiStatusPressureSnapshot } from "../pi-pressure";
+import {
+	piPressureEvidenceLimit,
+	resolvePiStatusPressureSnapshot,
+} from "../pi-pressure";
+import {
+	piProvenFloorModelKey,
+	resolvePiProvenInputFloor,
+} from "../pi-proven-floor";
 import { isPiRecompInFlight } from "../pi-recomp-runner";
 
 /** Countdown/usage cadence while dialog is open. */
@@ -127,6 +139,7 @@ export interface StatusDialogDeps {
 }
 
 export interface StatusDialogDetail {
+	reasoningBudgetLine?: string;
 	sessionId: string;
 	activeProfile: string | null;
 	configGeneration?: number;
@@ -150,7 +163,7 @@ export interface StatusDialogDetail {
 		pendingSinceMs: number | null;
 	};
 	historianRunning: boolean;
-	timesExecuteThresholdReached: number;
+	historianRuns: number;
 	historianFailureCount: number;
 	historianLastFailureAt: number | null;
 	historianLastError: string | null;
@@ -405,7 +418,7 @@ function piStatusWarnings(s: StatusDialogDetail): UserFacingFailureKey[] {
 
 /** Chat-text status for a Pi host without an interactive UI to draw a dialog on. */
 export function formatPiStatusSummary(s: StatusDialogDetail): string {
-	const summary = renderUserStatusSummary(
+	const summary = `${renderUserStatusSummary(
 		{
 			inputTokens: s.inputTokens,
 			usableContextTokens: s.contextLimit,
@@ -437,7 +450,7 @@ export function formatPiStatusSummary(s: StatusDialogDetail): string {
 			dreamerSkipped: s.dreamer.skipped,
 		},
 		"plain",
-	);
+	)}\nWindow source: ${formatWindowSource(s.windowGeometry)}; denominator: ${Math.round(s.contextLimit)} tokens${s.reasoningBudgetLine ? `\n${s.reasoningBudgetLine}` : ""}`;
 	return s.configGeneration === undefined
 		? summary
 		: `${summary}\nConfig generation: ${s.configGeneration} (adopted ${s.configAdoptedAt ? new Date(s.configAdoptedAt).toLocaleString() : "unknown"})${s.configReloadFailure ? `\nConfig reload failed ${s.configReloadFailure.path}: ${s.configReloadFailure.message}` : ""}`;
@@ -588,6 +601,8 @@ export function renderPiStatusOverlay(
 		),
 	);
 	if (view.windowLine) lines.push(theme.fg("muted", view.windowLine));
+	if (s.reasoningBudgetLine)
+		lines.push(theme.fg("muted", s.reasoningBudgetLine));
 
 	const bar = renderBar(view.bar, innerWidth);
 	if (bar) lines.push(bar);
@@ -604,10 +619,23 @@ export function renderPiStatusOverlay(
 		lines.push(renderStatusRow(view.hygiene, 9, innerWidth, theme));
 	}
 
-	// Pi has no sidebar, so a detached recomp run and compartments still in the
-	// pre-v2 layout have nowhere else to surface. This is live run state
-	// rather than status content, which is why it is not one of the shared
-	// sections.
+	// Pi has no sidebar, so show the total number of recorded historian runs
+	// here beside the recomp state.
+	if (status.state === "ready") {
+		lines.push(
+			renderStatusRow(
+				{
+					label: "Historian runs",
+					value: s.historianRuns.toLocaleString(),
+					tone: "muted",
+				},
+				9,
+				innerWidth,
+				theme,
+			),
+		);
+	}
+
 	const upgrade: StatusRow | null =
 		status.state !== "ready"
 			? null
@@ -756,6 +784,10 @@ interface StatusBuildState {
 		persistedInputTokens: number;
 		persistedPercentage: number;
 		detectedContextLimit: number | undefined;
+		// Captured with the full rebuild so the cheap per-second refresh uses
+		// the same proven floor and provider limit as the full build.
+		provenInputTokens: number | undefined;
+		providerInputLimit: number | undefined;
 	};
 }
 
@@ -881,9 +913,13 @@ function refreshLiveStatus(
 		rawContextWindow: usage?.contextWindow ?? ctx.model?.contextWindow,
 		rawContextWindowSource: "catalog",
 		model: ctx.model,
-		...live,
+		detectedContextLimit: live.detectedContextLimit,
+		provenInputTokens: live.provenInputTokens,
+		persistedInputTokens: live.persistedInputTokens,
+		persistedPercentage: live.persistedPercentage,
 	});
 	const pressure = resolvePiStatusPressureSnapshot({
+		providerInputLimit: live.providerInputLimit,
 		sessionId: detail.sessionId,
 		persistedPercentage: live.persistedPercentage,
 		persistedInputTokens: live.persistedInputTokens,
@@ -964,6 +1000,7 @@ function buildStatusDetail(
 	host = readStatusHostBytes(pi, ctx),
 ): StatusDialogDetail {
 	const usage = ctx.getContextUsage?.();
+
 	const meta = getOrCreateSessionMeta(deps.db, sessionId);
 	let detectedContextLimit: number | undefined;
 	try {
@@ -972,20 +1009,39 @@ function buildStatusDetail(
 	} catch {
 		// Status remains available when overflow metadata cannot be read.
 	}
+	const providerInputLimit = piPressureEvidenceLimit(
+		resolvePiWindowGeometry({
+			rawContextWindow: usage?.contextWindow ?? ctx.model?.contextWindow,
+			rawContextWindowSource: "catalog",
+			model: ctx.model,
+			detectedContextLimit,
+		}),
+	);
+	const provenInputTokens = resolvePiProvenInputFloor({
+		db: deps.db,
+		sessionId,
+		modelKey: piProvenFloorModelKey(ctx.model),
+		readBranch: () => ctx.sessionManager.getBranch(),
+		providerInputLimit,
+	});
 	state.live = {
 		persistedInputTokens: meta.lastInputTokens,
 		persistedPercentage: meta.lastContextPercentage,
 		detectedContextLimit,
+		provenInputTokens: provenInputTokens || undefined,
+		providerInputLimit,
 	};
 	const windowGeometry = resolvePiWindowGeometry({
 		rawContextWindow: usage?.contextWindow ?? ctx.model?.contextWindow,
 		rawContextWindowSource: "catalog",
 		model: ctx.model,
 		detectedContextLimit,
+		provenInputTokens: provenInputTokens || undefined,
 		persistedInputTokens: meta.lastInputTokens,
 		persistedPercentage: meta.lastContextPercentage,
 	});
 	const pressure = resolvePiStatusPressureSnapshot({
+		providerInputLimit,
 		sessionId,
 		persistedPercentage: meta.lastContextPercentage,
 		persistedInputTokens: meta.lastInputTokens,
@@ -1139,6 +1195,7 @@ function buildStatusDetail(
 
 	return {
 		sessionId,
+		reasoningBudgetLine: reasoningBudgetStatusLine(sessionId),
 		activeProfile: deps.activeProfile ?? null,
 		configGeneration: deps.configGeneration,
 		configAdoptedAt: deps.configAdoptedAt,
@@ -1175,7 +1232,7 @@ function buildStatusDetail(
 		pendingOpsCount: pendingOps,
 		compactionMarker: getCompactionMarkerHealth(deps.db, sessionId),
 		historianRunning: meta.compartmentInProgress,
-		timesExecuteThresholdReached: meta.timesExecuteThresholdReached,
+		historianRuns: countHistorianRuns(deps.db, sessionId),
 		historianFailureCount: Number(metaRow?.historian_failure_count ?? 0),
 		historianLastFailureAt:
 			typeof metaRow?.historian_last_failure_at === "number"

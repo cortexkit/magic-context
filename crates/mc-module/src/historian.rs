@@ -3292,6 +3292,7 @@ mod tests {
             protected_tags: 20,
             protected_tags_present: false,
             protected_tokens_effective: None,
+            keep_reasoning_tokens_effective: None,
             provider_id: None,
             model_key: None,
             clear_reasoning_age: 50,

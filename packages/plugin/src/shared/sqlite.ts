@@ -430,6 +430,18 @@ function buildNodeSqliteDatabaseClass(DatabaseSync: any): typeof BetterSqlite3 {
 
 export const Database: typeof BetterSqlite3 = TrackedDatabase;
 
+/** The constructor path, without querying SQLite on the prompt thread. */
+export function getSqliteDatabasePath(db: Database): string | null {
+    for (const connection of trackedSqliteConnections.values()) {
+        if (connection.reference.deref() === db) {
+            return connection.filename === ":memory:" || connection.filename === "<buffer>"
+                ? null
+                : connection.filename;
+        }
+    }
+    return null;
+}
+
 function pragmaValue(db: BetterSqlite3.Database, name: string): unknown {
     const row = db.prepare(`PRAGMA ${name}`).get() as Record<string, unknown> | undefined;
     if (!row) return undefined;

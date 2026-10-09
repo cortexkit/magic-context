@@ -124,10 +124,7 @@ import {
 	providerResponseFailed,
 } from "@magic-context/core/shared/provider-response-completion";
 import { setStoragePrivatePermissionEnforcement } from "@magic-context/core/shared/storage-permissions";
-import {
-	hasTrustedAbsoluteWall,
-	reloadWindowOverlay,
-} from "@magic-context/core/shared/window-geometry";
+import { reloadWindowOverlay } from "@magic-context/core/shared/window-geometry";
 import { gatePiEventsByCheckoutClaim } from "./checkout-claim-pi";
 import { handlePiCloneSessionStart } from "./clone-inheritance";
 import { registerCtxDreamCommand } from "./commands/ctx-dream";
@@ -214,8 +211,12 @@ import {
 	isPiContextUsageRawBranchEstimate,
 	notePiUsageReadingUsed,
 	noteRawBranchEstimateSetAside,
+	noteRejectedPiUsage,
 	piMessageAnchorsLiveUsage,
+	piPressureEvidenceLimit,
+	piUsageInputTokens,
 	recordPiLiveUsageClassification,
+	recordPiProviderUsageValidity,
 } from "./pi-pressure";
 import {
 	piProvenFloorModelKey,
@@ -653,35 +654,6 @@ function getPiMessageModel(message: unknown): {
 	};
 }
 
-const piUsageBoundLogSeen = new Set<string>();
-
-function logPiUsageBoundOnce(
-	sessionId: string,
-	reading: number,
-	absoluteWall: number,
-	reason: "current reading" | "persisted floor",
-): void {
-	const key = `${sessionId}|${reason}`;
-	if (piUsageBoundLogSeen.has(key)) return;
-	piUsageBoundLogSeen.add(key);
-	info(
-		`message_end: session=${sessionId} bounded ${reason} ${reading} at trusted absolute wall ${absoluteWall}; pressure_proof_not_capacity`,
-	);
-}
-
-function logPiUsageAboveWindowOnce(
-	sessionId: string,
-	reading: number,
-	absoluteWall: number,
-): void {
-	const key = `${sessionId}|accepted above window`;
-	if (piUsageBoundLogSeen.has(key)) return;
-	piUsageBoundLogSeen.add(key);
-	info(
-		`message_end: session=${sessionId} provider usage ${reading} exceeds configured window ${absoluteWall}; counted as real pressure against the configured limit`,
-	);
-}
-
 function resolvePiPressureContextLimit(args: {
 	db: ContextDatabase;
 	sessionId: string;
@@ -733,6 +705,7 @@ export async function persistPiPressureFromMessageEnd(args: {
 	piTokens?: number;
 	/** `piTokens` is Pi's raw-branch estimate (see isPiLiveUsageRawBranchEstimate). */
 	piTokensIsRawBranchEstimate?: boolean;
+	readBranch?: () => readonly unknown[] | undefined;
 	notifyIssue?: (message: string) => unknown | Promise<unknown>;
 }): Promise<void> {
 	// Pi emits message_end before it appends the message to the branch, so the
@@ -753,16 +726,37 @@ export async function persistPiPressureFromMessageEnd(args: {
 			? piModelRefToCanonical(`${activeModel.provider}/${activeModel.id}`)
 			: undefined;
 	const usage = extractAssistantUsage(args.message);
+	const detectedContextLimit = getOverflowState(
+		args.db,
+		args.sessionId,
+		modelKey,
+	).detectedContextLimit;
 	const reportedGeometry = resolvePiWindowGeometry({
 		rawContextWindow: args.piContextWindow,
 		rawContextWindowSource: args.piContextWindowSource,
 		model: activeModel,
+		detectedContextLimit,
 	});
-	const trustedAbsoluteWall =
-		reportedGeometry && hasTrustedAbsoluteWall(reportedGeometry)
-			? reportedGeometry.derivation.absoluteWall
-			: undefined;
-	const unboundedPressure = computePiPressure(usage, args.piContextWindow);
+
+	const providerInputLimit = piPressureEvidenceLimit(reportedGeometry);
+	const reportedInput = piUsageInputTokens(usage);
+	const rejectedUsage =
+		reportedInput !== null && reportedInput > providerInputLimit;
+	if (reportedInput !== null)
+		recordPiProviderUsageValidity(args.sessionId, rejectedUsage);
+	const unboundedPressure = computePiPressure(
+		usage,
+		args.piContextWindow,
+		providerInputLimit,
+	);
+	if (rejectedUsage) {
+		noteRejectedPiUsage(
+			args.sessionId,
+			reportedInput,
+			providerInputLimit,
+			"message_end",
+		);
+	}
 	const msg =
 		args.message && typeof args.message === "object"
 			? (args.message as { errorMessage?: unknown })
@@ -770,35 +764,16 @@ export async function persistPiPressureFromMessageEnd(args: {
 	const messageHadOverflowError =
 		typeof msg?.errorMessage === "string" &&
 		detectOverflow(msg.errorMessage).isOverflow;
-	const readingAboveTrustedWall =
-		unboundedPressure !== null &&
-		trustedAbsoluteWall !== undefined &&
-		unboundedPressure.inputTokens > trustedAbsoluteWall;
-	// Provider usage on a request the provider accepted is the real prompt
-	// size, so it counts in full whatever its size. The trusted window is a
-	// configured figure that can be smaller than what the model serves; a
-	// reading past it is real overflow of the user's limit. Only after an
-	// overflow error (no accepted request) is the reading clamped at the wall.
-	const requestAccepted = !messageHadOverflowError;
-	if (readingAboveTrustedWall && unboundedPressure && trustedAbsoluteWall) {
-		if (requestAccepted) {
-			logPiUsageAboveWindowOnce(
-				args.sessionId,
-				unboundedPressure.inputTokens,
-				trustedAbsoluteWall,
-			);
-		} else {
-			logPiUsageBoundOnce(
-				args.sessionId,
-				unboundedPressure.inputTokens,
-				trustedAbsoluteWall,
-				"current reading",
-			);
-		}
-	}
-	// Only a reading within the configured window proves capacity: one past it
-	// is pressure, and recording it as proven would widen the configured window.
-	const requestSucceeded = requestAccepted && !readingAboveTrustedWall;
+	// A successful reply can carry turn-aggregate billing counters. Success
+	// alone does not prove that such a reading measures one request.
+	const requestAccepted =
+		!messageHadOverflowError &&
+		!providerResponseFailed({
+			finish: (args.message as { stopReason?: unknown } | undefined)
+				?.stopReason,
+			error: msg?.errorMessage,
+		});
+	const requestSucceeded = requestAccepted && !rejectedUsage;
 	// A limit learned from an earlier overflow error is stale once the provider
 	// accepts a larger request, whatever the configured window says.
 	if (requestAccepted && unboundedPressure) {
@@ -822,10 +797,12 @@ export async function persistPiPressureFromMessageEnd(args: {
 	// The floor is proof about the model that served it; see pi-proven-floor.ts.
 	// Resolved before the row is read, because an unkeyed floor is cleared here.
 	const floorModelKey = piProvenFloorModelKey(activeModel);
-	let observedSafeInputTokens = resolvePiProvenInputFloor({
+	const observedSafeInputTokens = resolvePiProvenInputFloor({
 		db: args.db,
 		sessionId: args.sessionId,
 		modelKey: floorModelKey,
+		readBranch: args.readBranch,
+		providerInputLimit,
 	});
 	const meta = getOrCreateSessionMeta(args.db, args.sessionId);
 	const updates: Partial<{
@@ -865,29 +842,6 @@ export async function persistPiPressureFromMessageEnd(args: {
 		updates.lastResponseTime = Math.max(meta.lastResponseTime, Date.now());
 	}
 
-	if (
-		trustedAbsoluteWall !== undefined &&
-		observedSafeInputTokens > trustedAbsoluteWall
-	) {
-		logPiUsageBoundOnce(
-			args.sessionId,
-			observedSafeInputTokens,
-			trustedAbsoluteWall,
-			"persisted floor",
-		);
-		observedSafeInputTokens = 0;
-		updates.observedSafeInputTokens = 0;
-		updates.cacheAlertSent = false;
-		updates.lastUsageContextLimit = reportedGeometry?.usableSoft ?? 0;
-		if (meta.lastInputTokens > trustedAbsoluteWall) {
-			updates.lastInputTokens = trustedAbsoluteWall;
-			updates.lastContextPercentage =
-				reportedGeometry && reportedGeometry.usableSoft > 0
-					? (trustedAbsoluteWall / reportedGeometry.usableSoft) * 100
-					: 0;
-		}
-	}
-
 	const effectiveContextLimit = resolvePiPressureContextLimit({
 		db: args.db,
 		sessionId: args.sessionId,
@@ -896,11 +850,18 @@ export async function persistPiPressureFromMessageEnd(args: {
 		model: activeModel,
 		provenInputTokens: observedSafeInputTokens,
 	});
+	if (rejectedUsage) {
+		// Do not preserve a poisoned numerator or clamp it to the wall. If Pi
+		// also lacks a usable reading, the context pass will count request bytes.
+		updates.lastInputTokens = 0;
+		updates.lastContextPercentage = 0;
+		updates.lastUsageContextLimit = effectiveContextLimit;
+	}
 	const reportedContextLimit = reportedGeometry?.usableSoft ?? 0;
 	const pressure = computePiPressure(
 		usage,
 		effectiveContextLimit,
-		requestAccepted ? undefined : trustedAbsoluteWall,
+		providerInputLimit,
 	);
 
 	// Sent only after the reading is stored below, so a slow notification
@@ -943,9 +904,11 @@ export async function persistPiPressureFromMessageEnd(args: {
 			updates.observedSafeInputTokens = provenSafeInputTokens;
 		}
 	} else if (
-		usage === null &&
+		(usage === null || rejectedUsage) &&
 		typeof args.piTokens === "number" &&
-		(trustedAbsoluteWall === undefined || args.piTokens <= trustedAbsoluteWall)
+		Number.isFinite(args.piTokens) &&
+		args.piTokens > 0 &&
+		args.piTokens <= providerInputLimit
 	) {
 		// Non-assistant message_end events (tool results, user messages) carry
 		// no provider usage, so Pi's own figure stands in. Normally it is the
@@ -1120,7 +1083,7 @@ export function resolveHistorianFromConfig(
 		executeThresholdTokens: config.execute_threshold_tokens,
 		commitClusterTrigger: config.commit_cluster_trigger,
 		protectedTags: config.protected_tags,
-		clearReasoningAge: config.clear_reasoning_age,
+		keepReasoningTokens: config.keep_reasoning_tokens,
 		historyBudgetPercentage: config.history_budget_percentage,
 		memoryEnabled: config.memory.enabled,
 		autoPromote: config.memory.auto_promote,
@@ -1557,7 +1520,7 @@ async function startPiMagicContextRuntime(
 						wordRules: cavemanWordRulesForLanguage(cfg.language),
 					}
 				: undefined,
-			clearReasoningAge: cfg.clear_reasoning_age,
+			keepReasoningTokens: cfg.keep_reasoning_tokens,
 		},
 		injection: {
 			memoryEnabled: cfg.memory.enabled,
@@ -2851,6 +2814,7 @@ async function startPiMagicContextRuntime(
 				// Both Pi hosts report the configured model window here, not a provider-observed limit.
 				piContextWindowSource: "catalog",
 				piModel: ctx.model,
+				readBranch: () => ctx.sessionManager.getBranch(),
 				piTokens:
 					piUsage && typeof piUsage.tokens === "number"
 						? piUsage.tokens

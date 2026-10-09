@@ -6,6 +6,10 @@ import {
     releaseCompartmentLeaseBestEffort,
     renewCompartmentLease,
 } from "../../features/magic-context/compartment-lease";
+import {
+    getLastCompartmentEndMessage,
+    getLastCompartmentEndMessageId,
+} from "../../features/magic-context/compartment-storage";
 import { isWrapupInProgress, updateSessionMeta } from "../../features/magic-context/storage-meta";
 import { sessionLog } from "../../shared/logger";
 import { withoutSqliteTransformPass } from "../../shared/sqlite";
@@ -19,6 +23,8 @@ import type {
     CompartmentRunnerDeps,
     HiddenCompartmentRunnerDeps,
 } from "./compartment-runner-types";
+import type { ProtectedTailBoundarySnapshot } from "./protected-tail-boundary";
+import { primeTailRawMessageCache, withRawSessionMessageCache } from "./read-session-chunk";
 
 export interface ActiveCompartmentRun {
     promise: Promise<void>;
@@ -118,13 +124,17 @@ function startLeaseRenewal(
 export function startCompartmentAgent(
     deps: HiddenCompartmentRunnerDeps,
     runAgent: typeof runCompartmentAgent = runCompartmentAgent,
+    prepareBoundary?: () => ProtectedTailBoundarySnapshot | null,
 ): void {
-    withoutSqliteTransformPass(() => startBackgroundCompartmentAgent(deps, runAgent));
+    withoutSqliteTransformPass(() =>
+        startBackgroundCompartmentAgent(deps, runAgent, prepareBoundary),
+    );
 }
 
 function startBackgroundCompartmentAgent(
     deps: HiddenCompartmentRunnerDeps,
     runAgent: typeof runCompartmentAgent,
+    prepareBoundary?: () => ProtectedTailBoundarySnapshot | null,
 ): void {
     // Intentional: this check-then-set is safe in Bun's single-threaded event loop.
     // The synchronous code between activeRuns.get() and activeRuns.set() cannot interleave,
@@ -173,15 +183,49 @@ function startBackgroundCompartmentAgent(
     // Track the real underlying promise — NOT a raced wrapper.
     // This ensures activeRuns.has(sessionId) stays true until the historian run
     // actually completes, preventing duplicate runs even if an external await times out.
-    let realRunStarted = false;
     const runnerDeps = withPublishedCallback({
         ...deps,
         compartmentLeaseHolderId: holderId,
-        onHistorianRunStarted: () => {
-            realRunStarted = true;
-        },
     });
-    const promise = runAgent(runnerDeps)
+    // An async function executes its synchronous prefix immediately. Yield a whole
+    // event-loop turn, not a microtask, so the awaiting transform can finish before
+    // raw-history reads, boundary validation and prompt fitting begin.
+    const promise = new Promise<void>((resolve) => setTimeout(resolve, 0))
+        .then(() =>
+            withRawSessionMessageCache(() => {
+                const snapshot = deps.boundarySnapshot;
+                try {
+                    primeTailRawMessageCache({
+                        sessionId: deps.sessionId,
+                        lastCompartmentEnd:
+                            snapshot?.lastCompartmentEndMessageId !== undefined
+                                ? snapshot.offset - 1
+                                : getLastCompartmentEndMessage(deps.db, deps.sessionId),
+                        anchorMessageId:
+                            snapshot?.lastCompartmentEndMessageId !== undefined
+                                ? snapshot.lastCompartmentEndMessageId
+                                : getLastCompartmentEndMessageId(deps.db, deps.sessionId),
+                    });
+                } catch (error) {
+                    sessionLog(
+                        deps.sessionId,
+                        "compartment agent: tail prime failed (non-fatal):",
+                        error,
+                    );
+                }
+                if (prepareBoundary) {
+                    const boundary = prepareBoundary();
+                    if (!boundary) {
+                        updateSessionMeta(deps.db, deps.sessionId, {
+                            compartmentInProgress: false,
+                        });
+                        return;
+                    }
+                    runnerDeps.boundarySnapshot = boundary;
+                }
+                return runAgent(runnerDeps);
+            }),
+        )
         .catch((err) => {
             sessionLog(deps.sessionId, "compartment agent: unhandled rejection:", err);
             // Ensure compartmentInProgress is cleared on any failure
@@ -206,20 +250,6 @@ function startBackgroundCompartmentAgent(
             }
         });
     activeRuns.set(deps.sessionId, { promise, published: false, kind: "incremental" });
-    // If the runner no-op'd synchronously (stale/empty snapshot, nothing to
-    // compact, drain-quota), it returned before signalling onHistorianRunStarted
-    // and before any `await`, so `promise` is already settling. It cleared
-    // compartmentInProgress in its own finally, but the activeRuns entry above
-    // would otherwise survive (cleared only by the microtask-scheduled
-    // promise.finally) and make the SAME transform pass treat a non-running
-    // historian as in-progress — deferring queued drop ops and starving them
-    // turn after turn (the production livelock). Drop the registration
-    // synchronously so pending ops can materialize this pass. The promise.finally
-    // below still runs for interval/lease cleanup; its `=== promise` guard makes
-    // the (now redundant) delete a no-op.
-    if (!realRunStarted && activeRuns.get(deps.sessionId)?.promise === promise) {
-        activeRuns.delete(deps.sessionId);
-    }
 }
 
 export interface ExecuteContextRecompOptions {

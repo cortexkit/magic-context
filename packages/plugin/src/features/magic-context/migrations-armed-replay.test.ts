@@ -787,6 +787,27 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
             ).toEqual({ ordinal: null });
             populateModuleOwnedRows(db, version, state);
             return;
+        case 98:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            expect(db.prepare("SELECT id, activated_at FROM rescore_activation").get()).toEqual({
+                id: 1,
+                activated_at: expect.any(Number),
+            });
+            db.prepare(`INSERT INTO compartment_score_revisions
+                (compartment_id, session_id, source_identity, old_importance, new_importance,
+                 rubric_version, prompt_hash, model, seed_ids, job_id, batch_id, attempt_id,
+                 completed_at, reason)
+                VALUES (9801, 'armed-v98', 'source', 50, 50, 1, 'prompt', 'model', '[]',
+                        'job', 'batch', 'attempt', 1, 'Same score is accepted')`).run();
+            expect(
+                db
+                    .prepare(
+                        "SELECT new_importance FROM compartment_score_revisions WHERE session_id='armed-v98'",
+                    )
+                    .get(),
+            ).toEqual({ new_importance: 50 });
+            populateModuleOwnedRows(db, version, state);
+            return;
         default:
             throw new Error(`populateForVersion has no arm for migration v${version}`);
     }

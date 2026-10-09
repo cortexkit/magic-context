@@ -3,6 +3,14 @@
     "header": "CI push workflows run the manifest-derived TypeScript suites and Rust hermetic suite through scripts/run-rust-hermetic-e2e.sh; tag releases run the same Rust invocation. Cargo.lock pins the Rust dependency versions and git revisions. CI mc-module daemon tests and push/release builders use the locked subconscious source to build ck-subc; the scheduled CI builder intentionally probes default-branch HEAD as drift, while test shards consume its prebuilt artifact.",
     "entries": [
         {
+            "path": "tests/latest-turn-thinking.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real OpenCode 1.18.x task child and primary long tool loop at execute and force against a provider-side thinking oracle; negative controls reject edited, removed and reordered latest-turn blocks, queued drops release only after a real user turn, accepted legacy strips replay unchanged, a provider rejection restores the original thinking once, and host PID lsof proves throwaway containment. OpenCode 2, Pi and Rust have caller and module unit gates.",
+            "contract_refs": ["FOLD-UNDER-PRESSURE"],
+            "hosts": ["opencode"]
+        },
+        {
             "path": "tests/pi-historian-runtime.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
@@ -16,6 +24,38 @@
             "invocation": { "ts": true, "rust": false },
             "rationale": "Real OpenCode 2 failing read then /compact preserves error status and provider bytes; a successful read remains byte-identical; the same arm runs on a fresh host-converted OpenCode 1 store. Host PID lsof proves throwaway-store containment.",
             "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
+            "path": "tests/rust-tool-attachments.test.ts",
+            "tier": "rust-only",
+            "invocation": { "ts": false, "rust": true },
+            "rationale": "Real OpenCode 1 Rust-mode native attach: mock screenshot plus read image/PDF reach the Anthropic wire with tagged text on first sight and replay byte-identically on later defers; host PID lsof proves throwaway-store containment",
+            "contract_refs": ["S2-MIGRATION"],
+            "hosts": ["opencode"]
+        },
+        {
+            "path": "tests/rust-tool-attachment-upgrade.test.ts",
+            "tier": "rust-only",
+            "invocation": { "ts": false, "rust": true },
+            "rationale": "Real OpenCode 1 old-adapter upgrade preserves previously served attachment-free bytes on three defers across restart, restores once on acknowledged independent module flush permission, then replays media byte-identically on three tail deltas; host PID lsof proves throwaway-store containment",
+            "contract_refs": ["S2-MIGRATION"],
+            "hosts": ["opencode"]
+        },
+        {
+            "path": "tests/reasoning-token-budget.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real OpenCode 1 thinking-capable mock proves an over-budget defer retains identical provider bytes, a rebuilding pass keeps whole steps within budget, and later defers replay the frozen watermark; host PID lsof proves throwaway-store containment. Pi and Rust have corresponding module/unit gates.",
+            "contract_refs": ["FOLD-UNDER-PRESSURE"],
+            "hosts": ["opencode"]
+        },
+        {
+            "path": "tests/opencode2/latest-turn-thinking-recovery.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Real OpenCode 2.0.22 Anthropic tool loop against the provider-side thinking oracle: a replayed legacy omission in the active turn is rejected once, the host's session event arms recovery bound to the turn's real user message, a same-id resubmission reaches no provider, and the synthetic resume ends the turn, disarms without restoring and is accepted. Host PID lsof proves throwaway containment.",
+            "contract_refs": ["FOLD-UNDER-PRESSURE", "OC2-S1"],
             "hosts": ["opencode2"]
         },
         {

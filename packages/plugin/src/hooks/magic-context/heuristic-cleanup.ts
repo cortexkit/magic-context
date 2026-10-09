@@ -250,6 +250,7 @@ export function applyHeuristicCleanup(
                 const strippedSource = stripTagPrefix(stripped);
 
                 if (strippedSource.trim().length === 0) {
+                    if (target.thinkingDropProtected) continue;
                     const dropResult = target.drop?.() ?? "absent";
                     const replacement = `[dropped §${tag.tagNumber}§]`;
                     const didReplace =

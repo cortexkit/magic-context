@@ -1,0 +1,588 @@
+[
+  {
+    "answer": {
+      "answer": "ready",
+      "call_when": {
+        "default": 0.65
+      },
+      "initial": {
+        "compaction_id": "mc-joint-v1",
+        "range": {
+          "from": 0,
+          "to": 0
+        },
+        "replacement": [
+          {
+            "content": [
+              {
+                "text": "<session-history></session-history>",
+                "type": "text"
+              }
+            ],
+            "role": "user"
+          },
+          {
+            "content": [
+              {
+                "text": "<session-history-since>(no new content since last materialization)</session-history-since>",
+                "type": "text"
+              }
+            ],
+            "role": "user"
+          }
+        ],
+        "version": 2
+      },
+      "request_id": "setup",
+      "stability": [
+        {
+          "index": 0,
+          "rank": 2
+        },
+        {
+          "index": 1,
+          "rank": 1
+        }
+      ]
+    },
+    "call": "setup",
+    "expected_view": [
+      {
+        "content": [
+          {
+            "text": "<session-history></session-history>",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "content": [
+          {
+            "text": "<session-history-since>(no new content since last materialization)</session-history-since>",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "name": "setup-initial",
+    "request": {
+      "method": "compaction.setup",
+      "params": {
+        "composition": {},
+        "context_window": 100000,
+        "harness": "broca",
+        "lineage_id": "joint-lineage",
+        "model": "fixture",
+        "now": 1,
+        "params": {},
+        "preset": "head",
+        "request_id": "setup",
+        "session": "alfonso:joint"
+      }
+    }
+  },
+  {
+    "answer": {
+      "answer": "ops",
+      "ops": [
+        {
+          "block": 0,
+          "op": "replace",
+          "value": "visible answer"
+        }
+      ]
+    },
+    "call": "step",
+    "expected_view": {
+      "content": [
+        {
+          "signature": "signed-unalterable",
+          "text": "§99§ signed reasoning",
+          "type": "reasoning"
+        },
+        {
+          "text": "visible answer",
+          "type": "text"
+        },
+        {
+          "input": {
+            "path": "§13§ file"
+          },
+          "tool_call_id": "untouched",
+          "tool_name": "read",
+          "type": "tool_call"
+        },
+        {
+          "text": "second text stays",
+          "type": "text"
+        }
+      ],
+      "role": "assistant"
+    },
+    "name": "tag-strip-mixed",
+    "request": {
+      "method": "transform.hook",
+      "params": {
+        "blocks": [
+          "§12§ visible answer",
+          "second text stays"
+        ],
+        "harness": "broca",
+        "hook": "post_assistant",
+        "lineage_id": "joint-lineage",
+        "session": "alfonso:joint",
+        "step_id": "assistant-step"
+      }
+    }
+  },
+  {
+    "answer": {
+      "answer": "ops",
+      "ops": [
+        {
+          "block": 1,
+          "op": "append",
+          "text": "\n\n<system-reminder>Keep useful context and release obsolete tool output with ctx_reduce when available.</system-reminder>"
+        }
+      ]
+    },
+    "call": "step",
+    "expected_view": {
+      "content": [
+        {
+          "text": "first new block",
+          "type": "text"
+        },
+        {
+          "text": "last new block\n\n<system-reminder>Keep useful context and release obsolete tool output with ctx_reduce when available.</system-reminder>",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    "name": "reminder-last-text-block",
+    "request": {
+      "method": "transform.hook",
+      "params": {
+        "blocks": [
+          "first new block",
+          "last new block"
+        ],
+        "harness": "broca",
+        "hook": "pre_user",
+        "params": {
+          "nudge_every": 1
+        },
+        "session": "alfonso:joint",
+        "step_id": "new-user"
+      }
+    }
+  },
+  {
+    "answer": {
+      "answer": "noop",
+      "request_id": "noop"
+    },
+    "call": "step",
+    "expected_view": [
+      {
+        "content": [
+          {
+            "text": "<session-history></session-history>",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "content": [
+          {
+            "text": "<session-history-since>(no new content since last materialization)</session-history-since>",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "content": [
+          {
+            "text": "joint user",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "content": [
+          {
+            "signature": "signed-unalterable",
+            "text": "§99§ signed reasoning",
+            "type": "reasoning"
+          },
+          {
+            "text": "visible answer",
+            "type": "text"
+          },
+          {
+            "input": {
+              "path": "§13§ file"
+            },
+            "tool_call_id": "untouched",
+            "tool_name": "read",
+            "type": "tool_call"
+          },
+          {
+            "text": "second text stays",
+            "type": "text"
+          }
+        ],
+        "role": "assistant"
+      },
+      {
+        "content": [
+          {
+            "is_error": false,
+            "output": {
+              "kind": "text",
+              "text": "joint tool result"
+            },
+            "tool_call_id": "untouched",
+            "type": "tool_result"
+          }
+        ],
+        "role": "tool"
+      }
+    ],
+    "name": "noop-keeps-view",
+    "request": {
+      "method": "compaction.step",
+      "params": {
+        "context_window": 100000,
+        "estimate": {
+          "request_tokens": 1000
+        },
+        "harness": "broca",
+        "last_applied": {
+          "compaction_id": "mc-joint-v1",
+          "version": 2
+        },
+        "lineage_id": "joint-lineage",
+        "messages": [
+          {
+            "message": {
+              "content": [
+                {
+                  "text": "joint user",
+                  "type": "text"
+                }
+              ],
+              "role": "user"
+            },
+            "mid": "m0",
+            "ordinal": 0
+          },
+          {
+            "message": {
+              "content": [
+                {
+                  "signature": "signed-unalterable",
+                  "text": "§99§ signed reasoning",
+                  "type": "reasoning"
+                },
+                {
+                  "text": "visible answer",
+                  "type": "text"
+                },
+                {
+                  "input": {
+                    "path": "§13§ file"
+                  },
+                  "tool_call_id": "untouched",
+                  "tool_name": "read",
+                  "type": "tool_call"
+                },
+                {
+                  "text": "second text stays",
+                  "type": "text"
+                }
+              ],
+              "role": "assistant"
+            },
+            "mid": "m1",
+            "ordinal": 1
+          },
+          {
+            "message": {
+              "content": [
+                {
+                  "is_error": false,
+                  "output": {
+                    "kind": "text",
+                    "text": "joint tool result"
+                  },
+                  "tool_call_id": "untouched",
+                  "type": "tool_result"
+                }
+              ],
+              "role": "tool"
+            },
+            "mid": "m2",
+            "ordinal": 2
+          }
+        ],
+        "model": "fixture",
+        "newest": {
+          "mid": "m2",
+          "ordinal": 2
+        },
+        "now": 2,
+        "request_id": "noop",
+        "session": "alfonso:joint",
+        "step_id": "noop",
+        "step_kind": "user_turn"
+      }
+    }
+  },
+  {
+    "answer": {
+      "answer": "refuse",
+      "code": "misconfigured",
+      "reason": "Magic Context compaction is disabled",
+      "request_id": "known-refusal"
+    },
+    "call": "setup",
+    "expected_view": [],
+    "name": "known-refusal",
+    "request": {
+      "method": "compaction.setup",
+      "params": {
+        "composition": {},
+        "context_window": 100000,
+        "harness": "broca",
+        "lineage_id": "joint-lineage",
+        "model": "fixture",
+        "now": 1,
+        "params": {},
+        "preset": "head",
+        "request_id": "known-refusal",
+        "session": "alfonso:joint"
+      }
+    }
+  },
+  {
+    "answer": {
+      "answer": "refuse",
+      "code": "future_provider_reason",
+      "provider_code": "joint_unknown_control",
+      "reason": "Caller compatibility control",
+      "request_id": "unknown-refusal"
+    },
+    "call": "setup",
+    "expected_view": [],
+    "name": "unknown-refusal-control",
+    "request": {
+      "method": "compaction.setup",
+      "params": {
+        "composition": {},
+        "context_window": 100000,
+        "harness": "broca",
+        "lineage_id": "joint-lineage",
+        "model": "fixture",
+        "now": 1,
+        "params": {},
+        "preset": "head",
+        "request_id": "unknown-refusal",
+        "session": "alfonso:joint"
+      }
+    }
+  },
+  {
+    "answer": {
+      "answer": "noop",
+      "request_id": "oversized"
+    },
+    "call": "step",
+    "expected_view": [
+      {
+        "content": [
+          {
+            "text": "<session-history></session-history>",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "content": [
+          {
+            "text": "<session-history-since>(no new content since last materialization)</session-history-since>",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "content": [
+          {
+            "text": "joint user",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      },
+      {
+        "content": [
+          {
+            "signature": "signed-unalterable",
+            "text": "§99§ signed reasoning",
+            "type": "reasoning"
+          },
+          {
+            "text": "visible answer",
+            "type": "text"
+          },
+          {
+            "input": {
+              "path": "§13§ file"
+            },
+            "tool_call_id": "untouched",
+            "tool_name": "read",
+            "type": "tool_call"
+          },
+          {
+            "text": "second text stays",
+            "type": "text"
+          }
+        ],
+        "role": "assistant"
+      },
+      {
+        "content": [
+          {
+            "is_error": false,
+            "output": {
+              "kind": "text",
+              "text": "joint tool result"
+            },
+            "tool_call_id": "untouched",
+            "type": "tool_result"
+          }
+        ],
+        "role": "tool"
+      },
+      {
+        "content": [
+          {
+            "text": "large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text ",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "name": "oversized-text-keeps-view",
+    "request": {
+      "method": "compaction.step",
+      "params": {
+        "context_window": 100000,
+        "estimate": {
+          "request_tokens": 1000
+        },
+        "harness": "broca",
+        "last_applied": {
+          "compaction_id": "mc-joint-v1",
+          "version": 2
+        },
+        "lineage_id": "joint-lineage",
+        "messages": [
+          {
+            "message": {
+              "content": [
+                {
+                  "text": "joint user",
+                  "type": "text"
+                }
+              ],
+              "role": "user"
+            },
+            "mid": "m0",
+            "ordinal": 0
+          },
+          {
+            "message": {
+              "content": [
+                {
+                  "signature": "signed-unalterable",
+                  "text": "§99§ signed reasoning",
+                  "type": "reasoning"
+                },
+                {
+                  "text": "visible answer",
+                  "type": "text"
+                },
+                {
+                  "input": {
+                    "path": "§13§ file"
+                  },
+                  "tool_call_id": "untouched",
+                  "tool_name": "read",
+                  "type": "tool_call"
+                },
+                {
+                  "text": "second text stays",
+                  "type": "text"
+                }
+              ],
+              "role": "assistant"
+            },
+            "mid": "m1",
+            "ordinal": 1
+          },
+          {
+            "message": {
+              "content": [
+                {
+                  "is_error": false,
+                  "output": {
+                    "kind": "text",
+                    "text": "joint tool result"
+                  },
+                  "tool_call_id": "untouched",
+                  "type": "tool_result"
+                }
+              ],
+              "role": "tool"
+            },
+            "mid": "m2",
+            "ordinal": 2
+          },
+          {
+            "message": {
+              "content": [
+                {
+                  "text": "large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text large-text ",
+                  "type": "text"
+                }
+              ],
+              "role": "user"
+            },
+            "mid": "m3",
+            "ordinal": 3
+          }
+        ],
+        "model": "fixture",
+        "newest": {
+          "mid": "m3",
+          "ordinal": 3
+        },
+        "now": 2,
+        "request_id": "oversized",
+        "session": "alfonso:joint",
+        "step_id": "oversized",
+        "step_kind": "user_turn"
+      }
+    }
+  }
+]

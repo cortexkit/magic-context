@@ -68,6 +68,7 @@ export {
     recordEmbeddingMeasurement,
     type SynapseBatchLedgerInput,
 } from "./storage-embedding-measurements";
+export { countHistorianRuns } from "./storage-historian-runs";
 export {
     deleteIdentityRekeyMap,
     getIdentityRekeyMap,

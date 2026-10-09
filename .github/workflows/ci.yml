@@ -42,8 +42,12 @@ env:
 # Rust jobs run on every push and scheduled run. Pushes use Cargo.lock-pinned crates;
 # the scheduled hermetic build additionally probes the subconscious default branch:
 #
-#   rust-crates          cargo fmt / clippy --all-targets / cargo test, including every
-#                        integration target under crates/*/tests
+#   rust-crates               cargo fmt and clippy --all-targets
+#   rust-mc-module-lib        mc-module unit tests except its long differential
+#   rust-mc-module-parity     the large randomized differential in isolation
+#   rust-mc-module-integration daemon-backed and other Cargo integration targets
+#   rust-broca-conformance    real-daemon Broca conformance with drive-fault enabled
+#   rust-workspace-crates     all remaining workspace crate tests
 #   e2e-rust-hermetic-build → e2e-rust-hermetic (4 shards)
 #
 # The mc-module integration tests always build ck-subc from its Cargo.lock revision.
@@ -86,6 +90,8 @@ jobs:
         run: |
           bun run --cwd packages/plugin build
           bun run --cwd packages/cli build
+          # Plugin tests load the Pi worker bundles from packages/pi-plugin/dist.
+          bun run --cwd packages/pi-plugin build
 
       - name: Check compiled TUI freshness
         run: bun run --cwd packages/plugin check:tui-compiled
@@ -568,15 +574,8 @@ jobs:
 
   rust-crates:
     name: Rust (crates)
-    # mc-module integration tests build ck-subc from the locked source revision.
-    # Published commons and subconscious crates resolve from this repository's
-    # Cargo.lock, so there is no commons checkout or floating crate source here.
-    #
-    # It exists because no other CI job runs cargo test; the hermetic build below
-    # compiles the crates only as part of producing its Rust test binaries, so an
-    # integration test under crates/*/tests could fail unobserved. It depends on the
-    # no other suite, so a Rust regression is reported even
-    # when an unrelated host suite is red.
+    # Formatting and Clippy remain a single independent gate. The test targets run
+    # in parallel jobs below so one slow suite cannot consume the workspace budget.
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -587,6 +586,101 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+
+      - name: Restore Rust build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-crates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.job }}
+          restore-keys: |
+            rust-crates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
+
+      - name: Check Cargo path dependency boundaries
+        run: |
+          timeout 180s python3 scripts/check-cargo-path-dependencies.py
+          timeout 180s python3 scripts/check-cargo-path-dependencies.py --self-test
+
+      - name: Format check
+        run: cargo fmt --check
+
+      # --all-targets puts the integration tests under crates/*/tests through clippy
+      # too; a lib-only lint cannot see them.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  rust-mc-module-lib:
+    name: Rust (mc-module lib)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Rust build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-crates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.job }}
+          restore-keys: |
+            rust-crates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
+
+      # Keep the long differential in its own lane while still running it on every push.
+      - name: Test mc-module library excluding isolated differential
+        run: >-
+          cargo test -p mc-module --lib
+          --
+          --skip providers::step_transform::parity_tests::r2_review_720_pass_differential_with_new_seeds_and_real_reduce
+
+  rust-mc-module-parity:
+    name: Rust (mc-module parity differential)
+    runs-on: ubuntu-latest
+    # This single long randomized suite takes around 36 minutes on a standard CI runner.
+    # Its separate budget leaves headroom without delaying the other mc-module tests.
+    timeout-minutes: 65
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Rust build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-crates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.job }}
+          restore-keys: |
+            rust-crates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
+
+      - name: Test the large mc-module differential
+        run: >-
+          cargo test -p mc-module --lib
+          providers::step_transform::parity_tests::r2_review_720_pass_differential_with_new_seeds_and_real_reduce
+          --
+          --exact
+
+  rust-mc-module-integration:
+    name: Rust (mc-module integration)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
 
       # The hostless-store integration test provisions context.db through the CLI.
       - uses: oven-sh/setup-bun@v2
@@ -607,8 +701,7 @@ jobs:
           locked_crates="$(printf '%s\n' "$pins" | sed -n 's/^locked_crates=//p')"
           echo "Cargo.lock pins: $locked_crates" >> "$GITHUB_STEP_SUMMARY"
 
-      # real_daemon.rs builds ck-subc and checks its launch-nonce history; this
-      # exact locked checkout is therefore needed only by this integration-test job.
+      # Daemon-backed tests build ck-subc from the revision pinned by Cargo.lock.
       - name: Check out locked subconscious source for daemon integration tests
         uses: actions/checkout@v5
         with:
@@ -617,8 +710,6 @@ jobs:
           ref: ${{ steps.cargo-pins.outputs.subc_revision }}
           fetch-depth: 0
 
-      # These integration tests use ../subconscious to build ck-subc. Cargo now
-      # resolves commons crates from the registry/Git lock instead of ../commons.
       - name: Link locked daemon source for integration tests
         shell: bash
         run: |
@@ -626,25 +717,84 @@ jobs:
           ln -sfn "$GITHUB_WORKSPACE/.siblings/subconscious" "$GITHUB_WORKSPACE/../subconscious"
           test -f "$GITHUB_WORKSPACE/../subconscious/Cargo.lock"
 
-      - name: Check Cargo path dependency boundaries
-        run: |
-          timeout 180s python3 scripts/check-cargo-path-dependencies.py
-          timeout 180s python3 scripts/check-cargo-path-dependencies.py --self-test
+      # Restore after checkout so the daemon source checkout cannot clean cached build output.
+      - name: Restore Rust build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            .siblings/subconscious/target
+          key: rust-crates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.job }}
+          restore-keys: |
+            rust-crates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
 
-      - name: Format check
-        run: cargo fmt --check
+      # `--test '*'` runs every integration target, including new test files,
+      # without the library tests, which the library job runs. Doc tests need a
+      # separate invocation because cargo refuses --doc with other target flags.
+      - name: Test mc-module integration and binary targets
+        run: cargo test -p mc-module --test '*' --bins
 
-      # --all-targets puts the integration tests under crates/*/tests through clippy
-      # too; a lib-only lint cannot see them.
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test mc-module doc examples
+        run: cargo test -p mc-module --doc
 
-      # `cargo test -p mc-module` runs the lib unit tests AND every integration test
-      # target under crates/mc-module/tests, which is where cold_flip_adversarial and
-      # the other cross-crate behaviour proofs live. Naming the package (not --lib)
-      # is the whole point of this step.
-      - name: Test mc-module (lib + integration targets)
-        run: cargo test -p mc-module
+  rust-broca-conformance:
+    name: Rust (Broca conformance)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Rust build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-crates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.job }}
+          restore-keys: |
+            rust-crates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
+
+      # drive-fault compiles the crash point used by the real-daemon retry case.
+      - name: Test Broca conformance
+        run: cargo test -p mc-module --test broca_conformance --features drive-fault
+
+  rust-workspace-crates:
+    name: Rust (remaining crates)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Rust build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-crates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ github.job }}
+          restore-keys: |
+            rust-crates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # mc-store's move-inventory tests read the plugin's migration sources
+      # through the root JavaScript install.
+      - name: Install CLI dependencies
+        run: bun install --frozen-lockfile
 
       - name: Test the remaining workspace crates
         run: cargo test --workspace --exclude mc-module

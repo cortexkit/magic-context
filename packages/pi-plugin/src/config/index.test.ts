@@ -307,7 +307,7 @@ describe("loadPiConfig", () => {
 		);
 	});
 
-	it("warns and falls back to defaults for invalid Zod fields", () => {
+	it("warns and ignores deprecated age without converting it into a budget", () => {
 		const cwd = makeTempRoot("mc-pi-cwd-");
 		const home = makeTempRoot("mc-pi-home-");
 		withHome(home);
@@ -322,11 +322,9 @@ describe("loadPiConfig", () => {
 		const result = loadPiConfig({ cwd });
 
 		expect(result.config.enabled).toBe(false);
-		expect(result.config.clear_reasoning_age).toBe(
-			MagicContextConfigSchema.parse({}).clear_reasoning_age,
-		);
+		expect(result.config.keep_reasoning_tokens).toBeUndefined();
 		expect(result.warnings.join("\n")).toContain("clear_reasoning_age");
-		expect(result.warnings.join("\n")).toContain("using default");
+		expect(result.warnings.join("\n")).toContain("deprecated and ignored");
 	});
 
 	it("prunes only cross-harness qualifier leaves and names their full paths", () => {

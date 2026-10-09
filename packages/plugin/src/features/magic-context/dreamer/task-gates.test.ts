@@ -14,10 +14,19 @@ import {
     recordMemoryVerifications,
     setMemoryClassification,
 } from "../memory";
+import { indexSingleMessage } from "../message-index";
 import { runMigrations } from "../migrations";
 import { advanceSessionActivity } from "../session-activity";
+import { recordSessionProjectIdentity } from "../session-project-storage";
 import { initializeDatabase } from "../storage-db";
-import { evaluateTaskGate, getDreamTaskBacklog, getDreamTaskBacklogs } from "./task-gates";
+import {
+    evaluateTaskGate,
+    getDreamTaskBacklog,
+    getDreamTaskBacklogs,
+    identityHasProjectInput,
+    SCHEDULE_ACTIVITY_WINDOW_MS,
+    taskHasSchedulableInput,
+} from "./task-gates";
 import { formatDreamTaskBacklogs, processedDreamTaskItems } from "./task-registry";
 
 let db: Database | null = null;
@@ -32,6 +41,25 @@ function freshDb(): Database {
     initializeDatabase(database);
     runMigrations(database);
     return database;
+}
+
+function indexedSession(
+    database: Database,
+    sessionId: string,
+    harness: string,
+    project: string,
+    indexedAt: number,
+): void {
+    database
+        .prepare(
+            "INSERT INTO session_projects (session_id, harness, project_path, updated_at) VALUES (?, ?, ?, ?)",
+        )
+        .run(sessionId, harness, project, 1);
+    database
+        .prepare(
+            "INSERT INTO message_history_index (session_id, harness, last_indexed_ordinal, updated_at) VALUES (?, ?, ?, ?)",
+        )
+        .run(sessionId, harness, 1, indexedAt);
 }
 
 describe("dream task backlog probes", () => {
@@ -299,6 +327,61 @@ describe("dream task backlog probes", () => {
         );
     });
 
+    test("SDK retrospective backlog uses indexed activity without a ledger", () => {
+        db = freshDb();
+        const project = "git:bridge-backlog";
+        indexedSession(db, "old", "hermes", project, 100);
+        indexedSession(db, "at-watermark", "hermes", project, 200);
+        indexedSession(db, "fresh", "hermes", project, 300);
+        indexedSession(db, "newest", "hermes", project, 400);
+        indexedSession(db, "foreign", "hermes", "git:other", 500);
+        // Binding changes without messages are not session activity.
+        db.prepare(
+            "INSERT INTO session_projects (session_id, harness, project_path, updated_at) VALUES (?, ?, ?, ?)",
+        ).run("unindexed", "hermes", project, 9999);
+        db.prepare(
+            "INSERT INTO task_schedule_state (project_path, task, retrospective_watermark_ms) VALUES (?, ?, ?)",
+        ).run(project, "retrospective", 200);
+
+        expect(getDreamTaskBacklog(db, project, "retrospective")).toEqual({ pending: 2, total: 2 });
+        expect(getDreamTaskBacklogs(db, project, ["retrospective"]).retrospective).toEqual({
+            pending: 2,
+            total: 2,
+        });
+        // A bounded scan must leave the later session pending, rather than report zero.
+        expect(
+            getDreamTaskBacklog(db, project, "retrospective", {
+                retrospectiveWatermarkMs: 300,
+            }),
+        ).toEqual({ pending: 1, total: 1 });
+        expect(
+            getDreamTaskBacklog(db, project, "retrospective", {
+                retrospectiveWatermarkMs: 400,
+            }),
+        ).toEqual({ pending: 0, total: 0 });
+    });
+
+    test("Pi retrospective backlog keeps ledger precision with mixed indexed sessions", () => {
+        db = freshDb();
+        const project = "git:pi-backlog";
+        indexedSession(db, "idle-pi", "pi", project, 9999);
+        indexedSession(db, "active-pi", "pi", project, 100);
+        indexedSession(db, "bridge", "hermes", project, 300);
+        advanceSessionActivity(db, "idle-pi", 200);
+        advanceSessionActivity(db, "active-pi", 300);
+
+        expect(
+            getDreamTaskBacklog(db, project, "retrospective", {
+                retrospectiveWatermarkMs: 200,
+            }),
+        ).toEqual({ pending: 2, total: 2 });
+        expect(
+            getDreamTaskBacklog(db, project, "retrospective", {
+                retrospectiveWatermarkMs: 300,
+            }),
+        ).toEqual({ pending: 0, total: 0 });
+    });
+
     test("processed count is the start-to-end backlog reduction", () => {
         expect(processedDreamTaskItems(17, 5)).toBe(12);
         expect(processedDreamTaskItems(5, 7)).toBe(0);
@@ -306,6 +389,92 @@ describe("dream task backlog probes", () => {
 });
 
 describe("evaluateTaskGate", () => {
+    test("SDK retrospective scheduling retains old bindings with fresh indexed activity", () => {
+        db = freshDb();
+        const project = "git:bridge-schedule";
+        const now = SCHEDULE_ACTIVITY_WINDOW_MS + 200;
+        indexedSession(db, "bridge", "hermes", project, 200);
+        expect(taskHasSchedulableInput("retrospective", db, project, now)).toBe(false);
+        expect(identityHasProjectInput(db, project, now)).toBe(false);
+        db.prepare("UPDATE message_history_index SET updated_at = 300 WHERE session_id = ?").run(
+            "bridge",
+        );
+        expect(taskHasSchedulableInput("retrospective", db, project, now)).toBe(true);
+        expect(identityHasProjectInput(db, project, now)).toBe(true);
+    });
+
+    test("SDK retrospective gate reopens on indexed turns without host events", () => {
+        db = freshDb();
+        const projectIdentity = "git:bridge-gate";
+        const originalNow = Date.now;
+        const context = {
+            db,
+            projectIdentity,
+            lastRunAt: 9999,
+            retrospectiveWatermarkMs: 200,
+            promotionThreshold: 3,
+        };
+        try {
+            Date.now = () => 100;
+            recordSessionProjectIdentity(db, "bridge", projectIdentity);
+            Date.now = () => 300;
+            recordSessionProjectIdentity(db, "bridge", projectIdentity);
+            indexSingleMessage(db, "bridge", {
+                id: "first",
+                ordinal: 1,
+                role: "user",
+                parts: [{ type: "text", text: "First turn" }],
+                createdAt: 300,
+            });
+            expect(
+                db
+                    .prepare("SELECT updated_at FROM session_projects WHERE session_id = ?")
+                    .get("bridge"),
+            ).toEqual({ updated_at: 100 });
+            expect(
+                db
+                    .prepare(
+                        "SELECT 1 FROM schema_migrations_meta WHERE key LIKE 'retrospective_activity:%'",
+                    )
+                    .get(),
+            ).toBeNull();
+            expect(evaluateTaskGate("retrospective", context)).toBe(true);
+            context.retrospectiveWatermarkMs = 300;
+            expect(evaluateTaskGate("retrospective", context)).toBe(false);
+
+            Date.now = () => 400;
+            indexSingleMessage(db, "bridge", {
+                id: "second",
+                ordinal: 2,
+                role: "user",
+                parts: [{ type: "text", text: "Second turn" }],
+                createdAt: 400,
+            });
+            expect(evaluateTaskGate("retrospective", context)).toBe(true);
+        } finally {
+            Date.now = originalNow;
+        }
+    });
+
+    test("Pi retrospective gate prefers ledger timestamps over index maintenance", () => {
+        db = freshDb();
+        const projectIdentity = "git:pi-gate";
+        indexedSession(db, "pi-session", "pi", projectIdentity, 9999);
+        advanceSessionActivity(db, "pi-session", 200);
+        const context = {
+            db,
+            projectIdentity,
+            lastRunAt: 9999,
+            retrospectiveWatermarkMs: 200,
+            promotionThreshold: 3,
+        };
+        expect(evaluateTaskGate("retrospective", context)).toBe(false);
+        advanceSessionActivity(db, "pi-session", 201);
+        expect(evaluateTaskGate("retrospective", context)).toBe(true);
+        context.retrospectiveWatermarkMs = 201;
+        expect(evaluateTaskGate("retrospective", context)).toBe(false);
+    });
+
     test("classify-memories runs when active memories exist", () => {
         db = freshDb();
         const projectIdentity = "/repo/project";

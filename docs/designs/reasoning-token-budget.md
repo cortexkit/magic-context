@@ -1,6 +1,6 @@
 # Reasoning token budget (issue 620)
 
-Design only; no product code changes. Base: `d29d4a926d62626724d3dacaaf533698ed649df2`.
+Adopted design. Default and selection rulings: fixed 10,000 tokens, newest-first whole-step fit.
 Inputs: [issue 620](https://github.com/cortexkit/magic-context/issues/620),
 [`docs/reports/reasoning-resend-cost.md`](../reports/reasoning-resend-cost.md) (the resend
 measurement), [`docs/reports/reasoning-removal-all-providers-design.md`](../reports/reasoning-removal-all-providers-design.md),
@@ -17,11 +17,11 @@ measurement), [`docs/reports/reasoning-removal-all-providers-design.md`](../repo
    the model may think).
 2. **Unit:** one assistant step's reasoning, costed in input tokens. Use the provider's
    **reported reasoning count** for that step when it is positive (OpenCode `tokens.reasoning`,
-   Pi `usage.reasoning`). Otherwise use the **stored text estimate** that tags already persist
-   (`tags.reasoning_token_count`). When a step has opaque reasoning and neither number, count a
+   Pi `usage.reasoning`). Otherwise estimate the **kept plaintext of that assistant step**, using the frozen prose calibration. Legacy tool-tag estimates describe preceding thinking and cannot price their tool owner's step. When a step has opaque reasoning and neither number, count a
    **fixed 1,000 tokens**. The multiplier is 1.0 on every route: the measurement found about
    1.0 input token per reported reasoning token on every well-sampled route.
-3. **Selection does not change, only the cutoff does.** The budget produces a single tag cutoff,
+3. **Select newest to oldest, keeping whole steps while the running cost fits.** The first step
+   that does not fit sets a single tag cutoff (everything older goes),
    which replaces `maxTag − clear_reasoning_age` in every existing lane. Those lanes are the TS
    whole-part removal, the TS canonical-Anthropic `[cleared]` to empty-sentinel watermark, the
    inline `<thinking>` strip, the Pi empty-thinking watermark, Pi native reasoning replay, and
@@ -32,12 +32,9 @@ measurement), [`docs/reports/reasoning-removal-all-providers-design.md`](../repo
    is allowed to act today: `routineCleanupApplied` in TS, `is_bust_pass` in Rust, and the Pi
    execute pass. Defer passes replay the frozen set byte for byte. Being over budget never starts
    a bust of its own. Removed reasoning is never restored, even if the budget is raised later.
-5. **Default:** the same formula as the derived `protected_tokens`:
-   `clamp(round(0.05 × usableSoft), min(16,000, round(0.08 × usableSoft)), 64,000)`.
-   That gives 43,600 tokens for Opus 5.5 at 1M (872k usable), 16,000 for GPT-6.1-sol at 272k,
-   and 7,680 for a 128k-class window. Well-behaved models keep about what age 50 kept today or
-   more; overthinking models are capped (worked examples in §3).
-6. **Shape:** a number, or a per-model object `{ "default": n, "provider/model": n }` resolved
+5. **Default: fixed 10,000 tokens**, independent of the model's context window. Users can
+   override it globally or per model. Offline replay informs future decisions, not this default.
+6. **Shape:** a number, or a per-model object `{ "default": n, "provider/model": n, "provider/*": n }` resolved
    with the existing `cache_ttl` lookup walk (`resolveModelConfigValue`). Allowed in user and
    project config. `0` means "keep no historical reasoning".
 7. **Migration:** `clear_reasoning_age` becomes deprecated and ignored, with a load warning and
@@ -106,9 +103,7 @@ watermark, so it is cut by the same cutoff.
    Pi `usage.reasoning`; Rust OpenCode leg: `info.tokens.reasoning` in `native_messages`). If
    `reported > 0`, use it.
 2. Otherwise, if the step has reasoning text, use a text estimate multiplied by the model's
-   calibration `proseRatio`, as `storage-tags.ts:699` already does. On OpenCode, the estimate is
-   the sum of `tags.reasoning_token_count` over the message's tags, which is computed once per
-   tag at insert (`tag-messages.ts:376`). Pi tag rows store `null` there
+   calibration `proseRatio`, as `storage-tags.ts:699` already does. On OpenCode, the served step's own plaintext is estimated directly, after exact frozen merged-part removals are accounted for. Message-tag estimates can support DB-only projections once deduplicated; tool-tag estimates are excluded because they belong to preceding thinking. Pi tag rows store `null` there
    (`shared/tag-transcript.ts:528/942/1048`), and Rust tag rows (`mc-store` `McTagRow`) have no
    such column. Those two tokenize the thinking text on the busting pass: Pi with core
    `estimateTokens`, Rust with `mc_tokenizer::estimate_tokens`. That work is bounded, because
@@ -142,9 +137,9 @@ Gemini at 1.22, and there the removable share is unknown (see open question 3).
 
 | Harness | Reported count | Text estimate | Notes |
 |---|---|---|---|
-| OpenCode 1 (TS and Rust OpenCode leg) | `info.tokens.reasoning` on the assistant message; separate from `output` | `tags.reasoning_token_count` | Ollama routes store R=0 next to text, so they use the text estimate |
+| OpenCode 1 (TS and Rust OpenCode leg) | `info.tokens.reasoning` on the assistant message; separate from `output` | Kept thinking plaintext on that step | Legacy tool-tag estimates cannot prove the owning step's reasoning cost |
 | Pi / OMP | `usage.reasoning` (present on 3,989 of 4,020 Codex steps) | Thinking text tokenized on the busting pass (Pi tag rows store `null`) | Pi Anthropic coverage is unmeasured; the same rules apply |
-| OpenCode 2 | No measured steps (the named store has no assistant rows) | Same tag column | Read the same field if the v2 message exposes it; otherwise text estimate |
+| OpenCode 2 | No measured steps (the named store has no assistant rows) | Kept thinking plaintext on that step | Read the same field if the v2 message exposes it; otherwise text estimate |
 | Claude Code (Rust CC profile) | Claude Code usage has no reasoning split | Thinking text where the transcript keeps it, tokenized on the pass | Undercounts summarised Claude thinking by about 2×; see open question 6 |
 
 The counts are read **live from the host messages on the busting pass**. No new column is
@@ -159,9 +154,10 @@ rows to share the OpenCode path, but the budget does not need it.
 ```text
 reasoningBudgetCutoff(assistants newest→oldest, budget) -> tag (0 = remove nothing)
 
-kept = 0
+kept = sum(cost(step) for each on-wire newest or exempt step)
 for step in assistants, newest first:
     if step's reasoning is already off the wire: continue        # contributes 0
+    if step is newest or exempt: continue                       # already charged; cannot remove
     if kept + cost(step) <= budget: kept += cost(step); continue
     cutoff = step.tag, or the nearest older tagged step's tag when step is untagged
     break
@@ -173,7 +169,9 @@ The cutoff then goes into each lane where `maxTag − clear_reasoning_age` goes 
 lanes keep all of their existing eligibility rules:
 
 - the newest assistant and `findLatestAssistantReasoningMutationExemptMessage` (the newest one
-  with replayable content) are never touched;
+  with replayable content) are never newly selected;
+- on Anthropic routes, every assistant step after the last real user request is charged but exempt from the budget cutoff, in primary and subagent sessions; synthetic context and tool-result user carriers do not start a new turn;
+- frozen removals take precedence over every current exemption or lineage change: once removed, signed reasoning never returns;
 - tag 0, no wire content left after removal, and OpenRouter Gemini-signature details all still
   make a message ineligible;
 - **prefix-bound models** (Fable 5.1, Opus 5.5, Sonnet 5.5) still walk oldest first and stop at
@@ -183,11 +181,23 @@ lanes keep all of their existing eligibility rules:
 The exempt newest steps **count toward** the budget but cannot be removed. If they alone exceed
 it, everything older that is eligible goes.
 
-The kept total is **at most the budget right after a busting pass**, except in two cases where
+**Whole-step means selection, not a new clearing capability.** The cutoff never splits an
+assistant step and no reasoning block is truncated. Existing redacted/native eligibility and
+replay shapes remain authoritative: Pi serializers always send redacted thinking, so the lane
+keeps it while clearing ordinary siblings as before; native replay has its independent saved
+ids. Kept redacted/native blocks still count toward the budget. Old watermarks must replay
+byte-identically after upgrade, never restoring cleared signed bytes on a defer.
+
+The kept total is **at most the budget right after a busting pass**, except where
 it may exceed the budget:
 
 1. a prefix-bound walk stopped early at an ineligible message;
-2. the exempt newest steps are larger than the budget.
+2. the exempt newest steps are larger than the budget;
+3. existing lane eligibility keeps immutable redacted/native or protected signature payloads.
+
+Existing immutable payloads are also not a new removal capability: kept Pi redacted/native
+blocks and protected OpenRouter Gemini details can remain above the target. They still count;
+the budget never authorizes rewriting or restoring them just to hit a number.
 
 Between busts, new steps add reasoning on top. The budget is enforced at the next bust, never
 by starting one.
@@ -237,23 +247,15 @@ by starting one.
 
 ## 3. Default value
 
-### Formula
+### Fixed default
 
 ```text
-keep_reasoning_tokens (derived) = clamp(round(0.05 × usableSoft), min(16,000, round(0.08 × usableSoft)), 64,000)
+keep_reasoning_tokens (when omitted) = 10,000
 ```
 
-This is `deriveDefaultProtectedTokens` (`magic-context.ts:1670`) applied to the same usable
-window. Reasons:
-
-- **Cost rule.** The measurement says each kept reasoning token costs about one input token on
-  every request, cached or not. 5% of usable context is the share Magic Context already spends
-  on protecting the recent tail, so reasoning gets the same share.
-- **The window sets the cost; verbosity does not.** A token budget fixes the issue's complaint
-  by construction: an overthinking model simply keeps fewer steps. So a per-model default is not
-  needed to handle verbose models.
-- **No new constants.** The formula, its clamp and its sizing table already exist, are
-  documented and are tested.
+The default does not scale with the context window or verbosity. Each kept reasoning token
+costs about one input token on every request. A fixed budget caps that recurring cost, while
+the per-model shape provides an explicit escape hatch. Exempt steps can exceed the budget.
 
 ### Worked examples
 
@@ -265,20 +267,16 @@ tag); text-bearing steps add tags, so age 50 really spans somewhat fewer steps.
 
 | Route and window | Usable (`usableSoft`) | Default budget | Per-step R (p50 / p90) | Age 50 keeps about | Budget keeps |
 |---|---:|---:|---|---|---|
-| Opus 5.5, 1M | 872,000 (repo reports' live figure) | **43,600** | 157 / 754 | 7.9k / 37.7k | up to 277 / 57 steps: everything age 50 keeps, and more |
-| GPT-6.1-sol on OpenCode, 272k | ≈204,000 with a 68k reserve (25% cap); 247,424 with a 24,576 reserve | **16,000** either way | 73 / 516 | 3.7k / 25.8k | 219 / 31 steps |
-| GPT-6.1-sol on Pi, 272k | same | **16,000** | 516 / 2,588 | 25.8k / 129.4k (nearly half the window) | 31 / 6 steps |
-| Antigravity Gemini 3.8 Flash, 1M assumed (separate output quota, so no reserve is subtracted) | ≈1,000,000 | **50,000** | 3,970 / 29,168 | 198.5k / 1.46M | 12 / 1 steps |
-| Fable 5.1 (one session, 4 pairs; illustrative; 1M window assumed) | 872,000 | **43,600** | 9,098 / 22,060 | 455k / 1.1M | 4 / 1 steps |
-| An overthinking Flash model (issue), 128k-class window with a 32k (25%) reserve | ≈96,000 | **7,680** | 4,000 assumed | 200k (more than the window) | about 1–2 steps |
+| Opus 5.5, 1M | 872,000 (repo reports' live figure) | **10,000** | 157 / 754 | 7.9k / 37.7k | up to 63 / 13 steps |
+| GPT-6.1-sol on OpenCode, 272k | ≈204,000 with a 68k reserve (25% cap); 247,424 with a 24,576 reserve | **10,000** | 73 / 516 | 3.7k / 25.8k | 136 / 19 steps |
+| GPT-6.1-sol on Pi, 272k | same | **10,000** | 516 / 2,588 | 25.8k / 129.4k (nearly half the window) | 19 / 3 steps |
+| Antigravity Gemini 3.8 Flash, 1M assumed (separate output quota, so no reserve is subtracted) | ≈1,000,000 | **10,000** | 3,970 / 29,168 | 198.5k / 1.46M | 2 / 0 non-exempt steps |
+| Fable 5.1 (one session, 4 pairs; illustrative; 1M window assumed) | 872,000 | **10,000** | 9,098 / 22,060 | 455k / 1.1M | 1 / 0 non-exempt steps |
+| An overthinking Flash model (issue), 128k-class window with a 32k (25%) reserve | ≈96,000 | **10,000** | 4,000 assumed | 200k (more than the window) | 2 steps |
 
 What changes for users:
 
-- **Opus 5.5 at 1M keeps more reasoning than today.** At p50, age 50 kept about 8k and the
-  budget allows up to 43.6k. The extra is at most about 36k tokens per request, nearly all of it
-  cache reads. On a 1M window, the live tail is usually folded before it holds 277 steps, so in
-  practice the budget rarely removes anything there.
-- **OpenCode GPT-6.1-sol is about the same.** It keeps more at p50 and slightly less at p90.
+- **Opus 5.5 and OpenCode GPT-6.1-sol** keep more steps at p50 and fewer at p90 than age 50.
 - **Pi GPT-6.1-sol, Gemini, Fable and overthinkers are capped.** These are the issue's cases.
   At age 50, Pi GPT-6.1-sol at p90 kept about 129k tokens of reasoning in a 272k window.
 
@@ -296,7 +294,7 @@ caps by cost.
 ### Config shape
 
 ```jsonc
-// omitted: derived from the active model's usable window (recommended)
+// omitted: fixed 10,000 tokens (recommended)
 "keep_reasoning_tokens": 20000,
 // or per model, using the cache_ttl lookup order
 "keep_reasoning_tokens": { "default": 20000, "deepseek/deepseek-v4.1-flash": 6000, "openai/*": 30000 }
@@ -304,7 +302,7 @@ caps by cost.
 
 - Zod: `union([int().min(0).max(1_000_000), object({ default }).catchall(...)])`, optional.
 - Resolution: an exact model key, then shorter keys, then `provider/*`, then `default`, then the
-  derived value. Resolve once per pass with the active model, like `cache_ttl` and
+  fixed 10,000 default. Resolve once per pass with the active model, like `cache_ttl` and
   `output_reserve`.
 - `0` keeps no historical reasoning: on the next riding bust, every eligible step goes. A value
   of at least the window means it is never removed.
@@ -317,7 +315,7 @@ caps by cost.
   for `protected_tags` (`magic-context.ts:1254`). A load warning, through the
   `config/index.ts:418` path and the Pi loader's `config/index.ts:307` path, reads:
   > `clear_reasoning_age` is deprecated and ignored. Magic Context now keeps reasoning up to a
-  > token budget, `keep_reasoning_tokens`, derived from the model's context window. Remove the
+   > token budget, `keep_reasoning_tokens` (default 10,000). Remove the
   > key, or set `keep_reasoning_tokens` to a token count.
 - **No automatic conversion.** A tag age does not translate to tokens without knowing the
   route's step size. Mapping it to a token count would hide the change behind a number nobody
@@ -325,24 +323,23 @@ caps by cost.
 - Doctor (`doctor-opencode.ts` near the `auto_drop_tool_age` removal at `:1415`, and
   `doctor-pi.ts`): remove the key and print
   > Removed deprecated clear_reasoning_age (reasoning is now kept up to a token budget,
-  > keep_reasoning_tokens, derived from the context window).
+   > keep_reasoning_tokens, default 10,000).
   If the removed value was below 50, add:
   > You had set a lower age to keep less reasoning; set keep_reasoning_tokens (for example 8000)
   > to keep less than the default.
 - `migrate-config-location.ts`: drop the key the same way as `protected_tags` (`:281`, `:512`).
 - Dashboard: replace the `clear_reasoning_age` field (`ConfigEditor.tsx:135`,
-  `config-field-coverage.ts:37`) with "Keep reasoning tokens". Leave it blank to derive it.
+   `config-field-coverage.ts:37`) with "Keep reasoning tokens". Leave it blank for 10,000.
 - Docs: regenerate `reference/configuration.md` (`scripts/build-config-docs.ts`), and update
   `concepts/context-reduction.mdx` and `docs/architecture/reclaim.md` ("Strip and replay").
 - Rust wire: add `keep_reasoning_tokens_effective: Option<u64>`, resolved by the host the same
   way as `protected_tokens_effective`. Keep accepting `clear_reasoning_age` through serde so
   that older senders still parse, but ignore it. When the effective value is absent (an older
-  plugin or the Claude Code leg), the module derives it from its own config and window through
-  the same formula as `resolve_protected_tokens` (`config.rs:265`).
+   plugin or the Claude Code leg), the module resolves its own config with a fixed 10,000 fallback.
 
 ### Existing sessions on upgrade
 
-Persisted watermarks and frozen ids are unchanged and remain authoritative. The first riding
+Frozen reasoning decisions are absorbing at the **part** level. Exact merged-part decisions replay their selected blocks without reconsidering exemptions, while retained sibling blocks stay retained. Bare legacy merged ids lack exact evidence and continue the established partial-layout replay; they never become an all-block removal merely because of this upgrade. The first riding
 bust after upgrade computes a budget cutoff and advances by `max()`. It may remove more (Pi
 GPT, overthinkers) or nothing new (Opus at 1M). It never restores anything. No migration of
 stored state is needed.
@@ -351,7 +348,7 @@ stored state is needed.
 
 `/ctx-status` gets one line:
 
-`Reasoning kept: 12.4k of 16k (reported)`
+`Reasoning kept: 8.4k of 10k (reported)`
 
 with `(estimated)` when any counted step used the text or fixed fallback, and
 `(over budget: newest step)` or `(over budget: signed prefix)` when one of the two
@@ -368,7 +365,7 @@ without a separate diagnostic command.
   also contradict the report's warning that a zero result is about one adapter route, not a
   model brand: the same model on OpenRouter measured k=0.994. The cost is one log line and one
   frozen id per removed step.
-- **No count, but text.** Use the persisted text estimate. Where the true resend is about 1×
+- **No count, but text.** Estimate the step's own kept plaintext with frozen calibration. Where the true resend is about 1×
   (local Qwen measured 0.73–1.04), the estimate is about right. Where it is unknown (GLM), the
   estimate is the best available, and it errs toward removing reasoning that is actually resent.
 - **No count and no text (opaque).** A fixed 1,000 tokens per step, so these steps still use up
@@ -385,7 +382,7 @@ without a separate diagnostic command.
 | Concern | TS (OpenCode 1 and 2) | Pi / OMP | Rust module |
 |---|---|---|---|
 | Cutoff function | New pure `reasoningBudgetCutoff` in core `hooks/magic-context/reasoning-budget.ts` | Imports the same core function | `reasoning_budget_cutoff` next to `tag_age_cutoff`, which it replaces (`transform.rs:13149`) |
-| Step cost | `info.tokens.reasoning`, then the tag-row estimate, then 1,000 | `usage.reasoning`, then thinking text tokenized on the pass, then 1,000 | OpenCode leg: `native_messages[].info.tokens.reasoning`, then thinking text via `mc_tokenizer::estimate_tokens`, then 1,000; CC leg: thinking-text estimate |
+| Step cost | `info.tokens.reasoning`, then the step's kept-plaintext estimate, then 1,000 | `usage.reasoning`, then thinking text tokenized on the pass, then 1,000 | OpenCode leg: `native_messages[].info.tokens.reasoning`, then thinking text via `mc_tokenizer::estimate_tokens`, then 1,000; CC leg: thinking-text estimate |
 | Where the cutoff replaces age | `selectReasoningRemovals` (arg), `clearOldReasoning`, `stripInlineThinking`, the watermark write at `transform-postprocess-phase.ts:2670`, `compartment-trigger.ts:250` | `piReasoningClearCutoff`, `piPrefixBoundReasoningCutoff`, `clearOldReasoningPi`, `stripInlineThinkingPi`, `applyNativeReasoningReplayPi` (`:124`), historian trigger inputs (`context-handler.ts:5005`) | `opencode_reasoning_removal_mids`, `reasoning_clear_cutoff_with_tags`, CC `cc_reasoning_cutoff` |
 | Config plumbing | `hook.ts:733`, `transform.ts:451`, `rust-mode-transform.ts:1632/3107/3326`, `v2/hooks/context.ts:1485` | `index.ts:1120/1550`, `context-handler.ts:537` constant removed | `TransformRequest.keep_reasoning_tokens_effective`, module config |
 | Bust gate | `routineCleanupApplied` | execute pass | `is_bust_pass` |
@@ -394,6 +391,13 @@ Known asymmetries are kept, not widened. Rust still skips OpenRouter-shaped mess
 can strip. The Claude Code leg still removes no reasoning on prefix-bound models: today
 `reasoning_clear_cutoff_with_tags` returns `None` for them, and no `reasoning_age` lane runs
 there. Both stay as they are. The budget changes the cutoff only where a lane already runs.
+
+The Rust processed-image lane previously reused the reasoning-age cutoff even though TS and
+Pi use the highest dropped-tag watermark. Image retirement is now explicitly independent of
+both reasoning settings and uses that shared rule: an answered large image at or below a
+positive dropped-tag watermark is selected only on a rebuilding pass. Existing frozen image
+decisions replay unchanged. Legacy Rust sessions, including non-default `clear_reasoning_age`
+overrides, adopt the TS rule for new image decisions on their next rebuild; no migration runs.
 
 The historian trigger's projection must call the same cutoff function with the same costs as
 the transform on that pass. Otherwise the trigger predicts a reclaim the transform will not
@@ -464,15 +468,13 @@ request carrying only `clear_reasoning_age` and derives the budget itself.
 ## Open questions, with recommendations
 
 1. **One knob, or none?** With a token budget, a model's verbosity no longer needs a per-model
-   override, and the window already scales the default. *Recommendation:* keep exactly one
+   override. *Recommendation:* keep exactly one
    optional knob with the per-model shape. It replaces `clear_reasoning_age` one for one, the
    issue asks for per-model control, the resolver already exists, and it gives an escape hatch
    (`0` for privacy or maximum savings, a large value to keep everything). The fallback is to
    ship with no knob and add one on demand.
-2. **Same formula as `protected_tokens`, or a smaller fraction?** A smaller share (2.5%) would
-   keep Opus 5.5 at 1M close to today's age-50 behaviour. *Recommendation:* reuse 5% and confirm
-   with the offline replay in §3 before release. Revisit only if the replay shows the budget
-   rarely removing anything on any 200k–272k route.
+2. **Default sizing.** Settled: fixed 10,000 tokens. Run the offline replay in §3 and report
+   the comparison with age 50; changing the default requires a separate user decision.
 3. **Count Gemini at 1.25×?** *Recommendation:* no. The resend report's 1.218 is for the
    replay bundle, and the signature sits on the tool part that stays, so 1.25× would remove more
    reasoning text without removing the signature cost. Revisit after a wire A/B on Gemini shows
@@ -488,9 +490,7 @@ request carrying only `clear_reasoning_age` and derives the budget itself.
    *Recommendation:* use the text estimate unscaled, label the status `(estimated)`, and leave
    prefix-bound removal on Claude Code out of scope. It is a new lane with its own binding
    risks.
-7. **Protect the whole current user turn?** *Recommendation:* no. A subagent run is one long
-   turn, and protecting it would bring back the 609-item encrypted reasoning pile-up. The
-   existing newest and exempt protections already cover the open tool round.
+7. **Protect the whole current Anthropic turn.** Settled: the budget never selects reasoning after the last real user request, in any session. This can exceed the budget during a long active turn. Only budget first-selection uses this boundary here; fresh merged/proactive stripping policy remains owned by the parallel active-turn change. Absorbing replay of already-frozen removals is never withheld.
 8. **Let the force band remove below the budget?** *Recommendation:* not in v1. The emergency
    planner reclaims tool outputs by need, and reasoning reaches its budget on that same bust
    anyway.
@@ -513,14 +513,13 @@ request carrying only `clear_reasoning_age` and derives the budget itself.
 > The plan:
 >
 > - `clear_reasoning_age` is replaced by `keep_reasoning_tokens`, a token budget for the
->   reasoning Magic Context keeps in the prompt. Older reasoning beyond it is removed, oldest
->   first.
+>   reasoning Magic Context keeps in the prompt. Selection keeps whole steps newest first;
+>   the first non-fitting step and everything older form the removed prefix.
 > - It's measured with the provider's own reasoning count where one is reported. Otherwise
 >   it's estimated from the reasoning text, and encrypted reasoning with no count is charged a
 >   fixed amount so it can't pile up unseen.
-> - When you don't set it, it's derived from the model's context window (about 5%: roughly 16k
->   on a 200–272k window, about 44k at 1M). Efficient models keep about as much as today, or
->   more; heavy thinkers just keep fewer recent blocks.
+> - When you don't set it, the default is 10,000 tokens on every model. Heavy thinkers keep
+>   fewer recent blocks; a step is never partly trimmed.
 > - Like your suggestion, it accepts a number or a per-model object, the same way `cache_ttl`
 >   and `output_reserve` do, for example `{ "default": 20000, "your/flash-model": 6000 }`.
 > - Removal still only happens when the cache is being rebuilt anyway, so it never costs an

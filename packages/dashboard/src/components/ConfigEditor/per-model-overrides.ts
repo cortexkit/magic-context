@@ -3,6 +3,7 @@ export const PER_MODEL_KEYS = [
   "execute_threshold_percentage",
   "execute_threshold_tokens",
   "output_reserve",
+  "keep_reasoning_tokens",
 ] as const;
 export type PerModelKey = (typeof PER_MODEL_KEYS)[number];
 export type PerModelValues = Partial<Record<PerModelKey, unknown>>;

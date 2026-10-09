@@ -1,4 +1,4 @@
-// Age-based removal of whole reasoning parts for providers other than
+// Budget-selected removal of whole reasoning parts for providers other than
 // canonical Anthropic.
 //
 // Canonical Anthropic keeps its older lane (clearOldReasoning writes
@@ -118,7 +118,7 @@ function stripOpenRouterReasoningDetails(message: MessageLike): number {
  * Pick assistant message ids whose reasoning should be removed on this
  * rebuilding pass. Pure; the caller persists the result before applying it.
  *
- * A message qualifies when its tag is at most `maxTag - clearReasoningAge`, it
+ * A message qualifies when its tag is at most the frozen budget cutoff, it
  * carries a reasoning part (or one a drop neutralized), it is not the newest
  * assistant (nor the newest one with replayable content), it keeps wire
  * content after removal, and removal actually takes its reasoning payload off
@@ -137,7 +137,7 @@ function stripOpenRouterReasoningDetails(message: MessageLike): number {
 export function selectReasoningRemovals(args: {
     messages: MessageLike[];
     messageTagNumbers: Map<MessageLike, number>;
-    clearReasoningAge: number;
+    cutoff: number;
     alreadyRemoved: ReadonlySet<string>;
     prefixBound: boolean;
     /**
@@ -145,11 +145,10 @@ export function selectReasoningRemovals(args: {
      * good (the binding-mismatch strip set). Only the prefix walk reads it.
      */
     alsoGone?: ReadonlySet<string>;
+    protectedMessages?: ReadonlySet<MessageLike>;
 }): string[] {
-    let maxTag = 0;
-    for (const tag of args.messageTagNumbers.values()) if (tag > maxTag) maxTag = tag;
-    const cutoff = maxTag - args.clearReasoningAge;
-    if (maxTag === 0 || cutoff <= 0) return [];
+    const cutoff = args.cutoff;
+    if (cutoff <= 0) return [];
 
     const newest = newestAssistant(args.messages);
     const exempt = findLatestAssistantReasoningMutationExemptMessage(args.messages);
@@ -168,6 +167,7 @@ export function selectReasoningRemovals(args: {
             continue;
         const tag = args.messageTagNumbers.get(message) ?? 0;
         const removable =
+            !args.protectedMessages?.has(message) &&
             id !== undefined &&
             message !== newest &&
             message !== exempt &&
@@ -185,10 +185,9 @@ export function selectReasoningRemovals(args: {
 
 /**
  * Splice every reasoning part (including drop-neutralized ones) out of the
- * assistant messages named in `ids`, on every pass. The newest assistant with
- * replayable content is skipped, matching Rust's exempt-message rule; a
- * removed message can only become that message if newer history disappears,
- * which already rewrites the cache. On OpenRouter the message's
+ * assistant messages named in `ids`, on every pass. First selection protects
+ * active thinking, but replay must not restore a saved removal when a host
+ * subset makes that assistant newest or active again. On OpenRouter the message's
  * `reasoning_details` copies leave with it. When an earlier drop has already
  * emptied a message, a whole-message placeholder keeps it from being sent
  * empty.
@@ -199,10 +198,9 @@ export function removeReasoningParts(
     providerID: string | undefined,
 ): number {
     if (ids.size === 0) return 0;
-    const exempt = findLatestAssistantReasoningMutationExemptMessage(messages);
     let removed = 0;
     for (const message of messages) {
-        if (message.info.role !== "assistant" || message === exempt) continue;
+        if (message.info.role !== "assistant") continue;
         const id = message.info.id;
         if (typeof id !== "string" || !ids.has(id)) continue;
         if (!reasoningPayloadLeavesWithParts(message)) continue;

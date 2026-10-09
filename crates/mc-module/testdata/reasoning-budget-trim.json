@@ -1,0 +1,13 @@
+{
+  "cases": [
+    { "name": "total fits", "budget": 100, "prefix_bound": false, "steps": [{ "tag": 1, "reported": 10 }, { "tag": 2, "reported": 20, "exempt": true }], "cutoff": 0, "removed_after": [] },
+    { "name": "zero keeps newest", "budget": 0, "prefix_bound": false, "steps": [{ "tag": 1, "reported": 10 }, { "tag": 2, "reported": 20, "exempt": true }], "cutoff": 1, "removed_after": [0] },
+    { "name": "first non-fit removes whole older prefix, not smaller old steps", "budget": 7, "prefix_bound": false, "steps": [{ "tag": 1, "reported": 1 }, { "tag": 2, "reported": 8 }, { "tag": 3, "reported": 4 }, { "tag": 4, "reported": 2, "exempt": true }], "cutoff": 2, "removed_after": [0, 1] },
+    { "name": "newest over budget", "budget": 10, "prefix_bound": false, "steps": [{ "tag": 1, "reported": 1 }, { "tag": 2, "reported": 20, "exempt": true }], "cutoff": 1, "removed_after": [0] },
+    { "name": "prefix stops at untagged step", "budget": 10, "prefix_bound": true, "steps": [{ "tag": 1, "reported": 100 }, { "tag": 0, "reported": 100 }, { "tag": 3, "reported": 100 }, { "tag": 4, "reported": 10, "exempt": true }], "cutoff": 3, "removed_after": [0] },
+    { "name": "already removed counts zero", "budget": 10, "prefix_bound": true, "steps": [{ "tag": 1, "reported": 100, "already_removed": true }, { "tag": 0, "reported": 100, "already_removed": true }, { "tag": 3, "reported": 100 }, { "tag": 4, "reported": 10, "exempt": true }], "cutoff": 3, "removed_after": [0, 1, 2] },
+    { "name": "cost precedence and encrypted fixed charge", "budget": 1030, "prefix_bound": false, "steps": [{ "tag": 1, "reported": 100, "text_estimate": 1 }, { "tag": 2, "reported": 0, "text_estimate": 20 }, { "tag": 3, "opaque": true }, { "tag": 4, "reported": 10, "exempt": true }], "cutoff": 1, "removed_after": [0] },
+    { "name": "raise never restores", "budget": 100000, "prefix_bound": false, "steps": [{ "tag": 1, "reported": 100, "already_removed": true }, { "tag": 2, "reported": 20, "exempt": true }], "cutoff": 0, "removed_after": [0] },
+    { "name": "both exempt steps charged", "budget": 5, "prefix_bound": false, "steps": [{ "tag": 1, "reported": 1 }, { "tag": 2, "reported": 20, "exempt": true }, { "tag": 3, "reported": 10, "exempt": true }], "cutoff": 1, "removed_after": [0] }
+  ]
+}

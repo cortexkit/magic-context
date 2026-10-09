@@ -278,7 +278,7 @@ function sortJson(value: unknown): unknown {
     if (value && typeof value === "object") {
         const sorted: Record<string, unknown> = {};
         for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-            if (key === "protected_tags") continue;
+            if (key === "protected_tags" || key === "clear_reasoning_age") continue;
             sorted[key] = sortJson((value as Record<string, unknown>)[key]);
         }
         return sorted;
@@ -509,7 +509,9 @@ export function migrateConfigFile(opts: ConfigFileMigrationOptions): ConfigFileM
         let migratedContent = first.content;
         let strippedProtectedTags = false;
         try {
-            const stripped = removeJsoncValue(first.content, ["protected_tags"]);
+            const stripped = removeJsoncValue(removeJsoncValue(first.content, ["protected_tags"]), [
+                "clear_reasoning_age",
+            ]);
             if (stripped !== first.content) {
                 migratedContent = stripped;
                 strippedProtectedTags = true;
@@ -520,7 +522,12 @@ export function migrateConfigFile(opts: ConfigFileMigrationOptions): ConfigFileM
 
         atomicWriteConfigFile(opts.targetPath, migratedContent);
         if (strippedProtectedTags) {
-            info?.(`Stripped deprecated "protected_tags" key during config location migration`);
+            if (first.content.includes('"protected_tags"'))
+                info?.(`Stripped deprecated "protected_tags" key during config location migration`);
+            if (first.content.includes('"clear_reasoning_age"'))
+                info?.(
+                    `Stripped deprecated "clear_reasoning_age" key during config location migration`,
+                );
         }
         info?.(
             `Migrated Magic Context ${opts.scope} config from ${first.path} to ${opts.targetPath}`,

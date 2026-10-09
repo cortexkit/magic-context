@@ -121,7 +121,7 @@ const FIELD_DEFS: FieldDef[] = [
       "Shared across harnesses. Model used to compress each memory into a mural cue. The mural image itself is rendered deterministically.",
     section: "Background models",
   },
-  // The four context defaults and their exceptions are rendered by PerModelTable.
+  // Context defaults and their exceptions are rendered by PerModelTable.
   // Tags & cleanup
   {
     key: "protected_tokens",
@@ -129,14 +129,6 @@ const FIELD_DEFS: FieldDef[] = [
     type: "number",
     description:
       "Absolute token floor protected from automatic reclaim (4,000–1,000,000). Leave blank to derive it from the model's usable context window. User-level only.",
-    section: "Context window",
-  },
-  {
-    key: "clear_reasoning_age",
-    label: "Clear Reasoning Age",
-    type: "number",
-    description:
-      "Reasoning blocks older than this many tags are removed whole, only on passes that already rebuild the cache.",
     section: "Context window",
   },
   // Historian

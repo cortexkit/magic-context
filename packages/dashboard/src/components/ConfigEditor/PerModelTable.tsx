@@ -17,6 +17,14 @@ const COLUMNS: Record<
   PerModelKey,
   { label: string; description: string; unset?: string; min?: number; max?: number }
 > = {
+  keep_reasoning_tokens: {
+    label: "Keep reasoning tokens",
+    description:
+      "Keep whole reasoning steps newest first, only on passes that already rebuild the cache. Newest and exempt steps count but always stay. Blank uses fixed 10,000 tokens.",
+    unset: "Default: 10000",
+    min: 0,
+    max: 1000000,
+  },
   cache_ttl: {
     label: "Cache TTL",
     description: "Provider prompt-cache lifetime that Magic Context assumes.",

@@ -28,6 +28,6 @@ export const openrouterGemini: ProviderRoute = {
 };
 
 export const scenarios: ScenarioSpec[] = [
-    { route: openrouterClaude, kind: "age", loopSteps: 12, clearReasoningAge: 10, callBudget: 21 },
-    { route: openrouterGemini, kind: "age", loopSteps: 12, clearReasoningAge: 10, callBudget: 21 },
+    { route: openrouterClaude, kind: "age", loopSteps: 12, keepReasoningTokens: 1000, callBudget: 21 },
+    { route: openrouterGemini, kind: "age", loopSteps: 12, keepReasoningTokens: 1000, callBudget: 21 },
 ];

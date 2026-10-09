@@ -73,7 +73,8 @@ When and how aggressively Magic Context manages the session's context window. Pe
 | `execute_threshold_tokens.default` | number (5000–2000000) | — |  |
 | `protected_tokens` | integer (4000–1000000) | — | Positive integer token floor to protect from automatic reclaim (min: 4_000, max: 1_000_000). When omitted, the derived default is clamp(round(0.05 × usableSoft), min(16_000, round(0.08 × usableSoft)), 64_000). |
 | `protected_tags` | unknown | — | Deprecated: number of recent tags to protect. Ignored for behaviour; use protected_tokens instead. |
-| `clear_reasoning_age` | number (10–) | `50` | Clear reasoning/thinking blocks older than N tags (default: 50) |
+| `clear_reasoning_age` | unknown | — | Deprecated and ignored. Use keep_reasoning_tokens instead. |
+| `keep_reasoning_tokens` | integer (0–1000000) \| map<string, integer (0–1000000)> | — | Reasoning tokens to keep on rebuilding passes. Number or per-model object; exact, shorter model keys, provider/\*, then default. Omitted: fixed 10,000. 0 removes all eligible historical reasoning; newest and exempt steps always stay. |
 | `history_budget_percentage` | number (0.05–0.5) | `0.15` | Fraction of usable context (context_limit × execute_threshold) reserved for the session history block (default: 0.15) |
 
 ## Model profiles

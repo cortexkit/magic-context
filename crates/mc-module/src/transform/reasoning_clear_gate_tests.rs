@@ -161,6 +161,34 @@ fn load_pre_fix_reasoning_fixture(dir: &std::path::Path) -> (McStore, TransformR
     (db, request, fixture)
 }
 
+#[test]
+fn re_review_legacy_reexemption_never_restores_an_already_served_signed_block() {
+    let previous = include_bytes!("../../gen/reasoning-clear-legacy/pre-fix.native.json");
+    assert!(!String::from_utf8_lossy(previous).contains("thinking-already"));
+    let dir = tempfile::tempdir().unwrap();
+    let (db, mut request, _) = load_pre_fix_reasoning_fixture(dir.path());
+    // This unchanged signed response was already cleared before deployment, but
+    // its durable clear unit has not been adopted yet. A host subset makes it
+    // newest. Pricing the subset must not bring its original signed bytes back.
+    request.native_messages.as_mut().unwrap().retain(|message| {
+        !["old", "multipart-user"]
+            .iter()
+            .any(|id| message["info"]["id"] == *id)
+    });
+    request.messages =
+        crate::codec::decode_opencode(request.native_messages.as_ref().unwrap()).messages;
+    let mut ctx = pctx("git:fixture", "/nonexistent-docs", 0);
+    ctx.temporal_awareness = false;
+    let mut result = transform_with_projection(&db, &request, &ctx).unwrap();
+    let mut native = ReasoningNativeHarness::new();
+    native.attach(&db, &mut result, &request);
+    assert!(
+        !String::from_utf8_lossy(&native_mid_bytes(&native, "already"))
+            .contains("thinking-already"),
+        "legacy re-exemption restored the original signed thinking-already block"
+    );
+}
+
 fn append_native_reasoning(request: &mut TransformRequest, id: &str) {
     request.native_messages.as_mut().unwrap().push(json!({"info":{"id":id,"role":"assistant"},"parts":[
         {"id":format!("{id}-r"),"type":"reasoning","text":format!("thinking-{id}"),"metadata":{"signature":format!("signature-{id}")}},
@@ -177,11 +205,13 @@ fn reasoning_clear_pre_fix_database_migrates_ck_and_incremental_wire_without_bus
     ctx.temporal_awareness = false;
     let loaded = db.load(&request.session_id).unwrap();
     assert!(loaded.meta.reasoning_replay_evidence.is_none());
-    assert!(!loaded
-        .core
-        .frozen_units
-        .iter()
-        .any(|unit| unit.key.starts_with("strip:reasoning_clear:")));
+    assert!(
+        !loaded
+            .core
+            .frozen_units
+            .iter()
+            .any(|unit| unit.key.starts_with("strip:reasoning_clear:"))
+    );
     let mut native = ReasoningNativeHarness::new();
     let mut first = transform_with_projection(&db, &request, &ctx).unwrap();
     assert_eq!(first.response.action, "SOFT+");
@@ -198,12 +228,13 @@ fn reasoning_clear_pre_fix_database_migrates_ck_and_incremental_wire_without_bus
         wire,
         include_bytes!("../../gen/reasoning-clear-legacy/pre-fix.native.json").as_slice()
     );
-    assert!(db
-        .load(&request.session_id)
-        .unwrap()
-        .meta
-        .reasoning_replay_evidence
-        .is_some());
+    assert!(
+        db.load(&request.session_id)
+            .unwrap()
+            .meta
+            .reasoning_replay_evidence
+            .is_some()
+    );
     let mut adopted = transform_with_projection(&db, &request, &ctx).unwrap();
     assert_eq!(adopted.response.action, "SOFT+");
     assert_eq!(
@@ -229,10 +260,12 @@ fn reasoning_clear_pre_fix_database_migrates_ck_and_incremental_wire_without_bus
     for _ in 0..3 {
         let mut deferred = transform_with_projection(&db, &request, &ctx).unwrap();
         assert_eq!(deferred.response.action, "SOFT+");
-        assert!(!deferred
-            .reasoning_clear_units
-            .iter()
-            .any(|unit| unit.key.starts_with(LEGACY_REASONING_CLEAR_PREFIX)));
+        assert!(
+            !deferred
+                .reasoning_clear_units
+                .iter()
+                .any(|unit| unit.key.starts_with(LEGACY_REASONING_CLEAR_PREFIX))
+        );
         assert_eq!(native.attach(&db, &mut deferred, &request), priced_wire);
     }
     assert!(
@@ -355,7 +388,7 @@ fn native_mid_bytes(native: &ReasoningNativeHarness, mid: &str) -> Vec<u8> {
 }
 
 #[test]
-fn reasoning_clear_reexemption_and_native_keep_collision_change_only_on_priced_passes() {
+fn reasoning_clear_reexemption_and_native_keep_collision_remain_absorbing() {
     let dir = tempfile::tempdir().unwrap();
     let (db, mut request, _) = load_pre_fix_reasoning_fixture(dir.path());
     let mut ctx = pctx("git:fixture", "/nonexistent-docs", 0);
@@ -395,14 +428,24 @@ fn reasoning_clear_reexemption_and_native_keep_collision_change_only_on_priced_p
     request.messages =
         crate::codec::decode_opencode(request.native_messages.as_ref().unwrap()).messages;
     let mut reexempt = transform_with_projection(&db, &request, &ctx).unwrap();
-    assert_eq!(reexempt.response.action, "HARD");
-    assert_eq!(
+    // Contract change: a durably removed signed block stays absent when its
+    // assistant becomes newest; there is no restoration to price or suspend.
+    assert_eq!(reexempt.response.action, "SOFT+");
+    assert_ne!(
         reexempt.response.materialize_reason.as_deref(),
         Some("reasoning_exemption_repair")
     );
     native.attach(&db, &mut reexempt, &request);
-    let kept_bytes = native_mid_bytes(&native, "old");
-    assert!(String::from_utf8_lossy(&kept_bytes).contains("thinking-old"));
+    assert_eq!(native_mid_bytes(&native, "old"), clear_bytes);
+    assert!(
+        db.load(&request.session_id)
+            .unwrap()
+            .core
+            .frozen_units
+            .iter()
+            .filter(|unit| unit.key == "strip:reasoning_clear:old")
+            .all(|unit| unit.reset_rule.is_empty())
+    );
     for arm in 0..3 {
         if arm == 1 {
             request.native_messages = Some(with_new.clone());
@@ -414,8 +457,8 @@ fn reasoning_clear_reexemption_and_native_keep_collision_change_only_on_priced_p
         native.attach(&db, &mut deferred, &request);
         assert_eq!(
             native_mid_bytes(&native, "old"),
-            kept_bytes,
-            "a suspended clear resumed without permission"
+            clear_bytes,
+            "re-exemption or keep/clear collision restored a frozen block"
         );
     }
     request.render_config = "priced-resume".to_string();
@@ -425,7 +468,7 @@ fn reasoning_clear_reexemption_and_native_keep_collision_change_only_on_priced_p
 }
 
 #[test]
-fn reasoning_clear_lineage_anchor_suspension_requires_permission() {
+fn reasoning_clear_lineage_anchor_preserves_absence_without_suspension() {
     let mut request = reasoning_clear_fixture();
     let mut newer = request.messages[1].clone();
     newer.mid = "new".to_string();
@@ -435,21 +478,50 @@ fn reasoning_clear_lineage_anchor_suspension_requires_permission() {
     let mut core = CoreState::default();
     core.frozen_units
         .push(strip_unit("reasoning_clear", "old", ""));
-    assert!(!reasoning_clear_exemption_changed(&core, &request, None));
-    assert!(reasoning_clear_exemption_changed(
-        &core,
-        &request,
-        Some("old")
-    ));
-    refresh_reasoning_clear_exemptions(&mut core, &request, false, Some("old"));
-    assert_eq!(core.frozen_units[0].reset_rule, "");
-    refresh_reasoning_clear_exemptions(&mut core, &request, true, Some("old"));
-    assert_eq!(core.frozen_units[0].reset_rule, REASONING_CLEAR_SUSPENDED);
-    assert!(!reasoning_clear_exemption_changed(
-        &core,
-        &request,
-        Some("old")
-    ));
+    // Contract change: an anchor exemption protects first selection, not replay
+    // of a signed block already removed. Neither defer nor bust may suspend it.
+    let original = &request.messages[1].ck;
+    let mut cleared = original.clone();
+    replay_reasoning_clear(
+        &FrozenUnitLookup::Indexed(FrozenUnitIndex::new(&core.frozen_units)),
+        "old",
+        &mut cleared,
+    );
+    let meta = ModuleMeta {
+        reasoning_cleared_through_tag: 5,
+        ..Default::default()
+    };
+    let tags = BTreeMap::from([("old".to_string(), 2), ("new".to_string(), 16)]);
+    let projection = ck_wire::project_messages(&request.messages).unwrap();
+    for can_bust in [false, true] {
+        assert!(
+            new_reasoning_clear_units(
+                &core,
+                &meta,
+                &request,
+                &tags,
+                can_bust,
+                Some("old"),
+                ReasoningClearSnapshot {
+                    meta: &meta,
+                    row_version: None,
+                    projection: &projection
+                }
+            )
+            .is_empty()
+        );
+        assert_eq!(core.frozen_units[0].reset_rule, "");
+        let mut anchored = original.clone();
+        replay_reasoning_clear(
+            &FrozenUnitLookup::Indexed(FrozenUnitIndex::new(&core.frozen_units)),
+            "old",
+            &mut anchored,
+        );
+        assert_eq!(
+            serde_json::to_value(anchored).unwrap(),
+            serde_json::to_value(&cleared).unwrap()
+        );
+    }
 }
 
 #[test]
@@ -468,6 +540,7 @@ fn reasoning_clear_merged_assistant_whitespace_sentinels_replay_one_wire_shape()
         .insert(0, json!({"id":"old-blank","type":"text","text":"   "}));
     // The changed source belongs to a new session; no old source-identity pin is reused.
     request.session_id = "combined-reasoning".to_string();
+    request.keep_reasoning_tokens_effective = Some(0);
     request.messages =
         crate::codec::decode_opencode(request.native_messages.as_ref().unwrap()).messages;
     let mut ctx = pctx("git:fixture", "/nonexistent-docs", 0);
@@ -564,7 +637,7 @@ fn reasoning_clear_stale_generation_holds_legacy_wire_without_adopting() {
 }
 
 #[test]
-fn reasoning_clear_legacy_reexemption_prices_restoration_before_unit_adoption() {
+fn reasoning_clear_legacy_reexemption_preserves_absence_before_unit_adoption() {
     let dir = tempfile::tempdir().unwrap();
     let (db, mut request, _) = load_pre_fix_reasoning_fixture(dir.path());
     request.native_messages.as_mut().unwrap().retain(|message| {
@@ -576,16 +649,18 @@ fn reasoning_clear_legacy_reexemption_prices_restoration_before_unit_adoption() 
         crate::codec::decode_opencode(request.native_messages.as_ref().unwrap()).messages;
     let mut ctx = pctx("git:fixture", "/nonexistent-docs", 0);
     ctx.temporal_awareness = false;
+    // Contract change: preserved thinking forbids restoring an already removed
+    // signed block, even before a durable clear unit has been adopted.
     let mut restored = transform_with_projection(&db, &request, &ctx).unwrap();
-    assert_eq!(restored.response.action, "HARD");
-    assert_eq!(
+    assert_eq!(restored.response.action, "SOFT+");
+    assert_ne!(
         restored.response.materialize_reason.as_deref(),
         Some("reasoning_exemption_repair")
     );
     let mut native = ReasoningNativeHarness::new();
     native.attach(&db, &mut restored, &request);
     let bytes = native_mid_bytes(&native, "already");
-    assert!(String::from_utf8_lossy(&bytes).contains("thinking-already"));
+    assert!(!String::from_utf8_lossy(&bytes).contains("thinking-already"));
     for _ in 0..3 {
         let mut deferred = transform_with_projection(&db, &request, &ctx).unwrap();
         assert_eq!(deferred.response.action, "SOFT+");
@@ -634,7 +709,8 @@ fn reasoning_clear_subset_ingress_cannot_retire_an_omitted_legacy_clear() {
         .unwrap();
     served.content_hash = cleared_ck.block_fingerprints[0].0.clone();
     served.serialized_len = cleared_ck.block_fingerprints[0].1;
-    let tag_numbers = tag_number_by_message(&db.load_tags_for_session(&request.session_id).unwrap());
+    let tag_numbers =
+        tag_number_by_message(&db.load_tags_for_session(&request.session_id).unwrap());
     let old_tag = tag_numbers["old"];
     loaded.meta.reasoning_cleared_through_tag = old_tag;
     loaded.meta.reasoning_cleared_through_ordinal = old_tag;
@@ -659,17 +735,21 @@ fn reasoning_clear_subset_ingress_cannot_retire_an_omitted_legacy_clear() {
     let mut native = ReasoningNativeHarness::new();
     let mut first = transform_with_projection(&db, &request, &ctx).unwrap();
     assert_eq!(first.response.action, "SOFT+");
-    assert!(first
-        .reasoning_clear_units
-        .iter()
-        .any(|unit| unit.key == "strip:reasoning_clear_legacy:old"));
+    assert!(
+        first
+            .reasoning_clear_units
+            .iter()
+            .any(|unit| unit.key == "strip:reasoning_clear_legacy:old")
+    );
     native.attach(&db, &mut first, &request);
     let cleared_bytes = native_mid_bytes(&native, "old");
 
     let mut subset = request.clone();
-    subset.native_messages.as_mut().unwrap().retain(|message| {
-        !matches!(message["info"]["id"].as_str(), Some("old" | "already"))
-    });
+    subset
+        .native_messages
+        .as_mut()
+        .unwrap()
+        .retain(|message| !matches!(message["info"]["id"].as_str(), Some("old" | "already")));
     subset.messages =
         crate::codec::decode_opencode(subset.native_messages.as_ref().unwrap()).messages;
     let mut contracted = transform_with_projection(&db, &subset, &ctx).unwrap();
@@ -678,17 +758,20 @@ fn reasoning_clear_subset_ingress_cannot_retire_an_omitted_legacy_clear() {
 
     let mut expanded = transform_with_projection(&db, &request, &ctx).unwrap();
     assert_eq!(expanded.response.action, "SOFT+");
-    assert!(expanded
-        .reasoning_clear_units
-        .iter()
-        .any(|unit| unit.key == "strip:reasoning_clear_legacy:old"));
+    assert!(
+        expanded
+            .reasoning_clear_units
+            .iter()
+            .any(|unit| unit.key == "strip:reasoning_clear_legacy:old")
+    );
     native.attach(&db, &mut expanded, &request);
     assert_eq!(native_mid_bytes(&native, "old"), cleared_bytes);
-    assert!(!db
-        .load(&request.session_id)
-        .unwrap()
-        .meta
-        .reasoning_clear_initialized);
+    assert!(
+        !db.load(&request.session_id)
+            .unwrap()
+            .meta
+            .reasoning_clear_initialized
+    );
 }
 
 #[test]
@@ -701,12 +784,13 @@ fn reasoning_clear_legacy_arm_cannot_mint_for_just_demoted_exempt_assistant() {
 
     let mut held = transform_with_projection(&db, &request, &ctx).unwrap();
     assert_eq!(held.response.action, "SOFT+");
-    assert!(!held
-        .reasoning_clear_units
-        .iter()
-        .any(|unit| unit.key == "strip:reasoning_clear_legacy:old"));
+    assert!(
+        !held
+            .reasoning_clear_units
+            .iter()
+            .any(|unit| unit.key == "strip:reasoning_clear_legacy:old")
+    );
     let mut native = ReasoningNativeHarness::new();
     native.attach(&db, &mut held, &request);
-    assert!(String::from_utf8_lossy(&native_mid_bytes(&native, "old"))
-        .contains("thinking-old"));
+    assert!(String::from_utf8_lossy(&native_mid_bytes(&native, "old")).contains("thinking-old"));
 }

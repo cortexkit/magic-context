@@ -1,4 +1,3 @@
-const REASONING_CLEAR_SUSPENDED: &str = "newest-assistant-keep";
 const LEGACY_REASONING_CLEAR_PREFIX: &str = "strip:reasoning_clear_legacy:";
 
 struct ReasoningClearSnapshot<'a> {
@@ -16,45 +15,6 @@ pub(crate) fn reasoning_native_source_hash(req: &TransformRequest) -> String {
         &serde_json::to_string(&(&req.messages, &req.native_messages, &req.render_config))
             .expect("native source is serializable"),
     )
-}
-
-fn reasoning_clear_exemption_changed(
-    core: &CoreState,
-    req: &TransformRequest,
-    anchor: Option<&str>,
-) -> bool {
-    let newest = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
-    core.frozen_units.iter().any(|unit| {
-        unit.reset_rule != REASONING_CLEAR_SUSPENDED
-            && unit
-                .key
-                .strip_prefix("strip:reasoning_clear:")
-                .is_some_and(|mid| Some(mid) == newest || Some(mid) == anchor)
-    })
-}
-
-/// Exemption changes are structural repairs. Suspend a prior clear only on the
-/// pass that prices restoration of the signed response, and retain that keep on
-/// subsequent defers even when another assistant arrives.
-fn refresh_reasoning_clear_exemptions(
-    core: &mut CoreState,
-    req: &TransformRequest,
-    can_bust: bool,
-    anchor: Option<&str>,
-) {
-    if !can_bust {
-        return;
-    }
-    let newest = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
-    for unit in &mut core.frozen_units {
-        if let Some(mid) = unit.key.strip_prefix("strip:reasoning_clear:") {
-            unit.reset_rule = if Some(mid) == newest || Some(mid) == anchor {
-                REASONING_CLEAR_SUSPENDED.to_string()
-            } else {
-                String::new()
-            };
-        }
-    }
 }
 
 fn legacy_ck_clear_matches(
@@ -160,18 +120,28 @@ fn new_reasoning_clear_units(
                 && proof.ck_fingerprints == snapshot.meta.served_output_fingerprint
         });
     let mut units = Vec::new();
+    let protected_thinking = protected_thinking_turn_mids(req);
     for message in &req.messages {
         let tag = message_tag_number(message, tag_numbers);
+        // Legacy served evidence is replay, not new selection. Becoming newest
+        // or an anchor cannot restore thinking already absent from that wire.
+        let already_served_clear =
+            legacy_allowed && legacy_ck_clear_matches(&snapshot, &lookup, &previous, message);
         if message.ck.meta.synthetic
             || message.ck.role != "assistant"
             || message.mid.is_empty()
-            || newest == Some(message.mid.as_str())
-            || lineage_anchor_mid == Some(message.mid.as_str())
+            || (!already_served_clear
+                && (newest == Some(message.mid.as_str())
+                    || in_active_anthropic_turn(req, &message.mid)
+                    || lineage_anchor_mid == Some(message.mid.as_str())))
             || tag == 0
             || tag > cutoff
             || output_message_strip_unit(&lookup, "reasoning_clear", &message.mid).is_some()
             || !message.ck.content.iter().any(is_reasoning_block)
         {
+            continue;
+        }
+        if protected_thinking.contains(message.mid.as_str()) && !legacy_ck_clear_matches(&snapshot, &lookup, &previous, message) {
             continue;
         }
         if can_mutate_provider_prefix {
@@ -180,8 +150,6 @@ fn new_reasoning_clear_units(
         }
         // Compare the pre-hydration snapshot, not identities re-adopted earlier in
         // this transform. A fingerprint from another source generation is not proof.
-        let already_served_clear =
-            legacy_allowed && legacy_ck_clear_matches(&snapshot, &lookup, &previous, message);
         if already_served_clear {
             let native_matches = native_proof.is_some_and(|proof| {
                 proof
@@ -211,7 +179,6 @@ fn active_reasoning_clear<'a>(
 ) -> Option<&'a FrozenUnit> {
     output_message_strip_unit(frozen_units, "reasoning_clear", mid)
         .or_else(|| output_message_strip_unit(frozen_units, "reasoning_clear_legacy", mid))
-        .filter(|unit| unit.reset_rule != REASONING_CLEAR_SUSPENDED)
 }
 
 fn replay_reasoning_clear(
@@ -237,7 +204,6 @@ fn replay_reasoning_clear(
 pub(crate) fn reasoning_clear_mids(units: &[FrozenUnit]) -> HashSet<&str> {
     units
         .iter()
-        .filter(|unit| unit.reset_rule != REASONING_CLEAR_SUSPENDED)
         .filter_map(|unit| unit.key.strip_prefix("strip:reasoning_clear:"))
         .collect()
 }
@@ -245,7 +211,6 @@ pub(crate) fn reasoning_clear_mids(units: &[FrozenUnit]) -> HashSet<&str> {
 pub(crate) fn reasoning_native_clear_mids(units: &[FrozenUnit]) -> HashSet<&str> {
     units
         .iter()
-        .filter(|unit| unit.reset_rule != REASONING_CLEAR_SUSPENDED)
         .filter_map(|unit| {
             unit.key
                 .strip_prefix("strip:reasoning_clear:")
@@ -280,40 +245,4 @@ fn legacy_reasoning_adoption_complete(meta: &ModuleMeta, units: &[FrozenUnit]) -
         }
     }
     any_known
-}
-
-/// Restoring a legacy cleared assistant that becomes exempt also needs a priced
-/// pass, even if deployment has not yet adopted its durable clear decision.
-fn legacy_reasoning_exemption_changed(
-    core: &CoreState,
-    meta: &ModuleMeta,
-    req: &TransformRequest,
-    projection: &FlatProjection,
-    anchor: Option<&str>,
-) -> bool {
-    if meta.reasoning_clear_initialized
-        || !req.serve_native
-        || SerializerProfile::parse(&req.serializer_profile)
-            != Some(SerializerProfile::OpencodeAiSdk)
-    {
-        return false;
-    }
-    let newest = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
-    let lookup = FrozenUnitLookup::Indexed(FrozenUnitIndex::new(&core.frozen_units));
-    let previous = meta
-        .served_output_fingerprint
-        .iter()
-        .map(|block| (block.block_id.as_str(), block.content_hash.as_str()))
-        .collect::<HashMap<_, _>>();
-    let snapshot = ReasoningClearSnapshot {
-        meta,
-        row_version: None,
-        projection,
-    };
-    req.messages
-        .iter()
-        .filter(|message| {
-            Some(message.mid.as_str()) == newest || Some(message.mid.as_str()) == anchor
-        })
-        .any(|message| legacy_ck_clear_matches(&snapshot, &lookup, &previous, message))
 }

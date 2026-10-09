@@ -1,4 +1,5 @@
 import {
+	detectLatestTurnThinkingMismatch,
 	detectOverflow,
 	detectThinkingBindingMismatch,
 	isPrefixBoundThinkingModel,
@@ -6,7 +7,6 @@ import {
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import {
 	addMergedReasoningStrippedIds,
-	armThinkingBindingRecovery,
 	getMergedReasoningStrippedIds,
 	getThinkingBindingRecoveryTarget,
 	recordOverflowDetected,
@@ -14,10 +14,19 @@ import {
 	THINKING_BINDING_STRIP_ORDER_END_MARKER,
 	thinkingBindingRecoveryFrozenId,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
+import { latestAssistantTurnMessages } from "@magic-context/core/hooks/magic-context/latest-assistant-turn";
+import {
+	armBindingRecoverySafely,
+	armLatestThinkingRecovery,
+	LATEST_THINKING_RESTORE,
+	latestThinkingRecoveryCoversActiveTurn,
+} from "@magic-context/core/hooks/magic-context/latest-thinking-recovery";
 import { dropSlot } from "@magic-context/core/hooks/magic-context/lkg-slot";
+import { isAnthropicFamilyRoute } from "@magic-context/core/hooks/magic-context/sentinel";
 import { log } from "@magic-context/core/shared/logger";
 
 import { clearPiLkgSessionState } from "./pi-lkg";
+import { resolvePiStableId } from "./read-session-pi";
 
 function reportBindingRecovery(
 	sessionId: string,
@@ -67,6 +76,16 @@ export function handlePiProviderFailure(args: {
 		typeof message.provider === "string" ? message.provider : undefined;
 	const model = typeof message.model === "string" ? message.model : undefined;
 	const binding = detectThinkingBindingMismatch(message.errorMessage);
+	if (
+		detectLatestTurnThinkingMismatch(message.errorMessage) &&
+		!args.compactionOff &&
+		isAnthropicFamilyRoute(provider, model)
+	) {
+		armLatestThinkingRecovery(args.db, args.sessionId);
+		clearPiLkgSessionState(args.sessionId);
+		dropSlot(args.sessionId, "latest-thinking-recovery-arm");
+		return { kind: "thinking_binding", armed: true };
+	}
 	if (binding.isBindingMismatch) {
 		const enabled =
 			args.thinkingBindingRecoveryEnabled !== false &&
@@ -76,7 +95,7 @@ export function handlePiProviderFailure(args: {
 			// The 400 names only provider request-array paths. The next context
 			// pass maps the flag onto stable branch entry ids and strips thinking
 			// from every assistant that still carries it.
-			armThinkingBindingRecovery(args.db, args.sessionId);
+			armBindingRecoverySafely(args.db, args.sessionId);
 			clearPiLkgSessionState(args.sessionId);
 			dropSlot(args.sessionId, "thinking-binding-recovery-arm");
 			reportBindingRecovery(
@@ -171,12 +190,11 @@ export interface PiThinkingBindingApplication {
 /**
  * Apply an armed thinking-binding recovery and replay earlier ones.
  *
- * An armed flag freezes every assistant entry that still carries thinking,
- * the newest one included even when its tool call waits on a pending tool
- * result: after a prefix edit all of those blocks are invalid, and removing
- * all of them is always valid, so one failed request is enough. The frozen
- * set is persisted before bytes change and replays on every later pass, so a
- * removed block never comes back; blocks produced afterwards are kept.
+ * An armed flag freezes completed assistant entries that still carry thinking.
+ * The entire active assistant turn is excluded across tool results: its signed
+ * blocks must stay exactly as returned. The frozen set is persisted before
+ * bytes change and replays on every later pass, so a removed block never comes
+ * back; thinking in the current tool loop stays until a real user turn ends it.
  */
 export function applyPiThinkingBindingRecovery(args: {
 	db: ContextDatabase;
@@ -194,15 +212,23 @@ export function applyPiThinkingBindingRecovery(args: {
 	 */
 	endOfPassOrder?: boolean;
 }): PiThinkingBindingApplication | null {
+	const protectedMessages = latestAssistantTurnMessages(args.messages);
 	const frozenEntryIds = frozenBindingEntryIds(args.db, args.sessionId);
 
-	const flagTarget = isPrefixBoundThinkingModel(args.provider, args.model)
+	const flagTargetCandidate = isPrefixBoundThinkingModel(
+		args.provider,
+		args.model,
+	)
 		? getThinkingBindingRecoveryTarget(args.db, args.sessionId)
 		: null;
+	const flagTarget = flagTargetCandidate?.startsWith(LATEST_THINKING_RESTORE)
+		? null
+		: flagTargetCandidate;
 	let applied: PiThinkingBindingApplication | null = null;
 	if (flagTarget) {
 		const entryIds = new Set<string>();
 		for (let index = 0; index < args.messages.length; index += 1) {
+			if (protectedMessages.has(args.messages[index])) continue;
 			const entryId = args.entryIds[index];
 			if (entryId && hasThinkingPart(args.messages[index]))
 				entryIds.add(entryId);
@@ -227,7 +253,19 @@ export function applyPiThinkingBindingRecovery(args: {
 		}
 	}
 
+	// A provider rejection of this turn asks for its original thinking back.
+	// Replaying the turn's frozen omissions here would delete that original
+	// before recovery checks it (start of pass) or after it restored it (end
+	// of pass), resending the rejected bytes. Older turns stay omitted.
+	const restoringActiveTurn = latestThinkingRecoveryCoversActiveTurn({
+		db: args.db,
+		sessionId: args.sessionId,
+		messages: args.messages,
+		id: (message, index) => resolvePiStableId(message, index, args.entryIds),
+	});
 	for (let index = 0; index < args.messages.length; index += 1) {
+		if (restoringActiveTurn && protectedMessages.has(args.messages[index]))
+			continue;
 		const entryId = args.entryIds[index];
 		if (entryId && frozenEntryIds.has(entryId))
 			stripThinkingParts(args.messages[index]);
@@ -249,9 +287,9 @@ export interface PiProactiveThinkingStrip {
  * unchanged, and a busting pass is the pass that changes those bytes: older
  * accounts then drop the blocks silently, `drop_block` drops them, and newer
  * accounts reject the request with a 400. The pass therefore removes all of
- * them itself. The newest assistant of an open tool round is included and its
- * tool call stays: a live probe on Fable 5.1 and Opus 5.5 accepted that turn
- * with its thinking removed (docs/reports/anthropic-open-tool-round-thinking.md).
+ * them itself only outside the active assistant turn. All steps in a tool-use
+ * loop are part of that turn; none of its thinking blocks may be removed.
+ * Callers must defer prefix edits that would require stripping those blocks.
  *
  * `messages` is the final array this pass serves, after binding-mismatch strips
  * were replayed on it at the end of the pass. The entries are persisted into
@@ -278,9 +316,11 @@ export function applyPiProactiveThinkingStrip(args: {
 }): PiProactiveThinkingStrip | null {
 	if (!args.cacheBustingPass) return null;
 	if (!isPrefixBoundThinkingModel(args.provider, args.model)) return null;
+	const protectedMessages = latestAssistantTurnMessages(args.messages);
 	const entryIds: string[] = [];
 	const indices: number[] = [];
 	for (let index = 0; index < args.messages.length; index += 1) {
+		if (protectedMessages.has(args.messages[index])) continue;
 		const entryId = args.entryIds[index];
 		if (!entryId || !hasThinkingPart(args.messages[index])) continue;
 		entryIds.push(entryId);

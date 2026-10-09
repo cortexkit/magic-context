@@ -160,7 +160,7 @@ describe("createTransform heuristic cleanup persistence", () => {
             historyRefreshSessions: new Set(),
             pendingMaterializationSessions,
             lastHeuristicsTurnId: new Map(),
-            clearReasoningAge: 1,
+            keepReasoningTokens: 0,
             protectedTokens: 1,
             cavemanTextCompression: { enabled: true, minChars: 20 },
             directory: makeTestDirectory("context-transform-caveman-inline-dir-"),

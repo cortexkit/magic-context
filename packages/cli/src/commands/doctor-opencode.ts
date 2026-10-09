@@ -144,6 +144,7 @@ import {
     listUnresolvedCompartments,
     supportsCoordinateGenerationReporting,
 } from "./doctor-store-generation";
+import { removeDeprecatedReasoningAge } from "./reasoning-config-migration";
 
 const CLI_PACKAGE_NAME = "@cortexkit/magic-context";
 
@@ -1408,6 +1409,12 @@ export async function runDoctor(
                 fixed++;
             }
 
+            const reasoningMessages = removeDeprecatedReasoningAge(mcConfig);
+            if (reasoningMessages.length > 0) {
+                mcChanged = true;
+                fixed++;
+                for (const message of reasoningMessages) log.success(message);
+            }
             // Remove deprecated auto_drop_tool_age / drop_tool_structure — Phase 2
             // replaced need-blind routine tool drops with the tiered target-headroom
             // emergency drop (always full-drop), so both knobs are gone from the

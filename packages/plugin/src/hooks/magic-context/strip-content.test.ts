@@ -1423,8 +1423,8 @@ describe("frozen merged reasoning parts", () => {
                 frozenMessageIds: frozen,
                 mutationExemptMessage: exempt,
             }),
-        ).toBe(0);
-        expect(exempt.parts[0]).toMatchObject({ type: "reasoning" });
+        ).toBe(1);
+        expect(exempt.parts[0]).toEqual(SENTINEL);
         expect(
             stripReasoningFromMergedAssistants([exempt], "openai", { frozenMessageIds: frozen }),
         ).toBe(0);

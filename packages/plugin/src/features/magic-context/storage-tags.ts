@@ -702,6 +702,34 @@ export function getAllStatusTagTokenTotalsFlat(
     return { totals, nullMessageIds };
 }
 
+/** Only message tags prove ownership of their own assistant's reasoning group.
+ * Tool tags describe the preceding thought, not their tool owner, and parallel
+ * tools repeat that estimate. Repeated text tags likewise charge the group once.
+ */
+export function getReasoningTokenEstimatesByMessage(
+    db: Database,
+    sessionId: string,
+    proseRatio: number,
+): Map<string, number> {
+    const rows = db
+        .prepare(
+            `SELECT type, message_id, tool_owner_message_id, reasoning_token_count FROM tags WHERE session_id = ? AND reasoning_token_count IS NOT NULL`,
+        )
+        .all(sessionId) as Array<{
+        type: string;
+        message_id: string;
+        tool_owner_message_id: string | null;
+        reasoning_token_count: number;
+    }>;
+    const totals = new Map<string, number>();
+    for (const row of rows) {
+        if (row.type !== "message") continue;
+        const id = ownerMessageIdForTagRow(row);
+        totals.set(id, Math.max(totals.get(id) ?? 0, row.reasoning_token_count * proseRatio));
+    }
+    return totals;
+}
+
 /** Bump a tag's input_token_count — the token mirror of `updateTagInputByteSize`. */
 export function updateTagInputTokenCount(
     db: Database,

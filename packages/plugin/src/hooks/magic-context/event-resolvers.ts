@@ -13,6 +13,7 @@ import {
     isSaneLimit,
 } from "../../shared/models-dev-cache";
 import { applyProvenInputFloor, hasTrustedAbsoluteWall } from "../../shared/window-geometry";
+import { resolveOpenCodeProvenInputFloor } from "./opencode-proven-floor";
 
 export { escalationBands, MAX_EXECUTE_THRESHOLD };
 export const DEFAULT_CONTEXT_LIMIT = 200_000;
@@ -24,6 +25,7 @@ function modelMatchedPersistedUsage(
 ): NonNullable<ReturnType<typeof loadPersistedUsage>> | undefined {
     if (!db || !sessionID || !modelKey) return undefined;
     try {
+        resolveOpenCodeProvenInputFloor(db, sessionID, modelKey);
         const persisted = loadPersistedUsage(db, sessionID);
         if (
             persisted !== null &&

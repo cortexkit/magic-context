@@ -23,6 +23,7 @@ CREATE TABLE mc_provider_conversations_v2 (
     UNIQUE(project_root, session, harness)
 );
 CREATE INDEX mc_provider_conversations_session ON mc_provider_conversations_v2(session);
+CREATE INDEX mc_provider_conversations_engine_namespace ON mc_provider_conversations_v2(engine_namespace);
 
 CREATE TABLE mc_provider_lineages_v1 (
     conv_key TEXT NOT NULL,
@@ -56,12 +57,26 @@ CREATE TABLE mc_provider_hook_answers_v1 (
     tags_json TEXT NOT NULL,
     state TEXT NOT NULL CHECK(state IN ('pending', 'live', 'burned')),
     legacy_json TEXT,
+    policy_json TEXT NOT NULL DEFAULT '{}',
     session TEXT NOT NULL CHECK(session = json_extract(conv_key, '$[1]')),
     PRIMARY KEY(conv_key, answer_seq)
 );
 CREATE INDEX mc_provider_answers_subject ON mc_provider_hook_answers_v1
     (conv_key, lineage_id, subject_mid, hook, subject_part, state);
 CREATE INDEX mc_provider_answers_pending ON mc_provider_hook_answers_v1(conv_key, lineage_id, state, ordinal);
+-- Admission-time policy metadata, never transcript or operation content. Keeping
+-- it with the lineage makes protection, time and sibling releases restart-safe.
+CREATE TABLE mc_provider_policy_parts_v1 (
+    conv_key TEXT NOT NULL,
+    lineage_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    block_id TEXT NOT NULL,
+    policy_json TEXT NOT NULL,
+    session TEXT NOT NULL CHECK(session = json_extract(conv_key, '$[1]')),
+    PRIMARY KEY(conv_key, lineage_id, block_id)
+);
+CREATE INDEX mc_provider_policy_parts_ordinal ON mc_provider_policy_parts_v1(conv_key,lineage_id,ordinal);
+CREATE INDEX mc_provider_policy_parts_identity ON mc_provider_policy_parts_v1(conv_key,block_id);
 CREATE TABLE mc_provider_views_v1 (
     conv_key TEXT NOT NULL,
     version INTEGER NOT NULL,
@@ -89,6 +104,14 @@ CREATE TABLE mc_provider_pending_drops_v1 (
     tag_number INTEGER NOT NULL,
     session TEXT NOT NULL CHECK(session = json_extract(conv_key, '$[1]')),
     PRIMARY KEY(conv_key, tag_number)
+);
+-- A release belongs to the engine's number space, not to a transport answer.
+-- Replaying that answer cannot make an already consumed number actionable.
+CREATE TABLE mc_provider_consumed_tags_v1 (
+    engine_namespace TEXT NOT NULL,
+    tag_number INTEGER NOT NULL,
+    session TEXT NOT NULL,
+    PRIMARY KEY(engine_namespace,tag_number)
 );
 
 INSERT INTO mc_provider_conversations_v2
@@ -131,6 +154,8 @@ FROM mc_provider_conversations_v2 c
 JOIN mc_provider_sessions_v1 s USING(project_root, session, harness),
     json_each(s.record, '$.messages') l, json_each(l.value) m;
 INSERT INTO mc_provider_hook_answers_v1
+    (conv_key, answer_seq, lineage_id, subject_mid, hook, subject_part, ordinal,
+     ops_json, tags_json, state, legacy_json, session)
 SELECT c.conv_key, CAST(a.key AS INTEGER), coalesce(json_extract(a.value, '$.lineage'), ''),
     json_extract(a.value, '$.subject'), 'legacy', CAST(a.key AS TEXT), NULL,
     json_extract(a.value, '$.answer'), json_extract(a.value, '$.tags'),

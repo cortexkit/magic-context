@@ -110,7 +110,7 @@ export function applyNativeReasoningReplayPi(
 		messageIdToMaxTag: ReadonlyMap<string, number>;
 		stableId: (message: unknown, index: number) => string | undefined;
 		localWatermark: number;
-		clearReasoningAge: number;
+		budgetCutoff: number;
 		omissionAllowed: boolean;
 		canApply: boolean;
 		detectAged: boolean;
@@ -118,11 +118,8 @@ export function applyNativeReasoningReplayPi(
 	saved: ReadonlySet<string>,
 ): number {
 	if (!args.omissionAllowed) return 0;
-	let maxTag = 0;
-	for (const tag of args.messageIdToMaxTag.values())
-		maxTag = Math.max(maxTag, tag);
 	const cutoff = args.detectAged
-		? Math.max(args.localWatermark, maxTag - args.clearReasoningAge)
+		? Math.max(args.localWatermark, args.budgetCutoff)
 		: args.localWatermark;
 	const nextIds = new Set<string>();
 	const pending = new Map<number, Record<string, unknown>>();

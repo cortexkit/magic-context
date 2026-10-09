@@ -64,6 +64,7 @@ export interface ModuleWatermarks {
     workspace_fingerprint?: string | null;
     reasoning_cleared_through_tag?: number;
     note_evaluation_available?: boolean;
+    historian_model_chain_hash?: string;
 }
 
 export interface ModuleWorkspacePayload {
@@ -138,6 +139,8 @@ export interface ModuleStateSyncPayload {
     method: "state_sync";
     params: {
         session_id?: string;
+        historian_model_chain?: readonly string[];
+        pass_complete?: true;
         note_evaluation_available?: boolean;
         shadow_generation: number;
         expected_shadow_seq: number;
@@ -184,6 +187,60 @@ export interface ModuleStateSyncPass {
     sessionId: string;
     projectPath?: string;
     nowMs: number;
+    /** Host-resolved chain; absent preserves the full-request sender's wire. */
+    historianModelChain?: readonly string[];
+    /** Only new runner-record entries, reusing their admitted ingest. No estimator lives here. */
+    providerPass?: ModuleProviderPass;
+}
+
+export interface ModuleProviderPass {
+    lineage_id: string;
+    pass_id: string;
+    descends_from?: { lineage_id: string; through_ordinal: number };
+    appended: readonly { ordinal: number; mid: string; message: unknown }[];
+    physical_tail: { ordinal: number; mid: string } | null;
+    /** Exact shared engine plan only, never a conservative preflight candidate. */
+    exact_pass_plan?: "hard" | "migrate_hard" | "soft" | "defer" | "reject";
+    marker_hard_serves_frozen_prefix?: boolean;
+}
+
+/** Internal pass metadata is paged independently of reusable seed data. */
+export function providerPassPages(
+    pass: ModuleProviderPass,
+    sessionId: string,
+    complete: boolean,
+    maxBytes = MODULE_PAGE_MAX_BYTES,
+): Record<string, unknown>[] {
+    const common = { ...pass, ordered_ids: pass.appended.map((entry) => entry.mid), appended: [] };
+    const body = (appended: ModuleProviderPass["appended"], last: boolean) => ({
+        method: "state_sync",
+        session_id: sessionId,
+        provider_pass: { ...common, appended },
+        ...(last && complete ? { pass_complete: true } : {}),
+    });
+    const encodedBytes = (value: ReturnType<typeof body>): number => {
+        const { method, ...params } = value;
+        return moduleWireBodyBytes({ method, params });
+    };
+    const pages: Record<string, unknown>[] = [];
+    if (encodedBytes(body([], true)) > maxBytes)
+        throw Object.assign(new Error("provider pass metadata exceeds state-sync encoded cap"), {
+            code: "provider_message_too_large",
+        });
+    let batch: ModuleProviderPass["appended"] = [];
+    for (const entry of pass.appended) {
+        if (encodedBytes(body([entry], true)) > maxBytes)
+            throw Object.assign(new Error("provider message exceeds state-sync encoded cap"), {
+                code: "provider_message_too_large",
+            });
+        if (batch.length && encodedBytes(body([...batch, entry], true)) > maxBytes) {
+            pages.push(body(batch, false));
+            batch = [];
+        }
+        batch = [...batch, entry];
+    }
+    pages.push(body(batch, true));
+    return pages;
 }
 
 export interface ModuleStateSyncOptions {
@@ -205,6 +262,8 @@ export interface ModuleStateSyncOptions {
      * This bypasses both capability and own-store reads; force/restart seeds ignore it.
      */
     knownWatermarksUnchanged?: boolean;
+    /** A no-append provider pass still closes its ingest barrier. */
+    passComplete?: boolean;
     noteEvaluationProjectPath?: string;
 }
 
@@ -296,6 +355,7 @@ export function loadModuleWatermarks(args: {
     /** Reuse the enclosing pass's session_meta projection. */
     sessionMeta?: ReturnType<typeof getOrCreateSessionMeta>;
     noteEvaluationProjectPath?: string;
+    historianModelChain?: readonly string[];
 }): ModuleWatermarks {
     const workspace = args.workspace ?? resolveModuleWorkspaceContext(args.db, args.projectPath);
     const sessionMeta = args.sessionMeta ?? getOrCreateSessionMeta(args.db, args.sessionId);
@@ -334,6 +394,9 @@ export function loadModuleWatermarks(args: {
         workspace_fingerprint: workspace.workspace?.fingerprint ?? null,
         reasoning_cleared_through_tag: sessionMeta.clearedReasoningThroughTag ?? 0,
         note_evaluation_available: true,
+        ...(args.historianModelChain !== undefined
+            ? { historian_model_chain_hash: stableHash(JSON.stringify(args.historianModelChain)) }
+            : {}),
     };
 }
 
@@ -352,7 +415,8 @@ export function moduleWatermarksEqual(
         left.project_user_profile_version === right.project_user_profile_version &&
         (left.workspace_fingerprint ?? null) === (right.workspace_fingerprint ?? null) &&
         (left.reasoning_cleared_through_tag ?? 0) === (right.reasoning_cleared_through_tag ?? 0) &&
-        (left.note_evaluation_available ?? false) === (right.note_evaluation_available ?? false)
+        (left.note_evaluation_available ?? false) === (right.note_evaluation_available ?? false) &&
+        (left.historian_model_chain_hash ?? null) === (right.historian_model_chain_hash ?? null)
     );
 }
 
@@ -680,6 +744,8 @@ export function buildPagedModuleStateSyncPayloads(
         reasoningClearedThroughTag?: number;
         lastTodoState: string;
         watermarks: ModuleWatermarks;
+        historianModelChain?: readonly string[];
+        passComplete?: boolean;
     },
     maxPageBytes = MODULE_PAGE_MAX_BYTES,
 ): ModuleStateSyncPayload[] {
@@ -747,6 +813,10 @@ export function buildPagedModuleStateSyncPayloads(
         method: "state_sync",
         params: {
             shadow_generation: args.moduleGeneration,
+            ...(input.complete && args.historianModelChain !== undefined
+                ? { historian_model_chain: args.historianModelChain }
+                : {}),
+            ...(input.complete && args.passComplete ? { pass_complete: true as const } : {}),
             expected_shadow_seq: args.expectedShadowSeq,
             seed_id: args.seedId,
             seed_generation: args.moduleGeneration,
@@ -914,6 +984,7 @@ async function collectModuleStateSyncPayload(args: {
         workspace,
         sessionMeta,
         noteEvaluationProjectPath: args.options?.noteEvaluationProjectPath,
+        historianModelChain: args.pass.historianModelChain,
     });
     if (!args.force && moduleWatermarksEqual(args.state.lastAckedWatermarks, currentWatermarks)) {
         return null;
@@ -1141,6 +1212,8 @@ async function collectModuleStateSyncPayload(args: {
         reasoningClearedThroughTag: sessionMeta.clearedReasoningThroughTag,
         lastTodoState: effectiveLastTodoState(args.pass.sessionId, sessionMeta),
         watermarks: currentWatermarks,
+        historianModelChain: args.pass.historianModelChain,
+        passComplete: args.options?.passComplete,
     };
     if (args.force) {
         const pageStarted = performance.now();
@@ -1152,6 +1225,10 @@ async function collectModuleStateSyncPayload(args: {
         method: "state_sync",
         params: {
             shadow_generation: args.state.moduleGeneration,
+            ...(args.pass.historianModelChain !== undefined
+                ? { historian_model_chain: args.pass.historianModelChain }
+                : {}),
+            ...(args.options?.passComplete ? { pass_complete: true as const } : {}),
             expected_shadow_seq: args.state.lastAckedSeq,
             last_todo_state: effectiveLastTodoState(args.pass.sessionId, sessionMeta),
             acked_watermarks: currentWatermarks,
@@ -1278,6 +1355,38 @@ export async function syncModuleState(args: {
     args = { ...args, options: { ...args.options, timing } };
     try {
         let force = args.force;
+        const closePass = async (): Promise<boolean> => {
+            if (args.pass.providerPass) {
+                for (const body of providerPassPages(
+                    args.pass.providerPass,
+                    args.pass.sessionId,
+                    args.options?.passComplete === true,
+                )) {
+                    const result = await args.client.call({
+                        sessionId: args.pass.sessionId,
+                        projectRoot: args.projectRoot,
+                        method: "state_sync",
+                        generationSensitive: true,
+                        body,
+                    });
+                    if (isModuleTransportGenerationChangedResult(result)) return true;
+                }
+            } else if (args.options?.passComplete) {
+                const result = await args.client.call({
+                    sessionId: args.pass.sessionId,
+                    projectRoot: args.projectRoot,
+                    method: "state_sync",
+                    generationSensitive: true,
+                    body: {
+                        method: "state_sync",
+                        session_id: args.pass.sessionId,
+                        pass_complete: true,
+                    },
+                });
+                return isModuleTransportGenerationChangedResult(result);
+            }
+            return false;
+        };
         const probe = async (body: Record<string, unknown>): Promise<unknown> => {
             const started = performance.now();
             try {
@@ -1297,13 +1406,20 @@ export async function syncModuleState(args: {
                 timing.status += performance.now() - started;
             }
         };
+        let restartedOnBarrier = false;
         if (
             !force &&
             args.options?.knownWatermarksUnchanged === true &&
             args.state.lastAckedWatermarks !== null &&
-            args.state.lastAckedWatermarks.note_evaluation_available === true
+            args.state.lastAckedWatermarks.note_evaluation_available === true &&
+            (args.pass.historianModelChain === undefined ||
+                args.state.lastAckedWatermarks.historian_model_chain_hash ===
+                    stableHash(JSON.stringify(args.pass.historianModelChain)))
         ) {
-            return { status: "no_change" };
+            if (!(await closePass())) return { status: "no_change" };
+            restartedOnBarrier = true;
+            force = true;
+            args.state.lastAckedWatermarks = null;
         }
         const adoption = args.options?.authoritySeqAdoption ?? { used: false };
         let resumable = false;
@@ -1329,14 +1445,14 @@ export async function syncModuleState(args: {
             }
             return capability === true;
         };
-        let stateSyncDeltas = await resolveStateSyncDeltas();
+        let stateSyncDeltas = await resolveStateSyncDeltas(restartedOnBarrier);
         // Each connection-generation change rebuilds the whole payload and re-probes the
         // module. A module that drops the connection on every attempt (a crash-and-restart
         // loop, or a payload it cannot survive) would otherwise keep this pass rebuilding
         // forever. Two reconnects cover an ordinary module restart; a third fails the
         // pass, and the caller's failure ladder (last-known-good replay, then refusal)
         // decides what is served.
-        let generationChanges = 0;
+        let generationChanges = restartedOnBarrier ? 1 : 0;
         const afterGenerationChange = async (): Promise<void> => {
             generationChanges += 1;
             if (generationChanges > MAX_STATE_SYNC_GENERATION_CHANGES) {
@@ -1393,6 +1509,7 @@ export async function syncModuleState(args: {
                 options: {
                     ...args.options,
                     stateSyncDeltas,
+                    passComplete: args.pass.providerPass ? false : args.options?.passComplete,
                     noteEvaluationProjectPath: args.projectRoot,
                 },
             });
@@ -1403,7 +1520,13 @@ export async function syncModuleState(args: {
                     (timing.collect - collectBefore) -
                     (timing.pageBuild - pagesBefore),
             );
-            if (payload === null) return { status: "no_change" };
+            if (payload === null) {
+                if (!(await closePass())) return { status: "no_change" };
+                await afterGenerationChange();
+                force = true;
+                args.state.lastAckedWatermarks = null;
+                continue;
+            }
             if (
                 payload === "m0_mutation" ||
                 payload === "mismatch" ||
@@ -1428,6 +1551,7 @@ export async function syncModuleState(args: {
                         "seed_complete",
                         "seed_boundary_id",
                         "compartments",
+                        "pass_complete",
                     ]);
                     for (const batch of batches) {
                         for (const [key, value] of Object.entries(batch.params)) {
@@ -1468,6 +1592,12 @@ export async function syncModuleState(args: {
                         ) {
                             args.state.lastAckedWatermarks = payload.watermarks;
                             args.state.lastAckedSeq = receipt.shadow_seq as number;
+                            if (await closePass()) {
+                                await afterGenerationChange();
+                                force = true;
+                                args.state.lastAckedWatermarks = null;
+                                continue;
+                            }
                             return { status: "acked", watermarks: payload.watermarks };
                         }
                         if (receipt.applying === true) return { status: "retry_busy" };
@@ -1529,6 +1659,12 @@ export async function syncModuleState(args: {
                         await afterGenerationChange();
                         continue syncLoop;
                     }
+                }
+                if (args.pass.providerPass && (await closePass())) {
+                    await afterGenerationChange();
+                    force = true;
+                    args.state.lastAckedWatermarks = null;
+                    continue;
                 }
             } catch (error) {
                 if (isHistorianCompartmentSyncBusy(error)) {

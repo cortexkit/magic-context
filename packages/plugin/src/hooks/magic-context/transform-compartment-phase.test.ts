@@ -2,18 +2,29 @@ import { drainNotifications } from "../../shared/rpc-notifications";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 /// <reference types="bun-types" />
 
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
-import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
+import {
+    closeDatabase,
+    getOrCreateSessionMeta,
+    insertTag,
+    openDatabase,
+    updateSessionMeta,
+} from "../../features/magic-context/storage";
+import { DRAIN_WINDOW_MS } from "../../features/magic-context/storage-meta-persisted";
 import type { PluginContext } from "../../plugin/types";
+import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import * as runner from "./compartment-runner";
 import { getActiveCompartmentRun, registerActiveCompartmentRun } from "./compartment-runner";
+import { checkCompartmentTrigger } from "./compartment-trigger";
 import { createDefaultBoundarySnapshotForTests } from "./protected-tail-boundary";
+import * as rawHistory from "./read-session-chunk";
 import { __ignoredNotificationTest } from "./send-session-notification";
 import {
     HISTORIAN_INLINE_JOIN_BUDGET_MS,
@@ -92,6 +103,152 @@ afterEach(() => {
 });
 
 describe("runCompartmentPhase boundary handoff", () => {
+    it("spent drain budget suppresses a firing trigger and all compartment startup work until reset", async () => {
+        const sessionId = "ses-spent-drain-hot-path";
+        const raw = [
+            { id: "m1", role: "user", text: "a ".repeat(3500) },
+            { id: "m2", role: "assistant", text: "done" },
+            { id: "m3", role: "user", text: "b ".repeat(3500) },
+            { id: "m4", role: "assistant", text: "done" },
+            { id: "m5", role: "user", text: "c ".repeat(3500) },
+            { id: "m6", role: "assistant", text: "done" },
+            ...Array.from({ length: 5 }, (_, i) => ({
+                id: `m${i + 7}`,
+                role: "user",
+                text: "protected",
+            })),
+        ];
+        createOpenCodeDb(sessionId, raw);
+        const db = openDatabase();
+        for (const [i, id] of ["m1", "m3", "m5"].entries())
+            insertTag(db, sessionId, id, "message", 3500, i + 1);
+        const usage = { percentage: 25, inputTokens: 50_000 };
+        const trigger = () =>
+            checkCompartmentTrigger(
+                db,
+                sessionId,
+                getOrCreateSessionMeta(db, sessionId),
+                usage,
+                25,
+                65,
+                1000,
+                undefined,
+                undefined,
+                undefined,
+                200_000,
+            );
+        expect(trigger().shouldFire).toBe(true);
+        const startedAt = Date.now();
+        db.prepare(
+            "UPDATE session_meta SET protected_tail_drain_window_started_at = ?, protected_tail_drain_tokens = 500000 WHERE session_id = ?",
+        ).run(startedAt, sessionId);
+        const start = spyOn(runner, "startCompartmentAgent").mockImplementation(() => {});
+        const prime = spyOn(rawHistory, "primeTailRawMessageCache");
+        const log = spyOn(logger, "sessionLog");
+        const messages = raw.map((m) => ({
+            info: { id: m.id, role: m.role },
+            parts: [{ type: "text", text: m.text }],
+        }));
+        const bytes = JSON.stringify(messages);
+        const phase = (intent: boolean) =>
+            runCompartmentPhase({
+                canRunCompartments: true,
+                fullFeatureMode: true,
+                sessionMeta: { compartmentInProgress: intent },
+                contextUsage: usage,
+                boundaryContextLimit: 200_000,
+                boundaryExecuteThresholdPercentage: 65,
+                boundaryUsage: usage,
+                boundaryUsageSource: "live",
+                db,
+                sessionId,
+                resolvedSessionId: sessionId,
+                historianChunkTokens: 20_000,
+                compartmentDirectory: "/tmp",
+                messages,
+                pendingCompartmentInjection: null,
+                deferredHistoryRefreshSessions: new Set(),
+                client: {} as PluginContext["client"],
+            });
+        try {
+            for (let i = 0; i < 3; i++) {
+                const decision = trigger();
+                expect(decision.shouldFire).toBe(false);
+                await phase(decision.shouldFire);
+                expect(JSON.stringify(messages)).toBe(bytes);
+            }
+            // Recovery and mode transitions can leave an intent without going through the trigger.
+            updateSessionMeta(db, sessionId, { compartmentInProgress: true });
+            expect((await phase(true)).compartmentInProgress).toBe(false);
+            expect(getOrCreateSessionMeta(db, sessionId).compartmentInProgress).toBe(false);
+            expect(start).not.toHaveBeenCalled();
+            expect(prime).not.toHaveBeenCalled();
+            expect(
+                log.mock.calls.filter(
+                    ([id, text]) => id === sessionId && String(text).includes("next eligible at"),
+                ),
+            ).toHaveLength(1);
+            expect(
+                log.mock.calls.some(([, text]) =>
+                    String(text).includes(new Date(startedAt + DRAIN_WINDOW_MS).toISOString()),
+                ),
+            ).toBe(true);
+            db.prepare(
+                "UPDATE session_meta SET protected_tail_drain_window_started_at = ? WHERE session_id = ?",
+            ).run(Date.now() - DRAIN_WINDOW_MS, sessionId);
+            const resumed = trigger();
+            expect(resumed.shouldFire).toBe(true);
+            await phase(resumed.shouldFire);
+            expect(start).toHaveBeenCalledTimes(1);
+        } finally {
+            start.mockRestore();
+            prime.mockRestore();
+            log.mockRestore();
+        }
+    });
+
+    it("ordinary compartment phase returns before raw-history startup even without a trigger snapshot", async () => {
+        const sessionId = "ses-deferred-compartment-startup";
+        createOpenCodeDb(
+            sessionId,
+            Array.from({ length: 12 }, (_, i) => ({
+                id: `m${i}`,
+                role: i % 2 ? "assistant" : "user",
+                text: "history",
+            })),
+        );
+        const db = openDatabase();
+        const prime = spyOn(rawHistory, "primeTailRawMessageCache");
+        try {
+            const result = await runCompartmentPhase({
+                canRunCompartments: true,
+                fullFeatureMode: true,
+                sessionMeta: { compartmentInProgress: true },
+                contextUsage: { percentage: 25 },
+                boundaryContextLimit: 200_000,
+                boundaryExecuteThresholdPercentage: 65,
+                boundaryUsage: { percentage: 25, inputTokens: 50_000 },
+                boundaryUsageSource: "live",
+                db,
+                sessionId,
+                resolvedSessionId: sessionId,
+                historianChunkTokens: 20_000,
+                compartmentDirectory: "/tmp",
+                messages: [],
+                pendingCompartmentInjection: null,
+                deferredHistoryRefreshSessions: new Set(),
+                client: {} as PluginContext["client"],
+            });
+            expect(result.awaitedCompartmentRun).toBe(false);
+            expect(getActiveCompartmentRun(sessionId)).toBeDefined();
+            expect(prime).not.toHaveBeenCalled();
+            await getActiveCompartmentRun(sessionId)?.promise;
+            expect(prime).toHaveBeenCalledTimes(1);
+        } finally {
+            prime.mockRestore();
+        }
+    });
+
     it("reuses the trigger boundary anchor without rereading the compartment row", async () => {
         const sessionId = "ses-boundary-handoff";
         createOpenCodeDb(

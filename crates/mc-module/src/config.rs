@@ -111,6 +111,8 @@ pub struct McModuleConfig {
     /// User and project protected-token overrides remain separate until usable geometry is known.
     pub protected_tokens_user: Option<u64>,
     pub protected_tokens_project: Option<u64>,
+    /// Fixed-default reasoning retention, scalar or cache_ttl-style model map.
+    pub keep_reasoning_tokens: Option<Value>,
     /// Whether compaction is enabled, as resolved during host startup. This determines which
     /// component controls context-window compaction for the request.
     pub compaction_enabled: bool,
@@ -182,6 +184,7 @@ impl Default for McModuleConfig {
             execute_threshold_project_config: None,
             protected_tokens_user: None,
             protected_tokens_project: None,
+            keep_reasoning_tokens: None,
             compaction_enabled: true,
             memory_enabled: true,
             auto_search: AutoSearchConfig::default(),
@@ -262,6 +265,23 @@ fn resolve_threshold_config(
 }
 
 impl McModuleConfig {
+    pub fn resolve_keep_reasoning_tokens(&self, model_key: Option<&str>) -> u64 {
+        let Some(value) = &self.keep_reasoning_tokens else {
+            return 10_000;
+        };
+        if let Some(tokens) = value.as_u64() {
+            return tokens;
+        }
+        let Some(values) = value.as_object() else {
+            return 10_000;
+        };
+        model_key
+            .into_iter()
+            .flat_map(crate::tool_catalog::model_key_candidates)
+            .find_map(|candidate| values.get(&candidate).and_then(Value::as_u64))
+            .or_else(|| values.get("default").and_then(Value::as_u64))
+            .unwrap_or(10_000)
+    }
     pub fn resolve_protected_tokens(&self, usable_soft: u64) -> ResolvedProtectedTokens {
         let derived = crate::protection_window::derive_default_floor(usable_soft);
         let (mut floor, mut provenance) = self
@@ -684,6 +704,32 @@ fn merge_tiers_with_warnings(
 ) -> (McModuleConfig, Vec<String>) {
     let mut cfg = McModuleConfig::default();
     let mut warnings = Vec::new();
+    for (tier, value) in [("user", user), ("project", project)] {
+        let Some(value) = value else {
+            continue;
+        };
+        if value.get("clear_reasoning_age").is_some() {
+            warnings.push(format!("clear_reasoning_age in {tier} tier is deprecated and ignored; use keep_reasoning_tokens (default 10,000)"));
+        }
+        if let Some(tokens) = value.get("keep_reasoning_tokens") {
+            let valid = |value: &Value| value.as_u64().is_some_and(|n| n <= 1_000_000);
+            if valid(tokens)
+                || tokens
+                    .as_object()
+                    .is_some_and(|map| map.values().all(valid))
+            {
+                if let (Some(Value::Object(existing)), Value::Object(overrides)) =
+                    (&mut cfg.keep_reasoning_tokens, tokens)
+                {
+                    existing.extend(overrides.clone());
+                } else {
+                    cfg.keep_reasoning_tokens = Some(tokens.clone());
+                }
+            } else {
+                warnings.push(format!("invalid keep_reasoning_tokens in {tier} tier; expected integer 0..1,000,000 or per-model object"));
+            }
+        }
+    }
 
     if let Some(user) = user {
         if let Some(temperature) = number_at(user, "/historian/temperature") {
@@ -1117,6 +1163,58 @@ pub fn strip_jsonc(input: &str) -> String {
 
 #[cfg(test)]
 mod protected_tokens_tests {
+    #[test]
+    fn review_reasoning_budget_aliases_follow_the_shared_canonical_first_lookup() {
+        let (cfg, _) = super::merge_tiers_with_warnings(
+            Some(&serde_json::json!({"keep_reasoning_tokens": {
+                "openai/*": 250,
+                "openai-codex/*": 500,
+                "google/*": 750
+            }})),
+            None,
+        );
+        // The shared TS/Pi resolver checks canonical spellings first. Both a
+        // collision and a canonical-only wildcard must behave the same in Rust.
+        assert_eq!(
+            cfg.resolve_keep_reasoning_tokens(Some("openai-codex/gpt-6.1-sol")),
+            250
+        );
+        assert_eq!(
+            cfg.resolve_keep_reasoning_tokens(Some("google-antigravity/gemini-3.8-flash")),
+            750
+        );
+    }
+
+    #[test]
+    fn reasoning_budget_resolution_fixed_default_and_deprecated_age() {
+        use super::*;
+        let (cfg, warnings) = merge_tiers_with_warnings(
+            Some(
+                &serde_json::json!({"clear_reasoning_age": 1, "keep_reasoning_tokens": {"default": 4000, "openai/*": 3000, "openai/gpt-5": 2000, "openai/gpt-5-mini": 1000}}),
+            ),
+            None,
+        );
+        assert_eq!(
+            cfg.resolve_keep_reasoning_tokens(Some("openai/gpt-5-mini")),
+            1000
+        );
+        assert_eq!(
+            cfg.resolve_keep_reasoning_tokens(Some("openai/gpt-5-pro")),
+            2000
+        );
+        assert_eq!(cfg.resolve_keep_reasoning_tokens(Some("openai/o3")), 3000);
+        assert_eq!(cfg.resolve_keep_reasoning_tokens(Some("other/model")), 4000);
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("clear_reasoning_age") && warning.contains("ignored")));
+        assert_eq!(
+            McModuleConfig::default().resolve_keep_reasoning_tokens(None),
+            10_000
+        );
+        let (zero, _) =
+            merge_tiers_with_warnings(None, Some(&serde_json::json!({"keep_reasoning_tokens": 0})));
+        assert_eq!(zero.resolve_keep_reasoning_tokens(None), 0);
+    }
     use super::*;
     use serde_json::json;
 

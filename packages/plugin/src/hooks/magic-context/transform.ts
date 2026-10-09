@@ -113,6 +113,7 @@ import {
     estimateFinalWireInputTokens,
     estimateMessageTokens,
 } from "./final-wire-token-estimate";
+import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
 import type { LiveModelBySession } from "./hook-handlers";
 import { createOpenCodeProviderTransform } from "./host-runner/opencode-adapter";
 import {
@@ -124,6 +125,14 @@ import {
     prepareCompartmentInjection,
     selectHiddenMessagesAtCompactionSeam,
 } from "./inject-compartments";
+import {
+    hasActiveAnthropicThinkingTurn,
+    latestAssistantTurnMessages,
+} from "./latest-assistant-turn";
+import {
+    captureLatestTurnOriginals,
+    prepareLatestThinkingRecovery,
+} from "./latest-thinking-recovery";
 import { saveLkgSlotToDb } from "./lkg-persist";
 import { captureLkgSlot, createLkgEntryProjector, resolveLkgModelKeys } from "./lkg-replay";
 import { recordServedCapture } from "./lkg-served-marker";
@@ -146,6 +155,10 @@ import {
 import { readRawSessionMessages } from "./read-session-chunk";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { extractInMemoryMessageViews } from "./read-session-raw";
+import {
+    projectOpencodeReasoningBudgetCutoff,
+    resolveKeepReasoningTokens,
+} from "./reasoning-budget";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendStatusNotification } from "./send-session-notification";
 import { isAnthropicFamilyRoute, modelAcceptsEmptyContent } from "./sentinel";
@@ -451,7 +464,9 @@ export interface TransformDeps {
      *  sent to the model are byte-identical to the age-based-only behavior. */
     smartDrops?: boolean;
     protectedTools?: Readonly<Record<string, number>>;
-    clearReasoningAge: number;
+    keepReasoningTokens?: number | Record<string, number>;
+    /** Deprecated caller input. Ignored; retained for old integrations. */
+    clearReasoningAge?: number;
     /** Commit-cluster historian trigger config (`commit_cluster_trigger`). */
     commitClusterTrigger?: { enabled: boolean; min_clusters: number };
     /**
@@ -1174,18 +1189,39 @@ export function createTransform(deps: TransformDeps) {
         // as they always have: a session with nothing frozen yet, and one the
         // host has never resolved (no stored project binding), whose frozen
         // pair was itself rendered with the launch directory.
-        const freezeM0M1 =
-            sessionDirectoryFellBack &&
-            sessionMeta.cachedM0Bytes != null &&
-            sessionMeta.cachedM1Bytes != null &&
-            (() => {
-                try {
-                    return hasRecordedSessionProjectIdentity(db, sessionId);
-                } catch {
-                    // Unknown: keep the frozen pair rather than risk a rebuild.
-                    return true;
-                }
-            })();
+        const activeThinkingModel =
+            findLastAssistantModel(messages) ?? deps.liveModelBySession?.get(sessionId);
+        const thinkingRecovery = prepareLatestThinkingRecovery({
+            db,
+            sessionId,
+            messages,
+            id: (message) => (message as MessageLike)?.info.id,
+            parts: (message) => (message as MessageLike)?.parts ?? [],
+        });
+        if (thinkingRecovery.ended) deps.pendingMaterializationSessions?.add(sessionId);
+        let restoreLatestTurnOriginals: (() => void) | undefined;
+        let activeThinkingTurn = hasActiveAnthropicThinkingTurn(
+            messages,
+            activeThinkingModel?.providerID,
+            activeThinkingModel?.modelID,
+        );
+        let freezeM0M1 =
+            (activeThinkingTurn &&
+                isPrefixBoundThinkingModel(
+                    activeThinkingModel?.providerID,
+                    activeThinkingModel?.modelID,
+                )) ||
+            (sessionDirectoryFellBack &&
+                sessionMeta.cachedM0Bytes != null &&
+                sessionMeta.cachedM1Bytes != null &&
+                (() => {
+                    try {
+                        return hasRecordedSessionProjectIdentity(db, sessionId);
+                    } catch {
+                        // Unknown: keep the frozen pair rather than risk a rebuild.
+                        return true;
+                    }
+                })());
         if (freezeM0M1) {
             sessionLog(
                 sessionId,
@@ -1530,7 +1566,20 @@ export function createTransform(deps: TransformDeps) {
         // the live map. Reusing this value keeps cold/hot output identical and keeps
         // postprocess from making a divergent provider decision later in the pass.
         const resolvedProviderID = modelForBudget?.providerID;
+        activeThinkingTurn ||= hasActiveAnthropicThinkingTurn(
+            messages,
+            resolvedProviderID,
+            modelForBudget?.modelID,
+        );
+        freezeM0M1 ||=
+            activeThinkingTurn &&
+            isPrefixBoundThinkingModel(resolvedProviderID, modelForBudget?.modelID);
         const canUseEmptySentinels = modelAcceptsEmptyContent(resolvedProviderID);
+        const protectedThinkingMessages =
+            activeThinkingTurn ||
+            isAnthropicFamilyRoute(resolvedProviderID, modelForBudget?.modelID)
+                ? latestAssistantTurnMessages(messages)
+                : new Set<MessageLike>();
         const resolvedContextLimit = modelForBudget
             ? resolveTrustedContextLimit(modelForBudget.providerID, modelForBudget.modelID, {
                   db,
@@ -1807,78 +1856,96 @@ export function createTransform(deps: TransformDeps) {
             }
             return false;
         };
-        const startRecoveryRun = (): boolean => {
-            const scale = emergencyUsagePercentageEarly >= 95 ? 0.25 : 0.5;
-            let boundarySnapshot = getRunnableBoundaryForCompartment();
-            if (!boundarySnapshot || !hasRunnableCompartmentWindow(boundarySnapshot)) {
-                boundarySnapshot = getRunnableBoundaryForCompartment(scale);
-            }
+        const startRecoveryRun = (onReady?: () => void): boolean => {
             if (
-                process.env.NODE_ENV === "test" &&
-                !emergencyRecoveryArmed &&
-                (!boundarySnapshot || !hasRunnableCompartmentWindow(boundarySnapshot))
-            ) {
-                const legacyTestSnapshot = createDefaultBoundarySnapshotForTests(sessionId);
-                if (hasRunnableCompartmentWindow(legacyTestSnapshot)) {
-                    boundarySnapshot = legacyTestSnapshot;
-                }
-            }
+                isHistorianDrainBudgetSpent({
+                    db,
+                    sessionId,
+                    contextLimit: boundaryContextLimit,
+                    executeThresholdPercentage: boundaryExecuteThreshold,
+                    usagePercentage: boundaryUsageForProtectedTail.percentage,
+                })
+            )
+                return false;
             if (
                 !canRunCompartments ||
                 (!deps.client && !deps.hiddenCompletionExecutor) ||
-                !boundarySnapshot ||
-                !hasRunnableCompartmentWindow(boundarySnapshot)
-            ) {
+                getActiveCompartmentRun(sessionId)
+            )
                 return false;
-            }
-            if (getActiveCompartmentRun(sessionId)) {
-                return false;
-            }
+            const prepareRecoveryBoundary = (): ProtectedTailBoundarySnapshot | null => {
+                const scale = emergencyUsagePercentageEarly >= 95 ? 0.25 : 0.5;
+                let boundarySnapshot = getRunnableBoundaryForCompartment();
+                if (!boundarySnapshot || !hasRunnableCompartmentWindow(boundarySnapshot)) {
+                    boundarySnapshot = getRunnableBoundaryForCompartment(scale);
+                }
+                if (
+                    process.env.NODE_ENV === "test" &&
+                    !emergencyRecoveryArmed &&
+                    (!boundarySnapshot || !hasRunnableCompartmentWindow(boundarySnapshot))
+                ) {
+                    const legacyTestSnapshot = createDefaultBoundarySnapshotForTests(sessionId);
+                    if (hasRunnableCompartmentWindow(legacyTestSnapshot)) {
+                        boundarySnapshot = legacyTestSnapshot;
+                    }
+                }
+                if (!boundarySnapshot || !hasRunnableCompartmentWindow(boundarySnapshot))
+                    return null;
+                onReady?.();
+                return boundarySnapshot;
+            };
+            const urgent = emergencyUsagePercentageEarly >= 95;
+            const boundarySnapshot = urgent ? prepareRecoveryBoundary() : undefined;
+            if (urgent && !boundarySnapshot) return false;
 
             updateSessionMeta(db, sessionId, { compartmentInProgress: true });
-            startCompartmentAgent({
-                client: deps.client,
-                hiddenCompletionExecutor: deps.hiddenCompletionExecutor,
-                compactionMarkerStrategy: deps.compactionMarkerStrategy,
-                db,
-                sessionId,
-                historianChunkTokens:
-                    historianRun?.chunkTokens ?? deps.getHistorianChunkTokens?.() ?? 20_000,
-                boundarySnapshot,
-                currentContextLimit: boundaryContextLimit,
-                historyBudgetTokens,
-                historianTimeoutMs: historianRun?.timeoutMs ?? deps.historianTimeoutMs,
-                model: historianRun?.model ?? deps.historianModel,
-                fallbackModels: historianRun?.fallbackModels ?? deps.fallbackModels,
-                directory: compartmentDirectory,
-                fallbackModelId,
-                getNotificationParams: () => notificationParams,
-                experimentalUserMemories:
-                    historianRun?.userMemoriesEnabled ?? deps.experimentalUserMemories,
-                experimentalTemporalAwareness: deps.experimentalTemporalAwareness,
-                historianTwoPass: historianRun?.twoPass ?? deps.historianTwoPass,
-                historianExpandTools: historianRun?.expandTools ?? deps.historianExpandTools,
-                // Issue #44: gate historian-driven memory promotion so users
-                // who disable the feature actually see no memories created.
-                memoryEnabled: deps.memoryConfig?.enabled,
-                autoPromote: historianRun?.autoPromote ?? deps.memoryConfig?.autoPromote,
-                ensureProjectRegistered: deps.ensureProjectRegistered,
-                // Historian publication invalidates the injection cache AND
-                // changes compartments/facts that render into message[0]. We
-                // signal:
-                //   - deferredHistoryRefreshSessions: rebuilds only when a
-                //     materializing pass can consume history + drops together.
-                //   - deferredMaterializationSessions: queues drops that
-                //     historian published until heuristics actually run.
-                // We deliberately do NOT signal systemPromptRefreshSessions —
-                // historian doesn't change disk-backed adjuncts (docs/profile/
-                // key-files), so re-reading them would burn IO for nothing.
-                preserveInjectionCacheUntilConsumed: true,
-                onCompartmentStatePublished: (sid) => {
-                    deferredHistoryRefreshSessions.add(sid);
-                    deferredMaterializationSessions.add(sid);
+            startCompartmentAgent(
+                {
+                    client: deps.client,
+                    hiddenCompletionExecutor: deps.hiddenCompletionExecutor,
+                    compactionMarkerStrategy: deps.compactionMarkerStrategy,
+                    db,
+                    sessionId,
+                    historianChunkTokens:
+                        historianRun?.chunkTokens ?? deps.getHistorianChunkTokens?.() ?? 20_000,
+                    boundarySnapshot: boundarySnapshot ?? undefined,
+                    currentContextLimit: boundaryContextLimit,
+                    historyBudgetTokens,
+                    historianTimeoutMs: historianRun?.timeoutMs ?? deps.historianTimeoutMs,
+                    model: historianRun?.model ?? deps.historianModel,
+                    fallbackModels: historianRun?.fallbackModels ?? deps.fallbackModels,
+                    directory: compartmentDirectory,
+                    fallbackModelId,
+                    getNotificationParams: () => notificationParams,
+                    experimentalUserMemories:
+                        historianRun?.userMemoriesEnabled ?? deps.experimentalUserMemories,
+                    experimentalTemporalAwareness: deps.experimentalTemporalAwareness,
+                    historianTwoPass: historianRun?.twoPass ?? deps.historianTwoPass,
+                    historianExpandTools: historianRun?.expandTools ?? deps.historianExpandTools,
+                    // Issue #44: gate historian-driven memory promotion so users
+                    // who disable the feature actually see no memories created.
+                    memoryEnabled: deps.memoryConfig?.enabled,
+                    autoPromote: historianRun?.autoPromote ?? deps.memoryConfig?.autoPromote,
+                    ensureProjectRegistered: deps.ensureProjectRegistered,
+                    // Historian publication invalidates the injection cache AND
+                    // changes compartments/facts that render into message[0]. We
+                    // signal:
+                    //   - deferredHistoryRefreshSessions: rebuilds only when a
+                    //     materializing pass can consume history + drops together.
+                    //   - deferredMaterializationSessions: queues drops that
+                    //     historian published until heuristics actually run.
+                    // We deliberately do NOT signal systemPromptRefreshSessions —
+                    // historian doesn't change disk-backed adjuncts (docs/profile/
+                    // key-files), so re-reading them would burn IO for nothing.
+                    preserveInjectionCacheUntilConsumed: true,
+                    onCompartmentStatePublished: (sid) => {
+                        deferredHistoryRefreshSessions.add(sid);
+                        deferredMaterializationSessions.add(sid);
+                    },
                 },
-            });
+                undefined,
+                urgent ? undefined : prepareRecoveryBoundary,
+            );
             return true;
         };
 
@@ -1917,24 +1984,24 @@ export function createTransform(deps: TransformDeps) {
             fullFeatureMode &&
             !compactionOff &&
             isFirstTransformPassForSession &&
-            historianFailureState.failureCount > 0 &&
-            getEligibleHistoryForCompartment() &&
-            startRecoveryRun()
+            historianFailureState.failureCount > 0
         ) {
-            sessionLog(
-                sessionId,
-                `transform: historian recovery triggered on session load after ${historianFailureState.failureCount} failure(s)`,
-            );
-            if (deps.client) {
-                void withoutSqliteTransformPass(() =>
-                    sendStatusNotification(
-                        deps.client,
-                        sessionId,
-                        `## Historian recovery\n\nHistorian previously failed ${historianFailureState.failureCount} time(s), so Magic Context is retrying history comparting immediately after restart.`,
-                        notificationParams,
-                    ),
+            startRecoveryRun(() => {
+                sessionLog(
+                    sessionId,
+                    `transform: historian recovery triggered on session load after ${historianFailureState.failureCount} failure(s)`,
                 );
-            }
+                if (deps.client) {
+                    void withoutSqliteTransformPass(() =>
+                        sendStatusNotification(
+                            deps.client,
+                            sessionId,
+                            `## Historian recovery\n\nHistorian previously failed ${historianFailureState.failureCount} time(s), so Magic Context is retrying history comparting immediately after restart.`,
+                            notificationParams,
+                        ),
+                    );
+                }
+            });
         }
 
         logTransformTiming(sessionId, "emergencyRecoveryBlock", tFirstPass);
@@ -2061,13 +2128,29 @@ export function createTransform(deps: TransformDeps) {
                     sessionMeta.lastContextPercentage,
                     boundaryExecuteThreshold,
                     deriveTriggerBudget(boundaryContextLimit, boundaryExecuteThreshold),
-                    deps.clearReasoningAge,
+                    resolveKeepReasoningTokens(
+                        deps.keepReasoningTokens,
+                        currentModelKeyForBoundary,
+                    ),
                     historianRun?.commitClusterTrigger ?? deps.commitClusterTrigger,
                     undefined,
                     boundaryContextLimit,
                     inMemoryTail,
                     taggerFloor,
-                    { providerID: resolvedProviderID },
+                    {
+                        providerID: resolvedProviderID,
+                        budgetCutoff: projectOpencodeReasoningBudgetCutoff(
+                            db,
+                            sessionId,
+                            messages,
+                            resolveKeepReasoningTokens(
+                                deps.keepReasoningTokens,
+                                currentModelKeyForBoundary,
+                            ),
+                            sessionMeta.clearedReasoningThroughTag,
+                            sessionDecisionCalibration(db, sessionId).proseRatio,
+                        ),
+                    },
                     {
                         hardFold: false,
                         force:
@@ -2237,6 +2320,8 @@ export function createTransform(deps: TransformDeps) {
                     servedMessages: messages,
                 });
                 targets = result.targets;
+                if (thinkingRecovery.restore)
+                    restoreLatestTurnOriginals = captureLatestTurnOriginals(messages);
                 reasoningByMessage = result.reasoningByMessage;
                 messageTagNumbers = result.messageTagNumbers;
                 batch = result.batch;
@@ -2712,7 +2797,10 @@ export function createTransform(deps: TransformDeps) {
             deferredHistoryRefreshSessions,
             deferredMaterializationSessions,
             lastHeuristicsTurnId: deps.lastHeuristicsTurnId,
-            clearReasoningAge: deps.clearReasoningAge,
+            keepReasoningTokens: resolveKeepReasoningTokens(
+                deps.keepReasoningTokens,
+                currentModelKeyForBoundary,
+            ),
             protectedTagIds,
             protectedTagNumbers,
             protectedCutoff,
@@ -2742,6 +2830,19 @@ export function createTransform(deps: TransformDeps) {
             // empty-sentinel gate and whole-message placeholder choice agrees for
             // this transform pass, including cold DB-recovered passes.
             resolvedProviderID,
+            activeThinkingTurn,
+            protectedThinkingMessages: thinkingRecovery.restore
+                ? protectedThinkingMessages
+                : undefined,
+            restoreThinkingMessageIds: thinkingRecovery.restore
+                ? new Set(
+                      [...protectedThinkingMessages].flatMap((message) =>
+                          typeof message.info.id === "string" ? [message.info.id] : [],
+                      ),
+                  )
+                : undefined,
+            restoreLatestTurnOriginals,
+            resolvedModelID: modelForBudget?.modelID,
             thinkingBindingRecoveryEnabledForModel: isPrefixBoundThinkingModel(
                 modelForBudget?.providerID,
                 modelForBudget?.modelID,

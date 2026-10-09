@@ -77,7 +77,7 @@ function createTestTransform(sessionId: string) {
         historyRefreshSessions: new Set<string>(),
         pendingMaterializationSessions,
         lastHeuristicsTurnId: new Map<string, string>(),
-        clearReasoningAge: 2,
+        keepReasoningTokens: 0,
         protectedTokens: 0,
     });
     return { transform, shouldExecute, pendingMaterializationSessions };
@@ -408,6 +408,11 @@ describe("createTransform index staleness regressions", () => {
             },
         ];
 
+        // This regression concerns historical reasoning after a closed turn.
+        secondPass.push({
+            info: { id: "follow-up", role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text: "next request" }],
+        });
         await transform({}, { messages: secondPass });
 
         // The tool drop removed m-assistant-call and m-tool-drop via pruneEmptyMessages, so array shifts:

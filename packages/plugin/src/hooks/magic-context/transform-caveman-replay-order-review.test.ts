@@ -117,7 +117,7 @@ function makeTransform(
         historyRefreshSessions: new Set(),
         pendingMaterializationSessions: new Set([sessionId]),
         lastHeuristicsTurnId: new Map(),
-        clearReasoningAge,
+        keepReasoningTokens: clearReasoningAge === 1 ? 0 : 100_000,
         protectedTokens: 1,
         cavemanTextCompression: { enabled: true, minChars: 20 },
         directory: makeTempDir("context-caveman-order-review-dir-"),

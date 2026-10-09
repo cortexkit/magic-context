@@ -18,6 +18,7 @@ import type {
     HiddenCompletionExecutor,
 } from "./compartment-runner-types";
 import { BLOCK_UNTIL_DONE_PERCENTAGE } from "./compartment-trigger";
+import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
 import {
     type PreparedCompartmentInjection,
     prepareCompartmentInjection,
@@ -136,58 +137,46 @@ interface RunCompartmentPhaseArgs {
 }
 
 /**
- * Prime the raw-message cache for the WHOLE compartment phase, then run it.
- *
- * The phase's boundary resolution (`getRawHistoryEligibility` +
- * `resolveOpenCodeProtectedTailBoundary`) AND the historian runner's
- * `readSessionChunk` all read raw OpenCode history. On a large session an
- * un-primed read is O(session) (multi-second each) and runs on the transform
- * thread — OpenCode awaits `messages.transform` before the LLM call, so a
- * historian-FIRE pass froze ~9.6s at "Thinking". The compartment TRIGGER primes
- * its own scope (`withRawSessionMessageCache` inside `getUnsummarizedTailInfo`),
- * but that scope ends when the trigger returns, so the phase read un-primed.
- *
- * Prime from the TAIL-ONLY DB read (`primeTailRawMessageCache`), NOT the
- * in-memory `args.messages` tail: `extractInMemoryMessageViews` aliases the live
- * `parts` objects, which the transform MUTATES between the trigger and this phase
- * (§N§ prefixes, `[dropped]` sentinels, stripped reasoning). The historian must
- * read RAW content; the DB read is unmutated and O(tail).
- *
- * Scope/await correctness: every raw read happens in the phase's SYNCHRONOUS
- * prefix — `runCompartmentPhaseImpl` is `async` but reaches its first `await`
- * only on the ≥95% blocking path (`awaitCompartmentRun`), and the runner's
- * `readSessionChunk` runs in the runner's own synchronous prefix (before its
- * first `await` at `client.session.get`). `withRawSessionMessageCache`'s
- * try/finally clears the cache the moment the wrapped fn RETURNS its promise
- * (i.e. after the synchronous body suspends at the first await), so the cache
- * covers all raw reads; the only post-await work (`prepareCompartmentInjection`)
- * reads context.db, never raw history. Priming once under `resolvedSessionId`
- * covers the runner too — it reads under `args.sessionId`, which equals
- * `resolvedSessionId` (transform.ts).
+ * Only urgent (95%) passes resolve raw history inline. Ordinary starts register
+ * background work immediately; its own cache scope reads the unmodified host
+ * history after the transform returns, never the transform's mutable parts.
  */
 export function runCompartmentPhase(
     args: RunCompartmentPhaseArgs,
 ): ReturnType<typeof runCompartmentPhaseImpl> {
-    // Only prime (and pay its tail DB read) on a pass that will ACTUALLY read raw
-    // history — i.e. one that starts or blocks on a historian run. On a normal
-    // defer pass the impl does ZERO raw reads (both its start-block and its ≥95%
-    // block are gated off), so priming there would add a useless ~100ms tail read
-    // to EVERY pass on a large session (the regression this gate fixes). The impl
-    // reads raw history in exactly two cases, mirrored here:
-    //   - compartmentInProgress is set (the trigger fired) AND no run is active
-    //     yet → this pass resolves the boundary + the runner reads the chunk, OR
-    //   - usage ≥ 95% with await allowed → the emergency block force-starts.
-    // The active-run guard matters: compartmentInProgress STAYS true for the whole
-    // background run, but while a run is active the impl no-ops (the run owns it),
-    // so without this guard we'd re-prime every pass for the run's full duration.
+    if (
+        args.historianRunnable !== false &&
+        !args.compactionOff &&
+        args.canRunCompartments &&
+        !getActiveCompartmentRun(args.sessionId) &&
+        (args.sessionMeta.compartmentInProgress ||
+            args.contextUsage.percentage >= BLOCK_UNTIL_DONE_PERCENTAGE) &&
+        isHistorianDrainBudgetSpent({
+            db: args.db,
+            sessionId: args.sessionId,
+            contextLimit: args.boundaryContextLimit,
+            executeThresholdPercentage: args.boundaryExecuteThresholdPercentage,
+            usagePercentage: args.boundaryUsage.percentage,
+        })
+    ) {
+        if (args.sessionMeta.compartmentInProgress) {
+            updateSessionMeta(args.db, args.sessionId, { compartmentInProgress: false });
+        }
+        return runCompartmentPhaseImpl({
+            ...args,
+            canRunCompartments: false,
+            sessionMeta: { compartmentInProgress: false },
+        });
+    }
+    // Only a new urgent run needs foreground raw-history eligibility. An active
+    // run already owns its reads, and ordinary starts prime in the background.
     const historianRunnable = args.historianRunnable !== false;
     const willReadRawHistory =
         historianRunnable &&
         !args.compactionOff &&
         args.canRunCompartments &&
         getActiveCompartmentRun(args.sessionId) === undefined &&
-        (args.sessionMeta.compartmentInProgress ||
-            args.contextUsage.percentage >= BLOCK_UNTIL_DONE_PERCENTAGE);
+        args.contextUsage.percentage >= BLOCK_UNTIL_DONE_PERCENTAGE;
 
     if (!willReadRawHistory) {
         // No raw reads this pass — skip the prime and its cache scope entirely.
@@ -383,7 +372,10 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
         args.sessionMeta.compartmentInProgress &&
         !getActiveCompartmentRun(args.sessionId)
     ) {
-        if (!hasEligibleHistoryForCompartment()) {
+        if (
+            args.contextUsage.percentage >= BLOCK_UNTIL_DONE_PERCENTAGE &&
+            !hasEligibleHistoryForCompartment()
+        ) {
             sessionLog(
                 args.sessionId,
                 `transform: skipping compartment start, no eligible history before protected tail (beyond ${lastObservedCompartmentEnd})`,
@@ -396,33 +388,45 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
             compartmentInProgress = false;
         } else {
             sessionLog(args.sessionId, "transform: compartmentInProgress flag set, starting agent");
-            startCompartmentAgent({
-                client: args.client,
-                hiddenCompletionExecutor: args.hiddenCompletionExecutor,
-                compactionMarkerStrategy: args.compactionMarkerStrategy,
-                db: args.db,
-                sessionId: args.sessionId,
-                historianChunkTokens: args.historianChunkTokens,
-                boundarySnapshot: getBoundarySnapshotForCompartment() ?? undefined,
-                currentContextLimit: args.boundaryContextLimit,
-                historyBudgetTokens: args.historyBudgetTokens,
-                historianTimeoutMs: args.historianTimeoutMs,
-                model: args.historianModel,
-                historianContextLimit: args.historianContextLimit,
-                historianMaxOutputTokens: args.historianMaxOutputTokens,
-                fallbackModels: args.fallbackModels,
-                directory: args.compartmentDirectory,
-                fallbackModelId: args.fallbackModelId,
-                ensureProjectRegistered: args.ensureProjectRegistered,
-                getNotificationParams: args.getNotificationParams,
-                experimentalUserMemories: args.experimentalUserMemories,
-                historianTwoPass: args.historianTwoPass,
-                historianExpandTools: args.historianExpandTools,
-                memoryEnabled: args.memoryEnabled,
-                autoPromote: args.autoPromote,
-                onCompartmentStatePublished: args.onCompartmentStatePublished,
-                preserveInjectionCacheUntilConsumed: true,
-            });
+            startCompartmentAgent(
+                {
+                    client: args.client,
+                    hiddenCompletionExecutor: args.hiddenCompletionExecutor,
+                    compactionMarkerStrategy: args.compactionMarkerStrategy,
+                    db: args.db,
+                    sessionId: args.sessionId,
+                    historianChunkTokens: args.historianChunkTokens,
+                    boundarySnapshot: args.preResolvedBoundarySnapshot,
+                    currentContextLimit: args.boundaryContextLimit,
+                    historyBudgetTokens: args.historyBudgetTokens,
+                    historianTimeoutMs: args.historianTimeoutMs,
+                    model: args.historianModel,
+                    historianContextLimit: args.historianContextLimit,
+                    historianMaxOutputTokens: args.historianMaxOutputTokens,
+                    fallbackModels: args.fallbackModels,
+                    directory: args.compartmentDirectory,
+                    fallbackModelId: args.fallbackModelId,
+                    ensureProjectRegistered: args.ensureProjectRegistered,
+                    getNotificationParams: args.getNotificationParams,
+                    experimentalUserMemories: args.experimentalUserMemories,
+                    historianTwoPass: args.historianTwoPass,
+                    historianExpandTools: args.historianExpandTools,
+                    memoryEnabled: args.memoryEnabled,
+                    autoPromote: args.autoPromote,
+                    onCompartmentStatePublished: args.onCompartmentStatePublished,
+                    preserveInjectionCacheUntilConsumed: true,
+                },
+                undefined,
+                () => {
+                    const snapshot = getBoundarySnapshotForCompartment();
+                    if (snapshot && hasRunnableCompartmentWindow(snapshot)) return snapshot;
+                    sessionLog(
+                        args.sessionId,
+                        `transform: skipping compartment start, no eligible history before protected tail (beyond ${lastObservedCompartmentEnd})`,
+                    );
+                    return null;
+                },
+            );
             compartmentInProgress = true;
         }
     }

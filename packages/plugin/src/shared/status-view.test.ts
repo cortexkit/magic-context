@@ -118,7 +118,12 @@ describe("status view model", () => {
         expect(rowLabels("Tags")).toEqual(["Active", "Dropped", "Total"]);
         expect(rowLabels("Reductions")).toEqual(["Execute threshold", "Last reduce anchor"]);
         expect(rowLabels("Pending Queue")).toEqual(["Drops", "Marker"]);
-        expect(rowLabels("Context Details")).toEqual(["Protected tags", "Subagent"]);
+        expect(rowLabels("Context Details")).toEqual([
+            "Protected tags",
+            "Subagent",
+            "Denominator",
+            "Window source",
+        ]);
         expect(rowLabels("Cache TTL")).toEqual([
             "Configured",
             "Last response",

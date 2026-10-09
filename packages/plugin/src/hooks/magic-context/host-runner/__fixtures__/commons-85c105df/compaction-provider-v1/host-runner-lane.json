@@ -1,0 +1,270 @@
+{
+  "requests": [
+    {
+      "name": "served_through_ordinal absent on a step",
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1}
+    },
+    {
+      "name": "served_through_ordinal present on a step",
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1, "served_through_ordinal": 2}
+    },
+    {
+      "name": "unserved_subjects absent on a step",
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1}
+    },
+    {
+      "name": "unserved_subjects present on a step",
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1, "unserved_subjects": [{"subject_mid": "m1", "hook": "pre_user"}]}
+    },
+    {
+      "name": "subject_part absent in a step burn entry",
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1, "unserved_subjects": [{"subject_mid": "m1", "hook": "post_assistant"}]}
+    },
+    {
+      "name": "subject_part present in a step burn entry",
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1, "unserved_subjects": [{"subject_mid": "m1", "hook": "post_tool", "subject_part": "part-a"}]}
+    },
+    {
+      "name": "burn-entry subject_part at the 256-byte limit",
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1, "unserved_subjects": [{"subject_mid": "m1", "hook": "post_tool", "subject_part": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"}]}
+    }
+  ],
+  "checks": [
+    {
+      "name": "missing step acknowledgement never promotes",
+      "route": {"authenticated_principal": "direct", "bind": {"project_root": "/project", "session": "s", "harness": "opencode"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk", "observation": "answer"},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1},
+      "provider_state": {"held_messages": [{"ordinal": 0, "mid": "m0", "message": {"info": {"id": "m0", "role": "user"}, "parts": [{"id": "p0", "type": "text", "text": "raw 0"}]}}, {"ordinal": 1, "mid": "m1", "message": {"info": {"id": "m1", "role": "user"}, "parts": [{"id": "p1", "type": "text", "text": "raw 1"}]}}, {"ordinal": 2, "mid": "m2", "message": {"info": {"id": "m2", "role": "user"}, "parts": [{"id": "p2", "type": "text", "text": "raw 2"}]}}, {"ordinal": 3, "mid": "m3", "message": {"info": {"id": "m3", "role": "user"}, "parts": [{"id": "p3", "type": "text", "text": "raw 3"}]}}, {"ordinal": 4, "mid": "m4", "message": {"info": {"id": "m4", "role": "user"}, "parts": [{"id": "p4", "type": "text", "text": "raw 4"}]}}], "pending_subjects": [{"subject_mid": "m1", "hook": "pre_user", "ordinal": 1}]},
+      "promoted_subjects": [],
+      "session_read_calls": 0
+    },
+    {
+      "name": "step promotion stops at the acknowledged ordinal",
+      "route": {"authenticated_principal": "direct", "bind": {"project_root": "/project", "session": "s", "harness": "opencode"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk", "observation": "answer"},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1, "served_through_ordinal": 1},
+      "provider_state": {"held_messages": [{"ordinal": 0, "mid": "m0", "message": {"info": {"id": "m0", "role": "user"}, "parts": [{"id": "p0", "type": "text", "text": "raw 0"}]}}, {"ordinal": 1, "mid": "m1", "message": {"info": {"id": "m1", "role": "user"}, "parts": [{"id": "p1", "type": "text", "text": "raw 1"}]}}, {"ordinal": 2, "mid": "m2", "message": {"info": {"id": "m2", "role": "user"}, "parts": [{"id": "p2", "type": "text", "text": "raw 2"}]}}, {"ordinal": 3, "mid": "m3", "message": {"info": {"id": "m3", "role": "user"}, "parts": [{"id": "p3", "type": "text", "text": "raw 3"}]}}, {"ordinal": 4, "mid": "m4", "message": {"info": {"id": "m4", "role": "user"}, "parts": [{"id": "p4", "type": "text", "text": "raw 4"}]}}], "pending_subjects": [{"subject_mid": "m1", "hook": "pre_user", "ordinal": 1}, {"subject_mid": "m2", "hook": "pre_user", "ordinal": 2}]},
+      "promoted_subjects": [{"subject_mid": "m1", "hook": "pre_user"}],
+      "still_pending_subjects": [{"subject_mid": "m2", "hook": "pre_user"}],
+      "session_read_calls": 0
+    },
+    {
+      "name": "lower step watermark without revert refuses by name",
+      "route": {"authenticated_principal": "direct", "bind": {"project_root": "/project", "session": "s", "harness": "opencode"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk", "observation": "answer"},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1, "served_through_ordinal": 1},
+      "provider_state": {"held_messages": [{"ordinal": 0, "mid": "m0", "message": {"info": {"id": "m0", "role": "user"}, "parts": [{"id": "p0", "type": "text", "text": "raw 0"}]}}, {"ordinal": 1, "mid": "m1", "message": {"info": {"id": "m1", "role": "user"}, "parts": [{"id": "p1", "type": "text", "text": "raw 1"}]}}, {"ordinal": 2, "mid": "m2", "message": {"info": {"id": "m2", "role": "user"}, "parts": [{"id": "p2", "type": "text", "text": "raw 2"}]}}, {"ordinal": 3, "mid": "m3", "message": {"info": {"id": "m3", "role": "user"}, "parts": [{"id": "p3", "type": "text", "text": "raw 3"}]}}, {"ordinal": 4, "mid": "m4", "message": {"info": {"id": "m4", "role": "user"}, "parts": [{"id": "p4", "type": "text", "text": "raw 4"}]}}], "served_through_ordinal": 2},
+      "refusal": {"code": "invalid_params", "message": "invalid served_through_ordinal", "detail": {"field": "served_through_ordinal"}},
+      "provider_state_unchanged": true
+    },
+    {
+      "name": "step burn is idempotent and never-answered entries are ignored",
+      "route": {"authenticated_principal": "direct", "bind": {"project_root": "/project", "session": "s", "harness": "opencode"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk", "observation": "answer"},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1, "unserved_subjects": [{"subject_mid": "m1", "hook": "pre_user"}, {"subject_mid": "never-answered", "hook": "pre_user"}]},
+      "provider_state": {"held_messages": [{"ordinal": 0, "mid": "m0", "message": {"info": {"id": "m0", "role": "user"}, "parts": [{"id": "p0", "type": "text", "text": "raw 0"}]}}, {"ordinal": 1, "mid": "m1", "message": {"info": {"id": "m1", "role": "user"}, "parts": [{"id": "p1", "type": "text", "text": "raw 1"}]}}, {"ordinal": 2, "mid": "m2", "message": {"info": {"id": "m2", "role": "user"}, "parts": [{"id": "p2", "type": "text", "text": "raw 2"}]}}, {"ordinal": 3, "mid": "m3", "message": {"info": {"id": "m3", "role": "user"}, "parts": [{"id": "p3", "type": "text", "text": "raw 3"}]}}, {"ordinal": 4, "mid": "m4", "message": {"info": {"id": "m4", "role": "user"}, "parts": [{"id": "p4", "type": "text", "text": "raw 4"}]}}], "burned_subjects": [{"subject_mid": "m1", "hook": "pre_user"}]},
+      "newly_burned_subjects": [],
+      "ignored_subjects": [{"subject_mid": "never-answered", "hook": "pre_user"}],
+      "resurrected_subjects": []
+    },
+    {
+      "name": "step burn-entry part at 256 bytes is accepted",
+      "route": {"authenticated_principal": "direct", "bind": {"project_root": "/project", "session": "s", "harness": "opencode"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk", "observation": "answer"},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1, "unserved_subjects": [{"subject_mid": "m1", "hook": "post_tool", "subject_part": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"}]},
+      "provider_state": {"held_messages": [{"ordinal": 0, "mid": "m0", "message": {"info": {"id": "m0", "role": "user"}, "parts": [{"id": "p0", "type": "text", "text": "raw 0"}]}}, {"ordinal": 1, "mid": "m1", "message": {"info": {"id": "m1", "role": "user"}, "parts": [{"id": "p1", "type": "text", "text": "raw 1"}]}}, {"ordinal": 2, "mid": "m2", "message": {"info": {"id": "m2", "role": "user"}, "parts": [{"id": "p2", "type": "text", "text": "raw 2"}]}}, {"ordinal": 3, "mid": "m3", "message": {"info": {"id": "m3", "role": "user"}, "parts": [{"id": "p3", "type": "text", "text": "raw 3"}]}}, {"ordinal": 4, "mid": "m4", "message": {"info": {"id": "m4", "role": "user"}, "parts": [{"id": "p4", "type": "text", "text": "raw 4"}]}}]},
+      "outcome": "accepted",
+      "subject_part_bytes": 256
+    },
+    {
+      "name": "step burn-entry part over 256 bytes refuses",
+      "route": {"authenticated_principal": "direct", "bind": {"project_root": "/project", "session": "s", "harness": "opencode"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk", "observation": "answer"},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1, "unserved_subjects": [{"subject_mid": "m1", "hook": "post_tool", "subject_part": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééx"}]},
+      "refusal": {"code": "invalid_params", "message": "invalid unserved_subjects[0].subject_part", "detail": {"field": "unserved_subjects[0].subject_part"}},
+      "subject_part_bytes": 257
+    },
+    {
+      "name": "an empty step burn-entry part refuses",
+      "route": {"authenticated_principal": "direct", "bind": {"project_root": "/project", "session": "s", "harness": "opencode"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk", "observation": "answer"},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1, "unserved_subjects": [{"subject_mid": "m1", "hook": "post_tool", "subject_part": ""}]},
+      "refusal": {"code": "invalid_params", "message": "invalid unserved_subjects[0].subject_part", "detail": {"field": "unserved_subjects[0].subject_part"}}
+    },
+    {
+      "name": "sparse final status fills real gaps around hook-ingested messages",
+      "route": {"authenticated_principal": "direct", "bind": {"project_root": "/project", "session": "s", "harness": "opencode"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk", "observation": "answer"},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [{"ordinal": 1, "mid": "m1", "message": {"info": {"id": "m1", "role": "user"}, "parts": [{"id": "p1", "type": "text", "text": "raw 1"}]}}, {"ordinal": 3, "mid": "m3", "message": {"info": {"id": "m3", "role": "user"}, "parts": [{"id": "p3", "type": "text", "text": "raw 3"}]}}], "now": 1, "after_ordinal": 0, "served_through_ordinal": 4},
+      "host_records": [{"ordinal": 0, "ingested": true}, {"ordinal": 1, "ingested": false}, {"ordinal": 2, "ingested": true}, {"ordinal": 3, "ingested": false}, {"ordinal": 4, "ingested": true}],
+      "provider_state": {"held_messages": [{"ordinal": 0, "mid": "m0", "message": {"info": {"id": "m0", "role": "user"}, "parts": [{"id": "p0", "type": "text", "text": "raw 0"}]}}, {"ordinal": 2, "mid": "m2", "message": {"info": {"id": "m2", "role": "user"}, "parts": [{"id": "p2", "type": "text", "text": "raw 2"}]}}, {"ordinal": 4, "mid": "m4", "message": {"info": {"id": "m4", "role": "user"}, "parts": [{"id": "p4", "type": "text", "text": "raw 4"}]}}], "pending_subjects": [{"subject_mid": "m2", "hook": "pre_user", "ordinal": 2}, {"subject_mid": "m4", "hook": "pre_user", "ordinal": 4}]},
+      "held_ordinals_after": [0, 1, 2, 3, 4],
+      "promoted_subjects": [{"subject_mid": "m2", "hook": "pre_user"}, {"subject_mid": "m4", "hook": "pre_user"}],
+      "answer": {"answer": "noop", "request_id": "r1"},
+      "session_read_calls": 0
+    },
+    {
+      "name": "empty status after all messages were hook-ingested is valid",
+      "route": {"authenticated_principal": "direct", "bind": {"project_root": "/project", "session": "s", "harness": "opencode"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk", "observation": "answer"},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1, "after_ordinal": 4},
+      "host_records": [{"ordinal": 0, "ingested": true}, {"ordinal": 1, "ingested": true}, {"ordinal": 2, "ingested": true}, {"ordinal": 3, "ingested": true}, {"ordinal": 4, "ingested": true}],
+      "provider_state": {"held_messages": [{"ordinal": 0, "mid": "m0", "message": {"info": {"id": "m0", "role": "user"}, "parts": [{"id": "p0", "type": "text", "text": "raw 0"}]}}, {"ordinal": 1, "mid": "m1", "message": {"info": {"id": "m1", "role": "user"}, "parts": [{"id": "p1", "type": "text", "text": "raw 1"}]}}, {"ordinal": 2, "mid": "m2", "message": {"info": {"id": "m2", "role": "user"}, "parts": [{"id": "p2", "type": "text", "text": "raw 2"}]}}, {"ordinal": 3, "mid": "m3", "message": {"info": {"id": "m3", "role": "user"}, "parts": [{"id": "p3", "type": "text", "text": "raw 3"}]}}, {"ordinal": 4, "mid": "m4", "message": {"info": {"id": "m4", "role": "user"}, "parts": [{"id": "p4", "type": "text", "text": "raw 4"}]}}]},
+      "answer": {"answer": "noop", "request_id": "r1"},
+      "session_read_calls": 0
+    },
+    {
+      "name": "an incomplete final sparse page refuses the actual held-history gap",
+      "route": {"authenticated_principal": "direct", "bind": {"project_root": "/project", "session": "s", "harness": "opencode"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk", "observation": "answer"},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [{"ordinal": 3, "mid": "m3", "message": {"info": {"id": "m3", "role": "user"}, "parts": [{"id": "p3", "type": "text", "text": "raw 3"}]}}], "now": 1, "after_ordinal": 0},
+      "provider_state": {"held_messages": [{"ordinal": 0, "mid": "m0", "message": {"info": {"id": "m0", "role": "user"}, "parts": [{"id": "p0", "type": "text", "text": "raw 0"}]}}, {"ordinal": 2, "mid": "m2", "message": {"info": {"id": "m2", "role": "user"}, "parts": [{"id": "p2", "type": "text", "text": "raw 2"}]}}, {"ordinal": 4, "mid": "m4", "message": {"info": {"id": "m4", "role": "user"}, "parts": [{"id": "p4", "type": "text", "text": "raw 4"}]}}], "pending_subjects": [{"subject_mid": "m2", "hook": "pre_user", "ordinal": 2}, {"subject_mid": "m4", "hook": "pre_user", "ordinal": 4}]},
+      "answer": {"answer": "refuse", "request_id": "r1", "code": "history_unreadable", "reason": "missing history from ordinal 1", "detail": {"history_gap_from": 1}},
+      "session_read_calls": 0
+    },
+    {
+      "name": "a partial page waits without scan or retained lock",
+      "route": {"authenticated_principal": "direct", "bind": {"project_root": "/project", "session": "s", "harness": "opencode"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk", "observation": "answer"},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [{"ordinal": 1, "mid": "m1", "message": {"info": {"id": "m1", "role": "user"}, "parts": [{"id": "p1", "type": "text", "text": "raw 1"}]}}], "now": 1, "after_ordinal": 0, "more": true},
+      "provider_state": {"held_messages": [{"ordinal": 0, "mid": "m0", "message": {"info": {"id": "m0", "role": "user"}, "parts": [{"id": "p0", "type": "text", "text": "raw 0"}]}}, {"ordinal": 2, "mid": "m2", "message": {"info": {"id": "m2", "role": "user"}, "parts": [{"id": "p2", "type": "text", "text": "raw 2"}]}}, {"ordinal": 4, "mid": "m4", "message": {"info": {"id": "m4", "role": "user"}, "parts": [{"id": "p4", "type": "text", "text": "raw 4"}]}}], "pending_subjects": [{"subject_mid": "m2", "hook": "pre_user", "ordinal": 2}, {"subject_mid": "m4", "hook": "pre_user", "ordinal": 4}]},
+      "answer": {"answer": "wait", "request_id": "r1", "reason": "more host history pages required", "bound_ms": 1},
+      "session_read_calls": 0,
+      "compaction_ready_calls": 0,
+      "conversation_lock_retained": false,
+      "host_action": "page_immediately_with_fresh_request_id"
+    },
+    {
+      "name": "an unexpected wait on a final page is unavailable, never re-issued",
+      "route": {"authenticated_principal": "direct", "bind": {"project_root": "/project", "session": "s", "harness": "opencode"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk", "observation": "answer"},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1, "after_ordinal": 4},
+      "provider_state": {"held_messages": [{"ordinal": 0, "mid": "m0", "message": {"info": {"id": "m0", "role": "user"}, "parts": [{"id": "p0", "type": "text", "text": "raw 0"}]}}, {"ordinal": 1, "mid": "m1", "message": {"info": {"id": "m1", "role": "user"}, "parts": [{"id": "p1", "type": "text", "text": "raw 1"}]}}, {"ordinal": 2, "mid": "m2", "message": {"info": {"id": "m2", "role": "user"}, "parts": [{"id": "p2", "type": "text", "text": "raw 2"}]}}, {"ordinal": 3, "mid": "m3", "message": {"info": {"id": "m3", "role": "user"}, "parts": [{"id": "p3", "type": "text", "text": "raw 3"}]}}, {"ordinal": 4, "mid": "m4", "message": {"info": {"id": "m4", "role": "user"}, "parts": [{"id": "p4", "type": "text", "text": "raw 4"}]}}]},
+      "answer": {"answer": "wait", "request_id": "r1", "reason": "unexpected final wait", "bound_ms": 1},
+      "host_action": "unavailable",
+      "automatic_reissues": 0
+    },
+    {
+      "name": "conflicting sparse entry refuses before burn or promotion",
+      "route": {"authenticated_principal": "direct", "bind": {"project_root": "/project", "session": "s", "harness": "opencode"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk", "observation": "answer"},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [{"ordinal": 1, "mid": "m1", "message": {"info": {"id": "m1", "role": "user"}, "parts": [{"id": "p1", "type": "text", "text": "raw 1"}]}}, {"ordinal": 2, "mid": "m2", "message": {"info": {"id": "m2", "role": "user"}, "parts": [{"id": "p2", "type": "text", "text": "changed"}]}}], "now": 1, "after_ordinal": 0, "served_through_ordinal": 4, "unserved_subjects": [{"subject_mid": "m2", "hook": "pre_user"}]},
+      "provider_state": {"held_messages": [{"ordinal": 0, "mid": "m0", "message": {"info": {"id": "m0", "role": "user"}, "parts": [{"id": "p0", "type": "text", "text": "raw 0"}]}}, {"ordinal": 2, "mid": "m2", "message": {"info": {"id": "m2", "role": "user"}, "parts": [{"id": "p2", "type": "text", "text": "raw 2"}]}}, {"ordinal": 4, "mid": "m4", "message": {"info": {"id": "m4", "role": "user"}, "parts": [{"id": "p4", "type": "text", "text": "raw 4"}]}}], "pending_subjects": [{"subject_mid": "m2", "hook": "pre_user", "ordinal": 2}, {"subject_mid": "m4", "hook": "pre_user", "ordinal": 4}]},
+      "refusal": {"code": "invalid_params", "message": "invalid messages", "detail": {"field": "messages"}},
+      "provider_state_unchanged": true,
+      "burned_subjects": [],
+      "promoted_subjects": []
+    },
+    {
+      "name": "owned-broca ignores valid host status extensions and keeps the full suffix",
+      "route": {"authenticated_principal": "runner", "bind": {"project_root": "/project", "session": "s", "harness": "runner"}},
+      "frozen_plan_params": {"serializer_profile": "owned-broca"},
+      "request": {"session": "s", "harness": "broca", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [{"ordinal": 1, "mid": "m1", "message": {"info": {"id": "m1", "role": "user"}, "parts": [{"id": "p1", "type": "text", "text": "raw 1"}]}}, {"ordinal": 2, "mid": "m2", "message": {"info": {"id": "m2", "role": "user"}, "parts": [{"id": "p2", "type": "text", "text": "raw 2"}]}}, {"ordinal": 3, "mid": "m3", "message": {"info": {"id": "m3", "role": "user"}, "parts": [{"id": "p3", "type": "text", "text": "raw 3"}]}}, {"ordinal": 4, "mid": "m4", "message": {"info": {"id": "m4", "role": "user"}, "parts": [{"id": "p4", "type": "text", "text": "raw 4"}]}}], "now": 1, "after_ordinal": 0, "served_through_ordinal": 4, "unserved_subjects": [{"subject_mid": "m1", "hook": "post_tool", "subject_part": "part-a"}]},
+      "baseline_vectors": "status.json",
+      "outcome": "legacy_corpus_unchanged",
+      "host_promotions": 0,
+      "host_burns": 0
+    }
+  ],
+  "admission": [
+    {
+      "name": "bound OpenCode direct caller admits with no runner callbacks",
+      "route": {"authenticated_principal": "direct", "bind": {"project_root": "/project", "session": "s", "harness": "opencode"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk", "observation": "answer"},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1},
+      "runner_groups": [],
+      "serves_compaction_ready": false,
+      "outcome": "host_lane_admission"
+    },
+    {
+      "name": "bound OpenCode 2 direct caller admits with no runner callbacks",
+      "route": {"authenticated_principal": "direct", "bind": {"project_root": "/project", "session": "s", "harness": "opencode2"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk", "observation": "answer"},
+      "request": {"session": "s", "harness": "opencode2", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1},
+      "runner_groups": [],
+      "serves_compaction_ready": false,
+      "outcome": "host_lane_admission"
+    },
+    {
+      "name": "runner principal and host body get full runner admission, not the exception",
+      "route": {"authenticated_principal": "runner", "bind": {"project_root": "/project", "session": "s", "harness": "runner"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk", "observation": "answer"},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1, "params": {"serializer_profile": "opencode-aisdk", "observation": "answer"}},
+      "runner_groups": ["compaction", "transcript_reads"],
+      "serves_compaction_ready": true,
+      "outcome": "full_runner_admission",
+      "host_lane": false
+    },
+    {
+      "name": "runner principal with host body cannot bypass missing runner groups",
+      "route": {"authenticated_principal": "runner", "bind": {"project_root": "/project", "session": "s", "harness": "runner"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk", "observation": "answer"},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1, "params": {"serializer_profile": "opencode-aisdk", "observation": "answer"}},
+      "runner_groups": [],
+      "serves_compaction_ready": false,
+      "outcome": "full_runner_admission_refused",
+      "host_lane": false,
+      "missing_runner_groups": ["compaction", "transcript_reads"]
+    },
+    {
+      "name": "runner principal claiming a host bind still gets full runner admission",
+      "route": {"authenticated_principal": "runner", "bind": {"project_root": "/project", "session": "s", "harness": "opencode"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk", "observation": "answer"},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1, "params": {"serializer_profile": "opencode-aisdk", "observation": "answer"}},
+      "runner_groups": ["compaction", "transcript_reads"],
+      "serves_compaction_ready": true,
+      "outcome": "full_runner_admission",
+      "host_lane": false
+    },
+    {
+      "name": "body params cannot supply a missing frozen opt-in",
+      "route": {"authenticated_principal": "direct", "bind": {"project_root": "/project", "session": "s", "harness": "opencode"}},
+      "frozen_plan_params": {},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1, "params": {"serializer_profile": "opencode-aisdk", "observation": "answer"}},
+      "outcome": "host_lane_not_admitted"
+    },
+    {
+      "name": "answer observation requires the frozen serializer opt-in too",
+      "route": {"authenticated_principal": "direct", "bind": {"project_root": "/project", "session": "s", "harness": "opencode"}},
+      "frozen_plan_params": {"observation": "answer"},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1},
+      "outcome": "answer_observation_not_admitted"
+    },
+    {
+      "name": "answer observation requires the frozen observation opt-in too",
+      "route": {"authenticated_principal": "direct", "bind": {"project_root": "/project", "session": "s", "harness": "opencode"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk"},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1},
+      "outcome": "answer_observation_not_admitted"
+    },
+    {
+      "name": "body harness cannot supply a missing host bind",
+      "route": {"authenticated_principal": "direct", "bind": {"project_root": "/project", "session": "s", "harness": "broca"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk", "observation": "answer"},
+      "request": {"session": "s", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1, "params": {"serializer_profile": "opencode-aisdk", "observation": "answer"}},
+      "outcome": "host_lane_not_admitted"
+    },
+    {
+      "name": "a bound direct caller cannot name another session",
+      "route": {"authenticated_principal": "direct", "bind": {"project_root": "/project", "session": "s", "harness": "opencode"}},
+      "frozen_plan_params": {"serializer_profile": "opencode-aisdk", "observation": "answer"},
+      "request": {"session": "other", "harness": "opencode", "request_id": "r1", "lineage_id": "l", "step_id": "step", "step_kind": "user_turn", "model": "m", "estimate": {"request_tokens": 3}, "newest": {"ordinal": 4, "mid": "m4"}, "messages": [], "now": 1},
+      "refusal": {"code": "invalid_params", "message": "invalid session", "detail": {"field": "session"}}
+    }
+  ],
+  "plan_value_refusals": [
+    {
+      "name": "runner principal refuses host-only serializer_profile on compaction.setup",
+      "route": {"authenticated_principal": "runner", "bind": {"project_root": "/project", "session": "s", "harness": "runner"}},
+      "request": {"method": "compaction.setup", "params": {"preset": "head", "params": {"serializer_profile": "opencode-aisdk"}, "session": "s", "harness": "opencode", "request_id": "r1", "composition": {}, "model": "m", "now": 1}},
+      "refusal": {"code": "invalid_params", "message": "invalid params.serializer_profile", "detail": {"field": "params.serializer_profile"}}
+    },
+    {
+      "name": "runner principal refuses host-only observation on compaction.setup",
+      "route": {"authenticated_principal": "runner", "bind": {"project_root": "/project", "session": "s", "harness": "runner"}},
+      "request": {"method": "compaction.setup", "params": {"preset": "head", "params": {"observation": "answer"}, "session": "s", "harness": "opencode", "request_id": "r1", "composition": {}, "model": "m", "now": 1}},
+      "refusal": {"code": "invalid_params", "message": "invalid params.observation", "detail": {"field": "params.observation"}}
+    }
+  ]
+}

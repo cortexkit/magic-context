@@ -10,11 +10,11 @@ exclude = ["packages/dashboard/src-tauri"]
 [workspace.dependencies]
 # Published commons crates use their current lockfile versions from crates.io.
 # cache-core is not published, so pin the source to an immutable commit.
-cortexkit-cache-core = { git = "https://github.com/cortexkit/commons", rev = "067701f1ab61cd2c81aa58fb66b0cb65fbaef9e7" }
-cortexkit-store = "=0.2.1"
+cortexkit-cache-core = { git = "https://github.com/cortexkit/commons", rev = "85c105dfc10dfcd02360ef31b07b4bc67dea41f8" }
+cortexkit-store = "=0.2.4"
 cortexkit-store-types = "=0.2.2"
-cortexkit-lease = "=0.1.0"
-cortexkit-log = { version = "=0.3.4", features = ["store-paths"] }
+cortexkit-lease = "=0.1.2"
+cortexkit-log = { version = "=0.3.5", features = ["store-paths"] }
 
 # Published subc wire/SDK crates use crates.io. subc-core is unpublished; this
 # revision matches the version in the pre-migration lockfile.

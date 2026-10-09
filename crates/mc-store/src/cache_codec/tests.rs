@@ -208,6 +208,7 @@ fn encode_then_decode_round_trips_exactly() {
     );
     let index = SectionIndex {
         sv: 1,
+        shape: None,
         f: Some(FrozenIndex {
             n: 200,
             c: 4,
@@ -246,6 +247,184 @@ fn encode_then_decode_round_trips_exactly() {
     assert_eq!(decoded.core, core);
     assert_eq!(decoded.meta, meta);
     assert!(!decoded.sections.any_discarded());
+}
+
+#[test]
+fn shape_summary_is_old_reader_compatible_and_preserves_chunk_bytes_and_hashes() {
+    #[derive(Deserialize)]
+    struct OldIndex {
+        sv: u64,
+        f: Option<FrozenIndex>,
+        b: Option<SectionIndexEntry>,
+        t: Option<SectionIndexEntry>,
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(dir.path());
+    let (core, _) = seeded(&store);
+    let with_summary = snapshot(&store);
+    let old: OldIndex = serde_json::from_str(with_summary.section_index.as_ref().unwrap()).unwrap();
+    let current = SectionIndex::parse(with_summary.section_index.as_ref().unwrap()).unwrap();
+    assert!(current.shape.is_some());
+    assert_eq!(
+        (old.sv, old.f, old.b, old.t),
+        (
+            current.sv,
+            current.f.clone(),
+            current.b.clone(),
+            current.t.clone()
+        )
+    );
+    let old_chunk_bytes = core
+        .frozen_units
+        .chunks(FROZEN_CHUNK_UNITS)
+        .enumerate()
+        .map(|(i, units)| (i as i64, serde_json::to_string(units).unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(with_summary.chunks, old_chunk_bytes);
+    let mut old_index = current.clone();
+    old_index.shape = None;
+    store
+        .inner
+        .with_conn_fenced(|conn| {
+            conn.execute(
+                "UPDATE mc_cache_state SET section_index=?2 WHERE session_id=?1",
+                params![SESSION, old_index.to_json()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let without = snapshot(&store);
+    assert_eq!(without.chunks, with_summary.chunks);
+    assert_eq!(without.core_state, with_summary.core_state);
+    assert_eq!(without.meta, with_summary.meta);
+    assert_eq!(
+        SectionIndex::parse(without.section_index.as_ref().unwrap())
+            .unwrap()
+            .f,
+        current.f
+    );
+    assert_eq!(store.load(SESSION).unwrap().core, core);
+    assert!(store
+        .load_compaction_trigger_core(SESSION)
+        .unwrap()
+        .is_none());
+    // A scalar-only update must not create the missing summary or touch chunks.
+    let loaded = store.load_meta(SESSION).unwrap();
+    let mut meta = loaded.meta;
+    meta.last_model_key = "changed".into();
+    store
+        .commit_meta(SESSION, loaded.row_version, &meta)
+        .unwrap();
+    let scalar = snapshot(&store);
+    assert_eq!(scalar.section_index, without.section_index);
+    assert_eq!(scalar.chunks, without.chunks);
+}
+
+#[test]
+fn shape_accessor_reads_only_header_metadata_not_frozen_chunk_payloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(dir.path());
+    seeded(&store);
+    let before = store
+        .load_compaction_trigger_core(SESSION)
+        .unwrap()
+        .unwrap();
+    let decodes = full_decode_count();
+    store
+        .inner
+        .with_conn_fenced(|conn| {
+            conn.execute(
+                "UPDATE mc_cache_frozen_chunks SET body='unreadable payload' WHERE session_id=?1",
+                [SESSION],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        store
+            .load_compaction_trigger_core(SESSION)
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        full_decode_count(),
+        decodes,
+        "shape reads must not decode frozen payloads"
+    );
+}
+
+#[test]
+fn shape_summary_agrees_with_full_core_after_every_cache_write_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open_store(dir.path());
+    let check = || {
+        let actual = store.load(SESSION).unwrap();
+        let expected = encode_row(&actual.core, &actual.meta).unwrap().shape;
+        let index = SectionIndex::parse(snapshot(&store).section_index.as_ref().unwrap()).unwrap();
+        assert_eq!(index.shape.as_ref(), Some(&expected));
+        let summary = store
+            .load_compaction_trigger_core(SESSION)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            summary
+                .frozen_units
+                .iter()
+                .map(|u| u.key.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(summary.boundary_id, actual.core.boundary_id);
+    };
+    let core = CoreState {
+        frozen_units: ["m0", "m1"]
+            .into_iter()
+            .map(|key| FrozenUnit {
+                key: key.into(),
+                kind: "synthesized-region".into(),
+                frozen_payload: format!("{key} bytes"),
+                durability_class: cortexkit_cache_core::DurabilityClass::Lineage,
+                reset_rule: String::new(),
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let meta = ModuleMeta {
+        initialized: true,
+        ..Default::default()
+    };
+    store.commit(SESSION, None, &core, &meta).unwrap();
+    check();
+    let mut loaded = store.load(SESSION).unwrap();
+    loaded.core.frozen_units.push(unit(7));
+    commit_over(
+        &store,
+        &loaded,
+        &loaded.core,
+        &loaded.meta,
+        crate::FrozenClear::Refuse,
+    )
+    .unwrap();
+    check();
+    let mut scalar = store.load_meta(SESSION).unwrap();
+    scalar.meta.last_model_key = "scalar-only".into();
+    store
+        .commit_meta(SESSION, scalar.row_version, &scalar.meta)
+        .unwrap();
+    check();
+    let version = store.load_meta(SESSION).unwrap().row_version;
+    store.reset_session_for_recomp(SESSION, version).unwrap();
+    check();
+    assert!(store.load(SESSION).unwrap().core.frozen_units.is_empty());
+    let empty = store.load(SESSION).unwrap();
+    store
+        .commit(SESSION, empty.row_version, &empty.core, &empty.meta)
+        .unwrap();
+    check();
+    let version = store.load_meta(SESSION).unwrap().row_version;
+    store.commit(SESSION, version, &core, &meta).unwrap();
+    check();
 }
 
 #[test]
@@ -1029,6 +1208,8 @@ fn rewind_to_62(store: &McStore) {
           DROP TABLE mc_provider_lineages_v1;
           DROP TABLE mc_provider_messages_v1;
           DROP TABLE mc_provider_hook_answers_v1;
+          DROP TABLE mc_provider_policy_parts_v1;
+          DROP TABLE mc_provider_consumed_tags_v1;
           DROP TABLE mc_provider_views_v1;
           DROP TABLE mc_provider_legacy_tags_v1;
           DROP TABLE mc_provider_pending_drops_v1;

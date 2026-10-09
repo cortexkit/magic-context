@@ -460,7 +460,7 @@ describe("postprocess replay-or-refuse", () => {
                     case "reasoning-removal-committed-read-failure":
                         args.resolvedProviderID = "openai";
                         args.pendingMaterializationSessions.add(sessionId);
-                        args.clearReasoningAge = 0;
+                        args.keepReasoningTokens = 0;
                         messages.forEach((message, index) => {
                             args.messageTagNumbers.set(message, index + 1);
                         });
@@ -6390,7 +6390,7 @@ describe("postprocess empty-sentinel provider gate", () => {
                 contextUsage: { percentage: 60, inputTokens: 6000 },
                 currentTurnId: "turn-clear-write",
                 resolvedProviderID: "github-copilot",
-                clearReasoningAge: 1,
+                keepReasoningTokens: 0,
                 reasoningByMessage: new Map([[oldMsg, [oldThinking]]]) as never,
                 messageTagNumbers: new Map([
                     [oldMsg, 1],
@@ -6426,7 +6426,7 @@ describe("postprocess empty-sentinel provider gate", () => {
                 contextUsage: { percentage: 60, inputTokens: 6000 },
                 currentTurnId: "turn-clear-write-anthropic",
                 resolvedProviderID: "anthropic",
-                clearReasoningAge: 1,
+                keepReasoningTokens: 0,
                 reasoningByMessage: new Map([[oldMsg, [oldThinking]]]) as never,
                 messageTagNumbers: new Map([
                     [oldMsg, 1],
@@ -11309,14 +11309,20 @@ describe("prefix-bound oldest-prefix reasoning trim", () => {
     const boundLoop = (sessionId: string, steps: number, options: { untagged?: number } = {}) => {
         const messages: MessageLike[] = [
             {
-                info: { id: "user-0", role: "user", sessionID: sessionId },
+                // A historical context carrier, not the active real-user request.
+                info: { id: "user-0", role: "user", sessionID: sessionId, synthetic: true },
                 parts: [{ type: "text", text: "do the work" }],
             } as unknown as MessageLike,
         ];
         const tags = new Map<MessageLike, number>([[messages[0], 1]]);
         for (let step = 0; step < steps; step += 1) {
             const message = {
-                info: { id: `assistant-${step}`, role: "assistant", sessionID: sessionId },
+                info: {
+                    id: `assistant-${step}`,
+                    role: "assistant",
+                    sessionID: sessionId,
+                    tokens: { reasoning: 100 },
+                },
                 parts: [
                     {
                         type: "reasoning",
@@ -11359,7 +11365,7 @@ describe("prefix-bound oldest-prefix reasoning trim", () => {
                 resolvedProviderID: PROVIDER,
                 thinkingBindingRecoveryEnabledForModel: true,
                 messageTagNumbers: session.tags,
-                clearReasoningAge: options.clearReasoningAge ?? 3,
+                keepReasoningTokens: options.clearReasoningAge === 999 ? 100_000 : 300,
                 fullFeatureMode: options.fullFeatureMode ?? true,
                 contextUsage: options.force
                     ? { percentage: 96, inputTokens: 96_000 }
@@ -11487,6 +11493,124 @@ describe("prefix-bound oldest-prefix reasoning trim", () => {
         expect(getRemovedReasoningIds(db, sessionId)).toEqual(
             new Set([...AGED, ...[8, 9, 10].map((step) => `assistant-${step}`)]),
         );
+    });
+
+    it("timeout skips do not treat provisional hint rows as served prefix edits", async () => {
+        openDb();
+        let provisional = false;
+        const spy = spyOn(autoSearchRunner, "runAutoSearchHint").mockImplementation(
+            async ({ sessionId }) => {
+                if (provisional)
+                    replayStorage.appendAutoSearchHintDecision(db, sessionId, {
+                        messageId: "fresh-user",
+                        decision: "hint",
+                        text: "\n\n<ctx-search-hint>unserved row</ctx-search-hint>",
+                    });
+                return { ok: false, kind: "timeout" };
+            },
+        );
+        try {
+            const outputs: string[] = [];
+            for (const writeRow of [false, true]) {
+                provisional = writeRow;
+                const sessionId = `ses-skip-provisional-${writeRow}`;
+                const warm = boundLoop(sessionId, 8);
+                warm.messages.push({
+                    info: { id: "fresh-user", role: "user" },
+                    parts: [{ type: "text", text: "new question" }],
+                } as unknown as MessageLike);
+                await serve(sessionId, warm, { clearReasoningAge: 999 });
+                const pass = boundLoop(sessionId, 8);
+                pass.messages.push({
+                    info: { id: "fresh-user", role: "user" },
+                    parts: [{ type: "text", text: "new question" }],
+                } as unknown as MessageLike);
+                const result = await serve(sessionId, pass, {
+                    force: true,
+                    clearReasoningAge: 999,
+                    overrides: {
+                        projectPath: "git:throwaway",
+                        autoSearch: { enabled: true, scoreThreshold: 0, minPromptChars: 1 },
+                    },
+                });
+                expect(result.proactiveThinkingStrip).toBeNull();
+                outputs.push(
+                    JSON.stringify(
+                        pass.messages.map((message) => ({
+                            role: message.info.role,
+                            parts: message.parts,
+                        })),
+                    ),
+                );
+            }
+            expect(outputs[1]).toBe(outputs[0]);
+            expect(outputs[1]).toContain("signed 7");
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
+    it("review: a served hint still strips signed thinking and its defer replay is byte-identical", async () => {
+        openDb();
+        const embedding = await import("../../features/magic-context/memory/embedding");
+        const worker = await import("./auto-search-worker-client");
+        const { autoSearchTestSnapshot } = await import("./auto-search-snapshot.fixture");
+        const snapshot = spyOn(embedding, "getProjectEmbeddingSnapshot").mockReturnValue(
+            autoSearchTestSnapshot("git:review-healthy"),
+        );
+        const search = spyOn(worker, "searchAutoHint").mockResolvedValue([
+            {
+                source: "memory",
+                content: "historian cache wiring details",
+                score: 1,
+                memoryId: 1,
+                category: "ARCHITECTURE_DECISIONS",
+                matchType: "fts",
+            },
+        ]);
+        const sessionId = "review-healthy-thinking";
+        const fresh = () =>
+            ({
+                info: { id: "fresh-user", role: "user" },
+                parts: [{ type: "text", text: "historian cache wiring details" }],
+            }) as MessageLike;
+        try {
+            const warm = boundLoop(sessionId, 8);
+            warm.messages.push(fresh());
+            await serve(sessionId, warm, { clearReasoningAge: 999 });
+            const pass = boundLoop(sessionId, 8);
+            pass.messages.push(fresh());
+            const result = await serve(sessionId, pass, {
+                force: true,
+                clearReasoningAge: 999,
+                overrides: {
+                    projectPath: "git:review-healthy",
+                    autoSearch: { enabled: true, scoreThreshold: 0, minPromptChars: 1 },
+                },
+            });
+            expect(search).toHaveBeenCalledTimes(1);
+            expect(JSON.stringify(pass.messages)).toContain("<ctx-search-hint>");
+            expect(result.proactiveThinkingStrip?.messageIds).toHaveLength(8);
+            expect(JSON.stringify(pass.messages)).not.toContain("signed 7");
+            const defer = boundLoop(sessionId, 8);
+            defer.messages.push(fresh());
+            const replay = await serve(sessionId, defer, {
+                clearReasoningAge: 999,
+                overrides: {
+                    projectPath: "git:review-healthy",
+                    autoSearch: { enabled: true, scoreThreshold: 0, minPromptChars: 1 },
+                },
+            });
+            expect(replay.proactiveThinkingStrip).toBeNull();
+            const bytes = (messages: MessageLike[]) =>
+                JSON.stringify(
+                    messages.map((message) => ({ role: message.info.role, parts: message.parts })),
+                );
+            expect(bytes(defer.messages)).toBe(bytes(pass.messages));
+        } finally {
+            search.mockRestore();
+            snapshot.mockRestore();
+        }
     });
 
     it("Rust-mode host keeps newer blocks on a module bust whose only edit is the oldest-prefix trim, and strips them otherwise", () => {

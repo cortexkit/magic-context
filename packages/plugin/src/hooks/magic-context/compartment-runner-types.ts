@@ -221,11 +221,9 @@ export interface CompartmentRunnerDeps<
     /**
      * Called synchronously the moment the runner commits to a REAL historian
      * pass — after every no-op early-return (stale/empty snapshot, nothing to
-     * compact, drain-quota) and immediately before the first `await`. Lets
-     * `startCompartmentAgent` distinguish a fire-and-forget run that actually
-     * started from one that no-op'd synchronously, so a no-op does not leave
-     * the rest of the transform pass believing a historian is in progress
-     * (which would defer queued drop ops — the production livelock).
+     * compact, drain-quota) and immediately before the first `await`. Background
+     * starts reach this callback only after yielding to the transform; the
+     * active-run registration includes the scheduled startup until it settles.
      */
     onHistorianRunStarted?: () => void;
     /** Manual wrapup bypasses the pressure-window quota but keeps the no-progress breaker. */

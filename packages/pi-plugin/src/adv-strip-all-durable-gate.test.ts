@@ -39,11 +39,12 @@ const toolResult = () => ({
 	toolCallId: "call-1",
 	content: [{ type: "text", text: "ok" }],
 });
-const ids = ["assistant-1", "result-1", "assistant-2"];
+const ids = ["assistant-1", "result-1", "assistant-2", "next-user"];
 const input = () => [
 	assistant([thinking(), toolCall()]),
 	toolResult(),
 	assistant([thinking()]),
+	{ role: "user", content: [{ type: "text", text: "Next real turn" }] },
 ];
 
 it("replays strip-all across independent connections, restart, and undo with the same entry ids", () => {

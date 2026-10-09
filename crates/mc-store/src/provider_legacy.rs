@@ -133,7 +133,7 @@ pub(crate) fn save_tx(
     }
     if let Some(answers) = original.pointer("/hook/answers").and_then(Value::as_array) {
         for (index, a) in answers.iter().enumerate() {
-            conn.execute("INSERT INTO mc_provider_hook_answers_v1 VALUES (?1,?2,?3,?4,'legacy',?5,NULL,?6,?7,?8,?9,json_extract(?1,'$[1]')) ON CONFLICT(conv_key,answer_seq) DO UPDATE SET legacy_json=excluded.legacy_json,state=excluded.state,ops_json=excluded.ops_json,tags_json=excluded.tags_json",
+            conn.execute("INSERT INTO mc_provider_hook_answers_v1 (conv_key,answer_seq,lineage_id,subject_mid,hook,subject_part,ordinal,ops_json,tags_json,state,legacy_json,session) VALUES (?1,?2,?3,?4,'legacy',?5,NULL,?6,?7,?8,?9,json_extract(?1,'$[1]')) ON CONFLICT(conv_key,answer_seq) DO UPDATE SET legacy_json=excluded.legacy_json,state=excluded.state,ops_json=excluded.ops_json,tags_json=excluded.tags_json",
                 params![conv,index as i64,a["lineage"].as_str().unwrap_or(""),a["subject"].as_str().unwrap_or(""),index.to_string(),a["answer"].to_string(),a["tags"].to_string(),if a["observed"].as_bool().unwrap_or(false) {"live"} else {"pending"},a.to_string()])?;
         }
     }

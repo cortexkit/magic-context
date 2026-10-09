@@ -5,9 +5,11 @@ import {
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import { openDatabase } from "@magic-context/core/features/magic-context/storage-db";
+import { reasoningStepCost } from "@magic-context/core/hooks/magic-context/reasoning-budget";
 import { setHarness } from "@magic-context/core/shared/harness";
 import { createTestTempDir } from "@magic-context/core/shared/test-temp-dir";
 import prefixBoundGolden from "../../../crates/mc-module/testdata/prefix-bound-reasoning-trim.json";
+import budgetGolden from "../../../crates/mc-module/testdata/reasoning-budget-trim.json";
 import {
 	buildMessageIdToMaxTag,
 	clearOldReasoningPi,
@@ -111,7 +113,7 @@ describe("clearOldReasoningPi", () => {
 		const result = clearOldReasoningPi({
 			messages,
 			messageIdToMaxTag,
-			clearReasoningAge: 1,
+			maxCutoff: 1,
 			piMessageStableId,
 		});
 		expect(result.cleared).toBe(1);
@@ -166,7 +168,7 @@ describe("clearOldReasoningPi", () => {
 				["native", 2],
 				["recent", 10],
 			]),
-			clearReasoningAge: 3,
+			maxCutoff: 7,
 			piMessageStableId: (_message, index) =>
 				index === 0 ? "local" : "native",
 		});
@@ -212,7 +214,7 @@ describe("clearOldReasoningPi", () => {
 			const cleared = clearOldReasoningPi({
 				...options,
 				messages: [first],
-				clearReasoningAge: 3,
+				maxCutoff: 7,
 			});
 			expect(cleared).toEqual({ cleared: 1, newWatermark: 1 });
 			expect(first.content).toEqual([
@@ -255,14 +257,14 @@ describe("clearOldReasoningPi", () => {
 		const result = clearOldReasoningPi({
 			messages,
 			messageIdToMaxTag,
-			clearReasoningAge: 5, // larger than maxTag → ageCutoff = -4
+			maxCutoff: 0,
 			piMessageStableId,
 		});
 		expect(result.cleared).toBe(0);
 		expect(result.newWatermark).toBe(0);
 	});
 
-	it("preserves redacted and native blocks while clearing ordinary local thinking", () => {
+	it("replays an old watermark byte-identically on mixed redacted and ordinary thinking after upgrade", () => {
 		// Redacted blocks serialize before empty blocks, so they remain verbatim;
 		// ordinary local thinking in the same message must still be cleared.
 		const db = makeDb();
@@ -307,7 +309,7 @@ describe("clearOldReasoningPi", () => {
 			const cleared = clearOldReasoningPi({
 				...options,
 				messages: [first],
-				clearReasoningAge: 2,
+				maxCutoff: 2,
 			});
 			expect(cleared).toEqual({ cleared: 1, newWatermark: 1 });
 			expect(first.content).toEqual([
@@ -417,7 +419,7 @@ describe("stripInlineThinkingPi", () => {
 		const result = stripInlineThinkingPi({
 			messages,
 			messageIdToMaxTag,
-			clearReasoningAge: 1,
+			maxCutoff: 2,
 			piMessageStableId,
 		});
 
@@ -493,6 +495,87 @@ describe("replayStrippedInlineThinkingPi", () => {
 });
 
 describe("piReasoningClearCutoff", () => {
+	it("charges encrypted native reasoning a fixed 1000 without tokenizing payload bytes", () => {
+		const messages = [0, 1, 2].map((i) => ({
+			role: "assistant",
+			content: [{ type: "text", text: `answer-${i}` }],
+			providerPayload: {
+				items: [
+					{
+						type: "reasoning",
+						encrypted_content: "x".repeat(i === 0 ? 100000 : 1),
+					},
+				],
+			},
+			usage: i === 2 ? { reasoning: 500 } : undefined,
+		}));
+		expect(
+			piReasoningClearCutoff({
+				messages,
+				messageIdToMaxTag: new Map([
+					["a0", 1],
+					["a1", 2],
+					["a2", 3],
+				]),
+				keepReasoningTokens: 1500,
+				prefixBound: false,
+				piMessageStableId: (_, i) => `a${i}`,
+			}),
+		).toBe(1);
+	});
+	it("matches shared whole-step budget selection and prefix-stop goldens", () => {
+		for (const scenario of budgetGolden.cases) {
+			// Two explicit exemptions belong to the pure-cutoff fixture. Pi's newest
+			// reasoning-bearing assistant is also its newest replayable assistant.
+			if (scenario.steps.filter((step) => step.exempt).length > 1) continue;
+			const messages = scenario.steps.map((step, i) => ({
+				role: "assistant",
+				timestamp: i,
+				usage: {
+					reasoning: reasoningStepCost(
+						step.reported,
+						step.text_estimate ?? 0,
+						step.opaque === true,
+					),
+				},
+				content: [
+					{ type: "thinking", thinking: "", thinkingSignature: `sig-${i}` },
+					{ type: "text", text: `answer-${i}` },
+				],
+			}));
+			const tags = new Map(
+				scenario.steps.map((step, i) => [`a${i}`, step.tag]),
+			);
+			const gone = new Set(
+				scenario.steps.flatMap((step, i) =>
+					step.already_removed ? [`a${i}`] : [],
+				),
+			);
+			const cutoff = piReasoningClearCutoff({
+				messages,
+				messageIdToMaxTag: tags,
+				keepReasoningTokens: scenario.budget,
+				prefixBound: scenario.prefix_bound,
+				piMessageStableId: (_, i) => `a${i}`,
+				alreadyGone: (id) => gone.has(id),
+			});
+			clearOldReasoningPi({
+				messages,
+				messageIdToMaxTag: tags,
+				maxCutoff: cutoff,
+				piMessageStableId: (_, i) => `a${i}`,
+			});
+			const after = messages.flatMap((message, i) =>
+				gone.has(`a${i}`) || message.content[0].thinkingSignature === undefined
+					? [i]
+					: [],
+			);
+			expect({ name: scenario.name, after }).toEqual({
+				name: scenario.name,
+				after: scenario.removed_after,
+			});
+		}
+	});
 	// Five assistant steps; assistant i carries tag i + 1. A user turn after them
 	// carries tag 40, so the age rule alone would cover every assistant.
 	const build = (options: { redactedAt?: number } = {}) => {
@@ -534,7 +617,7 @@ describe("piReasoningClearCutoff", () => {
 		const cutoff = piReasoningClearCutoff({
 			messages,
 			messageIdToMaxTag,
-			clearReasoningAge: 3,
+			keepReasoningTokens: 0,
 			piMessageStableId,
 			prefixBound: false,
 		});
@@ -542,7 +625,6 @@ describe("piReasoningClearCutoff", () => {
 		const outcome = clearOldReasoningPi({
 			messages,
 			messageIdToMaxTag,
-			clearReasoningAge: 3,
 			piMessageStableId,
 			maxCutoff: cutoff,
 		});
@@ -558,7 +640,7 @@ describe("piReasoningClearCutoff", () => {
 		const bound = piReasoningClearCutoff({
 			messages,
 			messageIdToMaxTag,
-			clearReasoningAge: 3,
+			keepReasoningTokens: 0,
 			piMessageStableId,
 			prefixBound: true,
 		});
@@ -566,7 +648,6 @@ describe("piReasoningClearCutoff", () => {
 		clearOldReasoningPi({
 			messages,
 			messageIdToMaxTag,
-			clearReasoningAge: 3,
 			piMessageStableId,
 			maxCutoff: bound,
 		});
@@ -579,7 +660,7 @@ describe("piReasoningClearCutoff", () => {
 		const bound = piReasoningClearCutoff({
 			messages,
 			messageIdToMaxTag,
-			clearReasoningAge: 3,
+			keepReasoningTokens: 0,
 			piMessageStableId,
 			prefixBound: true,
 		});
@@ -588,7 +669,6 @@ describe("piReasoningClearCutoff", () => {
 		clearOldReasoningPi({
 			messages,
 			messageIdToMaxTag,
-			clearReasoningAge: 3,
 			piMessageStableId,
 			maxCutoff: bound,
 		});
@@ -604,7 +684,7 @@ describe("piReasoningClearCutoff", () => {
 			piReasoningClearCutoff({
 				messages,
 				messageIdToMaxTag,
-				clearReasoningAge: 3,
+				keepReasoningTokens: 0,
 				piMessageStableId,
 				prefixBound: false,
 			}),
@@ -619,7 +699,7 @@ describe("piReasoningClearCutoff", () => {
 		const bound = piReasoningClearCutoff({
 			messages,
 			messageIdToMaxTag,
-			clearReasoningAge: 3,
+			keepReasoningTokens: 0,
 			piMessageStableId,
 			prefixBound: true,
 		});
@@ -636,7 +716,7 @@ describe("piReasoningClearCutoff", () => {
 			piReasoningClearCutoff({
 				messages,
 				messageIdToMaxTag,
-				clearReasoningAge: 3,
+				keepReasoningTokens: 0,
 				piMessageStableId,
 				prefixBound: true,
 			}),
@@ -646,12 +726,19 @@ describe("piReasoningClearCutoff", () => {
 	it("prefix-bound: matches the shared TypeScript, Pi and Rust golden", () => {
 		for (const scenario of prefixBoundGolden.cases) {
 			const messages: Array<Record<string, unknown>> = [
-				{ role: "user", timestamp: 1, content: [{ type: "text", text: "go" }] },
+				// Historical context carrier: the real active-turn witness is separate.
+				{
+					role: "user",
+					synthetic: true,
+					timestamp: 1,
+					content: [{ type: "text", text: "go" }],
+				},
 			];
 			for (let step = 0; step < scenario.steps; step++) {
 				messages.push({
 					role: "assistant",
 					timestamp: step + 2,
+					usage: { reasoning: 100 },
 					content: [
 						{
 							type: "thinking",
@@ -676,7 +763,7 @@ describe("piReasoningClearCutoff", () => {
 			const cutoff = piReasoningClearCutoff({
 				messages,
 				messageIdToMaxTag,
-				clearReasoningAge: scenario.clear_reasoning_age,
+				keepReasoningTokens: scenario.keep_reasoning_tokens,
 				piMessageStableId,
 				prefixBound: true,
 				alreadyGone: (id) => gone.has(stepOf.get(id) ?? ""),
@@ -684,7 +771,6 @@ describe("piReasoningClearCutoff", () => {
 			clearOldReasoningPi({
 				messages,
 				messageIdToMaxTag,
-				clearReasoningAge: scenario.clear_reasoning_age,
 				piMessageStableId,
 				maxCutoff: cutoff,
 			});
@@ -712,14 +798,13 @@ describe("piReasoningClearCutoff", () => {
 			const cutoff = piReasoningClearCutoff({
 				messages: first.messages,
 				messageIdToMaxTag: first.messageIdToMaxTag,
-				clearReasoningAge: 3,
+				keepReasoningTokens: 0,
 				piMessageStableId,
 				prefixBound: false,
 			});
 			const outcome = clearOldReasoningPi({
 				messages: first.messages,
 				messageIdToMaxTag: first.messageIdToMaxTag,
-				clearReasoningAge: 3,
 				piMessageStableId,
 				maxCutoff: cutoff,
 			});

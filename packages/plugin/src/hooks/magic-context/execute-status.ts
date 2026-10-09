@@ -59,6 +59,7 @@ import {
 } from "./event-resolvers";
 import { formatBytes } from "./format-bytes";
 import { estimateTokens } from "./read-session-formatting";
+import { reasoningBudgetStatusLine } from "./reasoning-budget-status";
 
 function formatExecuteThreshold(detail: ExecuteThresholdDetail, contextLimit: number): string {
     const { percentage, mode } = detail;
@@ -183,7 +184,9 @@ export function executeStatus(
         const parseFailureLines = (display?.configParseFailures ?? []).map(
             formatConfigParseStatusLine,
         );
+        const reasoningLine = reasoningBudgetStatusLine(sessionId);
         const lines: string[] = [
+            ...(reasoningLine ? [reasoningLine, ""] : []),
             ...(openCodeDbStatusLine ? [openCodeDbStatusLine, ""] : []),
             ...parseFailureLines,
             ...(parseFailureLines.length > 0 ? [""] : []),

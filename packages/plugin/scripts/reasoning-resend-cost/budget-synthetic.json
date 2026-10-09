@@ -1,0 +1,7 @@
+[
+  { "route": "synthetic-openai", "model": "test", "order": 0, "reported": 8000, "encrypted": true },
+  { "route": "synthetic-openai", "model": "test", "order": 1, "reported": 3000, "encrypted": true },
+  { "route": "synthetic-openai", "model": "test", "order": 2, "reported": 2000, "encrypted": true },
+  { "route": "synthetic-no-count", "model": "test", "order": 0, "text_estimate": 9500, "encrypted": false },
+  { "route": "synthetic-no-count", "model": "test", "order": 1, "encrypted": true }
+]

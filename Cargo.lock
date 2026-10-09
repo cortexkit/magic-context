@@ -174,7 +174,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 [[package]]
 name = "cortexkit-cache-core"
 version = "0.1.0"
-source = "git+https://github.com/cortexkit/commons?rev=067701f1ab61cd2c81aa58fb66b0cb65fbaef9e7#067701f1ab61cd2c81aa58fb66b0cb65fbaef9e7"
+source = "git+https://github.com/cortexkit/commons?rev=85c105dfc10dfcd02360ef31b07b4bc67dea41f8#85c105dfc10dfcd02360ef31b07b4bc67dea41f8"
 dependencies = [
  "serde",
  "serde_json",
@@ -182,20 +182,22 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-lease"
-version = "0.1.0"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9a8fc97760adc623eddc8e092b6361b91f4449dd6c93443fde9e221fa727161"
+checksum = "d02256247fecd266c7d853cf63d85270367abce9925e52c9ee01ac4994ed2293"
 dependencies = [
  "fs2",
+ "windows-sys",
 ]
 
 [[package]]
 name = "cortexkit-log"
-version = "0.3.4"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d75f333ade3e19da329eecd3aafb0af8ffab2ae3f915242f0d3216c31c0a248"
+checksum = "0c237e3dbd3b9bc5b7bd77e4899c660d8f5773192a0b98a35bab9f68307feffe"
 dependencies = [
  "chrono",
+ "cortexkit-lease",
  "cortexkit-store-types",
  "regex",
  "tracing",
@@ -210,10 +212,11 @@ checksum = "d14cf5bd9d4b76fcf4d5380550dd11f9191598309ecaacc4805e317b2d6deb90"
 
 [[package]]
 name = "cortexkit-role-compaction-provider"
-version = "0.1.0"
-source = "git+https://github.com/cortexkit/commons?rev=9abd24916a087162b7650ad7db71cf287be1330c#9abd24916a087162b7650ad7db71cf287be1330c"
+version = "0.1.2"
+source = "git+https://github.com/cortexkit/commons?rev=85c105dfc10dfcd02360ef31b07b4bc67dea41f8#85c105dfc10dfcd02360ef31b07b4bc67dea41f8"
 dependencies = [
  "cortexkit-role-llm-runner",
+ "cortexkit-role-step-transform-provider",
  "serde",
  "serde_json",
 ]
@@ -230,7 +233,7 @@ dependencies = [
 [[package]]
 name = "cortexkit-role-harness"
 version = "0.1.0"
-source = "git+https://github.com/cortexkit/commons?rev=9abd24916a087162b7650ad7db71cf287be1330c#9abd24916a087162b7650ad7db71cf287be1330c"
+source = "git+https://github.com/cortexkit/commons?rev=85c105dfc10dfcd02360ef31b07b4bc67dea41f8#85c105dfc10dfcd02360ef31b07b4bc67dea41f8"
 dependencies = [
  "async-trait",
 ]
@@ -238,7 +241,7 @@ dependencies = [
 [[package]]
 name = "cortexkit-role-llm-runner"
 version = "0.1.0"
-source = "git+https://github.com/cortexkit/commons?rev=9abd24916a087162b7650ad7db71cf287be1330c#9abd24916a087162b7650ad7db71cf287be1330c"
+source = "git+https://github.com/cortexkit/commons?rev=85c105dfc10dfcd02360ef31b07b4bc67dea41f8#85c105dfc10dfcd02360ef31b07b4bc67dea41f8"
 dependencies = [
  "serde",
  "serde_json",
@@ -247,21 +250,23 @@ dependencies = [
 [[package]]
 name = "cortexkit-role-llm-runner-conformance"
 version = "0.1.0"
-source = "git+https://github.com/cortexkit/commons?rev=9abd24916a087162b7650ad7db71cf287be1330c#9abd24916a087162b7650ad7db71cf287be1330c"
+source = "git+https://github.com/cortexkit/commons?rev=85c105dfc10dfcd02360ef31b07b4bc67dea41f8#85c105dfc10dfcd02360ef31b07b4bc67dea41f8"
 dependencies = [
  "async-trait",
- "cortexkit-role-harness 0.1.0 (git+https://github.com/cortexkit/commons?rev=9abd24916a087162b7650ad7db71cf287be1330c)",
+ "cortexkit-role-compaction-provider",
+ "cortexkit-role-harness 0.1.0 (git+https://github.com/cortexkit/commons?rev=85c105dfc10dfcd02360ef31b07b4bc67dea41f8)",
  "cortexkit-role-llm-runner",
  "futures-util",
  "serde",
  "serde_json",
  "subc-protocol",
+ "tokio",
 ]
 
 [[package]]
 name = "cortexkit-role-step-transform-provider"
-version = "0.1.0"
-source = "git+https://github.com/cortexkit/commons?rev=9abd24916a087162b7650ad7db71cf287be1330c#9abd24916a087162b7650ad7db71cf287be1330c"
+version = "0.1.2"
+source = "git+https://github.com/cortexkit/commons?rev=85c105dfc10dfcd02360ef31b07b4bc67dea41f8#85c105dfc10dfcd02360ef31b07b4bc67dea41f8"
 dependencies = [
  "cortexkit-role-llm-runner",
  "serde",
@@ -297,9 +302,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-store"
-version = "0.2.1"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a6cc64ebbed57cb7f006b2b5fec9983c634d69334e4c966072b39b9433a907c"
+checksum = "df7beeeeaf1f244870ff160eff79a6f6b2eb8f2d234da9a1f6aa2c60a8a93c93"
 dependencies = [
  "cortexkit-lease",
  "cortexkit-store-types",

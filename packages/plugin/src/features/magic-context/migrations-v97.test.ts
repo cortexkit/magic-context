@@ -52,8 +52,8 @@ describe("migration 97", () => {
             expect(
                 db.prepare("SELECT * FROM session_meta WHERE session_id='legacy'").get(),
             ).toEqual(before);
-            expect(LATEST_SUPPORTED_VERSION).toBe(97);
-            expect(LATEST_MIGRATION_VERSION).toBe(97);
+            expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
+            expect(LATEST_MIGRATION_VERSION).toBeGreaterThanOrEqual(97);
             initializeDatabase(fresh);
             runMigrations(fresh);
             expect(schema(db)).toEqual(schema(fresh));
@@ -110,7 +110,7 @@ describe("migration 97", () => {
             const before = schema(db);
             expect(openDatabase({ dbPath: path, latestSupportedVersion: 96 })).toBeNull();
             expect(getSchemaFenceRejection()).toEqual({
-                persistedVersion: 97,
+                persistedVersion: LATEST_MIGRATION_VERSION,
                 supportedVersion: 96,
             });
             expect(schema(db)).toEqual(before);

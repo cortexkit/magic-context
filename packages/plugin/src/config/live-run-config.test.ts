@@ -7,7 +7,7 @@ import {
     userMemoryCollectionEnabled,
 } from "../features/magic-context/dreamer/task-config";
 import { producerInputTokenLimit } from "../hooks/magic-context/producer-window-guard";
-import { resolveHistorianModel } from "../shared/model-resolution";
+import { resolveDreamerTaskModel, resolveHistorianModel } from "../shared/model-resolution";
 import { createTestTempDirFromPath } from "../shared/test-temp-dir";
 import { loadPluginConfigDetailed } from "./index";
 import { dreamerRunConfig, historianRunConfig } from "./live-run-config";
@@ -247,4 +247,40 @@ test("malformed project config retains last good values and deduplicates the war
         else process.env.XDG_CONFIG_HOME = previous.config;
         rmSync(root, { recursive: true, force: true });
     }
+});
+
+test("OMP keeps the pi historian and dreamer models when the config has no omp block", () => {
+    // Live sampling used to create empty parent objects for every live path. An empty
+    // `omp` block then shadowed the `pi` block OMP falls back to, and OMP ran the
+    // historian and dreamer on its own default model.
+    const config = {
+        historian: { pi: { model: "anthropic/claude-sonnet-5-5" } },
+        dreamer: {
+            pi: {
+                model: "anthropic/claude-sonnet-5-5",
+                tasks: { curate: { model: "openai/gpt-6-luna" } },
+            },
+        },
+    } as unknown as Parameters<typeof historianRunConfig>[0];
+    for (const sampled of [historianRunConfig(config, config), dreamerRunConfig(config, config)]) {
+        expect((sampled as { historian?: Record<string, unknown> }).historian?.omp).toBeUndefined();
+        expect((sampled as { dreamer?: Record<string, unknown> }).dreamer?.omp).toBeUndefined();
+        expect(resolveHistorianModel(sampled, "omp").primary?.model).toBe(
+            "anthropic/claude-sonnet-5-5",
+        );
+        expect(
+            resolveDreamerTaskModel({ config: sampled, harness: "omp", task: "curate" }).primary
+                ?.model,
+        ).toBe("openai/gpt-6-luna");
+    }
+});
+
+test("live sampling clears a key removed from the fresh config without touching the boot object", () => {
+    const boot = {
+        historian: { pi: { model: "anthropic/claude-sonnet-5-5" } },
+    } as unknown as Parameters<typeof historianRunConfig>[0];
+    const fresh = { historian: { pi: {} } } as unknown as Parameters<typeof historianRunConfig>[0];
+    const sampled = historianRunConfig(boot, fresh);
+    expect(resolveHistorianModel(sampled, "pi").primary).toBeUndefined();
+    expect(resolveHistorianModel(boot, "pi").primary?.model).toBe("anthropic/claude-sonnet-5-5");
 });

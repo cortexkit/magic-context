@@ -188,6 +188,16 @@ impl Storage {
     }
 
     pub fn save(&self, key: &Key, record: &Record) -> Result<(), HandlerOutcome> {
+        // A host switch adopts the full-request engine namespace. Compatibility
+        // saves must not silently move its tags and frozen state to a new one.
+        let namespace = self
+            .store()?
+            .load_provider_conversation(&key.store_key())
+            .map_err(transient)?
+            .map_or_else(
+                || key.engine_key(),
+                |conversation| conversation.engine_namespace,
+            );
         let tags = record
             .hook
             .as_ref()
@@ -209,7 +219,7 @@ impl Storage {
             .save_provider_record(
                 &key.store_key(),
                 &serde_json::to_string(record).map_err(transient)?,
-                &key.engine_key(),
+                &namespace,
                 &tags,
             )
             .map_err(transient)
@@ -545,5 +555,65 @@ mod tests {
         assert_eq!(frontier(&record, "L"), 4011);
         record.messages.get_mut("L").unwrap().remove(&4005);
         assert_eq!(frontier(&record, "L"), 4005);
+    }
+}
+
+#[cfg(test)]
+mod namespace_tests {
+    use super::*;
+    #[test]
+    fn compatibility_save_preserves_host_namespace_and_creates_broca_hash_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            McStore::open_for_test(&StorageDescriptor {
+                module_id: DEFAULT_MODULE_ID.into(),
+                storage_namespace: "mc_cache".into(),
+                isolation: Isolation::Module,
+                backend: StorageBackend::Sqlite {
+                    path: dir.path().join("store.db").to_string_lossy().into(),
+                },
+            })
+            .unwrap(),
+        );
+        let slot = Arc::new(OnceLock::new());
+        slot.set(Arc::clone(&store)).ok().unwrap();
+        let storage = Storage::new(slot);
+        let host = Key {
+            project: dir.path().into(),
+            session: "host-session".into(),
+            harness: "opencode".into(),
+        };
+        store
+            .save_provider_conversation(
+                &host.store_key(),
+                &mc_store::provider_records::ProviderConversation {
+                    engine_namespace: host.session.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        storage.save(&host, &Record::default()).unwrap();
+        assert_eq!(
+            store
+                .load_provider_conversation(&host.store_key())
+                .unwrap()
+                .unwrap()
+                .engine_namespace,
+            host.session
+        );
+        let broca = Key {
+            harness: "broca".into(),
+            ..host
+        };
+        storage.save(&broca, &Record::default()).unwrap();
+        assert_eq!(
+            store
+                .load_provider_conversation(&broca.store_key())
+                .unwrap()
+                .unwrap()
+                .engine_namespace,
+            broca.engine_key()
+        );
+        assert!(broca.engine_key().starts_with("mc-provider:"));
     }
 }

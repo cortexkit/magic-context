@@ -180,11 +180,8 @@ for (const native of [false, true]) {
 	});
 }
 
-test("above-wall provider pressure clamps instead of disappearing", () => {
-	expect(computePiPressure({ input: 380687 }, 204000, 272000)).toEqual({
-		inputTokens: 272000,
-		percentage: (272000 / 204000) * 100,
-	});
+test("above-wall provider usage is rejected instead of clamped into pressure", () => {
+	expect(computePiPressure({ input: 380687 }, 204000, 272000)).toBeNull();
 });
 
 test("hygiene counts served skeleton bytes in T but never in U", () => {
@@ -214,7 +211,7 @@ test("hygiene counts served skeleton bytes in T but never in U", () => {
 	expect(measured.u).toBe(0);
 });
 
-test("bounded provider pressure drives the next scheduler pass without proving capacity", async () => {
+test("rejected usage leaves overflow recovery to the explicit recovery pressure latch", async () => {
 	const { persistPiPressureFromMessageEnd } = await import("./index");
 	const { getOrCreateSessionMeta, updateSessionMeta } = await import(
 		"@magic-context/core/features/magic-context/storage"
@@ -255,7 +252,7 @@ test("bounded provider pressure drives the next scheduler pass without proving c
 			},
 		});
 		const meta = getOrCreateSessionMeta(db, sessionId);
-		expect(meta.lastInputTokens).toBe(272000);
+		expect(meta.lastInputTokens).toBe(0);
 		expect(meta.lastUsageContextLimit).toBe(204000);
 		expect(meta.observedSafeInputTokens).toBe(140000);
 		expect(
@@ -265,6 +262,8 @@ test("bounded provider pressure drives the next scheduler pass without proving c
 			persistedPercentage: meta.lastContextPercentage,
 			persistedInputTokens: meta.lastInputTokens,
 			usableContextLimit: meta.lastUsageContextLimit,
+			// A genuine overflow error, not rejected usage, arms recovery.
+			minimumPercentage: 95,
 		});
 		expect(pressure.percentage).toBeGreaterThanOrEqual(95);
 		expect(
