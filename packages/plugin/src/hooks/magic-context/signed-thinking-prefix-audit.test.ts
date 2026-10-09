@@ -1,20 +1,62 @@
-import { afterEach, describe, expect, it } from "bun:test";
+/**
+ * Signed-thinking prefix audit for the OpenCode transform: OpenCode 1 TS mode
+ * (v1 store) and OpenCode 2 (v2 store) both run createTransform.
+ *
+ * Each case drives the real transform over a realistic Opus 5.5 tool loop and
+ * answers every served request from a strict-binding provider mock. It then
+ * offers one mutation lane a cache-busting pass while the current assistant
+ * turn holds signed thinking: mid tool loop in a primary session, or anywhere
+ * in a subagent run (a subagent's whole run is one assistant turn).
+ *
+ * A held (deferred) lane serves the unchanged request. A lane that lands an
+ * edit before a kept signed block produces the provider's 400. Every lane also
+ * has a control: the same setup and bust at the start of a new user turn must
+ * land the lane's own edit, which proves a held mid-loop result comes from the
+ * thinking guard and not from an idle lane.
+ *
+ * Findings: docs/reports/signed-thinking-prefix-edits-audit.md. Run with
+ * MC_AUDIT_STRICT=1 to make every exposed lane fail on its strict-binding 400.
+ */
+import { describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createTagger } from "../../features/magic-context/tagger";
 import {
-    closeDatabase,
+    appendCompartments,
+    replaceAllCompartmentState,
+} from "../../features/magic-context/compartment-storage";
+import { runMigrations } from "../../features/magic-context/migrations";
+import {
     getOrCreateSessionMeta,
+    getPendingOps,
     getTagsBySession,
-    openDatabase,
     queuePendingOp,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
-import type { MessageLike } from "./types";
+import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { getReasoningRemovalState } from "../../features/magic-context/storage-reasoning-removal";
+import { createTagger } from "../../features/magic-context/tagger";
+import { Database } from "../../shared/sqlite";
+import { closeQuietly } from "../../shared/sqlite-helpers";
+import {
+    type Block,
+    PREFIX_ERROR,
+    STRICT_AUDIT,
+    StrictBindingMock,
+    type Wire,
+    withoutThinking,
+} from "./__tests__/strict-binding-mock";
+import type { MessageLike } from "./tag-messages";
 import { createTransform, type TransformDeps } from "./transform";
 
-import { StrictBindingMock, PREFIX_ERROR, type Block, type Wire } from "./__tests__/strict-binding-mock";
+const MODEL = { providerID: "anthropic", modelID: "claude-opus-5-5" };
+
+/**
+ * What OpenCode's `@ai-sdk/anthropic` path sends for a message array: empty
+ * text and empty or unsigned reasoning are dropped by the adapter, a completed
+ * tool part becomes a tool_use plus a tool_result, a compacted tool keeps its
+ * call and sends OpenCode's cleared-output text.
+ */
 function wire(messages: MessageLike[]): Wire {
     const result: Wire = [];
     for (const m of messages) {
@@ -23,13 +65,33 @@ function wire(messages: MessageLike[]): Wire {
         for (const raw of m.parts) {
             const p = raw as Record<string, any>;
             if (p.ignored === true) continue;
-            if (p.type === "text") content.push({ type: "text", text: p.text });
-            else if (p.type === "reasoning" && p.text && p.text !== "[cleared]") content.push({ type: "thinking", thinking: p.text, signature: p.metadata?.anthropic?.signature });
-            else if (p.type === "thinking") content.push({ type: "thinking", thinking: p.thinking, signature: p.signature });
-            else if (p.type === "tool") {
-                content.push({ type: "tool_use", id: p.callID, name: p.tool, input: p.state.input ?? {} });
-                results.push({ type: "tool_result", tool_use_id: p.callID, content: p.state.output });
-            } else if (p.type === "file") content.push({ type: "image", source: { url: p.url, mime: p.mime } });
+            if (p.type === "text") {
+                if (typeof p.text === "string" && p.text.length > 0)
+                    content.push({ type: "text", text: p.text });
+            } else if (p.type === "reasoning") {
+                const signature = p.metadata?.anthropic?.signature;
+                if (
+                    typeof p.text === "string" &&
+                    p.text.length > 0 &&
+                    typeof signature === "string"
+                )
+                    content.push({ type: "thinking", thinking: p.text, signature });
+            } else if (p.type === "tool") {
+                content.push({
+                    type: "tool_use",
+                    id: p.callID,
+                    name: p.tool,
+                    input: p.state?.input ?? {},
+                });
+                const output = p.state?.time?.compacted
+                    ? "[Old tool result content cleared]"
+                    : p.state?.status === "completed"
+                      ? p.state.output
+                      : "[Tool execution was interrupted]";
+                results.push({ type: "tool_result", tool_use_id: p.callID, content: output });
+            } else if (p.type === "file") {
+                content.push({ type: "image", source: { url: p.url, mime: p.mime } });
+            }
         }
         if (content.length) result.push({ role: m.info.role, content });
         if (results.length) result.push({ role: "user", content: results });
@@ -37,109 +99,562 @@ function wire(messages: MessageLike[]): Wire {
     return result;
 }
 
-const oldData = process.env.XDG_DATA_HOME;
-const oldCache = process.env.XDG_CACHE_HOME;
-const dirs: string[] = [];
-afterEach(() => {
-    closeDatabase();
-    if (oldData === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = oldData;
-    if (oldCache === undefined) delete process.env.XDG_CACHE_HOME; else process.env.XDG_CACHE_HOME = oldCache;
-    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
+type Lane =
+    | "ctx_reduce drop (full removal)"
+    | "ctx_reduce drop (skeleton beside reasoning)"
+    | "age reclaim and heuristic cleanup"
+    | "supersession and dedup"
+    | "emergency 85% force band"
+    | "emergency 95% wall"
+    | "/ctx-flush"
+    | "HARD fold after historian publication"
+    | "m[0]/m[1] re-render after a recomp clears the cached pair"
+    | "synthetic todo"
+    | "caveman text compression"
+    | "reasoning clearing (keep_reasoning_tokens)"
+    | "processed image strip"
+    | "stale ctx_reduce strip"
+    | "frozen-sentinel first application";
 
-async function fixture(subagent: boolean, generation: "v1" | "v2", lane: string = "", extra: Partial<TransformDeps> = {}) {
-    const dir = mkdtempSync(join(tmpdir(), "signed-prefix-audit-"));
-    dirs.push(dir);
-    process.env.XDG_DATA_HOME = dir;
-    process.env.XDG_CACHE_HOME = dir;
-    const db = openDatabase()!;
-    const sessionId = `audit-${generation}-${subagent}`;
+/** Lanes the audit found landing an edit before kept signed thinking. */
+const EXPOSED = new Set<Lane>([
+    "m[0]/m[1] re-render after a recomp clears the cached pair",
+    "synthetic todo",
+    "processed image strip",
+    "stale ctx_reduce strip",
+    "frozen-sentinel first application",
+]);
+
+const PRIMARY_LANES: Lane[] = [
+    "ctx_reduce drop (full removal)",
+    "ctx_reduce drop (skeleton beside reasoning)",
+    "age reclaim and heuristic cleanup",
+    "supersession and dedup",
+    "emergency 85% force band",
+    "emergency 95% wall",
+    "/ctx-flush",
+    "HARD fold after historian publication",
+    "m[0]/m[1] re-render after a recomp clears the cached pair",
+    "synthetic todo",
+    "caveman text compression",
+    "reasoning clearing (keep_reasoning_tokens)",
+    "processed image strip",
+    "stale ctx_reduce strip",
+    "frozen-sentinel first application",
+];
+// Subagents have no m[0]/m[1], synthetic todo, caveman or /ctx-flush, and no
+// later user turn to anchor a processed-image watermark.
+const SUBAGENT_LANES: Lane[] = [
+    "ctx_reduce drop (full removal)",
+    "ctx_reduce drop (skeleton beside reasoning)",
+    "age reclaim and heuristic cleanup",
+    "supersession and dedup",
+    "emergency 85% force band",
+    "emergency 95% wall",
+    "reasoning clearing (keep_reasoning_tokens)",
+    "stale ctx_reduce strip",
+    "frozen-sentinel first application",
+];
+
+interface Fixture {
+    db: Database;
+    sessionId: string;
+    mock: StrictBindingMock;
+    served: MessageLike[];
+    pass: () => Promise<MessageLike[]>;
+    respond: (
+        served: MessageLike[],
+        parts?: (n: number) => unknown[],
+        withThinking?: boolean,
+    ) => void;
+    userTurn: (id: string, text: string) => void;
+    setUsage: (percentage: number) => void;
+    execute: (on: boolean) => void;
+    pendingMaterialization: Set<string>;
+    historyRefresh: Set<string>;
+    tag: (callId: string) => number;
+    tagStatus: (callId: string) => string | undefined;
+}
+
+function readPart(callID: string, filePath: string, output: string) {
+    return {
+        type: "tool",
+        tool: "read",
+        callID,
+        state: { status: "completed", input: { filePath }, output, time: { start: 1, end: 2 } },
+    };
+}
+
+/** A current-turn step: read one more source file. */
+function defaultStepParts(n: number): unknown[] {
+    return [
+        readPart(
+            `call-${n}`,
+            `/project/src/file-${n}.ts`,
+            `export const v${n} = ${n};\n`.repeat(400),
+        ),
+    ];
+}
+
+/** A ctx_reduce call; ctx_reduce keeps its newest 3 calls by default. */
+function reducePart(callID: string, drop: string): unknown {
+    return {
+        type: "tool",
+        tool: "ctx_reduce",
+        callID,
+        state: {
+            status: "completed",
+            input: { drop },
+            output: `Queued: drop §${drop}§`,
+            time: { start: 1, end: 2 },
+        },
+    };
+}
+
+const HISTORY_COMPARTMENT = {
+    sequence: 0,
+    startMessage: 1,
+    endMessage: 5,
+    startMessageId: "prompt-1",
+    endMessageId: "step-4",
+    title: "Parser inspection",
+    content: "Read parser.ts, ast.ts and lexer.ts; error recovery never resynchronises.",
+};
+
+const PARSER_SOURCE = "export function parse(tokens) { /* recursive descent */ }\n".repeat(150);
+const SUMMARY_TEXT =
+    "I have finished reading the parser and the lexer. The parser consumes tokens from the lexer, and the error recovery path is incomplete because it never resynchronises after an unexpected token.";
+
+async function fixture(
+    generation: "v1" | "v2",
+    subagent: boolean,
+    lane: Lane,
+    dir: string,
+): Promise<Fixture> {
+    const db = new Database(":memory:");
+    initializeDatabase(db);
+    runMigrations(db);
+    const sessionId = `prefix-audit-${generation}-${subagent ? "sub" : "pri"}-${lane.replace(/\W+/g, "-")}`;
     getOrCreateSessionMeta(db, sessionId);
-    updateSessionMeta(db, sessionId, { isSubagent: subagent, ...(lane === "todo" ? { lastTodoState: JSON.stringify([{ content: "Inspect parser", status: "in_progress", priority: "high" }]) } : {}) });
-    const model = { providerID: "anthropic", modelID: "claude-opus-5-5" };
-    const pendingMaterializationSessions = new Set<string>();
-    const historyRefreshSessions = new Set<string>();
+    updateSessionMeta(db, sessionId, { isSubagent: subagent });
+    if (lane === "synthetic todo")
+        updateSessionMeta(db, sessionId, {
+            lastTodoState: JSON.stringify([
+                { content: "Inspect parser", status: "in_progress", priority: "high" },
+            ]),
+        });
     const usage: TransformDeps["contextUsageMap"] = new Map();
+    const pendingMaterialization = new Set<string>();
+    const historyRefresh = new Set<string>();
     let decision: "execute" | "defer" = "defer";
     const transform = createTransform({
-        db, storeGeneration: generation, tagger: createTagger(),
-        scheduler: { shouldExecute: () => decision },
-        liveModelBySession: new Map([[sessionId, model]]),
-        contextUsageMap: usage, protectedTokens: 0, historianRunnable: false,
-        historyRefreshSessions, pendingMaterializationSessions,
-        lastHeuristicsTurnId: new Map(), keepReasoningTokens: 1_000_000,
-        ...extra,
+        db,
+        storeGeneration: generation,
+        tagger: createTagger(),
+        scheduler: { shouldExecute: () => decision } as never,
+        liveModelBySession: new Map([[sessionId, MODEL]]),
+        contextUsageMap: usage,
+        // The smallest accepted floor; the current loop's newer steps fill it,
+        // so the older work sits outside the protected tail.
+        protectedTokens: 4000,
+        historianRunnable: false,
+        directory: dir,
+        sessionDirectoryBySession: new Map([[sessionId, dir]]),
+        historyRefreshSessions: historyRefresh,
+        pendingMaterializationSessions: pendingMaterialization,
+        lastHeuristicsTurnId: new Map(),
+        smartDrops: true,
+        keepReasoningTokens: lane === "reasoning clearing (keep_reasoning_tokens)" ? 0 : 1_000_000,
+        ...(lane === "caveman text compression"
+            ? { cavemanTextCompression: { enabled: true, minChars: 40 } }
+            : {}),
     });
-    const raw: MessageLike[] = [{ info: { id: "prompt", role: "user", sessionID: sessionId }, parts: [{ type: "text", text: "Inspect the project and repair the parser; keep using tools until done." }] }];
-    if (lane === "image") raw[0]!.parts.push({ type: "file", mime: "image/png", url: `data:image/png;base64,${"a".repeat(220)}` });
-    raw.push({ info: { id: "unsigned-spent", role: "assistant", sessionID: sessionId, ...model }, parts: [
-        ...(lane === "sentinel" ? [{ type: "text", text: "[dropped §999§]" }] : []),
-        { type: "tool", tool: lane === "stale-reduce" ? "ctx_reduce" : "read", callID: "unsigned-call", state: { status: "completed", input: { filePath: lane === "ctx_reduce full" ? "p".repeat(5000) : "/project/parser.ts" }, output: "The parser source has been inspected. ".repeat(300) } },
-    ] });
-    if (lane === "sentinel") raw.push({ info: { id: "placeholder-only", role: "assistant", sessionID: sessionId, ...model }, parts: [{ type: "text", text: "[dropped §999§]" }] });
-    if (lane === "stale-reduce") for (let n = 1; n <= 4; n++) raw.push({ info: { id: `old-reduce-${n}`, role: "assistant", sessionID: sessionId, ...model }, parts: [{ type: "tool", tool: "ctx_reduce", callID: `old-reduce-call-${n}`, state: { status: "completed", input: { drop: "999" }, output: "Queued" } }] });
+    const raw: MessageLike[] = [];
     const mock = new StrictBindingMock();
-    mock.newUserTurn();
+    let step = 0;
     const pass = async () => {
         const messages = structuredClone(raw);
         await transform({}, { messages });
         return messages;
     };
-    if (lane === "todo") { decision = "execute"; pendingMaterializationSessions.add(sessionId); }
-    let served = await pass();
-    decision = "defer";
-    for (let n = 1; n <= 6; n++) {
-        expect(mock.check(wire(served))).toBeNull();
-        const block = mock.emit(wire(served));
-        raw.push({ info: { id: `step-${n}`, role: "assistant", sessionID: sessionId, ...model }, parts: [
-            { type: "reasoning", text: block.thinking, metadata: { anthropic: { signature: block.signature } } },
-            { type: "tool", tool: "read", callID: `call-${n}`, state: { status: "completed", input: { filePath: `/project/parser-${n}.ts` }, output: `export const value${n} = 1;\n`.repeat(300) } },
-        ] });
-        served = await pass();
-    }
-    expect(mock.check(wire(served))).toBeNull();
-    const bust = (percentage = 76) => {
-        decision = "execute";
-        usage.set(sessionId, { usage: { percentage, inputTokens: percentage * 1000 }, updatedAt: Date.now(), hasUsageTokens: true });
-        pendingMaterializationSessions.add(sessionId);
+    const respond: Fixture["respond"] = (served, parts, withThinking = true) => {
+        const block = mock.respond(wire(served), withThinking);
+        step++;
+        raw.push({
+            info: { id: `step-${step}`, role: "assistant", sessionID: sessionId, ...MODEL },
+            parts: [
+                ...(block
+                    ? [
+                          {
+                              type: "reasoning",
+                              text: block.thinking,
+                              metadata: { anthropic: { signature: block.signature } },
+                          },
+                      ]
+                    : []),
+                ...(parts ? parts(step) : defaultStepParts(step)),
+            ],
+        });
     };
-    return { db, sessionId, raw, mock, pass, bust, served, historyRefreshSessions, pendingMaterializationSessions };
-}
+    const userTurn = (id: string, text: string, extra: unknown[] = []) => {
+        mock.newUserTurn();
+        raw.push({
+            info: { id, role: "user", sessionID: sessionId },
+            parts: [{ type: "text", text }, ...extra],
+        });
+    };
+    const image =
+        lane === "processed image strip"
+            ? [
+                  {
+                      type: "file",
+                      mime: "image/png",
+                      url: `data:image/png;base64,${"iVBORw0KGgo".repeat(40)}`,
+                  },
+              ]
+            : [];
 
-const requireValid = process.env.MC_AUDIT_EXPECT_VALID === "1";
-function diagnose(actual: string | null, expected: string | null) {
-    expect(actual).toBe(requireValid ? null : expected);
-}
-
-describe("signed prefix audit: real OpenCode transform", () => {
-    for (const generation of ["v1", "v2"] as const) for (const subagent of [false, true]) {
-        const scope = `${generation} ${subagent ? "subagent" : "primary mid-loop"}`;
-        for (const lane of ["ctx_reduce full", "ctx_reduce skeleton", "force85", "wall95", "flush", "todo", "reasoning-budget", "caveman", "image", "sentinel", "stale-reduce"] as const) {
-            it(`${scope}: ${lane}`, async () => {
-                const f = await fixture(subagent, generation, lane, lane === "caveman" ? { cavemanTextCompression: { enabled: true, minChars: 20 } } : lane === "reasoning-budget" ? { keepReasoningTokens: 0 } : {});
-                const tool = getTagsBySession(f.db, f.sessionId).find(t => t.type === "tool" && t.messageId.includes("unsigned-call"))!;
-                expect(tool).toBeDefined();
-                if (lane.startsWith("ctx_reduce")) queuePendingOp(f.db, f.sessionId, tool.tagNumber, "drop");
-                if (lane === "todo") updateSessionMeta(f.db, f.sessionId, { lastTodoState: JSON.stringify([{ content: "Repair parser", status: "pending", priority: "high" }]) });
-                if (lane === "image") {
-                    // The unsigned trailing arc can be reduced without changing any
-                    // thinking prefix. Its dropped tag advances the image watermark.
-                    for (let n = 1; n <= 4; n++) f.raw.push({ info: { id: `unsigned-tail-${n}`, role: "assistant", sessionID: f.sessionId, providerID: "anthropic", modelID: "claude-opus-5-5" }, parts: [{ type: "tool", tool: "read", callID: n === 1 ? "tail-call" : `tail-new-${n}`, state: { status: "completed", input: { filePath: `/project/final-${n}.ts` }, output: "Already inspected. ".repeat(300) } }] });
-                    await f.pass();
-                    const tail = getTagsBySession(f.db, f.sessionId).find(t => t.type === "tool" && t.messageId.includes("tail-call"))!;
-                    queuePendingOp(f.db, f.sessionId, tail.tagNumber, "drop");
-                    f.bust(95);
-                    const tailReduced = await f.pass();
-                    expect(f.mock.check(wire(tailReduced))).toBeNull();
-                    expect(getTagsBySession(f.db, f.sessionId).find(t => t.tagNumber === tail.tagNumber)?.status).toBe("dropped");
-                }
-                f.bust(lane === "force85" ? 85 : lane === "wall95" ? 95 : 76);
-                const next = await f.pass();
-                const error = f.mock.check(wire(next));
-                console.log(`AUDIT ${scope} ${lane}: ${error ?? "accepted"}; changed=${JSON.stringify(next) !== JSON.stringify(f.served)}; pending=${f.pendingMaterializationSessions.has(f.sessionId)}`);
-                const exposed = lane === "sentinel" || lane === "stale-reduce" || lane === "image" || (lane === "todo" && !subagent);
-                diagnose(error, exposed ? "400: Invalid signature in thinking block: bound to a different conversation" : null);
-            });
-        }
+    // Older work. In a primary session it is a completed earlier user turn; in
+    // a subagent it is the first steps of the same (only) turn.
+    userTurn("prompt-1", "Inspect the parser and the attached screenshot, then report.", image);
+    let served = await pass();
+    respond(served, () => [readPart("old-read-a", "/project/src/parser.ts", PARSER_SOURCE)]);
+    served = await pass();
+    // An interleaved step without thinking; its tool is the full-removal target.
+    // Only the dedup lane rereads the same file.
+    respond(
+        served,
+        () => [
+            readPart(
+                "old-read-b",
+                lane === "supersession and dedup"
+                    ? "/project/src/parser.ts"
+                    : "/project/src/ast.ts",
+                lane === "supersession and dedup"
+                    ? PARSER_SOURCE
+                    : "export interface Node { kind: string }\n".repeat(150),
+            ),
+        ],
+        false,
+    );
+    served = await pass();
+    respond(served, () =>
+        lane === "stale ctx_reduce strip"
+            ? [reducePart("old-reduce", "3")]
+            : [
+                  readPart(
+                      "old-read-c",
+                      "/project/src/lexer.ts",
+                      "export function lex(src) {}\n".repeat(150),
+                  ),
+              ],
+    );
+    served = await pass();
+    respond(served, () => [{ type: "text", text: SUMMARY_TEXT }]);
+    if (lane === "frozen-sentinel first application") {
+        // A message left holding only a drop placeholder (history written while
+        // compaction was off, or by an older build) is neutralized on its first
+        // cache-busting pass.
+        raw.push({
+            info: { id: "placeholder-only", role: "assistant", sessionID: sessionId, ...MODEL },
+            parts: [{ type: "text", text: "[dropped §998§]" }],
+        });
     }
-});
+    if (!subagent) {
+        served = await pass();
+        expect(mock.check(wire(served))).toBeNull();
+        userTurn(
+            "prompt-2",
+            "Now repair the error recovery in the parser; keep using tools until it is done.",
+        );
+    }
+    served = await pass();
+    const tagRow = (callId: string) =>
+        getTagsBySession(db, sessionId).find(
+            (t) => t.messageId === callId || t.messageId.endsWith(callId),
+        );
+    const tag = (callId: string) => {
+        const row = tagRow(callId);
+        if (!row) throw new Error(`no tag for ${callId}`);
+        return row.tagNumber;
+    };
+    const setUsage = (percentage: number) =>
+        usage.set(sessionId, {
+            usage: { percentage, inputTokens: percentage * 1000 },
+            updatedAt: Date.now(),
+            hasUsageTokens: true,
+        } as never);
+    const execute = (on: boolean) => {
+        decision = on ? "execute" : "defer";
+    };
+    return {
+        db,
+        sessionId,
+        mock,
+        served,
+        pass,
+        respond,
+        userTurn,
+        setUsage,
+        execute,
+        pendingMaterialization,
+        historyRefresh,
+        tag,
+        tagStatus: (callId) => tagRow(callId)?.status,
+    };
+}
+
+/** Grow the current turn's tool loop by `steps` signed responses. */
+async function toolLoop(
+    f: Fixture,
+    steps: number,
+    parts?: (n: number, i: number) => unknown[] | undefined,
+): Promise<MessageLike[]> {
+    for (let i = 0; i < steps; i++) {
+        f.respond(f.served, parts ? (n) => parts(n, i) ?? defaultStepParts(n) : undefined);
+        f.served = await f.pass();
+        expect(f.mock.check(wire(f.served))).toBeNull();
+    }
+    return f.served;
+}
+
+/** In the stale ctx_reduce lane the agent calls ctx_reduce three more times, aging out its first call. */
+function loopParts(lane: Lane) {
+    return lane === "stale ctx_reduce strip"
+        ? (n: number, i: number) => (i < 3 ? [reducePart(`loop-reduce-${n}`, "1")] : undefined)
+        : undefined;
+}
+
+/** Finish the current turn with a text answer and start the next real user turn. */
+async function nextUserTurn(f: Fixture, id: string): Promise<void> {
+    f.respond(f.served, (n) => [
+        { type: "text", text: `Step ${n}: this part of the work is done and verified.` },
+    ]);
+    f.served = await f.pass();
+    expect(f.mock.check(wire(f.served))).toBeNull();
+    f.userTurn(id, "Continue with the next part of the parser work; keep using tools until done.");
+    f.served = await f.pass();
+    expect(f.mock.check(wire(f.served))).toBeNull();
+}
+
+/**
+ * Lane setup that must happen before the current turn's loop: anchors and
+ * watermarks that exist in a real session by the time a later bust comes.
+ */
+async function prepareLane(f: Fixture, lane: Lane): Promise<void> {
+    if (lane === "synthetic todo") {
+        // The todo pair is anchored on a turn-start bust (here a /ctx-flush).
+        f.pendingMaterialization.add(f.sessionId);
+        f.served = await f.pass();
+        expect(f.mock.check(wire(f.served))).toBeNull();
+    }
+    if (lane === "processed image strip") {
+        // A drop applied at the start of a later turn advances the drop
+        // watermark past the answered screenshot message; that same pass reads
+        // the old watermark, so the image itself is not stripped yet.
+        await toolLoop(f, 4);
+        await nextUserTurn(f, "prompt-3");
+        queuePendingOp(f.db, f.sessionId, f.tag("old-read-b"), "drop");
+        f.pendingMaterialization.add(f.sessionId);
+        f.served = await f.pass();
+        expect(f.mock.check(wire(f.served))).toBeNull();
+        expect(f.tagStatus("old-read-b")).toBe("dropped");
+        expect(JSON.stringify(wire(f.served))).toContain('"type":"image"');
+    }
+}
+
+/** Queue or arm whatever the lane needs, then offer the bust it rides. */
+function armAndBust(f: Fixture, lane: Lane, subagent: boolean): void {
+    switch (lane) {
+        case "ctx_reduce drop (full removal)":
+        case "/ctx-flush":
+            queuePendingOp(f.db, f.sessionId, f.tag("old-read-b"), "drop");
+            break;
+        case "ctx_reduce drop (skeleton beside reasoning)":
+            queuePendingOp(f.db, f.sessionId, f.tag("old-read-a"), "drop");
+            break;
+        case "age reclaim and heuristic cleanup":
+            updateSessionMeta(f.db, f.sessionId, { toolReclaimWatermark: f.tag("old-read-c") });
+            break;
+        case "HARD fold after historian publication":
+            // The historian appended a compartment covering the first turn and
+            // asked for a history refresh, as its incremental publication does.
+            appendCompartments(f.db, f.sessionId, [HISTORY_COMPARTMENT]);
+            f.historyRefresh.add(f.sessionId);
+            break;
+        case "m[0]/m[1] re-render after a recomp clears the cached pair":
+            // A recomp promotion (or a history-boundary repair) rewrites the
+            // compartments and clears the cached m[0]/m[1] pair in the same
+            // transaction. No bust is offered: the next pass is a defer pass.
+            replaceAllCompartmentState(f.db, f.sessionId, [HISTORY_COMPARTMENT], []);
+            return;
+        case "synthetic todo":
+            updateSessionMeta(f.db, f.sessionId, {
+                lastTodoState: JSON.stringify([
+                    { content: "Inspect parser", status: "completed", priority: "high" },
+                    { content: "Repair error recovery", status: "in_progress", priority: "high" },
+                ]),
+            });
+            break;
+        default:
+            break;
+    }
+    if (lane === "/ctx-flush") {
+        f.pendingMaterialization.add(f.sessionId);
+        return;
+    }
+    // A primary busts through the force band (its first pass at 85% may
+    // rewrite); a subagent through an ordinary execute decision, which is how
+    // issue 630 reached its tool loop.
+    f.execute(true);
+    f.setUsage(lane === "emergency 95% wall" ? 95 : subagent ? 76 : 85);
+}
+
+/** First differing non-thinking block, for diagnosing an unexpected edit (MC_AUDIT_DEBUG=1). */
+function debugDiff(label: string, before: Wire, after: Wire): void {
+    if (process.env.MC_AUDIT_DEBUG !== "1") return;
+    const flat = (w: Wire) =>
+        w.flatMap((m) =>
+            m.content
+                .filter((b) => b.type !== "thinking")
+                .map((b) => JSON.stringify([m.role, b]).slice(0, 160)),
+        );
+    const a = flat(before);
+    const b = flat(after);
+    const i = a.findIndex((x, k) => x !== b[k]);
+    console.log(
+        `DIFF ${label} at=${i} lens=${a.length}/${b.length}\n  before: ${a[i]}\n  after:  ${b[i]}`,
+    );
+}
+
+/** Whether the lane's own edit is in the served request. */
+function landed(f: Fixture, lane: Lane, after: Wire): boolean {
+    const text = JSON.stringify(after);
+    const old = ["old-read-a", "old-read-b", "old-read-c"];
+    switch (lane) {
+        case "ctx_reduce drop (full removal)":
+        case "/ctx-flush":
+            return f.tagStatus("old-read-b") === "dropped";
+        case "ctx_reduce drop (skeleton beside reasoning)":
+            return f.tagStatus("old-read-a") === "dropped";
+        case "age reclaim and heuristic cleanup":
+        case "emergency 85% force band":
+        case "emergency 95% wall":
+        case "supersession and dedup":
+            return old.some((id) => f.tagStatus(id) === "dropped");
+        case "HARD fold after historian publication":
+        case "m[0]/m[1] re-render after a recomp clears the cached pair":
+            return text.includes(HISTORY_COMPARTMENT.title);
+        case "synthetic todo":
+            return text.includes("Repair error recovery");
+        case "caveman text compression":
+            return !text.includes(SUMMARY_TEXT);
+        case "reasoning clearing (keep_reasoning_tokens)":
+            return getReasoningRemovalState(f.db, f.sessionId).messageIds.size > 0;
+        case "processed image strip":
+            return !text.includes('"type":"image"');
+        case "stale ctx_reduce strip":
+            return !text.includes('"id":"old-reduce"');
+        case "frozen-sentinel first application":
+            // The raw history always carries the placeholder message.
+            return !text.includes("[dropped §998§]");
+    }
+}
+
+function withFixture(
+    generation: "v1" | "v2",
+    subagent: boolean,
+    lane: Lane,
+    body: (f: Fixture) => Promise<void>,
+) {
+    return async () => {
+        const dir = mkdtempSync(join(tmpdir(), "signed-prefix-audit-"));
+        const f = await fixture(generation, subagent, lane, dir);
+        try {
+            await body(f);
+        } finally {
+            closeQuietly(f.db);
+            rmSync(dir, { recursive: true, force: true });
+        }
+    };
+}
+
+for (const generation of ["v1", "v2"] as const) {
+    const host = generation === "v1" ? "OpenCode 1 TS mode" : "OpenCode 2";
+    for (const subagent of [false, true]) {
+        const scope = subagent ? "subagent run" : "primary mid tool loop";
+        describe(`signed prefix audit: ${host}, ${scope}`, () => {
+            for (const lane of subagent ? SUBAGENT_LANES : PRIMARY_LANES) {
+                it(
+                    lane,
+                    withFixture(generation, subagent, lane, async (f) => {
+                        await prepareLane(f, lane);
+                        const before = wire(await toolLoop(f, 4, loopParts(lane)));
+                        armAndBust(f, lane, subagent);
+                        const afterMessages = await f.pass();
+                        const after = wire(afterMessages);
+                        const error = f.mock.check(after);
+                        const edit = landed(f, lane, after);
+                        debugDiff(lane, before, after);
+                        const nonThinkingEdit = withoutThinking(after) !== withoutThinking(before);
+                        console.log(
+                            `AUDIT ${host} | ${scope} | ${lane}: ${error ?? "accepted"}; laneLanded=${edit}; nonThinkingEdit=${nonThinkingEdit}; pendingOps=${getPendingOps(f.db, f.sessionId).length}`,
+                        );
+                        if (STRICT_AUDIT) {
+                            expect(error).toBeNull();
+                            return;
+                        }
+                        if (EXPOSED.has(lane)) {
+                            expect(edit).toBe(true);
+                            expect(error).toBe(PREFIX_ERROR);
+                            return;
+                        }
+                        // Held: valid, no byte outside thinking changed, the lane's
+                        // edit is not served, and any queued drop stays queued for
+                        // the next real user turn. Reasoning clearing is valid by
+                        // construction: it removes an oldest contiguous run.
+                        expect(error).toBeNull();
+                        expect(nonThinkingEdit).toBe(false);
+                        if (lane !== "reasoning clearing (keep_reasoning_tokens)")
+                            expect(edit).toBe(false);
+                        if (lane.startsWith("ctx_reduce") || lane === "/ctx-flush")
+                            expect(getPendingOps(f.db, f.sessionId).length).toBeGreaterThan(0);
+                        // The loop continues validly on the held pass's bytes.
+                        f.served = afterMessages;
+                        await toolLoop(f, 2);
+                    }),
+                );
+            }
+            if (subagent) return;
+            for (const lane of PRIMARY_LANES) {
+                it(
+                    `control: ${lane} lands validly at a new user turn`,
+                    withFixture(generation, false, lane, async (f) => {
+                        await prepareLane(f, lane);
+                        await toolLoop(f, 4, loopParts(lane));
+                        await nextUserTurn(f, "prompt-next");
+                        const before = wire(f.served);
+                        armAndBust(f, lane, false);
+                        const afterMessages = await f.pass();
+                        const after = wire(afterMessages);
+                        const error = f.mock.check(after);
+                        const edit = landed(f, lane, after);
+                        debugDiff(`control ${lane}`, before, after);
+                        const thinkingLeft = after.some((m) =>
+                            m.content.some((b) => b.type === "thinking"),
+                        );
+                        console.log(
+                            `AUDIT-CONTROL ${host} | new user turn | ${lane}: ${error ?? "accepted"}; laneLanded=${edit}; thinkingLeft=${thinkingLeft}`,
+                        );
+                        expect(edit).toBe(true);
+                        expect(error).toBeNull();
+                        // Every older signed block is gone, so the edit binds nothing.
+                        expect(thinkingLeft).toBe(false);
+                        f.served = afterMessages;
+                        await toolLoop(f, 3);
+                    }),
+                );
+            }
+        });
+    }
+}
