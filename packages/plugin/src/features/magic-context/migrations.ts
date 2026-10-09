@@ -5,6 +5,7 @@ import type { Database } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { splitLkgSlotPrefixes, splitReplayDecisions } from "./migration-v94-write-split";
 import { installV95PerfSchema } from "./migration-v95-perf-indexes";
+import { installCompartmentRescoreSchema } from "./migration-v98-compartment-rescore";
 import { repairOpenCode2HarnessLabels } from "./opencode2-relabel";
 import { installCompartmentHistoryVersions } from "./storage-compartment-history-version";
 import { installHostRunnerSchema } from "./storage-host-runner";
@@ -3235,6 +3236,13 @@ export const MIGRATIONS: Migration[] = [
         description: "durable append-only host runner entries, ids, views and pass state",
         up(db: Database): void {
             installHostRunnerSchema(db);
+        },
+    },
+    {
+        version: 98,
+        description: "score revision sidecar, selection history and project rescore jobs",
+        up(db: Database): void {
+            installCompartmentRescoreSchema(db);
         },
     },
 ];

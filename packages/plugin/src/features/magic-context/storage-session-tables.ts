@@ -40,6 +40,18 @@ export const SESSION_SCOPED_TABLES: readonly SessionScopedTableDefinition[] = [
         extraPredicate:
             "NOT EXISTS (SELECT 1 FROM compartments AS remaining WHERE remaining.session_id = compartment_history_versions.session_id)",
     },
+    // Selections precede revisions so their revision foreign keys remain valid.
+    // Compartments retained for another host (OpenCode or Pi) keep score history too.
+    {
+        table: "compartment_score_selections",
+        extraPredicate:
+            "NOT EXISTS (SELECT 1 FROM compartments AS remaining WHERE remaining.session_id = compartment_score_selections.session_id)",
+    },
+    {
+        table: "compartment_score_revisions",
+        extraPredicate:
+            "NOT EXISTS (SELECT 1 FROM compartments AS remaining WHERE remaining.session_id = compartment_score_revisions.session_id)",
+    },
     { table: "compression_depth", harnessScoped: true },
     { table: "session_facts", harnessScoped: true },
     { table: "compartment_state_lease" },
