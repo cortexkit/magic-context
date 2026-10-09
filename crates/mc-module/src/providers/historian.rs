@@ -394,6 +394,8 @@ impl McHandler {
 mod tests {
     use super::*;
 
+    include!("m5_review_tests.rs");
+
     fn handler(path: &Path) -> McHandler {
         let mut h = McHandler::new();
         h.fixed_config = Some(McModuleConfig {
