@@ -1235,7 +1235,31 @@ impl McHandler {
             self.provider_store.save(&key,&record)?;
             let detail=ctx_reduce_ack_details(&unknown,&already);
             if queue.is_empty() {return Ok(tool_error_result(format!("Refused: no valid tags to queue. {detail}")));}
-            Ok(mcp_text_result(format!("Queued: drop {}. {detail} Marking QUEUES content for release. It stays fully visible until a compaction pass.",format_tag_numbers(&queue)),false))
+            let store = self.store_for_request().await.map_err(StoreRefusal::into_outcome)?;
+            let engine_key = key.engine_key();
+            let meta = store.load_meta(&engine_key).map_err(transient)?.meta;
+            let tags = store.load_tags_for_session(&engine_key).map_err(transient)?;
+            let floor = meta.protected_tokens_effective.unwrap_or_else(|| {
+                binding.config.resolve_protected_tokens(
+                    record.setup.as_ref().and_then(|s| s.request.context_window).unwrap_or(200_000),
+                ).floor
+            });
+            let ratio = meta.decision_calibration.as_ref()
+                .and_then(decision_calibration::DecisionCalibration::from_frozen)
+                .unwrap_or_else(decision_calibration::DecisionCalibration::neutral).tools_ratio;
+            let window = protection_window::ProtectionWindow::from_persisted_rows_calibrated(&tags, floor, ratio);
+            let (held, immediate): (Vec<_>, Vec<_>) = queue.iter().copied().partition(|number| {
+                window.tag_numbers.tag_numbers.contains(&protection_window::TagNumber(*number as i64))
+                    || live.and_then(|tags| tags.get(number)).is_some_and(|tag| meta.protected_tool_block_ids.contains(&tag.block_id))
+            });
+            // Queue protected targets durably, but do not promise release on the
+            // next compaction: newer work must first displace their protection.
+            let mut reply = String::new();
+            if !immediate.is_empty() { reply = format!("Queued: drop {}. ", format_tag_numbers(&immediate)); }
+            if !held.is_empty() { reply.push_str(&ctx_reduce_held_reply(&held)); reply.push(' '); }
+            reply.push_str(&detail);
+            reply.push_str(" Marking QUEUES content for release. It stays fully visible until it is actually released, which may be the next turn or many turns later.");
+            Ok(mcp_text_result(reply,false))
         }.await;
         match result {
             Ok(answer) => answer,
