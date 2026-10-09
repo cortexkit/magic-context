@@ -439,7 +439,16 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                 }
                 for (const [id, bridges] of bridgesBySubject)
                     saved.bridges.set(id, new Map(clonePreservingInstances([...bridges])));
-                for (const [id, parts] of hostPartsByID) saved.hostParts.set(id, parts);
+                for (const [id, parts] of hostPartsByID)
+                    saved.hostParts.set(id, {
+                        parts: new Map(
+                            [...parts.parts].map(([key, part]) => [
+                                key,
+                                clonePreservingInstances(part),
+                            ]),
+                        ),
+                        types: new Set(parts.types),
+                    });
             }
             let head = 0;
             const rendered: V2Message[] = [];
@@ -623,7 +632,9 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                 }
                 rendered.push(...following);
                 if (saved) {
-                    const owned = rendered.slice(start);
+                    // The host can retain Magic Context's existing header messages.
+                    // Cache a private copy so edits to old references cannot change replay.
+                    const owned = clonePreservingInstances(rendered.slice(start));
                     saved.byNative.set(native, owned);
                     if (mid) nextRendered.set(mid, { native, messages: owned });
                 }

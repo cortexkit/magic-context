@@ -17,8 +17,8 @@ import { createTagger } from "../../../features/magic-context/tagger";
 import { createMessagesTransformHandler } from "../../../plugin/messages-transform";
 import { Database } from "../../../shared/sqlite";
 import { deliverSynthetic } from "../../../v2/hooks/channel2";
-import { adaptPayload } from "../../../v2/hooks/payload";
-import type { V2Context } from "../../../v2/hooks/types";
+import { adaptPayload, HEAD_IDS } from "../../../v2/hooks/payload";
+import type { SessionContext, V2Context } from "../../../v2/hooks/types";
 import { deliverSyntheticUserMessage } from "../channel2-delivery";
 import { EmergencyFailClosedError } from "../emergency-fail-closed";
 import { createRustModeTransform } from "../rust-mode-transform";
@@ -1254,4 +1254,50 @@ test("review resolution v2: repeated projected call IDs keep distinct parts, res
         { type: "text", value: "§2§ first" },
         { type: "error", value: "§2§ second" },
     ]);
+});
+
+test("v2: retained pre-existing synthetic heads cannot mutate the projection cache", async () => {
+    const f = fixture("v2");
+    const head: MessageLike = {
+        info: { role: "user", sessionID: "session", syntheticHead: true },
+        parts: [{ type: "text", text: "recorded head", synthetic: true }],
+    };
+    f.setReply((wire) => {
+        if (wire.method !== "compaction.step") return undefined;
+        return {
+            answer: "compaction_message",
+            request_id: wire.params.request_id,
+            compaction: {
+                compaction_id: "head-view",
+                version: 2,
+                range: { from: 1, to: 2 },
+                replacement: [head, message("A")],
+            },
+        };
+    });
+    const retained = {
+        id: HEAD_IDS[0],
+        role: "user" as const,
+        content: [{ type: "text", text: "old host head" }],
+    };
+    const draft: SessionContext = {
+        sessionID: "session",
+        agent: "build",
+        model: { providerID: "openai", id: "gpt-5.6", limit: { context: 200_000 } },
+        system: [],
+        options: {},
+        tools: {},
+        messages: [retained, { id: "A", role: "user", content: [{ type: "text", text: "A" }] }],
+    };
+    const first = adaptPayload(draft);
+    await f.adapter.run("session", first.messages, first, f.meta);
+    first.commit();
+    const served = JSON.stringify(draft.messages);
+    expect(draft.messages[0]?.content[0]?.text).toBe("recorded head");
+    retained.content[0]!.text = "HOST MUTATED OLD HEAD";
+    const replay = adaptPayload(draft);
+    await f.adapter.run("session", replay.messages, replay, f.meta);
+    replay.commit();
+    expect(JSON.stringify(draft.messages)).toBe(served);
+    f.adapter.dispose();
 });
