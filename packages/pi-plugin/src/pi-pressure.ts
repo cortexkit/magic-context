@@ -29,7 +29,53 @@
  */
 
 import { sessionLog } from "@magic-context/core/shared/logger";
-import { MIN_PLAUSIBLE_CONTEXT_LIMIT } from "@magic-context/core/shared/window-geometry";
+import {
+	hasTrustedAbsoluteWall,
+	MIN_PLAUSIBLE_CONTEXT_LIMIT,
+	type WindowGeometryResult,
+} from "@magic-context/core/shared/window-geometry";
+
+// OpenCode's model resolver uses the same 3M sanity ceiling. Without an
+// authoritative window, a larger billing counter is not proof of capacity.
+// Catalog windows remain advisory so accepted measurements can repair them.
+export const MAX_UNKNOWN_PI_INPUT_TOKENS = 3_000_000;
+
+export function piPressureEvidenceLimit(
+	geometry?: WindowGeometryResult,
+): number {
+	return geometry && hasTrustedAbsoluteWall(geometry)
+		? geometry.derivation.absoluteWall
+		: MAX_UNKNOWN_PI_INPUT_TOKENS;
+}
+
+const rejectedUsageLogged = new Set<string>();
+const rejectedProviderUsage = new Set<string>();
+
+export function recordPiProviderUsageValidity(
+	sessionId: string,
+	rejected: boolean,
+): void {
+	if (rejected) rejectedProviderUsage.add(sessionId);
+	else rejectedProviderUsage.delete(sessionId);
+}
+
+export function piProviderUsageWasRejected(sessionId: string): boolean {
+	return rejectedProviderUsage.has(sessionId);
+}
+
+export function noteRejectedPiUsage(
+	sessionId: string,
+	reading: number,
+	limit: number,
+	source: string,
+): void {
+	if (rejectedUsageLogged.has(sessionId)) return;
+	rejectedUsageLogged.add(sessionId);
+	sessionLog(
+		sessionId,
+		`provider_usage_not_single_request: ${source} input ${reading} exceeds pressure evidence bound ${limit}; ignoring possible turn-aggregate billing usage and using request estimates`,
+	);
+}
 
 export interface PiAssistantUsage {
 	input?: number;
@@ -91,6 +137,20 @@ export function computePiPressure(
 	contextLimit: number,
 	absoluteWall?: number,
 ): PiPressure | null {
+	const inputTokens = piUsageInputTokens(usage);
+	if (
+		inputTokens === null ||
+		inputTokens > (absoluteWall ?? MAX_UNKNOWN_PI_INPUT_TOKENS)
+	)
+		return null;
+	const percentage = contextLimit > 0 ? (inputTokens / contextLimit) * 100 : 0;
+	return { inputTokens, percentage };
+}
+
+/** Normalize old inclusive-cache shapes before judging the prompt reading. */
+export function piUsageInputTokens(
+	usage: PiAssistantUsage | null,
+): number | null {
 	if (!usage) return null;
 	const input = usage.input ?? 0;
 	const cacheRead = usage.cacheRead ?? 0;
@@ -103,21 +163,12 @@ export function computePiPressure(
 		Number.isFinite(usage.output)
 			? Math.max(0, usage.totalTokens - usage.output)
 			: undefined;
-	let inputTokens =
+	const inputTokens =
 		totalPromptTokens !== undefined && totalPromptTokens > 0
 			? Math.min(componentPromptTokens, totalPromptTokens)
 			: componentPromptTokens;
 	if (inputTokens <= 0 || !Number.isFinite(inputTokens)) return null;
-	if (
-		typeof absoluteWall === "number" &&
-		Number.isFinite(absoluteWall) &&
-		absoluteWall > 0 &&
-		inputTokens > absoluteWall
-	) {
-		inputTokens = absoluteWall;
-	}
-	const percentage = contextLimit > 0 ? (inputTokens / contextLimit) * 100 : 0;
-	return { inputTokens, percentage };
+	return inputTokens;
 }
 
 export interface PiPressureSnapshot extends PiPressure {
@@ -283,6 +334,10 @@ export function isPiContextUsageRawBranchEstimate(
 
 export interface ResolveGuardedPiPressureSnapshotArgs
 	extends ResolvePiPressureSnapshotArgs {
+	/** Absolute request wall, not the output-reserved percentage denominator. */
+	providerInputLimit?: number;
+	/** Tokenized outgoing messages plus the current system/tool envelope. */
+	fallbackInputTokens?: number;
 	/** Pi's live figure is a raw-branch estimate (see isPiLiveUsageRawBranchEstimate). */
 	liveIsRawBranchEstimate?: boolean;
 	/**
@@ -302,24 +357,47 @@ export interface ResolveGuardedPiPressureSnapshotArgs
  */
 export function resolveGuardedPiPressureSnapshot(
 	args: ResolveGuardedPiPressureSnapshotArgs,
-): { snapshot: PiPressureSnapshot; setAsideEstimate: number | undefined } {
+): {
+	snapshot: PiPressureSnapshot;
+	setAsideEstimate: number | undefined;
+} {
 	const live =
 		typeof args.liveInputTokens === "number" &&
 		Number.isFinite(args.liveInputTokens)
 			? args.liveInputTokens
 			: 0;
 	const setAside = args.liveIsRawBranchEstimate === true && live > 0;
+	const bound = args.providerInputLimit ?? MAX_UNKNOWN_PI_INPUT_TOKENS;
+	const rejectedPersisted = args.persistedInputTokens > bound;
+	const rejectedLive = live > bound;
+	const sanitized = {
+		...args,
+		persistedInputTokens: rejectedPersisted ? 0 : args.persistedInputTokens,
+		persistedPercentage: rejectedPersisted ? 0 : args.persistedPercentage,
+		liveInputTokens: rejectedLive ? undefined : args.liveInputTokens,
+	};
 	const snapshot = resolvePiPressureSnapshot(
 		setAside
 			? {
-					...args,
+					...sanitized,
 					liveInputTokens: undefined,
 					...(args.persistedFromLive
 						? { persistedInputTokens: 0, persistedPercentage: 0 }
 						: {}),
 				}
-			: args,
+			: sanitized,
 	);
+	if (args.fallbackInputTokens !== undefined) {
+		return {
+			snapshot: resolvePiPressureSnapshot({
+				...args,
+				persistedInputTokens: snapshot.inputTokens,
+				persistedPercentage: snapshot.percentage,
+				liveInputTokens: args.fallbackInputTokens,
+			}),
+			setAsideEstimate: setAside ? live : undefined,
+		};
+	}
 	return { snapshot, setAsideEstimate: setAside ? live : undefined };
 }
 
@@ -340,6 +418,8 @@ export function recordPiLiveUsageClassification(
 
 export function clearPiLiveUsageClassification(sessionId: string): void {
 	lastLiveUsageClassification.delete(sessionId);
+	rejectedUsageLogged.delete(sessionId);
+	rejectedProviderUsage.delete(sessionId);
 }
 
 /**
@@ -356,7 +436,7 @@ export function clearPiLiveUsageClassification(sessionId: string): void {
  * message_end, so the recorded value follows the branch.
  */
 export function resolvePiStatusPressureSnapshot(
-	args: ResolvePiPressureSnapshotArgs & { sessionId: string },
+	args: ResolveGuardedPiPressureSnapshotArgs & { sessionId: string },
 ): PiPressureSnapshot {
 	const { sessionId, ...pressureArgs } = args;
 	return resolveGuardedPiPressureSnapshot({
@@ -387,10 +467,9 @@ export function noteRawBranchEstimateSetAside(
  * Context removed from the served request. The previous provider reading
  * stands instead, and the first set-aside figure of an episode is logged.
  *
- * No reading is compared with the model window. A provider report is the size
- * of a request the provider accepted, and the window is a configured figure
- * that can be smaller than what the model serves, so a reading past it is real
- * overflow for the scheduler to handle.
+ * A provider reading beyond an authoritative request wall cannot measure one
+ * request. Leave it out rather than clamping it into a phantom emergency.
+ * Catalog metadata is advisory; accepted measurements can still repair it.
  */
 export function resolvePiPressureSnapshotWithEstimateGuard(
 	args: ResolveGuardedPiPressureSnapshotArgs & {
@@ -399,6 +478,13 @@ export function resolvePiPressureSnapshotWithEstimateGuard(
 	},
 ): PiPressureSnapshot {
 	const { snapshot, setAsideEstimate } = resolveGuardedPiPressureSnapshot(args);
+	const bound = args.providerInputLimit ?? MAX_UNKNOWN_PI_INPUT_TOKENS;
+	const rejected = Math.max(
+		args.persistedInputTokens,
+		args.liveInputTokens ?? 0,
+	);
+	if (rejected > bound)
+		noteRejectedPiUsage(args.sessionId, rejected, bound, args.source);
 	if (setAsideEstimate !== undefined) {
 		noteRawBranchEstimateSetAside(
 			args.sessionId,

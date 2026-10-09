@@ -121,6 +121,13 @@ export function isNeutralizedReasoningPart(part: unknown): boolean {
     );
 }
 
+/** A non-Anthropic drop restores this payload at final representation; cost it
+ * without changing the working part or invalidating the index-addressed lanes.
+ */
+export function neutralizedReasoningSource(part: unknown): unknown {
+    return isRecord(part) ? (NEUTRALIZED_ORIGINALS.get(part) ?? part) : part;
+}
+
 /**
  * Provider-cache facts for model identities whose effort can change without
  * invalidating cached prompt bytes: Anthropic Fable 5.1 was observed on

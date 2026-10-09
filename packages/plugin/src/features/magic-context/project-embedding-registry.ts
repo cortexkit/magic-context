@@ -2471,6 +2471,32 @@ export function getProjectEmbeddingSnapshot(
     return registration ? snapshotFor(registration) : null;
 }
 
+/**
+ * Install a worker-local search runtime backed by the owner's provider bridge.
+ * This does not register a project, load configuration, or write descriptors.
+ * The owner supplies the exact generation and model identities used for ranking;
+ * credentials and provider state remain on the owner thread.
+ */
+export function installProjectEmbeddingSearchBridge(
+    snapshot: ProjectEmbeddingRegistrationSnapshot,
+    provider: EmbeddingProvider,
+): void {
+    projectRegistrations.set(snapshot.projectIdentity, {
+        projectIdentity: snapshot.projectIdentity,
+        sourceDirectory: snapshot.sourceDirectory,
+        providerIdentity: snapshot.providerIdentity,
+        runtimeFingerprint: snapshot.runtimeFingerprint,
+        generation: snapshot.generation,
+        features: { ...snapshot.features },
+        modelId: snapshot.modelId,
+        chunkModelId: snapshot.chunkModelId,
+        // The bridge is already constructed; never instantiate a provider here.
+        config: { provider: "off" },
+        provider,
+        observationMode: !snapshot.historyEnabled,
+    });
+}
+
 export function getProjectChunkEmbeddingModelId(projectIdentity: string): string {
     const registration = projectRegistrations.get(projectIdentity);
     return registration && !registration.observationMode ? registration.chunkModelId : "off";

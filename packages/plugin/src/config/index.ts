@@ -415,6 +415,12 @@ export function parsePluginConfig(
     // opt-in/out state survives upgrades even when they never run `doctor`.
     const preMigrationWarnings: string[] = [];
     const configWithoutRemovedAgent = stripRemovedAgentConfig(rawConfig, preMigrationWarnings);
+    if (Object.hasOwn(rawConfig, "clear_reasoning_age")) {
+        const warning =
+            "clear_reasoning_age is deprecated and ignored. Magic Context now keeps reasoning up to a token budget, keep_reasoning_tokens (default 10,000). Remove the key, or set keep_reasoning_tokens to a token count.";
+        preMigrationWarnings.push(warning);
+        log(`[magic-context] ${warning}`);
+    }
     if (Object.hasOwn(rawConfig, "protected_tags")) {
         warnProtectedTagsDeprecationOnce();
         preMigrationWarnings.push(

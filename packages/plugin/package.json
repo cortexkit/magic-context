@@ -1,6 +1,6 @@
 {
   "name": "@cortexkit/opencode-magic-context",
-  "version": "0.46.0",
+  "version": "0.46.1",
   "type": "module",
   "description": "OpenCode plugin for Magic Context — cross-session memory and context management",
   "main": "dist/index.js",
@@ -37,8 +37,8 @@
     "README.md"
   ],
   "scripts": {
-    "build": "bun ../../scripts/check-bun.mjs && tsc -p ../retina-local-fs/tsconfig.build.json && bun run build:tui && bun ../../scripts/clean-dist-chunks.mjs dist index.js transformers-web.js transformers-node-wasm.js && bun build src/features/magic-context/memory/transformers-web-entry.ts --outfile dist/transformers-web.js --target browser --format esm --external onnxruntime-web && bun scripts/build-transformers-node-wasm.ts dist && bun build src/index.ts src/features/magic-context/memory/embedding-worker.ts src/features/magic-context/migration-worker.ts --outdir dist --entry-naming '[name].[ext]' --target node --format esm --splitting --external @opencode-ai/plugin --external onnxruntime-node --external onnxruntime-web --external sharp --external bun:sqlite --external node:sqlite && bun run build:v2 && tsc --emitDeclarationOnly",
-    "build:v2": "bun ../../scripts/clean-dist-chunks.mjs dist/v2 server.js embedding-worker.js migration-worker.js && bun build src/features/magic-context/memory/transformers-web-entry.ts --outfile dist/v2/transformers-web.js --target browser --format esm --external onnxruntime-web && bun scripts/build-transformers-node-wasm.ts dist/v2 && bun build src/v2/server.ts src/features/magic-context/memory/embedding-worker.ts src/features/magic-context/migration-worker.ts --outdir dist/v2 --entry-naming '[name].[ext]' --target node --format esm --splitting --external @opencode/plugin --external onnxruntime-node --external onnxruntime-web --external sharp --external bun:sqlite --external node:sqlite",
+    "build": "bun ../../scripts/check-bun.mjs && tsc -p ../retina-local-fs/tsconfig.build.json && bun run build:tui && bun ../../scripts/clean-dist-chunks.mjs dist index.js transformers-web.js transformers-node-wasm.js && bun build src/features/magic-context/memory/transformers-web-entry.ts --outfile dist/transformers-web.js --target browser --format esm --external onnxruntime-web && bun scripts/build-transformers-node-wasm.ts dist && bun build src/index.ts src/features/magic-context/memory/embedding-worker.ts src/features/magic-context/migration-worker.ts src/hooks/magic-context/auto-search-worker.ts --outdir dist --entry-naming '[name].[ext]' --target node --format esm --splitting --external @opencode-ai/plugin --external onnxruntime-node --external onnxruntime-web --external sharp --external bun:sqlite --external node:sqlite && bun run build:v2 && tsc --emitDeclarationOnly",
+    "build:v2": "bun ../../scripts/clean-dist-chunks.mjs dist/v2 server.js embedding-worker.js migration-worker.js && bun build src/features/magic-context/memory/transformers-web-entry.ts --outfile dist/v2/transformers-web.js --target browser --format esm --external onnxruntime-web && bun scripts/build-transformers-node-wasm.ts dist/v2 && bun build src/v2/server.ts src/features/magic-context/memory/embedding-worker.ts src/features/magic-context/migration-worker.ts src/hooks/magic-context/auto-search-worker.ts --outdir dist/v2 --entry-naming '[name].[ext]' --target node --format esm --splitting --external @opencode/plugin --external onnxruntime-node --external onnxruntime-web --external sharp --external bun:sqlite --external node:sqlite",
     "build:tui": "bun scripts/build-tui.ts",
     "check:tui-compiled": "git diff --exit-code -- src/tui-compiled && test -z \"$(git status --porcelain -- src/tui-compiled)\"",
     "check:transformers-node-wasm": "bun scripts/verify-transformers-node-wasm.ts",

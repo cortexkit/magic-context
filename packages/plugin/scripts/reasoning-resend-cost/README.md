@@ -1,5 +1,35 @@
 # Offline reasoning-resend analysis
 
+## Snapshot-only budget replay
+
+For budget comparisons, do **not** run the historical acquisition commands below when live-store
+access is prohibited. `replay-budget.ts` reads only an explicitly supplied sanitized JSON array:
+
+```json
+[{ "route": "openai", "model": "gpt-example", "order": 0, "reported": 3000, "text_estimate": 150, "encrypted": true }]
+```
+
+Allowed fields only: `route`, `model` (route labels, not credentials), nonnegative integer
+`order` (unique within a route/model trajectory), optional nonnegative `reported` and
+`text_estimate` (the already-calibrated plaintext token estimate), and boolean `encrypted`.
+No text, signatures, opaque transport, session identifiers, paths, or extra fields are accepted.
+Omitted/zero reported counts use the estimate, then the fixed 1,000 charge for encrypted reasoning.
+The newest step is exempt and charged. The tool compares a hypothetical rebuild at each trajectory
+prefix with retaining the last 50 steps. These are selection checkpoints, not reconstructed actual
+busts: the numeric format contains neither tags nor bust timestamps. Age 50 assumes one tag per step.
+It does not discover or open databases, invoke hosts, or perform acquisition or migration.
+
+```sh
+bun packages/plugin/scripts/reasoning-resend-cost/replay-budget.ts /throwaway/root/sanitized-steps.json
+bun test packages/plugin/scripts/reasoning-resend-cost/replay-budget.test.ts
+```
+
+`budget-synthetic.json` is deliberately synthetic test data, not a historical measurement.
+Historical 10k-vs-age-50 route replay was **not run** for this change: the original numeric outputs
+were removed and acquiring them from live stores is prohibited. A separately authorized operator
+can supply the sanitized trajectories for the routes in the design table. The fixed 10,000
+default does not depend on that informational comparison.
+
 No product code and no model requests. Run from the repository root with the
 installed Bun/SQLite/Python tools. The requested calibration file lives at
 `src/hooks/magic-context/tokenizer-calibration.ts`, not `src/features/…` at this

@@ -1079,6 +1079,7 @@ pub struct SessionDetail {
     /// thousands of rows for a long-running session and dominate IPC time.
     pub messages_count: i64,
     pub cache_events_count: i64,
+    pub historian_runs: i64,
     pub compartments: Vec<Compartment>,
     pub facts: Vec<SessionFact>,
     pub notes: Vec<Note>,
@@ -1186,7 +1187,6 @@ pub struct SessionMetaRow {
     pub is_subagent: bool,
     pub last_context_percentage: f64,
     pub last_input_tokens: i64,
-    pub times_execute_threshold_reached: i64,
     pub compartment_in_progress: bool,
     pub system_prompt_hash: String,
     pub memory_block_count: i64,
@@ -5634,6 +5634,39 @@ fn table_exists(conn: &Connection, table: &str) -> bool {
     .unwrap_or(false)
 }
 
+fn count_historian_runs(conn: &Connection, session_id: &str) -> i64 {
+    if !table_exists(conn, "historian_runs") {
+        return 0;
+    }
+    conn.query_row(
+        "SELECT COUNT(*) FROM historian_runs WHERE session_id = ?1",
+        [session_id],
+        |row| row.get(0),
+    )
+    .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod historian_runs_reader_tests {
+    use super::*;
+
+    #[test]
+    fn counts_recorded_runs_for_only_the_requested_session() {
+        let conn = Connection::open_in_memory().expect("open test database");
+        assert_eq!(count_historian_runs(&conn, "session-a"), 0);
+
+        conn.execute_batch(
+            "CREATE TABLE historian_runs (session_id TEXT NOT NULL);
+             INSERT INTO historian_runs (session_id) VALUES ('session-a'), ('session-b'), ('session-a');",
+        )
+        .expect("create historian run fixture");
+
+        assert_eq!(count_historian_runs(&conn, "session-a"), 2);
+        assert_eq!(count_historian_runs(&conn, "session-b"), 1);
+        assert_eq!(count_historian_runs(&conn, "session-c"), 0);
+    }
+}
+
 fn table_has_column(conn: &Connection, table: &str, column: &str) -> bool {
     conn.query_row(
         &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
@@ -7051,6 +7084,9 @@ pub fn get_opencode_session_detail(
         .map(|c| get_session_meta(c, &session_id))
         .transpose()?
         .flatten();
+    let historian_runs = conn
+        .map(|c| count_historian_runs(c, &session_id))
+        .unwrap_or(0);
     let token_breakdown = conn
         .map(|c| get_context_token_breakdown(c, &session_id))
         .transpose()?
@@ -7074,6 +7110,7 @@ pub fn get_opencode_session_detail(
         pi_jsonl_path: None,
         messages_count,
         cache_events_count,
+        historian_runs,
         compartments,
         facts,
         notes,
@@ -7247,6 +7284,9 @@ pub fn get_pi_session_detail(
     let meta = conn
         .and_then(|c| get_session_meta(c, session_id).ok())
         .flatten();
+    let historian_runs = conn
+        .map(|c| count_historian_runs(c, session_id))
+        .unwrap_or(0);
     let token_breakdown = conn
         .and_then(|c| get_context_token_breakdown(c, session_id).ok())
         .flatten();
@@ -7263,6 +7303,7 @@ pub fn get_pi_session_detail(
         pi_jsonl_path: Some(detail.meta.jsonl_path.to_string_lossy().to_string()),
         messages_count,
         cache_events_count,
+        historian_runs,
         compartments,
         facts,
         notes,
@@ -7614,7 +7655,7 @@ pub fn get_session_meta(
     let mut stmt = conn.prepare(
         "SELECT session_id, last_response_time, cache_ttl, counter, last_nudge_tokens,
                 last_nudge_band, is_subagent, last_context_percentage, last_input_tokens,
-                times_execute_threshold_reached, compartment_in_progress, system_prompt_hash,
+                compartment_in_progress, system_prompt_hash,
                 memory_block_count, COALESCE(new_work_tokens, 0), COALESCE(total_input_tokens, 0)
          FROM session_meta WHERE session_id = ?1",
     )?;
@@ -7629,12 +7670,11 @@ pub fn get_session_meta(
             is_subagent: row.get::<_, i64>(6)? != 0,
             last_context_percentage: row.get(7)?,
             last_input_tokens: row.get(8)?,
-            times_execute_threshold_reached: row.get(9)?,
-            compartment_in_progress: row.get::<_, i64>(10)? != 0,
-            system_prompt_hash: row.get(11)?,
-            memory_block_count: row.get(12)?,
-            new_work_tokens: row.get(13)?,
-            total_input_tokens: row.get(14)?,
+            compartment_in_progress: row.get::<_, i64>(9)? != 0,
+            system_prompt_hash: row.get(10)?,
+            memory_block_count: row.get(11)?,
+            new_work_tokens: row.get(12)?,
+            total_input_tokens: row.get(13)?,
         })
     })?;
     match rows.next() {

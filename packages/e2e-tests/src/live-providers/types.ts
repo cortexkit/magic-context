@@ -42,10 +42,9 @@ export interface ScenarioSpec {
     /** Number of single `bash` calls the first turn asks the model to make, one per step. */
     loopSteps: number;
     /**
-     * `clear_reasoning_age` for the throwaway Magic Context config: how many tags old an
-     * assistant message must be before its reasoning is removed (minimum 10).
+     * `keep_reasoning_tokens` in the throwaway config; removal rides rebuilding passes.
      */
-    clearReasoningAge: number;
+    keepReasoningTokens: number;
     /** Hard cap on provider calls this scenario may make; the recorder refuses beyond it. */
     callBudget: number;
 }

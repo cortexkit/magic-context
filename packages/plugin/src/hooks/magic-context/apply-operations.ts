@@ -401,6 +401,10 @@ export function applyPendingOperations(
                 }
 
                 const target = targets.get(pendingOp.tagId);
+                if (target?.thinkingDropProtected) {
+                    reject("active_thinking");
+                    continue;
+                }
                 const isToolTag = tagTypeById.get(pendingOp.tagId) === "tool";
 
                 if (synthetic) {

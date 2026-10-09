@@ -34,7 +34,7 @@ export const RENDERED_PREFIXES: readonly string[] = [
   "protected_tools",
   // Tags & cleanup
   "protected_tokens",
-  "clear_reasoning_age",
+  "keep_reasoning_tokens",
   // Historian
   "history_budget_percentage",
   "historian_timeout_ms",
@@ -89,6 +89,7 @@ export const RENDERED_PREFIXES: readonly string[] = [
  * omission was deliberate, not forgotten.
  */
 export const OMITTED_BY_DESIGN: Readonly<Record<string, string>> = {
+  clear_reasoning_age: "deprecated and ignored; doctor removes it",
   ...Object.fromEntries(
     ["historian", "dreamer"].flatMap((agent) =>
       [

@@ -575,7 +575,7 @@ describe("checkCompartmentTrigger", () => {
         }
     });
 
-    it("projects aged reasoning only when the provider can clear it from the wire", () => {
+    it("projects over-budget reasoning only when the provider can clear it from the wire", () => {
         // Match issue #274's shape: at 36.8% usage, 70% of tagged bytes are
         // aged reasoning. Counting it as reclaimable projects 11.0%, below the
         // 16.2% post-drop target; a provider that cannot clear it must instead

@@ -3,6 +3,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import prefixBoundGolden from "../../../../../crates/mc-module/testdata/prefix-bound-reasoning-trim.json";
+import budgetGolden from "../../../../../crates/mc-module/testdata/reasoning-budget-trim.json";
+import { sessionDecisionCalibration } from "../../features/magic-context/session-decision-calibration";
 import {
     getActiveTagsBySession,
     getOrCreateSessionMeta,
@@ -11,6 +13,7 @@ import {
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import {
+    addMergedReasoningStrippedIds,
     addTrailingBlankDecisions,
     getEmergencyInputSample,
     setEmergencyDropSample,
@@ -24,6 +27,8 @@ import { readReplayDocument } from "../../features/magic-context/storage-replay-
 import { createTagger } from "../../features/magic-context/tagger";
 import { Database } from "../../shared/sqlite";
 import { EmergencyFailClosedError } from "./emergency-fail-closed";
+import { estimateTokens } from "./read-session-formatting";
+import { reasoningBudgetCutoff, reasoningStepCost } from "./reasoning-budget";
 import {
     removeReasoningParts,
     selectReasoningRemovals,
@@ -35,7 +40,7 @@ import {
     makeSentinel,
     neutralizeDroppedReasoningPart,
 } from "./sentinel";
-import { replayClearedReasoning } from "./strip-content";
+import { findMergedReasoningStripDecisions, replayClearedReasoning } from "./strip-content";
 import type { MessageLike } from "./tag-messages";
 import { type TagTarget, tagMessages } from "./tag-messages";
 import { runPostTransformPhase } from "./transform-postprocess-phase";
@@ -70,7 +75,12 @@ function toolLoop(steps: number, options: { reasoningOnlyStep?: number } = {}) {
     for (let step = 0; step < steps; step += 1) {
         const reasoningOnly = options.reasoningOnlyStep === step;
         messages.push({
-            info: { id: `assistant-${step}`, role: "assistant", sessionID: "s" },
+            info: {
+                id: `assistant-${step}`,
+                role: "assistant",
+                sessionID: "s",
+                tokens: { reasoning: 100 },
+            },
             parts: [
                 { type: "step-start" },
                 {
@@ -106,14 +116,99 @@ function toolLoop(steps: number, options: { reasoningOnlyStep?: number } = {}) {
     return { messages, tags };
 }
 
+// The calibration witness prices historical steps rather than the active user
+// turn. Its context carrier is synthetic; toolLoop retains its original shape.
+function historicalToolLoop(steps: number) {
+    const session = toolLoop(steps);
+    (session.messages[0].parts[0] as Record<string, unknown>).synthetic = true;
+    return session;
+}
+
 describe("selectReasoningRemovals", () => {
+    it("random prefix sessions never leave a thinking gap across the stop rule", () => {
+        let seed = 620;
+        const random = (n: number) => {
+            seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+            return seed % n;
+        };
+        for (let trial = 0; trial < 500; trial++) {
+            const length = 3 + random(20);
+            const { messages, tags } = toolLoop(length);
+            const removedCount = random(length - 1);
+            const alreadyRemoved = new Set(
+                Array.from({ length: removedCount }, (_, i) => `assistant-${i}`),
+            );
+            for (let i = removedCount; i < length - 1; i++)
+                if (random(3) === 0) tags.delete(messages[i + 1]);
+            const steps = messages.slice(1).map((message, i) => ({
+                tag: tags.get(message) ?? 0,
+                cost: 1 + random(1000),
+                exempt: i === length - 1,
+                alreadyRemoved: alreadyRemoved.has(`assistant-${i}`),
+            }));
+            const cutoff = reasoningBudgetCutoff(steps, random(3000));
+            const selected = selectReasoningRemovals({
+                messages,
+                messageTagNumbers: tags,
+                cutoff,
+                alreadyRemoved,
+                prefixBound: true,
+            });
+            const gone = new Set([...alreadyRemoved, ...selected]);
+            let seenKept = false;
+            for (let i = 0; i < length; i++) {
+                if (!gone.has(`assistant-${i}`)) seenKept = true;
+                else expect({ trial, i, seenKept }).toEqual({ trial, i, seenKept: false });
+            }
+        }
+    });
+    it("matches the shared budget golden including the prefix-bound stop rule", () => {
+        for (const scenario of budgetGolden.cases) {
+            const { messages, tags } = toolLoop(scenario.steps.length);
+            tags.clear();
+            scenario.steps.forEach((step, index) => {
+                if (step.tag > 0) tags.set(messages[index + 1], step.tag);
+            });
+            const alreadyRemoved = new Set(
+                scenario.steps.flatMap((step, index) =>
+                    step.already_removed ? [`assistant-${index}`] : [],
+                ),
+            );
+            const cutoff = reasoningBudgetCutoff(
+                scenario.steps.map((step) => ({
+                    tag: step.tag,
+                    cost: reasoningStepCost(
+                        step.reported,
+                        step.text_estimate ?? 0,
+                        step.opaque === true,
+                    ),
+                    exempt: step.exempt,
+                    alreadyRemoved: step.already_removed,
+                })),
+                scenario.budget,
+            );
+            const added = selectReasoningRemovals({
+                messages,
+                messageTagNumbers: tags,
+                cutoff,
+                alreadyRemoved,
+                prefixBound: scenario.prefix_bound,
+            });
+            expect({
+                name: scenario.name,
+                removed: [...alreadyRemoved, ...added]
+                    .map((id) => Number(id.slice("assistant-".length)))
+                    .sort(),
+            }).toEqual({ name: scenario.name, removed: scenario.removed_after });
+        }
+    });
     it("selects old reasoning-bearing assistants and never the newest", () => {
         const { messages, tags } = toolLoop(8);
         // maxTag = 9, age 3 → cutoff 6 → assistants with tags 2..6 (steps 0..4).
         const selected = selectReasoningRemovals({
             messages,
             messageTagNumbers: tags,
-            clearReasoningAge: 3,
+            cutoff: 6,
             alreadyRemoved: new Set(),
             prefixBound: false,
         });
@@ -135,7 +230,7 @@ describe("selectReasoningRemovals", () => {
         const all = selectReasoningRemovals({
             messages: [...messages, followUp],
             messageTagNumbers: tags,
-            clearReasoningAge: 3,
+            cutoff: 37,
             alreadyRemoved: new Set(),
             prefixBound: false,
         });
@@ -151,7 +246,7 @@ describe("selectReasoningRemovals", () => {
         const selected = selectReasoningRemovals({
             messages,
             messageTagNumbers: tags,
-            clearReasoningAge: 3,
+            cutoff: 6,
             alreadyRemoved: new Set(),
             prefixBound: false,
         });
@@ -166,7 +261,7 @@ describe("selectReasoningRemovals", () => {
         const selected = selectReasoningRemovals({
             messages,
             messageTagNumbers: tags,
-            clearReasoningAge: 3,
+            cutoff: 6,
             alreadyRemoved: new Set(),
             prefixBound: true,
         });
@@ -185,7 +280,7 @@ describe("selectReasoningRemovals", () => {
         const selected = selectReasoningRemovals({
             messages,
             messageTagNumbers: tags,
-            clearReasoningAge: 3,
+            cutoff: 6,
             alreadyRemoved: new Set(),
             prefixBound: true,
         });
@@ -199,7 +294,7 @@ describe("selectReasoningRemovals", () => {
             selectReasoningRemovals({
                 messages,
                 messageTagNumbers: tags,
-                clearReasoningAge: 3,
+                cutoff: 6,
                 alreadyRemoved: new Set(["assistant-0"]),
                 prefixBound: true,
                 alsoGone: new Set(["assistant-1", "assistant-2"]),
@@ -218,7 +313,7 @@ describe("selectReasoningRemovals", () => {
             const selected = selectReasoningRemovals({
                 messages,
                 messageTagNumbers: tags,
-                clearReasoningAge: scenario.clear_reasoning_age,
+                cutoff: Math.max(...tags.values()) - scenario.clear_reasoning_age,
                 alreadyRemoved: new Set(removed),
                 prefixBound: true,
             });
@@ -238,7 +333,7 @@ describe("selectReasoningRemovals", () => {
         const selected = selectReasoningRemovals({
             messages,
             messageTagNumbers: tags,
-            clearReasoningAge: 3,
+            cutoff: 6,
             alreadyRemoved: new Set(["assistant-0"]),
             prefixBound: false,
         });
@@ -319,7 +414,7 @@ describe("reasoning removal through postprocess", () => {
             deferredHistoryRefreshSessions: new Set(),
             deferredMaterializationSessions: new Set(),
             lastHeuristicsTurnId: new Map(),
-            clearReasoningAge: 3,
+            keepReasoningTokens: 300,
             protectedTagIds: new Set(),
             protectedTagNumbers: new Set(),
             protectedCutoff: null,
@@ -335,6 +430,65 @@ describe("reasoning removal through postprocess", () => {
         };
         return runPostTransformPhase(args);
     }
+
+    it("review: bust selection applies frozen prose calibration to unstored thinking estimates", async () => {
+        const database = openDb();
+        const sessionId = "review-calibrated-fallback";
+        getOrCreateSessionMeta(database, sessionId);
+        const ratio = sessionDecisionCalibration(database, sessionId, {
+            bustPermitted: true,
+            modelKey: "anthropic/claude-opus-5-5",
+        }).proseRatio;
+        expect(ratio).toBeGreaterThan(1);
+        const session = historicalToolLoop(3);
+        for (const message of session.messages.slice(1)) {
+            (message.info as unknown as Record<string, unknown>).tokens = { reasoning: 0 };
+            (message.parts[1] as { text: string }).text = "a substantial thought ".repeat(100);
+        }
+        const rawCost = estimateTokens("a substantial thought ".repeat(100));
+        // Three raw estimates fit, but only the newest calibrated estimate fits.
+        await pass(database, sessionId, session, {
+            busting: true,
+            providerID: "google-vertex-anthropic",
+            prefixBound: true,
+            overrides: { keepReasoningTokens: 3 * rawCost },
+        });
+        expect(getRemovedReasoningIds(database, sessionId)).toEqual(
+            new Set(["assistant-0", "assistant-1"]),
+        );
+    });
+
+    it("review: merged-assistant frozen strips cost zero on the next budget rebuild", async () => {
+        const database = openDb();
+        const sessionId = "review-merged-cost";
+        getOrCreateSessionMeta(database, sessionId);
+        const session = toolLoop(3);
+        (session.messages[2].info as unknown as Record<string, unknown>).tokens = {
+            reasoning: 20_000,
+        };
+        const frozen = findMergedReasoningStripDecisions(session.messages, "anthropic", new Set(), {
+            mutationExemptMessage: session.messages[3],
+        });
+        expect(frozen).toContain("assistant-1");
+        expect(addMergedReasoningStrippedIds(database, sessionId, frozen)).toBe(true);
+        await pass(database, sessionId, session, {
+            busting: true,
+            providerID: "anthropic",
+            overrides: {
+                keepReasoningTokens: 200,
+                reasoningByMessage: new Map(
+                    session.messages
+                        .slice(1)
+                        .map((message) => [
+                            message,
+                            [message.parts[1] as import("./tag-messages").ThinkingLikePart],
+                        ]),
+                ),
+            },
+        });
+        // a1 is already off-wire. a0 + newest a2 cost 100 + 100 and both fit.
+        expect(getOrCreateSessionMeta(database, sessionId).clearedReasoningThroughTag).toBe(0);
+    });
 
     it("removes old reasoning on a rebuilding pass and replays it byte-identically on defer passes", async () => {
         const database = openDb();
@@ -372,6 +526,26 @@ describe("reasoning removal through postprocess", () => {
         // Newly aged reasoning waits for the next rebuilding pass.
         expect(reasoningCount(deferTwo.messages[6])).toBe(1);
         expect(getRemovedReasoningIds(database, sessionId)).toEqual(new Set(removed));
+    });
+
+    it("uses fixed 10000 by default at every window and charges reported counts rather than short summaries", async () => {
+        const database = openDb();
+        for (const window of [128_000, 272_000, 1_000_000]) {
+            const sessionId = `fixed-budget-${window}`;
+            const session = toolLoop(3);
+            for (const message of session.messages.slice(1)) {
+                (message.info as unknown as Record<string, unknown>).tokens = { reasoning: 8000 };
+            }
+            await pass(database, sessionId, session, {
+                busting: true,
+                providerID: "openai",
+                overrides: { keepReasoningTokens: undefined, usableWindow: window },
+            });
+            expect(getRemovedReasoningIds(database, sessionId)).toEqual(
+                new Set(["assistant-0", "assistant-1"]),
+            );
+            expect(reasoningCount(session.messages.at(-1) as MessageLike)).toBe(1);
+        }
     });
 
     it("leaves canonical Anthropic on its existing lane and its frozen set empty", async () => {
@@ -945,7 +1119,7 @@ describe("the removal lane never changes bytes without taking reasoning off the 
                     [message, 1],
                     [newer, 20],
                 ]),
-                clearReasoningAge: 5,
+                cutoff: 15,
                 alreadyRemoved: new Set(),
                 prefixBound: false,
             });
@@ -984,12 +1158,12 @@ describe("the removal lane never changes bytes without taking reasoning off the 
 });
 
 describe("replay and route guards", () => {
-    it("replay skips the newest assistant with replayable content, as Rust does", () => {
+    it("frozen replay remains absorbing when removed assistants become newest", () => {
         const { messages } = toolLoop(3);
         const newest = messages[messages.length - 1];
         removeReasoningParts(messages, new Set(["assistant-1", "assistant-2"]), "openai");
         expect(reasoningCount(messages[2])).toBe(0);
-        expect(reasoningCount(newest)).toBe(1);
+        expect(reasoningCount(newest)).toBe(0);
     });
 
     it("recognizes the OpenRouter adapter by its metadata under any provider id", () => {
@@ -1020,7 +1194,7 @@ describe("replay and route guards", () => {
                 [message, 1],
                 [newer, 20],
             ]),
-            clearReasoningAge: 5,
+            cutoff: 15,
             alreadyRemoved: new Set(),
             prefixBound: false,
         });

@@ -462,6 +462,8 @@ export function createToolDropTarget(
     batch: ToolMutationBatch,
     tagId: number,
 ): {
+    dropReasoningParts: readonly unknown[];
+    mutationParts: readonly { message: MessageLike; part: unknown }[];
     setContent: (content: string) => boolean;
     drop: () => ToolDropResult;
     truncate: () => ToolDropResult;
@@ -587,6 +589,10 @@ export function createToolDropTarget(
     };
 
     return {
+        dropReasoningParts: thinkingParts,
+        mutationParts:
+            index.get(compositeKey)?.occurrences.map(({ message, part }) => ({ message, part })) ??
+            [],
         measureReclaim: (skeleton) => {
             const entry = index.get(compositeKey);
             const parts = entry?.occurrences.map((occ) => occ.part) ?? [];

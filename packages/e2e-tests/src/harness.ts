@@ -24,6 +24,8 @@ import { MockProvider, type MockResponse } from "./mock-provider/server";
 import { spawnOpencode, type SpawnedOpencode, type SpawnOptions } from "./opencode-runner/spawn";
 
 export interface TestHarnessOptions {
+    mockModelID?: string;
+    thinkingScope?: (body: Record<string, unknown>) => string | undefined;
     /** Use a canonical provider id when testing provider-specific replay lanes. */
     mockProviderID?: string;
     /** magic-context config overrides. Merged onto test defaults. */
@@ -60,6 +62,7 @@ export interface SdkClient {
         prompt: (opts: {
             path: { id: string };
             body: {
+                messageID?: string;
                 model: { providerID: string; modelID: string };
                 parts: Array<{ type: "text"; text: string }>;
                 agent?: string;
@@ -136,7 +139,7 @@ export class TestHarness implements HostHarness {
 
     static async create(options: TestHarnessOptions = {}): Promise<TestHarness> {
         const mock = new MockProvider();
-        const { baseURL } = await mock.start();
+        const { baseURL } = await mock.start({ thinkingScope: options.thinkingScope });
 
         // Always install a default so unexpected extra requests don't 500.
         mock.setDefault(options.mockDefault ?? DEFAULT_MOCK_RESPONSE);
@@ -148,6 +151,7 @@ export class TestHarness implements HostHarness {
         const spawnOpts: SpawnOptions = {
             mockProviderURL: baseURL,
             mockProviderID: options.mockProviderID,
+            mockModelID: options.mockModelID,
             magicContextConfig: options.magicContextConfig,
             openCodeConfigExtra: options.openCodeConfigExtra,
             openCodeGlobalConfigExtra: options.openCodeGlobalConfigExtra,
@@ -383,7 +387,7 @@ export class TestHarness implements HostHarness {
             body: {
                 model: {
                     providerID: options.providerID ?? this.spawnOptions.mockProviderID ?? "mock-anthropic",
-                    modelID: options.modelID ?? "mock-sonnet",
+                    modelID: options.modelID ?? this.spawnOptions.mockModelID ?? "mock-sonnet",
                 },
                 parts: [{ type: "text", text }],
                 ...(options.agent ? { agent: options.agent } : {}),
@@ -551,12 +555,13 @@ export class TestHarness implements HostHarness {
 
     assertHistorianRequestsUseMock(): void {
         if (this.expectMagicContext && this.hasContextDb()) {
-            // A test that pins the historian to its own mock model routes there.
+            // The historian is pinned to the host's mock provider, on its own mock
+            // model when a test names one and on the host model otherwise.
             const historianModel = this.spawnOptions.historianMockModel;
             assertHistorianMockRouting(
                 this.contextDb(),
                 "opencode",
-                `mock-anthropic/${historianModel?.id ?? "mock-sonnet"}`,
+                `${this.spawnOptions.mockProviderID ?? "mock-anthropic"}/${historianModel?.id ?? this.spawnOptions.mockModelID ?? "mock-sonnet"}`,
             );
         }
     }

@@ -22,6 +22,7 @@ import {
     resolveSessionId,
     resolveTrustedContextLimit,
 } from "./event-resolvers";
+import { recordOpenCodeProvenInputFloor } from "./opencode-proven-floor";
 
 describe("event-resolvers", () => {
     it("identifies the selected history policy without a live window or unrelated model overrides", () => {
@@ -133,6 +134,7 @@ describe("event-resolvers", () => {
                     lastObservedModelKey: "custom/model",
                     observedSafeInputTokens: 90_000,
                 });
+                recordOpenCodeProvenInputFloor(db, sessionId, "custom/model", 90_000);
 
                 const context = { db, sessionID: sessionId };
                 expect(resolveContextLimit("custom", "model", context)).toBe(90_000);
@@ -205,6 +207,7 @@ describe("event-resolvers", () => {
                     observedSafeInputTokens: 593_717,
                     cacheAlertSent: true,
                 });
+                recordOpenCodeProvenInputFloor(db, sessionId, "test-provider/test-model", 593_717);
 
                 const geometry = resolveContextWindowGeometry("test-provider", "test-model", {
                     db,

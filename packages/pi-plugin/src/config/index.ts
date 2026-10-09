@@ -300,6 +300,11 @@ function parsePiConfig(
 	warnings: string[];
 } {
 	const preMigrationWarnings: string[] = [];
+	if (Object.hasOwn(rawConfig, "clear_reasoning_age")) {
+		preMigrationWarnings.push(
+			"clear_reasoning_age is deprecated and ignored. Magic Context now keeps reasoning up to a token budget, keep_reasoning_tokens (default 10,000). Remove the key, or set keep_reasoning_tokens to a token count.",
+		);
+	}
 	const configWithoutRemovedAgent = stripRemovedAgentConfig(
 		rawConfig,
 		preMigrationWarnings,

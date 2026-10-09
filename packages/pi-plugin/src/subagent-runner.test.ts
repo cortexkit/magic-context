@@ -1515,6 +1515,244 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 			meta: { stderr: undefined },
 		});
 	});
+
+	it.each([
+		"pi",
+		"omp",
+	] as const)("preserves %s stop text without agent_end through drain SIGTERM and two aborted events", async (targetHarness) => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child, {
+			invocation: { command: targetHarness, prefixArgs: [], targetHarness },
+		});
+		const text = "s".repeat(6103);
+		const timeline: string[] = [];
+		const terminals: Array<{ stopReason?: string; textLength: number }> = [];
+		// The shutdown events must come from the runner's actual drain signal,
+		// not an independently scheduled close that could bypass the timer.
+		child.kill.mockImplementation((signal) => {
+			timeline.push(String(signal));
+			for (let i = 0; i < 2; i++) {
+				child.writeStdoutLine({
+					type: "message_end",
+					message: {
+						role: "assistant",
+						content: [],
+						stopReason: "aborted",
+						errorMessage: "Cloud Code Assist API error (400)",
+					},
+				});
+			}
+			child.emitClose(null, "SIGTERM");
+			return true;
+		});
+		const resultPromise = runner.run({
+			...baseOptions,
+			timeoutMs: 10_000,
+			onProgress: (event) => {
+				if (event.type === "terminal") terminals.push(event);
+				if (event.type === "raw_event" && event.eventType === "message_end") {
+					const message = (event.event as { message: { stopReason: string } })
+						.message;
+					timeline.push(message.stopReason);
+				}
+			},
+		});
+		child.writeStdoutLine({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text }],
+				stopReason: "stop",
+			},
+		});
+
+		expect(await resultPromise).toMatchObject({
+			ok: true,
+			assistantText: text,
+		});
+		expect(timeline).toEqual(["stop", "SIGTERM", "aborted", "aborted"]);
+		expect(terminals).toEqual([
+			expect.objectContaining({ stopReason: "stop", textLength: 6103 }),
+		]);
+	}, 15_000);
+
+	it.each([
+		"message_end",
+		"agent_end",
+	] as const)("preserves a drained stop result against a later aborted %s", async (eventType) => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+		const resultPromise = runner.run(baseOptions);
+		child.writeStdoutLine({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "completed summary" }],
+				stopReason: "stop",
+			},
+		});
+		const aborted = {
+			role: "assistant",
+			content: [{ type: "text", text: "shutdown partial" }],
+			stopReason: "aborted",
+			errorMessage: "stale error",
+		};
+		child.writeStdoutLine(
+			eventType === "agent_end"
+				? agentEnd([aborted])
+				: { type: "message_end", message: aborted },
+		);
+		child.emitClose(null, "SIGTERM");
+		expect(await resultPromise).toMatchObject({
+			ok: true,
+			assistantText: "completed summary",
+		});
+	});
+
+	it("drains a standalone agent_end and preserves its terminal text", async () => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+		child.kill.mockImplementation((signal) => {
+			expect(signal).toBe("SIGTERM");
+			child.writeStdoutLine(
+				agentEnd([{ role: "assistant", content: [], stopReason: "aborted" }]),
+			);
+			child.emitClose(null, "SIGTERM");
+			return true;
+		});
+		const resultPromise = runner.run({ ...baseOptions, timeoutMs: 10_000 });
+		child.writeStdoutLine(
+			agentEnd([
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "agent_end summary" }],
+					stopReason: "stop",
+				},
+			]),
+		);
+		expect(await resultPromise).toMatchObject({
+			ok: true,
+			assistantText: "agent_end summary",
+		});
+	}, 15_000);
+
+	it.each([
+		"auto_retry_start",
+		"agent_end",
+	] as const)("allows a new successful attempt after %s resets terminal capture", async (retryType) => {
+		for (const stopReason of ["error", "stop"]) {
+			const child = createMockChild();
+			const { runner } = runnerWith(child);
+			const resultPromise = runner.run(baseOptions);
+			const first = {
+				role: "assistant",
+				content: [{ type: "text", text: "first attempt" }],
+				stopReason,
+			};
+			child.writeStdoutLine({ type: "message_end", message: first });
+			child.writeStdoutLine(
+				retryType === "agent_end"
+					? { ...agentEnd([first]), willRetry: true }
+					: { type: "auto_retry_start" },
+			);
+			child.writeStdoutLine({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "second attempt" }],
+					stopReason: "stop",
+				},
+			});
+			child.emitClose(0);
+			expect(await resultPromise).toMatchObject({
+				ok: true,
+				assistantText: "second attempt",
+			});
+		}
+	});
+
+	it("preserves length as truncated rather than a shutdown abort", async () => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+		const resultPromise = runner.run(baseOptions);
+		child.writeStdoutLine({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "partial summary" }],
+				stopReason: "length",
+			},
+		});
+		child.writeStdoutLine({
+			type: "message_end",
+			message: { role: "assistant", content: [], stopReason: "aborted" },
+		});
+		child.emitClose(null, "SIGTERM");
+		expect(await resultPromise).toMatchObject({
+			ok: false,
+			reason: "truncated",
+			error: expect.stringContaining(
+				'pi assistant stopped with reason "length"',
+			),
+		});
+	});
+
+	it.each([
+		"error",
+		"aborted",
+	] as const)("still fails when the first terminal is an empty %s", async (stopReason) => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+		const resultPromise = runner.run(baseOptions);
+		child.writeStdoutLine({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [],
+				stopReason,
+				errorMessage: "provider failed",
+			},
+		});
+		child.emitClose(0);
+		expect(await resultPromise).toMatchObject({
+			ok: false,
+			reason: "no_assistant",
+			error:
+				"pi assistant produced empty text (provider error: provider failed)",
+		});
+	});
+
+	it("does not preserve agent_end text with a pending tool call", async () => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+		const resultPromise = runner.run(baseOptions);
+		child.writeStdoutLine(
+			agentEnd([
+				{
+					role: "assistant",
+					content: [
+						{ type: "text", text: "still investigating" },
+						{ type: "toolCall", id: "read-1", name: "read", arguments: {} },
+					],
+					stopReason: "stop",
+				},
+			]),
+		);
+		child.writeStdoutLine({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "provider failure" }],
+				stopReason: "error",
+			},
+		});
+		child.emitClose(0);
+		expect(await resultPromise).toMatchObject({
+			ok: false,
+			reason: "model_failed",
+		});
+	});
+
 	it("counts toolCall content parts from assistant message_end into toolCallCount (grounding gate)", async () => {
 		// The grounding gate (refresh-primers) treats toolCallCount === 0 as a
 		// closed-book paraphrase and refuses to commit. The count is derived from

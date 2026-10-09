@@ -1,0 +1,11 @@
+{
+  "cases": [
+    { "name": "no drops means no new image retirement, however old its tag", "detect": true, "dropped_tags": [], "frozen": [], "steps": [{ "id": "old", "role": "user", "tag": 1, "image": true }, { "id": "reply", "role": "assistant", "tag": 200 }], "selected": [], "removed_after": [] },
+    { "name": "answered image below the dropped watermark", "detect": true, "dropped_tags": [10], "frozen": [], "steps": [{ "id": "old", "role": "user", "tag": 9, "image": true }, { "id": "reply", "role": "assistant", "tag": 200 }], "selected": ["old"], "removed_after": ["old"] },
+    { "name": "an image above the dropped watermark stays", "detect": true, "dropped_tags": [5], "frozen": [], "steps": [{ "id": "old", "role": "user", "tag": 9, "image": true }, { "id": "reply", "role": "assistant", "tag": 200 }], "selected": [], "removed_after": [] },
+    { "name": "an unanswered image stays even below the watermark", "detect": true, "dropped_tags": [10], "frozen": [], "steps": [{ "id": "reply", "role": "assistant", "tag": 1 }, { "id": "new", "role": "user", "tag": 2, "image": true }], "selected": [], "removed_after": [] },
+    { "name": "an untagged answered image retires when a drop watermark exists", "detect": true, "dropped_tags": [1], "frozen": [], "steps": [{ "id": "old", "role": "user", "tag": 0, "image": true }, { "id": "reply", "role": "assistant", "tag": 200 }], "selected": ["old"], "removed_after": ["old"] },
+    { "name": "defer never selects a new image", "detect": false, "dropped_tags": [10], "frozen": [], "steps": [{ "id": "old", "role": "user", "tag": 9, "image": true }, { "id": "reply", "role": "assistant", "tag": 200 }], "selected": [], "removed_after": [] },
+    { "name": "an old frozen image replays without a current watermark or answer", "detect": false, "dropped_tags": [], "frozen": ["old"], "steps": [{ "id": "old", "role": "user", "tag": 9, "image": true }], "selected": [], "removed_after": ["old"] }
+  ]
+}

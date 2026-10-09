@@ -19,6 +19,6 @@ export const deepseek: ProviderRoute = {
 };
 
 export const scenarios: ScenarioSpec[] = [
-    { route: deepseek, kind: "age", loopSteps: 12, clearReasoningAge: 10, callBudget: 21 },
-    { route: deepseek, kind: "drop", loopSteps: 12, clearReasoningAge: 100_000, callBudget: 21 },
+    { route: deepseek, kind: "age", loopSteps: 12, keepReasoningTokens: 1000, callBudget: 21 },
+    { route: deepseek, kind: "drop", loopSteps: 12, keepReasoningTokens: 1_000_000, callBudget: 21 },
 ];

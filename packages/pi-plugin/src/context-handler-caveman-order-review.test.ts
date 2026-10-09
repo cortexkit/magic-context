@@ -64,7 +64,7 @@ function register(
 		protectedTags: 0,
 		heuristics: {
 			caveman: { enabled: true, minChars: 20 },
-			clearReasoningAge,
+			keepReasoningTokens: clearReasoningAge === 1 ? 0 : 100_000,
 		},
 		scheduler: { executeThresholdPercentage: 80 },
 		historianContextLimit: 1_000_000,

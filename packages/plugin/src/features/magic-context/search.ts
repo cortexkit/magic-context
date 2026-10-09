@@ -171,6 +171,8 @@ export interface UnifiedSearchOptions {
      *  do, automatic surfacing doesn't indicate usefulness. Mis-counting drives
      *  spurious retrieval-count-based memory promotion decisions. */
     countRetrievals?: boolean;
+    /** Automatic hints rank only stored vectors. Their backfill is a separate job. */
+    backfillMemoryEmbeddings?: boolean;
     /** When true, run multi-probe message search: extract literal symbol/command/
      *  path probes from the query and query each one separately (RRF-fused) so a
      *  message containing the exact literal but not the query's other tokens is
@@ -692,6 +694,7 @@ async function getSemanticScores(args: {
     queryEmbedding: Float32Array | null;
     queryModelId?: string | null;
     workspace?: SearchWorkspaceContext;
+    backfillMemoryEmbeddings?: boolean;
 }): Promise<Map<number, number>> {
     const semanticScores = new Map<number, number>();
 
@@ -706,12 +709,15 @@ async function getSemanticScores(args: {
 
     if (!args.workspace?.isWorkspaced) {
         const cachedEmbeddings = getProjectEmbeddings(args.db, args.projectPath, args.queryModelId);
-        const embeddings = await ensureMemoryEmbeddings({
-            db: args.db,
-            projectIdentity: args.projectPath,
-            memories: args.memories,
-            existingEmbeddings: cachedEmbeddings,
-        });
+        const embeddings =
+            args.backfillMemoryEmbeddings === false
+                ? cachedEmbeddings
+                : await ensureMemoryEmbeddings({
+                      db: args.db,
+                      projectIdentity: args.projectPath,
+                      memories: args.memories,
+                      existingEmbeddings: cachedEmbeddings,
+                  });
 
         for (const memory of args.memories) {
             const memoryEmbedding = embeddings.get(memory.id);
@@ -741,7 +747,7 @@ async function getSemanticScores(args: {
     }
 
     const ownMemories = memoriesByIdentity.get(args.projectPath) ?? [];
-    if (ownMemories.length > 0) {
+    if (ownMemories.length > 0 && args.backfillMemoryEmbeddings !== false) {
         const ownEmbeddings = getProjectEmbeddings(args.db, args.projectPath, args.queryModelId);
         await ensureMemoryEmbeddings({
             db: args.db,
@@ -917,6 +923,7 @@ async function searchMemories(args: {
     workspace?: SearchWorkspaceContext;
     visibleMemoryIds?: Set<number> | null;
     dateRange: InclusiveDateRange | null;
+    backfillMemoryEmbeddings?: boolean;
 }): Promise<{ results: MemorySearchResult[]; suppressedVisibleIds: number[] }> {
     if (!args.memoryEnabled) {
         return { results: [], suppressedVisibleIds: [] };
@@ -960,6 +967,7 @@ async function searchMemories(args: {
         db: args.db,
         projectPath: args.projectPath,
         memories: semanticCandidates,
+        backfillMemoryEmbeddings: args.backfillMemoryEmbeddings,
         queryEmbedding: args.queryEmbedding,
         queryModelId: args.queryModelId,
         workspace: args.workspace,
@@ -2179,6 +2187,7 @@ export async function unifiedSearch(
                       embeddingModelId && embeddingModelId !== "off" ? embeddingModelId : null,
                   workspace,
                   visibleMemoryIds: options.visibleMemoryIds,
+                  backfillMemoryEmbeddings: options.backfillMemoryEmbeddings,
                   dateRange,
               })
             : Promise.resolve({

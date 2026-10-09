@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { cancelAutoSearchWork } from "../../shared/auto-search-lifecycle";
 import { getHarness } from "../../shared/harness";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import {
@@ -307,6 +308,7 @@ export function clearSession(
     sessionId: string,
     rustModuleCleanupAcknowledged = false,
 ): void {
+    cancelAutoSearchWork(sessionId);
     let transactionStartedAt = 0;
     withoutSqliteTransformPass(() =>
         withSqliteBackgroundWriter(() =>

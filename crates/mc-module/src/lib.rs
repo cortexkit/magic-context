@@ -4854,6 +4854,7 @@ impl McHandler {
                 execute_threshold_project_config: None,
                 protected_tokens_user: None,
                 protected_tokens_project: None,
+                keep_reasoning_tokens: None,
                 compaction_enabled: true,
                 memory_enabled: true,
                 auto_search: crate::config::AutoSearchConfig::default(),
@@ -10368,6 +10369,13 @@ impl McHandler {
             }
             _ => {}
         }
+        if parsed.keep_reasoning_tokens_effective.is_none() {
+            parsed.keep_reasoning_tokens_effective = Some(
+                binding
+                    .config
+                    .resolve_keep_reasoning_tokens(parsed.model_key.as_deref()),
+            );
+        }
         let parsed = Arc::new(parsed);
         let projection_cache_lookup_started_at = Instant::now();
         let projection_cache_input = native_delta_frontier
@@ -15119,12 +15127,17 @@ fn encode_full_native_messages(
         .iter()
         .map(|message| message.deref().clone())
         .collect::<Vec<_>>();
+    // Raw newest-vector replay protects live signed thinking, not a cleared
+    // response. Cleared mids must retain the served tagged/sentinel layout.
+    let cleared_mids = transform::reasoning_native_clear_mids(reasoning_clear_units);
     let mutation_exempt_mids = [mutation_exempt_mid, lineage_anchor_mid]
         .into_iter()
         .flatten()
+        .filter(|mid| !cleared_mids.contains(mid))
         .collect::<Vec<_>>();
     let reasoning_exempt_mid =
-        transform::latest_assistant_reasoning_mutation_exempt_mid(&request.messages);
+        transform::latest_assistant_reasoning_mutation_exempt_mid(&request.messages)
+            .filter(|mid| !cleared_mids.contains(mid));
     profile_end!(perf_prepare);
     profile_start!(perf_encode, "native_reference_encode");
     let mut native_messages =
@@ -15291,12 +15304,15 @@ fn attach_native_messages_incremental(
         }
         None
     });
+    let cleared_mids = transform::reasoning_native_clear_mids(reasoning_clear_units);
     let mutation_exempt_mids = [mutation_exempt_mid, lineage_anchor_mid]
         .into_iter()
         .flatten()
+        .filter(|mid| !cleared_mids.contains(mid))
         .collect::<Vec<_>>();
     let newest_assistant_mid =
-        transform::latest_assistant_reasoning_mutation_exempt_mid(&request.messages);
+        transform::latest_assistant_reasoning_mutation_exempt_mid(&request.messages)
+            .filter(|mid| !cleared_mids.contains(mid));
     let ingress_ordinals = request
         .messages
         .iter()
@@ -15311,7 +15327,6 @@ fn attach_native_messages_incremental(
         .as_mut()
         .map(|snapshot| std::mem::take(&mut snapshot.sidecar_sizes))
         .unwrap_or_default();
-    let cleared_mids = transform::reasoning_native_clear_mids(reasoning_clear_units);
     profile_end!(perf_indexes);
     profile_start!(perf_keys, "native_message_keys");
     let mut message_keys = Vec::with_capacity(response.messages().len());
@@ -15478,6 +15493,7 @@ fn attach_native_messages_incremental(
         codec::opencode::NativeEncodeExemptions {
             mutation_mids: &mutation_exempt_mids,
             reasoning_mid: newest_assistant_mid,
+            reasoning_policy_resolved: true,
         },
         transition_consumed,
         suffix_start,
@@ -19235,6 +19251,7 @@ pub fn manifest_with_route_targets(
 
 #[cfg(test)]
 mod tests {
+    include!("tests/tool_attachment_memory_review.rs");
     use super::*;
     use std::collections::{HashMap, VecDeque};
     use std::sync::{
@@ -22168,6 +22185,7 @@ mod tests {
             execute_threshold_project_config: None,
             protected_tokens_user: None,
             protected_tokens_project: None,
+            keep_reasoning_tokens: None,
             compaction_enabled: true,
             memory_enabled: true,
             auto_search: crate::config::AutoSearchConfig::default(),
@@ -23931,6 +23949,200 @@ mod tests {
     }
 
     #[test]
+    fn tagged_tool_attachments_survive_native_cache_and_explicit_drop_stays_dropped() {
+        for status in ["completed", "error"] {
+            let mut native = vec![json!({
+                "info": { "id": "tool-msg", "role": "assistant" },
+                "parts": [{ "type": "tool", "callID": "call", "tool": "read", "state": {
+                    "status": status, "input": {}, "output": "Read result", "error": "Read result",
+                    "attachments": [
+                        { "type": "file", "id": "image-id", "mime": "image/jpeg", "url": "data:image/jpeg;base64,aW1n", "filename": "screen.jpg", "vendor": { "keep": true } },
+                        { "type": "file", "mime": "application/pdf", "url": "data:application/pdf;base64,cGRm", "filename": "read.pdf" },
+                        { "type": "vendor-file", "id": "opaque-id", "payload": [1, 2] },
+                        { "type": "text", "text": "attached text", "vendor": "keep" }
+                    ], "time": { "start": 1, "end": 2 }
+                } }]
+            })];
+            native.push(native_text_message("user-one", "user", "first prompt"));
+            let ingress = codec::decode_opencode(&native).messages;
+            let request = native_cache_request(status, ingress.clone(), native.clone(), "fp-1");
+            let mut served = ingress.iter().map(|m| m.ck.clone()).collect::<Vec<_>>();
+            let CkKind::ToolResult { output, .. } = &mut served[0].content[1].kind else {
+                panic!("result")
+            };
+            let blocks = match &mut output.kind {
+                CkOutputKind::Content { blocks } | CkOutputKind::ErrorContent { blocks } => blocks,
+                _ => panic!("attachments must be projected as content"),
+            };
+            let ck_wire::ResultBlockKind::Text { text } = &mut blocks[0].kind else {
+                panic!("text child")
+            };
+            *text = "§1§ Read result".into();
+            served[0].content[1].mark_modified();
+            served[0].mark_modified();
+            let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
+            let tags = BTreeMap::new();
+            let (first, _) = run_native_cache_pass(
+                &cache,
+                &request,
+                served.clone(),
+                &tags,
+                false,
+                0,
+                NativeCacheKeyMode::Normal,
+            );
+            let first_native = first.native_messages.unwrap();
+            assert_eq!(
+                first_native[0]["parts"][0]["state"]["attachments"],
+                native[0]["parts"][0]["state"]["attachments"]
+            );
+            let output_key = if status == "error" { "error" } else { "output" };
+            assert_eq!(
+                first_native[0]["parts"][0]["state"][output_key],
+                "§1§ Read result"
+            );
+            let frozen_bytes = serde_json::to_vec(&first_native[0]).unwrap();
+            for clear_cache in [false, true] {
+                if clear_cache {
+                    cache.lock().unwrap().remove(status);
+                }
+                let (replay, _) = run_native_cache_pass(
+                    &cache,
+                    &request,
+                    served.clone(),
+                    &tags,
+                    false,
+                    0,
+                    NativeCacheKeyMode::Normal,
+                );
+                assert_eq!(
+                    serde_json::to_vec(&replay.native_messages.unwrap()[0]).unwrap(),
+                    frozen_bytes
+                );
+            }
+            let appended = ck("next", 3, "defer");
+            let mut next_messages = ingress;
+            next_messages.push(appended.clone());
+            let mut next_native = native;
+            next_native.push(native_text_message("next", "user", "defer"));
+            let mut next = native_cache_request(status, next_messages, next_native, "fp-2");
+            next.tail_delta =
+                Some(json!({ "after": "fp-1", "replace_from": 2, "native_replace_from": 2 }));
+            served.push(appended.ck);
+            let prefix = next.native_messages.as_ref().unwrap()[..2]
+                .iter()
+                .cloned()
+                .map(Arc::new)
+                .collect::<Vec<_>>();
+            let frontier = NativeDeltaFrontier {
+                after: "fp-1".into(),
+                native_replace_from: 2,
+                native_prefix_retained_bytes: prefix
+                    .iter()
+                    .map(|value| native_value_retained_bytes(value))
+                    .collect(),
+                native_prefix: prefix,
+                projection_cache: None,
+            };
+            let mut replay = transform::TransformResponse::passthrough(
+                served.clone(),
+                next.full_array_fingerprint.clone(),
+            );
+            let stats = attach_native_messages_incremental(
+                &mut replay,
+                &next,
+                &[],
+                &tags,
+                None,
+                None,
+                false,
+                Some(&frontier),
+                0,
+                &cache,
+                NativeCacheKeyMode::Normal,
+            );
+            assert_eq!(stats.delta_fallback_reason, None);
+            assert!(stats.reused_messages > 0, "{stats:?}");
+            assert_eq!(
+                serde_json::to_vec(&replay.native_messages.unwrap()[0]).unwrap(),
+                frozen_bytes
+            );
+            // Native attach must not restore attachments that the frozen reduction removed.
+            let CkKind::ToolResult { output, .. } = &mut served[0].content[1].kind else {
+                panic!("result")
+            };
+            *output = CkToolOutput::bare(CkOutputKind::Text {
+                text: "[dropped §1§]".into(),
+            });
+            let (drop, _) = run_native_cache_pass(
+                &cache,
+                &next,
+                served,
+                &tags,
+                false,
+                0,
+                NativeCacheKeyMode::Normal,
+            );
+            assert!(drop.native_messages.unwrap()[0]["parts"][0]["state"]
+                .get("attachments")
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn attachment_free_upgrade_keeps_native_served_bytes_identical() {
+        let native = vec![
+            json!({ "info": { "id": "tool-msg", "role": "assistant" }, "parts": [{ "type": "tool", "callID": "call", "tool": "read", "state": { "status": "completed", "input": { "path": "code.rs" }, "output": "line\n\u{0000}§raw§", "vendor": true, "time": { "start": 1, "end": 2 } } }] }),
+        ];
+        let fixed_ingress = codec::decode_opencode(&native).messages;
+        let mut old_ingress = fixed_ingress.clone();
+        let CkKind::ToolResult { output, .. } = &mut old_ingress[0].ck.content[1].kind else {
+            panic!("result")
+        };
+        *output = CkToolOutput::bare(CkOutputKind::Text {
+            text: "line\n\u{0000}§raw§".into(),
+        });
+        old_ingress[0].ck.content[1].mark_modified();
+        old_ingress[0].ck.mark_modified();
+        for tagged in [false, true] {
+            let render = |messages: Vec<CkIngressMessage>| {
+                let mut served = messages.iter().map(|m| m.ck.clone()).collect::<Vec<_>>();
+                if tagged {
+                    let CkKind::ToolResult { output, .. } = &mut served[0].content[1].kind else {
+                        panic!("result")
+                    };
+                    match &mut output.kind {
+                        CkOutputKind::Text { text } => text.insert_str(0, "§1§ "),
+                        CkOutputKind::Content { blocks } => {
+                            let ck_wire::ResultBlockKind::Text { text } = &mut blocks[0].kind
+                            else {
+                                panic!("text")
+                            };
+                            text.insert_str(0, "§1§ ");
+                        }
+                        _ => panic!("output"),
+                    }
+                    served[0].content[1].mark_modified();
+                    served[0].mark_modified();
+                }
+                let request = native_cache_request("upgrade", messages, native.clone(), "fp");
+                let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
+                let (response, _) = run_native_cache_pass(
+                    &cache,
+                    &request,
+                    served,
+                    &BTreeMap::new(),
+                    false,
+                    0,
+                    NativeCacheKeyMode::Normal,
+                );
+                serde_json::to_vec(&response.native_messages.unwrap()).unwrap()
+            };
+            assert_eq!(render(old_ingress.clone()), render(fixed_ingress.clone()));
+        }
+    }
+
+    #[test]
     fn native_delta_ingress_core_is_independent_of_changed_output_messages() {
         let ingress = vec![
             ck("core-1", 1, "one"),
@@ -25616,6 +25828,108 @@ mod tests {
     }
 
     #[test]
+    fn native_newest_shortcut_preserves_live_signed_bytes_and_keys_clear_transitions() {
+        let raw = vec![json!({"info":{"id":"newest","role":"assistant"},"parts":[
+            {"id":"r","type":"reasoning","text":"signed original","metadata":{"anthropic":{"signature":"sig-original"}}},
+            {"id":"t","type":"text","text":"answer"}
+        ]})];
+        let ingress = codec::decode_opencode(&raw).messages;
+        let request = native_cache_request(
+            "newest-clear-shortcut",
+            ingress.clone(),
+            raw.clone(),
+            "same-input",
+        );
+        let mut served = ingress[0].ck.clone();
+        served.content[0].kind = ck_wire::CkKind::Reasoning {
+            text: String::new(),
+            signature: None,
+        };
+        served.content[0].mark_modified();
+        served.content[1].kind = ck_wire::CkKind::Text {
+            text: "§1§ answer".into(),
+        };
+        served.content[1].mark_modified();
+        served.mark_modified();
+        let cache = Mutex::new(NativeAttachmentCache::new(1024 * 1024));
+        let tags = BTreeMap::from([("newest".to_string(), 1)]);
+        let clear = vec![mc_core::FrozenUnit {
+            key: "strip:reasoning_clear:newest".into(),
+            kind: "strip_reasoning_clear".into(),
+            frozen_payload: String::new(),
+            durability_class: mc_core::DurabilityClass::Lineage,
+            reset_rule: String::new(),
+        }];
+        let control = transform::TransformResponse::passthrough(
+            vec![served.clone()],
+            request.full_array_fingerprint.clone(),
+        );
+        // The unchanged master shortcut serves a non-cleared newest response raw,
+        // including its signed thinking, even when a working CK clone differs.
+        assert_eq!(
+            encode_full_native_messages(&control, &request, &[], &tags, None, None, true),
+            raw
+        );
+        let (live, _) = run_native_cache_pass_with_clear_units(
+            &cache,
+            &request,
+            vec![served.clone()],
+            &[],
+            &tags,
+            true,
+            0,
+            NativeCacheKeyMode::Normal,
+        );
+        assert_eq!(live.native_messages.as_ref().unwrap()[0].as_ref(), &raw[0]);
+        let expected_clear =
+            encode_full_native_messages(&control, &request, &clear, &tags, None, None, true);
+        assert!(serde_json::to_string(&expected_clear)
+            .unwrap()
+            .contains("§1§ answer"));
+        assert!(!serde_json::to_string(&expected_clear)
+            .unwrap()
+            .contains("signed original"));
+        let (cleared, stats) = run_native_cache_pass_with_clear_units(
+            &cache,
+            &request,
+            vec![served.clone()],
+            &clear,
+            &tags,
+            true,
+            0,
+            NativeCacheKeyMode::Normal,
+        );
+        assert!(
+            stats.encoded_messages > 0,
+            "clear transition reused a stale raw newest vector"
+        );
+        assert_eq!(
+            cleared.native_messages.as_ref().unwrap()[0].as_ref(),
+            &expected_clear[0]
+        );
+        // Exercise the cache key's exemption bits in both directions. This is
+        // an encoder control, not permission for a session to restore a clear.
+        let (live_again, stats) = run_native_cache_pass_with_clear_units(
+            &cache,
+            &request,
+            vec![served],
+            &[],
+            &tags,
+            true,
+            0,
+            NativeCacheKeyMode::Normal,
+        );
+        assert!(
+            stats.encoded_messages > 0,
+            "shortcut transition reused stale cleared bytes"
+        );
+        assert_eq!(
+            live_again.native_messages.as_ref().unwrap()[0].as_ref(),
+            &raw[0]
+        );
+    }
+
+    #[test]
     fn frontier_vacuity_covers_opaque_repeats_eviction_and_same_length_edits() {
         let baseline_ingress = vec![ck("frontier-1", 1, "aaa"), ck("frontier-2", 2, "bbb")];
         let baseline_native = vec![
@@ -27099,12 +27413,20 @@ mod tests {
                 bytes.len(),
                 Sha256::digest(&bytes)
             );
+            if pass == 3 {
+                eprintln!("issue630-byte-audit {}", String::from_utf8_lossy(&bytes));
+            }
             // Captured on the pre-compaction implementation with the identical fixture.
+            // Pass 3 is the one exception: the whole fixture is a single Anthropic
+            // turn with signed thinking on a prefix-bound model, and its priced pass
+            // used to release the earlier steps' native reasoning, removing signed
+            // thinking from the active turn (rejected by the provider). It now keeps
+            // that reasoning; the compacted/uncompacted differential above is unchanged.
             let baseline = [
                 "44e6c96da02972ffb728ac3e84cbcc7367e7cc907a80dc348bfb520f5b1d2ee3",
                 "48be75604d237c4c5d166ce849670b9c6ca0f1441349e403b9bf74bd4bf3b789",
                 "0545fea19343e3bb11358897ff80fa974b5b37992515617423c22b6493e87e15",
-                "b7405b3032dd3b08e721edc579173ac316385a80d626f7937173a9b084cbe217",
+                "bc265068c217dc390b2e46cb9696a23ac576694c8f914daad3e2df383c5e7c3e",
             ];
             if pass < 4 {
                 assert_eq!(
@@ -27186,6 +27508,21 @@ mod tests {
         priced_request["render_config"] = json!("independent-priced-config-change");
         let priced = call_transform_request(&handler, priced_request).await;
         assert_eq!(priced["action"], "HARD");
+        // step-0 belongs to the active Anthropic turn (no real user message follows
+        // it), so a priced pass must keep replaying its signed reasoning unchanged.
+        assert!(store
+            .load("ses")
+            .unwrap()
+            .core
+            .frozen_units
+            .iter()
+            .any(|unit| unit.key == "strip:native_reasoning_keep:step-0"));
+        // A real user request ends that turn; the next priced pass releases the keep.
+        native.push(json!({"info":{"id":"next-user","role":"user"},"parts":[{"type":"text","text":"next request"}]}));
+        let mut released_request = make_request(&native);
+        released_request["render_config"] = json!("second-priced-config-change");
+        let released = call_transform_request(&handler, released_request).await;
+        assert_eq!(released["action"], "HARD");
         assert!(!store
             .load("ses")
             .unwrap()

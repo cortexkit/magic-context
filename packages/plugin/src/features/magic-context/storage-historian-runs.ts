@@ -65,11 +65,21 @@ export interface HistorianRunInput {
     legacy?: boolean;
 }
 
-/**
- * Record one historian run. Best-effort: never throws into the historian path —
- * telemetry must not break compaction. Returns the new row id, or null on
- * failure.
- */
+/** Count recorded attempts for one session, regardless of their outcome. */
+export function countHistorianRuns(db: Database, sessionId: string): number {
+    try {
+        const row = db
+            .prepare<[string], { count: number }>(
+                "SELECT COUNT(*) AS count FROM historian_runs WHERE session_id = ?",
+            )
+            .get(sessionId);
+        return row?.count ?? 0;
+    } catch {
+        // Older stores may not have the telemetry table yet; status stays usable.
+        return 0;
+    }
+}
+
 export function recordHistorianRun(db: Database, input: HistorianRunInput): number | null {
     try {
         const result = db

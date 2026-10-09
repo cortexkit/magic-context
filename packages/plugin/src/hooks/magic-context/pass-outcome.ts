@@ -103,10 +103,24 @@ export function createPassOutcome(): PassOutcome {
             finalized = true;
         },
         get captureEligible() {
-            return finalized && degradations.length === 0;
+            // A deadline skip is a finalized optional-hint decision, not an
+            // incomplete managed representation. Capture the bytes actually served.
+            return (
+                finalized &&
+                degradations.every(
+                    (item) => item.kind !== "fatal" && item.site === "auto-search-timeout",
+                )
+            );
         },
         isCaptureEligible() {
-            return finalized && degradations.length === 0;
+            // A deadline skip is a finalized optional-hint decision, not an
+            // incomplete managed representation. Capture the bytes actually served.
+            return (
+                finalized &&
+                degradations.every(
+                    (item) => item.kind !== "fatal" && item.site === "auto-search-timeout",
+                )
+            );
         },
     };
 }

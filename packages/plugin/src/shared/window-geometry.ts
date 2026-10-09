@@ -89,6 +89,8 @@ export interface WindowDerivation {
     geometry: WindowGeometry;
     windowSource: WindowLimitSource;
     absoluteWall: number;
+    /** Accepted provider input used to raise the usable denominator above metadata. */
+    provenInputTokens?: number;
 }
 
 export interface WindowGeometryResult {
@@ -691,6 +693,7 @@ export function applyProvenInputFloor(
                 absoluteWall: trustedAbsoluteWall
                     ? geometry.derivation.absoluteWall
                     : Math.max(geometry.derivation.absoluteWall, provenInputTokens),
+                provenInputTokens,
             },
         },
     };
@@ -713,6 +716,13 @@ export function formatWindowDerivationLine(
     // pushed the line past the narrowest dialog's content width, where it
     // wrapped onto a second row.
     return `${formatCompactTokens(inputTokens)} / ${formatCompactTokens(result.usableSoft)} usable · window ${formatCompactTokens(result.derivation.window)} · ${formatCompactTokens(result.derivation.reserve)} ${reserveLabel}`;
+}
+
+/** Distinguish metadata from a denominator raised by an accepted input measurement. */
+export function formatWindowSource(result: WindowGeometryResult | undefined): string {
+    return result?.derivation.provenInputTokens
+        ? `provider-measured floor (${result.derivation.windowSource})`
+        : (result?.derivation.windowSource ?? "unknown");
 }
 
 export function formatCompactTokens(value: number): string {

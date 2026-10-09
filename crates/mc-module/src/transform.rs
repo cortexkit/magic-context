@@ -740,6 +740,8 @@ pub struct TransformRequest {
     /// complete signed thinking block. This mirrors the TS `clear_reasoning_age` setting.
     #[serde(default = "default_clear_reasoning_age")]
     pub clear_reasoning_age: u64,
+    /// Host-resolved retention budget; deprecated age is accepted but ignored.
+    pub keep_reasoning_tokens_effective: Option<u64>,
     /// TS-resolved per-model TTL (session_meta.cacheTtl). None when the consumer does
     /// not resolve TTLs (CC leg); the module's own config resolves then. Until this
     /// field existed the adapter's value was silently dropped by serde, leaving every
@@ -1031,6 +1033,8 @@ struct TransformRequestWire {
     #[serde(default = "default_clear_reasoning_age")]
     clear_reasoning_age: u64,
     #[serde(default)]
+    keep_reasoning_tokens_effective: Option<u64>,
+    #[serde(default)]
     cache_ttl: Option<String>,
     /// Broca's name for the cache TTL, in milliseconds. Used only when `cache_ttl` is absent.
     #[serde(default)]
@@ -1180,6 +1184,7 @@ impl<'de> Deserialize<'de> for TransformRequest {
             provider_id: wire.provider_id,
             model_key: wire.model_key,
             clear_reasoning_age: wire.clear_reasoning_age,
+            keep_reasoning_tokens_effective: wire.keep_reasoning_tokens_effective,
             cache_ttl: wire.cache_ttl.or_else(|| {
                 wire.cache_ttl_ms
                     .map(|milliseconds| milliseconds.to_string())
@@ -2092,6 +2097,7 @@ pub enum TransformError {
     CoverageGap(String),
     /// Internal retry: a priced pass must use the ingress synthetic classification.
     SyntheticTreatmentBust,
+    AttachmentProjectionBust,
     /// The lexical hint query failed before a durable decision could be written.
     Search(String),
     /// CK ingress rejected an unsupported or unpairable block before any partial projection.
@@ -2143,6 +2149,7 @@ impl std::fmt::Display for TransformError {
             ),
             TransformError::CoverageGap(m) => write!(f, "{m}"),
             TransformError::SyntheticTreatmentBust => write!(f, "synthetic treatment requires a priced retry"),
+            TransformError::AttachmentProjectionBust => write!(f, "attachment projection requires a priced retry"),
             TransformError::Search(m) => write!(f, "search: {m}"),
             TransformError::CkWire(e) => write!(f, "ck wire: {e}"),
             TransformError::DuplicateBlockId(id) => write!(f, "duplicate flattened block id: {id}"),
@@ -3097,6 +3104,7 @@ fn apply_once_with_estimator_and_projection(
         .map(|(_, ingress)| ingress.mid.clone())
         .collect();
     let mut replay_legacy_treatment = legacy_req.is_some();
+    let mut restore_attachments = false;
     profile_end!(perf_wrapper_prepare);
     loop {
         let mut boundary_divergence_detected = false;
@@ -3105,13 +3113,16 @@ fn apply_once_with_estimator_and_projection(
         } else {
             req
         };
+        let attachment_upgrade = attachment_projection_replay(store, pass_req)?;
+        let attachment_replay = attachment_upgrade.as_ref().filter(|_| !restore_attachments);
+        let effective_req = attachment_replay.map_or(pass_req, |upgrade| &upgrade.legacy);
         match apply_once(
             store,
-            pass_req,
+            effective_req,
             ctx,
             estimate_tokens,
             output_cache,
-            if replay_legacy_treatment {
+            if replay_legacy_treatment || attachment_upgrade.is_some() {
                 None
             } else {
                 projection_cache
@@ -3121,11 +3132,18 @@ fn apply_once_with_estimator_and_projection(
             incremental_history,
             replay_legacy_treatment,
             &reclassified_on_bust,
+            attachment_upgrade.as_ref(),
+            attachment_replay.is_some(),
         ) {
+            Err(TransformError::AttachmentProjectionBust) if attachment_replay.is_some() => {
+                restore_attachments = true;
+                continue;
+            }
             Err(TransformError::SyntheticTreatmentBust | TransformError::CoverageGap(_))
                 if replay_legacy_treatment =>
             {
                 replay_legacy_treatment = false;
+                restore_attachments = false;
                 continue;
             }
             Err(TransformError::Store(McStoreError::CasConflict { .. }))
@@ -3136,9 +3154,17 @@ fn apply_once_with_estimator_and_projection(
                 // cannot turn the already-proven inconsistency back into an ordinary defer.
                 boundary_divergence_retry |= boundary_divergence_detected;
                 attempt += 1;
+                restore_attachments = false;
                 continue;
             }
             Ok(mut output) => {
+                if attachment_replay.is_some() {
+                    // The facade's delta cache is an ingress cache, not a served
+                    // output cache. Keep the repaired media there while replaying
+                    // old provider bytes, so later tail deltas can still discover
+                    // the upgrade when independent bust permission arrives.
+                    output.projection = project_messages(&pass_req.messages)?;
+                }
                 output.response.cache_ttl =
                     response_marker_ttl(req, &ctx.cache_ttl, ctx.cache_ttl_provenance);
                 return Ok(output);
@@ -3606,6 +3632,8 @@ fn apply_additive_only(
     req: &TransformRequest,
     ctx: &ProducerContext<'_>,
     estimate_tokens: impl Fn(&str) -> usize + Copy,
+    attachment_upgrade: Option<&AttachmentProjectionUpgrade>,
+    replay_attachments: bool,
 ) -> Result<TransformWithProjection, TransformError> {
     let total_started_at = Instant::now();
     let projection_started_at = Instant::now();
@@ -3810,6 +3838,16 @@ fn apply_additive_only(
     if let PassPlan::Reject(message) = plan {
         return Err(TransformError::UnknownShape(message));
     }
+    let prefix_rebuild_permitted = matches!(
+        plan,
+        PassPlan::Hard | PassPlan::MigrateHard | PassPlan::Soft
+    );
+    if replay_attachments && prefix_rebuild_permitted {
+        return Err(TransformError::AttachmentProjectionBust);
+    }
+    if attachment_upgrade.is_some() && !replay_attachments && !prefix_rebuild_permitted {
+        return Err(TransformError::AttachmentProjectionBust);
+    }
     let additive_shape_clean = loaded.core.boundary_id.is_empty()
         && loaded.core.pending_changes.is_empty()
         && loaded
@@ -3843,7 +3881,20 @@ fn apply_additive_only(
         meta.last_render_config = effective_render_config.clone();
     }
     let provisional_tail_mid = provisional_tail_mid(req);
-    apply_ingress_meta(&mut meta, req, &projection, provisional_tail_mid, None, &[]);
+    // Restored media and its recognized identity are one serving decision. Keeping
+    // the scalar identity here would make the next defer undo this permitted rebuild.
+    let attachment_re_adoptions = attachment_upgrade
+        .filter(|_| !replay_attachments && prefix_rebuild_permitted)
+        .map(|upgrade| attachment_identity_re_adoptions(&loaded.meta, &projection, upgrade))
+        .unwrap_or_default();
+    apply_ingress_meta(
+        &mut meta,
+        req,
+        &projection,
+        provisional_tail_mid,
+        None,
+        &attachment_re_adoptions,
+    );
     let cc_u1_active = crate::cc_u1_active(serializer_profile, req.tool_present);
     meta.cc_u1_active = cc_u1_active;
     meta.tagging_surface_active = tagging_surface_requested;
@@ -4048,6 +4099,15 @@ fn apply_additive_only(
     timings.tail_messages_emitted = req.messages.len();
     timings.frozen_units = core.frozen_units.len();
 
+    if prefix_rebuild_permitted && serializer_profile == Some(SerializerProfile::OpencodeAiSdk) {
+        // A provisional assistant deliberately has no identity pin. Record the
+        // admitted serving bytes with the rebuild so its next defer can prove
+        // media was already shown, without adding fingerprint writes on defers.
+        let mut frame_block_stems = vec![None; messages.len()];
+        frame_block_stems[leading_systems] = Some("mc_m0");
+        frame_block_stems[leading_systems + 1] = Some("mc_m1");
+        meta.served_output_fingerprint = served_output_fingerprints(&messages, &frame_block_stems);
+    }
     let state_changed = core != loaded.core || meta != loaded.meta;
     if state_changed {
         meta.last_committed_pass_at_ms = ctx.now_ms;
@@ -4217,12 +4277,21 @@ fn apply_once(
     incremental_history: bool,
     replay_legacy_treatment: bool,
     reclassified_on_bust: &BTreeSet<String>,
+    attachment_upgrade: Option<&AttachmentProjectionUpgrade>,
+    replay_attachments: bool,
 ) -> Result<TransformWithProjection, TransformError> {
     // Keep this span alive through local destruction, which the wall `total` omits.
     profile_start!(_perf_apply, "apply_once");
     *boundary_divergence_detected = false;
     if !ctx.compaction_enabled {
-        return apply_additive_only(store, req, ctx, estimate_tokens);
+        return apply_additive_only(
+            store,
+            req,
+            ctx,
+            estimate_tokens,
+            attachment_upgrade,
+            replay_attachments,
+        );
     }
     let total_started_at = Instant::now();
     let mut timings = TransformTimings::default();
@@ -4870,7 +4939,36 @@ fn apply_once(
         &loaded.core,
         provisional_tail_mid,
         lineage_anchor_mid,
-    )?;
+    )
+    .or_else(|error| {
+        // This is not a general drift exemption. The legacy projection must match
+        // every stored block identity, including siblings and the tool envelope.
+        let Some(upgrade) = attachment_upgrade.filter(|_| !replay_attachments) else {
+            return Err(error);
+        };
+        let mut legacy_meta = loaded.meta.clone();
+        for mid in &upgrade.mids {
+            if let Some(vector) = projection.identity_by_mid.get(mid) {
+                legacy_meta
+                    .block_identity_by_mid
+                    .insert(mid.clone(), vector.clone());
+            }
+        }
+        let mut adoptions = enforce_block_identity(
+            &legacy_meta,
+            req,
+            &projection,
+            &loaded.core,
+            provisional_tail_mid,
+            lineage_anchor_mid,
+        )?;
+        adoptions.extend(attachment_identity_re_adoptions(
+            &loaded.meta,
+            &projection,
+            upgrade,
+        ));
+        Ok(adoptions)
+    })?;
     timings.identity_enforce = elapsed_ms(identity_enforce_started_at);
     profile_end!(perf_identity);
     let mut pending_overlays = PendingOverlayDecisions::default();
@@ -5225,21 +5323,9 @@ fn apply_once(
                 .or_else(|| req.usage.as_ref().map(|usage| usage.context_limit_tokens))
                 .unwrap_or(200_000),
         );
-    let reasoning_exemption_repair = !req.is_subagent
-        && (reasoning_clear_exemption_changed(&loaded.core, req, lineage_anchor_mid)
-            || legacy_reasoning_exemption_changed(
-                &loaded.core,
-                &loaded.meta,
-                req,
-                &projection,
-                lineage_anchor_mid,
-            ));
     // Every trigger below asks for a HARD. Whether that HARD may also price automatic
     // reductions and the other bust-only lanes depends on whether it can re-render the
     // served prefix byte-identically:
-    // - reasoning_exemption_repair: the repair exists to change which reasoning blocks the
-    //   tail serves, so the pass changes provider-visible bytes by construction (in the
-    //   tail, which the m0/m1 head comparison would not see). It keeps pricing.
     // - first_fold_due: folds the session's first compartment and mints the first
     //   boundary, so m0 and the coverage anchor change by construction. It keeps pricing.
     // - boundary_divergence_recut: re-cuts compartments to a new boundary, so coverage and
@@ -5254,8 +5340,7 @@ fn apply_once(
     // Reconcile (the boundary left the live array after a revert) and lineage descent (a new
     // host conversation epoch) are separate HARD inputs below; both serve a different
     // message array than the cached one, so they keep pricing too.
-    let hard_fold_requested = reasoning_exemption_repair
-        || pre_snapshot_inputs_changed
+    let hard_fold_requested = pre_snapshot_inputs_changed
         || first_fold_due
         || boundary_divergence_recut.is_some()
         || idle_fold_due
@@ -5266,7 +5351,10 @@ fn apply_once(
     // below can authorize new provider-visible mutations.
     // Subagents execute a reductions-only branch, not the prefix plan. Inherited
     // HARD/reconcile advisories cannot price automatic reductions without a fold.
-    let prefix_materialization_enabled = !req.is_subagent;
+    let active_thinking_turn = active_anthropic_thinking_turn(req);
+    let protected_signed_prefix =
+        active_thinking_turn && is_prefix_bound_thinking_model(req.model_key.as_deref());
+    let prefix_materialization_enabled = !req.is_subagent && !protected_signed_prefix;
     let profile_transition = !loaded.meta.last_serializer_profile.is_empty()
         && loaded.meta.last_serializer_profile != req.serializer_profile;
     // A known previous identity that differs from this request means the provider's
@@ -5294,8 +5382,7 @@ fn apply_once(
         && (external_revision_changed
             || project_memory_epoch_hard_due
             || pre_snapshot_inputs_changed)
-        && !(reasoning_exemption_repair
-            || first_fold_due
+        && !(first_fold_due
             || boundary_divergence_recut.is_some()
             || system_absorb_hard_due
             || hard_fold_loses_provider_cache)
@@ -5357,7 +5444,7 @@ fn apply_once(
         // for queued drops and automatic cleanup, not a request to change bytes.
         || (req.is_subagent && scheduler_outcome.pass.canonical_decision() == "execute")
         || force_episode_available
-        || scheduler_outcome.pass == scheduler::PassDecision::Emergency95;
+            || scheduler_outcome.pass == scheduler::PassDecision::Emergency95;
     let pass_already_busting = supersession_ride_available;
     let emergency_minimum_waived = independent_rebuild;
     let calibration_candidate = crate::decision_calibration::DecisionCalibration::freeze_for_model(
@@ -5449,7 +5536,7 @@ fn apply_once(
         active_calibration.tools_ratio,
     );
     let tag_window_protected_block_ids = protection_window.row_identities.block_ids.clone();
-    let exempt_message_protected_block_ids = [mutation_exempt_mid, lineage_anchor_mid]
+    let mut exempt_message_protected_block_ids = [mutation_exempt_mid, lineage_anchor_mid]
         .into_iter()
         .flatten()
         .flat_map(|mid| {
@@ -5460,6 +5547,7 @@ fn apply_once(
                 .map(|block| block.id.clone())
         })
         .collect::<HashSet<_>>();
+    exempt_message_protected_block_ids.extend(active_thinking_prefix_edit_ids(&loaded.core, req));
     let mut protected_block_ids = tag_window_protected_block_ids
         .union(&exempt_message_protected_block_ids)
         .cloned()
@@ -5596,11 +5684,17 @@ fn apply_once(
         planned_age_basis,
         ctx.caveman_english_word_rules,
     );
+    let reasoning_scope = ReasoningBudgetScope {
+        coverage: loaded.meta.coverage_ordinal.unwrap_or(0),
+        anchor: lineage_anchor_mid,
+    };
     let planned_reasoning_cutoff = reasoning_clear_cutoff_with_tags(
         req,
         serializer_profile,
         non_tool_bust_opportunity,
         &tag_numbers,
+        &loaded.core,
+        reasoning_scope,
     );
     let planned_strip_units = new_frozen_strip_units(
         &loaded.core,
@@ -5608,12 +5702,23 @@ fn apply_once(
         &tag_numbers,
         planned_reasoning_cutoff,
         non_tool_bust_opportunity,
-        lineage_anchor_mid,
+        StripSelectionScope {
+            reasoning: reasoning_scope,
+            image_watermark: processed_image_watermark(
+                &tag_rows,
+                &loaded.core.frozen_units,
+                &selected_reductions,
+            ),
+        },
         &selection_outcome.protected_tool_block_ids,
     );
     let reclaim_pending_now = reductions_pending_now
         || !planned_caveman_units.is_empty()
-        || !planned_strip_units.is_empty();
+        || !planned_strip_units.is_empty()
+        // Restoration is deferred prefix work, like a queued reduction. It can
+        // give an independently authorized flush/force/rebuild something to do,
+        // but never grants the shared permission itself.
+        || (attachment_upgrade.is_some() && independent_bust_opportunity);
     let mut plan = classify(&ClassifierInput {
         initialized: loaded.meta.initialized && !loaded.meta.bootstrap_seed_fold_pending,
         is_legacy_baseline: is_legacy_baseline(&loaded.core),
@@ -5631,11 +5736,13 @@ fn apply_once(
         // published prefix work, an explicit flush, force, or actual reductions.
         bust_opportunity,
     });
-    // Todo insertion and an expired retry's new tail reductions do not need a coverage
+    // Attachment restoration, todo insertion and an expired retry's new tail reductions do not need a coverage
     // anchor: neither moves the frozen m0/m1 boundary. The generic classifier requires
     // an anchor for history deltas, so promote only an ordinary defer here, after the
     // independent bust gate has priced the work. Reconcile defers remain untouched.
-    if (todo_injection_pending || (scheduler_outcome.idle_ttl_fired && reclaim_pending_now))
+    if (attachment_upgrade.is_some()
+        || todo_injection_pending
+        || (scheduler_outcome.idle_ttl_fired && reclaim_pending_now))
         && bust_opportunity
         && !loaded.core.reconcile_pending
         && matches!(plan, PassPlan::Defer)
@@ -5696,9 +5803,6 @@ fn apply_once(
     }
     if pre_snapshot_inputs_changed {
         materialize_reason = Some("protected_tokens_inputs_changed".to_string());
-    }
-    if reasoning_exemption_repair {
-        materialize_reason = Some("reasoning_exemption_repair".to_string());
     }
     // Attribution belongs to this expired provider request, even if the head was
     // already prepared by an aborted attempt and the materializer only replays it.
@@ -5843,6 +5947,14 @@ fn apply_once(
     if replay_legacy_treatment && is_provider_prefix_mutation_pass {
         return Err(TransformError::SyntheticTreatmentBust);
     }
+    if replay_attachments && is_provider_prefix_mutation_pass {
+        // Retry before any CAS commit, with the repaired projection. Restoration
+        // rides this existing permission; discovering it never originates a bust.
+        return Err(TransformError::AttachmentProjectionBust);
+    }
+    if attachment_upgrade.is_some() && !replay_attachments && !is_provider_prefix_mutation_pass {
+        return Err(TransformError::AttachmentProjectionBust);
+    }
     if is_provider_prefix_mutation_pass {
         meta.reclassified_synthetic_mids
             .extend(reclassified_on_bust.iter().cloned());
@@ -5932,8 +6044,14 @@ fn apply_once(
         }
     }
     timings.user_hint = elapsed_ms(user_hint_started_at);
-    let reasoning_clear_cutoff =
-        reasoning_clear_cutoff_with_tags(req, serializer_profile, is_bust_pass, &tag_numbers);
+    let reasoning_clear_cutoff = reasoning_clear_cutoff_with_tags(
+        req,
+        serializer_profile,
+        is_bust_pass,
+        &tag_numbers,
+        &loaded.core,
+        reasoning_scope,
+    );
     if let Some(cutoff) = reasoning_clear_cutoff {
         meta.reasoning_cleared_through_tag = meta.reasoning_cleared_through_tag.max(cutoff);
         // Keep the legacy ordinal watermark populated so readers that predate the tag-number
@@ -5998,6 +6116,7 @@ fn apply_once(
             unit.key.starts_with(SYSTEM_STRIP_BLOCK_PREFIX) && !unit.reset_rule.is_empty()
         });
     let reasoning_trim_only_candidate = is_bust_pass
+        && attachment_upgrade.is_none()
         && serializer_profile == Some(SerializerProfile::OpencodeAiSdk)
         && is_prefix_bound_thinking_model(req.model_key.as_deref())
         && matches!(plan, PassPlan::Soft)
@@ -7034,7 +7153,6 @@ fn apply_once(
             }
         }
     }
-    refresh_reasoning_clear_exemptions(&mut core, req, is_bust_pass, lineage_anchor_mid);
     let frozen_units_before_reasoning_clear = core.frozen_units.len();
     core.frozen_units.extend(new_reasoning_clear_units(
         &core,
@@ -7060,8 +7178,13 @@ fn apply_once(
         meta.reasoning_clear_initialized = true;
         meta.reasoning_replay_evidence = None;
     }
-    let cleared_mids = reasoning_clear_mids(&core.frozen_units)
+    let cleared_mids = reasoning_native_clear_mids(&core.frozen_units)
         .into_iter()
+        .chain(core.frozen_units.iter().filter_map(|unit| {
+            unit.key
+                .strip_prefix("strip:reasoning_age:")
+                .or_else(|| unit.key.strip_prefix("strip:merged_reasoning:"))
+        }))
         .map(str::to_owned)
         .collect::<HashSet<_>>();
     core.frozen_units.retain(|unit| {
@@ -7072,10 +7195,16 @@ fn apply_once(
     let output_meta = no_trim_meta.as_ref().unwrap_or(&meta);
     // OpenCode must replay the newest signed assistant's complete native vector. Its
     // demotion is not permission to apply previously withheld overlays on a defer.
-    // Release these keeps only when the prefix is already being repriced.
+    // Release these keeps only when the prefix is already being repriced. Keeps on the
+    // active Anthropic turn's thinking stay: releasing one would remove a signed block
+    // the provider requires unchanged until the next real user request.
     if is_provider_prefix_mutation_pass {
-        core.frozen_units
-            .retain(|unit| !unit.key.starts_with("strip:native_reasoning_keep:"));
+        let active_thinking = protected_thinking_turn_mids(req);
+        core.frozen_units.retain(|unit| {
+            unit.key
+                .strip_prefix("strip:native_reasoning_keep:")
+                .is_none_or(|mid| active_thinking.contains(mid))
+        });
     }
     if serializer_profile == Some(SerializerProfile::OpencodeAiSdk) && req.serve_native {
         let mut keep_mids = Vec::new();
@@ -7704,6 +7833,239 @@ fn provisional_tail_mid(req: &TransformRequest) -> Option<&str> {
         .filter(|message| !message.ck.meta.synthetic && message.ck.role == "assistant")
         .max_by_key(|message| message.ordinal)
         .map(|message| message.mid.as_str())
+}
+
+struct AttachmentProjectionUpgrade {
+    legacy: TransformRequest,
+    mids: BTreeSet<String>,
+}
+
+// Recognize only the old OpenCode adapter's Text -> Content projection change.
+// Pinned message identities must match after removing attachments; arbitrary edits
+// to text, call inputs, polarity or siblings still go through the ordinary fence.
+// Provisional assistants have no pin, so their served fingerprints govern replay.
+fn attachment_projection_replay(
+    store: &McStore,
+    req: &TransformRequest,
+) -> Result<Option<AttachmentProjectionUpgrade>, TransformError> {
+    if SerializerProfile::parse(&req.serializer_profile) != Some(SerializerProfile::OpencodeAiSdk)
+        || req.lineage_switched
+    {
+        return Ok(None);
+    }
+    let mut replacements = BTreeMap::new();
+    for message in &req.messages {
+        for (index, block) in message.ck.content.iter().enumerate() {
+            let ck_wire::CkKind::ToolResult { output, .. } = &block.kind else {
+                continue;
+            };
+            let (blocks, error) = match &output.kind {
+                ck_wire::CkOutputKind::Content { blocks } => (blocks, false),
+                ck_wire::CkOutputKind::ErrorContent { blocks } => (blocks, true),
+                _ => continue,
+            };
+            if blocks.len() < 2 {
+                continue;
+            }
+            let ck_wire::ResultBlockKind::Text { text } = &blocks[0].kind else {
+                continue;
+            };
+            let old = ck_wire::CkToolOutput::bare(if error {
+                ck_wire::CkOutputKind::ErrorText { text: text.clone() }
+            } else {
+                ck_wire::CkOutputKind::Text { text: text.clone() }
+            });
+            // Keep the ingress shell byte-exact, including omitted defaults.
+            // Rebuilding the typed kind would add provider_executed=false to
+            // the TS adapter's old wire and fail the stored identity comparison.
+            let legacy_block = if let Some(original) = block.retained_original_json() {
+                let mut wire = original.clone();
+                wire["kind"]["output"] = serde_json::to_value(old).expect("CK output serializes");
+                serde_json::from_value(wire).expect("validated CK block with scalar output")
+            } else {
+                let mut wire = block.clone();
+                if let ck_wire::CkKind::ToolResult { output, .. } = &mut wire.kind {
+                    *output = old;
+                }
+                wire.mark_modified();
+                wire
+            };
+            replacements.insert((message.mid.clone(), index), legacy_block);
+        }
+    }
+    if replacements.is_empty() {
+        return Ok(None);
+    }
+    // The old serving already froze raw block identities by message and part,
+    // alongside the served-output fingerprint. Use that state without writing
+    // on a defer; the repaired identities commit only with the restoring bust.
+    let loaded = store.load(&req.session_id)?;
+    let current = project_messages(&req.messages)?;
+    let served_with_media =
+        attachment_results_served_with_media(store, req, &current, &loaded.meta, &replacements)?;
+    let provisional_mid = provisional_tail_mid(req);
+    let previous_tail_mid = loaded
+        .meta
+        .newest_live_block_id
+        .as_deref()
+        .and_then(split_block_id)
+        .map(|(mid, _)| mid);
+    replacements.retain(|(mid, index), old| {
+        if let Some(stored) = loaded.meta.block_identity_by_mid.get(mid) {
+            // A formerly provisional message may have frozen a mix of already
+            // admitted media and lossy results. Replace only the scalar slots;
+            // the full reconstructed vector below must still match its pin.
+            let old_fingerprint = ck_wire::fingerprint(
+                &serde_json::to_string(old).expect("validated CK block serializes"),
+            );
+            return Some(stored) != current.identity_by_mid.get(mid)
+                && stored
+                    .get(*index)
+                    .is_some_and(|identity| identity.byte_fingerprint == old_fingerprint);
+        }
+        // A served result can outlive its provisional assistant without ever
+        // gaining a block-identity pin. Missing identity is not first-sight proof.
+        // If the served fingerprint cannot prove media was already shown, keep
+        // the lossy form. An unseen provisional result on an initialized session
+        // also waits for permission rather than risking a cached-prefix rewrite.
+        loaded.meta.initialized
+            && !served_with_media.contains(&(mid.clone(), *index))
+            && (overlay_target_was_served(
+                &loaded.meta.served_output_fingerprint,
+                &ck_wire::block_id(mid, *index),
+            ) || provisional_mid == Some(mid.as_str())
+                || previous_tail_mid == Some(mid.as_str()))
+    });
+    if replacements.is_empty() {
+        return Ok(None);
+    }
+    let mut legacy = req.clone();
+    for message in &mut legacy.messages {
+        for (index, block) in message.ck.content.iter_mut().enumerate() {
+            let Some(old) = replacements.get(&(message.mid.clone(), index)) else {
+                continue;
+            };
+            *block = old.clone();
+        }
+        message.ck.mark_modified();
+    }
+    let projection = project_messages(&legacy.messages)?;
+    let mids: BTreeSet<String> = projection
+        .identity_by_mid
+        .iter()
+        .filter(|(mid, vector)| {
+            replacements.keys().any(|(candidate, _)| candidate == *mid)
+                && loaded
+                    .meta
+                    .block_identity_by_mid
+                    .get(*mid)
+                    .is_none_or(|stored| stored == *vector)
+                && current.identity_by_mid.get(*mid) != Some(*vector)
+        })
+        .map(|(mid, _)| mid.clone())
+        .collect();
+    if mids.is_empty() {
+        return Ok(None);
+    }
+    for (candidate, original) in legacy.messages.iter_mut().zip(&req.messages) {
+        if !mids.contains(&candidate.mid) {
+            *candidate = original.clone();
+            continue;
+        }
+    }
+    Ok(Some(AttachmentProjectionUpgrade { legacy, mids }))
+}
+
+// A matching served hash is positive evidence, even after restart, that the
+// identity-less result already included media. Reproduce only persisted overlays:
+// discovery must neither mint a new decision nor introduce a defer write.
+fn attachment_results_served_with_media(
+    store: &McStore,
+    req: &TransformRequest,
+    projection: &FlatProjection,
+    meta: &ModuleMeta,
+    replacements: &BTreeMap<(String, usize), CkWireBlock>,
+) -> Result<BTreeSet<(String, usize)>, TransformError> {
+    let unpinned_mids: BTreeSet<&str> = replacements
+        .keys()
+        .filter(|(mid, _)| !meta.block_identity_by_mid.contains_key(mid))
+        .map(|(mid, _)| mid.as_str())
+        .collect();
+    if unpinned_mids.is_empty() || meta.served_output_fingerprint.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let snapshot = store.load_transform_snapshot(&req.session_id)?;
+    let tags = load_cached_tags(store, &req.session_id)?;
+    let overlay = tag_overlay_state(
+        &tags,
+        &snapshot.temporal_marks,
+        &snapshot.user_hints,
+        &snapshot.channel1_appends,
+        &meta.pending_tag_block_ids,
+        &meta.pending_user_hint_block_ids,
+    );
+    let blocks_by_mid = projection_blocks_by_mid(projection);
+    let served_hashes: HashMap<&str, &str> = meta
+        .served_output_fingerprint
+        .iter()
+        .map(|block| (block.block_id.as_str(), block.content_hash.as_str()))
+        .collect();
+    let mut matches = BTreeSet::new();
+    for message in &req.messages {
+        if !unpinned_mids.contains(message.mid.as_str()) {
+            continue;
+        }
+        let mut rendered = message.ck.clone();
+        let blocks = blocks_by_mid
+            .get(message.mid.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        apply_tag_overlay_to_message(
+            &mut rendered,
+            message,
+            blocks,
+            Some(&overlay),
+            |_| false,
+            false,
+        );
+        for block in blocks {
+            if !replacements.contains_key(&(message.mid.clone(), block.block_index)) {
+                continue;
+            }
+            let Some(previous_hash) = served_hashes.get(block.id.as_str()) else {
+                continue;
+            };
+            let raw_hash = ck_wire::fingerprint_digest(&block.content_hash);
+            let overlaid_hash = ck_wire::fingerprint(
+                &serde_json::to_string(&rendered.content[block.block_index])
+                    .expect("validated CK block serializes"),
+            );
+            if *previous_hash == raw_hash || *previous_hash == overlaid_hash {
+                matches.insert((message.mid.clone(), block.block_index));
+            }
+        }
+    }
+    Ok(matches)
+}
+
+fn attachment_identity_re_adoptions(
+    meta: &ModuleMeta,
+    projection: &FlatProjection,
+    upgrade: &AttachmentProjectionUpgrade,
+) -> Vec<TailIdentityReAdoption> {
+    upgrade
+        .mids
+        .iter()
+        .map(|mid| TailIdentityReAdoption {
+            mid: mid.clone(),
+            old_hash_prefix: meta
+                .block_identity_by_mid
+                .get(mid)
+                .map(|vector| block_identity_hash_prefix(vector))
+                .unwrap_or_default(),
+            new_hash_prefix: block_identity_hash_prefix(&projection.identity_by_mid[mid]),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -8718,6 +9080,7 @@ fn new_caveman_units(
         .map(|row| (row.block_id.as_str(), row))
         .collect::<HashMap<_, _>>();
     let frozen_red = frozen_red_targets(core);
+    let unsafe_thinking_prefix = active_thinking_prefix_edit_ids(core, req);
     let mut candidates = live
         .iter()
         .filter_map(|block| {
@@ -8748,6 +9111,9 @@ fn new_caveman_units(
     let total = candidates.len();
     let mut units = Vec::new();
     for (position, (_tag_number, block_id, source)) in candidates.into_iter().enumerate() {
+        if unsafe_thinking_prefix.contains(&block_id) {
+            continue;
+        }
         let target_depth = caveman_target_depth(position, total);
         if target_depth == 0 {
             continue;
@@ -14275,12 +14641,43 @@ fn tag_number_by_message(tags: &[McTagRow]) -> BTreeMap<String, u64> {
     output
 }
 
-fn tag_age_cutoff(req: &TransformRequest, tag_numbers: &BTreeMap<String, u64>) -> Option<u64> {
-    let max_tag = tag_numbers.values().copied().max().unwrap_or(0);
-    Some(max_tag.saturating_sub(req.clear_reasoning_age))
-}
+include!("transform/reasoning_budget.rs");
+include!("transform/active_anthropic_turn.rs");
 
 include!("transform/reasoning_clear.rs");
+
+#[derive(Clone, Copy)]
+struct StripSelectionScope<'a> {
+    reasoning: ReasoningBudgetScope<'a>,
+    image_watermark: u64,
+}
+
+/// Processed images follow the shared dropped-tag watermark, not reasoning retention.
+/// Planned drops count only on the rebuilding pass that commits them with these strips.
+fn processed_image_watermark(
+    rows: &[McTagRow],
+    frozen: &[FrozenUnit],
+    planned: &[ReductionDecision],
+) -> u64 {
+    let dropped =
+        |kind: &str| matches!(kind, "drop" | "skeleton" | "skeleton_real" | "edit_marker");
+    let targets: HashSet<&str> = frozen
+        .iter()
+        .filter(|unit| dropped(&unit.kind))
+        .filter_map(|unit| unit.key.strip_prefix(RED_KEY_PREFIX))
+        .chain(
+            planned
+                .iter()
+                .filter(|decision| dropped(&decision.kind))
+                .map(|decision| decision.target_id.as_str()),
+        )
+        .collect();
+    rows.iter()
+        .filter(|row| targets.contains(row.block_id.as_str()))
+        .filter_map(|row| u64::try_from(row.tag_number).ok())
+        .max()
+        .unwrap_or(0)
+}
 
 fn new_frozen_strip_units(
     core: &CoreState,
@@ -14288,12 +14685,14 @@ fn new_frozen_strip_units(
     tag_numbers: &BTreeMap<String, u64>,
     reasoning_clear_cutoff: Option<u64>,
     is_bust_pass: bool,
-    lineage_anchor_mid: Option<&str>,
+    selection_scope: StripSelectionScope<'_>,
     protected_tools: &HashSet<String>,
 ) -> Vec<FrozenUnit> {
     if !is_bust_pass {
         return Vec::new();
     }
+    let scope = selection_scope.reasoning;
+    let lineage_anchor_mid = scope.anchor;
     let sentinel = provider_sentinel_text(req);
     let existing_keys: HashSet<&str> = core
         .frozen_units
@@ -14305,7 +14704,7 @@ fn new_frozen_strip_units(
         .messages
         .len()
         .saturating_sub(STRUCTURAL_PROTECTED_MESSAGE_COUNT);
-    let age_cutoff = tag_age_cutoff(req, tag_numbers);
+    let age_cutoff = Some(reasoning_budget_cutoff(req, tag_numbers, core, scope));
     let reasoning_mutation_exempt_mid =
         latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
     let profile = SerializerProfile::parse(&req.serializer_profile);
@@ -14324,11 +14723,13 @@ fn new_frozen_strip_units(
         && (!request_accepts_empty_content(req)
             || is_prefix_bound_thinking_model(req.model_key.as_deref()))
     {
-        opencode_reasoning_removal_mids(req, tag_numbers, age_cutoff, &existing_keys)
+        opencode_reasoning_removal_mids(req, tag_numbers, age_cutoff, &existing_keys, scope)
     } else {
         HashSet::new()
     };
     let mut units = BTreeMap::<String, FrozenUnit>::new();
+    let protected_thinking = protected_thinking_turn_mids(req);
+    let unsafe_content = active_thinking_prefix_edit_ids(core, req);
     let mut has_assistant_response = false;
 
     for index in (0..req.messages.len()).rev() {
@@ -14349,7 +14750,14 @@ fn new_frozen_strip_units(
             has_assistant_response = true;
         }
         if index < protected_start {
-            if message.ck.role != "user" && whole_system_injected(blocks) {
+            if message.ck.role != "user"
+                && whole_system_injected(blocks)
+                && !protected_thinking.contains(message.mid.as_str())
+                && !blocks
+                    .iter()
+                    .enumerate()
+                    .any(|(i, _)| unsafe_content.contains(&ck_wire::block_id(&message.mid, i)))
+            {
                 let unit = strip_unit("system_injected", &message.mid, &sentinel);
                 if !existing_keys.contains(unit.key.as_str()) {
                     units.insert(unit.key.clone(), unit);
@@ -14369,6 +14777,9 @@ fn new_frozen_strip_units(
                         continue;
                     }
                     let target = format!("{}#{block_index}", message.mid);
+                    if unsafe_content.contains(&target) {
+                        continue;
+                    }
                     let unit = strip_unit("system_injected_block", &target, &cleaned);
                     if !existing_keys.contains(unit.key.as_str()) {
                         units.insert(unit.key.clone(), unit);
@@ -14383,6 +14794,9 @@ fn new_frozen_strip_units(
             // this already-busting pass and replays unchanged on defers; selection.rs continues to
             // exclude every reasoning block from ReductionDecision targets.
             let cc_aged = message.ck.role == "assistant"
+                && !in_active_anthropic_turn(req, &message.mid)
+                && scope.visible(message)
+                && !protected_thinking.contains(message.mid.as_str())
                 && reasoning_mutation_exempt_mid != Some(message.mid.as_str())
                 && cc_reasoning_cutoff.is_some_and(|cutoff| {
                     let tag = message_tag_number(message, tag_numbers);
@@ -14399,13 +14813,19 @@ fn new_frozen_strip_units(
                 && index < protected_start
                 && blocks.iter().any(is_reduce_block)
                 && !protected_reduce
+                && !blocks
+                    .iter()
+                    .enumerate()
+                    .any(|(i, _)| unsafe_content.contains(&ck_wire::block_id(&message.mid, i)))
             {
                 let unit = strip_unit("stale_reduce", &message.mid, &sentinel);
                 if !existing_keys.contains(unit.key.as_str()) {
                     units.insert(unit.key.clone(), unit);
                 }
             }
-            if whole_marker_or_blank_message(blocks) {
+            if whole_marker_or_blank_message(blocks)
+                && !protected_thinking.contains(message.mid.as_str())
+            {
                 let unit = strip_unit("placeholder", &message.mid, &sentinel);
                 if !existing_keys.contains(unit.key.as_str()) {
                     units.insert(unit.key.clone(), unit);
@@ -14425,11 +14845,12 @@ fn new_frozen_strip_units(
         }
         if has_assistant_response
             && request_accepts_empty_content(req)
-            && age_cutoff.is_some_and(|cutoff| {
+            && selection_scope.image_watermark > 0
+            && {
                 // Missing tags are age zero in the TypeScript lane. This decision is still
                 // minted only on a bust and then frozen by message/block id for stable replay.
-                message_tag_number(message, tag_numbers) <= cutoff
-            })
+                message_tag_number(message, tag_numbers) <= selection_scope.image_watermark
+            }
             && blocks.iter().any(image_block_is_large)
         {
             let marker = strip_unit("processed_image", &message.mid, &sentinel);
@@ -14457,7 +14878,7 @@ fn new_frozen_strip_units(
 
 /// True for Claude models whose signed thinking is bound to the request prefix, on any
 /// route. Mirrors TS `isPrefixBoundThinkingModel` and its `PREFIX_BOUND_THINKING_MODELS`
-/// (Fable 5.1, Opus 5.5, Sonnet 5.5); the provider is deliberately ignored.
+/// (Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5); the provider is deliberately ignored.
 pub(crate) fn is_prefix_bound_thinking_model(model_key: Option<&str>) -> bool {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
     let Some(key) = model_key else {
@@ -14467,7 +14888,7 @@ pub(crate) fn is_prefix_bound_thinking_model(model_key: Option<&str>) -> bool {
     PATTERN
         .get_or_init(|| {
             Regex::new(
-                r"(?i)(?:^|[-_.:/])(?:fable[-_.]?5[-_.]1|opus[-_.]?5[-_.]5|sonnet[-_.]?5[-_.]5)(?:$|[-_.:/@])",
+                r"(?i)(?:^|[-_.:/])(?:fable[-_.]?5[-_.]1|opus[-_.]?5[-_.]5|sonnet[-_.]?5[-_.]5|haiku[-_.]?5[-_.]5)(?:$|[-_.:/@])",
             )
             .unwrap()
         })
@@ -14497,6 +14918,7 @@ fn opencode_reasoning_removal_mids<'a>(
     tag_numbers: &BTreeMap<String, u64>,
     age_cutoff: Option<u64>,
     existing_keys: &HashSet<&str>,
+    scope: ReasoningBudgetScope<'_>,
 ) -> HashSet<&'a str> {
     let mut selected = HashSet::new();
     let Some(cutoff) = age_cutoff.filter(|cutoff| *cutoff > 0) else {
@@ -14513,6 +14935,7 @@ fn opencode_reasoning_removal_mids<'a>(
     let prefix_bound = is_prefix_bound_thinking_model(req.model_key.as_deref());
     let newest = latest_assistant_mid(&req.messages);
     let exempt = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
+    let protected_thinking = protected_thinking_turn_mids(req);
     // `@openrouter/ai-sdk-provider` keeps copies of the reasoning as
     // `metadata.openrouter.reasoning_details` on other parts of the message. This lane
     // cannot strip those, so such messages are skipped whatever the provider id is.
@@ -14535,20 +14958,26 @@ fn opencode_reasoning_removal_mids<'a>(
         .collect();
     for message in &req.messages {
         if message.ck.meta.synthetic
+            || !scope.visible(message)
             || message.ck.role != "assistant"
             || !message.ck.content.iter().any(is_reasoning_block)
         {
             continue;
         }
         let mid = message.mid.as_str();
-        if existing_keys.contains(format!("strip:reasoning_age:{mid}").as_str()) {
+        if existing_keys.contains(format!("strip:reasoning_age:{mid}").as_str())
+            || existing_keys.contains(format!("strip:merged_reasoning:{mid}").as_str())
+        {
             continue;
         }
         let tag = message_tag_number(message, tag_numbers);
         let eligible = !mid.is_empty()
+            && !protected_thinking.contains(mid)
             && !openrouter_shaped.contains(mid)
             && Some(mid) != newest
             && Some(mid) != exempt
+            && Some(mid) != scope.anchor
+            && !in_active_anthropic_turn(req, mid)
             && tag > 0
             && tag <= cutoff
             && message.ck.content.iter().any(has_meaningful_content);
@@ -14571,11 +15000,10 @@ struct ReasoningMutationPolicy {
 fn remove_frozen_historical_reasoning(
     frozen_units: &FrozenUnitLookup<'_>,
     message: &CkIngressMessage,
-    reasoning_mutation_exempt: bool,
+    _reasoning_mutation_exempt: bool,
     rebuilt: &mut CkWireMessage,
 ) -> usize {
-    if reasoning_mutation_exempt
-        || message.ck.role != "assistant"
+    if message.ck.role != "assistant"
         || output_message_strip_unit(frozen_units, "reasoning_age", &message.mid).is_none()
     {
         return 0;
@@ -15661,6 +16089,7 @@ fn new_merged_reasoning_strip_units(
         .map(|unit| unit.key.as_str())
         .collect::<HashSet<_>>();
     let mutation_exempt_mid = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
+    let protected_thinking = protected_thinking_turn_mids(req);
     let clear_lookup = FrozenUnitLookup::Indexed(FrozenUnitIndex::new(&core.frozen_units));
     let mut prev_assistant = false;
     let mut units = Vec::new();
@@ -15675,7 +16104,8 @@ fn new_merged_reasoning_strip_units(
                 && active_reasoning_clear(&clear_lookup, mid).is_none()
             {
                 let mut candidate = rendered.clone().into_message();
-                let mutation_exempt = mutation_exempt_mid == Some(mid);
+                let mutation_exempt =
+                    mutation_exempt_mid == Some(mid) || protected_thinking.contains(mid);
                 if apply_serializer_residual_to_message(
                     profile,
                     req.provider_id.as_deref(),
@@ -16513,10 +16943,8 @@ fn build_output_with_tags_inner(
             .is_some_and(|(anchor_mid, _)| anchor_mid == msg.mid);
         let mutation_exempt =
             mutation_exempt_mid == Some(msg.mid.as_str()) || lineage_anchor_exempt;
-        let reasoning_mutation_exempt = reasoning_mutation_exempt_mid == Some(msg.mid.as_str())
-            || lineage_anchor_exempt
-            || output_message_strip_unit(&frozen_units, "reasoning_clear", &msg.mid)
-                .is_some_and(|unit| unit.reset_rule == REASONING_CLEAR_SUSPENDED);
+        let reasoning_mutation_exempt =
+            reasoning_mutation_exempt_mid == Some(msg.mid.as_str()) || lineage_anchor_exempt;
         let first_assistant_in_run = msg.ck.role == "assistant" && !prev_assistant;
         let blocks = blocks_by_mid
             .get(msg.mid.as_str())
@@ -16906,6 +17334,125 @@ fn is_mutable_merged_reasoning_block(block: &CkWireBlock) -> bool {
             .is_some_and(|extras| extras.contains_key("cache_control"))
 }
 
+/// Thinking-bearing assistants inside the active Anthropic turn. Membership comes from
+/// `in_active_anthropic_turn`, the one turn boundary shared with reasoning retention, so
+/// every lane agrees on which signed blocks are immutable this turn. A `[cleared]`
+/// placeholder is Magic Context's own earlier neutralization, not a block the provider
+/// returned, so it does not make a message immutable.
+fn protected_thinking_turn_mids(req: &TransformRequest) -> HashSet<&str> {
+    let route = active_turn_route_request(req);
+    req.messages
+        .iter()
+        .filter(|m| {
+            m.ck.role == "assistant"
+                && m.ck
+                    .content
+                    .iter()
+                    .any(|block| is_reasoning_block(block) && !is_structural_noise(block))
+        })
+        .filter(|m| in_active_anthropic_turn(&route, &m.mid))
+        .map(|m| m.mid.as_str())
+        .collect()
+}
+
+/// The request the active-turn predicate should judge. A custom provider or model name
+/// says nothing about the serializer, but an OpenCode reasoning part carrying
+/// `metadata.anthropic` was signed by Anthropic, so its turn is protected exactly as the
+/// TypeScript transform treats it. Only that case pays for a copy whose route names
+/// Anthropic; a request already named for the family is judged as it is.
+fn active_turn_route_request(req: &TransformRequest) -> std::borrow::Cow<'_, TransformRequest> {
+    let named = |value: Option<&str>| {
+        value.is_some_and(|value| {
+            let value = value.to_ascii_lowercase();
+            value.contains("anthropic") || value.contains("claude")
+        })
+    };
+    if named(req.provider_id.as_deref())
+        || named(req.model_key.as_deref())
+        || !req.messages.iter().any(|message| {
+            message.ck.role == "assistant"
+                && message
+                    .ck
+                    .content
+                    .iter()
+                    .any(has_anthropic_reasoning_metadata)
+        })
+    {
+        return std::borrow::Cow::Borrowed(req);
+    }
+    let mut view = req.clone();
+    view.provider_id = Some("anthropic".to_string());
+    std::borrow::Cow::Owned(view)
+}
+
+fn has_anthropic_reasoning_metadata(block: &CkWireBlock) -> bool {
+    is_reasoning_block(block)
+        && block
+            .provider_extras
+            .get("opencode")
+            .and_then(|extras| extras.get("metadata"))
+            .and_then(|metadata| metadata.get("anthropic"))
+            .is_some_and(serde_json::Value::is_object)
+}
+
+fn active_anthropic_thinking_turn(req: &TransformRequest) -> bool {
+    let protected = protected_thinking_turn_mids(req);
+    req.messages
+        .iter()
+        .any(|m| protected.contains(m.mid.as_str()) && m.ck.content.iter().any(is_reasoning_block))
+}
+
+/// Reproduce persisted reasoning decisions before protecting a new prefix edit.
+/// Already-frozen legacy omissions are not new mutations and remain authoritative.
+fn active_thinking_prefix_edit_ids(core: &CoreState, req: &TransformRequest) -> HashSet<String> {
+    if !is_prefix_bound_thinking_model(req.model_key.as_deref()) {
+        return HashSet::new();
+    }
+    let active = protected_thinking_turn_mids(req);
+    let lookup = FrozenUnitLookup::Indexed(FrozenUnitIndex::new(&core.frozen_units));
+    let exempt = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
+    let mut ordinal = 0;
+    let mut last = None;
+    let mut coordinates = Vec::new();
+    let mut previous_assistant = false;
+    for message in &req.messages {
+        let mut replay = message.ck.clone();
+        replay_reasoning_clear(&lookup, &message.mid, &mut replay);
+        remove_frozen_historical_reasoning(
+            &lookup,
+            message,
+            exempt == Some(message.mid.as_str()),
+            &mut replay,
+        );
+        if output_message_strip_unit(&lookup, "merged_reasoning", &message.mid).is_some() {
+            if let Some(profile) = SerializerProfile::parse(&req.serializer_profile) {
+                apply_serializer_residual_to_message(
+                    profile,
+                    req.provider_id.as_deref(),
+                    exempt == Some(message.mid.as_str()),
+                    !previous_assistant,
+                    &mut replay,
+                );
+            }
+        }
+        for (index, block) in message.ck.content.iter().enumerate() {
+            coordinates.push((ordinal, ck_wire::block_id(&message.mid, index)));
+            if active.contains(message.mid.as_str())
+                && is_reasoning_block(block)
+                && replay.content.iter().any(|kept| kept == block)
+            {
+                last = Some(ordinal);
+            }
+            ordinal += 1;
+        }
+        previous_assistant = message.ck.role == "assistant";
+    }
+    coordinates
+        .into_iter()
+        .filter_map(|(position, id)| last.is_some_and(|last| position < last).then_some(id))
+        .collect()
+}
+
 fn latest_assistant_mid(messages: &[CkIngressMessage]) -> Option<&str> {
     messages
         .iter()
@@ -16994,6 +17541,8 @@ fn reasoning_clear_cutoff_with_tags(
     profile: Option<SerializerProfile>,
     is_bust_pass: bool,
     tag_numbers: &BTreeMap<String, u64>,
+    core: &CoreState,
+    scope: ReasoningBudgetScope<'_>,
 ) -> Option<u64> {
     // Prefix-bound models never take this watermark lane: it skips an ineligible message
     // instead of stopping there, so it could remove a block from the middle and invalidate
@@ -17009,7 +17558,7 @@ fn reasoning_clear_cutoff_with_tags(
         _ => false,
     };
     if profile_supported {
-        tag_age_cutoff(req, tag_numbers)
+        Some(reasoning_budget_cutoff(req, tag_numbers, core, scope))
     } else {
         None
     }
@@ -18029,6 +18578,7 @@ pub(crate) mod tests {
     }
     use super::*;
     use crate::m1_compose::{m1_revision_signal, m1_revision_signal_parts_for_pass};
+    include!("tests/tool_attachment_upgrade_review.rs");
     use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
 
     use mc_store::{
@@ -20088,11 +20638,50 @@ pub(crate) mod tests {
             ),
         };
         let assistant = wire_item("assistant", "image-answer", 2, &["processed"]);
-        let mut request = req("untagged-image", "cfg0", vec![image, assistant]);
+        let mut request = req(
+            "untagged-image",
+            "cfg0",
+            vec![
+                item("head", 0, "older history"),
+                image,
+                assistant,
+                item("dropper", 3, "spent"),
+            ],
+        );
         request.provider_id = Some("anthropic".to_string());
         request.protected_tags = 0;
 
-        let bust = run(&store, &request, &spine());
+        let baseline = run(&store, &request, &spine());
+        assert!(
+            baseline
+                .messages()
+                .iter()
+                .find(|message| message.meta.harness_id.as_deref() == Some("image-user"))
+                .unwrap()
+                .content
+                .iter()
+                .any(image_block_is_large),
+            "an answer alone is not a dropped-tag watermark"
+        );
+        store
+            .seed_tags_for_test(
+                "untagged-image",
+                &[mc_store::TagMintInput {
+                    block_id: "dropper#0".into(),
+                    kind: "message".into(),
+                    token_count: 1,
+                    source_bytes: b"spent".to_vec(),
+                }],
+                0,
+            )
+            .unwrap();
+        let drops = vec![ReductionDecision {
+            target_id: "dropper#0".into(),
+            kind: "drop".into(),
+            payload: String::new(),
+        }];
+        request.render_config = "cfg1".into();
+        let bust = run(&store, &request, &drops);
         assert_eq!(bust.action, "HARD");
         assert_eq!(tail_bytes(&bust, "image-user"), "");
         let frozen = store.load("untagged-image").unwrap();
@@ -20296,6 +20885,41 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn latest_thinking_turn_is_not_a_merged_reasoning_strip_candidate() {
+        let mut messages = vec![item("user", 1, "task")];
+        for (mid, ordinal) in [("a1", 2), ("a2", 3), ("a3", 4)] {
+            let mut assistant = trailing_regression_assistant(mid, ordinal, None, false);
+            assistant.ck.content.insert(
+                0,
+                CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                    text: mid.to_string(),
+                    signature: Some(format!("signed-{mid}")),
+                }),
+            );
+            messages.push(assistant);
+        }
+        let mut request = req("latest-turn", "cfg", messages);
+        request.serializer_profile = "opencode-aisdk".to_string();
+        request.provider_id = Some("anthropic".to_string());
+        let rendered = request
+            .messages
+            .iter()
+            .map(|m| ServedMessage::from_message(m.ck.clone()))
+            .collect::<Vec<_>>();
+        assert!(
+            new_merged_reasoning_strip_units(&CoreState::default(), &request, &rendered, true)
+                .is_empty()
+        );
+        request
+            .messages
+            .push(item("next-user", 5, "next real turn"));
+        let completed =
+            new_merged_reasoning_strip_units(&CoreState::default(), &request, &rendered, true);
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].key, "strip:merged_reasoning:a2");
+    }
+
     fn protection_cutoff(cutoff: Option<i64>) -> TagNumberCutoffProjection {
         TagNumberCutoffProjection {
             coordinate_space: CoordinateSpace::TagNumber,
@@ -20325,6 +20949,7 @@ pub(crate) mod tests {
             provider_id: None,
             model_key: None,
             clear_reasoning_age: DEFAULT_CLEAR_REASONING_AGE,
+            keep_reasoning_tokens_effective: None,
             caveman_enabled: false,
             caveman_min_chars: DEFAULT_CAVEMAN_MIN_CHARS,
             tool_input_key_orders: BTreeMap::new(),
@@ -23386,6 +24011,181 @@ pub(crate) mod tests {
     #[test]
     fn issue_619_subagent_execute_drains_queued_drops() {
         check_issue_619_subagent_ride(true, true, true);
+    }
+
+    #[test]
+    fn latest_thinking_turn_holds_pending_drops_through_force_and_95_without_refusing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut first = assistant_tool_call("a1", 2, "t1");
+        first.ck.content.insert(
+            0,
+            CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                text: "signed-one".to_string(),
+                signature: Some("signature-one".to_string()),
+            }),
+        );
+        first.ck.content.insert(
+            1,
+            CkWireBlock::bare(ck_wire::CkKind::Text {
+                text: "spent assistant text".to_string(),
+            }),
+        );
+        let mut second = assistant_tool_call("a2", 4, "t2");
+        second.ck.content.insert(
+            0,
+            CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                text: "signed-two".to_string(),
+                signature: Some("signature-two".to_string()),
+            }),
+        );
+        let mut final_thought = trailing_regression_assistant("a3", 6, None, false);
+        final_thought.ck.content.insert(
+            0,
+            CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                text: "last signed thought".to_string(),
+                signature: Some("signature-three".to_string()),
+            }),
+        );
+        let mut request = with_usage(
+            req(
+                "latest-turn-drops",
+                "cfg",
+                vec![
+                    item("prompt", 1, "task"),
+                    first,
+                    tool_result("r1", 3, "t1", "spent output"),
+                    second,
+                    tool_result("r2", 5, "t2", "newest output"),
+                    final_thought,
+                ],
+            ),
+            76_000,
+            100_000,
+        );
+        request.is_subagent = true;
+        request.provider_id = Some("anthropic".to_string());
+        request.model_key = Some("anthropic/claude-opus-5-5".to_string());
+        request.serializer_profile = "opencode-aisdk".to_string();
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        transform(&s, &request, &ctx).unwrap();
+        let baseline = transform(&s, &request, &ctx).unwrap();
+        s.append_pending_agent_drops("latest-turn-drops", &["a1#1".into()], 1)
+            .unwrap();
+        for tokens in [76_000, 85_000] {
+            request = with_usage(request, tokens, 100_000);
+            assert_eq!(
+                transform(&s, &request, &ctx).unwrap().ck_messages,
+                baseline.ck_messages
+            );
+            assert_eq!(
+                s.load_pending_agent_drops("latest-turn-drops")
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        request = with_usage(request, 95_000, 100_000);
+        // Holding the unsafe drop never refuses the turn on its own: the unchanged
+        // turn is served, because only a proven final-wire overflow refuses.
+        assert_eq!(
+            transform(&s, &request, &ctx).unwrap().ck_messages,
+            baseline.ck_messages
+        );
+        assert_eq!(
+            s.load_pending_agent_drops("latest-turn-drops")
+                .unwrap()
+                .len(),
+            1
+        );
+        request.messages.push(item("next-real-user", 7, "continue"));
+        request = with_usage(request, 76_000, 100_000);
+        transform(&s, &request, &ctx).unwrap();
+        assert!(s
+            .load_pending_agent_drops("latest-turn-drops")
+            .unwrap()
+            .is_empty());
+    }
+
+    fn check_review_issue630_rust_95_without_unsafe_work(is_subagent: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        let mut assistant = assistant_tool_call("a", 2, "t");
+        assistant.ck.content.insert(
+            0,
+            CkWireBlock::bare(ck_wire::CkKind::Reasoning {
+                text: "original".into(),
+                signature: Some("sig-original".into()),
+            }),
+        );
+        let mut request = with_usage(
+            req(
+                "review-no-unsafe-work",
+                "cfg",
+                vec![
+                    item("u", 1, "task"),
+                    assistant,
+                    tool_result("r", 3, "t", "spent"),
+                ],
+            ),
+            20_000,
+            100_000,
+        );
+        request.is_subagent = is_subagent;
+        request.provider_id = Some("anthropic".into());
+        request.model_key = Some("claude-opus-5-5".into());
+        request.serializer_profile = "opencode-aisdk".into();
+        let ctx = pctx("git:proj", "/nonexistent-docs", 0);
+        transform(&s, &request, &ctx).unwrap();
+        // Only one signed response, no queued drop, and no provider overflow.
+        // The existing 95%-usage reading still leaves room in the window.
+        request = with_usage(request, 95_000, 100_000);
+        let result = transform(&s, &request, &ctx);
+        assert!(result.is_ok(), "primary/subagent={is_subagent}: {result:?}");
+    }
+
+    #[test]
+    fn review_issue630_rust_primary_95_without_unsafe_work_still_serves() {
+        check_review_issue630_rust_95_without_unsafe_work(false);
+    }
+
+    #[test]
+    fn review_issue630_rust_subagent_95_without_unsafe_work_still_serves() {
+        check_review_issue630_rust_95_without_unsafe_work(true);
+    }
+
+    #[test]
+    fn review_issue630_rust_metadata_route_keeps_all_active_thinking() {
+        let native = vec![
+            serde_json::json!({"info":{"id":"u","role":"user"},"parts":[{"type":"text","text":"task"}]}),
+            serde_json::json!({"info":{"id":"a1","role":"assistant"},"parts":[
+                {"type":"reasoning","text":"first","metadata":{"anthropic":{"signature":"sig-first"}}},
+                {"type":"text","text":"answer one"}
+            ]}),
+            serde_json::json!({"info":{"id":"a2","role":"assistant"},"parts":[
+                {"type":"reasoning","text":"last","metadata":{"anthropic":{"signature":"sig-last"}}},
+                {"type":"text","text":"answer two"}
+            ]}),
+        ];
+        let decoded = crate::codec::decode_opencode(&native);
+        let mut request = opencode_req("review-custom-route", "cfg", decoded.messages);
+        // Custom route names are not provider evidence. The native blocks still
+        // explicitly identify their Anthropic signatures, just as in the TS fixture.
+        request.provider_id = Some("custom".into());
+        request.model_key = Some("renamed".into());
+        request.native_messages = Some(native);
+        let tags = BTreeMap::from([("a1".into(), 2), ("a2".into(), 4)]);
+        let selected = opencode_reasoning_removal_mids(
+            &request,
+            &tags,
+            Some(3),
+            &HashSet::new(),
+            ReasoningBudgetScope::default(),
+        );
+        assert!(
+            selected.is_empty(),
+            "removed active signed thinking: {selected:?}"
+        );
     }
 
     #[test]
@@ -27704,6 +28504,18 @@ pub(crate) mod tests {
                 fixture.name
             );
 
+            // These goldens exercise historical serializer repair. A live
+            // continuation must instead retain every thinking block.
+            if fixture.expect_strip {
+                let ordinal = request
+                    .messages
+                    .last()
+                    .map_or(1, |message| message.ordinal + 1);
+                request
+                    .messages
+                    .push(item("next-real-user", ordinal, "next turn"));
+            }
+
             let response = run(&store, &request, &spine());
             assert_eq!(response.action, "HARD");
             let target = response
@@ -29374,6 +30186,10 @@ pub(crate) mod tests {
         ) -> TransformRequest {
             let mut request = profile_req(SerializerProfile::OpencodeAiSdk, session, cfg, messages);
             request.provider_id = Some("anthropic".to_string());
+            // Serializer repair is priced only for completed history.
+            request
+                .messages
+                .push(item("next-real-user", 100, "next turn"));
             request
         }
 
@@ -29497,6 +30313,10 @@ pub(crate) mod tests {
             let mut request = opencode_req(session, config, messages);
             request.provider_id = Some("anthropic".to_string());
             request.is_subagent = true;
+            // New stripping is tested outside the still-frozen assistant turn.
+            request
+                .messages
+                .push(item("next-real-user", 100, "next turn"));
             request
         }
 
@@ -30333,7 +31153,8 @@ pub(crate) mod tests {
             let mut request = active_opencode_req("reasoning-batch", "cfg0", messages);
             request.provider_id = Some("anthropic".to_string());
             request.serve_native = true;
-            request.clear_reasoning_age = 3;
+            request.keep_reasoning_tokens_effective =
+                Some(2 * mc_tokenizer::estimate_tokens("thinking-assistant-a") as u64);
             with_usage(request, 70, 100)
         }
 
@@ -30383,8 +31204,8 @@ pub(crate) mod tests {
                 .unwrap()
                 .meta
                 .reasoning_cleared_through_tag,
-            2,
-            "the bootstrap HARD records its pre-reasoning cutoff while preserving newer signatures"
+            0,
+            "the bootstrap HARD fits both assistant steps, so it records no removal"
         );
 
         messages.push(item("gap-c", 6, "separator"));
@@ -30427,8 +31248,8 @@ pub(crate) mod tests {
                 .unwrap()
                 .meta
                 .reasoning_cleared_through_tag,
-            6,
-            "the fold captures every current-pass tag in one cutoff"
+            5,
+            "the fold captures the first non-fitting assistant step in one cutoff"
         );
 
         drop(db);
@@ -30461,8 +31282,8 @@ pub(crate) mod tests {
                 .unwrap()
                 .meta
                 .reasoning_cleared_through_tag,
-            6,
-            "a restart must replay the prior bust cutoff instead of deriving maxTag-age"
+            5,
+            "a restart must replay the prior bust cutoff instead of reselecting a budget"
         );
     }
 
@@ -30522,7 +31343,11 @@ pub(crate) mod tests {
                 signed_assistant("latest", 4),
             ];
             let mut request = active_cc_req("cc-reasoning-age", config, messages);
-            request.clear_reasoning_age = clear_reasoning_age;
+            request.keep_reasoning_tokens_effective = Some(if clear_reasoning_age == 100 {
+                100_000
+            } else {
+                0
+            });
             request
         }
 

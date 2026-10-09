@@ -75,6 +75,10 @@ describe("compartment lease release under SQLite contention", () => {
         const nowSpy = spyOn(Date, "now").mockImplementation(() => now);
         const sessionId = "ses-historian-release-contention";
         let holderId = "";
+        let markStarted!: () => void;
+        const started = new Promise<void>((resolve) => {
+            markStarted = resolve;
+        });
         let resolveRun!: () => void;
         const underlyingRun = new Promise<void>((resolve) => {
             resolveRun = resolve;
@@ -82,6 +86,7 @@ describe("compartment lease release under SQLite contention", () => {
         const runAgent = (deps: Parameters<typeof runCompartmentAgent>[0]): Promise<void> => {
             holderId = deps.compartmentLeaseHolderId ?? "";
             deps.onHistorianRunStarted?.();
+            markStarted();
             return underlyingRun;
         };
         const rejections: unknown[] = [];
@@ -102,6 +107,7 @@ describe("compartment lease release under SQLite contention", () => {
                 runAgent,
             );
             expect(getActiveCompartmentRun(sessionId)).toBeDefined();
+            await started;
             expect(holderId).not.toBe("");
 
             blocker.exec("BEGIN IMMEDIATE");

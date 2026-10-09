@@ -67,7 +67,6 @@ export interface CtxStatusDetails {
 	droppedTags: number;
 	totalBytes: number;
 	pendingOps: number;
-	lastExecuteThreshold: number;
 	compartmentCount: number;
 	lastCompartmentRange: string | null;
 	memoryCount: number;
@@ -80,7 +79,7 @@ export interface CtxStatusDetails {
 		backlog?: ReturnType<typeof getDreamTaskBacklogs>;
 	};
 	historian: {
-		lastFireCount: number;
+		runs: number;
 		inProgress: boolean;
 		lastFailureAt: number | null;
 		lastError: string | null;
@@ -174,14 +173,13 @@ function buildStatusDetails(
 		droppedTags: status.droppedTags,
 		totalBytes: status.activeBytes,
 		pendingOps: status.pendingOpsCount,
-		lastExecuteThreshold: status.timesExecuteThresholdReached,
 		compartmentCount: status.compartmentCount,
 		lastCompartmentRange: status.lastCompartmentRange,
 		memoryCount: status.memoryCount,
 		noteCount: status.sessionNoteCount + status.readySmartNoteCount,
 		dreamer: status.dreamer,
 		historian: {
-			lastFireCount: status.timesExecuteThresholdReached,
+			runs: status.historianRuns,
 			inProgress: status.historianRunning,
 			lastFailureAt: status.historianLastFailureAt,
 			lastError: status.historianLastError,

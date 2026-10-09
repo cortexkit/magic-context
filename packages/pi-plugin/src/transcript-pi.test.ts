@@ -43,6 +43,38 @@ class LegacyAggregateToolTokenCache extends CountingToolTokenCache {
 }
 
 describe("createPiTranscript", () => {
+	it("tags only tool result text and replays image children byte-identically", () => {
+		const db = createTestDb();
+		try {
+			const image = { type: "image", data: "aW1n", mimeType: "image/jpeg" };
+			const result = {
+				...toolResultMessage("attachment-call", "Read result"),
+				content: [{ type: "text", text: "Read result" }, image],
+			};
+			const messages = [
+				assistantToolCall("attachment-call", "read", {}),
+				result,
+			];
+			const tagger = createTagger();
+			tagger.initFromDb("ses-attachment", db);
+			const transcript = createPiTranscript(messages, "ses-attachment");
+			tagTranscript("ses-attachment", transcript, tagger, db);
+			transcript.commit();
+			const output = messages[1] as typeof result;
+			expect(output.content[0]).toEqual({
+				type: "text",
+				text: "§1§ Read result",
+			});
+			expect(output.content[1]).toBe(image);
+			const bytes = JSON.stringify(output);
+			const replay = createPiTranscript(messages, "ses-attachment");
+			tagTranscript("ses-attachment", replay, tagger, db);
+			replay.commit();
+			expect(JSON.stringify(messages[1])).toBe(bytes);
+		} finally {
+			closeQuietly(db);
+		}
+	});
 	it("scoped gate Pi finalization preserves unrelated reasoning-only assistant", () => {
 		const db = createTestDb();
 		try {

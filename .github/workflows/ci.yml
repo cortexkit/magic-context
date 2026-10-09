@@ -90,6 +90,8 @@ jobs:
         run: |
           bun run --cwd packages/plugin build
           bun run --cwd packages/cli build
+          # Plugin tests load the Pi worker bundles from packages/pi-plugin/dist.
+          bun run --cwd packages/pi-plugin build
 
       - name: Check compiled TUI freshness
         run: bun run --cwd packages/plugin check:tui-compiled

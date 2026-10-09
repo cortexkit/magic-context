@@ -260,6 +260,14 @@ export interface TagNormalizationTarget {
 }
 
 export type TagTarget = {
+    /** Parts a drop neutralizes, distinct from a meaning-preserving text rewrite. */
+    dropReasoningParts?: readonly unknown[];
+    /** Original coordinates of the content this target edits. */
+    mutationParts?: readonly { message: MessageLike; part: unknown }[];
+    /** New drops are withheld; persisted replay uses the original target map. */
+    thinkingDropProtected?: boolean;
+    /** A rewrite here would invalidate a later protected signed block. */
+    thinkingRewriteProtected?: boolean;
     /** Non-mutating count of current and replacement token-bearing fields for a planned drop. */
     measureReclaim?: (skeleton: boolean) => {
         beforeTools: number;
@@ -444,6 +452,8 @@ function extractToolTagMetadata(part: unknown): {
 }
 
 export interface TagMessagesOptions {
+    /** Original part references in the provider's unfinished signed assistant turn. */
+    protectedThinkingMessages?: ReadonlySet<MessageLike>;
     /**
      * When true, skip injecting §N§ prefix into message text/tool output parts.
      * DB-level tag records are still created normally — this flag only affects
@@ -498,6 +508,9 @@ export function tagMessages(
     db: ContextDatabase,
     options: TagMessagesOptions = {},
 ): TagMessagesResult {
+    const protectedThinkingParts = new Set(
+        [...(options.protectedThinkingMessages ?? [])].flatMap((message) => message.parts),
+    );
     const skipPrefixInjection = options.skipPrefixInjection === true;
     const onToolOwnerFallbackLookup = options.onToolOwnerFallbackLookup;
     const targets = new Map<number, TagTarget>();
@@ -916,6 +929,8 @@ export function tagMessages(
                 }
                 targets.set(tagId, {
                     message,
+                    dropReasoningParts: thinkingParts,
+                    mutationParts: [{ message, part: textPart }],
                     textPrefix: skipPrefixInjection ? "" : prependTag(tagId, ""),
                     setContent: (content, options) => {
                         if (textPart.text === content) return false;
@@ -924,6 +939,7 @@ export function tagMessages(
                         textPart.text = content;
                         if (options?.keepReasoning === true) return true;
                         for (const tp of thinkingParts) {
+                            if (protectedThinkingParts.has(tp)) continue;
                             if (partialEnd !== undefined && message.parts.indexOf(tp) > partialEnd)
                                 continue;
                             neutralizeDroppedReasoningPart(tp);
@@ -1053,7 +1069,10 @@ export function tagMessages(
                 );
                 targets.set(tagId, {
                     message,
+                    mutationParts: [{ message, part: filePart }],
                     setContent: (content) => {
+                        // File edits do not clear reasoning; their position can
+                        // still invalidate a later prefix-bound signature.
                         const prev = messageParts[partIndex];
                         const prevText =
                             typeof prev === "object" && prev !== null && "text" in prev
@@ -1101,7 +1120,13 @@ export function tagMessages(
         const thinkingParts = toolThinkingByCallId.get(compositeKey) ?? [];
         targets.set(
             tagId,
-            createToolDropTarget(compositeKey, thinkingParts, toolCallIndex, batch, tagId),
+            createToolDropTarget(
+                compositeKey,
+                thinkingParts.filter((part) => !protectedThinkingParts.has(part)),
+                toolCallIndex,
+                batch,
+                tagId,
+            ),
         );
     }
 

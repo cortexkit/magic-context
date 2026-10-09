@@ -68,6 +68,7 @@ import {
     createToolExecuteAfterHook,
 } from "../../hooks/magic-context/hook-handlers";
 import { materializeM0 } from "../../hooks/magic-context/inject-compartments";
+import { armLatestThinkingRecoveryFromError } from "../../hooks/magic-context/latest-thinking-recovery";
 import {
     beginV2LkgRequest,
     lkgProviderInputTotal,
@@ -1176,6 +1177,20 @@ export async function registerContext(context: V2Context) {
                 if (event.type === "session.error" || event.type === "session.execution.failed") {
                     const error = hiddenTerminalError(event);
                     if (error !== undefined) hiddenSessionErrors.set(sessionID, error);
+                    if (error !== undefined && db && !compactionOff) {
+                        const model = liveModels.get(sessionID);
+                        try {
+                            armLatestThinkingRecoveryFromError({
+                                db,
+                                sessionId: sessionID,
+                                error,
+                                providerID: model?.providerID,
+                                modelID: model?.modelID,
+                            });
+                        } catch (armError) {
+                            log("[magic-context] v2 latest-thinking recovery arm failed", armError);
+                        }
+                    }
                     continue;
                 }
                 if (event.type === "session.deleted") {
@@ -1540,7 +1555,7 @@ export async function registerContext(context: V2Context) {
                 pendingMaterializationSessions,
                 lastHeuristicsTurnId,
                 variantBySession: variants,
-                clearReasoningAge: config.clear_reasoning_age,
+                keepReasoningTokens: config.keep_reasoning_tokens,
                 directory,
                 sessionDirectoryBySession: sessionDirectories,
                 projectPath: directory,

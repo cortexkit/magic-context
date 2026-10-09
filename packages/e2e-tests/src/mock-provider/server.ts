@@ -12,6 +12,8 @@
  * Shorter than the mock server's own idle timeout (Bun.serve closes a request
  * that sends nothing for 10 s).
  */
+import { LatestTurnThinkingValidator } from "./latest-turn-thinking";
+
 const STREAM_PING_INTERVAL_MS = 5_000;
 
 /**
@@ -106,6 +108,8 @@ export interface MockResponse {
 }
 
 export interface CapturedRequest {
+    /** Provider-side rejection, recorded before request matchers run. */
+    thinkingViolation?: string;
     receivedAt: number;
     /** Exact provider request payload, before JSON parsing. */
     rawBody?: string;
@@ -125,6 +129,8 @@ export interface CapturedRequest {
 
 export interface MockServerOptions {
     port?: number;
+    /** Stable caller identity for the provider's latest-turn thinking oracle. */
+    thinkingScope?: (body: Record<string, unknown>) => string | undefined;
 }
 
 /**
@@ -149,9 +155,12 @@ export class MockProvider {
     private defaultResponse: MockResponse | null = null;
     private matchers: RequestMatcher[] = [];
     private misses = 0;
+    private thinkingScope?: MockServerOptions["thinkingScope"];
+    private thinkingValidator = new LatestTurnThinkingValidator();
 
     async start(options: MockServerOptions = {}): Promise<{ port: number; baseURL: string }> {
         const port = options.port ?? 0; // 0 = pick any available port
+        this.thinkingScope = options.thinkingScope;
         this.server = Bun.serve({
             port,
             // Bind the address advertised to the child. A localhost listener can
@@ -194,6 +203,10 @@ export class MockProvider {
         this.matchers.push(matcher);
     }
 
+    resumeLegacyThinking(scope: string, userTurns: number, returnedThinking: unknown[]): void {
+        this.thinkingValidator.resumeLegacy(scope, userTurns, returnedThinking);
+    }
+
     /** All captured requests, in order. */
     requests(): CapturedRequest[] {
         return [...this.captured];
@@ -210,6 +223,7 @@ export class MockProvider {
         this.captured = [];
         this.defaultResponse = null;
         this.matchers = [];
+        this.thinkingValidator = new LatestTurnThinkingValidator();
     }
 
     private async handle(req: Request): Promise<Response> {
@@ -255,6 +269,16 @@ export class MockProvider {
                 rawBody,
             };
             this.captured.push(captured);
+
+            const scope = isMessages ? this.thinkingScope?.(body) : undefined;
+            if (scope !== undefined) {
+                const error = this.thinkingValidator.check(scope, body.messages as Array<{ role: string; content: unknown }>);
+                if (error) {
+                    captured.thinkingViolation = error;
+                    captured.responseCompletedAt = Date.now();
+                    return Response.json({ type: "error", error: { type: "invalid_request_error", message: error } }, { status: 400 });
+                }
+            }
 
             // Matcher routing: first-match-wins. Matchers can return tailored
             // responses based on request body (e.g. slow down historian calls).
@@ -324,6 +348,7 @@ export class MockProvider {
             const content =
                 scripted.content ??
                 [{ type: "text", text: scripted.text ?? "OK" }];
+            if (scope !== undefined) this.thinkingValidator.returned(scope, content);
 
             const respModel =
                 scripted.model ??

@@ -42,7 +42,6 @@ describe("MagicContextConfigSchema", () => {
                 cache_ttl: "5m",
                 prompt_surface: { default: "full" },
                 execute_threshold_percentage: 65,
-                clear_reasoning_age: 50,
                 history_budget_percentage: DEFAULT_HISTORY_BUDGET_PERCENTAGE,
                 historian_timeout_ms: DEFAULT_HISTORIAN_TIMEOUT_MS,
                 embedding: {
@@ -701,8 +700,10 @@ describe("MagicContextConfigSchema", () => {
             ).toBe(30000);
         });
 
-        it("rejects clear_reasoning_age below minimum", () => {
-            expect(() => MagicContextConfigSchema.parse({ clear_reasoning_age: 9 })).toThrow();
+        it("accepts deprecated clear_reasoning_age without applying its old validation", () => {
+            expect(
+                MagicContextConfigSchema.parse({ clear_reasoning_age: 9 }).keep_reasoning_tokens,
+            ).toBeUndefined();
         });
 
         it("rejects historian_timeout_ms below minimum", () => {

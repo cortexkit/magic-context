@@ -98,6 +98,17 @@ Several independent budgets and boundaries decide where the pass lands:
 - **Injected memory text and optional mural:** project memory and the memory mural have their own budgets and selection rules.
 - **The protected recent token window:** recent turns stay untouched until they age past the token floor.
 - **Unsettled live work:** in-flight reasoning and messages that have not settled yet remain in the prompt.
+
+Historical reasoning has its own retention budget, `keep_reasoning_tokens` (fixed default
+10,000). On passes that already rebuild the cache, Magic Context keeps whole assistant
+steps newest first until the next step does not fit; that step and everything older form
+the removed prefix. The newest assistant and the reasoning-exempt step count toward the
+budget but always stay. Provider-reported reasoning counts take precedence over plaintext
+estimates; encrypted reasoning with no count or text costs a fixed 1,000 tokens per step.
+The budget never starts a rebuild itself. Defer passes replay the frozen ids and watermarks
+byte-identically, and raising the budget never restores removed reasoning. Signed-thinking
+models retain their oldest-prefix stop rule. `clear_reasoning_age` is deprecated and ignored;
+`doctor` removes it, without converting tag ages into tokens.
 - **Conversation-vs-tool-output mix:** settled conversation condenses into compact history, while tool output can only be dropped or reclaimed.
 - **Reclaimable tool output:** how much tool output was queued with `ctx_reduce` or was old enough for age-based reclaim.
 

@@ -31,7 +31,11 @@ import {
     type UserFacingFailureKey,
     userFacingFailureCode,
 } from "./user-facing-codes";
-import { formatWindowDerivationLine, type WindowGeometryResult } from "./window-geometry";
+import {
+    formatWindowDerivationLine,
+    formatWindowSource,
+    type WindowGeometryResult,
+} from "./window-geometry";
 
 /** Theme-independent colour role; each host maps these onto its own palette. */
 export type StatusTone = "accent" | "text" | "muted" | "warning" | "error";
@@ -656,6 +660,16 @@ function statusSections(source: StatusViewSource, now: number): StatusSection[] 
                     tone: "muted",
                 },
                 { label: "Subagent", value: source.isSubagent ? "yes" : "no", tone: "muted" },
+                {
+                    label: "Denominator",
+                    value: `${Math.round(source.contextLimit)} tokens`,
+                    tone: "muted",
+                },
+                {
+                    label: "Window source",
+                    value: formatWindowSource(source.windowGeometry),
+                    tone: "muted",
+                },
             ],
         },
         { title: "Cache TTL", labelWidth: 14, rows: cacheRows(source, now) },

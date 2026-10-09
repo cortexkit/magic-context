@@ -15,5 +15,5 @@ export const claudeOAuth: ProviderRoute = {
 };
 
 export const scenarios: ScenarioSpec[] = [
-    { route: claudeOAuth, kind: "trim-only", loopSteps: 12, clearReasoningAge: 10, callBudget: 24 },
+    { route: claudeOAuth, kind: "trim-only", loopSteps: 12, keepReasoningTokens: 1000, callBudget: 24 },
 ];

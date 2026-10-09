@@ -10,12 +10,14 @@ import {
     getTriggerTagTokenUpperBound,
     loadProtectedTailMeta,
 } from "../../features/magic-context/storage";
+import { getReasoningTokenEstimatesByMessage } from "../../features/magic-context/storage-tags";
 import type { ContextUsage, SessionMeta, TagEntry } from "../../features/magic-context/types";
 import { escalationBands } from "../../shared/escalation-bands";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { contentTagOwnerMessageId } from "../../shared/tag-owner-id";
 import { hasReclaimRide, type ReclaimRideSignals, reclaimRideLabel } from "./cache-busting-signals";
+import { isHistorianDrainBudgetSpent } from "./historian-drain-gate";
 import {
     createDefaultBoundarySnapshotForTests,
     getRawHistoryEligibility,
@@ -35,6 +37,7 @@ import {
     type RawMessage,
 } from "./read-session-raw";
 import { estimateTrueRawMessageTokens } from "./read-session-true-raw-tokens";
+import { reasoningBudgetCutoff } from "./reasoning-budget";
 import { modelAcceptsEmptyContent } from "./sentinel";
 
 const PROACTIVE_TRIGGER_OFFSET_PERCENTAGE = 2;
@@ -82,6 +85,8 @@ export interface InMemoryTailSource {
 export interface ReasoningProjectionCapability {
     providerID?: string;
     canClearReasoning?: boolean;
+    /** Host-message projection uses the same costs as the transform; absent on DB-only paths. */
+    budgetCutoff?: number;
 }
 
 /**
@@ -214,9 +219,10 @@ function estimateProjectedPostDropPercentage(
     sessionId: string,
     usage: ContextUsage,
     activeTags: readonly TagEntry[],
-    clearReasoningAge: number | undefined,
+    keepReasoningTokens: number | undefined,
     clearedReasoningThroughTag: number | undefined,
     canClearReasoning: boolean,
+    liveBudgetCutoff?: number,
 ): number | null {
     // Denominator must include both text/tool bytes and reasoning bytes to match the numerator
     const totalActiveBytes = activeTags.reduce(
@@ -241,13 +247,36 @@ function estimateProjectedPostDropPercentage(
     //    (Phase 2 removed routine age-based tool drops — tool outputs are no longer
     //    projected as droppable here. The tiered emergency drop fires only at the derived force band,
     //    which is above this trigger's window, so it is intentionally not modeled.)
-    const maxTag = activeTags.reduce((max, t) => Math.max(max, t.tagNumber), 0);
     if (
         canClearReasoning &&
-        clearReasoningAge !== undefined &&
+        keepReasoningTokens !== undefined &&
         clearedReasoningThroughTag !== undefined
     ) {
-        const reasoningAgeCutoff = maxTag - clearReasoningAge;
+        const estimates = getReasoningTokenEstimatesByMessage(
+            db,
+            sessionId,
+            sessionDecisionCalibration(db, sessionId).proseRatio,
+        );
+        const groups = new Map<string, { tag: number; cost: number }>();
+        for (const tag of activeTags) {
+            const id = tag.type === "tool" ? tag.toolOwnerMessageId : tag.messageId;
+            if (!id) continue;
+            const group = groups.get(id) ?? { tag: 0, cost: estimates.get(id) ?? 0 };
+            if (!estimates.has(id)) group.cost += tag.reasoningByteSize / 4;
+            group.tag = Math.max(group.tag, tag.tagNumber);
+            groups.set(id, group);
+        }
+        const steps = [...groups.values()].sort((a, b) => a.tag - b.tag);
+        const reasoningAgeCutoff =
+            liveBudgetCutoff ??
+            reasoningBudgetCutoff(
+                steps.map((step, index) => ({
+                    ...step,
+                    exempt: index === steps.length - 1,
+                    alreadyRemoved: step.tag <= clearedReasoningThroughTag,
+                })),
+                keepReasoningTokens,
+            );
         for (const tag of activeTags) {
             if (tag.type !== "message") continue;
             // Skip tags already fully counted in pending drops (text + reasoning)
@@ -432,7 +461,7 @@ export function checkCompartmentTrigger(
     _previousPercentage: number,
     executeThresholdPercentage: number,
     triggerBudget: number,
-    clearReasoningAge?: number,
+    keepReasoningTokens?: number,
     commitClusterTrigger?: { enabled: boolean; min_clusters: number },
     preloadedActiveTags?: readonly TagEntry[],
     contextLimit?: number,
@@ -448,6 +477,17 @@ export function checkCompartmentTrigger(
         );
         return { shouldFire: false };
     }
+
+    if (
+        isHistorianDrainBudgetSpent({
+            db,
+            sessionId,
+            usagePercentage: usage.percentage,
+            contextLimit: resolveBoundaryContextLimit(usage, contextLimit),
+            executeThresholdPercentage,
+        })
+    )
+        return { shouldFire: false };
 
     const lazyInMemoryTail = typeof inMemoryTail === "function" ? inMemoryTail : undefined;
     let resolvedInMemoryTail = typeof inMemoryTail === "function" ? undefined : inMemoryTail;
@@ -626,9 +666,10 @@ export function checkCompartmentTrigger(
         sessionId,
         usage,
         preloadedActiveTags ?? getActiveTagsBySession(db, sessionId),
-        clearReasoningAge,
+        keepReasoningTokens,
         sessionMeta.clearedReasoningThroughTag,
         canClearReasoning,
+        reasoningProjection?.budgetCutoff,
     );
     const relativePostDropTarget = executeThresholdPercentage * POST_DROP_TARGET_RATIO;
     // Queued drops need an existing cache-busting event to apply. A future history

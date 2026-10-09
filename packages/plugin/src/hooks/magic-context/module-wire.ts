@@ -867,6 +867,110 @@ export const __moduleWireTest = {
     toFlatModuleWireBody,
 };
 
+/** Match the native codec's tool-result children, including their lossless carrier. */
+function moduleToolOutput(
+    part: Record<string, unknown>,
+    state: Record<string, unknown>,
+    text: string,
+): Record<string, unknown> {
+    const attachments = state.attachments ?? part.attachments;
+    const error = state.status === "error";
+    // Keep the old wire bytes for text-only results, including an empty attachment list.
+    if (!Array.isArray(attachments) || attachments.length === 0) {
+        return { kind: { type: error ? "error_text" : "text", text } };
+    }
+    // Even media-only results need a separate text carrier for their address tag.
+    const blocks: Record<string, unknown>[] = [{ kind: { type: "text", text } }];
+    for (const attachment of attachments) {
+        const child =
+            attachment !== null && typeof attachment === "object"
+                ? (attachment as Record<string, unknown>)
+                : {};
+        const string = (key: string): string | undefined =>
+            typeof child[key] === "string" ? (child[key] as string) : undefined;
+        const mime = string("mime") ?? string("mimeType");
+        const data = string("data");
+        const url = string("url");
+        let kind: Record<string, unknown>;
+        if (child.type === "text" && typeof child.text === "string") {
+            kind = { type: "text", text: child.text };
+        } else if (mime !== undefined && (data !== undefined || url !== undefined)) {
+            const prefix = `data:${mime};base64,`;
+            const nativeUrl = url ?? "";
+            const source =
+                data !== undefined
+                    ? { type: "data_base64", data }
+                    : nativeUrl.startsWith(prefix)
+                      ? { type: "data_base64", data: nativeUrl.slice(prefix.length) }
+                      : { type: "url", url };
+            const filename = string("filename") ?? string("name");
+            kind = {
+                type: "media",
+                media: {
+                    kind: mime.startsWith("image/")
+                        ? "image"
+                        : mime.startsWith("audio/")
+                          ? "audio"
+                          : mime.startsWith("video/")
+                            ? "video"
+                            : mime === "application/pdf"
+                              ? "document"
+                              : "file",
+                    media_type: mime,
+                    ...(filename !== undefined ? { filename } : {}),
+                    source,
+                },
+            };
+        } else {
+            // Unknown/malformed children remain opaque, never disappear on a text edit.
+            kind = {
+                type: "opaque",
+                opaque: {
+                    source: { type: "harness", harness: "opencode" },
+                    kind: string("type") ?? "attachment",
+                    raw: attachment,
+                },
+            };
+        }
+        // Store payload bytes once. Native encoding reconstructs only the recorded
+        // fields from the media source; all other carrier fields remain lossless.
+        const rawAttachment = { ...child };
+        const sourceFields: string[] = [];
+        if (kind.type === "media") {
+            const media = kind.media as { source: { type: string; data?: string; url?: string } };
+            const derivedUrl =
+                media.source.type === "data_base64"
+                    ? `data:${mime};base64,${media.source.data}`
+                    : media.source.url;
+            for (const [field, derived] of [
+                ["url", derivedUrl],
+                ["data", media.source.data],
+            ] as const) {
+                if (child[field] !== undefined && child[field] === derived) {
+                    delete rawAttachment[field];
+                    sourceFields.push(field);
+                }
+            }
+        }
+        blocks.push(
+            kind.type === "opaque"
+                ? { kind }
+                : {
+                      kind,
+                      provider_extras: {
+                          opencode: {
+                              rawAttachment,
+                              ...(sourceFields.length
+                                  ? { rawAttachmentSourceFields: sourceFields }
+                                  : {}),
+                          },
+                      },
+                  },
+        );
+    }
+    return { kind: { type: error ? "error_content" : "content", blocks } };
+}
+
 export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
     mid: string;
     ordinal: number;
@@ -1011,12 +1115,7 @@ export function encodeOpenCodeMessagesToCk(messages: unknown[]): Array<{
                             type: "tool_result",
                             id: callId,
                             tool_name: toolName,
-                            output: {
-                                kind: {
-                                    type: state.status === "error" ? "error_text" : "text",
-                                    text: output,
-                                },
-                            },
+                            output: moduleToolOutput(part, state, output),
                         },
                     });
                 }

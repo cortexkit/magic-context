@@ -274,11 +274,13 @@ describe("Pi status dialog", () => {
 					"80-100": 1,
 				},
 			});
-			// The distribution is data the status surfaces no longer draw: the
-			// single view dropped the Importance histogram row.
-			expect(
-				renderPiStatusOverlay(detail, plainTheme(), 74).join("\n"),
-			).not.toContain("Importance");
+			expect(detail.historianRuns).toBe(0);
+			const overlay = renderPiStatusOverlay(detail, plainTheme(), 74).join(
+				"\n",
+			);
+			expect(overlay).toContain("Historian runs");
+			expect(overlay).toMatch(/Historian runs\s+0/);
+			expect(overlay).not.toContain("Importance");
 		} finally {
 			closeQuietly(db);
 		}
@@ -340,7 +342,8 @@ Reclaimable: 3 spent tool outputs (~14k tokens)
 Memory: 0 memories · 0 notes
 Search indexing: Off
 Warning: The last context update did not finish. Send another message to retry. (MC-S02)
-Warning: History compression could not finish this turn. It will retry automatically. (MC-H01)`);
+Warning: History compression could not finish this turn. It will retry automatically. (MC-H01)
+Window source: catalog; denominator: 100000 tokens`);
 			for (const value of ["1.0%", "65.0%", "1h (your config)"]) {
 				expect(summary).toContain(value);
 			}

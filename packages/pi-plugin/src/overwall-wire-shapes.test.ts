@@ -245,7 +245,7 @@ test("Q6 above-wall persisted floor plus provider pressure, then below wall", as
 			},
 		});
 		const meta = getOrCreateSessionMeta(db, sessionId);
-		expect(meta.lastInputTokens).toBe(272000);
+		expect(meta.lastInputTokens).toBe(0);
 		expect(meta.observedSafeInputTokens).toBe(140000);
 		expect(
 			getOverflowState(db, sessionId).detectedContextLimit,
@@ -254,8 +254,10 @@ test("Q6 above-wall persisted floor plus provider pressure, then below wall", as
 			persistedPercentage: meta.lastContextPercentage,
 			persistedInputTokens: meta.lastInputTokens,
 			usableContextLimit: meta.lastUsageContextLimit,
+			// Recovery is driven by the provider error, not aggregate usage.
+			minimumPercentage: 95,
 		});
-		expect(pressure.percentage).toBeCloseTo(133.333333, 4);
+		expect(pressure.percentage).toBe(95);
 		expect(
 			createScheduler({ executeThresholdPercentage: 90 }).shouldExecute(
 				meta,

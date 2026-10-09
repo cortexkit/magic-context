@@ -144,6 +144,7 @@ const SECTION_ORDER: Array<{ keys: string[]; title: string; intro: string }> = [
             "protected_tokens",
             "protected_tags",
             "clear_reasoning_age",
+            "keep_reasoning_tokens",
             "history_budget_percentage",
         ],
         title: "Context management",

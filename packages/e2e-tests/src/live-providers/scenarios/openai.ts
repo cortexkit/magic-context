@@ -23,5 +23,5 @@ export const openaiResponses: ProviderRoute = {
 };
 
 export const scenarios: ScenarioSpec[] = [
-    { route: openaiResponses, kind: "age", loopSteps: 12, clearReasoningAge: 10, callBudget: 24 },
+    { route: openaiResponses, kind: "age", loopSteps: 12, keepReasoningTokens: 1000, callBudget: 24 },
 ];

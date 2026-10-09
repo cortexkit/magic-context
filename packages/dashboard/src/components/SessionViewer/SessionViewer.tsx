@@ -1806,8 +1806,8 @@ export default function SessionViewer(props: SessionViewerProps = {}) {
                       <td>{metaData().last_nudge_tokens.toLocaleString()}</td>
                     </tr>
                     <tr>
-                      <td>Execute hits</td>
-                      <td>{metaData().times_execute_threshold_reached}</td>
+                      <td>Historian runs</td>
+                      <td>{sessionDetail()?.historian_runs ?? 0}</td>
                     </tr>
                     <Show
                       when={sessionDetail()?.harness !== "pi" && sessionDetail()?.harness !== "omp"}

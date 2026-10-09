@@ -59,9 +59,9 @@ const LIVE_BINDING_400_BODY = {
 	request_id: "req_011CfSakFxfwQ2vmA7q6iK45",
 };
 
-// Three assistants whose thinking was signed before a prefix edit. The newest
-// one called a tool whose result is the pending continuation.
-function multiAssistantOpenToolMessages(): unknown[] {
+// Three completed assistant turns whose thinking was signed before a prefix edit.
+// The final real user entry releases the tool loop for history reductions.
+function multiAssistantCompletedMessages(): unknown[] {
 	const assistant = (thinking: string, rest: unknown, timestamp: number) => ({
 		role: "assistant",
 		content: [
@@ -91,6 +91,7 @@ function multiAssistantOpenToolMessages(): unknown[] {
 			isError: false,
 			timestamp: 7,
 		},
+		{ role: "user", content: "Next real turn", timestamp: 8 },
 	];
 }
 
@@ -201,10 +202,10 @@ describe("Pi provider failure recovery", () => {
 		);
 	});
 
-	it("converges after exactly one binding failure, including an open tool round", () => {
+	it("converges after exactly one binding failure after a real user releases the tool round", () => {
 		const database = db();
 		const sessionId = "pi-binding-converges-once";
-		const entryIds = ["u1", "a1", "u2", "a2", "u3", "a3", "tr3"];
+		const entryIds = ["u1", "a1", "u2", "a2", "u3", "a3", "tr3", "release"];
 		const boundEntries = new Set(["a1", "a2", "a3"]);
 		const rejects = (messages: unknown[]) =>
 			messages.some(
@@ -215,7 +216,7 @@ describe("Pi provider failure recovery", () => {
 		let failures = 0;
 		let acceptedBytes: string | null = null;
 		for (let attempt = 0; attempt < 6; attempt += 1) {
-			const wire = multiAssistantOpenToolMessages();
+			const wire = multiAssistantCompletedMessages();
 			const applied = applyPiThinkingBindingRecovery({
 				db: database,
 				sessionId,
@@ -252,7 +253,7 @@ describe("Pi provider failure recovery", () => {
 		expect(acceptedBytes).not.toBeNull();
 
 		// Later passes replay the persisted strips byte-identically.
-		const replay = multiAssistantOpenToolMessages();
+		const replay = multiAssistantCompletedMessages();
 		expect(
 			applyPiThinkingBindingRecovery({
 				db: database,
@@ -329,7 +330,7 @@ describe("Pi provider failure recovery", () => {
 // wire; later passes replay the removal byte-identically, and a defer pass never
 // starts one.
 describe("Pi proactive strip of thinking on busting passes", () => {
-	const ENTRY_IDS = ["u1", "a1", "u2", "a2", "u3", "a3", "tr3"];
+	const ENTRY_IDS = ["u1", "a1", "u2", "a2", "u3", "a3", "tr3", "release"];
 	const sha256 = (value: unknown) =>
 		createHash("sha256").update(JSON.stringify(value)).digest("hex");
 	const thinkingCount = (message: unknown) =>
@@ -340,7 +341,7 @@ describe("Pi proactive strip of thinking on busting passes", () => {
 		)?.filter?.((part) => part.type === "thinking").length ?? 0;
 
 	function session(first = "original first message"): unknown[] {
-		const messages = multiAssistantOpenToolMessages();
+		const messages = multiAssistantCompletedMessages();
 		(messages[0] as { content: string }).content = first;
 		return messages;
 	}
@@ -522,7 +523,7 @@ describe("Pi proactive strip of thinking on busting passes", () => {
 		);
 	});
 
-	it("keeps thinking produced after a strip until the next busting pass", () => {
+	it("keeps thinking produced after a strip through busts until a real user releases it", () => {
 		const database = db();
 		const sessionId = "pi-proactive-multi-pass";
 		serve(database, sessionId, session(), true);
@@ -539,8 +540,18 @@ describe("Pi proactive strip of thinking on busting passes", () => {
 		const nextBust = withFreshTurn(session());
 		expect(
 			serve(database, sessionId, nextBust.messages, true, nextBust.entryIds),
+		).toBeNull();
+		expect(thinkingCount(nextBust.messages.at(-1))).toBe(1);
+		nextBust.messages.push({
+			role: "user",
+			content: "Finish the turn",
+			timestamp: 11,
+		});
+		nextBust.entryIds.push("release-4");
+		expect(
+			serve(database, sessionId, nextBust.messages, true, nextBust.entryIds),
 		).toEqual({ entryIds: ["a4"] });
-		expect(thinkingCount(nextBust.messages.at(-1))).toBe(0);
+		expect(thinkingCount(nextBust.messages.at(-2))).toBe(0);
 	});
 
 	it("strips nothing and remembers nothing when the frozen set cannot be written", () => {

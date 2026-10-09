@@ -3070,7 +3070,7 @@ describe("runCompartmentAgent", () => {
     // reads `getActiveCompartmentRun` synchronously in the same pass and would
     // defer queued drop ops for a run that already finished. The no-op must clear
     // the registration synchronously.
-    it("clears the active-run registration synchronously when the runner no-ops", async () => {
+    it("clears the scheduled active-run registration when a background runner no-ops", async () => {
         useTempDataHome("compartment-runner-sync-noop-clear-");
         createOpenCodeDb("ses-sync-noop", [
             { id: "m-1", role: "user", text: "only protected 1" },
@@ -3131,15 +3131,12 @@ describe("runCompartmentAgent", () => {
             currentContextLimit: 128_000,
         });
 
-        // SYNCHRONOUS assertion (no await): the no-op already cleared the
-        // registration, so the same transform pass sees no active run and can
-        // materialize queued drops instead of deferring them forever.
-        expect(getActiveCompartmentRun("ses-sync-noop")).toBeUndefined();
+        // Startup is deferred, so even a no-op owns a registration until it has
+        // inspected the history. Once it finishes, later passes can apply drops.
+        const scheduled = getActiveCompartmentRun("ses-sync-noop");
+        expect(scheduled).toBeDefined();
+        await scheduled?.promise;
         expect(getOrCreateSessionMeta(db, "ses-sync-noop").compartmentInProgress).toBe(false);
-
-        // Let the fire-and-forget promise settle so its finally clears the lease
-        // renewal interval before the db closes.
-        await new Promise((resolve) => setTimeout(resolve, 0));
         expect(getActiveCompartmentRun("ses-sync-noop")).toBeUndefined();
     });
 });

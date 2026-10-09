@@ -366,6 +366,9 @@ pub(crate) fn encode_opencode_with_transition_state(
 pub(crate) struct NativeEncodeExemptions<'a> {
     pub(crate) mutation_mids: &'a [&'a str],
     pub(crate) reasoning_mid: Option<&'a str>,
+    /// None can mean a resolved policy with no eligible raw shortcut, not a
+    /// request to rediscover newest reasoning while encoding a cached suffix.
+    pub(crate) reasoning_policy_resolved: bool,
 }
 
 pub(crate) fn encode_opencode_with_transition_state_and_reasoning_exemption(
@@ -384,6 +387,7 @@ pub(crate) fn encode_opencode_with_transition_state_and_reasoning_exemption(
         NativeEncodeExemptions {
             mutation_mids: mutation_exempt_mids,
             reasoning_mid: reasoning_exempt_mid,
+            reasoning_policy_resolved: true,
         },
         transition_consumed,
         0,
@@ -418,6 +422,7 @@ fn encode_opencode_impl(
         NativeEncodeExemptions {
             mutation_mids: mutation_exempt_mids,
             reasoning_mid: None,
+            reasoning_policy_resolved: false,
         },
         transition_consumed,
         0,
@@ -487,7 +492,7 @@ pub(crate) fn encode_opencode_chunks_with_transition_state(
                 meta,
                 preserve_compaction,
                 preserve_native_reasoning,
-                exemptions.reasoning_mid.is_some(),
+                exemptions.reasoning_policy_resolved,
             ),
             None => encode_new_message(msg, session_id),
         };
@@ -712,7 +717,8 @@ fn tool_output_from_part(part: &Value, is_error: bool, output_text: String) -> C
         .get("state")
         .and_then(|state| state.get("attachments"))
         .or_else(|| part.get("attachments"))
-        .and_then(Value::as_array);
+        .and_then(Value::as_array)
+        .filter(|attachments| !attachments.is_empty());
     let Some(attachments) = attachments else {
         return if is_error {
             CkToolOutput::bare(CkOutputKind::ErrorText { text: output_text })
@@ -721,21 +727,53 @@ fn tool_output_from_part(part: &Value, is_error: bool, output_text: String) -> C
         };
     };
 
+    let kinds: Vec<_> = attachments
+        .iter()
+        .map(|attachment| classify_tool_result_child(attachment, ToolResultChildAdapter::OpenCode))
+        .collect();
+    let needs_tag_carrier = kinds
+        .iter()
+        .any(|kind| matches!(kind, ResultBlockKind::Media { .. }))
+        && !kinds
+            .iter()
+            .any(|kind| matches!(kind, ResultBlockKind::Text { .. }));
     let mut blocks = Vec::new();
-    if !output_text.is_empty() {
+    if !output_text.is_empty() || needs_tag_carrier {
         blocks.push(ResultBlock {
             kind: ResultBlockKind::Text { text: output_text },
             provider_extras: ProviderExtras::new(),
         });
     }
-    for attachment in attachments {
+    for (attachment, kind) in attachments.iter().zip(kinds) {
         let mut provider_extras = ProviderExtras::new();
-        provider_extras
-            .entry(HARNESS.to_string())
-            .or_default()
-            .insert("rawAttachment".to_string(), attachment.clone());
+        let mut raw = attachment.clone();
+        let mut source_fields = Vec::new();
+        if let ResultBlockKind::Media { media } = &kind {
+            let rendered = render_media_part(media);
+            for field in ["url", "data"] {
+                let derived = if field == "url" {
+                    rendered.get("url")
+                } else {
+                    media.source.get("data")
+                };
+                if raw.get(field).is_some() && raw.get(field) == derived {
+                    raw.as_object_mut().unwrap().remove(field);
+                    source_fields.push(field);
+                }
+            }
+        }
+        if !matches!(kind, ResultBlockKind::Opaque { .. }) {
+            let ns = provider_extras.entry(HARNESS.to_string()).or_default();
+            ns.insert("rawAttachment".to_string(), raw);
+            if !source_fields.is_empty() {
+                ns.insert(
+                    "rawAttachmentSourceFields".to_string(),
+                    json!(source_fields),
+                );
+            }
+        }
         blocks.push(ResultBlock {
-            kind: classify_tool_result_child(attachment, ToolResultChildAdapter::OpenCode),
+            kind,
             provider_extras,
         });
     }
@@ -1349,7 +1387,7 @@ fn output_status_text(output: &CkToolOutput) -> (&'static str, String) {
                 .unwrap_or_else(|| "Execution denied".to_string()),
         ),
         CkOutputKind::Content { blocks } | CkOutputKind::ErrorContent { blocks } => {
-            let text = blocks
+            let mut text = blocks
                 .iter()
                 .filter(|block| {
                     block
@@ -1364,6 +1402,19 @@ fn output_status_text(output: &CkToolOutput) -> (&'static str, String) {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
+            // A provider/CK source that the native carrier cannot represent must be
+            // visible to the model, not silently turned into a file without a URL.
+            // Only stored fields participate, so cached and rebuilt defers agree.
+            for block in blocks {
+                if let ResultBlockKind::Media { media } = &block.kind {
+                    if tool_media_is_unshown(block, media) {
+                        if !text.is_empty() {
+                            text.push('\n');
+                        }
+                        text.push_str(&unshown_attachment_notice(block, media));
+                    }
+                }
+            }
             let status = if matches!(&output.kind, CkOutputKind::ErrorContent { .. }) {
                 "error"
             } else {
@@ -1383,7 +1434,9 @@ fn output_attachments(output: &CkToolOutput) -> Vec<Value> {
         .iter()
         .filter_map(|block| match &block.kind {
             ResultBlockKind::Text { text } => render_tool_text_attachment(block, text),
-            ResultBlockKind::Media { media } => Some(render_tool_attachment(block, media)),
+            ResultBlockKind::Media { media } => {
+                (!tool_media_is_unshown(block, media)).then(|| render_tool_attachment(block, media))
+            }
             ResultBlockKind::Opaque { opaque } => Some(opaque.raw.clone()),
         })
         .collect()
@@ -1408,13 +1461,71 @@ fn render_tool_text_attachment(block: &ResultBlock, text: &str) -> Option<Value>
     Some(retained)
 }
 
-fn render_tool_attachment(block: &ResultBlock, media: &MediaBlock) -> Value {
-    let Some(mut retained) = block
+fn unshown_attachment_notice(block: &ResultBlock, media: &MediaBlock) -> String {
+    let raw = block
         .provider_extras
         .get(HARNESS)
-        .and_then(|namespace| namespace.get("rawAttachment"))
-        .cloned()
-    else {
+        .and_then(|ns| ns.get("rawAttachment"));
+    let field = |key: &str| {
+        raw.and_then(|v| v.get(key))
+            .or_else(|| media.source.get(key))
+    };
+    let identity = field("id")
+        .and_then(Value::as_str)
+        .or(media.filename.as_deref());
+    let dimensions = match (
+        field("width").and_then(Value::as_u64),
+        field("height").and_then(Value::as_u64),
+    ) {
+        (Some(width), Some(height)) => format!(" {width}x{height}"),
+        _ => String::new(),
+    };
+    let identity = identity
+        .map(|value| format!(" ({value})"))
+        .unwrap_or_default();
+    format!(
+        "[attachment not shown: {}{dimensions}{identity}]",
+        media.media_type
+    )
+}
+
+fn tool_media_is_unshown(block: &ResultBlock, media: &MediaBlock) -> bool {
+    // An unchanged native child is losslessly replayable even in a vendor format.
+    // A changed media source instead needs a representable fresh carrier.
+    retained_tool_attachment(block, media)
+        .is_none_or(|retained| media_from_part(&retained) != *media)
+        && render_media_part(media)
+            .get("url")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+}
+
+// Payload fields live only in the media source. The carrier records which native
+// fields to reconstruct, keeping vendor metadata and the original native shape.
+fn retained_tool_attachment(block: &ResultBlock, media: &MediaBlock) -> Option<Value> {
+    let ns = block.provider_extras.get(HARNESS)?;
+    let mut raw = ns.get("rawAttachment")?.clone();
+    if let Some(fields) = ns
+        .get("rawAttachmentSourceFields")
+        .and_then(Value::as_array)
+    {
+        let rendered = render_media_part(media);
+        for field in fields.iter().filter_map(Value::as_str) {
+            let value = match field {
+                "url" => rendered.get("url"),
+                "data" => media.source.get("data"),
+                _ => None,
+            };
+            if let (Some(object), Some(value)) = (raw.as_object_mut(), value) {
+                object.insert(field.to_string(), value.clone());
+            }
+        }
+    }
+    Some(raw)
+}
+
+fn render_tool_attachment(block: &ResultBlock, media: &MediaBlock) -> Value {
+    let Some(mut retained) = retained_tool_attachment(block, media) else {
         return render_media_part(media);
     };
     if media_from_part(&retained) == *media {
@@ -1568,6 +1679,7 @@ fn set_nested_value(value: &mut Value, object_key: &str, key: &str, next: Value)
 
 #[cfg(test)]
 mod tests {
+    include!("../tests/tool_attachment_notice_review.rs");
     use super::*;
 
     fn fresh_tool_transform_fixture() -> Vec<CkWireMessage> {
@@ -1654,6 +1766,86 @@ mod tests {
                 },
             ),
         ]
+    }
+
+    #[test]
+    fn unsupported_tool_media_source_has_visible_byte_stable_notice() {
+        let message = CkWireMessage::from_parts(
+            "tool",
+            vec![CkWireBlock::bare(CkKind::ToolResult {
+                id: "call".into(),
+                tool_name: "read".into(),
+                output: CkToolOutput::bare(CkOutputKind::Content {
+                    blocks: vec![
+                        ResultBlock {
+                            kind: ResultBlockKind::Text {
+                                text: "§1§ Read result".into(),
+                            },
+                            provider_extras: ProviderExtras::new(),
+                        },
+                        ResultBlock {
+                            kind: ResultBlockKind::Media {
+                                media: MediaBlock {
+                                    kind: MediaKind::Image,
+                                    media_type: "image/jpeg".into(),
+                                    filename: Some("screen.jpg".into()),
+                                    source: json!({ "type": "unavailable", "id": "iikxf4", "width": 1382, "height": 868 }),
+                                },
+                            },
+                            provider_extras: ProviderExtras::new(),
+                        },
+                    ],
+                }),
+                provider_executed: false,
+            })],
+            None,
+            ProviderExtras::new(),
+            Default::default(),
+        );
+        let encoded = encode_opencode(
+            std::slice::from_ref(&message),
+            &DecodeSidecar::new("opencode"),
+            None,
+        );
+        assert_eq!(
+            encoded[0]["parts"][0]["state"]["output"],
+            "§1§ Read result\n[attachment not shown: image/jpeg 1382x868 (iikxf4)]"
+        );
+        assert!(encoded[0]["parts"][0]["state"].get("attachments").is_none());
+        for _ in 0..3 {
+            assert_eq!(
+                serde_json::to_vec(&encode_opencode(
+                    std::slice::from_ref(&message),
+                    &DecodeSidecar::new("opencode"),
+                    None
+                ))
+                .unwrap(),
+                serde_json::to_vec(&encoded).unwrap()
+            );
+        }
+        // A retained carrier is not usable when CK has changed its source to a
+        // representation the host cannot encode. Do not emit a URL-less file.
+        let mut with_carrier = message.clone();
+        let CkKind::ToolResult { output, .. } = &mut with_carrier.content[0].kind else {
+            panic!("result")
+        };
+        let CkOutputKind::Content { blocks } = &mut output.kind else {
+            panic!("content")
+        };
+        blocks[1].provider_extras.entry(HARNESS.into()).or_default().insert(
+            "rawAttachment".into(),
+            json!({ "type": "file", "mime": "image/jpeg", "url": "data:image/jpeg;base64,aW1n", "id": "iikxf4", "width": 1382, "height": 868, "filename": "screen.jpg" }),
+        );
+        let drift = encode_opencode(
+            std::slice::from_ref(&with_carrier),
+            &DecodeSidecar::new("opencode"),
+            None,
+        );
+        assert_eq!(
+            drift[0]["parts"][0]["state"]["output"],
+            encoded[0]["parts"][0]["state"]["output"]
+        );
+        assert!(drift[0]["parts"][0]["state"].get("attachments").is_none());
     }
 
     #[test]
@@ -2945,6 +3137,7 @@ mod tests {
             NativeEncodeExemptions {
                 mutation_mids: &[],
                 reasoning_mid: Some("new"),
+                reasoning_policy_resolved: true,
             },
             true,
             0,

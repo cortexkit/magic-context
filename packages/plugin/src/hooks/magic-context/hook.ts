@@ -150,7 +150,8 @@ export interface MagicContextDeps {
         smart_drops?: unknown;
         protected_tools?: Readonly<Record<string, number>>;
         toast_duration_ms?: number;
-        clear_reasoning_age?: number;
+        clear_reasoning_age?: unknown;
+        keep_reasoning_tokens?: number | Record<string, number>;
         execute_threshold_percentage?: number | { default: number; [modelKey: string]: number };
         execute_threshold_tokens?: { default?: number; [modelKey: string]: number | undefined };
         cache_ttl: MagicContextConfig["cache_ttl"];
@@ -735,7 +736,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         protectedTokens: deps.config.protected_tokens,
         protectedTokenTierOverrides: deps.config.protectedTokenTierOverrides,
         protectedTools: deps.config.protected_tools,
-        clearReasoningAge: deps.config.clear_reasoning_age ?? 50,
+        keepReasoningTokens: deps.config.keep_reasoning_tokens,
         commitClusterTrigger: bootHistorian.commitClusterTrigger,
         historyRefreshSessions,
         deferredHistoryRefreshSessions,

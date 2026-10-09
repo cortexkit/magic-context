@@ -11,6 +11,14 @@ export function sampleLiveConfig<T extends MagicContextConfig>(boot: T, fresh: T
         const parts = path.split(".");
         let value: unknown = fresh;
         for (const part of parts) value = (value as Record<string, unknown> | undefined)?.[part];
+        if (value === undefined) {
+            // An unset live path must not create its parent objects. An empty `omp`
+            // block, for example, shadows the `pi` block it would otherwise fall back
+            // to, and the historian and dreamer lose their configured model. Only
+            // clear a leaf the boot config actually has, so removing a key live works.
+            removeLeaf(result, parts);
+            continue;
+        }
         let target = result;
         for (const part of parts.slice(0, -1)) {
             const child = target[part];
@@ -25,6 +33,26 @@ export function sampleLiveConfig<T extends MagicContextConfig>(boot: T, fresh: T
         if (leaf !== undefined) target[leaf] = value;
     }
     return result as T;
+}
+
+function removeLeaf(root: Record<string, unknown>, parts: string[]): void {
+    const parents = parts.slice(0, -1);
+    let node: Record<string, unknown> = root;
+    for (const part of parents) {
+        const child = node[part];
+        if (!child || typeof child !== "object" || Array.isArray(child)) return;
+        node = child as Record<string, unknown>;
+    }
+    const leaf = parts.at(-1);
+    if (leaf === undefined || !Object.hasOwn(node, leaf)) return;
+    // Copy the parent chain before deleting so the boot config object is never mutated.
+    let target = root;
+    for (const part of parents) {
+        const copy = { ...(target[part] as Record<string, unknown>) };
+        target[part] = copy;
+        target = copy;
+    }
+    delete target[leaf];
 }
 
 export function changedLiveKeys(previous: MagicContextConfig, next: MagicContextConfig): string[] {

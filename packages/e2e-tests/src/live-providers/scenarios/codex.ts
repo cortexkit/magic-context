@@ -15,5 +15,5 @@ export const codex: ProviderRoute = {
 };
 
 export const scenarios: ScenarioSpec[] = [
-    { route: codex, kind: "age", loopSteps: 12, clearReasoningAge: 10, callBudget: 24 },
+    { route: codex, kind: "age", loopSteps: 12, keepReasoningTokens: 1000, callBudget: 24 },
 ];

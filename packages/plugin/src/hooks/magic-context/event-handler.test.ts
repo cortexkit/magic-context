@@ -202,6 +202,55 @@ function providersClient(limit: number, prompt?: ReturnType<typeof mock>) {
     };
 }
 
+describe("provider-measured proven floor", () => {
+    it("keeps accepted 757872 and 1328370 inputs unscaled and excludes failed usage", async () => {
+        useTempDataHome("context-event-measured-floor-");
+        const deps = createDeps(new Map());
+        const handler = createEventHandler(deps);
+        const sessionID = "ses-measured-floor";
+        for (const [ordinal, input] of [757_872, 1_328_370].entries()) {
+            await handler({
+                event: {
+                    type: "message.updated",
+                    properties: {
+                        info: {
+                            id: `measured-${ordinal}`,
+                            role: "assistant",
+                            sessionID,
+                            providerID: "cursor",
+                            modelID: "grok-4.7",
+                            finish: "stop",
+                            tokens: { input, cache: { read: 0, write: 0 } },
+                        },
+                    },
+                },
+            });
+            const meta = getOrCreateSessionMeta(deps.db, sessionID);
+            expect(meta.observedSafeInputTokens).toBe(input);
+            expect(meta.lastUsageContextLimit).toBe(input);
+            expect(meta.lastContextPercentage).toBe(100);
+        }
+        await handler({
+            event: {
+                type: "message.updated",
+                properties: {
+                    info: {
+                        id: "measured-2",
+                        role: "assistant",
+                        sessionID,
+                        providerID: "cursor",
+                        modelID: "grok-4.7",
+                        finish: "error",
+                        error: { message: "quota exhausted" },
+                        tokens: { input: 8_732_692, cache: { read: 0, write: 0 } },
+                    },
+                },
+            },
+        });
+        expect(getOrCreateSessionMeta(deps.db, sessionID).observedSafeInputTokens).toBe(1_328_370);
+    });
+});
+
 // Captured 400 body for Claude Fable 5.1 and Claude Opus 5.5 (identical on both),
 // from docs/reports/anthropic-thinking-binding.md section 2.
 const LIVE_BINDING_400_BODY = {

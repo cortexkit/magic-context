@@ -831,6 +831,83 @@ export function emergencyDrainExitThreshold(executeThresholdPercentage: number):
     return Math.max(0, executeThresholdPercentage - EMERGENCY_DRAIN_EXIT_MARGIN);
 }
 
+function resolvedEmergencyDrainLatch(
+    meta: ProtectedTailMeta,
+    usagePercentage: number,
+    executeThresholdPercentage: number,
+    now: number,
+): number {
+    const { forceMaterializationPercentage } = escalationBands(executeThresholdPercentage);
+    if (usagePercentage >= forceMaterializationPercentage)
+        return meta.emergencyDrainActive > 0 ? meta.emergencyDrainActive : now;
+    if (
+        usagePercentage < emergencyDrainExitThreshold(executeThresholdPercentage) ||
+        now - meta.emergencyDrainActive > EMERGENCY_DRAIN_MAX_LATCH_MS
+    )
+        return 0;
+    return meta.emergencyDrainActive;
+}
+
+function drainFailureBackoffActive(meta: ProtectedTailMeta, now: number): boolean {
+    return (
+        meta.historianDrainFailureAt > 0 &&
+        meta.historianDrainFailureAt <= now &&
+        now - meta.historianDrainFailureAt < EMERGENCY_DRAIN_FAILURE_BACKOFF_MS
+    );
+}
+
+/** Cheap admission check; the runner still reserves atomically before invoking a model. */
+export function getProtectedTailDrainBudgetSkip(args: {
+    db: Database;
+    sessionId: string;
+    usagePercentage: number;
+    usable: number;
+    perRunCap: number;
+    executeThresholdPercentage: number;
+    now?: number;
+}): (ProtectedTailDrainBudgetState & { nextEligibleAt: number }) | null {
+    const now = args.now ?? Date.now();
+    const meta = loadProtectedTailMeta(args.db, args.sessionId);
+    const latch = resolvedEmergencyDrainLatch(
+        meta,
+        args.usagePercentage,
+        args.executeThresholdPercentage,
+        now,
+    );
+    // Usage-driven catch-up transitions must survive even when admission skips the runner.
+    // Only write a changed latch; admission must not charge tokens or reset the window.
+    if (latch !== meta.emergencyDrainActive) {
+        args.db
+            .prepare(
+                "UPDATE session_meta SET emergency_drain_active = ? WHERE session_id = ? AND emergency_drain_active = ?",
+            )
+            .run(latch, args.sessionId, meta.emergencyDrainActive);
+    }
+    const startedAt = meta.protectedTailDrainWindowStartedAt;
+    if (startedAt <= 0 || startedAt > now || now - startedAt >= DRAIN_WINDOW_MS) return null;
+    const limitTokens = protectedTailWindowBudget(
+        args.usagePercentage,
+        args.usable,
+        args.perRunCap,
+    );
+    if (meta.protectedTailDrainTokens < limitTokens) return null;
+    if (latch > 0 && !drainFailureBackoffActive(meta, now)) return null;
+    return {
+        windowStartedAt: startedAt,
+        resetsAt: startedAt + DRAIN_WINDOW_MS,
+        nextEligibleAt:
+            latch > 0
+                ? Math.min(
+                      startedAt + DRAIN_WINDOW_MS,
+                      meta.historianDrainFailureAt + EMERGENCY_DRAIN_FAILURE_BACKOFF_MS,
+                  )
+                : startedAt + DRAIN_WINDOW_MS,
+        resetInMs: startedAt + DRAIN_WINDOW_MS - now,
+        spentTokens: meta.protectedTailDrainTokens,
+        limitTokens,
+    };
+}
+
 export function reserveProtectedTailDrainTokens(args: {
     db: Database;
     sessionId: string;
@@ -888,17 +965,12 @@ export function reserveProtectedTailDrainTokens(args: {
             // reaches the derived force band; exit once usage falls back below
             // the safe zone, or after a self-expiry backstop. Persisted unconditionally
             // so the next pass sees the resolved state even when we skip below.
-            const exitThreshold = emergencyDrainExitThreshold(args.executeThresholdPercentage);
-            let latchActiveSince = meta.emergencyDrainActive;
-            const { forceMaterializationPercentage } = escalationBands(
+            const latchActiveSince = resolvedEmergencyDrainLatch(
+                meta,
+                args.usagePercentage,
                 args.executeThresholdPercentage,
+                now,
             );
-            if (args.usagePercentage >= forceMaterializationPercentage) {
-                if (latchActiveSince <= 0) latchActiveSince = now;
-            } else if (latchActiveSince > 0) {
-                const expired = now - latchActiveSince > EMERGENCY_DRAIN_MAX_LATCH_MS;
-                if (args.usagePercentage < exitThreshold || expired) latchActiveSince = 0;
-            }
             if (latchActiveSince !== meta.emergencyDrainActive) {
                 args.db
                     .prepare(
@@ -920,10 +992,7 @@ export function reserveProtectedTailDrainTokens(args: {
             // the normal window budget unless a recent historian failure is still backing
             // off. A future failure timestamp is ignored because it cannot represent a
             // recent failure after the wall clock moved backward.
-            const inFailureBackoff =
-                meta.historianDrainFailureAt > 0 &&
-                meta.historianDrainFailureAt <= now &&
-                now - meta.historianDrainFailureAt < EMERGENCY_DRAIN_FAILURE_BACKOFF_MS;
+            const inFailureBackoff = drainFailureBackoffActive(meta, now);
             if (reserved <= 0 && latchActive && !inFailureBackoff) {
                 reserved = Math.min(requested, args.perRunCap);
                 bypass = true;

@@ -3,7 +3,11 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { degradationChangesRequest, PASS_DEGRADATION_EFFECTS } from "./pass-outcome";
+import {
+    createPassOutcome,
+    degradationChangesRequest,
+    PASS_DEGRADATION_EFFECTS,
+} from "./pass-outcome";
 
 // The sources that record pass degradations, through `passOutcome.record`,
 // `args.passOutcome?.record` or the transform's `failPass`.
@@ -64,4 +68,19 @@ describe("pass degradation sites", () => {
             "session-directory-fallback",
         ]);
     });
+});
+
+it("captures a finalized optional auto-search timeout skip, but not other failures", () => {
+    const outcome = createPassOutcome();
+    outcome.record("auto-search-timeout");
+    expect(outcome.captureEligible).toBe(false);
+    outcome.markFinalized();
+    expect(outcome.captureEligible).toBe(true);
+    expect(outcome.isCaptureEligible()).toBe(true);
+    outcome.record("pending-operation-failure");
+    expect(outcome.captureEligible).toBe(false);
+    const fatal = createPassOutcome();
+    fatal.record("auto-search-timeout", "fatal");
+    fatal.markFinalized();
+    expect(fatal.captureEligible).toBe(false);
 });

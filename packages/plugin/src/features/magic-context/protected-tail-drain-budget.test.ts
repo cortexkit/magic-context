@@ -1,12 +1,15 @@
 /// <reference types="bun-types" />
 
-import { beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 
 import { Database } from "../../shared/sqlite";
 import { initializeDatabase } from "./storage-db";
 import {
     DRAIN_WINDOW_MS,
     describeProtectedTailDrainBudgetSkip,
+    EMERGENCY_DRAIN_FAILURE_BACKOFF_MS,
+    EMERGENCY_DRAIN_MAX_LATCH_MS,
+    getProtectedTailDrainBudgetSkip,
     loadProtectedTailMeta,
     reserveProtectedTailDrainTokens,
     rollbackProtectedTailDrainReservation,
@@ -37,6 +40,125 @@ describe("protected-tail drain budget window", () => {
     beforeEach(() => {
         db = new Database(":memory:");
         initializeDatabase(db);
+    });
+    afterEach(() => db.close());
+
+    it("admission persists latch transitions without changing the budget and matches reservation decisions", () => {
+        const now = 10_000_000;
+        const cases = [
+            { usage: 20, start: now - 1, latch: 0, failure: 0, blocked: true, afterLatch: 0 },
+            {
+                usage: 20,
+                start: now - DRAIN_WINDOW_MS,
+                latch: 0,
+                failure: 0,
+                blocked: false,
+                afterLatch: 0,
+            },
+            { usage: 20, start: now + 1, latch: 0, failure: 0, blocked: false, afterLatch: 0 },
+            { usage: 85, start: now - 1, latch: 0, failure: 0, blocked: false, afterLatch: now },
+            { usage: 95, start: now - 1, latch: 0, failure: 0, blocked: false, afterLatch: now },
+            {
+                usage: 70,
+                start: now - 1,
+                latch: now - 1000,
+                failure: 0,
+                blocked: false,
+                afterLatch: now - 1000,
+            },
+            {
+                usage: 69,
+                start: now - 1,
+                latch: now - 1000,
+                failure: 0,
+                blocked: true,
+                afterLatch: 0,
+            },
+            {
+                usage: 69,
+                start: now - DRAIN_WINDOW_MS,
+                latch: now - 1000,
+                failure: 0,
+                blocked: false,
+                afterLatch: 0,
+            },
+            {
+                usage: 69,
+                start: now + 1,
+                latch: now - 1000,
+                failure: 0,
+                blocked: false,
+                afterLatch: 0,
+            },
+            {
+                usage: 70,
+                start: now - 1,
+                latch: now - EMERGENCY_DRAIN_MAX_LATCH_MS - 1,
+                failure: 0,
+                blocked: true,
+                afterLatch: 0,
+            },
+            {
+                usage: 95,
+                start: now - 1,
+                latch: 0,
+                failure: now - 1,
+                blocked: true,
+                afterLatch: now,
+            },
+            {
+                usage: 95,
+                start: now - 1,
+                latch: 0,
+                failure: now - EMERGENCY_DRAIN_FAILURE_BACKOFF_MS,
+                blocked: false,
+                afterLatch: now,
+            },
+            {
+                usage: 95,
+                start: now - 1,
+                latch: 0,
+                failure: now + 1,
+                blocked: false,
+                afterLatch: now,
+            },
+        ];
+        cases.forEach((c, i) => {
+            const sessionId = `admission-${i}`;
+            reserve(db, sessionId, now);
+            db.prepare(
+                "UPDATE session_meta SET protected_tail_drain_window_started_at = ?, protected_tail_drain_tokens = 1000000, emergency_drain_active = ?, historian_drain_failure_at = ? WHERE session_id = ?",
+            ).run(c.start, c.latch, c.failure, sessionId);
+            const args = {
+                db,
+                sessionId,
+                usagePercentage: c.usage,
+                usable: USABLE_TOKENS,
+                perRunCap: PER_RUN_CAP,
+                executeThresholdPercentage: 80,
+                now,
+            };
+            const before = loadProtectedTailMeta(db, sessionId);
+            const block = getProtectedTailDrainBudgetSkip(args);
+            expect(block !== null).toBe(c.blocked);
+            if (c.blocked)
+                expect(block?.nextEligibleAt).toBe(
+                    c.usage === 95
+                        ? Math.min(
+                              c.start + DRAIN_WINDOW_MS,
+                              c.failure + EMERGENCY_DRAIN_FAILURE_BACKOFF_MS,
+                          )
+                        : c.start + DRAIN_WINDOW_MS,
+                );
+            expect(loadProtectedTailMeta(db, sessionId)).toEqual({
+                ...before,
+                emergencyDrainActive: c.afterLatch,
+            });
+            expect(
+                reserveProtectedTailDrainTokens({ ...args, runId: sessionId, trueRawTokens: 100 })
+                    .ok,
+            ).toBe(!c.blocked);
+        });
     });
 
     it("replenishes by clock time across the reported 17-hour trigger timeline", () => {

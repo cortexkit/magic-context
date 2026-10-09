@@ -182,6 +182,7 @@ export interface SessionDetail {
   // `getSessionMessages`; cache events by `getSessionCacheEvents`.
   messages_count: number;
   cache_events_count: number;
+  historian_runs: number;
   compartments: Compartment[];
   facts: SessionFact[];
   notes: Note[];
@@ -271,7 +272,6 @@ export interface SessionMetaRow {
   is_subagent: boolean;
   last_context_percentage: number;
   last_input_tokens: number;
-  times_execute_threshold_reached: number;
   compartment_in_progress: boolean;
   system_prompt_hash: string;
   memory_block_count: number;

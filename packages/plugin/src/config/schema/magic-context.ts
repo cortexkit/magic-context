@@ -963,7 +963,8 @@ export interface MagicContextConfig {
     protected_tokens?: number;
     protected_tags?: number;
     protected_tools: Record<string, number>;
-    clear_reasoning_age: number;
+    clear_reasoning_age?: unknown;
+    keep_reasoning_tokens?: number | Record<string, number>;
     history_budget_percentage: number;
     historian_timeout_ms: number;
     commit_cluster_trigger: {
@@ -1263,10 +1264,21 @@ export const MagicContextConfigSchema = z
             )
             .meta({ deprecated: true }),
         clear_reasoning_age: z
-            .number()
-            .min(10)
-            .default(50)
-            .describe("Clear reasoning/thinking blocks older than N tags (default: 50)"),
+            .unknown()
+            .optional()
+            .describe("Deprecated and ignored. Use keep_reasoning_tokens instead.")
+            .meta({ deprecated: true }),
+        keep_reasoning_tokens: z
+            .union([
+                z.number().int().min(0).max(1_000_000),
+                z
+                    .object({ default: z.number().int().min(0).max(1_000_000).optional() })
+                    .catchall(z.number().int().min(0).max(1_000_000)),
+            ])
+            .optional()
+            .describe(
+                "Reasoning tokens to keep on rebuilding passes. Number or per-model object; exact, shorter model keys, provider/*, then default. Omitted: fixed 10,000. 0 removes all eligible historical reasoning; newest and exempt steps always stay.",
+            ),
         history_budget_percentage: z
             .number()
             .min(0.05)

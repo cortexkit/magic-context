@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-
 import { DEFAULT_HISTORIAN_TIMEOUT_MS } from "../../config/schema/magic-context";
 import {
     resolveProjectIdentity,
@@ -90,6 +89,14 @@ import {
 } from "./final-wire-token-estimate";
 import { createHistorianHostRunner } from "./historian-host-runner";
 import {
+    hasActiveAnthropicThinkingTurn,
+    latestAssistantTurnMessages,
+} from "./latest-assistant-turn";
+import {
+    captureLatestTurnOriginals,
+    prepareLatestThinkingRecovery,
+} from "./latest-thinking-recovery";
+import {
     claimLkgRequestIdentity,
     type LkgRequestIdentity,
     noteCapturedLkgRequest,
@@ -160,11 +167,14 @@ import { RECOVERY_NO_HEAD_LIMIT } from "./protected-tail-boundary";
 import { RawFallbackContextLimitError } from "./raw-fallback-context-limit";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import type { RawMessageOrdinalAnchor } from "./read-session-raw";
+import { resolveKeepReasoningTokens } from "./reasoning-budget";
+import { captureOpencodeReasoningBudgetStatus } from "./reasoning-budget-status";
 import {
     nextRustPassStamp,
     type RustLkgReplayParticipant,
     registerRustLkgReplayParticipant,
 } from "./rust-lkg-freeze-registry";
+import { isAnthropicFamilyRoute } from "./sentinel";
 import { SharedCompartmentBoundaryError } from "./shared-compartment-boundaries";
 import { singleStoreMigrationRequiredFailure } from "./single-store-refusal";
 import { StorageBusyRefusalError } from "./storage-busy-refusal";
@@ -1657,7 +1667,7 @@ function buildTransformBody(args: {
         historian_model_limits: args.passInputs.historian_model_limits,
         historian_model_variants: args.passInputs.historian_model_variants,
         historian_timeout_ms: args.passInputs.historian_timeout_ms,
-        clear_reasoning_age: args.passInputs.clear_reasoning_age,
+        keep_reasoning_tokens_effective: args.passInputs.keep_reasoning_tokens_effective,
         caveman_enabled: args.passInputs.caveman_enabled === true,
         caveman_min_chars: args.passInputs.caveman_min_chars ?? 500,
         cache_ttl: args.passInputs.cache_ttl,
@@ -2485,6 +2495,17 @@ export function createRustModeTransform(
             );
         }
         const inputCount = messages.length;
+        const inputHasActiveThinking = hasActiveAnthropicThinkingTurn(messages, "anthropic");
+        const thinkingRecovery = prepareLatestThinkingRecovery({
+            db: deps.db,
+            sessionId,
+            messages,
+            id: (message) => (message as MessageLike)?.info.id,
+            parts: (message) => (message as MessageLike)?.parts ?? [],
+        });
+        const restoreLatestTurnOriginals = thinkingRecovery.restore
+            ? captureLatestTurnOriginals(messages as MessageLike[])
+            : undefined;
         let requestInputTokens = 0;
         let decision = "error";
         let materializeReason = "none";
@@ -3167,7 +3188,10 @@ export function createRustModeTransform(
                     historianRun?.timeoutMs ??
                     deps.historianTimeoutMs ??
                     DEFAULT_HISTORIAN_TIMEOUT_MS,
-                clear_reasoning_age: deps.clearReasoningAge,
+                keep_reasoning_tokens_effective: resolveKeepReasoningTokens(
+                    deps.keepReasoningTokens,
+                    modelKey ?? undefined,
+                ),
                 caveman_enabled:
                     !sessionMeta.isSubagent && deps.cavemanTextCompression?.enabled === true,
                 caveman_min_chars: deps.cavemanTextCompression?.minChars ?? 500,
@@ -4231,7 +4255,19 @@ export function createRustModeTransform(
                             if (!isTransientSqliteError(error)) throw error;
                         }
                     }
+                    const protectedThinkingMessages = latestAssistantTurnMessages(
+                        appliedMessages as MessageLike[],
+                    );
+                    const activeThinkingTurn =
+                        inputHasActiveThinking &&
+                        isAnthropicFamilyRoute(model?.providerID, model?.modelID);
                     const postprocess = runRustModePostprocess({
+                        activeThinkingTurn,
+                        protectedThinkingMessages: thinkingRecovery.restore
+                            ? protectedThinkingMessages
+                            : undefined,
+                        restoreLatestTurnOriginals: () =>
+                            restoreLatestTurnOriginals?.(appliedMessages as MessageLike[]),
                         db: deps.db,
                         sessionId,
                         messages: appliedMessages as MessageLike[],
@@ -4652,6 +4688,12 @@ export function createRustModeTransform(
                 agentName: deps.getNotificationParams?.(sessionId)?.agent,
                 systemPromptHash: sessionMeta.systemPromptHash,
             });
+            captureOpencodeReasoningBudgetStatus(
+                sessionId,
+                output.messages as MessageLike[],
+                resolveKeepReasoningTokens(deps.keepReasoningTokens, modelKey ?? undefined),
+                isPrefixBoundThinkingModel(model?.providerID, model?.modelID),
+            );
             finishPass(true);
             // Validation, message replacement, synchronous LKG persistence and
             // bookkeeping have finished. Clear the persisted replay block last; if

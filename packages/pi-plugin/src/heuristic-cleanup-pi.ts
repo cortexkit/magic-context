@@ -574,6 +574,7 @@ export function applyPiHeuristicCleanup(
 				const strippedSource = stripTagPrefix(stripped);
 
 				if (strippedSource.trim().length === 0) {
+					if (target.thinkingDropProtected) continue;
 					const dropResult = target.drop?.() ?? "absent";
 					const didReplace =
 						dropResult === "absent"
@@ -598,7 +599,7 @@ export function applyPiHeuristicCleanup(
 							tag.messageId,
 						)
 					) {
-						if (target.setContent(stripped)) {
+						if (target.setContent(stripped, { keepReasoning: true })) {
 							droppedInjections++;
 							droppedTokenReductions.push({
 								tagNumber: tag.tagNumber,

@@ -1602,6 +1602,7 @@ export class PiSubagentRunner implements SubagentRunner {
 			let finalErrorMessage: string | null = null;
 			let finalStopReason: string | null = null;
 			let sawAgentEnd = false;
+			let preserveDrainedResult = false;
 			let parseError: string | null = null;
 			// Tool-invocation count for the grounding gate (refresh-primers:
 			// 0 tool calls = closed-book paraphrase, rejected). Derived at settle
@@ -1653,19 +1654,37 @@ export class PiSubagentRunner implements SubagentRunner {
 			// (tool-call) and terminal turns, with the final assistant
 			// message carrying stopReason="stop" and no toolCall content.
 			//
-			// Why we accumulate instead of waiting for `agent_end`:
-			// Pi's print mode does NOT emit an `agent_end` event on stdout.
-			// That event exists in Pi's internal extension event channel
-			// only — the stdout JSON stream comes from `session.subscribe`,
-			// which receives only `message_start`/`message_end`/
-			// `tool_execution_*`/`compaction_*`/`session_info_changed`/
-			// `thinking_level_changed`/`queue_update`/`auto_retry_end`.
+			// Some Pi-compatible print streams omit `agent_end`, so completion
+			// cannot depend on receiving it. Accumulate the message_end stream
+			// and accept agent_end's complete transcript when available.
 			//
 			// We detect run completion the same way Pi itself does: watch
 			// `message_end` for the final assistant turn (stopReason="stop"
 			// + no toolCall content), then drain until natural child exit.
 			const accumulatedMessages: unknown[] = [];
 			accountingMessages = accumulatedMessages;
+			const captureFinalAssistant = (messages: unknown[]) => {
+				const result = extractFinalAssistant(messages);
+				finalAssistantText = result.text;
+				finalStopReason = result.stopReason;
+				finalErrorMessage = result.errorMessage;
+				const lastAssistant = [...messages]
+					.reverse()
+					.find(
+						(message) =>
+							typeof message === "object" &&
+							message !== null &&
+							(message as { role?: unknown }).role === "assistant",
+					);
+				// Capturing terminal text starts the drain below. Its SIGTERM can
+				// produce empty aborted turns; those are shutdown noise, not a new
+				// answer. Keep length-capped text too, so it still reports truncated.
+				preserveDrainedResult =
+					(result.stopReason === "stop" || result.stopReason === "length") &&
+					!!result.text?.trim() &&
+					countToolCalls([lastAssistant]) === 0;
+				return result;
+			};
 
 			rl.on("line", (line) => {
 				if (settled || line.length === 0) return;
@@ -1873,6 +1892,10 @@ export class PiSubagentRunner implements SubagentRunner {
 						(event as { willRetry?: unknown }).willRetry === true)
 				) {
 					sawAgentEnd = false;
+					preserveDrainedResult = false;
+					finalAssistantText = null;
+					finalStopReason = null;
+					finalErrorMessage = null;
 					agentEndMessages = null;
 					drainTimerStarted = false;
 					if (drainTimerHandle) {
@@ -1883,20 +1906,20 @@ export class PiSubagentRunner implements SubagentRunner {
 					return;
 				}
 
-				// Backwards-compat: if Pi (or any pi-compatible runner) ever
-				// does emit `agent_end` with the full messages array, treat
-				// it as authoritative. Older Pi versions may have done this.
-				if (e.type === "agent_end" && Array.isArray(e.messages)) {
+				// Accept a complete transcript unless a usable terminal result is
+				// already draining. Shutdown events must not replace that result.
+				if (
+					e.type === "agent_end" &&
+					Array.isArray(e.messages) &&
+					!preserveDrainedResult
+				) {
 					sawAgentEnd = true;
 					agentEndMessages = e.messages;
 					// agent_end is authoritative when a Pi-compatible child emits it;
 					// retain its complete assistant-message list so usage is accounted
 					// even when no message_end events were printed.
 					accountingMessages = e.messages;
-					const result = extractFinalAssistant(e.messages);
-					finalAssistantText = result.text;
-					finalStopReason = result.stopReason;
-					finalErrorMessage = result.errorMessage;
+					const result = captureFinalAssistant(e.messages);
 					emitProgress({
 						type: "terminal",
 						stopReason: result.stopReason ?? undefined,
@@ -1904,7 +1927,6 @@ export class PiSubagentRunner implements SubagentRunner {
 						hasToolCall: false,
 						ms: elapsedMs,
 					});
-					return;
 				}
 
 				// Live path: accumulate every assistant/tool message Pi
@@ -1914,7 +1936,7 @@ export class PiSubagentRunner implements SubagentRunner {
 				// being a non-toolUse value AND no toolCall content in the
 				// assistant message body. "length" means the model hit its
 				// max-tokens cap mid-response — still terminal, but we
-				// surface it as model_failed so callers can react.
+				// surface it as truncated so callers can react.
 				if (e.type === "message_end" && e.message) {
 					// Every assistant message_end is retained. recordChildInvocation
 					// sums message.usage here, matching OpenCode's per-assistant
@@ -1941,12 +1963,13 @@ export class PiSubagentRunner implements SubagentRunner {
 								m.stopReason === "length" ||
 								m.stopReason === "error" ||
 								m.stopReason === "aborted");
-						if (isTerminalStopReason && !hasToolCall) {
+						if (
+							isTerminalStopReason &&
+							!hasToolCall &&
+							!preserveDrainedResult
+						) {
 							sawAgentEnd = true;
-							const result = extractFinalAssistant(accumulatedMessages);
-							finalAssistantText = result.text;
-							finalStopReason = result.stopReason;
-							finalErrorMessage = result.errorMessage;
+							const result = captureFinalAssistant(accumulatedMessages);
 							emitProgress({
 								type: "terminal",
 								stopReason: m.stopReason,

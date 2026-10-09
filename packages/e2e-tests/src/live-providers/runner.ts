@@ -20,7 +20,7 @@
  *   turn-2.. three more turns of one bash call each; the first pass of turn-2 is where the
  *            age lane (or the queued drop) takes reasoning off the wire.
  *
- * `clear_reasoning_age` must be at least 10 (Magic Context's minimum); an invalid value would
+ * `keep_reasoning_tokens` is a nonnegative integer; an invalid value would
  * silently fall back to the default, so the runner refuses to start when the host logs a
  * config warning.
  *
@@ -162,7 +162,7 @@ export async function runScenario(spec: ScenarioSpec, options: RunOptions, calls
             modelsCatalog: options.modelsCatalog,
             authPlugins: options.authPlugins,
             magicContext: {
-                clear_reasoning_age: spec.clearReasoningAge,
+                keep_reasoning_tokens: spec.keepReasoningTokens,
                 execute_threshold_percentage: 80,
             },
         });

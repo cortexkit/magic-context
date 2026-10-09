@@ -5,6 +5,7 @@
       "name": "a contiguous oldest prefix up to the age cutoff",
       "steps": 8,
       "clear_reasoning_age": 3,
+      "keep_reasoning_tokens": 300,
       "untagged": [],
       "already_removed": [],
       "removed_after": ["a0", "a1", "a2", "a3", "a4"]
@@ -13,6 +14,7 @@
       "name": "the walk stops at the first step it may not remove",
       "steps": 8,
       "clear_reasoning_age": 3,
+      "keep_reasoning_tokens": 300,
       "untagged": ["a2"],
       "already_removed": [],
       "removed_after": ["a0", "a1"]
@@ -21,6 +23,7 @@
       "name": "steps already removed are passed over, never restored",
       "steps": 8,
       "clear_reasoning_age": 3,
+      "keep_reasoning_tokens": 300,
       "untagged": ["a2"],
       "already_removed": ["a0", "a1", "a2"],
       "removed_after": ["a0", "a1", "a2", "a3", "a4"]
@@ -29,6 +32,7 @@
       "name": "the newest assistant is never removed",
       "steps": 8,
       "clear_reasoning_age": 0,
+      "keep_reasoning_tokens": 0,
       "untagged": [],
       "already_removed": [],
       "removed_after": ["a0", "a1", "a2", "a3", "a4", "a5", "a6"]

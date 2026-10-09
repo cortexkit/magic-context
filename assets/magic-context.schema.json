@@ -2241,10 +2241,33 @@
       "deprecated": true
     },
     "clear_reasoning_age": {
-      "default": 50,
-      "description": "Clear reasoning/thinking blocks older than N tags (default: 50)",
-      "type": "number",
-      "minimum": 10
+      "description": "Deprecated and ignored. Use keep_reasoning_tokens instead.",
+      "deprecated": true
+    },
+    "keep_reasoning_tokens": {
+      "description": "Reasoning tokens to keep on rebuilding passes. Number or per-model object; exact, shorter model keys, provider/*, then default. Omitted: fixed 10,000. 0 removes all eligible historical reasoning; newest and exempt steps always stay.",
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        {
+          "type": "object",
+          "properties": {
+            "default": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000
+            }
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000
+          }
+        }
+      ]
     },
     "history_budget_percentage": {
       "default": 0.15,
