@@ -116,6 +116,7 @@ function makeMemoryDatabase(): Database {
       INSERT INTO memories_fts(rowid, content, category) VALUES (new.id, new.content, new.category);
     END;
   `);
+    initializeDatabase(database);
     return database;
 }
 
@@ -312,7 +313,7 @@ describe("promotion", () => {
                 computeNormalizedHash("Use createX naming for factories"),
             );
 
-            expect(result).toEqual({ newMemoryRefs: [], factsPromoted: 1 });
+            expect(result).toMatchObject({ newMemoryRefs: [], factsPromoted: 1, receipts: [{state: "applied",reason: "live_match",memoryId: memory!.id}] });
             expect(memory?.seenCount).toBe(2);
         });
 
@@ -430,10 +431,10 @@ describe("promotion", () => {
                 { category: "ARCHITECTURE_DECISIONS", content },
             ]);
 
-            // The archived row's seen_count is bumped; no new active row inserted.
+            // An archived match is pending review and does not change the archived row.
             const same = getMemoryById(db, original!.id);
             expect(same?.status).toBe("archived"); // NOT revived
-            expect(same?.seenCount).toBe(2); // re-observation counted
+            expect(same?.seenCount).toBe(1);
             expect(getMemoryCount(db, "/repo/project")).toBe(1); // no duplicate insert
             // → the re-observed fact is invisible to active rendering despite recurrence.
             expect(getMemoriesByProject(db, "/repo/project")).toHaveLength(0);
