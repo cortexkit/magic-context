@@ -271,15 +271,14 @@ async fn host_message(h: &McHandler, raw: &Value, ordinal: u64, served: u64) -> 
                 .unwrap();
             part["state"]["output"] = json!(rendered[0]);
         } else {
-            let mut i = 0;
-            for p in result["parts"]
+            for (i, p) in result["parts"]
                 .as_array_mut()
                 .unwrap()
                 .iter_mut()
                 .filter(|p| p["type"] == "text")
+                .enumerate()
             {
                 p["text"] = json!(rendered[i]);
-                i += 1;
             }
         }
     }
@@ -465,11 +464,9 @@ async fn queued_tool_and_sibling_text_releases_match_full_engine_grace_and_oldes
     drive_overlay_corpus(true, false).await;
 }
 
-// Expected failure until the host compaction temporal-view implementation in
-// commit 64dbbf2f93a7099c94b4a7b1dfa3d6b19be09c22 lands. A covering
-// range alone cannot repair a marker that the hook correctly withheld.
+// A late HARD replacement must render the temporal marker withheld by hooks on
+// non-HARD passes. Extending the covered range alone cannot supply those bytes.
 #[test]
-#[ignore = "expected failure until temporal-view commit 64dbbf2f integrates; then run normally"]
 fn late_hard_view_covers_new_users_and_renders_full_engine_temporal_marker() {
     use transform::compaction::{Answer, Preset, State, Status};
     let late_dir = tempfile::tempdir().unwrap();
@@ -496,7 +493,7 @@ fn late_hard_view_covers_new_users_and_renders_full_engine_temporal_marker() {
         last_applied_version: None,
         last_not_applied: None,
     };
-    let mut setup_template = request(&[first.clone()], false);
+    let mut setup_template = request(std::slice::from_ref(&first), false);
     setup_template.kind = "compaction.host".into();
     transform::compaction::setup(
         late.store.get().unwrap(),
@@ -509,7 +506,7 @@ fn late_hard_view_covers_new_users_and_renders_full_engine_temporal_marker() {
     for _ in 0..2 {
         transform::transform(
             full.store.get().unwrap(),
-            &request(&[first.clone()], false),
+            &request(std::slice::from_ref(&first), false),
             &context(&full_project, 0.0, true, 1),
         )
         .unwrap();
@@ -747,7 +744,7 @@ async fn alf_shaped_policy_fixture() -> (tempfile::TempDir, McHandler) {
         1,
         true,
     );
-    let req = request(&[sample.clone()], false);
+    let req = request(std::slice::from_ref(&sample), false);
     let projection = ck_wire::project_messages(&req.messages).unwrap();
     let template = super::admission_policy_parts(&req, &projection);
     assert_eq!(template.len(), 9);

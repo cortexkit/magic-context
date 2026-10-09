@@ -880,6 +880,9 @@ impl McHandler {
         bytes(&answer)
     }
 
+    // Hint selection needs project/session identity, current messages and search
+    // thresholds, plus IDs of memories already shown to avoid duplicate hints.
+    #[allow(clippy::too_many_arguments)]
     fn host_user_hint(
         &self,
         store: &McStore,
@@ -1711,7 +1714,6 @@ mod host_tests {
                 reclaimable_tokens: u,
                 tool_outputs: 3,
                 real_users: users,
-                ..Default::default()
             };
             let metrics = ProviderPolicyTotals {
                 tool_outputs: 1,

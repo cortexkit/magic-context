@@ -231,7 +231,7 @@ async fn review_disabled_auto_search_produces_no_hint_like_full_engine() {
     response(dispatch(&h, 7, "transform.declare", json!({"params":plan})).await);
     let message = text("u", "user", "rust ownership borrowing");
     sync_pass(&h, &[(1, message.clone())]).await;
-    let request = engine_request(&[message.clone()], false);
+    let request = engine_request(std::slice::from_ref(&message), false);
     let ctx = engine_context(&project, "/nonexistent-docs");
     let store = h.store.get().unwrap();
     transform::transform(store, &request, &ctx).unwrap();
@@ -401,7 +401,7 @@ async fn review_hint_excludes_fragments_already_rendered_in_the_memory_head() {
         "auto_search_min_prompt_chars":0,"auto_search_score_threshold":0.0});
     response(dispatch(&h, 7, "transform.declare", json!({"params":plan})).await);
     let baseline = text("base", "user", "baseline");
-    let baseline_req = engine_request(&[baseline.clone()], false);
+    let baseline_req = engine_request(std::slice::from_ref(&baseline), false);
     let mut ctx = engine_context(&project, "/nonexistent-docs");
     ctx.memory_budget_tokens = 8000.0;
     let mut host_ctx = engine_context(&host_project, "/nonexistent-docs");
