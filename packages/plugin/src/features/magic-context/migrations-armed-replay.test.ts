@@ -94,6 +94,12 @@ function applyExactlyOneMigration(db: DatabaseType, migration: (typeof MIGRATION
 // a distinctive column value, and each value must be present at walk end.
 const CLAIMED_ARM_SIGNATURES = [
     {
+        arm: "populateForVersion v99",
+        table: "memory_pending_facts",
+        column: "content",
+        like: "armed-v99 candidate",
+    },
+    {
         arm: "populateV95GitFtsAtV94",
         table: "git_commits",
         column: "sha",
@@ -806,6 +812,21 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
                     )
                     .get(),
             ).toEqual({ new_importance: 50 });
+            populateModuleOwnedRows(db, version, state);
+            return;
+        case 99:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            db.exec(`INSERT INTO memory_publications(publication_id,project_path,source_session_id,commit_order,committed_at)
+                VALUES('armed-v99','armed-project','armed-v99',1,0);
+                INSERT INTO memory_pending_facts(project_path,publication_id,fact_index,category,content,reason)
+                VALUES('armed-project','armed-v99',0,'NAMING','armed-v99 candidate','authority_elsewhere');`);
+            expect(
+                db
+                    .prepare(
+                        "SELECT state,fact_attempts FROM memory_pending_facts WHERE publication_id='armed-v99'",
+                    )
+                    .get(),
+            ).toEqual({ state: "retryable", fact_attempts: 0 });
             populateModuleOwnedRows(db, version, state);
             return;
         default:

@@ -1,14 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { sessionLog } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
-import { CATEGORY_DEFAULT_TTL, PROMOTABLE_CATEGORIES } from "./constants";
+import { PROMOTABLE_CATEGORIES } from "./constants";
 import { embedTextForProject } from "./embedding";
-import { computeNormalizedHash } from "./normalize-hash";
-import {
-    getMemoryByHash,
-    getMemoryById,
-    insertMemory,
-    updateMemorySeenCount,
-} from "./storage-memory";
+import { type ApplierReceipt, applyMemoryAdmission } from "./lifecycle-applier";
+import { getMemoryById } from "./storage-memory";
 import { saveEmbeddingIfHashMatches } from "./storage-memory-embeddings";
 import type { MemoryCategory, MemoryInput } from "./types";
 
@@ -27,15 +23,11 @@ export interface PromoteSessionFactsDurableResult {
     newMemoryRefs: PromotedMemoryRef[];
     /** Valid promotable facts that inserted a row or updated an existing row. */
     factsPromoted: number;
+    receipts: ApplierReceipt[];
 }
 
 function isPromotableCategory(category: string): category is MemoryCategory {
     return PROMOTABLE_CATEGORIES.some((promotableCategory) => promotableCategory === category);
-}
-
-function resolveExpiresAt(category: MemoryCategory): number | null {
-    const ttl = CATEGORY_DEFAULT_TTL[category];
-    return ttl === undefined ? null : Date.now() + ttl;
 }
 
 /**
@@ -53,6 +45,7 @@ export function promoteSessionFactsDurable(
     facts: SessionFact[],
 ): PromoteSessionFactsDurableResult {
     const newMemoryRefs: PromotedMemoryRef[] = [];
+    const receipts: ApplierReceipt[] = [];
     let factsPromoted = 0;
     for (const fact of facts) {
         if (
@@ -67,30 +60,27 @@ export function promoteSessionFactsDurable(
             continue;
         }
 
-        const normalizedHash = computeNormalizedHash(fact.content);
-        const existingMemory = getMemoryByHash(db, projectPath, fact.category, normalizedHash);
-
-        if (existingMemory) {
-            updateMemorySeenCount(db, existingMemory.id);
-            factsPromoted += 1;
-            continue;
-        }
-
         const memoryInput: MemoryInput = {
             projectPath,
             category: fact.category,
             content: fact.content,
             sourceSessionId: sessionId,
             sourceType: "historian",
-            expiresAt: resolveExpiresAt(fact.category),
         };
-
-        const memory = insertMemory(db, memoryInput);
-        newMemoryRefs.push({ memoryId: memory.id, content: memory.content });
-        factsPromoted += 1;
+        const receipt = applyMemoryAdmission(db, {
+            key: randomUUID(),
+            operation: "new",
+            input: memoryInput,
+        });
+        receipts.push(receipt);
+        if (receipt.state === "applied") {
+            if (receipt.inserted)
+                newMemoryRefs.push({ memoryId: receipt.memoryId!, content: fact.content });
+            factsPromoted += 1;
+        }
     }
 
-    return { newMemoryRefs, factsPromoted };
+    return { newMemoryRefs, factsPromoted, receipts };
 }
 
 /**
