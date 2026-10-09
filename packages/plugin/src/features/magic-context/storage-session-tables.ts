@@ -1,5 +1,6 @@
 import type { Database } from "../../shared/sqlite";
 import { deleteChunkEmbedBackoffForSession } from "./compartment-chunk-embedding";
+import { releaseMemoryReservations } from "./memory/lifecycle-applier";
 import { deleteUnmappedMessageFtsRows } from "./message-fts-rowid-map";
 import { deleteSessionActivity } from "./session-activity";
 
@@ -81,6 +82,10 @@ export const SESSION_SCOPED_TABLES: readonly SessionScopedTableDefinition[] = [
     { table: "host_runner_ids", harnessScoped: true },
     { table: "host_runner_views", harnessScoped: true },
     { table: "host_runner_state", harnessScoped: true },
+    { table: "memory_check_attempts", harnessScoped: true },
+    { table: "memory_stage_attempts", harnessScoped: true },
+    { table: "memory_applied_rows", harnessScoped: true },
+    { table: "memory_applied_snapshots", harnessScoped: true },
 ];
 
 export interface DeleteSessionScopedRowsOptions {
@@ -123,6 +128,8 @@ export function deleteSessionScopedRows(
     }
     if (deletableSessionIds.length === 0) return 0;
     const placeholders = deletableSessionIds.map(() => "?").join(", ");
+
+    releaseMemoryReservations(db, deletableSessionIds, harness);
 
     for (const sessionId of deletableSessionIds) deleteChunkEmbedBackoffForSession(db, sessionId);
     for (const definition of SESSION_SCOPED_TABLES) {

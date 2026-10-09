@@ -65,6 +65,7 @@ import {
 } from "./migration-v94-write-split";
 import { installV95PerfSchema } from "./migration-v95-perf-indexes";
 import { installCompartmentRescoreSchema } from "./migration-v98-compartment-rescore";
+import { installMemoryLifecycleSchema } from "./migration-v99-memory-lifecycle";
 import { runMigrationsOffThread } from "./migration-worker-client";
 import {
     FORK_MIGRATION_VERSION_FLOOR,
@@ -163,7 +164,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastUnconfirmedMigrationHolders = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 98;
+export const LATEST_SUPPORTED_VERSION = 99;
 
 /**
  * Every runtime backend receives the same finite wait before the first schema
@@ -2555,6 +2556,7 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // Fresh stores first record the timestamp before which compartments can be
     // rescored; new historian compartments inserted by callers are not eligible.
     if (version === 0 || version >= 98) installCompartmentRescoreSchema(db);
+    if (version === 0 || version >= 99) installMemoryLifecycleSchema(db);
 }
 
 const CHANNEL2_CLAIM_TTL_MS = 10 * 60_000;

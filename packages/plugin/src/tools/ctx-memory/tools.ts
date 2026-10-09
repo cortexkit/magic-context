@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import { DREAMER_AGENT } from "../../agents/dreamer";
 import {
@@ -10,19 +11,13 @@ import {
     recordCurateSafetyRefusal,
 } from "../../features/magic-context/dreamer/curate-memory-safety";
 import {
-    archiveMemory,
     CATEGORY_PRIORITY,
-    clearMemoryVerifications,
     getMemoriesByIds,
     getMemoryByHash,
     getMemoryById,
-    insertMemoryIdempotent,
     type Memory,
     type MemoryCategory,
-    mergeMemoryStats,
     saveEmbeddingIfHashMatches,
-    supersededMemory,
-    updateMemorySeenCount,
     V2_MEMORY_CATEGORIES,
 } from "../../features/magic-context/memory";
 import {
@@ -30,19 +25,19 @@ import {
     enqueueShadowEmbeddingItems,
     getProjectEmbeddingSnapshot,
 } from "../../features/magic-context/memory/embedding";
-import { invalidateMemory } from "../../features/magic-context/memory/embedding-cache";
+import {
+    type ApplierReceipt,
+    applyAgentMemoryMutation,
+    applyMemoryAdmission,
+    getMemoryRevision,
+    MemoryContentDuplicateError,
+    proposeMemoryMutation,
+} from "../../features/magic-context/memory/lifecycle-applier";
 import { createMemoryVisibilityPolicy } from "../../features/magic-context/memory/memory-visibility";
 import { computeNormalizedHash } from "../../features/magic-context/memory/normalize-hash";
 import { describeUnresolvedProjectIdentity } from "../../features/magic-context/memory/project-identity";
-import {
-    getMemoriesForList,
-    hasMemoryClassifiedAtColumn,
-    hasMemoryShareableColumn,
-} from "../../features/magic-context/memory/storage-memory";
-import {
-    normalizeStoredProjectPath,
-    queueMemoryMutation,
-} from "../../features/magic-context/storage";
+import { getMemoriesForList } from "../../features/magic-context/memory/storage-memory";
+import { normalizeStoredProjectPath } from "../../features/magic-context/storage";
 import {
     projectNeedsSingleStoreMigration,
     renderSingleStoreMigrationRequiredRefusal,
@@ -63,7 +58,6 @@ import {
     type CtxMemoryArgs,
     type CtxMemoryToolDeps,
 } from "./types";
-import { runImmediateTransaction } from "./verification-recording";
 
 export { CTX_MEMORY_LIGHT_DESCRIPTION } from "../light-descriptions";
 
@@ -248,10 +242,6 @@ function getDisabledMessage(): string {
     return "Cross-session memory is disabled for this project.";
 }
 
-function getSourceType(deps: CtxMemoryToolDeps) {
-    return deps.sourceType ?? "agent";
-}
-
 function requestRustMemorySync(deps: CtxMemoryToolDeps, sessionId: string): void {
     try {
         deps.rustToolBackends?.memorySync?.(sessionId);
@@ -342,45 +332,13 @@ function inactiveMemoryError(id: number, action: "updating" | "merging" | "archi
     return `Error: Memory with ID ${id} is archived or superseded; restore it before ${action}.`;
 }
 
-function isUniqueConstraintError(error: unknown): boolean {
-    if (!(error instanceof Error)) {
-        return false;
-    }
-    const code = "code" in error ? (error as { code?: unknown }).code : undefined;
-    if (code === "SQLITE_CONSTRAINT_UNIQUE") {
-        return true;
-    }
-    // bun:sqlite sets SQLITE_CONSTRAINT_UNIQUE; node:sqlite may omit or remap
-    // the code. sqlite3_errmsg text is stable across adapters.
-    return /UNIQUE constraint failed/i.test(error.message);
-}
-
-const DUPLICATE_MEMORY_ERROR = (id: number): string =>
-    `Error: Memory content already exists as ID ${id}; merge or archive duplicates instead.`;
-
-function updateMemoryContentInCurrentTransaction(
-    db: CtxMemoryToolDeps["db"],
-    memory: Memory,
-    content: string,
-    normalizedHash: string,
-    targetCategory: MemoryCategory = memory.category,
-): void {
-    db.prepare(
-        "UPDATE memories SET content = ?, category = ?, normalized_hash = ?, updated_at = ? WHERE id = ?",
-    ).run(content, targetCategory, normalizedHash, Date.now(), memory.id);
-    // The classify `shareable` verdict was scored against the OLD content; new
-    // content invalidates it. Fail closed → private; the dreamer re-scores later.
-    if (hasMemoryShareableColumn(db)) {
-        db.prepare("UPDATE memories SET shareable = 0 WHERE id = ?").run(memory.id);
-    }
-    // Clear the classify marker so the changed fact is re-scored on the next
-    // classify run (importance/scope were judged against the old content).
-    if (hasMemoryClassifiedAtColumn(db)) {
-        db.prepare("UPDATE memories SET classified_at = NULL WHERE id = ?").run(memory.id);
-    }
-    db.prepare("DELETE FROM memory_embeddings WHERE memory_id = ?").run(memory.id);
-    clearMemoryVerifications(db, memory.id);
-    invalidateMemory(memory.projectPath, memory.id);
+function isMemoryUniqueConstraint(error: unknown): boolean {
+    return (
+        error instanceof Error &&
+        error.message.includes(
+            "UNIQUE constraint failed: memories.project_path, memories.category, memories.normalized_hash",
+        )
+    );
 }
 
 const ctxMemoryArgsShape = {
@@ -545,40 +503,28 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     return `Error: Unknown memory category '${rawCategory}'.`;
                 }
 
-                const existingMemory = getMemoryByHash(
-                    deps.db,
-                    projectPath,
-                    category,
-                    computeNormalizedHash(content),
-                );
-                if (existingMemory) {
-                    updateMemorySeenCount(deps.db, existingMemory.id);
-                    requestRustMemorySync(deps, toolContext.sessionID);
-                    return `Memory already exists [ID: ${existingMemory.id}] in ${category} (seen count incremented).`;
-                }
-
-                const insertResult = insertMemoryIdempotent(deps.db, {
-                    projectPath: projectPath,
-                    category,
-                    content,
-                    sourceSessionId: toolContext.sessionID,
-                    sourceType:
-                        toolContext.agent === DREAMER_AGENT ? "dreamer" : getSourceType(deps),
+                const receipt = applyMemoryAdmission(deps.db, {
+                    key: randomUUID(),
+                    operation: "agent_save",
+                    input: {
+                        projectPath,
+                        category,
+                        content,
+                        sourceSessionId: toolContext.sessionID,
+                    },
                 });
-                if (!insertResult.inserted) {
-                    return `Memory already exists [ID: ${insertResult.memory.id}] in ${category} (seen count incremented).`;
-                }
-
+                if (receipt.state !== "applied") return `${receipt.reason}: memory was not saved.`;
+                if (!receipt.inserted)
+                    return `Memory already exists [ID: ${receipt.memoryId}] in ${category} (seen count incremented).`;
                 queueMemoryEmbedding({
                     deps,
                     sessionId: toolContext.sessionID,
                     projectPath,
-                    memoryId: insertResult.memory.id,
+                    memoryId: receipt.memoryId!,
                     content,
                 });
                 requestRustMemorySync(deps, toolContext.sessionID);
-
-                return `Saved memory [ID: ${insertResult.memory.id}] in ${category}.`;
+                return `Saved memory [ID: ${receipt.memoryId}] in ${category}.`;
             }
 
             if (args.action === "list") {
@@ -646,75 +592,62 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     return inactiveMemoryError(updateId, "updating");
                 }
 
-                const normalizedHash = computeNormalizedHash(content);
-                const targetCategory =
-                    args.category &&
-                    (V2_MEMORY_CATEGORIES as readonly string[]).includes(args.category)
-                        ? (args.category as MemoryCategory)
-                        : memory.category;
-                // UNIQUE(project_path, category, normalized_hash) is on the
-                // stored path, which UPDATE leaves unchanged (legacy raw paths
-                // stay raw). Lookup with that same identity so a recategorize
-                // collision returns the duplicate error instead of throwing.
-                // Probe + write share one BEGIN IMMEDIATE so a concurrent insert
-                // cannot slip in between; UNIQUE remains the friendly fallback.
-                const projectIdentity = targetIdentityForStoredPath(rawProjectPath);
-                let duplicateId: number | null = null;
-                try {
-                    runImmediateTransaction(deps.db, () => {
-                        const duplicate = getMemoryByHash(
-                            deps.db,
-                            rawProjectPath,
-                            targetCategory,
-                            normalizedHash,
-                        );
-                        if (duplicate && duplicate.id !== memory.id) {
-                            duplicateId = duplicate.id;
-                            return;
-                        }
-                        updateMemoryContentInCurrentTransaction(
-                            deps.db,
-                            memory,
+                if (toolContext.agent !== DREAMER_AGENT) {
+                    const category =
+                        args.category &&
+                        (V2_MEMORY_CATEGORIES as readonly string[]).includes(args.category)
+                            ? (args.category as MemoryCategory)
+                            : memory.category;
+                    let receipt: ApplierReceipt;
+                    try {
+                        receipt = applyAgentMemoryMutation(deps.db, {
+                            key: randomUUID(),
+                            projectPath,
+                            operation: "update",
+                            sourceSessionId: toolContext.sessionID,
+                            targets: [
+                                { id: memory.id, revision: getMemoryRevision(deps.db, memory.id)! },
+                            ],
                             content,
-                            normalizedHash,
-                            targetCategory,
-                        );
-                        queueMemoryMutation(deps.db, {
-                            projectPath: projectIdentity,
-                            mutationType: "update",
-                            targetMemoryId: memory.id,
-                            category: targetCategory,
-                            newContent: content,
+                            category,
+                            reason: args.reason,
                         });
-                    });
-                } catch (error) {
-                    if (!isUniqueConstraintError(error)) {
+                    } catch (error) {
+                        if (error instanceof MemoryContentDuplicateError)
+                            return `Error: ${error.message}`;
+                        if (isMemoryUniqueConstraint(error)) {
+                            const duplicate = getMemoryByHash(
+                                deps.db,
+                                rawProjectPath,
+                                category,
+                                computeNormalizedHash(content),
+                            );
+                            if (duplicate && duplicate.id !== memory.id)
+                                return `Error: Memory content already exists as ID ${duplicate.id}; merge or archive duplicates instead.`;
+                        }
                         throw error;
                     }
-                    const raced = getMemoryByHash(
-                        deps.db,
-                        rawProjectPath,
-                        targetCategory,
-                        normalizedHash,
-                    );
-                    if (raced && raced.id !== memory.id) {
-                        return DUPLICATE_MEMORY_ERROR(raced.id);
-                    }
-                    throw error;
+                    if (receipt.state !== "applied")
+                        return `Error: ${receipt.reason}; memory [ID: ${memory.id}] is unchanged.`;
+                    queueMemoryEmbedding({
+                        deps,
+                        sessionId: toolContext.sessionID,
+                        projectPath: targetIdentityForStoredPath(rawProjectPath),
+                        memoryId: memory.id,
+                        content,
+                    });
+                    requestRustMemorySync(deps, toolContext.sessionID);
+                    return `Updated memory [ID: ${memory.id}] in ${category}.`;
                 }
-                if (duplicateId !== null) {
-                    return DUPLICATE_MEMORY_ERROR(duplicateId);
-                }
-                queueMemoryEmbedding({
-                    deps,
-                    sessionId: toolContext.sessionID,
-                    projectPath: projectIdentity,
-                    memoryId: memory.id,
-                    content,
+                const receipt = proposeMemoryMutation(deps.db, {
+                    projectPath: targetIdentityForStoredPath(rawProjectPath),
+                    sourceSessionId: toolContext.sessionID,
+                    writer: "curate",
+                    operation: "update",
+                    targetIds: [memory.id],
+                    proposal: { content, category: args.category, reason: args.reason },
                 });
-                requestRustMemorySync(deps, toolContext.sessionID);
-
-                return `Updated memory [ID: ${memory.id}] in ${targetCategory}.`;
+                return `${receipt.reason}: update retained as a pending proposal; memory [ID: ${memory.id}] is unchanged.`;
             }
 
             if (args.action === "merge") {
@@ -737,15 +670,9 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 if (sourceMemories.length !== ids.length) {
                     return "Error: One or more source memories were not found.";
                 }
-                // Cross-identity consolidation is a DREAMER-ONLY capability: the
-                // loop below supersedes each source under ITS OWN project identity
-                // and queues a per-project supersede-delta row, so every affected
-                // project's m[1] reconciles. But `merge` is now in the primary
-                // action set too, and a primary agent must not be able to reach
-                // into ANOTHER project's memories. So mirror update/archive: a
-                // non-dreamer caller may only merge memories that all belong to
-                // its own resolved project. The dreamer keeps the cross-identity
-                // path (see the "merging across identities" test).
+                // Primary agents may apply changes only to their own project's memories.
+                // The dreamer may propose cross-project consolidation, but workspace sharing
+                // still controls which source rows it is allowed to read.
                 if (toolContext.agent !== DREAMER_AGENT) {
                     const foreign = sourceMemories.find((memory) => !memoryOwnedByTool(memory));
                     if (foreign) {
@@ -788,136 +715,48 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     return "Error: A valid category is required when action is 'merge'.";
                 }
 
-                const normalizedHash = computeNormalizedHash(content);
-
-                const mergedFrom = JSON.stringify(
-                    Array.from(
-                        new Set(
-                            sourceMemories.flatMap((memory) => {
-                                let parsed: unknown[];
-                                try {
-                                    parsed = memory.mergedFrom ? JSON.parse(memory.mergedFrom) : [];
-                                } catch {
-                                    parsed = [];
-                                }
-                                return [
-                                    memory.id,
-                                    ...(Array.isArray(parsed)
-                                        ? parsed.filter(
-                                              (value): value is number => typeof value === "number",
-                                          )
-                                        : []),
-                                ];
-                            }),
-                        ),
-                    ).sort((left, right) => left - right),
-                );
-                const mergedSeenCount = sourceMemories.reduce(
-                    (sum, memory) => sum + memory.seenCount,
-                    0,
-                );
-                const mergedRetrievalCount = sourceMemories.reduce(
-                    (sum, memory) => sum + memory.retrievalCount,
-                    0,
-                );
-                const mergedStatus = sourceMemories.some((memory) => memory.status === "permanent")
-                    ? "permanent"
-                    : "active";
-
-                let mergeConflict: string | null = null;
-                const canonicalMemory = runImmediateTransaction(deps.db, () => {
-                    const lockedDuplicate = getMemoryByHash(
-                        deps.db,
-                        projectPath,
-                        category,
-                        normalizedHash,
-                    );
-                    const canonicalExisting =
-                        lockedDuplicate && ids.includes(lockedDuplicate.id)
-                            ? lockedDuplicate
-                            : null;
-                    if (lockedDuplicate && !canonicalExisting) {
-                        mergeConflict = `Error: Memory content already exists as ID ${lockedDuplicate.id}; update or archive existing duplicates instead.`;
-                        return null;
-                    }
-
-                    const nextCanonical =
-                        canonicalExisting?.id != null
-                            ? canonicalExisting
-                            : insertMemoryIdempotent(deps.db, {
-                                  projectPath: projectPath,
-                                  category,
-                                  content,
-                                  sourceSessionId: toolContext.sessionID,
-                                  sourceType:
-                                      toolContext.agent === DREAMER_AGENT
-                                          ? "dreamer"
-                                          : getSourceType(deps),
-                              }).memory;
-                    const canonicalContentChanged =
-                        nextCanonical.content !== content ||
-                        nextCanonical.normalizedHash !== normalizedHash;
-
-                    if (canonicalContentChanged) {
-                        updateMemoryContentInCurrentTransaction(
-                            deps.db,
-                            nextCanonical,
+                if (toolContext.agent !== DREAMER_AGENT) {
+                    let receipt: ApplierReceipt;
+                    try {
+                        receipt = applyAgentMemoryMutation(deps.db, {
+                            key: randomUUID(),
+                            projectPath,
+                            operation: "merge",
+                            sourceSessionId: toolContext.sessionID,
+                            targets: sourceMemories.map((memory) => ({
+                                id: memory.id,
+                                revision: getMemoryRevision(deps.db, memory.id)!,
+                            })),
                             content,
-                            normalizedHash,
-                        );
-                    }
-
-                    mergeMemoryStats(
-                        deps.db,
-                        nextCanonical.id,
-                        mergedSeenCount,
-                        mergedRetrievalCount,
-                        mergedFrom,
-                        mergedStatus,
-                    );
-
-                    for (const memory of sourceMemories) {
-                        if (memory.id === nextCanonical.id) {
-                            continue;
-                        }
-                        supersededMemory(deps.db, memory.id, nextCanonical.id);
-                        queueMemoryMutation(deps.db, {
-                            projectPath: projectIdentityForStoredPath(memory.projectPath),
-                            mutationType: "superseded",
-                            targetMemoryId: memory.id,
-                            supersededById: nextCanonical.id,
-                        });
-                    }
-
-                    if (canonicalExisting && canonicalContentChanged) {
-                        queueMemoryMutation(deps.db, {
-                            projectPath: projectIdentityForStoredPath(nextCanonical.projectPath),
-                            mutationType: "update",
-                            targetMemoryId: nextCanonical.id,
                             category,
-                            newContent: content,
+                            reason: args.reason,
                         });
+                    } catch (error) {
+                        if (error instanceof MemoryContentDuplicateError)
+                            return `Error: Memory content already exists as ID ${error.memoryId}; update or archive existing duplicates instead.`;
+                        throw error;
                     }
-
-                    return nextCanonical;
-                });
-                if (mergeConflict || !canonicalMemory) {
-                    return mergeConflict ?? "Error: Failed to merge memories.";
+                    if (receipt.state !== "applied")
+                        return `Error: ${receipt.reason}; memories [${ids.join(", ")}] are unchanged.`;
+                    queueMemoryEmbedding({
+                        deps,
+                        sessionId: toolContext.sessionID,
+                        projectPath,
+                        memoryId: receipt.memoryId!,
+                        content,
+                    });
+                    requestRustMemorySync(deps, toolContext.sessionID);
+                    return `Merged memories [${ids.join(", ")}] into canonical memory [ID: ${receipt.memoryId}] in ${category}; superseded [${receipt.supersededIds?.join(", ")}].`;
                 }
-
-                queueMemoryEmbedding({
-                    deps,
-                    sessionId: toolContext.sessionID,
+                const receipt = proposeMemoryMutation(deps.db, {
                     projectPath,
-                    memoryId: canonicalMemory.id,
-                    content,
+                    sourceSessionId: toolContext.sessionID,
+                    writer: "curate",
+                    operation: "merge",
+                    targetIds: ids,
+                    proposal: { content, category, reason: args.reason },
                 });
-                requestRustMemorySync(deps, toolContext.sessionID);
-
-                const supersededIds = sourceMemories
-                    .map((memory) => memory.id)
-                    .filter((id) => id !== canonicalMemory.id);
-                return `Merged memories [${ids.join(", ")}] into canonical memory [ID: ${canonicalMemory.id}] in ${category}; superseded [${supersededIds.join(", ")}].`;
+                return `${receipt.reason}: merge retained as a pending proposal; memories [${ids.join(", ")}] are unchanged.`;
             }
 
             if (args.action === "archive") {
@@ -929,13 +768,10 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 ) {
                     return "Error: 'ids' must contain at least one integer memory ID when action is 'archive'.";
                 }
-                // De-dupe (first-seen order) so `ids:[42,42]` archives once and
-                // queues one mutation-log row instead of two.
+                // Preserve first-seen order and record each requested target only once.
                 const archiveIds = [...new Set(rawArchiveIds)];
 
-                // Validate the whole batch BEFORE mutating anything so a typo'd
-                // id can't half-archive a batch (all-or-nothing, matching the
-                // single-transaction write below).
+                // Validate the entire batch first so a bad id cannot leave a partial archive.
                 const targets: Array<{ memoryId: number; projectIdentity: string }> = [];
                 for (const memoryId of archiveIds) {
                     const rawProjectPath = projectPathForMemoryId(deps.db, memoryId);
@@ -960,36 +796,35 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     });
                 }
 
-                runImmediateTransaction(deps.db, () => {
-                    for (const target of targets) {
-                        archiveMemory(deps.db, target.memoryId, args.reason);
-                        if (toolContext.agent === DREAMER_AGENT && curatePreflight.successor) {
-                            supersededMemory(
-                                deps.db,
-                                target.memoryId,
-                                curatePreflight.successor.id,
-                            );
-                            queueMemoryMutation(deps.db, {
-                                projectPath: target.projectIdentity,
-                                mutationType: "superseded",
-                                targetMemoryId: target.memoryId,
-                                supersededById: curatePreflight.successor.id,
-                            });
-                        } else {
-                            queueMemoryMutation(deps.db, {
-                                projectPath: target.projectIdentity,
-                                mutationType: "archive",
-                                targetMemoryId: target.memoryId,
-                            });
-                        }
-                    }
+                if (toolContext.agent !== DREAMER_AGENT) {
+                    const receipt = applyAgentMemoryMutation(deps.db, {
+                        key: randomUUID(),
+                        projectPath,
+                        operation: "archive",
+                        sourceSessionId: toolContext.sessionID,
+                        targets: targets.map((target) => ({
+                            id: target.memoryId,
+                            revision: getMemoryRevision(deps.db, target.memoryId)!,
+                        })),
+                        reason: args.reason,
+                    });
+                    if (receipt.state !== "applied")
+                        return `Error: ${receipt.reason}; memories [${archiveIds.join(", ")}] are unchanged.`;
+                    requestRustMemorySync(deps, toolContext.sessionID);
+                    const plural = archiveIds.length > 1 ? "memories" : "memory";
+                    return args.reason?.trim()
+                        ? `Archived ${plural} [ID: ${archiveIds.join(", ")}] (${args.reason.trim()}).`
+                        : `Archived ${plural} [ID: ${archiveIds.join(", ")}].`;
+                }
+                const receipt = proposeMemoryMutation(deps.db, {
+                    projectPath,
+                    sourceSessionId: toolContext.sessionID,
+                    writer: "curate",
+                    operation: "archive",
+                    targetIds: archiveIds,
+                    proposal: { reason: args.reason, supersededBy: args.superseded_by },
                 });
-                requestRustMemorySync(deps, toolContext.sessionID);
-                const idList = targets.map((t) => t.memoryId).join(", ");
-                const plural = targets.length > 1 ? "memories" : "memory";
-                return args.reason?.trim()
-                    ? `Archived ${plural} [ID: ${idList}] (${args.reason.trim()}).`
-                    : `Archived ${plural} [ID: ${idList}].`;
+                return `${receipt.reason}: archive retained as a pending proposal; memories [${archiveIds.join(", ")}] are unchanged.`;
             }
 
             return "Error: Unknown action.";

@@ -6,6 +6,7 @@ import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { splitLkgSlotPrefixes, splitReplayDecisions } from "./migration-v94-write-split";
 import { installV95PerfSchema } from "./migration-v95-perf-indexes";
 import { installCompartmentRescoreSchema } from "./migration-v98-compartment-rescore";
+import { installMemoryLifecycleSchema } from "./migration-v99-memory-lifecycle";
 import { repairOpenCode2HarnessLabels } from "./opencode2-relabel";
 import { installCompartmentHistoryVersions } from "./storage-compartment-history-version";
 import { installHostRunnerSchema } from "./storage-host-runner";
@@ -97,6 +98,10 @@ export const V85_OPENCODE2_RELABEL_TABLES = [
     "host_runner_ids",
     "host_runner_views",
     "host_runner_state",
+    "memory_applied_rows",
+    "memory_applied_snapshots",
+    "memory_stage_attempts",
+    "memory_check_attempts",
 ] as const;
 
 /**
@@ -3243,6 +3248,13 @@ export const MIGRATIONS: Migration[] = [
         description: "score revision sidecar, selection history and project rescore jobs",
         up(db: Database): void {
             installCompartmentRescoreSchema(db);
+        },
+    },
+    {
+        version: 99,
+        description: "memory lifecycle evidence, attempts, receipts and applied snapshots",
+        up(db: Database): void {
+            installMemoryLifecycleSchema(db);
         },
     },
 ];

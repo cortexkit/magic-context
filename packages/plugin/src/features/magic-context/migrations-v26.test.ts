@@ -91,6 +91,7 @@ describe("migration v26 — memory mutation log and m[1] cache", () => {
                 "category",
                 "new_content",
                 "queued_at",
+                "adoption_class",
             ]);
             const metaColumns = columnNames(db, "session_meta");
             expect(metaColumns).toContain("cached_m0_max_memory_mutation_id");

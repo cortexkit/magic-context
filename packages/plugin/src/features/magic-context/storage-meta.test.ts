@@ -97,7 +97,7 @@ describe("storage-meta", () => {
             expect(db.transaction).toHaveBeenCalledTimes(1);
             // The runner and score-history tables are session-owned too; their
             // deletion must stay in the same transaction as other session state.
-            expect(db.prepare).toHaveBeenCalledTimes(46);
+            expect(db.prepare).toHaveBeenCalledTimes(51);
             const sqls = db.prepare.mock.calls.map(([sql]) => sql);
             for (const table of [
                 "host_runner_entries",
@@ -106,6 +106,10 @@ describe("storage-meta", () => {
                 "host_runner_state",
                 "compartment_score_selections",
                 "compartment_score_revisions",
+                "memory_stage_attempts",
+                "memory_check_attempts",
+                "memory_applied_rows",
+                "memory_applied_snapshots",
             ]) {
                 expect(sqls.some((sql) => sql.startsWith(`DELETE FROM ${table} `))).toBe(true);
             }
