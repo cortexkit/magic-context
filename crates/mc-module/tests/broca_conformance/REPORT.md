@@ -113,3 +113,108 @@ caller's answer fence failed only
 while `compaction::failed_step_keeps_last_view_and_is_not_setup_compaction_unavailable`
 passed. Each mutation had a non-empty diff while applied and an empty diff after
 `git checkout -- <path> && touch <path>`. No mutation remains in the tree.
+
+## Follow-up resolution
+
+The final executable conformance suite passes **13/13**: the original eleven
+scenarios plus runner Setup admission and protected-drop displacement cases.
+No committed joint fixture bytes or original noop/history/drop expectations
+were relaxed. The crossing input now spans `[0,12)` instead of `[0,7)` because
+it contains two additional tool-call/result pairs and a final user turn.
+
+### Root causes and changes
+
+1. **Unobserved response time opened the history gate.**
+   `crates/mc-module/src/providers/compaction.rs:673-677` used a producer context
+   with no prior-response timestamp and a finite configured TTL. The scheduler
+   substitutes zero for that missing timestamp, measuring idle time from the
+   Unix epoch and selecting Execute even at 1% fill. New history then legitimately
+   selected Soft inside the engine, but the adapter had supplied a false execute
+   opportunity. Runner execution now uses internal `cache_ttl = "never"`, like
+   host execution: the runner reports actual cache expiry with `prefix_rebuilding`.
+   The configured TTL and transcript-reading wait bound remain unchanged.
+
+2. **The original queued target was protected, not eligible.**
+   `crates/mc-module/src/protection_window.rs:72-132` deliberately unions the
+   token-floor suffix with the newest three tool-tag groups. The original
+   two-group fixture put tag 1 inside that window even though tag 2 alone paid
+   the 4,000-token floor. At the parent's explicit direction, the fixture was
+   corrected to four groups rather than changing the protection policy. The
+   crossing pass now releases tag 1 and empties the queue with no production
+   selection/drop change. The companion test keeps the original two-group
+   situation, verifies a held reply and retention through a rebuild, then adds
+   newer groups and verifies release on the next genuine rebuild.
+   This exposed a separate acknowledgement defect in
+   `crates/mc-module/src/providers/step_transform.rs:236-262`: every valid target
+   previously received `Queued`, including protected targets. Replies now use
+   the canonical calibrated protection window and protected-tool set to report
+   `Held` while preserving the same durable queue and execution policy.
+
+3. **One exact-plan permission; frozen host transport copies are not busts.**
+   `crates/mc-module/src/transform.rs:2604-2611` now reports only the engine's
+   `prefix_bust_permitted`, without OR-ing a status signal into that permission.
+   A host pipeline switch may still copy the already-served frozen engine view
+   into the new transport envelope without granting mutation permission. The
+   existing host byte-equivalence tests remain unchanged, and the new adapter
+   test pins false permission and an unconsumed queued target on that defer.
+
+4. **Fence and runner admission.** The stale assertion at
+   `crates/mc-module/src/lib.rs:20743` now expects context ceiling 97. A source
+   scan found no other context/schema ceiling hard-coded to 96. Runner Setup
+   already refuses the host-only plan settings through `host_plan`
+   (`crates/mc-module/src/providers/compaction.rs:21-51`); the new real-route case
+   checks each setting separately, both together, and plain Setup succeeding.
+   No admission change was necessary.
+
+### Final Linux gates
+
+Every Cargo command used `test "$(uname -s)" = Linux || exit 90` through the
+remote Linux runner. Cargo: `1.99.0 (5f94df478 2026-08-27)`; rustc:
+`1.99.0 (b940084d7 2026-09-28)`; Clippy: `0.1.99 (b940084d7e 2026-09-28)`.
+
+- `cargo test -p mc-module --test broca_conformance --features drive-fault`:
+  **13 passed**, none failed.
+- `cargo test -p mc-module --lib --features drive-fault`:
+  **1748 passed**, none failed, 22 ignored (1770 total).
+- `cargo test --locked -p mc-store`:
+  **287 passed**, none failed, 4 ignored (291 total); zero doctests.
+- `cargo clippy --locked -p mc-module -p mc-store --all-targets -- -D warnings`:
+  **passed** for both requested packages and their targets. The first run found
+  three baseline feature-off warnings in the new S4 suite; imports and the
+  `wait_fault` helper are now gated by `drive-fault`, matching their only caller.
+- The first library run after removing the permission OR failed four host
+  transport-bootstrap tests. Preserving frozen transport replay separately from
+  mutation permission fixed all four without changing those tests.
+
+The runner temporarily refused jobs with `runner_draining`. Verified fixes were
+committed, then the parent requested a WIP checkpoint of the remaining work.
+All gates above ran after recovery; no Cargo command ran locally. Fault-enabled
+builds still report pre-existing Rust 1.99 deprecation warnings for atomic
+`fetch_update`; the required feature-off Clippy gate is clean.
+
+### Mutation controls
+
+Each control temporarily reintroduced a known wrong behavior to prove its
+named test actually detects the regression. The change was marked
+`NON-VACUITY BREAK` and made from an explicit staged live snapshot, with a
+non-empty `git diff --stat` while applied, and
+`git checkout -- <path> && touch <path>` followed by an empty diff after restore.
+No mutation remains. Names below are exact Rust test names; no other test failed.
+
+- Restore the configured time-to-live in runner execution instead of internal
+  `cache_ttl = "never"`: only
+  `compaction::pending_history_below_threshold_preserves_last_view` failed
+  (`compaction_message` instead of `noop`; 1 failed, 11 filtered at execution).
+- Restore the independent permission OR: only
+  `transform::tests::compaction_adapter_tests::pipeline_switch_does_not_override_exact_engine_prefix_permission`
+  failed (`true` versus `false`); the other 13 adapter tests passed.
+- Remove observed tags from the two added displacement groups while preserving
+  transcript length: only
+  `compaction::below_threshold_noops_crossing_once_history_drops_and_stable_prompts`
+  failed (pending tags `[1]` instead of `[]`; 12 filtered).
+- Restore the unconditional `Queued` acknowledgement: only
+  `compaction::protected_drop_is_held_across_rebuild_until_newer_groups_displace_it`
+  failed on the missing `Held` reply (12 filtered).
+- Restore the stale context-ceiling expectation: only
+  `tests::supported_fences_report_plugin_and_store_ceilings` failed
+  (`context.db=97 store.db=66` versus `context.db=96 store.db=66`; 1769 filtered).

@@ -2604,7 +2604,11 @@ pub mod compaction {
         let engine = transform_with_projection(store, &req, ctx)?;
         let permitted = engine.response.prefix_bust_permitted;
         let mut answer = Answer::Noop;
-        if initial || permitted {
+        // The host may already be serving a whole-request transform. When it
+        // switches to compaction messages, return those same frozen prompt bytes
+        // in a View; this transport-only copy does not authorize new prefix edits.
+        let transport_replay = host && status.pipeline_switch;
+        if initial || permitted || transport_replay {
             let replacement = replacement(&engine.response, &req, state.preset)?;
             let candidate = View {
                 compaction_id: state.compaction_id.clone(),
@@ -17014,6 +17018,33 @@ pub(crate) mod tests {
                 &PassPlan::Reject("unsafe shape"),
                 false
             ));
+        }
+
+        #[test]
+        fn pipeline_switch_does_not_override_exact_engine_prefix_permission() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            let mut request = req("host-permission", "cfg", vec![item("u", 0, "plain user")]);
+            request.serializer_profile = "opencode-aisdk".into();
+            let mut st = status(&request.messages);
+            let mut state = State::new("compact".into(), Preset::Head);
+            adapter::setup(&store, &request, &context(), &st, &mut state).unwrap();
+            store
+                .append_pending_agent_drops("host-permission", &["u#0".into()], 1)
+                .unwrap();
+            st.prefix_rebuilding = true;
+            st.pipeline_switch = true;
+            let pass = adapter::step(&store, &request, &context(), &st, &mut state).unwrap();
+            assert!(!pass.engine.response.prefix_bust_permitted);
+            assert_eq!(
+                pass.prefix_bust_permitted,
+                pass.engine.response.prefix_bust_permitted
+            );
+            assert_eq!(pass.answer, Answer::Noop);
+            assert_eq!(
+                store.load_pending_agent_drops("host-permission").unwrap().len(),
+                1
+            );
         }
 
         #[test]

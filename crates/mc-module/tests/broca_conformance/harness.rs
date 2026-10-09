@@ -323,6 +323,7 @@ impl Rig {
         fs::read_to_string(self.dir.path().join("module.stderr")).unwrap()
     }
 
+    #[cfg(feature = "drive-fault")]
     pub async fn wait_fault(&self, point: &str) {
         let marker = format!("MC_PROVIDER_FAULT_REACHED {point}");
         let deadline = tokio::time::Instant::now() + TIMEOUT;

@@ -3,8 +3,11 @@ use compact::{
     answer::StepAnswer,
     fence::{dispose, Disposition, FenceState},
 };
+#[cfg(feature = "drive-fault")]
 use subc_client_rs::{ConsumerOptions, SubcConsumer};
-use subc_protocol::{BindIdentity, RouteTarget};
+use subc_protocol::BindIdentity;
+#[cfg(feature = "drive-fault")]
+use subc_protocol::RouteTarget;
 
 pub async fn tagged_transcript(rig: &Rig, session: &str) -> Vec<Value> {
     let identity = rig.identity(session);
@@ -26,8 +29,9 @@ pub async fn tagged_transcript(rig: &Rig, session: &str) -> Vec<Value> {
     };
     let rendered = transform::answer::apply_ops(&blocks, &ops).unwrap();
     assert!(rendered[0].starts_with("§1§ "));
-    // A newer, large tool result pays the configured protected-token floor,
-    // leaving the older result eligible for ctx_reduce rather than held.
+    // Retain at least 4000 tokens of recent tool output and the last three
+    // tool-tag groups. This newer output supplies enough tokens, but tag 1
+    // cannot be dropped until three newer groups exist.
     let tail = format!("PROTECTED TAIL {}", "tail ".repeat(7000));
     let tagged_tail = rig.method(&identity,"transform.hook",json!({
         "session":session,"harness":"broca","lineage_id":LINEAGE,"hook":"post_tool",
@@ -181,9 +185,9 @@ async fn below_threshold_noops_crossing_once_history_drops_and_stable_prompts() 
     rig.script.calls.lock().unwrap().clear();
     let mut view = ready["initial"].clone();
     let mut transcript = tagged_transcript(&rig, SESSION).await;
-    // Protection includes the newest three tool groups as well as the token
-    // floor. Two extra groups put tag 1 outside both limits without changing
-    // the protection policy; tag 2 alone already supplies more than 4000 tokens.
+    // Recent tool output must retain at least 4000 tokens and three groups.
+    // Add tags 3 and 4 to tag 2 so those three newer groups meet both requirements;
+    // tag 1 can then be dropped while the recent output remains protected.
     append_newer_tool_groups(&rig, &mut transcript).await;
     transcript.insert(1, user(1, "recent history"));
     for (ordinal, message) in transcript.iter_mut().enumerate() {
