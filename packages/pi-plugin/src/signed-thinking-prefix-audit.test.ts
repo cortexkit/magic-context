@@ -15,6 +15,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	appendCompartments,
 	replaceAllCompartmentState,
+	replaceAllCompartments,
 } from "@magic-context/core/features/magic-context/compartment-storage";
 import {
 	getOrCreateSessionMeta,
@@ -127,6 +128,7 @@ type Lane =
 	| "/ctx-flush"
 	| "HARD fold after historian publication"
 	| "m[0]/m[1] re-render after a recomp clears the cached pair"
+	| "prefix cut moved by a compartment rewrite that keeps the cached pair"
 	| "synthetic todo"
 	| "caveman text compression"
 	| "reasoning clearing (keep_reasoning_tokens)"
@@ -197,6 +199,17 @@ const PARSER_SOURCE =
 const SUMMARY_TEXT =
 	"I have finished reading the parser and the lexer. The parser consumes tokens from the lexer, and the error recovery path is incomplete because it never resynchronises after an unexpected token.";
 const COMPARTMENT_TITLE = "Parser inspection";
+/** The first turn as one compartment, ending inclusively at its summary message. */
+const FIRST_TURN_COMPARTMENT = {
+	sequence: 0,
+	startMessage: 1,
+	endMessage: 5,
+	startMessageId: "prompt-1",
+	endMessageId: "step-4",
+	title: COMPARTMENT_TITLE,
+	content:
+		"Read parser.ts, ast.ts and lexer.ts; error recovery never resynchronises.",
+};
 
 interface Fixture {
 	db: ReturnType<typeof createTestDb>;
@@ -476,6 +489,19 @@ async function prepareLane(f: Fixture, lane: Lane): Promise<void> {
 		f.served = await f.pass();
 		expect(f.mock.check(wire(f.served))).toBeNull();
 	}
+	if (
+		lane ===
+		"prefix cut moved by a compartment rewrite that keeps the cached pair"
+	) {
+		// The first turn is folded at the start of this turn, so the cached m[0]/m[1]
+		// pair is served with an inclusive cut through step-4, the summary message.
+		appendCompartments(f.db, f.sessionId, [FIRST_TURN_COMPARTMENT]);
+		signalPiHistoryRefresh(f.sessionId);
+		f.served = await f.pass();
+		expect(f.mock.check(wire(f.served))).toBeNull();
+		expect(JSON.stringify(wire(f.served))).toContain(COMPARTMENT_TITLE);
+		expect(JSON.stringify(wire(f.served))).not.toContain(SUMMARY_TEXT);
+	}
 }
 
 function armAndBust(f: Fixture, lane: Lane, subagent: boolean): void {
@@ -537,6 +563,15 @@ function armAndBust(f: Fixture, lane: Lane, subagent: boolean): void {
 				[],
 			);
 			return;
+		case "prefix cut moved by a compartment rewrite that keeps the cached pair":
+			// A compartment writer that does not clear the cached pair rewrites the served
+			// boundary row so that it ends part-way through step-4. The pair stays
+			// complete, and Pi's trim re-reads the partial-end decision from the live
+			// row. No bust is offered: the next pass is a defer pass.
+			replaceAllCompartments(f.db, f.sessionId, [
+				{ ...FIRST_TURN_COMPARTMENT, endBlockIndex: 0 },
+			]);
+			return;
 		case "synthetic todo":
 			updateSessionMeta(f.db, f.sessionId, {
 				lastTodoState: JSON.stringify([
@@ -593,6 +628,9 @@ function landed(f: Fixture, lane: Lane, after: Wire): boolean {
 		case "HARD fold after historian publication":
 		case "m[0]/m[1] re-render after a recomp clears the cached pair":
 			return text.includes(COMPARTMENT_TITLE);
+		case "prefix cut moved by a compartment rewrite that keeps the cached pair":
+			// The inclusive cut removed step-4; a partial cut serves it again.
+			return text.includes(SUMMARY_TEXT);
 		case "synthetic todo":
 			return text.includes("Repair error recovery");
 		case "caveman text compression":
@@ -781,6 +819,72 @@ for (const subagent of [false, true]) {
 				await nextUserTurn(f, "prompt-release");
 				expect(f.mock.check(wire(f.served))).toBeNull();
 				expect(f.tagStatus("old-read-b")).toBe("dropped");
+			}),
+		);
+		// A replayed m[0]/m[1] pair must be replayed with the cut it was served with.
+		// Today Pi's trim re-reads the partial-end decision from the live compartment
+		// row, so a writer that rewrites that row without clearing the pair moves the cut
+		// on a defer pass. The design replays head and cut as one unit (section 7).
+		const CUT_LANE: Lane =
+			"prefix cut moved by a compartment rewrite that keeps the cached pair";
+		it(
+			`${CUT_LANE}: mid tool loop`,
+			withFixture(false, CUT_LANE, async (f) => {
+				await prepareLane(f, CUT_LANE);
+				const before = wire(await toolLoop(f, 4));
+				armAndBust(f, CUT_LANE, false);
+				const afterMessages = await f.pass();
+				const after = wire(afterMessages);
+				const error = f.mock.check(after);
+				const moved = landed(f, CUT_LANE, after);
+				debugDiff(CUT_LANE, before, after);
+				console.log(
+					`AUDIT-CUT Pi/OMP | mid tool loop: ${error ?? "accepted"}; cutMoved=${moved}`,
+				);
+				if (!STRICT_AUDIT) {
+					expect(moved).toBe(true);
+					expect(error).toBe(PREFIX_ERROR);
+					return;
+				}
+				expect(error).toBeNull();
+				expect(moved).toBe(false);
+				expect(withoutThinking(after)).toBe(withoutThinking(before));
+				expect(wire(await f.pass())).toEqual(after);
+				f.served = afterMessages;
+				await toolLoop(f, 2);
+				// The rewrite is ride-only: it lands with the next prefix render, which this
+				// fixture does not offer, so the next turn must only stay valid.
+				await nextUserTurn(f, "prompt-release");
+				expect(f.mock.check(wire(f.served))).toBeNull();
+			}),
+		);
+		it(
+			`${CUT_LANE}: defer pass at a new user turn`,
+			withFixture(false, CUT_LANE, async (f) => {
+				await prepareLane(f, CUT_LANE);
+				await toolLoop(f, 4);
+				await nextUserTurn(f, "prompt-next");
+				const before = wire(f.served);
+				armAndBust(f, CUT_LANE, false);
+				const afterMessages = await f.pass();
+				const after = wire(afterMessages);
+				const error = f.mock.check(after);
+				const moved = landed(f, CUT_LANE, after);
+				console.log(
+					`AUDIT-CUT Pi/OMP | defer pass at a new user turn: ${error ?? "accepted"}; cutMoved=${moved}`,
+				);
+				// No current-turn thinking yet, but the previous turn's signed blocks are
+				// still sent, and a defer pass strips none of them.
+				if (!STRICT_AUDIT) {
+					expect(moved).toBe(true);
+					expect(error).toBe(PREFIX_ERROR);
+					return;
+				}
+				expect(error).toBeNull();
+				expect(moved).toBe(false);
+				expect(withoutThinking(after)).toBe(withoutThinking(before));
+				f.served = afterMessages;
+				await toolLoop(f, 2);
 			}),
 		);
 	});

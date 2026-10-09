@@ -24,6 +24,7 @@ import { join } from "node:path";
 import {
     appendCompartments,
     replaceAllCompartmentState,
+    replaceAllCompartments,
 } from "../../features/magic-context/compartment-storage";
 import { runMigrations } from "../../features/magic-context/migrations";
 import {
@@ -111,6 +112,7 @@ type Lane =
     | "/ctx-flush"
     | "HARD fold after historian publication"
     | "m[0]/m[1] re-render after a recomp clears the cached pair"
+    | "prefix cut moved by a compartment rewrite that keeps the cached pair"
     | "synthetic todo"
     | "caveman text compression"
     | "reasoning clearing (keep_reasoning_tokens)"
@@ -502,6 +504,16 @@ async function prepareLane(f: Fixture, lane: Lane): Promise<void> {
         expect(f.tagStatus("old-read-b")).toBe("dropped");
         expect(JSON.stringify(wire(f.served))).toContain('"type":"image"');
     }
+    if (lane === "prefix cut moved by a compartment rewrite that keeps the cached pair") {
+        // The first turn is folded at the start of this turn, so the cached m[0]/m[1] pair is
+        // served with an inclusive cut through its last message (step-4, the summary text).
+        appendCompartments(f.db, f.sessionId, [HISTORY_COMPARTMENT]);
+        f.historyRefresh.add(f.sessionId);
+        f.served = await f.pass();
+        expect(f.mock.check(wire(f.served))).toBeNull();
+        expect(JSON.stringify(wire(f.served))).toContain(HISTORY_COMPARTMENT.title);
+        expect(JSON.stringify(wire(f.served))).not.toContain(SUMMARY_TEXT);
+    }
 }
 
 /** Queue or arm whatever the lane needs, then offer the bust it rides. */
@@ -528,6 +540,16 @@ function armAndBust(f: Fixture, lane: Lane, subagent: boolean): void {
             // compartments and clears the cached m[0]/m[1] pair in the same
             // transaction. No bust is offered: the next pass is a defer pass.
             replaceAllCompartmentState(f.db, f.sessionId, [HISTORY_COMPARTMENT], []);
+            return;
+        case "prefix cut moved by a compartment rewrite that keeps the cached pair":
+            // A compartment writer that does not clear the cached pair (here
+            // replaceAllCompartments; the Rust fold upsert behaves the same) rewrites the
+            // served boundary row so that it now ends part-way through step-4. The pair stays
+            // complete, and replay re-reads the partial-end decision from the live row. No
+            // bust is offered: the next pass is a defer pass.
+            replaceAllCompartments(f.db, f.sessionId, [
+                { ...HISTORY_COMPARTMENT, endBlockIndex: 0 },
+            ]);
             return;
         case "synthetic todo":
             updateSessionMeta(f.db, f.sessionId, {
@@ -586,6 +608,9 @@ function landed(f: Fixture, lane: Lane, after: Wire): boolean {
         case "HARD fold after historian publication":
         case "m[0]/m[1] re-render after a recomp clears the cached pair":
             return text.includes(HISTORY_COMPARTMENT.title);
+        case "prefix cut moved by a compartment rewrite that keeps the cached pair":
+            // The inclusive cut removed step-4; the partial cut serves it again.
+            return text.includes(SUMMARY_TEXT);
         case "synthetic todo":
             return text.includes("Repair error recovery");
         case "caveman text compression":
@@ -789,6 +814,72 @@ for (const generation of ["v1", "v2"] as const) {
                     await nextUserTurn(f, "prompt-release");
                     expect(f.mock.check(wire(f.served))).toBeNull();
                     expect(f.tagStatus("old-read-b")).toBe("dropped");
+                }),
+            );
+            // A replayed m[0]/m[1] pair must be replayed with the cut it was served with. Today
+            // the replay re-reads the partial-end decision from the live compartment row, so a
+            // writer that rewrites that row without clearing the pair moves the cut on a defer
+            // pass. The design replays head and cut as one unit (section 7).
+            const CUT_LANE: Lane =
+                "prefix cut moved by a compartment rewrite that keeps the cached pair";
+            it(
+                `${CUT_LANE}: mid tool loop`,
+                withFixture(generation, false, CUT_LANE, async (f) => {
+                    await prepareLane(f, CUT_LANE);
+                    const before = wire(await toolLoop(f, 4));
+                    armAndBust(f, CUT_LANE, false);
+                    const afterMessages = await f.pass();
+                    const after = wire(afterMessages);
+                    const error = f.mock.check(after);
+                    const moved = landed(f, CUT_LANE, after);
+                    debugDiff(CUT_LANE, before, after);
+                    console.log(
+                        `AUDIT-CUT ${host} | mid tool loop: ${error ?? "accepted"}; cutMoved=${moved}`,
+                    );
+                    if (!STRICT_AUDIT) {
+                        expect(moved).toBe(true);
+                        expect(error).toBe(PREFIX_ERROR);
+                        return;
+                    }
+                    expect(error).toBeNull();
+                    expect(moved).toBe(false);
+                    expect(withoutThinking(after)).toBe(withoutThinking(before));
+                    expect(wire(await f.pass())).toEqual(after);
+                    f.served = afterMessages;
+                    await toolLoop(f, 2);
+                    // The rewrite is ride-only: it lands with the next prefix render, which this
+                    // fixture does not offer, so the next turn must only stay valid.
+                    await nextUserTurn(f, "prompt-release");
+                    expect(f.mock.check(wire(f.served))).toBeNull();
+                }),
+            );
+            it(
+                `${CUT_LANE}: defer pass at a new user turn`,
+                withFixture(generation, false, CUT_LANE, async (f) => {
+                    await prepareLane(f, CUT_LANE);
+                    await toolLoop(f, 4);
+                    await nextUserTurn(f, "prompt-next");
+                    const before = wire(f.served);
+                    armAndBust(f, CUT_LANE, false);
+                    const afterMessages = await f.pass();
+                    const after = wire(afterMessages);
+                    const error = f.mock.check(after);
+                    const moved = landed(f, CUT_LANE, after);
+                    console.log(
+                        `AUDIT-CUT ${host} | defer pass at a new user turn: ${error ?? "accepted"}; cutMoved=${moved}`,
+                    );
+                    // No current-turn thinking yet, but the previous turn's signed blocks are
+                    // still sent, and a defer pass strips none of them.
+                    if (!STRICT_AUDIT) {
+                        expect(moved).toBe(true);
+                        expect(error).toBe(PREFIX_ERROR);
+                        return;
+                    }
+                    expect(error).toBeNull();
+                    expect(moved).toBe(false);
+                    expect(withoutThinking(after)).toBe(withoutThinking(before));
+                    f.served = afterMessages;
+                    await toolLoop(f, 2);
                 }),
             );
         });

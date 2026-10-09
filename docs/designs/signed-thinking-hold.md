@@ -2,10 +2,12 @@
 
 ## Status and scope
 
-**Revision 2.** This is a fix design for review before implementation. Revision 1 (commit
-`6668dd20`) was reviewed by an Athena panel; both seats that returned asked for changes while
-keeping the core rule. This revision answers that review; the mapping from each finding to
-its answer is in the last section, "Changes from r1".
+**Revision 3.** This is a fix design for review before implementation. Revision 1 (commit
+`6668dd20`) and revision 2 (commit `c06844f9`) were each reviewed by an Athena panel. The
+second review confirmed four r1 closures (issue 630 parity, the Rust force-band latch
+diagnosis, pure and durable release obligations, Pi's id space) and found the r2 replay
+manifest built on a false premise. This revision answers it; the mapping from each finding to
+its answer is in "Changes from r2", and r1's mapping is kept below it.
 
 It is based on the audit in
 [`signed-thinking-prefix-edits-audit.md`](../reports/signed-thinking-prefix-edits-audit.md),
@@ -14,11 +16,11 @@ the live strict-mode report `docs/reports/live-thinking-arc-removal.md` (branch 
 [`user-append-into-served-carrier.md`](../reports/user-append-into-served-carrier.md) and
 [`skeleton-retirement.md`](skeleton-retirement.md).
 
-No product code changes in this delivery. The three audit suites are extended so that
+No product code changes in this delivery. The audit suites are extended so that
 `MC_AUDIT_STRICT=1` asserts the whole contract this design requires (section 11). Without the
 variable they stay green and pin what the code does today. `ARCHITECTURE.md` and
-`STRUCTURE.md` are untouched: section 10 proposes the replacement wording for the
-architecture invariant this design contradicts, for the operator to apply.
+`STRUCTURE.md` are untouched: section 10 proposes the replacement wording for the two
+architecture invariants this design contradicts, for the operator to apply.
 
 **What is guaranteed, and what is not.** The guarantee is scoped to Magic Context's own
 edits: no edit that Magic Context makes to a request lands before a kept current-turn signed
@@ -31,8 +33,11 @@ question before it changes the request: *does the earliest position this edit to
 before the last thinking block the current turn keeps?* If it does, the edit is **held**. A
 held edit is not applied, not persisted as served or frozen, and does not use up the trigger
 that offered it. Work withheld from a pass that was independently authorized to bust is
-released on the first pass of the next turn. When the boundary cannot be resolved, the check
-fails closed and holds. TypeScript (OpenCode 1, OpenCode 2 and Pi) and the Rust module
+released on the first pass of the next turn; a held trigger authorizes no later pass of the
+same turn. When the boundary cannot be resolved, the check fails closed and holds. The
+prefix (m[0]/m[1] and the cut of raw history) is recorded as one unit after it is served,
+and every pass that does not newly change it replays that record, head and cut together
+(section 7). TypeScript (OpenCode 1, OpenCode 2 and Pi) and the Rust module
 (OpenCode 1 Rust mode and Claude Code) each get one implementation of this check, with the
 same coordinate and the same verdicts on a shared corpus. The tag-target protection from the
 issue 630 fix (`protectNewTagMutations`, `freezeM0M1`) is re-expressed on the same check
@@ -92,12 +97,13 @@ older accounts.
 | 4 | Claude Code: no older-turn strip on a bust | n/a | n/a | every bust at a new user turn → 400 |
 | 5 | Placeholder / system-injected neutralization | exposed P, S | exposed P | exposed P |
 | 6 | m[0]/m[1] re-render after `clearCachedM0M1` | exposed P, even on defer | **exposed P (new)** | **not exposed (new)** |
+| 6b | **Prefix cut moved on replay by a compartment rewrite that keeps the cached pair (new in r3)** | exposed P, and at a new user turn on a defer pass | exposed P, and at a new user turn | not exposed (own frozen render) |
 | 7 | Processed-image strip | exposed P | held | held |
 | 8 | Rust-mode host strip after a frozen release | code-read only | n/a | n/a |
 | 9 | **Temporal-marker first application (new, code-read)** | likely exposed P | gap | gap |
 | — | **Release of held work at the next turn (new)** | releases | releases | **does not release** drop, flush, caveman, image |
 
-The three new results:
+The three results new in r2, then the one new in r3:
 
 - **Pi, finding 6.** The new Pi lane "m[0]/m[1] re-render after a recomp clears the cached
   pair" calls `replaceAllCompartmentState` and offers no bust. The next pass lands the new
@@ -129,12 +135,22 @@ The three new results:
     `explicit_flush` pass: `soft_refresh_pending` makes `independent_rebuild` true
     (`:5285-5295`), so the plan is a provider-prefix mutation (`:5800-5807`) whose only work
     the thinking exemption then declines. Because it is a mutation pass, `soft_refresh_pending`
-    is cleared (`:6002-6004`). The response even reports `prefix_bust_permitted=true` while
-    no byte changed. Nothing is armed at the next turn.
+    is cleared (`:6002-6004`: the clear runs whenever `prefix_replay_must_be_preserved` is
+    false, which is `!is_provider_prefix_mutation_pass`, `:5827`). The response even reports
+    `prefix_bust_permitted=true` while no byte changed. Nothing is armed at the next turn.
 
   TS keeps the request alive through `pendingMaterializationSessions`
   (`transform-postprocess-phase.ts:2232-2238, 2848-2856`), and Pi releases the same lanes,
   but both lose the `/ctx-flush` release across a process restart (section 4).
+- **Finding 6b (r3): the cut is re-derived on every replay.** Not every compartment writer
+  clears the cached pair (section 7 lists them). The new tests rewrite the served boundary
+  row with `replaceAllCompartments` so that it ends part-way through its message, and offer
+  no bust. The pair stays complete, the next defer pass replays it, and the replay re-reads
+  the partial-end decision from the live row: OpenCode now serves the boundary message it
+  had cut, and Pi serves the whole window, because a partial end turns its trim off
+  (`inject-compartments-pi.ts:174-200, 2726-2737`). Both are rejected with `PREFIX_ERROR`
+  mid-loop, and also on a defer pass at the start of a new user turn, where the previous
+  turn's signed blocks are still sent and nothing strips them.
 
 **Finding 9 (code-read, not tested).** The experimental temporal-awareness lane freezes a
 marker decision per user message on a busting pass (`transform-postprocess-phase.ts:2300-2316`).
@@ -411,9 +427,36 @@ in TS today. The fourth is what the Rust release gap and the restart gap are mis
    and history-refresh signals, the Rust soft-refresh arm, the force-episode latch
    (`has_prior_emergency_drop`), the todo state difference and an unrendered compartment
    publication. TS already does this for ops (`:2848-2856`). Rust does not, and section 2
-   names the two latches that spend a trigger today.
+   names the two latches that spend a trigger today. A trigger kept this way is **parked**,
+   not standing (below).
 4. **Released at the turn boundary, only for real obligations.** See "Release obligations"
    below.
+
+### Parked triggers are not a standing permission
+
+Keeping a held trigger alive must not turn it into a bust permission for every later pass of
+the turn. In Rust, a kept `soft_refresh_pending` makes `independent_rebuild` true
+(`transform.rs:5294`) and a kept force episode makes `force_episode_available` true (`:5280`),
+so every later loop pass would compute `pass_already_busting` (`:5302`) and open selection and
+the strip and caveman planners to admitted work after the boundary. One `/ctx-flush` would
+then price a tail edit on every step of a long loop; TS and Pi keep their in-memory signals
+the same way.
+
+The rule: **a trigger whose authorized work was held on a pass is parked until the turn
+boundary.** It is not spent, and it authorizes no later pass of the same turn. The release
+request (below) is the parking record: it names the turn (the stable id of the real user
+message the frame's scan stopped at) and the triggers it carries, and a pass in that same
+turn treats those triggers as not armed when it decides whether it busts. On the first pass
+of the next turn they are armed again and carry their original permission ("Release
+obligations"). Two consequences:
+
+- A force episode is spent by the reclaim that lands on its first pass, as today; if every
+  reclaim on that pass was held, the episode is parked, not spent and not reused. Either way
+  one force episode authorizes at most one pass in the turn.
+- The 95% wall is not a parked trigger. It is live pressure, re-evaluated on every pass from
+  usage as it is today, so each pass at the wall may land admitted tail reductions
+  (section 8). A new trigger that arises later in the turn (a new `/ctx-flush`, a first
+  crossing of the force band) authorizes its own pass as usual.
 
 ### Rust: what a held pass may commit
 
@@ -427,22 +470,31 @@ the planner hands it (`mc-store/src/lib.rs:10663-11105`). The fields of `Transfo
 | `consumed_drop_ids` | deletes `pending_agent_drops` rows (`:11101-11105`) | `consumed_pending_drop_ids` (`transform.rs:7461-7467, 9401-9451`): newly frozen targets, or targets proven obsolete | **never** a held target. Retiring a target proven obsolete (covered, already frozen, structurally unappliable) is allowed, because it does not depend on the hold |
 | `first_applied_command_ids` | sets `mc_reduce_command_ledger.first_applied_at_ms` (`:11091-11099`) | `first_applied_pending_command_ids` (`transform.rs:9375-9398`), only targets frozen this pass | unchanged for held targets (already true: it needs an application) |
 | `overlays.temporal_marks`, `tag_mints`, `user_hint`, `channel1_append` | `mc_tags`, temporal marks, `mc_user_hints`, `mc_channel1_appends` (`:10976-11089`) | `compute_active_overlay_decisions` (`transform.rs:11552-11802`), `maybe_decide_live_user_hint` (`:5874-5905`) | **none** whose position is held. Today they are discarded only when the pass is not a mutation pass (`:5823-5835`); a SOFT pass whose work was all held (the flush case) currently commits them |
+| `overlays.rewrite_temporal_marks` | when true, every computed mark is upserted into `mc_temporal_marks` with its marker text replaced, instead of inserting only marks beyond the frontier (`mc-store/src/lib.rs:10845-10851, 11020-11048`); it also forces the decision-write version bump | the overlay computation; cleared on a defer (`transform.rs:5833`) and kept on any mutation pass | **false** unless every mark it would rewrite is at an admitted coordinate. A pass downgraded to a defer clears it, as a defer does today |
 | `overlays.max_seen_ordinal` | `mc_overlay_frontiers`, by `MAX` | the same overlay computation (`:11762-11785`) | **must not pass** a held mark or hint. A later insertion only lands at an ordinal above the previous frontier, so advancing it over withheld work loses that work for good |
 | `meta.soft_refresh_pending` | meta blob | cleared at `transform.rs:6002-6004` on any mutation pass | **unchanged** while its work is held |
 | `meta.has_prior_emergency_drop`, `last_emergency_input_sample` | meta blob | set at `:7341-7357` when a force-band pass mints a qualifying unit | set only by a unit that changed served bytes for an admitted coordinate; never by a bookkeeping unit |
 | todo state and anchor | meta (`set_todo_state`) | bust-only capture (`:6010-6023`, `injection.rs:199-221`) | **unchanged** when the todo move is held |
-| coverage, m[1] revision, `deferred_execute_state`, drain latch | meta blob | the plan (`:5285-5303, 5581-5610`) | **unchanged** when the fold or refresh is held |
+| coverage, m[1] revision, `deferred_execute_state` | meta blob | the plan (`:5285-5303, 5581-5610`) | **unchanged** when the fold or refresh is held |
+| emergency drain latch (`meta.emergency_drain_active`, `emergency_drain_entered_at_ms`) | meta blob, by `apply_scheduler_meta` (`transform.rs:8663-8675`); read back by `latch_from_meta` (`:8655-8661`) into the scheduler (`:5071`) | `advance_drain_latch` (`scheduler.rs:617`) from usage and time, and the disarm on a trusted final-wire measurement under the provider-proven limit (`transform.rs:5080-5092`) | **committed as computed.** It is pressure state, not a trigger: no applied or held work enters or leaves it, so a held pass cannot spend it. r2 listed it with the fold state as "unchanged"; that would have frozen its hysteresis and its time limit instead |
 | release request (new) | meta blob | section 4, "Release obligations" | written when an obligation is withheld |
 | `memory_revision`, `compartment_max_seq` | nothing (destructured as `_`, `:10668-10688`) | — | no rule needed |
-| `first_divergence`, `scheduler_observation` and counters, `project_root` | `mc_pass_trace`, its history, `mc_transform_session_roots` (`:10917-10973`) | the pass trace | **observation, allowed**: they do not change request bytes |
+| `scheduler_observation` | appended to `mc_pass_trace_history` as `scheduler` and `interesting` entries (`mc-store/src/lib.rs:10729-10742, 10952-10960`) | `pass_scheduler_observation` (`transform.rs:2778-2790`, called at `:7527-7533`): the scheduler arm and `drain_latch_active`, a copy of the latch row above | **observation, committed unchanged.** Its latch field copies the meta latch the same pass computes, and it is read back only by the trace loaders `load_pass_scheduler_history` and its siblings (`lib.rs:9163-9270`), whose callers are tests and incident queries; no eligibility decision reads it. So it needs no split: the rule that matters is on the meta row above |
+| `first_divergence`, the scheduler counters, `project_root` | `mc_pass_trace`, `mc_transform_session_roots` (`:10917-10973`) | the pass trace | **observation, allowed**: they do not change request bytes |
 | identity adoption (`last_provider_id`, `last_model_key`, system hash), ingress meta, block-identity and served-fingerprint maps | meta, row tables (`:10827-10838`) | `apply_ingress_meta`, identity adoption (`transform.rs:5718-5726`) | **observation, allowed**: they describe what was served, which is unchanged |
 
 The structural fix is in the planner, not the store. When admission holds every edit a
 mutation plan would make, the plan is downgraded to a defer before
 `is_provider_prefix_mutation_pass` is computed, so the soft-refresh clear, todo capture,
-overlay commit and `prefix_bust_permitted` all see a pass that changed nothing. When some
-edits are admitted (a mixed pass), the pass stays a mutation pass, and the rows above marked
-"unchanged" are filtered to the admitted coordinates. The force latch at `:7341-7357` counts
+overlay commit and `prefix_bust_permitted` all see a pass that changed nothing. That is not
+early enough on its own: `pass_already_busting` is fixed at `transform.rs:5302`, before
+selection, and already drives calibration adoption and the transition-hygiene units
+(`:5312-5322, 5694-5708`), the floor snapshot as `FloorPass::CacheBust` (`:5383-5387`) and the
+`has_prior_drop` mask (`:5465`). The planner therefore either computes the flag after
+admission, or recomputes it and redoes those decisions as a defer when the downgrade fires;
+either way an all-held pass makes none of those writes. Parked triggers (above) do not set
+the flag at all. When some edits are admitted (a mixed pass), the pass stays a mutation pass,
+and the rows above marked "unchanged" are filtered to the admitted coordinates. The force latch at `:7341-7357` counts
 only units for admitted reclaim, and excludes the trailing-blank bookkeeping units
 regardless of thinking: outside a thinking turn the same unit spends the episode on any
 force-band pass that applies nothing, for example one the historian veto holds.
@@ -487,7 +539,11 @@ release request recorded, carrying the trigger's original reason. Three conseque
   release pass is priced and logged as that reason.
 
 The first pass with no boundary (normally the first pass after a real user message) treats a
-recorded request as a ride.
+recorded request as its trigger, armed again: the request carries the original trigger's one
+bust permission forward, so that pass busts for the original reason and every lane drains
+into it under the ordinary rules. It is not a ride, which by definition waits for some other
+permission. On the `claude-code-anthropic` profile this release is off until the
+completed-turn strip ships (section 13).
 
 **Durability.** r1 proposed to reuse TS `pendingMaterializationSessions` and Pi
 `signalPiPendingMaterialization`. Both are process memory: the TS sets are fields of the
@@ -500,12 +556,55 @@ their triggers are in the database (`pending_ops`, `storage-ops.ts:14-33`, usage
 compartment rows). So the release request is **persisted**: a nullable `held_release` column
 on `session_meta` in TS and Pi (reason plus the obligations it carries), written in the same
 transaction as the pass's other session writes, and read by the transform alongside the
-in-memory sets. In Rust it is a field of the module meta committed with the transform.
+in-memory sets. In Rust it is a field of the module meta committed with the transform. The
+migration, fence and clone and repair rules for it are under "Persisted state" below.
 
 **Telemetry.** Each lane that withholds work logs its lane, its coordinate and the boundary
 message id once per pass, and adds to a per-session `held_edits` counter in the existing pass
 metrics. A session where reclamation is continuously held (the subagent case, section 8) must
 be visible without reading logs.
+
+### Persisted state
+
+This design adds two pieces of persisted state: the release request (above) and the served
+prefix record (section 7). In TS and Pi both are nullable columns on `session_meta` in
+`context.db`: `held_release` and `served_prefix`. They are columns, not tables, so neither
+needs a `SESSION_SCOPED_TABLES` entry (`storage-session-tables.ts:16`); an implementation that
+moves either into its own per-session table must register that table there, with a `harness`
+column (`docs/architecture/storage.md:42, 50`).
+
+- **One host migration, numbered at slice time.** This base is at version 95
+  (`storage-db.ts:164`). The migration takes the next free `context.db` version after the
+  migration branch's v97 and whatever lands after it, and adds both columns in the first
+  rollout step, before any code reads them, so the machine-wide restart happens once. It
+  follows `docs/architecture/storage.md:36-46`: a `migrations-v<N>.test.ts`,
+  `LATEST_SUPPORTED_VERSION` bumped to the same number, the fresh-install schema in
+  `storage-db.ts`, `ensureColumn` calls, both dists rebuilt with `bun run build:dists`, and every
+  host restarted. A host left on the old build fails closed at its fence, as for any migration.
+- **Rust, `store.db`.** The module's release request is a field of the module meta, which
+  decodes with serde defaults. An older module build would load a blob that carries the field
+  and drop it on its next commit, losing the obligation without a trace. The slice that adds
+  the field therefore also adds an `mc-store` migration, so that an older binary refuses the
+  newer store (`STORE_AHEAD_OF_BINARY_REFUSAL_REASON` and `StoreAheadOfBinary`,
+  `mc-store/src/lib.rs:3268-3274, 6034-6042`), and it ships
+  together with the host migration: `context.db` and `store.db` are one consistency unit
+  (`storage.md:53`).
+- **`clearCachedM0M1` clears neither column** (`storage-meta-shared.ts:575-618`).
+- **Clone** (`storage-clone.ts:711-756`). The clone writes the destination's `session_meta`
+  itself, remaps message ids, and already nulls the cached pair (`:735-736`). Both new columns
+  are written NULL. `served_prefix` describes a request the destination never served, and its
+  digest covers the source's ids; a clone continued mid-turn with kept thinking therefore
+  refuses until a real user message (section 7), which is also where it would render its own
+  head. `held_release` names the source session's triggers and turn; the queued drops the
+  clone copies (`pending_ops`, `:651-657`) carry their own trigger.
+- **Rust single-store repair** (`single_store_repair.rs`). `SESSION_META_RESETS` (`:58-86`)
+  mirrors `clearCachedM0M1` and must not gain either column: resetting `served_prefix` would
+  delete the only replayable prefix while a turn is held, and resetting `held_release` would
+  drop an obligation. The repair queues a `compartment_delete` mutation so that the host's next
+  fold is unconditional (`:828-834`). Under the hold that fold is a Prefix edit, so the host
+  holds it while the frame has a boundary and folds on the first pass without one. The repair's
+  code needs no change for that, because admission runs in the host; its comment does ("the
+  host folds on its next pass with no kept current-turn thinking").
 
 ## 5. Where each lane calls it
 
@@ -521,7 +620,7 @@ candidate back to `workingMessages` entry ids first.
 | 2 Synthetic todo move | `applyTodoSynthesis`, bust branch (`:403-447`), asked before the `part === null` clear (`:414-416`) and before any anchor write | `injectSyntheticTodowriteForPi` bust branch (`pi-todo-inject.ts:259-299`), asked before the `part === null` clear (`:261-265`), the re-anchor (`:285-293`) and the clear on a missing anchor (`:294-296`); the anchor's `responseId` / `pi-ts-` id is translated to its entry id first | todo capture/advance on a bust (`injection.rs:199-241,278-305`; pending at `transform.rs:5590-5609`) | earliest of `Message{old anchor, Whole}` and `Append{new anchor}`; a removal alone is `Message{old anchor, Whole}` | serve the persisted pair at the persisted anchor (the defer path); write, clear or move nothing; keep the state difference |
 | 3 Coverage fold | already held by `freezeM0M1` (`:2029-2031`) | held by `protectedSignedPrefix` (`context-handler.ts:5572-5573,5924-5930`) | `coverage_fold_due` / `system_absorb_hard_due` (`transform.rs:5285-5295,5641,17179-17213`) | `Prefix` | no fold, no meta advance; publication stays pending; release request (the fold was due) |
 | 5 Placeholder and system-injected | `stripDroppedPlaceholderMessages`, `stripSystemInjectedMessages` detect (`:3238-3299`) | `stripPiDroppedPlaceholderMessages` detect (`strip-placeholders-pi.ts:178-213`) | `placeholder` unit `transform.rs:14187-14194`; `system_injected*` units `:14113-14148` | `Message{id, Whole}` or `{id, block}` | skip; not added to the persisted delta |
-| 6 m[0]/m[1] re-render | `injectM0M1` with no cached pair (`:3090-3115`), and the outer `freezeM0M1` (`transform.ts:1155-1181`) | Pi cached-prefix path (`context-handler.ts:5924-5930`) | not exposed; keep the `Recomp` test as a guard | `Prefix` | serve the validated replay manifest, else refuse locally (section 7) |
+| 6, 6b m[0]/m[1] re-render, and the cut of raw history | `injectM0M1` (`inject-compartments.ts:3944-4252`): the hold short-circuits before `mustMaterialize` and before every fresh-render path (`renderFreshM0NonPersisted` on contention or under `allowFreshContentionFallback`, `:4024-4126`; the drift backstop refold, `:4131-4189`; the legacy re-anchor, `:696-759`), and replaces the cached-pair replay and its trim (`prepareCachedM0M1Replay` and `trimToPreparedPrefix`, `:3803-3933`); the outer `freezeM0M1` (`transform.ts:1155-1181`) | the Pi cached-prefix path (`context-handler.ts:5924-5930`) and its trim (`inject-compartments-pi.ts:2726-2737`) | not exposed; keep the `Recomp` test as a guard | `Prefix` | replay the served prefix record, head and cut together; a pass that cannot validate it refuses locally, that pass only (section 7) |
 | 7 Processed-image strip | `stripProcessedImages` detect (`:3068-3086`) | `strip-processed-images-pi.ts:111` (held today only because its drop is held) | `processed_image` units `transform.rs:14207-14235` | `Message{id, first image part}` | skip; id not persisted |
 | 8 Rust-mode host strip | `applyRustModeThinkingStrips` (`:983-1070`) | n/a | n/a | thinking removal, not a content edit (below) | never remove current-turn thinking |
 | 9 Temporal markers | `freezeTemporalDecisions` on a bust (`:2300-2316`) | gap: whether Pi renders temporal markers was not checked | overlay temporal marks (`transform.rs:11666-11759`), and the frontier rule in section 4 | `Message{user message id, first text part}` | keep the NULL row; the marker is not inserted; the frontier does not pass it |
@@ -615,8 +714,17 @@ part of this fix.
 - It is applied to the body served on the same pass, not only on later replays.
 - It is not built on the cutoff walker (`reasoning_clear_cutoff_with_tags`), which can
   remove a middle block (`transform.rs:16908-16910`). It removes every completed-turn
-  thinking block the request carries, and on replay it removes every visible completed-turn
-  block, not a closed set of ids, so a block the client surfaces later is removed too.
+  thinking block the request carries.
+- **Its domain is frozen when it is minted.** The unit records the turn it was minted in (the
+  `mid` of the real user message that started that turn) and covers exactly the assistant
+  messages before that message. Replay removes every thinking block inside that domain, not
+  a closed set of ids, so a block the client surfaces later in an already-covered turn is
+  removed too. It never extends to turns completed after the mint: when turn N+1 starts, turn
+  N's blocks were all produced after the mint (an edit before a kept turn-N block is held, so
+  the mint happened before turn N had any) and were signed over the stripped bytes, so they
+  stay valid as they are, and removing them would be a fresh edit with no authorization.
+  Extending the strip to later turns needs a new admitted edit before kept completed-turn
+  thinking, which mints a new unit with its own domain.
 - A failed commit (`CasConflict`, `mc-store/src/lib.rs:10778-10780`) does not send a one-off
   stripped body. A fail-open pass forwards the raw request (`healing.rs:128-129`); it must not
   record the edit as frozen, so the next pass decides again.
@@ -631,109 +739,192 @@ part of this fix.
 4. that the gateway forwards the module's message array unchanged apart from headers and
    the stage-7 binding field.
 
-## 7. A held m[0]/m[1] re-render (finding 6)
+## 7. The served prefix: head and cut replayed as one unit (findings 6 and 6b)
 
-The problem: `clearCachedM0M1` runs inside recomp promotion
-(`compartment-runner-recomp.ts:125-143`), history-boundary repair
-(`history-boundary-repair.ts:139-147,233-252`), the store-generation rebase
-(`store-generation-rebase.ts:965`) and several compartment writers
-(`compartment-storage.ts:421,456,495,701,743`). The next pass has no complete pair, so it
-renders a new one from the current compartments and trims raw history to match. This
-happens even on a defer pass (TS and, per the audit test, Pi).
+The prefix is everything Magic Context puts before raw history plus where raw history
+starts: the m[0] text, the mural block, the m[1] text and the cut. Two paths change it
+under kept current-turn thinking today.
 
-**Decision: replay a complete manifest of what was served, until the turn ends. Never render
-a new prefix under kept current-turn signatures.** When the manifest cannot be proven to
-reproduce the served request, the pass refuses locally rather than render.
+- **A cleared pair is re-rendered (finding 6).** `clearCachedM0M1` runs inside recomp
+  promotion (`compartment-runner-recomp.ts:125-143`), history-boundary repair
+  (`history-boundary-repair.ts:139-147,233-252`), the store-generation rebase
+  (`store-generation-rebase.ts:965`) and the compartment-state writers
+  (`compartment-storage.ts:421,456,495,701,743`). The next pass has no complete pair, so it
+  renders a new one and trims raw history to match, even on a defer pass.
+- **A kept pair is replayed with a re-derived cut (finding 6b, new in r3).** r2 claimed that
+  every compartment writer clears the pair in the same transaction. That is false.
+  `appendCompartments` (`compartment-storage.ts:395-405`) clears nothing, and neither does
+  `replaceAllCompartments` (`:369-388`), which deletes and reinserts every row and only queues
+  a `recomp_boundary_change` mutation. The Rust fold upsert rewrites an occupied sequence in
+  place, `end_block_index` included, and queues a `compartment_delete` mutation
+  (`mc-store/src/context_writes.rs:176-207`, from `apply_fold_tx` at `:288-302`), and
+  `replace_compartments_from_first_sequence` leaves `session_meta` alone on purpose
+  (`mc-module/src/host_store.rs:1134-1140`). Meanwhile every replay re-derives the cut:
+  `trimToPreparedPrefix` asks `isPartialCompartmentEnd`, a live query on `end_block_index`
+  (`compartment-storage.ts:948-960`), in both of its branches (`inject-compartments.ts:3868-3873,
+  3885-3889`), and Pi passes the same live answer as `preserveBoundary`
+  (`inject-compartments-pi.ts:2726-2737`), which turns its trim off altogether (`:174-200`).
+  A writer's mutation is a HARD trigger, which the boundary holds, so the pair is replayed
+  under a cut that may have flipped. When the boundary id is absent the trim status is
+  `refused` and the whole window is served (`classifyAbsentBoundary`, `:3706-3747`). The new
+  audit tests show the flipped cut rejected mid-loop, and on a defer pass at a new user turn,
+  in OpenCode 1, OpenCode 2 and Pi (section 2).
 
-### The replay manifest (`served_m0m1`)
+No column records the cut that was served. `materializeM0` and `softRefreshCachedM1` commit
+the pair and `cached_m0_last_baseline_end_message_id` in their own transactions
+(`inject-compartments.ts:2448-2801`, `:3253-3337`, the soft refresh rewriting the baseline id
+at `:3293-3313`), and `injectM0M1` trims only afterwards (`:3944-3957, 4230-4238`), where the
+cut is applied, refused, found before the window or not needed.
 
-The cached pair is not enough to replay. `prepareCachedM0M1Replay` reads the mural data URL
-from its own column and changes the m[0] text depending on it
-(`inject-compartments.ts:3909-3921`), and both TS and Pi decide whether the trim boundary is
-a partial cut by reading the *current* compartment rows (`isPartialCompartmentEnd` at
-`inject-compartments.ts:3871, 3887`; `inject-compartments-pi.ts:2733`). After a recomp the
-saved text and the boundary id can both survive while the cut moves by one message. So the
-manifest records every decision, as it was served, and nothing in it is re-derived from
-compartments:
+**Decision.** The served prefix, head and cut, is one replay unit. The unit a pass served is
+recorded at the end of that pass, and every pass that does not newly change the prefix
+replays the record: the head bytes as stored, and raw history cut at the recorded first kept
+message. Nothing in a replay is read from compartments, from the cache columns or from the
+baseline id. While the current turn keeps signed thinking no pass changes the prefix, and a
+pass that cannot reproduce the record refuses locally. That refusal covers that pass only.
+
+### The record (`served_prefix`)
 
 | Field | What it pins |
 |---|---|
-| `head` | the emitted head messages exactly as served: m[0] text after the mural decision, the mural image block (data URL and hash) when it was sent, m[1] text. Stored as the serialized head, not as inputs to re-render it |
-| `cut` | `none` (no trim), or `{ boundary_id, mode: inclusive \| partial }`: whether the boundary message itself was dropped or kept. The mode is frozen at serve time, never read from `isPartialCompartmentEnd` later |
-| `first_kept_id` | the id of the first raw message served after the cut, a cross-check that the cut lands where it did |
-| `provenance` | host (`opencode-v1`, `opencode-v2`, `pi`), id space (section 3), the store generation and projection the ids were read under, and the pass that served it |
+| `head` | the head messages exactly as served: the m[0] text after the mural decision, the mural block (data URL and hash) when it was sent, the m[1] text. Stored as serialized messages, not as inputs to re-render them |
+| `first_kept` | the first raw message served after the head: its stable id (section 3's id function for the host) and a digest of that message exactly as the pass returned it to the host. `none` if no raw message was served |
+| `cut_mode` | `none`, `inclusive` or `partial`, with the id the cut was made at. Kept for logs only: a replay cuts at `first_kept` and never reads this field |
+| `turn` | the stable id of the real user message that started the turn in which the record was written (the message the frame's scan stops at) |
+| `provenance` | host (`opencode-v1`, `opencode-v2`, `pi`), id space, store generation and projection, and the pass |
 
-It is written in the same transaction that records a pair as served. It is *not* cleared by
-`clearCachedM0M1` (`storage-meta-shared.ts:575-618` clears the pair, the mural columns and the
-baseline id together). It is replaced only when a newly rendered prefix is actually served,
-which happens only on a pass where `admit(Prefix)` admits.
+**Written after the cut is decided.** At the end of every pass that serves a head and whose
+frame has no boundary (whether it rendered, soft-refreshed, folded or replayed), as the last
+step before the array goes back to the host, and only when the record differs from what the
+pass served, `turn` included. That makes it at most one small write at the start of each
+turn plus one per prefix change. It is not written inside `materializeM0`'s or
+`softRefreshCachedM1`'s transaction, which run before the cut is known, and it is never
+written on a pass with a boundary, where nothing may differ. A pass whose record write fails
+is not served: it fails through the host's existing transform-failure path, as a Rust pass
+fails on a CAS conflict, so no request ever carries a unit the record does not hold.
 
-### When it is served, and when it may not be
+**Replayed on every pass that does not change the prefix.** On a pass with a boundary,
+always. On a pass with no boundary, whenever the pass would otherwise replay the cached pair
+(a defer, or a bust that leaves m[0]/m[1] alone); the cached pair and the record normally hold
+the same head, since both are written for the same serve. The replay prepends `head` and
+removes every raw message before `first_kept`. Id-less rows the host renders between
+persisted messages (OpenCode 2's instruction rows) are kept or removed with their neighbours,
+as `trimToPreparedPrefix` does today (`:3845-3850`). On a pass with a boundary the hold
+short-circuits `injectM0M1` before `mustMaterialize`, so the fresh-render paths, the drift
+backstop and the legacy re-anchor (section 5, row 6) never run. A pass with no boundary that
+renders, refreshes or folds the head is a prefix change: it is admitted, its served unit is
+recorded, and it is served only together with the strip of all older-turn thinking
+(section 5, companion strip).
 
-The admission frame has a boundary, the cached pair is absent, and `admit(Prefix)` holds.
-The pass serves `head` and applies `cut` exactly as recorded, and is marked
-contention-exhausted, as the frozen replay is today
-(`transform-postprocess-phase.ts:3090-3096`), so the refresh stays pending and lands on the
-first pass of the next turn.
+**Validated on every replay, at the end of the pass.** The record validates when its host and
+id space match; on a pass with a boundary, its `turn` is the current turn; the live array
+contains `first_kept.id`; and the digest of that message as this pass returns it equals
+`first_kept.digest`. The digest is taken at the end because on a pass with a boundary every
+lane before the boundary only replays, so the first kept message's returned bytes equal
+those of the pass that wrote the record unless something changed them. Whatever changed
+them, sending them would invalidate the kept blocks.
 
-Before serving, the manifest is **validated** against the live array in its own id space:
-the host and id space match, `boundary_id` and `first_kept_id` are both present, and
-`first_kept_id` is the message right after `boundary_id` (inclusive) or is `boundary_id`
-itself (partial). Neither presence nor absence of an id is taken as proof of anything else:
+### Why this is enough, and why it is not smaller
 
-- **An absent id is not a revert.** The transform documents ids that disappear from one
-  pass's array and come back, at compaction seams (`transform-postprocess-phase.ts:3274-3280`).
-- **A present id is not compatibility.** The OpenCode 1.x/2.x store conversion keeps ids but
-  splits some rows and folds others (`store-generation-rebase.ts:704-722`); an id can survive
-  while the occurrence after it changes. The generation and projection in `provenance` must
-  match the running projection, or the cut must re-validate against it by `first_kept_id`.
-  Bytes are carried across a generation change unchanged, but they are served only after that
-  validation.
+Three facts carry the guarantee.
 
-When validation fails while the boundary exists, the pass does **not** render. In order:
+1. **The record is the unit the kept blocks were signed over.** The first pass of a turn has
+   no boundary (the frame's scan stops at the real user message), so it writes or confirms
+   the record with that turn. A pass with a boundary never writes. So when a kept current-turn
+   block is produced, the record holds the unit of the newest pass with no boundary in the
+   same turn, which is the request that produced the turn's first kept block, and every later
+   request of the turn replays it. This assumes what every host does: the request sent is the
+   array the newest transform pass returned (a retry runs the transform again).
+2. **The replay reproduces that request up to and including the first kept message.** The head
+   is the stored bytes. The cut is identified by the first kept occurrence, by id and by the
+   digest of its served bytes, and everything before it is removed. Raw history after it is
+   outside the record: Magic Context's edits there are governed by admission, and the host's
+   by section 9.
+3. **No writer can move it.** A replay reads nothing that a compartment writer, a cache clear,
+   a soft refresh or a baseline-id update touches, so clearing and non-clearing writers alike
+   only affect the next prefix change, which waits for a pass with no boundary.
 
-1. If the host keeps a compatible full-request snapshot, replay that. The OpenCode Rust-mode
-   last-known-good slot is one (`lkg-persist.ts`), with its own input-id and content-digest
-   fences; replaying it is still subject to section 9.
-2. Otherwise refuse the pass locally with a Magic Context error that names the reason
-   (`served prefix cannot be reproduced while signed thinking is kept`), and keep refusing
-   until the turn boundary, where `admit(Prefix)` admits and a normal render is valid. The
-   refusal is logged and counted with the held edits.
+Why each part is needed:
 
-The binding-recovery path is not a fallback here: the audit established that it cannot
-repair an invalidated current turn (`signed-thinking-prefix-edits-audit.md:171-179`).
+- **Head and cut together.** Freezing only the cut and taking the head from the cache fails
+  on a clear or a soft refresh. Freezing only the head is r2's defect.
+- **A digest, not ids.** In partial mode the first kept message *is* the cut message, so an
+  adjacency check compares an id with itself. The store-generation conversion keeps ids while
+  it splits or folds rows (`store-generation-rebase.ts:704-722`), so an id can survive while
+  its occurrence changes. `capturePrefixTrimSourceOrder` (`inject-compartments.ts:3764-3801`)
+  proves the order of ids, not their content, so it stays the trim's own guard, and a
+  mismatch it reports under a boundary is a local refusal, never "serve the whole window".
+- **Written on every serve with no boundary.** Writing only on a render, as r2 did, misses
+  the soft refresh (new m[1] bytes and a new baseline id, `:3293-3313`) and every cut decided
+  on a replay.
 
-### Upgrade: no cached pair and no manifest
+The record is smaller than r2's manifest: no adjacency rules, no re-validation across a store
+generation (the digest covers it) and no seeding from the cached pair. It grew in one way:
+it is written on every serve with no boundary, not only on renders. A smaller construction
+that holds the same guarantee was not found: dropping the digest loses the partial-mode and
+rebase cases above, and dropping the turn stamp would let a record from an earlier turn, or
+one left behind by an upgrade, pass validation.
 
-A session upgraded to this design may have neither a complete cached pair nor a manifest.
+### Refusal is decided per pass
 
-- **Seed only from a proven served snapshot.** A complete cached pair *is* one: every
-  compartment writer clears it in the same transaction as it rewrites compartments (the call
-  sites above), so while it is complete, the compartment rows it was rendered from are
-  unchanged and the partial-cut decision read from them is the one that was served. The first
-  pass after upgrade that loads a complete pair writes the manifest from it, before anything
-  can clear it. A persisted full-request snapshot whose fences validate is the other source.
-- **No proven snapshot, boundary present:** use a compatible full-request replay if one
-  exists, else refuse locally until the turn boundary, as above.
-- **No proven snapshot, no boundary:** render normally; that pass's served prefix seeds the
-  manifest.
+A pass with a boundary whose record does not validate refuses locally with a Magic Context
+error that names the reason (`served prefix cannot be reproduced while signed thinking is
+kept`, and which check failed), unless the host has a compatible full-request snapshot whose
+own fences validate: the OpenCode Rust-mode last-known-good slot (`lkg-persist.ts`), which
+is still subject to section 9. The binding-recovery path is not a fallback: it cannot repair
+an invalidated current turn (`signed-thinking-prefix-edits-audit.md:171-179`).
+
+Nothing about a refusal is persisted, and nothing is latched. The next pass validates again
+and replays as soon as it can, for example when an id that was missing at a compaction seam
+(`transform-postprocess-phase.ts:3274-3280`) is back. A sticky refusal would turn a one-pass
+seam into the loss of the rest of the turn. A refusal is logged and counted with the held
+edits.
+
+A pass with **no** boundary whose record does not validate is not refused: no current-turn
+block is kept, so the pass may change the prefix. It is served as a prefix change: cut at
+`first_kept.id` when that id is present, otherwise by today's decision (including serving the
+window when the trim is refused), and in either case with the strip of all older-turn
+thinking, and its unit is recorded.
+
+**Policy cost.** On accounts that silently drop invalidated blocks (created before
+2026-08-31), a refused pass is a failure where today the turn is served with reasoning
+silently lost. That trade is deliberate: the alternative sends bytes the kept blocks were not
+signed over. A primary session recovers at its next real user message, whose first pass has
+no boundary and renders normally. Subagents have no head (`inject-compartments.ts:3975`, and
+Pi gives subagents no m[0]/m[1]), so they never reach this refusal.
+
+### Upgrade, clone and repair
+
+There is no seeding from the cached pair: its premise was the false claim above. A session
+with no record for the current turn (upgraded, cloned, or with a record from an earlier
+turn) behaves as any record that does not validate. With no boundary, the pass renders or
+replays as today and records its unit. With a boundary, every pass of that turn refuses
+(or replays a fenced snapshot), because only a pass with no boundary can write the record,
+and the session recovers at its next real user message. This is per-pass revalidation whose
+outcome lasts for the rest of that turn, not a latch. It is bounded: the migration that adds
+the column restarts every host ("Persisted state", section 4), which ends the turns in flight,
+so it reaches only a turn resumed after the restart without a real user message. The clone
+and repair rules are in section 4, "Persisted state".
+
+**Rust** is not exposed. The module serves its own frozen render, skips the m[0] mutation rows
+it writes itself (`MODULE_M0_MUTATION_TARGET`, `context_writes.rs:243-250`), and has no cache
+clear. The `Recomp` lane stays as a guard, and a Rust lane for an in-place fold upsert joins
+it (section 11).
 
 Why replay rather than refuse by default:
 
 - The last-served bytes are valid by construction: the provider minted every kept block
   against them.
-- The writers that clear the cache are background maintenance. Refusing on each of them
-  would fail every pass until the turn ends. A subagent would die, and Claude Code would
-  retry about 12 times first. The refusal path above is kept for the case where replay is
-  not provably the served request.
-- The cost is staleness: the improved summary from a recomp waits until the turn ends.
-  Holding tag drops costs the same kind of delay.
-- Storage is one manifest per session, about the size of the cache it shadows. Separating
-  render invalidation from the immutable served payload, instead of shadowing the cache, is
-  an acceptable implementation of the same contract.
+- The writers that move the prefix are background maintenance. Refusing on each of them would
+  fail every pass until the turn ends.
+- The cost is staleness: an improved summary from a recomp, or a moved cut, waits until the
+  turn ends, as held tag drops do.
+- Storage is one record per session, about the size of the cached pair it shadows.
 
-The manifest covers Magic Context's prefix only. A host edit to raw history, such as the
-OpenCode late-user splice, changes bytes the manifest does not hold (section 9).
+The record covers Magic Context's prefix only. A host edit to raw history after the first kept
+message, such as the OpenCode late-user splice, changes bytes the record does not hold
+(section 9).
+
 ## 8. Subagents, the force band and the 95% wall
 
 A subagent's whole run is one turn. On a prefix-bound model the boundary is the newest
@@ -745,27 +936,35 @@ What still works: content **after** the boundary can be edited. That is the tool
 model has received since its last thinking block, usually the newest and often the largest
 input. Pi's 95% wall already drops the newest tool result, which the audit found valid.
 
-**Force band (85% by default).** Hold, and do not bust. Log once per force episode that
-reclamation is held by signed thinking, with the held edit count and the current usage. No
-pass manufactures a bust.
+**Force band (85% by default).** Admitted reclaim (after the boundary) lands on the band's
+first pass and spends the episode, as today. Reclaim the frame holds does not bust: the
+episode is parked for the rest of the turn (section 4), not spent and not reused, and
+released at the next turn. No pass manufactures a bust. Log once per force episode that
+reclamation is held by signed thinking, with the held edit count and the current usage.
 
 **95% wall.** In order:
 
 1. **Admitted tail reductions.** Apply emergency reductions only to coordinates the frame
    admits, which means whole tool arcs (parallel batches included) after the boundary
    (section 3). All runtimes do this. Pi does it today; TS and Rust hold everything at the
-   wall today, and the strict mixed-pass test requires TS to land it (section 11).
-2. **Refuse visibly if still at or above the wall.** Refuse the pass with a Magic Context
-   error that names the reason (reclamation held by signed thinking, the held edit count, the
-   usage), rather than letting the provider fail on context length. This is the existing
-   refusal at a proven 95% when nothing can be folded, now also reached when what could be
-   folded is held.
+   wall today, and the strict mixed-pass test requires TS to land it (section 11). The wall
+   is live pressure, so every pass at the wall may do this.
+2. **Send the request.** An admitted reduction is a valid request, and so is a pass whose
+   reductions were all held: the audit sends both today and the provider accepts them. The
+   hold adds no refusal of its own. The pass is refused only where `ARCHITECTURE.md` already
+   refuses: at a *provider-proven* 95%, a context limit parsed from a provider overflow for
+   this model (`provider_proven_limit`, `transform.rs:5080-5085`;
+   `FrozenReplayOverProvenLimitRefusal`, `rust-mode-transform.ts:210`), with nothing folded
+   (`ARCHITECTURE.md:24`). When that existing refusal fires on a pass whose reclaim was held,
+   its message also names the held edit count, so the cause is visible. r2 refused whenever
+   usage was still at or above 95% after held reclamation; that turned servable requests into
+   failures and is withdrawn.
 
 **The subagent wrap-up is removed from this fix.** r1 proposed appending one synthetic user
-instruction at the wall to end the subagent's run early. It is not part of this design, and
-the wall refuses instead, until a live capture with kept signed thinking shows that a
-mid-loop user append is accepted. The panel found no such capture, and the reasons to wait
-are concrete:
+instruction at the wall to end the subagent's run early. It is not part of this design: the
+wall sends what admission allows, as above, until a live capture with kept signed thinking
+shows that a mid-loop user append is accepted. The panel found no such capture, and the
+reasons to wait are concrete:
 
 - No capture shows a user text block after a `tool_result` accepted with current-turn signed
   thinking kept. OpenCode's `groupIntoBlocks` merges consecutive user and tool messages into
@@ -849,21 +1048,25 @@ any automatic recovery.
 
 | Path | What happens | Classification in this fix |
 |---|---|---|
-| **OpenCode late user message spliced into a served tool-result carrier** | OpenCode stamps a user message's `time.created` before the step's assistant is created but writes it after that step's history snapshot. Every later load sorts it before that assistant, and `groupIntoBlocks` merges it into the tool-result carrier the previous request ended with (`user-append-into-served-carrier.md:16-39, 96-107`). The assistant's thinking was signed without that text. | **Explicitly out of scope.** It is a host input change, not a Magic Context edit: the bytes it changes are raw history, outside both admission and the m[0]/m[1] manifest (section 7). The owner is OpenCode (`prompt.ts`, per the report). If it produces a binding 400, the existing binding-recovery path behaves as today, which cannot repair the current turn. This fix adds no detection; a detector that compares the live array with the last served request would be a separate design. |
+| **OpenCode late user message spliced into a served tool-result carrier** | OpenCode stamps a user message's `time.created` before the step's assistant is created but writes it after that step's history snapshot. Every later load sorts it before that assistant, and `groupIntoBlocks` merges it into the tool-result carrier the previous request ended with (`user-append-into-served-carrier.md:16-39, 96-107`). The assistant's thinking was signed without that text. | **Explicitly out of scope.** It is a host input change, not a Magic Context edit: the bytes it changes are raw history, outside both admission and the served prefix record (section 7). The owner is OpenCode (`prompt.ts`, per the report). If it produces a binding 400, the existing binding-recovery path behaves as today, which cannot repair the current turn. This fix adds no detection; a detector that compares the live array with the last served request would be a separate design. |
 | **Last-known-good replay re-exposing a double-signed assistant** | The OpenCode Rust-mode recovery ladder restores a captured served prefix and appends the current tail without the proactive older-thinking strip, which can re-expose an assistant with two signed parts that the live validator rejects (`cereb-lkg-reasoning-run-2026-09-28.md`). | **Detect and decline, which exists today; no recovery.** The LKG validator declines that shape (`lkg_anthropic_reasoning_run_invalid`) and the pass falls back to the raw request. That report's idea of stripping later reasoning in the replayed tail is not safe and is not part of this fix. LKG replay is not an admission lane, and section 7 uses a full-request snapshot only when its own fences, this validator included, pass. |
 
 The Claude Code client may also edit its own history mid-turn (section 6, "Still needs
 THALAMUS", item 2). That is in the same class as the OpenCode splice: out of scope, and not
 covered by any promise here.
 
-## 10. Proposal: replacing ARCHITECTURE.md invariant 4
+## 10. Proposal: amending ARCHITECTURE.md invariants 1 and 4
 
 `ARCHITECTURE.md` invariant 4 ends with: *"There is no mid-turn deferral: a tool loop is not a
-reason to hold an execute (…)"*. On prefix-bound models this design holds edits inside a
-tool loop, so it contradicts the invariant as written, and the next editor who follows the
-invariant would undo the fix. The invariants live in the operator-maintained protected region,
-so this delivery does not edit them. Proposed replacement for invariant 4, in full; the first
-four sentences are unchanged, and the change starts at "Cache cost is never":
+reason to hold an execute (…)"*, and invariant 1 says *"Never 'defer' a hard bust. This pass
+IS the fold; there is no later fold to wait for."* (`ARCHITECTURE.md:80, 83`). On prefix-bound
+models this design holds edits inside a tool loop, the HARD fold among them, so it
+contradicts both as written, and the next editor who follows them would undo the fix. The
+invariants live in the operator-maintained protected region, so this delivery does not edit
+them.
+
+**Invariant 4**, proposed in full. Its bold title and first three sentences are unchanged;
+the fourth ("There is no mid-turn deferral …") is reworded, and the rest is new:
 
 > 4. **Automatic reclaim is ride-only, and every lane shares ONE bust permission.** Age sweeps,
 > heuristic cleanup, supersession and duplicate dedup never originate a bust: they land only on
@@ -879,20 +1082,40 @@ four sentences are unchanged, and the change starts at "Cache cost is never":
 > hold an execute (the OpenCode detector never engaged and Pi's only measurable effect was
 > withholding drops for hours on steered marathons), and Anthropic's incremental tool-loop
 > caching makes a held mutation cost strictly more than one applied at first eligibility.
-> **Provider validity is the one exception.** On prefix-bound thinking models (Fable 5.1,
-> Opus 5.5, Sonnet 5.5, Haiku 5.5) every kept signed thinking block is bound to the bytes before
-> it, so every first-application edit, in every lane, asks the one admission check of
-> `docs/designs/signed-thinking-hold.md` before it mutates. An edit that lands before the last
-> kept current-turn thinking block is held: not applied, not persisted, and its trigger not
-> spent. Bust permission authorizes spending cache; it never authorizes invalidating a
-> signature. The check is the same for every lane, so it is not a per-lane veto. Edits after
-> that block, and every edit on other models, follow the rules above. Work withheld from an
-> independently authorized bust is released as a ride on the first pass of the next turn;
-> held opportunistic work waits for the next permitted bust, as it does everywhere else.
+> **Provider validity is the one exception.** On prefix-bound thinking models (the ones
+> `isPrefixBoundThinkingModel` and `is_prefix_bound_thinking_model` match) every kept signed
+> thinking block is bound to the bytes before it. So every first-application edit, in every
+> lane, asks the one admission check of `docs/designs/signed-thinking-hold.md` before it
+> mutates, and an edit that lands before the last kept current-turn thinking block is held:
+> not applied, not persisted, and its trigger not spent. Bust permission authorizes spending
+> cache; it never authorizes invalidating a signature. There is still one permission per pass,
+> and the validity check is one predicate applied the same way to every coordinate. By
+> outcome it splits a pass: the prefix lanes (m[1] refresh, fold) always sit before the
+> boundary and are held, while edits after the boundary land, so one trigger can price a
+> tail bust now and a prefix bust at the next turn. That split is accepted for provider
+> validity alone; any other difference between lanes is still the defect above. A trigger
+> whose authorized work was held is parked: it authorizes no later pass of the same turn,
+> and on the first pass of the next turn it carries its original permission forward, so that
+> pass busts for the original reason and every lane drains into it. Held opportunistic work
+> carries no permission; it waits for the next permitted bust, as it does everywhere else.
 
-Invariant 1 ("drain EVERYTHING" into a HARD bust) needs the same qualification, as one added
-sentence: *"On a prefix-bound thinking model, the drain still excludes edits the admission
-check holds, and those are released at the next turn."*
+**Invariant 1**, with two sentences added at its end:
+
+> 1. **A HARD bust means the prefix is already gone → drain EVERYTHING into it. Never "defer"
+> a hard bust.** This pass IS the fold; there is no later fold to wait for. Deferring the
+> drain only produces a second, avoidable bust ~one turn later. (The `compartmentRunning`
+> veto must therefore yield to a hard fold — the fold-exec bypass.) *The one exception is
+> provider validity: on a prefix-bound thinking model whose current turn keeps signed
+> thinking, the HARD fold is itself a prefix edit and waits, with its drain, for the first
+> pass of the next turn, while the held passes replay the served prefix unchanged. When that
+> HARD came from a TTL expiry or a cache eviction, the held passes already pay a full prefix
+> write and the fold pays a second one at the next turn: that is the price of validity.*
+
+The added sentences say that the fold waits, not only the drain; r2's single sentence
+qualified only the drain, and a reader following the unamended "this pass IS the fold" would
+fold under kept signatures again. The released fold is a real HARD, so everything eligible
+drains into it then, including opportunistic work; nothing opportunistic originates a bust
+of its own.
 
 ## 11. Test plan
 
@@ -916,7 +1139,7 @@ whole contract for **every** lane, not just validity:
 7. **release** (primary only): after the turn ends and a real user message starts the next
    one, the same state lands the lane's edit validly, with nothing re-queued or re-armed.
 
-**Added in this revision:**
+**Added in r2:**
 
 - **Tool pairing in the provider mock.** `StrictBindingMock.check` now rejects an unanswered
   `tool_use` or an unasked `tool_result` (`ORPHAN_ERROR`) on the request as the SDK sends it,
@@ -940,14 +1163,31 @@ whole contract for **every** lane, not just validity:
   either cause turns the default suite red, so the explanation in section 2 cannot go stale
   silently. `MC_AUDIT_DEBUG=1` prints the triggers on every pass.
 
+**Added in r3:**
+
+- **The cut moved on replay** (OpenCode 1, OpenCode 2, Pi; finding 6b). The first turn is
+  folded at the start of the second, so the cached pair is served with an inclusive cut
+  through the first turn's summary message. Then `replaceAllCompartments` rewrites that
+  compartment so that it ends part-way through the message, without clearing the pair, and
+  no bust is offered. Two tests, each in every host:
+  `prefix cut moved by a compartment rewrite that keeps the cached pair: mid tool loop` and
+  `…: defer pass at a new user turn`. By default both pin today's result: the cut moves and
+  the request is rejected with `PREFIX_ERROR`. Strict requires the defer pass to be valid,
+  not to move the cut, to change no byte outside thinking, and (mid-loop) to repeat
+  byte-identically, continue validly and stay valid at the next turn. The rewrite is
+  ride-only, so landing it at the next turn is not required. These are separate tests, not
+  lanes in the generic loop, because the generic control ("the edit lands validly at a new
+  user turn") is the wrong bar here: at a new user turn the defer pass must replay the
+  recorded cut too.
+
 Without `MC_AUDIT_STRICT` the exposed lanes still assert their exact 400, Rust's
 `release_gap` lanes assert that they do not release, and the restart gap and the TS tail
 requirement are pinned. Today's results:
 
 | Suite | Default | `MC_AUDIT_STRICT=1` today | Must be after the fix |
 |---|---|---|---|
-| OC1 TS / OC2, `packages/plugin/.../signed-thinking-prefix-audit.test.ts` | 88 pass | 70 pass, 18 fail: the audit's 14, `release survives a restart: /ctx-flush` and the mixed pass, each in OC1 and OC2 | 88 pass |
-| Pi, `packages/pi-plugin/src/signed-thinking-prefix-audit.test.ts` | 43 pass | 39 pass, 4 fail: m[0]/m[1] recomp, synthetic todo, frozen-sentinel, `release survives a restart: /ctx-flush` | 43 pass |
+| OC1 TS / OC2, `packages/plugin/.../signed-thinking-prefix-audit.test.ts` | 92 pass | 70 pass, 22 fail: the audit's 14, `release survives a restart: /ctx-flush`, the mixed pass and the two cut tests, each in OC1 and OC2 | 92 pass |
+| Pi, `packages/pi-plugin/src/signed-thinking-prefix-audit.test.ts` | 45 pass | 39 pass, 6 fail: m[0]/m[1] recomp, synthetic todo, frozen-sentinel, `release survives a restart: /ctx-flush`, the two cut tests | 45 pass |
 | Rust, `crates/mc-module/tests/signed_thinking_prefix_audit.rs` | 6 pass | 3 pass, 3 fail: `opencode_rust_mode::primary_mid_loop` (first failure is now the DropFull trigger assertion), `claude_code::primary_mid_loop`, `claude_code::control_at_new_user_turn` | 6 pass |
 | Mock, `packages/plugin/.../__tests__/strict-binding-mock.test.ts` | 11 pass | (no strict mode) | 11 pass |
 
@@ -999,20 +1239,44 @@ One JSON corpus is read by both a TS test and a Rust test, with identical expect
 Issue 630 parity runs beside it: over every audit fixture, the new `prefixEdit` must protect
 a superset of what the identity map protects today.
 
-### `served_m0m1` and release cases
+### Served prefix record, parking, persisted state and release cases
 
-- upgrade with a complete cached pair (seeds the manifest); upgrade with neither (refuses at
-  a boundary, renders without one);
-- a mural-bearing head, a partial cut and an inclusive cut, each replayed byte-identically
-  after a recomp that changes the partial-end decision;
-- a store-generation rebase that keeps the boundary id but changes the following occurrence
-  (refuse, not render);
-- a compaction seam where the boundary id is absent for one pass (refuse that pass, never
-  render; replay when it returns);
+These need the implementation; each is written with the slice that makes it pass.
+
+- the record replayed byte-identically, with a mural-bearing head, a partial cut and an
+  inclusive cut, after each kind of writer: a clearing writer (recomp promotion), a
+  non-clearing rewrite (`replaceAllCompartments`, and the Rust fold upsert on a TS-served
+  session), and a soft refresh earlier in the turn (the record holds the refreshed m[1]);
+- the record is written after the trim: a pass whose trim is `refused` or finds the boundary
+  before the window records what it actually served, and a later replay serves exactly that;
+- a store-generation rebase that keeps the first kept id but changes its row: the digest fails
+  and the pass refuses, it does not render;
+- **per-pass refusal**: a compaction seam where the first kept id is absent for one pass
+  refuses that pass only, never renders, and the next pass replays when the id is back;
+- a record from an earlier turn, and no record at all (upgrade, clone): refuses at a
+  boundary on every pass of that turn; renders and records with no boundary; the next real
+  user message recovers;
+- a record write that fails: the pass is not served;
+- a defer pass with no boundary whose record no longer validates: served with the strip of
+  all older-turn thinking and recorded;
+- Rust single-store repair during a held turn: the record survives, the next pass replays it,
+  and the fold lands on the first pass of the next turn; a Rust lane for an in-place fold
+  upsert next to `Recomp` (not exposed today; a guard);
+- clone of a session with both columns set: both are NULL in the destination;
+- an older `mc-store` binary opening a store migrated by the release-request slice refuses
+  (`store_ahead_of_binary`);
+- **parking**: a `/ctx-flush` and a force episode held mid-loop authorize no later pass of the
+  turn (no admitted tail edit lands on the following loop passes because of them), and both
+  release at the next turn; at the 95% wall each pass may still land admitted tail reductions;
+- the Claude Code strip replayed at turn N+1 leaves turn N's thinking in place, and still
+  removes a block the client surfaces later inside the strip's own domain;
+- with the `claude-code-anthropic` gate on (rollout steps 2 and 4), a held `/ctx-flush` is
+  cleared as today and no release request is written, so nothing busts at the next turn;
 - a CAS conflict on a pass that recorded a release request (TS/Pi write and Rust commit), and
   a restart between the held pass and the release, in Rust as well;
 - an idle session whose tag targets are protected but which has no queued operation: no
-  release request, no bust at the next turn.
+  release request, no bust at the next turn;
+- a held Rust pass commits `rewrite_temporal_marks = false` and the drain latch as computed.
 
 ### Mutation controls, one per lane
 
@@ -1025,11 +1289,12 @@ guard. It runs the named strict test, and only that test may go red.
 | TS todo `admit` | `… primary mid tool loop > synthetic todo` |
 | TS placeholder `admit` | `… frozen-sentinel first application` (primary and subagent) |
 | TS image `admit` | `… processed image strip` |
-| TS `Prefix` hold, with `served_m0m1` replay neutralized | `… m[0]/m[1] re-render after a recomp clears the cached pair` |
+| TS `Prefix` hold, with the record replay neutralized | `… m[0]/m[1] re-render after a recomp clears the cached pair` |
+| TS/Pi record replay re-reads the cut from compartments | `… prefix cut moved by a compartment rewrite that keeps the cached pair: mid tool loop` and `…: defer pass at a new user turn` |
 | TS tag-target `admit` | every held tag lane (drops, reclaim, dedup, 85%, 95%, flush, caveman), as in the audit's own proof |
 | TS/Pi arc coordinate reduced to the result alone | the mixed-pass test, on `ORPHAN_ERROR` once the tail reduction removes a result |
 | Pi todo / placeholder / prefix `admit` | `Pi/OMP, primary mid tool loop > synthetic todo` / `> frozen-sentinel first application` / `> m[0]/m[1] re-render …` |
-| Pi proactive strip on `cacheBustingPass` alone | the repeat-pass byte-identity assertion of the held Pi lanes that bust |
+| Pi proactive strip on `cacheBustingPass` alone | the repeat-pass byte-identity assertion of the held Pi lanes that bust. This is today's gating and those lanes pass strict today, so this control may not discriminate; it is checked before step 7 relies on it, and replaced by a lane that offers a bust whose edits are all held if it does not go red |
 | Rust coverage-fold `admit` | `opencode_rust_mode::primary_mid_loop` with `MC_AUDIT_LANE=HardFold`, and `claude_code::…` |
 | Rust todo / placeholder `admit` | the same functions with `MC_AUDIT_LANE=Todo` / `Placeholder` |
 | Rust force latch counts trailing-blank units again | `opencode_rust_mode::primary_mid_loop`, `MC_AUDIT_LANE=DropFull`, trigger assertion |
@@ -1040,6 +1305,7 @@ guard. It runs the named strict test, and only that test may go red.
 | Claude Code completed-turn strip removed | `claude_code::control_at_new_user_turn` |
 | **Leak control:** persist a held id (stale reduce, image) or the held todo state | the repeat-pass byte-identity assertion of that lane |
 | **Trigger control:** consume `pendingMaterializationSessions` on a held flush | `… /ctx-flush` release step |
+| **Parking control:** let a parked trigger authorize a later pass of the same turn | the parking case above |
 | Temporal `admit` (after its lane is added) | the new temporal-marker lane |
 
 Every mutation is applied and restored with the staged `git diff --stat` sequence, never a
@@ -1085,9 +1351,11 @@ the last retained thinking part or the last real user message:
   shown they stay, so the first rollout steps add the frame's cost without removing these.
   Lane scans that are already O(history), such as the stale-reduce and placeholder detection
   loops, are unchanged. Admission adds one call per candidate, not a scan.
-- **Held state:** the `served_m0m1` manifest (one per session) and the release request (one
-  column in TS and Pi, one meta field in Rust). Held edits are re-detected from live state at
-  release. Nothing accumulates per pass.
+- **Held state:** the served prefix record (one per session, about the size of the cached pair
+  it shadows, rewritten at most once per turn plus once per prefix change) and the release
+  request (one column in TS and Pi, one meta field in Rust). Held edits are re-detected from
+  live state at release. Nothing accumulates per pass. Validating the record costs one id
+  lookup and one digest of one message per pass.
 
 The cost guard counts every message visit, including those inside helper predicates, on a
 2,000-message history. It asserts at most *k* + 2 visits when the turn has retained thinking
@@ -1095,51 +1363,108 @@ and at most *T* + 2 when it has none, and it fails if any helper it calls rescan
 
 ## 13. Rollout order
 
+0. Passive storage, before anything reads it: one `context.db` migration adding
+   `served_prefix` and `held_release` to `session_meta`, the release-request field in the
+   module meta with its `mc-store` migration, fences bumped, both dists rebuilt, every host
+   restarted (section 4, "Persisted state"). Numbered at slice time.
 1. The shared check and its corpus in TS and Rust, beside the existing issue 630 protection,
    which keeps deciding tag targets. Parity test.
-2. Rust triggers: the force latch ignores bookkeeping units, and a plan whose edits are all
-   held is downgraded to a defer. Flips the Rust trigger assertions.
+2. Rust triggers: the force latch ignores bookkeeping units, a plan whose edits are all held
+   is downgraded to a defer (with `pass_already_busting` decided after admission), and held
+   triggers are parked. Flips the Rust trigger assertions. **Not on the
+   `claude-code-anthropic` profile until step 8:** there the held `/ctx-flush` is still
+   cleared as today.
 3. The non-tag lanes in this order: placeholder and system-injected strips, stale reduce,
    image, todo (with the anchor clears), temporal markers and the overlay frontier, then the
    Rust coverage fold. Each lane flips its strict audit test to green, with its mutation
    control.
-4. Release obligations, persisted (TS and Pi column, Rust meta), recorded only from
-   withheld authorized work. Flips the restart and Rust release assertions.
+4. Release obligations, recorded only from withheld authorized work into the columns of
+   step 0. Flips the restart and Rust release assertions. **Not on the
+   `claude-code-anthropic` profile until step 8:** that profile writes no release request.
 5. Compound tool-arc coordinates, and admitted tail reductions at the 95% wall in TS and
-   Rust. Flips the TS mixed-pass test.
-6. The `served_m0m1` manifest with validation, upgrade seeding and local refusal, in TS and
-   Pi.
+   Rust. Flips the TS mixed-pass test. The Rust half ships with a Rust fixture that lands a
+   reduction at the wall (section 11, parity gaps); until then it has no test that can fail.
+6. The served prefix record in TS and Pi: written after the trim, replayed head and cut
+   together, validated per pass, local per-pass refusal. Flips the m[0]/m[1] recomp lanes and
+   the cut tests.
 7. Pi's proactive strip gated on an admitted edit, and the companion-strip precondition in
    every runtime.
-8. The Claude Code completed-turn strip, after THALAMUS's per-model split confirms section 6.
+8. The Claude Code completed-turn strip, with its domain frozen at mint, after THALAMUS's
+   per-model split confirms section 6. Removes the profile gate of steps 2 and 4.
 9. Finding 8's host fix and its test.
 10. Retire the identity map and Rust's ordinal walk in favour of the check, once the parity
     test is green.
 11. Delete the `EXPOSED` / `exposed()` / `release_gap()` / `RESTART_GAP` scaffolding and make
     strict the default.
 
+**Why the Claude Code profile is gated out of steps 2 and 4 rather than step 8 landing
+first.** On `claude-code-anthropic` every bust at a new user turn is a 400 until the
+completed-turn strip exists (finding 4), and the gateway turns that 400 into a 503 that the
+client retries about 12 times. Today a held `/ctx-flush` is silently lost on that profile;
+step 2 would keep it and step 4 would release it at the next turn, turning a silent loss
+into a failed turn. Step 8 waits on an external confirmation (THALAMUS's per-model split), and
+ordering everything behind it would hold back validity fixes for every other profile. The
+gate is one profile condition in two places, it keeps Claude Code exactly as it is today,
+and step 8 removes it in the same change that makes the release valid. What the gate does
+not change: Claude Code's held drops and force episodes already survive to the next turn and
+fail there today, and step 3 moves the Rust coverage fold's failure from mid-loop to the
+next turn's start; both are one failure in place of one, until step 8.
+
 The subagent wrap-up instruction is not a follow-up of this fix; it may be revisited only
 after a live capture (section 8). Server-side clearing is a separate study.
+
 ## Verification of this design delivery
 
-Run on Linux (Bun 1.4.2, cargo 1.99.0, TypeScript 5.9.3):
+Run locally on macOS for r3 (Bun 1.4.2, TypeScript 5.9.3); the Linux runner was draining:
 
 - `bun test src/hooks/magic-context/signed-thinking-prefix-audit.test.ts
   src/hooks/magic-context/__tests__/strict-binding-mock.test.ts` in `packages/plugin`:
-  99 pass, 0 fail (88 audit, 11 mock). With `MC_AUDIT_STRICT=1` the audit file gives 70 pass
-  and 18 fail, as listed in section 11.
-- `bun test src/signed-thinking-prefix-audit.test.ts` in `packages/pi-plugin`: 43 pass,
-  0 fail. Strict: 39 pass, 4 fail (section 11).
-- `cargo test -p mc-module --test signed_thinking_prefix_audit`: 6 pass. Strict: 3 pass,
-  3 fail (section 11). `cargo fmt -p mc-module -- --check` is clean.
+  103 pass, 0 fail (92 audit, 11 mock). With `MC_AUDIT_STRICT=1` the audit file gives 70 pass
+  and 22 fail, as listed in section 11.
+- `bun test src/signed-thinking-prefix-audit.test.ts` in `packages/pi-plugin`: 45 pass,
+  0 fail. Strict: 39 pass, 6 fail (section 11).
+- The Rust suite is unchanged in r3; its r2 results stand (6 pass; strict 3 pass, 3 fail).
 - `bun run typecheck` in `packages/plugin` and `packages/pi-plugin`: exit 0. `biome check`
-  on the four changed TypeScript files: no diagnostics.
+  (2.5.1) on the two changed test files: no diagnostics.
 - No product code, architecture document, package manifest or lockfile changed.
+
+## Changes from r2
+
+Each row is a finding of the second Athena review (consult
+`ct_00000000-0000-4672-98dd-ba9da45b5978`) and where this revision answers it. The review
+confirmed as closed: issue 630 parity, the Rust force-band latch diagnosis, pure and durable
+release obligations, and Pi's id space.
+
+| # | Finding | Answer in r3 |
+|---|---|---|
+| 1 | The upgrade seed rests on a false premise: `appendCompartments`, `replaceAllCompartments`, the Rust fold upsert and `replace_compartments_from_first_sequence` do not clear the cached pair, and `isPartialCompartmentEnd` reads the live row | Section 7: the premise is withdrawn and there is no seeding from the pair. A session without a record for the current turn refuses per pass at a boundary and recovers at the next real user message |
+| 1 | A replay with the pair present re-derives the cut every pass, and a `refused` trim serves the whole window | Section 7: the record (head and cut as one unit) governs every pass that does not change the prefix, with or without a boundary, pair present or not; a `refused` trim or source-order mismatch under a boundary is a local refusal. New tests pin the moved cut in OC1, OC2 and Pi, mid-loop and at a new user turn (sections 2 and 11) |
+| 1 | The manifest was written inside `materializeM0`'s transaction, before the trim decided the cut | Section 7: the record is written at the end of the pass, after the trim and every later lane; a failed write fails the pass |
+| 1 | It was replaced only on a render, missing `softRefreshCachedM1` | Section 7: rewritten on every serve with no boundary whose unit differs, which covers renders, soft refreshes, folds and cuts decided on a replay |
+| 1 | Id adjacency checks nothing in partial mode and cannot see split or folded rows | Section 7: the cut is identified by the first kept served occurrence, id plus digest of its returned bytes; `capturePrefixTrimSourceOrder` stays as the trim's guard, refusing instead of serving the window. Why this is enough, and why a smaller construction is not, is argued there |
+| 2 | Refusal duration contradicted itself (until the turn boundary vs replay when the id returns) | Section 7, "Refusal is decided per pass": one rule, per-pass revalidation, nothing latched; the test plan matches |
+| 3 | The invariant 1 amendment qualified only the drain | Section 10: the HARD fold itself waits, with its drain, for the next turn; a TTL or eviction HARD pays a second full write. Invariant 4 rewritten: one permission and one predicate, the per-coordinate split accepted by outcome for validity only, the release described as the original permission carried forward, not a ride; model names replaced by the predicates; the claim about unchanged sentences corrected |
+| 4 | Steps 2 and 4 open a Claude Code window before step 8 | Section 13: the `claude-code-anthropic` profile is gated out of steps 2 and 4 until step 8, with the reason (step 8 is externally gated; the gate keeps Claude Code as it is today) |
+| 5 | Persisted state without migration and fence discipline; clone and repair rules missing | Section 4, "Persisted state": both columns on `session_meta` in one migration numbered at slice time after v97, fence bump, fresh schema, `ensureColumn`, both dists, restart; no table so no `SESSION_SCOPED_TABLES` entry; an `mc-store` migration so an older module refuses the newer store; clone writes both NULL; the single-store repair reset list gains neither column, and its fold is held by the host while a boundary exists. Rollout step 0 lands the storage passively |
+| 6 | `TransformCommit` split missed `rewrite_temporal_marks`, and classed `scheduler_observation` as observation although it carries drain-latch state | Section 4: a `rewrite_temporal_marks` row (false on a held pass unless every mark is admitted). `scheduler_observation` is a trace copy read only by trace loaders; the durable latch is the meta pair, which is pressure state and commits as computed, so the observation stays unchanged and r2's "drain latch unchanged" row is corrected |
+| 6 | The downgrade came after `pass_already_busting` had driven meta writes | Section 4: the flag is decided after admission, or recomputed and the writes redone as a defer |
+| 7 | The 95% wall refused beyond ARCHITECTURE's provider-proven refusal | Section 8: admitted reductions and fully held passes are sent; refusal only where ARCHITECTURE already refuses (provider-proven 95% with nothing folded) |
+| 8 | A preserved but held trigger could become a standing bust permission | Section 4, "Parked triggers": a held trigger authorizes no later pass of the turn; the release request is the parking record; the 95% wall stays live pressure |
+| 8 | The Claude Code replay strip had an unbounded domain | Section 6: the domain is frozen at mint to the turns completed then; extending it needs a new authorized edit |
+| 8 | The `soft_refresh_pending` clear at `transform.rs:6002-6004` was not shown | Section 2: it runs whenever `prefix_replay_must_be_preserved` is false, i.e. on every provider-prefix mutation pass, which confirms the flush diagnosis |
+| — | Unlisted fresh-render paths in `injectM0M1` | Section 5, row 6: the hold short-circuits before `mustMaterialize` and every fallback render path |
+| — | The Pi proactive-strip mutation control may not discriminate; Rust step 5 has no failing test | Section 11 and section 13: the control is checked before it is relied on; the Rust half of step 5 ships with its fixture |
+
+Where a mechanism grew: the record is written on every serve with no boundary rather than
+only on renders, and it carries a digest and a turn stamp; section 7 explains why nothing
+smaller holds. Parking adds no state: it reuses the release request. Everything else in this
+revision removes or narrows (no seeding, no adjacency rules, no extra wall refusal).
 
 ## Changes from r1
 
-Each item is a finding of the Athena review (consult `ct_00000000-0000-448f-98dd-be0494920bd0`)
-and where this revision answers it.
+Each item is a finding of the first Athena review (consult
+`ct_00000000-0000-448f-98dd-be0494920bd0`) and where r2 answered it. Rows about the
+`served_m0m1` manifest are superseded by the served prefix record ("Changes from r2").
 
 | # | Finding | Answer in r2 |
 |---|---|---|
@@ -1158,6 +1483,6 @@ and where this revision answers it.
 | 5 | Pi's frame array and id space were not named | Section 3: `workingMessages` with `resolvePiStableId` tiers 1-2; `pi-msg-*`, empty ids and transcript `synth-user-` ids are not coordinates |
 | 5 | No proof that coordinates match the serialized wire | Section 11, "Serialized-wire agreement", plus `beforeLastThinking` and pairing on the wire now |
 | 6 | Host-side splice and LKG replay are outside admission | Section 9: the OpenCode late-user splice is out of scope; LKG is detect-and-decline with no recovery; nothing automatic is promised |
-| 7 | The 95% subagent wrap-up was not shown safe | Section 8: removed; the wall refuses visibly until a live capture; Pi's folding noted; server-side clearing stays out |
+| 7 | The 95% subagent wrap-up was not shown safe | Section 8: removed; the wall refuses visibly until a live capture (r3 withdraws that extra refusal, see "Changes from r2"); Pi's folding noted; server-side clearing stays out |
 | 8 | The O(*k*) frame cost was wrong | Section 12: the reused helper is O(*T* log *n*); the frame is one reverse scan, and the guard counts visits inside helpers |
 | 9 | `ARCHITECTURE.md` invariant 4 contradicts the hold | Section 10: exact replacement wording, plus one sentence for invariant 1, for the operator to apply |
