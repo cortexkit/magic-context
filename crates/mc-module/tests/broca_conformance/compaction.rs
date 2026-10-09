@@ -357,7 +357,7 @@ async fn protected_drop_is_held_across_rebuild_until_newer_groups_displace_it() 
     assert_eq!(rig.record(SESSION)["pending_drops"], json!([1]));
     append_newer_tool_groups(&rig, &mut transcript).await;
     let mut rebuild = step(SESSION, "displaced-rebuild", &transcript, 70_000, &view);
-    rebuild["prefix_rebuilding"] = json!({"reason":"cold"});
+    rebuild["prefix_rebuilding"] = json!({"reason":"expired_cache"});
     let released = rig.method(&identity, "compaction.step", rebuild).await;
     assert_eq!(released["answer"], "compaction_message", "{released}");
     view = released["compaction"].clone();
