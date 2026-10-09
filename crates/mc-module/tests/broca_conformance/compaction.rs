@@ -79,16 +79,24 @@ async fn append_newer_tool_groups(rig: &Rig, transcript: &mut Vec<Value>) {
     for number in 3..=4 {
         let call_id = format!("call-{number}");
         let text = format!("NEWER GROUP {number} {}", "tail ".repeat(2000));
-        let answer = rig.method(&rig.identity(SESSION), "transform.hook", json!({
-            "session":SESSION,"harness":"broca","lineage_id":LINEAGE,"hook":"post_tool",
-            "step_id":format!("newer-{number}"),"tool":"read","tool_call_id":call_id,
-            "blocks":[text],"is_error":false
-        })).await;
+        let answer = rig
+            .method(
+                &rig.identity(SESSION),
+                "transform.hook",
+                json!({
+                    "session":SESSION,"harness":"broca","lineage_id":LINEAGE,"hook":"post_tool",
+                    "step_id":format!("newer-{number}"),"tool":"read","tool_call_id":call_id,
+                    "blocks":[text],"is_error":false
+                }),
+            )
+            .await;
         let transform::answer::HookAnswer::Ops { ops } = serde_json::from_value(answer).unwrap()
         else {
             panic!("expected newer tool tag");
         };
-        let rendered = transform::answer::apply_ops(&[text], &ops).unwrap().remove(0);
+        let rendered = transform::answer::apply_ops(&[text], &ops)
+            .unwrap()
+            .remove(0);
         assert!(rendered.starts_with(&format!("§{number}§ ")));
         let ordinal = transcript.len() as u64;
         transcript.push(message(ordinal, "assistant", json!([{
@@ -310,28 +318,46 @@ async fn protected_drop_is_held_across_rebuild_until_newer_groups_displace_it() 
         message["ordinal"] = json!(ordinal);
         message["mid"] = json!(format!("m{ordinal}"));
     }
-    let observed = rig.method(&identity, "compaction.step", step(
-        SESSION, "observe-protected", &transcript, 1000, &view,
-    )).await;
+    let observed = rig
+        .method(
+            &identity,
+            "compaction.step",
+            step(SESSION, "observe-protected", &transcript, 1000, &view),
+        )
+        .await;
     assert_eq!(observed["answer"], "noop");
-    let held = rig.call(&identity, json!({"name":"ctx_reduce","arguments":{"drop":"1"}})).await;
+    let held = rig
+        .call(
+            &identity,
+            json!({"name":"ctx_reduce","arguments":{"drop":"1"}}),
+        )
+        .await;
     assert_eq!(held["isError"], false, "{held}");
     let reply = held["content"][0]["text"].as_str().unwrap();
     assert!(reply.contains("Held:"), "{reply}");
-    assert!(reply.contains("inside the protected working set"), "{reply}");
+    assert!(
+        reply.contains("inside the protected working set"),
+        "{reply}"
+    );
     assert!(!reply.contains("Queued: drop"), "{reply}");
     assert_eq!(rig.record(SESSION)["pending_drops"], json!([1]));
     rig.publish_more_history(SESSION);
-    let crossing = rig.method(&identity, "compaction.step", step(
-        SESSION, "protected-crossing", &transcript, 70_000, &view,
-    )).await;
+    let crossing = rig
+        .method(
+            &identity,
+            "compaction.step",
+            step(SESSION, "protected-crossing", &transcript, 70_000, &view),
+        )
+        .await;
     assert_eq!(crossing["answer"], "compaction_message", "{crossing}");
     view = crossing["compaction"].clone();
-    assert!(String::from_utf8(render(&view, &transcript)).unwrap().contains("RELEASABLE OUTPUT"));
+    assert!(String::from_utf8(render(&view, &transcript))
+        .unwrap()
+        .contains("RELEASABLE OUTPUT"));
     assert_eq!(rig.record(SESSION)["pending_drops"], json!([1]));
     append_newer_tool_groups(&rig, &mut transcript).await;
     let mut rebuild = step(SESSION, "displaced-rebuild", &transcript, 70_000, &view);
-    rebuild["prefix_rebuilding"] = json!({"reason":"cold"});
+    rebuild["prefix_rebuilding"] = json!({"reason":"expired_cache"});
     let released = rig.method(&identity, "compaction.step", rebuild).await;
     assert_eq!(released["answer"], "compaction_message", "{released}");
     view = released["compaction"].clone();
@@ -341,7 +367,11 @@ async fn protected_drop_is_held_across_rebuild_until_newer_groups_displace_it() 
     assert!(text.contains("NEWER GROUP 3"));
     assert!(text.contains("NEWER GROUP 4"));
     assert_eq!(rig.record(SESSION)["pending_drops"], json!([]));
-    assert!(rig.store().load_pending_agent_drops(&rig.engine_key(SESSION)).unwrap().is_empty());
+    assert!(rig
+        .store()
+        .load_pending_agent_drops(&rig.engine_key(SESSION))
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

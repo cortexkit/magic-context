@@ -514,10 +514,10 @@ id = 'rs-identical-bytes-hard-grants-no-bust'
 guards = 'a HARD pass that serves the frozen prefix unchanged (an identical-bytes epoch fold) does not grant the bust permission, so queued work keeps waiting'
 file = 'crates/mc-module/src/transform.rs'
 old = '''
-    ) && !marker_hard_serves_frozen_prefix;
+    ) && !marker_hard_serves_frozen_prefix
 '''
 new = '''
-    );
+    ) // NON-VACUITY BREAK
 '''
 test_file = 'crates/mc-module/src/transform.rs'
 runner = 'command'
@@ -539,6 +539,29 @@ command = ['cargo', 'test', '--locked', '-p', 'mc-module', '--lib', '--', '--exa
 test_count_pattern = 'running {count} test'
 expect_red = ['transform::tests::mixed_legacy_numbered_and_new_canonical_freezes_replay_correctly']
 expect_message = 'left: "[truncated §3§]"'
+timeout_s = 2400
+
+[[control]]
+id = 'rs-nonstructural-retry-returns-current-candidate'
+guards = 'a lost or late compaction answer cannot hide an independent rebuild: a non-structural retry returns the current candidate, not stale last_produced bytes'
+file = 'crates/mc-module/src/transform.rs'
+old = 'answer = Answer::Replacement(state.allocate(candidate)?);'
+new = '''// NON-VACUITY BREAK: replay stale output instead of the current rebuild.
+                let candidate = if rejected.is_some_and(|r| !r.structural) {
+                    state.last_produced.clone().unwrap_or(candidate)
+                } else {
+                    candidate
+                };
+                answer = Answer::Replacement(state.allocate(candidate)?);'''
+test_file = 'crates/mc-module/src/transform.rs'
+runner = 'command'
+command = ['cargo', 'test', '--locked', '-p', 'mc-module', '--lib', '--', '--exact', '{test}']
+test_count_pattern = 'running {count} test'
+expect_red = [
+    'providers::compaction::compaction_review_tests::r73_late_transport_copy_cannot_hide_independent_model_rebuild',
+    'transform::tests::compaction_adapter_tests::lost_broca_view_cannot_hide_independent_model_rebuild',
+]
+expect_message = '/assertion failed: current_bytes\.contains\("NEWEST-HISTORY"\)|returned a superseded view/'
 timeout_s = 2400
 
 # --- Rust store: owner-only files and the exactly-once historian report ---

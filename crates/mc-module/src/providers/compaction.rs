@@ -2272,7 +2272,7 @@ mod host_tests {
                 s.arm_soft_refresh("s").unwrap();
             }
             "cold" => {
-                params["prefix_rebuilding"] = json!({"reason":"cold"});
+                params["prefix_rebuilding"] = json!({"reason":"expired_cache"});
             }
             "external_revision" => {
                 let mut changed = baseline.clone();
@@ -2763,7 +2763,7 @@ mod host_tests {
             let mut rebuild = step("rebuild", vec![], 5);
             rebuild["served_through_ordinal"] = json!(5);
             if hard {
-                rebuild["prefix_rebuilding"] = json!({"reason":"cold"});
+                rebuild["prefix_rebuilding"] = json!({"reason":"expired_cache"});
                 ctx.now_ms += 300_002;
                 ctx.observed_last_response_at_ms = Some(ctx.now_ms - 300_001);
             } else {
@@ -2843,7 +2843,7 @@ mod host_tests {
         .unwrap();
         let mut cold = step("cold", vec![], 2);
         cold["last_applied"] = json!({"compaction_id":view["compaction"]["compaction_id"],"version":view["compaction"]["version"]});
-        cold["prefix_rebuilding"] = json!({"reason":"cold"});
+        cold["prefix_rebuilding"] = json!({"reason":"expired_cache"});
         let folded = answer(h.provider_step(b.clone(), &cold).await);
         assert_eq!(folded["answer"], "compaction_message");
         assert!(folded["compaction"]["replacement"]

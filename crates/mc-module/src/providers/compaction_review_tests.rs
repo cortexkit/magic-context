@@ -322,7 +322,7 @@ async fn retry_after_independent_rebuild(pipeline_switch: bool) {
     publication(&s, 1, 2, "SECOND-HISTORY");
     let mut cold = step("cold", vec![], 4);
     cold["last_applied"] = initial.clone();
-    cold["prefix_rebuilding"] = json!({"reason":"cold"});
+    cold["prefix_rebuilding"] = json!({"reason":"expired_cache"});
     let lost = response(h.provider_step(b.clone(), &cold).await)["compaction"].clone();
     assert!(lost.to_string().contains("SECOND-HISTORY"));
     assert!(lost.to_string().contains("raw 4"));
@@ -537,7 +537,7 @@ async fn pressure_flush_model_and_cold_match_the_real_engine_with_queued_drops_a
                 let mut params = step("evaluate", vec![], 3);
                 params["estimate"]["request_tokens"] = json!(tokens);
                 if event == "cold" {
-                    params["prefix_rebuilding"] = json!({"reason":"cold"});
+                    params["prefix_rebuilding"] = json!({"reason":"expired_cache"});
                 }
                 if event == "model" {
                     params["model"] = json!("new-model");
@@ -656,7 +656,7 @@ async fn module_ahead_descent_after_restart_burns_stranded_tags_without_rewritin
     let mut cold = step("cold-child", vec![], 2);
     cold["lineage_id"] = json!("child");
     cold["served_through_ordinal"] = json!(2);
-    cold["prefix_rebuilding"] = json!({"reason":"cold"});
+    cold["prefix_rebuilding"] = json!({"reason":"expired_cache"});
     let rebuilt = response(h.provider_step(b, &cold).await);
     assert_eq!(rebuilt["answer"], "compaction_message");
     let raw = rebuilt["compaction"]["replacement"].as_array().unwrap();
@@ -1071,7 +1071,7 @@ async fn r3_randomized_host_full_engine_240_passes() {
                     }
                 }
                 4 => {
-                    params["prefix_rebuilding"] = json!({"reason":"cold"});
+                    params["prefix_rebuilding"] = json!({"reason":"expired_cache"});
                     epoch += 1;
                     req.render_config =
                         format!("{}|broca-compaction:{epoch}", setup_request()["params"]);

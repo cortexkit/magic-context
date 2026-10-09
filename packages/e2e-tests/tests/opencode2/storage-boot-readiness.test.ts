@@ -344,6 +344,17 @@ test.each([
 			);
 			magicContextPlugin = packageDir;
 		}
+		const hostRunnerTables = [
+			"host_runner_entries",
+			"host_runner_ids",
+			"host_runner_views",
+			"host_runner_state",
+		];
+		// Model a valid v96 database by removing only v97's version row and
+		// host-runner tables below. Keep git_commit_fts_rowid_map: v96 already
+		// committed its migration, so deleting that FTS identity map is corruption
+		// and startup must refuse it instead of rebuilding it.
+		expect(LATEST_SUPPORTED_VERSION).toBe(97);
 		const dbPath = join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db");
 		if (!openDatabase(dbPath))
 			throw new Error("could not seed isolated storage");
@@ -355,9 +366,7 @@ test.each([
 				.run(LATEST_SUPPORTED_VERSION);
 			// Remove new schema objects as well as the version marker: the packaged
 			// worker must actually install them, not just report an already-current DB.
-			seed.run("DROP TABLE temporal_decisions");
-			seed.run("DROP TABLE git_commit_fts_rowid_map");
-			seed.run("DROP INDEX idx_transform_decisions_retention");
+			for (const name of hostRunnerTables) seed.run(`DROP TABLE ${name}`);
 		} finally {
 			seed.close();
 		}
@@ -395,6 +404,8 @@ test.each([
 				"async open main-thread migration-body count: 0",
 			);
 			expect(log).toContain("migration worker ready");
+			expect(log).toContain("[migrations] applied v97:");
+			expect(log).not.toContain("storage fatal:");
 			expect(log).toContain("async open main-thread migration-body count: 0");
 			expect(log).not.toContain("migration worker could not start");
 			const checked = new Database(dbPath, { readonly: true });
@@ -405,6 +416,7 @@ test.each([
 						.get(),
 				).toEqual({ version: LATEST_SUPPORTED_VERSION });
 				for (const name of [
+					...hostRunnerTables,
 					"temporal_decisions",
 					"git_commit_fts_rowid_map",
 					"idx_transform_decisions_retention",
