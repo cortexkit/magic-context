@@ -3839,7 +3839,7 @@ pub struct McHandler {
     store_open: Arc<StoreOpenCoordinator>,
     producer_factory: Arc<dyn HistorianProducerFactory>,
     session_resolver: Arc<dyn SessionResolver>,
-    config: Mutex<ConfigCache>,
+    config: Arc<Mutex<ConfigCache>>,
     historian_runner_refusals: Arc<HistorianRunnerRefusalCache>,
     /// Runs queued for a claimant that a firing task in this process is still
     /// waiting on. Empty under the in-module runner.
@@ -3867,7 +3867,7 @@ pub struct McHandler {
     serialized_outputs: Mutex<SerializedOutputCache>,
     native_attachments: Mutex<NativeAttachmentCache>,
     projections: Mutex<ProjectionCache>,
-    boundary_tokens: Mutex<BoundaryTokenCache>,
+    boundary_tokens: Arc<Mutex<BoundaryTokenCache>>,
     guidance_dates: Mutex<HashMap<String, String>>,
     prompt_surface_epochs: Mutex<HashMap<String, PromptSurfaceSelection>>,
     /// Route channels whose consumer declared it speaks `tool-provider/v1` at bind
@@ -3880,6 +3880,11 @@ pub struct McHandler {
     provider_store: Arc<providers::Storage>,
     provider_serial: Arc<providers::ProviderSerial>,
     provider_runner: Arc<dyn session_resolver::ProviderRunner>,
+    provider_historian_worker: OnceLock<Arc<McHandler>>,
+    #[cfg(test)]
+    provider_historian_gate: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+    #[cfg(test)]
+    provider_historian_scan_rows: Arc<AtomicU64>,
     #[cfg(test)]
     guidance_now_ms: Mutex<Option<i64>>,
     #[cfg(test)]
@@ -4191,12 +4196,21 @@ fn historian_trigger_rule(reason: boundary::TriggerReason) -> &'static str {
 
 struct HistorianPrepareContext<'a> {
     now: i64,
-    snapshot_generation: u64,
+    // Provider runs compare selected message fingerprints and lineage cuts
+    // against the database. They have no full-request cache generation to check,
+    // including when a restarted module adopts a report from a host claimant.
+    snapshot_generation: Option<u64>,
+    publication_fence: Option<Arc<dyn historian::HistorianPublicationFence>>,
     /// Final immutable tag rows validated by the transform's generation/count/max identity.
     /// Early pass-through paths leave this absent and retain the legacy store fallback.
     tag_snapshot: Option<Arc<Vec<McTagRow>>>,
     reclaim_ride_available: bool,
     timings: &'a mut HistorianTriggerTimings,
+}
+
+struct ReattachPublicationGuards {
+    snapshot_generation: Option<u64>,
+    log_fence: Option<Arc<dyn historian::HistorianPublicationFence>>,
 }
 
 #[derive(Default)]
@@ -4435,6 +4449,7 @@ struct HistorianFiringTask {
     live_guard: SessionSetGuard,
     connect_failure_commit_hook: ConnectFailureCommitHook,
     publication_fence: Option<Arc<dyn historian::HistorianPublicationFence>>,
+    provider_completion: Option<providers::RunCompletion>,
 }
 
 #[async_trait]
@@ -4494,7 +4509,7 @@ impl McHandler {
             store_open: Arc::new(StoreOpenCoordinator::new()),
             producer_factory,
             session_resolver,
-            config: Mutex::new(ConfigCache::default()),
+            config: Arc::new(Mutex::new(ConfigCache::default())),
             historian_runner_refusals: Arc::new(HistorianRunnerRefusalCache::default()),
             host_runs: Arc::new(HostRunLedger::new()),
             runner_choices: Arc::new(Mutex::new(runner_choices::RunnerChoiceLog::default())),
@@ -4514,7 +4529,9 @@ impl McHandler {
             serialized_outputs: Mutex::new(SerializedOutputCache::default()),
             native_attachments: Mutex::new(NativeAttachmentCache::default()),
             projections: Mutex::new(ProjectionCache::default()),
-            boundary_tokens: Mutex::new(BoundaryTokenCache::new(BOUNDARY_TOKEN_CACHE_BUDGET_BYTES)),
+            boundary_tokens: Arc::new(Mutex::new(BoundaryTokenCache::new(
+                BOUNDARY_TOKEN_CACHE_BUDGET_BYTES,
+            ))),
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             tool_provider_v1_channels: Mutex::new(HashSet::new()),
@@ -4522,6 +4539,11 @@ impl McHandler {
             provider_store,
             provider_serial: Arc::new(providers::ProviderSerial::default()),
             provider_runner,
+            provider_historian_worker: OnceLock::new(),
+            #[cfg(test)]
+            provider_historian_gate: Mutex::new(None),
+            #[cfg(test)]
+            provider_historian_scan_rows: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             guidance_now_ms: Mutex::new(None),
             #[cfg(test)]
@@ -4900,7 +4922,7 @@ impl McHandler {
             store_open: Arc::new(StoreOpenCoordinator::new()),
             producer_factory: factory,
             session_resolver,
-            config: Mutex::new(ConfigCache::default()),
+            config: Arc::new(Mutex::new(ConfigCache::default())),
             historian_runner_refusals: Arc::new(HistorianRunnerRefusalCache::default()),
             host_runs: Arc::new(HostRunLedger::new()),
             runner_choices: Arc::new(Mutex::new(runner_choices::RunnerChoiceLog::default())),
@@ -4919,7 +4941,9 @@ impl McHandler {
             serialized_outputs: Mutex::new(SerializedOutputCache::default()),
             native_attachments: Mutex::new(NativeAttachmentCache::default()),
             projections: Mutex::new(ProjectionCache::default()),
-            boundary_tokens: Mutex::new(BoundaryTokenCache::new(BOUNDARY_TOKEN_CACHE_BUDGET_BYTES)),
+            boundary_tokens: Arc::new(Mutex::new(BoundaryTokenCache::new(
+                BOUNDARY_TOKEN_CACHE_BUDGET_BYTES,
+            ))),
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             tool_provider_v1_channels: Mutex::new(HashSet::new()),
@@ -4927,6 +4951,9 @@ impl McHandler {
             provider_store,
             provider_serial: Arc::new(providers::ProviderSerial::default()),
             provider_runner: Arc::new(session_resolver::MissingProviderRunner),
+            provider_historian_worker: OnceLock::new(),
+            provider_historian_gate: Mutex::new(None),
+            provider_historian_scan_rows: Arc::new(AtomicU64::new(0)),
             guidance_now_ms: Mutex::new(None),
             reduction_injection: Mutex::new(HashMap::new()),
             between_transform_and_prepare: Mutex::new(None),
@@ -5929,11 +5956,15 @@ impl McHandler {
         &self,
         store: Arc<McStore>,
         parsed: &TransformRequest,
-        snapshot_generation: u64,
+        guards: ReattachPublicationGuards,
         binding: &SessionBinding,
         projection: &crate::ck_wire::FlatProjection,
         now: i64,
     ) -> Option<&'static str> {
+        let ReattachPublicationGuards {
+            snapshot_generation,
+            log_fence: log_publication_fence,
+        } = guards;
         let project_path = binding.project_root.to_string_lossy().to_string();
         let harness = binding.harness.clone();
         let config = self.effective_config(&binding.project_root);
@@ -6027,13 +6058,17 @@ impl McHandler {
                 drop(guard);
                 return Some("reattaching");
             }
-            let publication_fence = Arc::new(ReattachSnapshotPublicationFence {
-                snapshots: Arc::clone(&self.transform_snapshots),
-                session_id: session_id.clone(),
-                generation: snapshot_generation,
-                #[cfg(test)]
-                after_store_publish: Arc::clone(&self.publication_fence_write_hook),
-            });
+            let publication_fence = snapshot_generation
+                .map(|generation| {
+                    Arc::new(ReattachSnapshotPublicationFence {
+                        snapshots: Arc::clone(&self.transform_snapshots),
+                        session_id: session_id.clone(),
+                        generation,
+                        #[cfg(test)]
+                        after_store_publish: Arc::clone(&self.publication_fence_write_hook),
+                    }) as Arc<dyn historian::HistorianPublicationFence>
+                })
+                .or_else(|| log_publication_fence.clone());
             let live: Vec<_> = projection
                 .blocks
                 .iter()
@@ -6104,7 +6139,9 @@ impl McHandler {
                         now_ms: now,
                         failure_backoff_at_ms: now + HISTORIAN_FAILURE_BACKOFF_MS,
                         completion_now_ms: now_ms,
-                        publication_fence: Some(publication_fence.as_ref()),
+                        publication_fence: publication_fence
+                            .as_deref()
+                            .map(|f| f as &dyn historian::HistorianPublicationFence),
                     });
                 match outcome {
                     Ok(historian::HostRunAdoption::Published(success)) => eprintln!(
@@ -6131,13 +6168,17 @@ impl McHandler {
 
         match phase {
             HistorianPhase::AwaitingProducer => {
-                let publication_fence = Arc::new(ReattachSnapshotPublicationFence {
-                    snapshots: Arc::clone(&self.transform_snapshots),
-                    session_id: session_id.clone(),
-                    generation: snapshot_generation,
-                    #[cfg(test)]
-                    after_store_publish: Arc::clone(&self.publication_fence_write_hook),
-                });
+                let publication_fence = snapshot_generation
+                    .map(|generation| {
+                        Arc::new(ReattachSnapshotPublicationFence {
+                            snapshots: Arc::clone(&self.transform_snapshots),
+                            session_id: session_id.clone(),
+                            generation,
+                            #[cfg(test)]
+                            after_store_publish: Arc::clone(&self.publication_fence_write_hook),
+                        }) as Arc<dyn historian::HistorianPublicationFence>
+                    })
+                    .or_else(|| log_publication_fence.clone());
                 let factory = Arc::clone(&self.producer_factory);
                 let project_root = PathBuf::from(&project_path);
                 let live: Vec<_> = projection
@@ -6233,7 +6274,9 @@ impl McHandler {
                                 now_ms: now,
                                 failure_backoff_at_ms: now + HISTORIAN_FAILURE_BACKOFF_MS,
                                 completion_now_ms: now_ms,
-                                publication_fence: Some(publication_fence.as_ref()),
+                                publication_fence: publication_fence
+                                    .as_deref()
+                                    .map(|f| f as &dyn historian::HistorianPublicationFence),
                             },
                         )
                         .await
@@ -6288,6 +6331,7 @@ impl McHandler {
         let HistorianPrepareContext {
             now,
             snapshot_generation,
+            publication_fence,
             tag_snapshot,
             reclaim_ride_available,
             timings,
@@ -6370,7 +6414,10 @@ impl McHandler {
                 .maybe_spawn_reattach(
                     Arc::clone(&store),
                     parsed,
-                    snapshot_generation,
+                    ReattachPublicationGuards {
+                        snapshot_generation,
+                        log_fence: publication_fence.clone(),
+                    },
                     binding,
                     projection,
                     now,
@@ -6910,7 +6957,8 @@ impl McHandler {
                 // Organic pressure firings assemble and publish in one continuous drive
                 // while the live-session guard is held. They do not depend on a cached raw
                 // snapshot, so a transform-snapshot generation fence would reject valid work.
-                publication_fence: None,
+                publication_fence,
+                provider_completion: None,
             },
         }))
     }
@@ -7070,6 +7118,7 @@ impl McHandler {
             live_guard,
             connect_failure_commit_hook: Arc::clone(&self.connect_failure_commit_hook),
             publication_fence: None,
+            provider_completion: None,
         }))
     }
 
@@ -7171,6 +7220,7 @@ impl McHandler {
             live_guard,
             connect_failure_commit_hook,
             publication_fence,
+            provider_completion,
         } = task;
         let _guard = live_guard;
         tracing::info!(
@@ -7207,6 +7257,9 @@ impl McHandler {
             );
             let result =
                 historian::run_historian_firing_on_host(&host_runs, request, firing_budget).await;
+            if let Some(completion) = provider_completion {
+                completion.record(&store, &session_id, &result);
+            }
             if let Ok(loaded) = store.load(&session_id) {
                 DISPATCH_HEALTH.record_historian_outcome(
                     historian_status_summary(&loaded.meta.historian),
@@ -7262,6 +7315,9 @@ impl McHandler {
                 historian_status_summary(&loaded.meta.historian),
                 loaded.meta.historian.recent_decisions.len(),
             );
+        }
+        if let Some(completion) = provider_completion {
+            completion.record(&store, &session_id, &result);
         }
         result
     }
@@ -10655,7 +10711,8 @@ impl McHandler {
                 &result.projection,
                 HistorianPrepareContext {
                     now: pass_now,
-                    snapshot_generation,
+                    snapshot_generation: Some(snapshot_generation),
+                    publication_fence: None,
                     tag_snapshot: result.historian_tags.clone(),
                     reclaim_ride_available: result.reclaim_ride_available,
                     timings: &mut trigger_timings,
@@ -10687,7 +10744,8 @@ impl McHandler {
                             &result.projection,
                             HistorianPrepareContext {
                                 now: pass_now,
-                                snapshot_generation,
+                                snapshot_generation: Some(snapshot_generation),
+                                publication_fence: None,
                                 tag_snapshot: result.historian_tags.clone(),
                                 reclaim_ride_available: result.reclaim_ride_available,
                                 timings: &mut trigger_timings,
@@ -10760,7 +10818,8 @@ impl McHandler {
                 &result.projection,
                 HistorianPrepareContext {
                     now: pass_now,
-                    snapshot_generation,
+                    snapshot_generation: Some(snapshot_generation),
+                    publication_fence: None,
                     tag_snapshot: result.historian_tags.clone(),
                     reclaim_ride_available: result.reclaim_ride_available,
                     timings: &mut trigger_timings,
@@ -10999,10 +11058,17 @@ impl McHandler {
             let Some(store) = self.store.get() else {
                 return self.store_refusal();
             };
+            let chain: Option<Vec<String>> = match request.get("historian_model_chain") {
+                Some(value) => match serde_json::from_value(value.clone()) {
+                    Ok(chain) => Some(chain),
+                    Err(error) => return providers::invalid(error),
+                },
+                None => None,
+            };
             return match self.sync_provider_pass_inputs(
                 &binding,
                 store,
-                None,
+                chain.as_deref(),
                 request.get("pass_complete") == Some(&Value::Bool(true)),
                 request.get("provider_pass"),
             ) {
@@ -11688,6 +11754,11 @@ impl McHandler {
                     provider_pass,
                 ) {
                     return error;
+                }
+                if pass_complete {
+                    if let Some((key, _)) = self.host_provider_conversation(binding) {
+                        self.schedule_provider_historian(binding.clone(), key);
+                    }
                 }
                 self.set_note_evaluation_capability(
                     &binding.project_root,

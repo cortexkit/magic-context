@@ -6979,7 +6979,11 @@ fn apply_once(
         agent_drops_applied_this_pass,
     );
 
-    if tagging_active && !compaction::host_pass(req) {
+    // Full-request transforms and provider engine steps decide Channel 1 here,
+    // after reductions and their compliance grace. Provider inputs omit the
+    // hook-reminder Appends; separately saved engine units retain any earlier
+    // reminder's exact bytes, so no hook text enters as a second copy.
+    if tagging_active {
         if let Some((row, unit)) = maybe_append_channel1_nudge(
             Channel1NudgeInputs {
                 ctx,
