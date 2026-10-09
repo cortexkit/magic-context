@@ -98,6 +98,10 @@ export const V85_OPENCODE2_RELABEL_TABLES = [
     "host_runner_ids",
     "host_runner_views",
     "host_runner_state",
+    "memory_applied_rows",
+    "memory_applied_snapshots",
+    "memory_stage_attempts",
+    "memory_check_attempts",
 ] as const;
 
 /**

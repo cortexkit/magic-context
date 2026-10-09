@@ -1,21 +1,46 @@
 import { createHash } from "node:crypto";
-import { CLAUSE_ABBREVIATIONS, CONCRETE_UNITS, NARROW_CHECK_WINDOW_MAX } from "./lifecycle-constants";
+import {
+    CLAUSE_ABBREVIATIONS,
+    CONCRETE_UNITS,
+    NARROW_CHECK_WINDOW_MAX,
+} from "./lifecycle-constants";
 
-const SPACE = /[\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]/;
-export const isLifecycleWhitespace = (char: string): boolean => SPACE.test(char);
-export function normalizeLifecycleText(text: string): string {
-    return text.replace(/[\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]+/g, " ").replace(/^ | $/g, "");
+export function isLifecycleWhitespace(char: string): boolean {
+    const code = char.charCodeAt(0);
+    return (
+        (code >= 0x09 && code <= 0x0d) ||
+        code === 0x20 ||
+        code === 0x85 ||
+        code === 0xa0 ||
+        code === 0x1680 ||
+        (code >= 0x2000 && code <= 0x200a) ||
+        code === 0x2028 ||
+        code === 0x2029 ||
+        code === 0x202f ||
+        code === 0x205f ||
+        code === 0x3000
+    );
 }
-export const lifecycleTextHash = (text: string): string => createHash("sha256").update(text).digest("hex");
+export function normalizeLifecycleText(text: string): string {
+    return normalizedOffsets(text).text;
+}
+export const lifecycleTextHash = (text: string): string =>
+    createHash("sha256").update(text).digest("hex");
 
-export interface Clause { ordinal: number; text: string; start: number; end: number }
+export interface Clause {
+    ordinal: number;
+    text: string;
+    start: number;
+    end: number;
+}
 export function splitMemoryClauses(text: string): Clause[] {
     const clauses: Clause[] = [];
     let start = 0;
     let tickWidth = 0;
     let listLine = /^\s*(?:[-*+] |\d+[.)] )/.test(text.split("\n")[0] ?? "");
     const emit = (end: number) => {
-        if (end > start) clauses.push({ ordinal: clauses.length + 1, text: text.slice(start, end), start, end });
+        if (end > start)
+            clauses.push({ ordinal: clauses.length + 1, text: text.slice(start, end), start, end });
         start = end;
     };
     for (let i = 0; i < text.length; i++) {
@@ -36,9 +61,18 @@ export function splitMemoryClauses(text: string): Clause[] {
             continue;
         }
         if (listLine) continue;
-        if (char === "—" && isLifecycleWhitespace(text[i - 1] ?? "") && isLifecycleWhitespace(text[i + 1] ?? "")) {
+        if (
+            char === "—" &&
+            isLifecycleWhitespace(text[i - 1] ?? "") &&
+            isLifecycleWhitespace(text[i + 1] ?? "")
+        ) {
             let end = i + 1;
-            while (end < text.length && text[end] !== "\n" && isLifecycleWhitespace(text[end] ?? "")) end++;
+            while (
+                end < text.length &&
+                text[end] !== "\n" &&
+                isLifecycleWhitespace(text[end] ?? "")
+            )
+                end++;
             emit(end);
             i = end - 1;
             continue;
@@ -52,6 +86,8 @@ export function splitMemoryClauses(text: string): Clause[] {
         }
         let end = i + 1;
         while (end < text.length && isLifecycleWhitespace(text[end] ?? "")) end++;
+        if (text.slice(i + 1, end).includes("\n"))
+            listLine = /^\s*(?:[-*+] |\d+[.)] )/.test(text.slice(end).split("\n")[0] ?? "");
         emit(end);
         i = end - 1;
     }
@@ -59,39 +95,73 @@ export function splitMemoryClauses(text: string): Clause[] {
     return clauses;
 }
 
-export interface EvidenceBlock { startOrdinal: number; endOrdinal: number; role: string; parts: string[]; joinedText: string }
-export interface EvidenceSpan { blockStartOrdinal: number; partIndex: number; start: number; end: number; text: string; window: string }
+export interface EvidenceBlock {
+    startOrdinal: number;
+    endOrdinal: number;
+    role: string;
+    parts: string[];
+    joinedText: string;
+}
+export interface EvidenceSpan {
+    blockStartOrdinal: number;
+    partIndex: number;
+    start: number;
+    end: number;
+    text: string;
+    window: string;
+}
 
 // Ordinal prefixes and Pi message headers contain varying numbers, so match their whole formats.
 export const EVIDENCE_MARKERS: readonly string[] = [
-    " / ", "...[truncated]", "[… tokens truncated by Magic Context to fit the historian window …]", "…",
-    "[dropped]", "[dropped §", "[truncated §", "<!-- +",
+    " / ",
+    "[N]",
+    "[N-M]",
+    "Messages N-M:",
+    "...[truncated]",
+    "[… tokens truncated by Magic Context to fit the historian window …]",
+    "…",
+    "… +N more",
+    "[dropped]",
+    "[dropped §",
+    "[truncated §",
+    "<!-- +",
 ];
-export const EVIDENCE_MARKER_PATTERNS: readonly RegExp[] = [/\[\d+(?:-\d+)?\]/, /Messages \d+-\d+:/];
+export const EVIDENCE_MARKER_PATTERNS: readonly RegExp[] = [
+    /\[\d+(?:-\d+)?\]/,
+    /Messages \d+-\d+:/,
+];
 export function hasEvidenceMarker(text: string): boolean {
-    return EVIDENCE_MARKERS.some((marker) => text.includes(marker)) || EVIDENCE_MARKER_PATTERNS.some((marker) => marker.test(text));
+    return (
+        EVIDENCE_MARKERS.some((marker) => text.includes(marker)) ||
+        EVIDENCE_MARKER_PATTERNS.some((marker) => marker.test(text))
+    );
 }
 
 function normalizedOffsets(text: string): { text: string; starts: number[]; ends: number[] } {
     let normalized = "";
     const starts: number[] = [];
     const ends: number[] = [];
-    for (let i = 0; i < text.length;) {
+    for (let i = 0; i < text.length; ) {
         if (isLifecycleWhitespace(text[i] ?? "")) {
             const start = i;
             while (i < text.length && isLifecycleWhitespace(text[i] ?? "")) i++;
             if (normalized && i < text.length) {
-                normalized += " "; starts.push(start); ends.push(i);
+                normalized += " ";
+                starts.push(start);
+                ends.push(i);
             }
         } else {
-            normalized += text[i]; starts.push(i); ends.push(i + 1); i++;
+            normalized += text[i];
+            starts.push(i);
+            ends.push(i + 1);
+            i++;
         }
     }
     return { text: normalized, starts, ends };
 }
 function safeStart(text: string, start: number): number {
     const code = text.charCodeAt(start);
-    return code >= 0xDC00 && code <= 0xDFFF ? start + 1 : start;
+    return code >= 0xdc00 && code <= 0xdfff ? start + 1 : start;
 }
 export function extractEvidenceWindow(part: string, start: number, end: number): string | null {
     if (end - start > NARROW_CHECK_WINDOW_MAX) return null;
@@ -115,7 +185,11 @@ export function extractEvidenceWindow(part: string, start: number, end: number):
     }
     return part.slice(windowStart, windowEnd);
 }
-export function matchFactEvidence(blocks: readonly EvidenceBlock[], ordinal: number, excerpt: string): EvidenceSpan | null {
+export function matchFactEvidence(
+    blocks: readonly EvidenceBlock[],
+    ordinal: number,
+    excerpt: string,
+): EvidenceSpan | null {
     if (hasEvidenceMarker(excerpt)) return null;
     const needle = normalizeLifecycleText(excerpt);
     if (!needle) return null;
@@ -148,24 +222,55 @@ export function scanConcreteTokens(input: string): string[] {
         if (text[i] === "`") {
             const ticks = /^`+/.exec(rest)?.[0] ?? "`";
             const end = text.indexOf(ticks, i + ticks.length);
-            if (end >= 0) { tokens.push(text.slice(i, end + ticks.length)); i = end + ticks.length; continue; }
+            if (end >= 0) {
+                tokens.push(text.slice(i, end + ticks.length));
+                i = end + ticks.length;
+                continue;
+            }
         }
-        if (isLifecycleWhitespace(text[i] ?? "")) { i++; continue; }
-        const raw = /^[^\s`]+/.exec(rest)?.[0] ?? "";
+        if (isLifecycleWhitespace(text[i] ?? "")) {
+            i++;
+            continue;
+        }
+        let wordEnd = i;
+        while (
+            wordEnd < text.length &&
+            !isLifecycleWhitespace(text[wordEnd] ?? "") &&
+            text[wordEnd] !== "`"
+        )
+            wordEnd++;
+        const raw = text.slice(i, wordEnd);
         const word = raw.replace(/[.,;:!?)}\]]+$/, "");
-        if (word.includes("/") || /\.[A-Za-z0-9]{1,5}$/.test(word) || /^[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)+$/.test(word) || /^[A-Z0-9]+(?:_[A-Z0-9]+)+$/.test(word)) {
-            tokens.push(word); i += raw.length; continue;
+        if (
+            word.includes("/") ||
+            /\.[A-Za-z0-9]{1,5}$/.test(word) ||
+            /^[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)+$/.test(word) ||
+            /^[A-Z0-9]+(?:_[A-Z0-9]+)+$/.test(word)
+        ) {
+            tokens.push(word);
+            i += raw.length;
+            continue;
         }
         const date = /^(?:\d{4}-\d{2}-\d{2}|\d{2}:\d{2})(?![A-Za-z0-9_])/.exec(rest)?.[0];
-        if (date) { tokens.push(date); i += date.length; continue; }
+        if (date) {
+            tokens.push(date);
+            i += date.length;
+            continue;
+        }
         const number = /^[><≥≤]?\d+(?:\.\d+)?/.exec(rest)?.[0];
         if (number && !/[A-Za-z0-9_]/.test(text[i + number.length] ?? "")) {
             let end = i + number.length;
             let unitStart = end;
             while (isLifecycleWhitespace(text[unitStart] ?? "")) unitStart++;
-            const unit = units.find((candidate) => text.startsWith(candidate, unitStart) && !/[A-Za-z0-9_]/.test(text[unitStart + candidate.length] ?? ""));
+            const unit = units.find(
+                (candidate) =>
+                    text.startsWith(candidate, unitStart) &&
+                    !/[A-Za-z0-9_]/.test(text[unitStart + candidate.length] ?? ""),
+            );
             if (unit) end = unitStart + unit.length;
-            tokens.push(text.slice(i, end)); i = end; continue;
+            tokens.push(text.slice(i, end));
+            i = end;
+            continue;
         }
         // Skip whole non-token words to avoid numeric and identifier suffix collisions.
         i += raw.length || 1;

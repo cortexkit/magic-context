@@ -73,6 +73,10 @@ function makePreV65ReplayFixture(db: DatabaseType): void {
     // behind them and produce a different column ORDER than a fresh database for
     // the same set of columns.
     db.exec(`
+        ALTER TABLE memories DROP COLUMN verify_commit;
+        ALTER TABLE memories DROP COLUMN verify_files_json;
+        ALTER TABLE memories DROP COLUMN verify_result;
+        ALTER TABLE memories DROP COLUMN revision;
         ALTER TABLE memories DROP COLUMN mural_cue_rejection_count;
         ALTER TABLE memories DROP COLUMN mural_cue_at;
         ALTER TABLE memories DROP COLUMN mural_cue_hash;

@@ -1,11 +1,11 @@
-import { sessionLog } from "../../../shared/logger";
 import { randomUUID } from "node:crypto";
+import { sessionLog } from "../../../shared/logger";
 import type { Database } from "../../../shared/sqlite";
 import { PROMOTABLE_CATEGORIES } from "./constants";
 import { embedTextForProject } from "./embedding";
+import { type ApplierReceipt, applyMemoryAdmission } from "./lifecycle-applier";
 import { computeNormalizedHash } from "./normalize-hash";
 import { getMemoryById } from "./storage-memory";
-import { applyMemoryAdmission, type ApplierReceipt } from "./lifecycle-applier";
 import { saveEmbeddingIfHashMatches } from "./storage-memory-embeddings";
 import type { MemoryCategory, MemoryInput } from "./types";
 
@@ -68,10 +68,15 @@ export function promoteSessionFactsDurable(
             sourceSessionId: sessionId,
             sourceType: "historian",
         };
-        const receipt = applyMemoryAdmission(db, { key: randomUUID(), operation: "new", input: memoryInput });
+        const receipt = applyMemoryAdmission(db, {
+            key: randomUUID(),
+            operation: "new",
+            input: memoryInput,
+        });
         receipts.push(receipt);
         if (receipt.state === "applied") {
-            if (receipt.inserted) newMemoryRefs.push({ memoryId: receipt.memoryId!, content: fact.content });
+            if (receipt.inserted)
+                newMemoryRefs.push({ memoryId: receipt.memoryId!, content: fact.content });
             factsPromoted += 1;
         }
     }

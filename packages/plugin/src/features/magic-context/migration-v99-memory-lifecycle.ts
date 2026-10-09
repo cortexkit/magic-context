@@ -3,11 +3,20 @@ import { ensureColumn } from "./storage-schema-helpers";
 
 /** Project evidence survives deletion of the session that originally produced it. */
 export function installMemoryLifecycleSchema(db: Database): void {
-    ensureColumn(db, "memories", "revision", "INTEGER NOT NULL DEFAULT 1");
-    ensureColumn(db, "memories", "verify_result", "TEXT");
-    ensureColumn(db, "memories", "verify_files_json", "TEXT");
-    ensureColumn(db, "memories", "verify_commit", "TEXT");
-    ensureColumn(db, "memory_mutation_log", "adoption_class", "TEXT NOT NULL DEFAULT 'live' CHECK(adoption_class IN ('live','deferred'))");
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE name='memories'").get()) {
+        ensureColumn(db, "memories", "revision", "INTEGER NOT NULL DEFAULT 1");
+        ensureColumn(db, "memories", "verify_result", "TEXT");
+        ensureColumn(db, "memories", "verify_files_json", "TEXT");
+        ensureColumn(db, "memories", "verify_commit", "TEXT");
+    }
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE name='memory_mutation_log'").get()) {
+        ensureColumn(
+            db,
+            "memory_mutation_log",
+            "adoption_class",
+            "TEXT NOT NULL DEFAULT 'live' CHECK(adoption_class IN ('live','deferred'))",
+        );
+    }
     db.exec(`
         CREATE TABLE IF NOT EXISTS memory_publications (
             publication_id TEXT PRIMARY KEY,

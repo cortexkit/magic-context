@@ -313,7 +313,11 @@ describe("promotion", () => {
                 computeNormalizedHash("Use createX naming for factories"),
             );
 
-            expect(result).toMatchObject({ newMemoryRefs: [], factsPromoted: 1, receipts: [{state: "applied",reason: "live_match",memoryId: memory!.id}] });
+            expect(result).toMatchObject({
+                newMemoryRefs: [],
+                factsPromoted: 1,
+                receipts: [{ state: "applied", reason: "live_match", memoryId: memory!.id }],
+            });
             expect(memory?.seenCount).toBe(2);
         });
 

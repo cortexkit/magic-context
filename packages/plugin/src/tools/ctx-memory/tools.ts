@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import { DREAMER_AGENT } from "../../agents/dreamer";
 import {
@@ -12,7 +13,6 @@ import {
 import {
     CATEGORY_PRIORITY,
     getMemoriesByIds,
-    getMemoryByHash,
     getMemoryById,
     type Memory,
     type MemoryCategory,
@@ -24,15 +24,15 @@ import {
     enqueueShadowEmbeddingItems,
     getProjectEmbeddingSnapshot,
 } from "../../features/magic-context/memory/embedding";
+import {
+    applyMemoryAdmission,
+    proposeMemoryMutation,
+} from "../../features/magic-context/memory/lifecycle-applier";
 import { createMemoryVisibilityPolicy } from "../../features/magic-context/memory/memory-visibility";
 import { computeNormalizedHash } from "../../features/magic-context/memory/normalize-hash";
 import { describeUnresolvedProjectIdentity } from "../../features/magic-context/memory/project-identity";
-import {
-    getMemoriesForList,
-} from "../../features/magic-context/memory/storage-memory";
-import {
-    normalizeStoredProjectPath,
-} from "../../features/magic-context/storage";
+import { getMemoriesForList } from "../../features/magic-context/memory/storage-memory";
+import { normalizeStoredProjectPath } from "../../features/magic-context/storage";
 import {
     projectNeedsSingleStoreMigration,
     renderSingleStoreMigrationRequiredRefusal,
@@ -53,8 +53,6 @@ import {
     type CtxMemoryArgs,
     type CtxMemoryToolDeps,
 } from "./types";
-import { randomUUID } from "node:crypto";
-import { applyMemoryAdmission, proposeMemoryMutation } from "../../features/magic-context/memory/lifecycle-applier";
 
 export { CTX_MEMORY_LIGHT_DESCRIPTION } from "../light-descriptions";
 
@@ -239,7 +237,6 @@ function getDisabledMessage(): string {
     return "Cross-session memory is disabled for this project.";
 }
 
-
 function requestRustMemorySync(deps: CtxMemoryToolDeps, sessionId: string): void {
     try {
         deps.rustToolBackends?.memorySync?.(sessionId);
@@ -329,7 +326,6 @@ function isPrimaryMutableMemory(memory: Memory): boolean {
 function inactiveMemoryError(id: number, action: "updating" | "merging" | "archiving"): string {
     return `Error: Memory with ID ${id} is archived or superseded; restore it before ${action}.`;
 }
-
 
 const ctxMemoryArgsShape = {
     // Advertise only primary actions. The separate ctx_memory_list tool reuses this
@@ -496,11 +492,23 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 const receipt = applyMemoryAdmission(deps.db, {
                     key: randomUUID(),
                     operation: "agent_save",
-                    input: { projectPath, category, content, sourceSessionId: toolContext.sessionID },
+                    input: {
+                        projectPath,
+                        category,
+                        content,
+                        sourceSessionId: toolContext.sessionID,
+                    },
                 });
                 if (receipt.state !== "applied") return `${receipt.reason}: memory was not saved.`;
-                if (!receipt.inserted) return `Memory already exists [ID: ${receipt.memoryId}] in ${category} (seen count incremented).`;
-                queueMemoryEmbedding({ deps, sessionId: toolContext.sessionID, projectPath, memoryId: receipt.memoryId!, content });
+                if (!receipt.inserted)
+                    return `Memory already exists [ID: ${receipt.memoryId}] in ${category} (seen count incremented).`;
+                queueMemoryEmbedding({
+                    deps,
+                    sessionId: toolContext.sessionID,
+                    projectPath,
+                    memoryId: receipt.memoryId!,
+                    content,
+                });
                 requestRustMemorySync(deps, toolContext.sessionID);
                 return `Saved memory [ID: ${receipt.memoryId}] in ${category}.`;
             }
@@ -601,15 +609,9 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 if (sourceMemories.length !== ids.length) {
                     return "Error: One or more source memories were not found.";
                 }
-                // Cross-identity consolidation is a DREAMER-ONLY capability: the
-                // loop below supersedes each source under ITS OWN project identity
-                // and queues a per-project supersede-delta row, so every affected
-                // project's m[1] reconciles. But `merge` is now in the primary
-                // action set too, and a primary agent must not be able to reach
-                // into ANOTHER project's memories. So mirror update/archive: a
-                // non-dreamer caller may only merge memories that all belong to
-                // its own resolved project. The dreamer keeps the cross-identity
-                // path (see the "merging across identities" test).
+                // Primary agents may propose changes only to their own project's memories.
+                // The dreamer may propose cross-project consolidation, but workspace sharing
+                // still controls which source rows it is allowed to read.
                 if (toolContext.agent !== DREAMER_AGENT) {
                     const foreign = sourceMemories.find((memory) => !memoryOwnedByTool(memory));
                     if (foreign) {
@@ -672,13 +674,11 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 ) {
                     return "Error: 'ids' must contain at least one integer memory ID when action is 'archive'.";
                 }
-                // De-dupe (first-seen order) so `ids:[42,42]` archives once and
-                // queues one mutation-log row instead of two.
+                // Preserve first-seen order and record each requested target only once.
                 const archiveIds = [...new Set(rawArchiveIds)];
 
-                // Validate the whole batch BEFORE mutating anything so a typo'd
-                // id can't half-archive a batch (all-or-nothing, matching the
-                // single-transaction write below).
+                // Validate the entire batch before recording a proposal, so a bad id cannot
+                // leave a partial archive request on the review list.
                 const targets: Array<{ memoryId: number; projectIdentity: string }> = [];
                 for (const memoryId of archiveIds) {
                     const rawProjectPath = projectPathForMemoryId(deps.db, memoryId);

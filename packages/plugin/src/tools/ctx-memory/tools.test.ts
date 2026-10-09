@@ -38,6 +38,8 @@ import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
 const { createCtxMemoryListTools, createCtxMemoryTools } = await import("./tools");
 
+import { installMemoryLifecycleSchema } from "../../features/magic-context/migration-v99-memory-lifecycle";
+
 function createTestDb(dbPath = ":memory:"): Database {
     const db = new Database(dbPath);
     db.exec(`
@@ -225,7 +227,22 @@ function createTestDb(dbPath = ":memory:"): Database {
         VALUES (new.id, new.content, new.category);
         END;
     `);
+    db.exec("CREATE TABLE IF NOT EXISTS authority_repair_pending(project_path TEXT PRIMARY KEY)");
+    installMemoryLifecycleSchema(db);
     return db;
+}
+
+function expectPendingProposal(
+    db: Database,
+    result: unknown,
+    memories: Array<NonNullable<ReturnType<typeof getMemoryById>>>,
+): void {
+    expect(String(result)).toContain("MEMORY_PENDING_PROPOSAL");
+    for (const memory of memories) expect(getMemoryById(db, memory.id)).toEqual(memory);
+    expect(
+        (db.prepare("SELECT COUNT(*) AS n FROM memory_tool_proposals").get() as { n: number }).n,
+    ).toBeGreaterThan(0);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM memory_mutation_log").get()).toEqual({ n: 0 });
 }
 
 it("bounded memory lists preserve full-reader ordering, legacy categories and invalid-row filtering", () => {
@@ -619,7 +636,7 @@ describe("createCtxMemoryTools", () => {
             expect(row?.count).toBe(1);
         });
 
-        it("returns an exact-dedup response when another writer wins after the pre-check", async () => {
+        it("serializes admission against other writers and deduplicates the next save", async () => {
             const tempDir = createTestTempDirFromPath(join(tmpdir(), "ctx-memory-race-"));
             const dbPath = join(tempDir, "context.db");
             const db1 = createTestDb(dbPath);
@@ -632,7 +649,6 @@ describe("createCtxMemoryTools", () => {
             });
             const originalPrepare = db1.prepare.bind(db1);
             let injected = false;
-            let winnerInsert: ReturnType<typeof insertMemoryIdempotent> | null = null;
             (db1 as unknown as { prepare: typeof db1.prepare }).prepare = ((sql: string) => {
                 const stmt = originalPrepare(sql);
                 if (sql.startsWith("INSERT INTO memories")) {
@@ -640,13 +656,15 @@ describe("createCtxMemoryTools", () => {
                     (stmt as unknown as { run: typeof stmt.run }).run = ((...args: unknown[]) => {
                         if (!injected) {
                             injected = true;
-                            winnerInsert = insertMemoryIdempotent(db2, {
-                                projectPath: "/repo/project",
-                                category: "USER_DIRECTIVES",
-                                content: "Race-safe exact dedup",
-                                sourceSessionId: "ses-memory-2",
-                                sourceType: "agent",
-                            });
+                            expect(() =>
+                                insertMemoryIdempotent(db2, {
+                                    projectPath: "/repo/project",
+                                    category: "USER_DIRECTIVES",
+                                    content: "Race-safe exact dedup",
+                                    sourceSessionId: "ses-memory-2",
+                                    sourceType: "agent",
+                                }),
+                            ).toThrow("locked");
                         }
                         return run(...(args as Parameters<typeof stmt.run>));
                     }) as typeof stmt.run;
@@ -663,11 +681,24 @@ describe("createCtxMemoryTools", () => {
                     },
                     toolContext("ses-memory-1"),
                 );
-                expect(winnerInsert).not.toBeNull();
+                expect(injected).toBe(true);
+                expect(loserResult).toContain("Saved memory");
+                const tools2 = createCtxMemoryTools({
+                    db: db2,
+                    resolveProjectPath: () => "/repo/project",
+                    memoryEnabled: true,
+                    embeddingEnabled: false,
+                });
+                const nextResult = await tools2.ctx_memory.execute(
+                    {
+                        action: "write",
+                        category: "USER_DIRECTIVES",
+                        content: "Race-safe exact dedup",
+                    },
+                    toolContext("ses-memory-2"),
+                );
+                expect(nextResult).toContain("Memory already exists");
                 const memories = getMemoriesByProject(db1, "/repo/project");
-
-                expect(winnerInsert?.inserted).toBe(true);
-                expect(loserResult).toContain("Memory already exists");
                 expect(memories).toHaveLength(1);
                 expect(memories[0]?.seenCount).toBe(2);
             } finally {
@@ -679,10 +710,8 @@ describe("createCtxMemoryTools", () => {
     });
 
     describe("#given archive action by a PRIMARY agent", () => {
-        // archive is now a primary action (it replaced the redundant `delete`
-        // alias). A primary agent — no DREAMER_AGENT context — must be able to
-        // soft-remove a memory it sees in the injected project-memory block.
-        it("archives the memory by ID", async () => {
+        // A primary agent may request a proposal for a visible memory; approval is not implicit.
+        it("retains an archive proposal by ID without changing the row", async () => {
             const memory = insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "KNOWN_ISSUES",
@@ -695,23 +724,16 @@ describe("createCtxMemoryTools", () => {
             );
             const updated = getMemoryById(db, memory.id);
 
-            expect(result).toContain("Archived memory");
-            expect(updated?.status).toBe("archived");
-            expect(getProjectMemoryEpoch(db, "/repo/project")).toBe(0);
-            expect(getMutationRows(db, "/repo/project", [memory.id])).toMatchObject([
-                { mutationType: "archive", targetMemoryId: memory.id },
-            ]);
-            // The get header must not call an archived row "active"; the STATUS column tells the truth.
+            expectPendingProposal(db, result, [memory]);
             const fetched = await tools.ctx_memory.execute(
                 { action: "get", ids: [memory.id] },
                 toolContext(),
             );
-            expect(fetched).toContain("Found 1 memory:");
-            expect(fetched).not.toContain("active memory");
-            expect(fetched).toContain("archived");
+            expect(fetched).toContain("Found 1 active memory:");
+            expect(fetched).toContain("active");
         });
 
-        it("archives a batch of memories in one call, all-or-nothing", async () => {
+        it("retains one batch archive proposal all-or-nothing", async () => {
             const first = insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "KNOWN_ISSUES",
@@ -727,9 +749,7 @@ describe("createCtxMemoryTools", () => {
                 { action: "archive", ids: [first.id, second.id], reason: "obsolete" },
                 toolContext(),
             );
-            expect(batch).toContain(`Archived memories [ID: ${first.id}, ${second.id}]`);
-            expect(getMemoryById(db, first.id)?.status).toBe("archived");
-            expect(getMemoryById(db, second.id)?.status).toBe("archived");
+            expectPendingProposal(db, batch, [first, second]);
 
             // A bad id anywhere in the batch must archive NOTHING.
             const third = insertMemory(db, {
@@ -928,8 +948,7 @@ describe("createCtxMemoryTools", () => {
             toolContext(),
         );
 
-        expect(result).toContain("Archived memory");
-        expect(getMemoryById(db, own.id)?.status).toBe("archived");
+        expectPendingProposal(db, result, [own]);
     });
 
     it("REFUSES a PRIMARY merge that pulls in a foreign memory in a NON-shared category", async () => {
@@ -1169,9 +1188,7 @@ describe("createCtxMemoryTools", () => {
             toolContext("ses-dreamer", DREAMER_AGENT),
         );
 
-        expect(result).not.toContain("not shared");
-        expect(getMemoryById(db, own.id)?.status).toBe("archived");
-        expect(getMemoryById(db, foreignShared.id)?.status).toBe("archived");
+        expectPendingProposal(db, result, [own, { ...foreignShared, shareable: 1 }]);
     });
 
     describe("#given curate safety gates", () => {
@@ -1224,18 +1241,7 @@ describe("createCtxMemoryTools", () => {
                 dreamerToolContext("/repo/project"),
             );
 
-            expect(result).toContain("Archived memory");
-            expect(getMemoryById(db, source.id)).toMatchObject({
-                status: "archived",
-                supersededByMemoryId: successor.id,
-            });
-            expect(getMutationRows(db, "/repo/project", [source.id])).toMatchObject([
-                {
-                    mutationType: "superseded",
-                    targetMemoryId: source.id,
-                    supersededById: successor.id,
-                },
-            ]);
+            expectPendingProposal(db, result, [source, successor]);
         });
 
         it("allows a user-profile reason for a legacy user category when consolidation is valid", async () => {
@@ -1260,8 +1266,7 @@ describe("createCtxMemoryTools", () => {
                 dreamerToolContext("/repo/project"),
             );
 
-            expect(result).toContain("Archived memory");
-            expect(getMemoryById(db, source.id)?.supersededByMemoryId).toBe(successor.id);
+            expectPendingProposal(db, result, [source, successor]);
         });
 
         it("REFUSES a user-profile archive reason for a project-scoped category", async () => {
@@ -1356,8 +1361,7 @@ describe("createCtxMemoryTools", () => {
                 dreamerToolContext("/repo/project"),
             );
 
-            expect(result).toContain("Updated memory");
-            expect(getMemoryById(db, source.id)?.content).toBe("The registry loads.");
+            expectPendingProposal(db, result, [source, successor]);
         });
     });
 
@@ -1391,7 +1395,7 @@ describe("createCtxMemoryTools", () => {
             );
         });
 
-        it("updates memory content and invalidates stale embeddings", async () => {
+        it("pending update preserves content verification and derived data", async () => {
             const memory = insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "CONFIG_DEFAULTS",
@@ -1408,62 +1412,32 @@ describe("createCtxMemoryTools", () => {
                 toolContext("ses-dreamer", DREAMER_AGENT),
             );
 
-            expect(result).toContain(`Updated memory [ID: ${memory.id}]`);
-            expect(getMemoryById(db, memory.id)?.content).toBe("cache_ttl=10m");
-            expect(getMemoryVerifications(db, [memory.id]).has(memory.id)).toBe(false);
-            expect(getProjectMemoryEpoch(db, "/repo/project")).toBe(0);
-            expect(getMutationRows(db, "/repo/project", [memory.id])).toMatchObject([
-                {
-                    mutationType: "update",
-                    targetMemoryId: memory.id,
-                    category: "CONFIG_DEFAULTS",
-                    newContent: "cache_ttl=10m",
-                },
-            ]);
+            expectPendingProposal(db, result, [memory]);
+            expect(getMemoryVerifications(db, [memory.id]).has(memory.id)).toBe(true);
         });
 
-        it("skips saving an embedding when the memory content changes before the provider returns", async () => {
+        it("pending update never starts an embedding request", async () => {
             registerMemoryEmbeddingsForProject(db);
-            let release: (() => void) | undefined;
-            const started = new Promise<void>((resolve) => {
-                installTestEmbeddingProvider(async () => {
-                    resolve();
-                    await new Promise<void>((resume) => {
-                        release = resume;
-                    });
-                    return new Float32Array([3, 4]);
-                });
+            let calls = 0;
+            installTestEmbeddingProvider(async () => {
+                calls++;
+                return new Float32Array([3, 4]);
             });
             const memory = insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "CONFIG_DEFAULTS",
                 content: "cache_ttl=5m",
             });
-
             const result = await tools.ctx_memory.execute(
-                {
-                    action: "update",
-                    ids: [memory.id],
-                    content: "cache_ttl=10m",
-                },
-                toolContext("ses-dreamer", DREAMER_AGENT),
+                { action: "update", ids: [memory.id], content: "cache_ttl=10m" },
+                toolContext(),
             );
-
-            expect(result).toContain(`Updated memory [ID: ${memory.id}]`);
-            await started;
-            db.prepare(
-                "UPDATE memories SET content = ?, normalized_hash = ?, updated_at = ? WHERE id = ?",
-            ).run("cache_ttl=30m", computeNormalizedHash("cache_ttl=30m"), Date.now(), memory.id);
-            release?.();
+            expectPendingProposal(db, result, [memory]);
             await wait();
-
-            const row = db
-                .prepare("SELECT COUNT(*) AS count FROM memory_embeddings WHERE memory_id = ?")
-                .get(memory.id) as { count?: number } | null;
-            expect(row?.count).toBe(0);
+            expect(calls).toBe(0);
         });
 
-        it("normalizes legacy raw project paths before queueing the mutation", async () => {
+        it("normalizes legacy raw project paths before recording a proposal", async () => {
             const rawProjectPath = "/legacy/raw-project";
             const projectIdentity = normalizeStoredProjectPath(rawProjectPath);
             const legacyTools = createCtxMemoryTools({
@@ -1487,12 +1461,10 @@ describe("createCtxMemoryTools", () => {
                 toolContext("ses-dreamer", DREAMER_AGENT),
             );
 
-            expect(result).toContain(`Updated memory [ID: ${memory.id}]`);
-            expect(getProjectState(db, projectIdentity)).toBeNull();
-            expect(getProjectState(db, rawProjectPath)).toBeNull();
-            expect(getMutationRows(db, projectIdentity, [memory.id])).toMatchObject([
-                { mutationType: "update", targetMemoryId: memory.id, newContent: "timeout=10s" },
-            ]);
+            expectPendingProposal(db, result, [memory]);
+            expect(db.prepare("SELECT project_path FROM memory_tool_proposals").get()).toEqual({
+                project_path: projectIdentity,
+            });
         });
 
         it("rejects malformed update ids without mutating", async () => {
@@ -1539,7 +1511,7 @@ describe("createCtxMemoryTools", () => {
             expect(getMemoryById(db, memory.id)?.status).toBe("archived");
         });
 
-        it("rejects recategorizing a legacy raw-path memory onto an existing duplicate", async () => {
+        it("retains a recategorization proposal even if the proposed text duplicates another row", async () => {
             const rawProjectPath = "/legacy/raw-project";
             const projectIdentity = normalizeStoredProjectPath(rawProjectPath);
             const legacyTools = createCtxMemoryTools({
@@ -1569,17 +1541,10 @@ describe("createCtxMemoryTools", () => {
                 toolContext("ses-primary", "general"),
             );
 
-            expect(result).toBe(
-                `Error: Memory content already exists as ID ${existing.id}; merge or archive duplicates instead.`,
-            );
-            expect(getMemoryById(db, memory.id)).toMatchObject({
-                category: "CONFIG_DEFAULTS",
-                content: "timeout=5s",
-                projectPath: rawProjectPath,
-            });
+            expectPendingProposal(db, result, [memory, existing]);
         });
 
-        it("recategorizes a legacy raw-path memory when no duplicate exists under the stored path", async () => {
+        it("retains a recategorization proposal for a legacy raw-path row", async () => {
             const rawProjectPath = "/legacy/raw-project";
             const projectIdentity = normalizeStoredProjectPath(rawProjectPath);
             const legacyTools = createCtxMemoryTools({
@@ -1604,15 +1569,10 @@ describe("createCtxMemoryTools", () => {
                 toolContext("ses-primary", "general"),
             );
 
-            expect(result).toBe(`Updated memory [ID: ${memory.id}] in CONSTRAINTS.`);
-            expect(getMemoryById(db, memory.id)).toMatchObject({
-                category: "CONSTRAINTS",
-                content: "timeout=5s",
-                projectPath: rawProjectPath,
-            });
+            expectPendingProposal(db, result, [memory]);
         });
 
-        it("persists a valid category change on update", async () => {
+        it("retains a valid category-change proposal without changing the row", async () => {
             const memory = insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "CONFIG_VALUES",
@@ -1629,19 +1589,7 @@ describe("createCtxMemoryTools", () => {
                 toolContext("ses-primary", "general"),
             );
 
-            expect(result).toBe(`Updated memory [ID: ${memory.id}] in CONSTRAINTS.`);
-            expect(getMemoryById(db, memory.id)).toMatchObject({
-                category: "CONSTRAINTS",
-                content: "cache_ttl=10m",
-            });
-            expect(getMutationRows(db, "/repo/project", [memory.id])).toMatchObject([
-                {
-                    mutationType: "update",
-                    targetMemoryId: memory.id,
-                    category: "CONSTRAINTS",
-                    newContent: "cache_ttl=10m",
-                },
-            ]);
+            expectPendingProposal(db, result, [memory]);
         });
 
         it("keeps the current category when update omits category", async () => {
@@ -1660,11 +1608,7 @@ describe("createCtxMemoryTools", () => {
                 toolContext("ses-primary", "general"),
             );
 
-            expect(result).toBe(`Updated memory [ID: ${memory.id}] in CONFIG_VALUES.`);
-            expect(getMemoryById(db, memory.id)?.category).toBe("CONFIG_VALUES");
-            expect(getMutationRows(db, "/repo/project", [memory.id])).toMatchObject([
-                { mutationType: "update", category: "CONFIG_VALUES" },
-            ]);
+            expectPendingProposal(db, result, [memory]);
         });
 
         it("keeps the current category when update receives an invalid category", async () => {
@@ -1684,17 +1628,10 @@ describe("createCtxMemoryTools", () => {
                 toolContext("ses-primary", "general"),
             );
 
-            expect(result).toBe(`Updated memory [ID: ${memory.id}] in CONFIG_VALUES.`);
-            expect(getMemoryById(db, memory.id)).toMatchObject({
-                category: "CONFIG_VALUES",
-                content: "cache_ttl=10m",
-            });
-            expect(getMutationRows(db, "/repo/project", [memory.id])).toMatchObject([
-                { mutationType: "update", category: "CONFIG_VALUES" },
-            ]);
+            expectPendingProposal(db, result, [memory]);
         });
 
-        it("still rewrites content when recategorizing or omitting category", async () => {
+        it("retains both content and category change proposals", async () => {
             const recategorized = insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "CONFIG_VALUES",
@@ -1724,19 +1661,11 @@ describe("createCtxMemoryTools", () => {
                 toolContext("ses-primary", "general"),
             );
 
-            expect(recategorizeResult).toContain("in PROJECT_RULES");
-            expect(omitResult).toContain("in NAMING");
-            expect(getMemoryById(db, recategorized.id)).toMatchObject({
-                category: "PROJECT_RULES",
-                content: "new recategorize content",
-            });
-            expect(getMemoryById(db, omitted.id)).toMatchObject({
-                category: "NAMING",
-                content: "new omitted-category content",
-            });
+            expectPendingProposal(db, recategorizeResult, [recategorized]);
+            expectPendingProposal(db, omitResult, [omitted]);
         });
 
-        it("rejects recategorizing onto an existing duplicate without throwing a constraint", async () => {
+        it("retains duplicate proposals without exercising canonical uniqueness constraints", async () => {
             const existing = insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "CONSTRAINTS",
@@ -1758,17 +1687,10 @@ describe("createCtxMemoryTools", () => {
                 toolContext("ses-primary", "general"),
             );
 
-            expect(result).toBe(
-                `Error: Memory content already exists as ID ${existing.id}; merge or archive duplicates instead.`,
-            );
-            expect(String(result)).not.toContain("UNIQUE constraint failed");
-            expect(getMemoryById(db, memory.id)).toMatchObject({
-                category: "CONFIG_VALUES",
-                content: "timeout=5s",
-            });
+            expectPendingProposal(db, result, [memory, existing]);
         });
 
-        it("returns a friendly duplicate error after a unique-constraint fallback", async () => {
+        it("proposal does not execute a canonical write even when duplicate lookup is stale", async () => {
             const originalPrepare = db.prepare.bind(db);
             const originalExec = db.exec.bind(db);
             let inTx = false;
@@ -1818,21 +1740,14 @@ describe("createCtxMemoryTools", () => {
                     toolContext("ses-primary", "general"),
                 );
 
-                expect(result).toBe(
-                    `Error: Memory content already exists as ID ${existing.id}; merge or archive duplicates instead.`,
-                );
-                expect(String(result)).not.toContain("UNIQUE constraint failed");
-                expect(getMemoryById(db, memory.id)).toMatchObject({
-                    category: "CONFIG_VALUES",
-                    content: "cache_ttl=5m",
-                });
+                expectPendingProposal(db, result, [memory, existing]);
             } finally {
                 (db as { prepare: typeof originalPrepare }).prepare = originalPrepare;
                 (db as { exec: typeof originalExec }).exec = originalExec;
             }
         });
 
-        it("returns a friendly duplicate error when the constraint code is remapped but the message matches", async () => {
+        it("proposal does not execute a canonical write with remapped constraint errors", async () => {
             const originalPrepare = db.prepare.bind(db);
             const originalExec = db.exec.bind(db);
             let inTx = false;
@@ -1893,21 +1808,14 @@ describe("createCtxMemoryTools", () => {
                     toolContext("ses-primary", "general"),
                 );
 
-                expect(result).toBe(
-                    `Error: Memory content already exists as ID ${existing.id}; merge or archive duplicates instead.`,
-                );
-                expect(String(result)).not.toContain("UNIQUE constraint failed");
-                expect(getMemoryById(db, memory.id)).toMatchObject({
-                    category: "CONFIG_VALUES",
-                    content: "cache_ttl=5m",
-                });
+                expectPendingProposal(db, result, [memory, existing]);
             } finally {
                 (db as { prepare: typeof originalPrepare }).prepare = originalPrepare;
                 (db as { exec: typeof originalExec }).exec = originalExec;
             }
         });
 
-        it("rethrows authority errors instead of treating them as duplicates", async () => {
+        it("proposal does not execute canonical writes while authority is draining", async () => {
             const originalPrepare = db.prepare.bind(db);
             const memory = insertMemory(db, {
                 projectPath: "/repo/project",
@@ -1946,22 +1854,20 @@ describe("createCtxMemoryTools", () => {
                 (db as { prepare: typeof originalPrepare }).prepare = originalPrepare;
             }
 
-            expect(thrown).toBeInstanceOf(Error);
-            expect(String(thrown)).toContain("authority is draining");
-            expect(String(thrown)).not.toContain("already exists as ID");
+            expect(thrown).toBeUndefined();
             expect(getMemoryById(db, memory.id)).toMatchObject({
                 category: "CONFIG_VALUES",
                 content: "cache_ttl=5m",
             });
         });
 
-        it("rolls back content updates when queueing the mutation fails", async () => {
+        it("proposal persistence failure leaves canonical content unchanged", async () => {
             const memory = insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "CONFIG_DEFAULTS",
                 content: "cache_ttl=5m",
             });
-            db.exec("DROP TABLE memory_mutation_log");
+            db.exec("DROP TABLE memory_tool_proposals");
 
             let thrown: unknown;
             try {
@@ -1977,13 +1883,13 @@ describe("createCtxMemoryTools", () => {
                 thrown = error;
             }
 
-            expect(String(thrown)).toContain("memory_mutation_log");
+            expect(String(thrown)).toContain("memory_tool_proposals");
             expect(getMemoryById(db, memory.id)?.content).toBe("cache_ttl=5m");
         });
     });
 
     describe("#given merge action", () => {
-        it("creates a canonical merged memory and archives source memories", async () => {
+        it("retains a merge proposal without creating a canonical row or archiving sources", async () => {
             const first = insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "CONSTRAINTS",
@@ -2004,28 +1910,11 @@ describe("createCtxMemoryTools", () => {
                 toolContext("ses-dreamer", DREAMER_AGENT),
             );
 
-            expect(result).toContain("Merged memories");
-            const activeMemories = getMemoriesByProject(db, "/repo/project");
-            expect(activeMemories).toHaveLength(1);
-            expect(activeMemories[0]?.content).toBe("Use bun for all scripts in this repository.");
-            expect(getMemoryById(db, first.id)?.status).toBe("archived");
-            expect(getMemoryById(db, second.id)?.status).toBe("archived");
-            expect(getProjectMemoryEpoch(db, "/repo/project")).toBe(0);
-            expect(getMutationRows(db, "/repo/project", [first.id, second.id])).toMatchObject([
-                {
-                    mutationType: "superseded",
-                    targetMemoryId: first.id,
-                    supersededById: activeMemories[0]?.id,
-                },
-                {
-                    mutationType: "superseded",
-                    targetMemoryId: second.id,
-                    supersededById: activeMemories[0]?.id,
-                },
-            ]);
+            expectPendingProposal(db, result, [first, second]);
+            expect(getMemoriesByProject(db, "/repo/project")).toHaveLength(2);
         });
 
-        it("queues an update row when an existing canonical memory content changes", async () => {
+        it("retains a merge proposal matching a canonical hash without changing its bytes", async () => {
             const canonical = insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "CONSTRAINTS",
@@ -2046,22 +1935,7 @@ describe("createCtxMemoryTools", () => {
                 toolContext("ses-dreamer", DREAMER_AGENT),
             );
 
-            expect(result).toContain(`canonical memory [ID: ${canonical.id}]`);
-            expect(getMemoryById(db, canonical.id)?.content).toBe("USE BUN FOR SCRIPTS");
-            expect(
-                getMutationRows(db, "/repo/project", [canonical.id, duplicate.id]),
-            ).toMatchObject([
-                {
-                    mutationType: "superseded",
-                    targetMemoryId: duplicate.id,
-                    supersededById: canonical.id,
-                },
-                {
-                    mutationType: "update",
-                    targetMemoryId: canonical.id,
-                    newContent: "USE BUN FOR SCRIPTS",
-                },
-            ]);
+            expectPendingProposal(db, result, [canonical, duplicate]);
         });
 
         it("rejects a PRIMARY-agent merge that includes another project's memory", async () => {
@@ -2123,7 +1997,7 @@ describe("createCtxMemoryTools", () => {
             expect(getMemoryById(db, active.id)?.status).toBe("active");
         });
 
-        it("keeps dreamer able to curate archived memories during merge", async () => {
+        it("retains a dreamer merge proposal for archived memories without restoring them", async () => {
             const archived = insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "CONSTRAINTS",
@@ -2145,9 +2019,8 @@ describe("createCtxMemoryTools", () => {
                 toolContext("ses-dreamer", DREAMER_AGENT),
             );
 
-            expect(result).toContain(`canonical memory [ID: ${archived.id}]`);
-            expect(getMemoryById(db, archived.id)?.status).toBe("active");
-            expect(getMemoryById(db, active.id)?.status).toBe("archived");
+            expectPendingProposal(db, result, [getMemoryById(db, archived.id)!, active]);
+            expect(getMemoryById(db, archived.id)?.status).toBe("archived");
         });
 
         it("rejects malformed or duplicate merge ids", async () => {
@@ -2185,7 +2058,7 @@ describe("createCtxMemoryTools", () => {
             expect(getMemoryById(db, second.id)?.status).toBe("active");
         });
 
-        it("queues superseded rows under each affected project identity when merging across identities", async () => {
+        it("retains a cross-project dreamer merge proposal without touching either identity", async () => {
             const first = insertMemory(db, {
                 projectPath: "/repo/project-a",
                 category: "CONSTRAINTS",
@@ -2211,21 +2084,14 @@ describe("createCtxMemoryTools", () => {
                 toolContext("ses-dreamer", DREAMER_AGENT),
             );
 
-            expect(result).toContain("Merged memories");
+            expectPendingProposal(db, result, [first, second, third]);
             expect(getProjectMemoryEpoch(db, "/repo/project-a")).toBe(0);
             expect(getProjectMemoryEpoch(db, "/repo/project-b")).toBe(0);
-            expect(getMutationRows(db, "/repo/project-a", [first.id, second.id])).toMatchObject([
-                { mutationType: "superseded", targetMemoryId: first.id },
-                { mutationType: "superseded", targetMemoryId: second.id },
-            ]);
-            expect(getMutationRows(db, "/repo/project-b", [third.id])).toMatchObject([
-                { mutationType: "superseded", targetMemoryId: third.id },
-            ]);
         });
     });
 
     describe("#given archive action", () => {
-        it("lets a primary agent archive a memory and stores the reason in metadata", async () => {
+        it("retains the primary archive reason on a proposal not memory metadata", async () => {
             const memory = insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "KNOWN_ISSUES",
@@ -2241,14 +2107,11 @@ describe("createCtxMemoryTools", () => {
                 toolContext("ses-primary", "general"),
             );
 
-            expect(result).toContain("Archived memory");
-            expect(getMemoryById(db, memory.id)?.metadataJson).toContain(
-                "Removed subsystem no longer exists",
-            );
-            expect(getProjectMemoryEpoch(db, "/repo/project")).toBe(0);
-            expect(getMutationRows(db, "/repo/project", [memory.id])).toMatchObject([
-                { mutationType: "archive", targetMemoryId: memory.id },
-            ]);
+            expectPendingProposal(db, result, [memory]);
+            const proposal = db
+                .prepare("SELECT proposal_json FROM memory_tool_proposals")
+                .get() as { proposal_json: string };
+            expect(proposal.proposal_json).toContain("Removed subsystem no longer exists");
         });
     });
 
@@ -2328,13 +2191,13 @@ describe("createCtxMemoryTools", () => {
                 allowedActions: [...PRIMARY_ACTIONS],
             });
 
-            // archive by a primary agent (no dreamer context) must succeed.
+            // A primary agent may propose an archive, but cannot apply it.
             const result = await primaryTools.ctx_memory.execute(
                 { action: "archive", ids: [memory.id] },
                 toolContext(),
             );
 
-            expect(result).toContain("Archived memory");
+            expectPendingProposal(db, result, [memory]);
         });
 
         it("allows dreamer sessions to use the dreamer-only `list` action on the shared tool", async () => {
@@ -2399,7 +2262,7 @@ describe("createCtxMemoryTools", () => {
     });
 
     describe("#given content update invalidates classification", () => {
-        it("an `update` to content RESETS a prior shareable=1 and clears classified_at (fail closed on re-edit)", async () => {
+        it("a pending update preserves classification until content is actually changed", async () => {
             const memory = insertMemory(db, {
                 projectPath: "/repo/project",
                 category: "PROJECT_RULES",
@@ -2410,8 +2273,7 @@ describe("createCtxMemoryTools", () => {
             expect(getMemoryById(db, memory.id)).toMatchObject({ shareable: 1 });
             expect(getUnclassifiedMemoryIds(db, [memory.id])).toEqual([]); // classified
 
-            // A later content edit (primary agent) must invalidate the stale flag
-            // AND clear classified_at so the changed fact is re-scored.
+            // A proposed edit does not change the fact, so its existing classification stays valid.
             const res = await tools.ctx_memory.execute(
                 {
                     action: "update",
@@ -2420,9 +2282,12 @@ describe("createCtxMemoryTools", () => {
                 },
                 toolContext("ses-primary"),
             );
-            expect(res).not.toContain("Error");
-            expect(getMemoryById(db, memory.id)).toMatchObject({ shareable: 0 });
-            expect(getUnclassifiedMemoryIds(db, [memory.id])).toEqual([memory.id]); // re-scorable
+            expect(res).toContain("MEMORY_PENDING_PROPOSAL");
+            expect(getMemoryById(db, memory.id)).toMatchObject({
+                shareable: 1,
+                content: memory.content,
+            });
+            expect(getUnclassifiedMemoryIds(db, [memory.id])).toEqual([]);
         });
     });
 
@@ -2688,7 +2553,7 @@ describe("createCtxMemoryTools", () => {
                 reason: "",
             });
             expect(filler).toBe(clean);
-            expect(clean).toContain("Archived memory [ID: 1]");
+            expect(clean).toContain("MEMORY_PENDING_PROPOSAL");
         });
 
         it("update/get/merge ignore unused-field filler and match the clean call", async () => {

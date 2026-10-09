@@ -1,8 +1,8 @@
 import type { Database } from "../../shared/sqlite";
 import { deleteChunkEmbedBackoffForSession } from "./compartment-chunk-embedding";
+import { releaseMemoryReservations } from "./memory/lifecycle-applier";
 import { deleteUnmappedMessageFtsRows } from "./message-fts-rowid-map";
 import { deleteSessionActivity } from "./session-activity";
-import { releaseMemoryReservations } from "./memory/lifecycle-applier";
 
 export interface SessionScopedTableDefinition {
     readonly table: string;

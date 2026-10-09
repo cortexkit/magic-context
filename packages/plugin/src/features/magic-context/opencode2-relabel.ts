@@ -111,7 +111,7 @@ export const V87_HARNESS_TWIN_RULES: ReadonlyArray<{
  * from the host store; report it as one declared prefix rebuild, not one per table.
  */
 export const V87_HARNESS_AGGREGATE_RULES: ReadonlyArray<{
-    record: "host_runner";
+    record: "host_runner" | "memory_applied";
     tables: readonly string[];
 }> = [
     {
@@ -122,6 +122,10 @@ export const V87_HARNESS_AGGREGATE_RULES: ReadonlyArray<{
             "host_runner_views",
             "host_runner_state",
         ],
+    },
+    {
+        record: "memory_applied",
+        tables: ["memory_applied_snapshots", "memory_applied_rows"],
     },
 ];
 

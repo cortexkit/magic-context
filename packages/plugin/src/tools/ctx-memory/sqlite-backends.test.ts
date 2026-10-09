@@ -30,34 +30,11 @@ async function exerciseUpdate(authorityGuard: boolean): Promise<void> {
                 BEGIN SELECT RAISE(ABORT, 'authority is draining'); END`);
         }
 
-        // Suppress only the optimistic duplicate probe. The UPDATE still executes
-        // against real SQLite and the post-rollback lookup still sees the duplicate.
-        // Otherwise the pre-check would green this test without reaching the catch.
         const prepare = db.prepare.bind(db);
-        let nativeError: unknown;
-        let probes = 0;
+        let canonicalWrites = 0;
         db.prepare = ((sql: string) => {
-            const stmt = prepare(sql);
-            if (
-                sql.includes(
-                    "FROM memories WHERE project_path = ? AND category = ? AND normalized_hash = ?",
-                )
-            ) {
-                const get = stmt.get.bind(stmt);
-                stmt.get = (...args: unknown[]) => (++probes === 1 ? undefined : get(...args));
-            }
-            if (sql.includes("UPDATE memories SET content = ?")) {
-                const run = stmt.run.bind(stmt);
-                stmt.run = (...args: unknown[]) => {
-                    try {
-                        return run(...args);
-                    } catch (error) {
-                        nativeError = error;
-                        throw error;
-                    }
-                };
-            }
-            return stmt;
+            if (sql.includes("UPDATE memories SET content")) canonicalWrites++;
+            return prepare(sql);
         }) as typeof db.prepare;
 
         const tool = createCtxMemoryTools({
@@ -77,26 +54,32 @@ async function exerciseUpdate(authorityGuard: boolean): Promise<void> {
                 { sessionID: "review", agent: "general", directory: "/review" } as never,
             );
 
-        if (authorityGuard) {
-            await assert.rejects(update, (error: unknown) => {
-                assert.equal(error, nativeError);
-                assert.match((error as Error).message, /authority is draining/);
-                return true;
-            });
-            // Only the pre-check should run; a duplicate fallback would hide the
-            // authority refusal because the matching row above really exists.
-            assert.equal(probes, 1);
-        } else {
-            assert.equal(
-                await update(),
-                `Error: Memory content already exists as ID ${existing.id}; merge or archive duplicates instead.`,
+        assert.match(String(await update()), /MEMORY_PENDING_PROPOSAL/);
+        assert.equal(canonicalWrites, 0);
+        assert.deepEqual(getMemoryById(db, existing.id), existing);
+        assert.deepEqual(db.prepare("SELECT COUNT(*) AS n FROM memory_tool_proposals").get(), {
+            n: 1,
+        });
+        assert.deepEqual(db.prepare("SELECT COUNT(*) AS n FROM memory_mutation_log").get(), {
+            n: 0,
+        });
+        let nativeError: unknown;
+        try {
+            prepare("UPDATE memories SET content=?,category=?,normalized_hash=? WHERE id=?").run(
+                existing.content,
+                existing.category,
+                existing.normalizedHash,
+                source.id,
             );
-            assert.equal(probes, 2);
+        } catch (error) {
+            nativeError = error;
         }
-        assert.ok(nativeError instanceof Error, "the native UPDATE must reach a constraint");
-        const code = (nativeError as Error & { code: string }).code;
+        assert.ok(
+            nativeError instanceof Error,
+            "the canonical write still reaches the native guard",
+        );
         assert.equal(
-            code,
+            (nativeError as Error & { code: string }).code,
             detectSqliteRuntime() === "Node.js"
                 ? "ERR_SQLITE_ERROR"
                 : authorityGuard
@@ -111,7 +94,7 @@ async function exerciseUpdate(authorityGuard: boolean): Promise<void> {
 }
 
 console.log(`SQLite review checks: ${process.version}, ${detectSqliteRuntime()}`);
-test("ctx_memory returns the friendly duplicate response after a native UNIQUE violation", () =>
+test("ctx_memory records duplicate updates as pending without reaching a native UNIQUE violation", () =>
     exerciseUpdate(false));
-test("ctx_memory preserves a native authority refusal even when a duplicate exists", () =>
+test("ctx_memory records pending work without exercising native memory authority writes", () =>
     exerciseUpdate(true));
