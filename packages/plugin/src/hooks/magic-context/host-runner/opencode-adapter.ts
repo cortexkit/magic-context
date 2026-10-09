@@ -87,6 +87,12 @@ function toolTextField(state: Part): "error" | "output" {
     return state.status === "error" && typeof state.error === "string" ? "error" : "output";
 }
 const publishedSources = new WeakMap<MessageLike, MessageLike>();
+const hostReplay = new WeakMap<MessageLike, () => unknown>();
+/** Defer copying v2 tool-result and host metadata until rust_pipeline's provider
+ * mode records a new message; the legacy full-request path never reads it. */
+export function rememberOpenCodeHostReplay(message: MessageLike, read: () => unknown): void {
+    hostReplay.set(message, read);
+}
 /** Let v2 reuse its rendered content for the unchanged recorded message, even
  * though each publication gives the host a new, independently mutable copy. */
 export function providerMessageSource(message: MessageLike): MessageLike {
@@ -161,7 +167,12 @@ export function providerIncoming(message: MessageLike): Incoming<MessageLike> {
                 changed = true;
                 return { ...tool, id: providerSubjectPart(tool, index) };
             });
-            return changed ? { ...message, parts } : message;
+            const replay = hostReplay.get(message);
+            return replay
+                ? { ...message, info: { ...message.info, magicContextHostReplay: replay() }, parts }
+                : changed
+                  ? { ...message, parts }
+                  : message;
         },
     };
 }

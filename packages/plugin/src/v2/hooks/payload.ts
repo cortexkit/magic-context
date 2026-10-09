@@ -3,6 +3,7 @@ import {
     getOpenCodeProviderProjection,
     providerMessageSource,
     providerSubjectPart,
+    rememberOpenCodeHostReplay,
 } from "../../hooks/magic-context/host-runner/opencode-adapter";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import { log, sessionLog } from "../../shared/logger";
@@ -37,6 +38,7 @@ interface ToolBridge {
     native?: Part;
     output: string;
     resultMessage?: V2Message;
+    inlineResult?: boolean;
     /** The host result's `content` value when it carries files (see fileContentValue). */
     files?: Part[];
 }
@@ -46,6 +48,10 @@ interface ProviderProjectionCache {
     metadata: Map<string, V2Message>;
     bridges: Map<string, Map<string, ToolBridge>>;
     hostParts: Map<string, { parts: Map<string, Part>; types: Set<unknown> }>;
+}
+interface HostReplay {
+    metadata: V2Message;
+    bridges: Array<[string, ToolBridge]>;
 }
 const providerProjectionCaches = new WeakMap<object, ProviderProjectionCache>();
 function providerCache(owner: object): ProviderProjectionCache {
@@ -392,6 +398,22 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
             },
             parts,
         };
+        // This lazy sidecar is not part of the legacy projection. Provider admission
+        // stores it with the native row so a restart can reconstruct split tool arcs
+        // without re-reading known host content or losing image/signature metadata.
+        rememberOpenCodeHostReplay(mapped, () => ({
+            metadata: metadataOnly(message),
+            bridges: [...bySubject].map(([id, bridge]) => [
+                id,
+                {
+                    ...bridge,
+                    resultMessage: bridge.resultMessage
+                        ? metadataOnly(bridge.resultMessage)
+                        : undefined,
+                    inlineResult: bridge.resultMessage === message,
+                },
+            ]),
+        }));
         originals.set(mapped, message);
         if (typeof message.id !== "string") bridgesByCarrier.set(mapped, byCallID);
         messages.push(mapped);
@@ -402,6 +424,15 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
             const active = getOpenCodeProviderProjection(draft.sessionID);
             const saved = active ? providerCache(active.owner) : undefined;
             if (saved) {
+                for (const message of messages) {
+                    const id = message.info.id;
+                    const replay = (message.info as unknown as Part).magicContextHostReplay as
+                        | HostReplay
+                        | undefined;
+                    if (!id || !replay) continue;
+                    if (!saved.metadata.has(id)) saved.metadata.set(id, replay.metadata);
+                    if (!saved.bridges.has(id)) saved.bridges.set(id, new Map(replay.bridges));
+                }
                 for (const [id, original] of originalsByID) {
                     if (!saved.metadata.has(id)) saved.metadata.set(id, metadataOnly(original));
                 }
@@ -573,7 +604,8 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                                             value: state.output,
                                         },
                         };
-                        if (bridge.resultMessage === original) content.push(result);
+                        if (bridge.inlineResult || bridge.resultMessage === original)
+                            content.push(result);
                         else following.push({ ...bridge.resultMessage, content: [result] });
                     }
                 }
