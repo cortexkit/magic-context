@@ -1,0 +1,68 @@
+{
+  "harness": "broca",
+  "messages": [
+    {
+      "message": {
+        "content": [
+          {
+            "text": "joint user",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      },
+      "mid": "m0",
+      "ordinal": 0
+    },
+    {
+      "message": {
+        "content": [
+          {
+            "signature": "signed-unalterable",
+            "text": "§99§ signed reasoning",
+            "type": "reasoning"
+          },
+          {
+            "text": "§12§ visible answer",
+            "type": "text"
+          },
+          {
+            "input": {
+              "path": "§13§ file"
+            },
+            "tool_call_id": "untouched",
+            "tool_name": "read",
+            "type": "tool_call"
+          },
+          {
+            "text": "second text stays",
+            "type": "text"
+          }
+        ],
+        "role": "assistant"
+      },
+      "mid": "m1",
+      "ordinal": 1
+    },
+    {
+      "message": {
+        "content": [
+          {
+            "is_error": false,
+            "output": {
+              "kind": "text",
+              "text": "joint tool result"
+            },
+            "tool_call_id": "untouched",
+            "type": "tool_result"
+          }
+        ],
+        "role": "tool"
+      },
+      "mid": "m2",
+      "ordinal": 2
+    }
+  ],
+  "project_root": "/joint/project",
+  "session": "alfonso:joint"
+}
