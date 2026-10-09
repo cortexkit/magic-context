@@ -56,6 +56,24 @@ struct LogPublicationFence {
     serial: Arc<ProviderSerial>,
 }
 
+enum EvaluationOutcome {
+    Fire,
+    Busy,
+    Complete { recovering: bool },
+}
+
+impl EvaluationOutcome {
+    fn of(action: &PreparedHistorianAction) -> Self {
+        match action {
+            PreparedHistorianAction::FireReady(_) => Self::Fire,
+            PreparedHistorianAction::Busy { .. } => Self::Busy,
+            PreparedHistorianAction::Complete(d) => Self::Complete {
+                recovering: matches!(d.no_fire.as_deref(), Some("recovering" | "reattaching")),
+            },
+        }
+    }
+}
+
 impl crate::historian::HistorianPublicationFence for LogPublicationFence {
     fn publish(
         &self,
@@ -167,6 +185,51 @@ impl McHandler {
                 let _ = store.save_provider_conversation(&key.store_key(), &c);
             }
         }
+    }
+
+    async fn finish_provider_evaluation(
+        &self,
+        key: &Key,
+        generation: u64,
+        cadence: Value,
+        outcome: EvaluationOutcome,
+    ) -> Result<(), HandlerOutcome> {
+        let store = self
+            .store
+            .get()
+            .ok_or_else(|| transient("store unavailable"))?;
+        let _serial = self.provider_serial.lock_for(key).await;
+        let Some(mut c) = store
+            .load_provider_conversation(&key.store_key())
+            .map_err(transient)?
+        else {
+            return Ok(());
+        };
+        let mut counters: Value = serde_json::from_str(&c.hook_counters_json).map_err(transient)?;
+        if counters["historian_barrier_generation"].as_u64() != Some(generation) {
+            return Ok(());
+        }
+        // The decision is durable before cadence is consumed. A prepared fire
+        // still needs a durable run; keep its launch intent across a crash in
+        // the gap between returning FireReady and starting the firing task.
+        counters["historian_cadence"] = cadence;
+        match outcome {
+            EvaluationOutcome::Fire => {
+                counters["historian_evaluation_due"] = json!(false);
+                counters["historian_launch_pending"] = json!({"generation":generation});
+            }
+            EvaluationOutcome::Busy => {}
+            EvaluationOutcome::Complete { recovering } => {
+                counters["historian_evaluation_due"] = json!(recovering);
+                if !recovering {
+                    counters["historian_launch_pending"] = Value::Null;
+                }
+            }
+        }
+        c.hook_counters_json = counters.to_string();
+        store
+            .save_provider_conversation(&key.store_key(), &c)
+            .map_err(transient)
     }
 
     async fn prepare_provider_historian(
@@ -285,6 +348,7 @@ impl McHandler {
         counters = current_counters;
         let cadence = &counters["historian_cadence"];
         let due = counters["historian_evaluation_due"].as_bool() == Some(true)
+            || counters["historian_launch_pending"].is_object()
             || cadence.is_null()
             || cadence["lineage"].as_str() != Some(&conversation.lineage_id)
             || cadence["user"] != user
@@ -323,9 +387,9 @@ impl McHandler {
         // engine does. Serializing and reparsing them loses retained native
         // block representation, changing the content fingerprints used by CAS.
         parsed.messages = decoded.messages;
-        counters["historian_evaluation_due"] = json!(false);
-        counters["historian_cadence"] =
-            json!({"user": user, "tools": tools, "lineage": conversation.lineage_id});
+        // Claim this barrier for this process, but leave a durable retry marker
+        // until the trigger decision and any required launch intent are stored.
+        counters["historian_evaluation_due"] = json!(true);
         conversation.hook_counters_json = counters.to_string();
         store
             .save_provider_conversation(&key.store_key(), &conversation)
@@ -386,6 +450,13 @@ impl McHandler {
                 )
                 .map_err(transient)?;
         }
+        self.finish_provider_evaluation(
+            key,
+            generation,
+            json!({"user":user,"tools":tools,"lineage":conversation.lineage_id}),
+            EvaluationOutcome::of(&action),
+        )
+        .await?;
         Ok(Some(action))
     }
 }
@@ -393,6 +464,39 @@ impl McHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn prepared_but_unlaunched_fire_retries_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = handler(dir.path());
+        declare(&h).await;
+        let entries = corpus();
+        let inputs =
+            json!({"usage":{"current_total_input_tokens":45000,"context_limit_tokens":50000}});
+        review_sync(&h, &entries, inputs.clone());
+        let action = h
+            .provider_historian_worker()
+            .prepare_provider_historian(&binding(&h), &key(&h))
+            .await
+            .unwrap();
+        assert!(matches!(
+            action,
+            Some(PreparedHistorianAction::FireReady(_))
+        ));
+        drop(action);
+        drop(h);
+        let restarted = handler(dir.path());
+        review_sync(&restarted, &[], inputs);
+        let action = restarted
+            .provider_historian_worker()
+            .prepare_provider_historian(&binding(&restarted), &key(&restarted))
+            .await
+            .unwrap();
+        assert!(
+            matches!(action, Some(PreparedHistorianAction::FireReady(_))),
+            "a persisted decision alone is not a launched run"
+        );
+    }
 
     include!("m5_review_tests.rs");
 

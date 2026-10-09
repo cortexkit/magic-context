@@ -190,3 +190,38 @@ Cargo invocations were serialized. Cargo version: **1.99.0 (5f94df478 2026-08-27
 Neither unrelated TypeScript/environment test failure was changed or hidden.
 The narrow Rust behavior gates are green; the two baseline/environment failures
 must still be considered before any repository-wide release gate is declared green.
+
+## Follow-up independent review fixes
+
+Review commit `34d20b2dda07c93478119dbe5a67f639aaa601e0` was cherry-picked as
+`2bf5df6aa6`. Its report and all review tests are kept unchanged. The review's
+200-session experiment found zero mismatches across 163 publications and 117
+reopens, but exposed the recovery and reminder cases listed in `m5-review.md`.
+The earlier disposition of recovery as complete is superseded by these fixes.
+
+### F1: do not consume an unfinished evaluation
+
+The accepted barrier is an in-process duplicate-exclusion marker, not completion
+of the trigger. Its transaction now leaves `historian_evaluation_due=true` and
+does not advance cadence before the existing decision recorder runs. After that
+outcome, cadence is committed against the same barrier generation. A FireReady
+outcome also stores `historian_launch_pending`, because a recorded decision is
+not yet a durable run. This preserves retry intent if the process dies either
+before trigger preparation or after returning FireReady but before task launch.
+It does not replace the existing non-Idle run recovery.
+
+Verification (Linux guard, Cargo 1.99.0): the unchanged
+`review_m5_crash_before_launch_retries_completed_barrier` and
+`review_m5_two_concurrent_evaluations_launch_only_one` each passed; the new
+`prepared_but_unlaunched_fire_retries_after_restart` passed. All-targets checking
+passed. A paired mutation restores early cadence consumption and clears retry
+intent before the cancellation seam: the crash review test alone fails, while
+the concurrent-evaluation control stays green. Staging preceded mutation;
+checkout plus touch restores an empty unstaged diff. Comment review found no
+unclear new comments. No review assertion or test was edited.
+
+Before cost optimization, the unchanged `review_m5_20000_message_scan_cost`
+passed and measured: payload load 21.675 ms, frontier 5.318 ms, first evaluation
+3581.929 ms, debounced evaluation 674.588 ms, same-runtime 1 ms timer 674.763 ms;
+payload 3,855,571 bytes. Its structural history scan is 20,000 payload rows plus
+20,000 ordinal rows. These are debug-build measurements, not a release SLA.
