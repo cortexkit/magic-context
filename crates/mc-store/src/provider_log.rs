@@ -840,6 +840,47 @@ fn promote_tx(
 }
 
 impl McStore {
+    /// Persist engine-derived identities for a log-backed historian without
+    /// loading or rewriting frozen state. The caller holds the provider lock and
+    /// derives the vectors with the engine's message projection.
+    pub fn upsert_provider_block_identities(
+        &self,
+        key: &ProviderSessionKey,
+        lineage: &str,
+        identities: &BTreeMap<String, Vec<crate::BlockIdentity>>,
+    ) -> Result<usize, ProviderError> {
+        let result = self.inner.with_conn_fenced(|tx| {
+            let c = conversation_tx(tx, key)?.ok_or(rusqlite::Error::InvalidQuery)?;
+            if c.lineage_id != lineage {
+                return Ok(Err(ProviderError::Transient("provider lineage changed".into())));
+            }
+            crate::move_store::check_writer(tx, &c.engine_namespace)?;
+            let mut missing = Vec::new();
+            // Validate the complete batch before writing: one conflicting row
+            // must not leave other messages partially admitted to the CAS fence.
+            for (mid, vector) in identities {
+                if let Some(held) = crate::block_identities_for_mid_tx(tx, &c.engine_namespace, mid)? {
+                    if &held != vector {
+                        return Ok(Err(ProviderError::InvalidParams { field: "block_identities" }));
+                    }
+                } else {
+                    missing.push((mid, serde_json::to_string(vector).map_err(sql_json)?));
+                }
+            }
+            for (mid, vector) in &missing {
+                tx.execute("INSERT INTO mc_block_identities (session_id,mid,identities) VALUES (?1,?2,?3)", params![c.engine_namespace, mid, vector])?;
+            }
+            if !missing.is_empty() {
+                // The digest memoizes the previously committed identity/fingerprint
+                // rows so full commits can skip comparing them. An identity-only
+                // insert invalidates that memo without changing frozen state.
+                tx.execute("DELETE FROM mc_cache_state_digest WHERE session_id=?1", [&c.engine_namespace])?;
+            }
+            Ok(Ok(missing.len()))
+        }).map_err(|e| ProviderError::Storage(e.into()))?;
+        result
+    }
+
     pub fn has_provider_namespace(&self, namespace: &str) -> Result<bool, McStoreError> {
         Ok(self.inner.with_conn(|conn|conn.query_row("SELECT EXISTS(SELECT 1 FROM mc_provider_conversations_v2 WHERE engine_namespace=?1)",[namespace],|r|r.get(0)))?)
     }

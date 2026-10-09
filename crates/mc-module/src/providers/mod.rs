@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod codec;
 mod codec_opencode;
 mod compaction;
+mod historian;
 mod records;
 mod step_transform;
 #[cfg(test)]

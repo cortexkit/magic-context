@@ -47,6 +47,9 @@ struct ProviderPassInput {
     physical_tail: Option<ProviderTail>,
     exact_pass_plan: Option<String>,
     marker_hard_serves_frozen_prefix: Option<bool>,
+    /// Usage, context geometry and historian model budgets synchronized before
+    /// per-message transform hooks. This field never carries transcript content.
+    historian_inputs: Option<Value>,
 }
 #[derive(Deserialize, Serialize)]
 struct ProviderTail {
@@ -305,7 +308,11 @@ impl McHandler {
             .provider_serial
             .try_lock_for(&key)
             .map_err(|_| transient("provider conversation is busy"))?;
-        self.sync_provider_pass_inputs_locked(binding, store, chain, pass_complete, pass)
+        self.sync_provider_pass_inputs_locked(binding, store, chain, pass_complete, pass)?;
+        if pass_complete {
+            self.schedule_provider_historian(binding.clone(), key);
+        }
+        Ok(())
     }
 
     pub(crate) fn sync_provider_pass_inputs_locked(
@@ -323,8 +330,16 @@ impl McHandler {
             .load_provider_conversation(&key.store_key())
             .map_err(transient)?
             .ok_or_else(|| transient("provider conversation disappeared"))?;
+        // Opening a pass invalidates the preceding barrier even if no message
+        // was appended. A queued evaluator must not read a half-synchronized pass.
+        let mut inputs = None;
         if let Some(pass) = pass {
             let pass: ProviderPassInput = decode(pass)?;
+            if let Some(value) = &pass.historian_inputs {
+                inputs = Some(super::historian::checked_inputs(value)?);
+            } else {
+                inputs = Some(json!({}));
+            }
             let first = pass.appended.first().map_or(0, |m| m.ordinal);
             let lineage = store
                 .load_provider_lineage(&key.store_key(), &pass.lineage_id)
@@ -414,6 +429,10 @@ impl McHandler {
                 .ok_or_else(|| transient("provider conversation disappeared"))?;
         }
         let mut counters: Value = serde_json::from_str(&c.hook_counters_json).map_err(transient)?;
+        counters["pass_complete"] = Value::Null;
+        if let Some(inputs) = inputs {
+            counters["historian_inputs"] = inputs;
+        }
         if counters.get("engine_policy").is_none() {
             counters["engine_policy"] = transform::provider_engine_settings(
                 &store
@@ -436,11 +455,13 @@ impl McHandler {
                 .saturating_sub(1);
             counters["pass_complete"] =
                 json!({"lineage_id":c.lineage_id,"through_ordinal":through});
+            super::historian::record_barrier(&mut counters);
         }
         c.hook_counters_json = serde_json::to_string(&counters).map_err(transient)?;
         store
             .save_provider_conversation(&key.store_key(), &c)
-            .map_err(transient)
+            .map_err(transient)?;
+        Ok(())
     }
 
     async fn provider_host_reduce(
@@ -848,9 +869,11 @@ impl McHandler {
                         .or_else(|| state.get("last_response_at_ms").and_then(Value::as_i64)));
                     policy["metrics"] = serde_json::to_value(&metrics).expect("metrics JSON");
                     counters["answer_policy"] = policy;
+                    counters["pass_complete"] = Value::Null;
                     if fields.pass_complete == Some(true) {
                         counters["pass_complete"] =
                             json!({"lineage_id":lineage_id,"through_ordinal":ordinal});
+                        super::historian::record_barrier(&mut counters);
                     }
                     let answer = if ops.is_empty() {
                         HookAnswer::Pass
@@ -877,6 +900,9 @@ impl McHandler {
             )
             .map_err(provider_policy_error)?;
         fault("HookStateRecorded");
+        if fields.pass_complete == Some(true) {
+            self.schedule_provider_historian(binding, key);
+        }
         bytes(&answer)
     }
 
