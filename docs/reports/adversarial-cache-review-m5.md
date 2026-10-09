@@ -225,3 +225,36 @@ passed and measured: payload load 21.675 ms, frontier 5.318 ms, first evaluation
 3581.929 ms, debounced evaluation 674.588 ms, same-runtime 1 ms timer 674.763 ms;
 payload 3,855,571 bytes. Its structural history scan is 20,000 payload rows plus
 20,000 ordinal rows. These are debug-build measurements, not a release SLA.
+
+### F2: retry publication refusals without a model cooldown
+
+Prepared provider runs carry a completion observer into the existing firing
+driver, including direct/static launches used by the unchanged review tests.
+The observer settles only its own launch generation. An error returning the
+namespace to Idle without an active model backoff sets a separate durable
+`historian_run_retry_due` marker; the next completed pass bypasses debounce.
+Successful completion clears the matching launch intent. A small store
+transaction reloads current counters before editing those fields, and never
+waits for the provider admission lock which the report publisher collided with.
+An older completion cannot clear a newer launch or synchronized input.
+
+Paid output is **not retained for republishing by this fix**. The existing live
+host driver calls `finish_historian_pending_run` immediately after receiving its
+report, before validation/publication; the rejected run then returns to Idle.
+Its queue row and matching publication predicate no longer exist. The existing
+parked-report adoption API protects reports across restart, but cannot adopt a
+report already consumed by this live path. This fix permits a fresh run on the
+next pass, which can incur another model call. Retaining paid output would need
+an explicit durable report/source-identity cache and fresh validation/CAS policy
+in that shared lifecycle, rather than replaying a stale publication predicate.
+No hidden output cache or claim-lane fork was added.
+
+Verification (Linux guard, Cargo 1.99.0): unchanged
+`review_m5_publication_contention_retries_next_complete_pass` passed; the existing
+surviving-cut/contention control passed; new
+`old_run_completion_preserves_newer_launch_and_sync_inputs` passed; module/store
+all-targets checking passed. The mutation clears launch intent but neutralizes
+run-retry marking: the unchanged contention-retry test alone turns red, while
+the surviving-cut/contention control stays green. Staging, nonempty mutation
+diff and empty checkout/touch restoration are recorded. Comment review's three
+clarity suggestions were resolved. Review tests remain unedited.

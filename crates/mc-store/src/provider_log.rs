@@ -840,6 +840,38 @@ fn promote_tx(
 }
 
 impl McStore {
+    /// Clear historian_launch_pending only for the completed run's generation
+    /// and record whether the next pass must retry. Reload counters within this
+    /// transaction to preserve concurrent admissions. Do not acquire the module's
+    /// provider-serial lock: an admission may hold it while awaiting this result.
+    pub fn finish_provider_historian_run(
+        &self,
+        key: &ProviderSessionKey,
+        namespace: &str,
+        generation: u64,
+        retry: bool,
+    ) -> Result<(), McStoreError> {
+        self.inner.with_conn_fenced(|tx| {
+            let Some(mut c) = conversation_tx(tx, key)? else {
+                return Ok(());
+            };
+            let mut counters = parse(&c.hook_counters_json)?;
+            if c.engine_namespace != namespace
+                || counters
+                    .pointer("/historian_launch_pending/generation")
+                    .and_then(Value::as_u64)
+                    != Some(generation)
+            {
+                return Ok(());
+            }
+            counters["historian_launch_pending"] = Value::Null;
+            counters["historian_run_retry_due"] = json!(retry);
+            c.hook_counters_json = counters.to_string();
+            save_conversation_tx(tx, key, &c)
+        })?;
+        Ok(())
+    }
+
     /// Persist engine-derived identities for a log-backed historian without
     /// loading or rewriting frozen state. The caller holds the provider lock and
     /// derives the vectors with the engine's message projection.

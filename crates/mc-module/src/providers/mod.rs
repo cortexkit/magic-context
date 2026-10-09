@@ -17,6 +17,7 @@ mod tests;
 use codec::{checked_view, decode_message};
 #[cfg(test)]
 use codec::{encode_message, validate_replacement};
+pub(crate) use historian::RunCompletion;
 use records::{frontier, ingest, scan, HookRecord, HookState, Key, Record, Setup};
 pub(crate) use records::{Catalog, Storage};
 use step_transform::declaration;

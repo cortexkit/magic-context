@@ -4442,6 +4442,7 @@ struct HistorianFiringTask {
     live_guard: SessionSetGuard,
     connect_failure_commit_hook: ConnectFailureCommitHook,
     publication_fence: Option<Arc<dyn historian::HistorianPublicationFence>>,
+    provider_completion: Option<providers::RunCompletion>,
 }
 
 #[async_trait]
@@ -6942,6 +6943,7 @@ impl McHandler {
                 // while the live-session guard is held. They do not depend on a cached raw
                 // snapshot, so a transform-snapshot generation fence would reject valid work.
                 publication_fence,
+                provider_completion: None,
             },
         }))
     }
@@ -7101,6 +7103,7 @@ impl McHandler {
             live_guard,
             connect_failure_commit_hook: Arc::clone(&self.connect_failure_commit_hook),
             publication_fence: None,
+            provider_completion: None,
         }))
     }
 
@@ -7202,6 +7205,7 @@ impl McHandler {
             live_guard,
             connect_failure_commit_hook,
             publication_fence,
+            provider_completion,
         } = task;
         let _guard = live_guard;
         tracing::info!(
@@ -7238,6 +7242,9 @@ impl McHandler {
             );
             let result =
                 historian::run_historian_firing_on_host(&host_runs, request, firing_budget).await;
+            if let Some(completion) = provider_completion {
+                completion.record(&store, &session_id, &result);
+            }
             if let Ok(loaded) = store.load(&session_id) {
                 DISPATCH_HEALTH.record_historian_outcome(
                     historian_status_summary(&loaded.meta.historian),
@@ -7293,6 +7300,9 @@ impl McHandler {
                 historian_status_summary(&loaded.meta.historian),
                 loaded.meta.historian.recent_decisions.len(),
             );
+        }
+        if let Some(completion) = provider_completion {
+            completion.record(&store, &session_id, &result);
         }
         result
     }

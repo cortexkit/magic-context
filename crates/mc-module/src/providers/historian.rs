@@ -56,6 +56,54 @@ struct LogPublicationFence {
     serial: Arc<ProviderSerial>,
 }
 
+pub(crate) struct RunCompletion {
+    key: Key,
+    generation: u64,
+}
+
+impl RunCompletion {
+    pub(crate) fn record(
+        self,
+        store: &McStore,
+        session: &str,
+        result: &Result<
+            crate::historian::HistorianDriveOutcome,
+            crate::historian::HistorianDriveError,
+        >,
+    ) {
+        // If admission prevents publishing a completed report, the existing
+        // driver returns to Idle without a model-failure backoff. Mark the next
+        // completed pass retryable even if its user/tool counts are unchanged.
+        // Do not acquire the admission lock: its owner may be waiting for this
+        // firing task to return before releasing it.
+        let recorded = store.load_meta(session).and_then(|loaded| {
+            let retry = result.is_err()
+                && loaded.meta.historian.state == HistorianPhase::Idle
+                && loaded
+                    .meta
+                    .historian
+                    .failure_backoff_at_ms
+                    .is_none_or(|at| at <= now_ms());
+            store.finish_provider_historian_run(
+                &self.key.store_key(),
+                session,
+                self.generation,
+                retry,
+            )
+        });
+        if let Err(error) = recorded {
+            // historian_launch_pending records a prepared fire whose completion
+            // has not been acknowledged. Retaining it keeps the next completed
+            // pass retryable if this result transaction fails.
+            tracing::warn!(
+                session,
+                ?error,
+                "provider historian result could not be recorded"
+            );
+        }
+    }
+}
+
 enum EvaluationOutcome {
     Fire,
     Busy,
@@ -213,6 +261,7 @@ impl McHandler {
         // still needs a durable run; keep its launch intent across a crash in
         // the gap between returning FireReady and starting the firing task.
         counters["historian_cadence"] = cadence;
+        counters["historian_run_retry_due"] = json!(false);
         match outcome {
             EvaluationOutcome::Fire => {
                 counters["historian_evaluation_due"] = json!(false);
@@ -348,6 +397,7 @@ impl McHandler {
         counters = current_counters;
         let cadence = &counters["historian_cadence"];
         let due = counters["historian_evaluation_due"].as_bool() == Some(true)
+            || counters["historian_run_retry_due"].as_bool() == Some(true)
             || counters["historian_launch_pending"].is_object()
             || cadence.is_null()
             || cadence["lineage"].as_str() != Some(&conversation.lineage_id)
@@ -411,7 +461,7 @@ impl McHandler {
         }
         let projection = ck_wire::project_messages(&parsed.messages).map_err(transient)?;
         let mut timings = HistorianTriggerTimings::default();
-        let action = self.prepare_historian_fire(
+        let mut action = self.prepare_historian_fire(
             Arc::clone(store),
             &parsed,
             binding,
@@ -430,7 +480,11 @@ impl McHandler {
                 timings: &mut timings,
             },
         );
-        if let PreparedHistorianAction::FireReady(prepared) = &action {
+        if let PreparedHistorianAction::FireReady(prepared) = &mut action {
+            prepared.task.provider_completion = Some(RunCompletion {
+                key: key.clone(),
+                generation,
+            });
             // Persist content fingerprints only for messages this chunk selects.
             // Previously compacted messages are not source for this publication;
             // writing their fingerprints could conflict with a stored rendering.
@@ -495,6 +549,46 @@ mod tests {
         assert!(
             matches!(action, Some(PreparedHistorianAction::FireReady(_))),
             "a persisted decision alone is not a launched run"
+        );
+    }
+
+    #[tokio::test]
+    async fn old_run_completion_preserves_newer_launch_and_sync_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = handler(dir.path());
+        declare(&h).await;
+        let store = h.store.get().unwrap();
+        let k = key(&h).store_key();
+        let mut c = store.load_provider_conversation(&k).unwrap().unwrap();
+        c.hook_counters_json = json!({"historian_launch_pending":{"generation":2},"historian_evaluation_due":true,"historian_inputs":{"usage":{"current_total_input_tokens":123}}}).to_string();
+        store.save_provider_conversation(&k, &c).unwrap();
+        store
+            .finish_provider_historian_run(&k, "s", 1, false)
+            .unwrap();
+        assert_eq!(
+            store
+                .load_provider_conversation(&k)
+                .unwrap()
+                .unwrap()
+                .hook_counters_json,
+            c.hook_counters_json
+        );
+        store
+            .finish_provider_historian_run(&k, "s", 2, true)
+            .unwrap();
+        let counters: Value = serde_json::from_str(
+            &store
+                .load_provider_conversation(&k)
+                .unwrap()
+                .unwrap()
+                .hook_counters_json,
+        )
+        .unwrap();
+        assert_eq!(counters["historian_evaluation_due"], true);
+        assert_eq!(counters["historian_run_retry_due"], true);
+        assert_eq!(
+            counters.pointer("/historian_inputs/usage/current_total_input_tokens"),
+            Some(&json!(123))
         );
     }
 
