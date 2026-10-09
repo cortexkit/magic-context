@@ -227,8 +227,19 @@ fn non_tag_messages(
         else {
             continue;
         };
-        let ops: Vec<hooks::answer::Operation> =
+        let mut ops: Vec<hooks::answer::Operation> =
             serde_json::from_str(&answer.ops_json).map_err(transient)?;
+        // The host record keeps its earlier hook answer unchanged when a step
+        // does not replace history. Remove Channel 1 Appends from live post_tool
+        // answers before engine ingestion: tagged CHANNEL1_NOTE operations and
+        // legacy untagged operations, which this hook used only for reminders.
+        // The engine decides after drops and the grace that suppresses nudges
+        // following a fulfilled reduction; replaying the hook text bypasses that
+        // decision and can duplicate an engine-saved reminder.
+        if answer.subject.hook == "post_tool" {
+            ops.retain(|op| !matches!(op, hooks::answer::Operation::Append { note, .. }
+                if note.as_deref().is_none_or(|note| note == super::step_transform::CHANNEL1_NOTE)));
+        }
         let parts = message
             .message
             .get_mut("parts")
@@ -346,6 +357,14 @@ fn can_skip_host_step(
     status: &transform::compaction::Status,
     relevant_not_applied: bool,
 ) -> Result<bool, HandlerOutcome> {
+    let pending_reminder = store.load_provider_conversation(&work.key.store_key()).map_err(transient)?
+        .map(|c| serde_json::from_str::<Value>(&c.hook_counters_json).map_err(transient))
+        .transpose()?.is_some_and(|c| c["channel1_hook_append_pending"].as_bool()==Some(true));
+    // A hook prepared a reminder that the engine has not yet reconciled.
+    // Return false so the engine observes the complete input and saves its own
+    // reminder decision. It may still answer noop; the host record's earlier
+    // bytes change only when a replacement is actually applied.
+    if pending_reminder { return Ok(false); }
     let meta = store.load_meta(namespace).map_err(transient)?.meta;
     let usage =
         status.usage().current_total_input_tokens as f64 * 100.0 / status.context_window as f64;
@@ -1148,14 +1167,20 @@ impl McHandler {
                     .checked_add(1)
                     .ok_or_else(|| transient("version exhausted"))?;
                 save_host_setup(store, &work.key, &mut conversation, &setup)?;
-                if let Some(view) = execute_host(
+                let view = execute_host(
                     store,
                     work,
                     &conversation,
                     &mut setup,
                     &normalized,
                     &lineage,
-                )? {
+                )?;
+                let current = store.load_provider_conversation(&work.key.store_key()).map_err(transient)?
+                    .ok_or_else(|| transient("provider conversation disappeared"))?;
+                let mut counters: Value = serde_json::from_str(&current.hook_counters_json).map_err(transient)?;
+                counters["channel1_hook_append_pending"] = json!(false);
+                conversation.hook_counters_json = counters.to_string();
+                if let Some(view) = view {
                     save_host_view(store, &work.key, &view, "produced")?;
                     setup.produced = Some(ViewSummary::from(&view.engine));
                     let mut answer = json!({"answer":"compaction_message","request_id":request.request_id,"compaction":view.wire});

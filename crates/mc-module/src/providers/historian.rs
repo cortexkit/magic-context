@@ -592,6 +592,67 @@ mod tests {
         );
     }
 
+            #[tokio::test]
+    async fn chronology_hook_bytes_replay_on_defer_and_rebuild_matches_full_engine() {
+        for first_serve in [60,80] {
+            let dir = tempfile::tempdir().unwrap(); let reference_dir = tempfile::tempdir().unwrap();
+            let mut h = handler(dir.path()); let mut reference = handler(reference_dir.path());
+            for handler in [&mut h,&mut reference] {
+                let config = handler.fixed_config.as_mut().unwrap(); config.protected_tokens_user = Some(0); config.protected_tools.clear();
+                let mut b = binding(handler); b.config = handler.fixed_config.clone().unwrap(); handler.bind_route(7,b); declare(handler).await;
+            }
+            let mut entries = corpus();
+            entries[1].message = json!({"info":{"id":"m2","role":"assistant","time":{"created":2000}},"parts":[{"id":"p2","type":"tool","callID":"read-old","tool":"read","state":{"status":"completed","input":{"filePath":"old.txt"},"output":"old payload ".repeat(3000)}}]});
+            for ordinal in [40,50,60] { entries[ordinal-1].message = json!({"info":{"id":format!("m{ordinal}"),"role":"assistant","time":{"created":ordinal*1000}},"parts":[{"id":format!("p{ordinal}"),"type":"tool","callID":format!("read-new-{ordinal}"),"tool":"read","state":{"status":"completed","input":{"filePath":"old.txt"},"output":"fresh payload ".repeat(50)}}]}); }
+            let mut applied = Value::Null;
+            for handler in [&h,&reference] {
+                review_sync(handler,&entries[..3],json!({}));
+                for entry in &entries[..3] { review_hook_message(handler,entry).await; }
+                let view = warm(handler,&entries[..3]).await; if std::ptr::eq(handler,&h) { applied = view; }
+                let store = handler.store.get().unwrap(); let loaded = store.load_meta("s").unwrap(); let mut meta = loaded.meta; meta.last_execute_ordinal = 3; store.commit_meta("s",loaded.row_version,&meta).unwrap();
+            }
+            let mut served_hook = Value::Null;
+            for handler in [&h,&reference] {
+                review_sync(handler,&entries[3..first_serve],json!({}));
+                for entry in &entries[3..first_serve] { let served = review_hook_message(handler,entry).await; if std::ptr::eq(handler,&h) && entry.ordinal==60 { served_hook = served; } }
+                let store = handler.store.get().unwrap(); let k = key(handler).store_key(); let lineage = store.load_provider_lineage(&k,"L").unwrap().unwrap();
+                store.commit_provider_status(&k,&lineage,&[],Some(first_serve as u64),&[]).unwrap();
+            }
+            let body = |messages: &Value| messages.as_array().unwrap().iter().find(|m|m["info"]["id"]=="m60").unwrap()["parts"][0]["state"]["output"].as_str().unwrap().to_string();
+            let hook_body = served_hook["parts"][0]["state"]["output"].as_str().unwrap().to_string();
+            assert!(hook_body.matches("<system-reminder>").count()<=1);
+            let (historical,permitted) = review_full_native(&reference,&entries[..first_serve],1000,false); assert!(!permitted);
+            let mut low = step("chronology-first",first_serve as u64); low["last_applied"] = applied["compaction"].clone();
+            assert_eq!(response(h.handle_provider_value(7,"compaction.step",&low).await)["answer"],"noop");
+            if first_serve==60 {
+                for handler in [&h,&reference] {
+                    review_sync(handler,&entries[60..],json!({}));
+                    for entry in &entries[60..] { review_hook_message(handler,entry).await; }
+                    let store = handler.store.get().unwrap(); let k = key(handler).store_key(); let lineage = store.load_provider_lineage(&k,"L").unwrap().unwrap(); store.commit_provider_status(&k,&lineage,&[],Some(80),&[]).unwrap();
+                }
+            }
+            let (deferred,permitted) = review_full_native(&reference,&entries,1000,false); assert!(!permitted); assert_eq!(body(&deferred),body(&historical));
+            let mut low = step("chronology-next",80); low["last_applied"] = applied["compaction"].clone();
+            assert_eq!(response(h.handle_provider_value(7,"compaction.step",&low).await)["answer"],"noop");
+            let held = h.store.get().unwrap().load_provider_hook_answers(&key(&h).store_key()).unwrap();
+            let hook_answer = held.iter().find(|a|a.answer.subject.subject_mid=="m60").unwrap();
+            let ops: Vec<hooks::answer::Operation> = serde_json::from_str(&hook_answer.answer.ops_json).unwrap();
+            let raw = entries[59].message["parts"][0]["state"]["output"].as_str().unwrap().to_string();
+            let mut stored = hooks::answer::apply_ops(&[raw],&ops).unwrap()[0].clone();
+            let tag = hook_answer.answer.tags[0].number; stored = format!("{}{}",transform::tag_prefix(tag),stored);
+            assert_eq!(stored,hook_body,"defer keeps exactly the hook bytes that were served");
+            for handler in [&h,&reference] { handler.store.get().unwrap().append_pending_agent_drops("s",&["m3#0".into()],2).unwrap(); }
+            let (expected,permitted) = review_full_native(&reference,&entries,90000,false); assert!(permitted);
+            let mut force = step("chronology-force",80); force["estimate"]["request_tokens"] = json!(90000); force["last_applied"] = applied["compaction"].clone();
+            let actual = response(h.handle_provider_value(7,"compaction.step",&force).await); assert_eq!(actual["answer"],"compaction_message");
+            let difference = review_byte_diff("chronology rebuild",&serde_json::to_vec(&actual["compaction"]["replacement"]).unwrap(),&serde_json::to_vec(&expected).unwrap());
+            eprintln!("M5_CHRONOLOGY before_assert first_serve={first_serve} hook_reminder={} full_defer_reminder={} rebuilt_reminders={} expected_reminders={}",hook_body.contains("<system-reminder>"),body(&historical).contains("<system-reminder>"),body(&actual["compaction"]["replacement"]).matches("<system-reminder>").count(),body(&expected).matches("<system-reminder>").count());
+            assert!(difference.is_none(),"rebuild follows the full engine's actual chronology: {difference:?}");
+            assert!(body(&actual["compaction"]["replacement"]).matches("<system-reminder>").count()<=1);
+            eprintln!("M5_CHRONOLOGY first_serve={first_serve} hook_reminder={} full_defer_reminder={} hook_defer=exact_replay force_rebuild=full_engine_bytes",hook_body.contains("<system-reminder>"),body(&historical).contains("<system-reminder>"));
+        }
+    }
+
     include!("m5_review_tests.rs");
 
     fn handler(path: &Path) -> McHandler {

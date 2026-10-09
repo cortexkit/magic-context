@@ -6,6 +6,8 @@ use mc_store::provider_records::{
 };
 use serde::Deserialize;
 
+pub(super) const CHANNEL1_NOTE: &str = "mc:channel1";
+
 #[cfg(test)]
 #[path = "step_transform_parity_tests.rs"]
 mod parity_tests;
@@ -853,14 +855,20 @@ impl McHandler {
                         counters["engine_policy"]["baseline"]=serde_json::to_value(baseline).expect("baseline JSON");
                         counters["engine_policy"]["baseline_len"]=json!(inputs.baseline.baseline_parts.len());
                     }
-                    let (mut cadence_ops, mut policy) = host_channel1(&inputs,state);
+                    let (cadence_ops, mut policy) = host_channel1(&inputs,state);
                     counters["engine_policy"]["reduce_suppressed"]=policy["reduce_pending"].clone();
                     counters["engine_policy"]["baseline"]["channel1_post_reduce_grace_baseline_u"]=policy["grace_u"].clone();
                     counters["engine_policy"]["baseline"]["channel1_post_reduce_grace_pre_level"]=policy["grace_level"].clone();
                     policy.as_object_mut().expect("policy object").remove("channel1");
                     if hook == Hook::PostTool {
                         ops.append(&mut cadence_ops.clone());
-                        non_tag_ops.append(&mut cadence_ops);
+                        for mut op in cadence_ops {
+                            if let Operation::Append { note, .. } = &mut op {
+                                *note = Some(CHANNEL1_NOTE.into());
+                                counters["channel1_hook_append_pending"] = json!(true);
+                            }
+                            non_tag_ops.push(op);
+                        }
                     }
                     policy["last_response_at_ms"] = json!(ingress
                         .ck

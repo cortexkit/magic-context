@@ -258,3 +258,42 @@ run-retry marking: the unchanged contention-retry test alone turns red, while
 the surviving-cut/contention control stays green. Staging, nonempty mutation
 diff and empty checkout/touch restoration are recorded. Comment review's three
 clarity suggestions were resolved. Review tests remain unedited.
+
+### F3 source checkpoint: engine-owned rebuild reminders
+
+The parent authorized the additional narrow `transform.rs` gate change after
+confirming that provider compaction requests bypassed the private engine nudge
+decision. Blame and `git log -L` identify `ef6caa376aa4c67fe08706f4d2fbf08a94a3fc3c`
+as the commit refining the host exclusion; its predecessor already skipped the
+OpenCode provider step so hook reminders would not be generated twice. The new
+protection is to remove retained hook Channel-1 Appends from engine input, not to
+duplicate the post-drop decision in a provider. Newly retained operations get an
+ownership note; returned wire operations and ordinary served bytes are unchanged.
+Legacy note-less post_tool Appends are recognized as the old Channel-1 form.
+
+The chronology caveat matters. The new regression runs actual low-pressure model
+calls through 60 and through 80 before the force rebuild, and also covers a first
+serve through 80 after the warmed three-message prefix:
+
+- First serve through 60: the hook and full engine emit no reminder on m60;
+  defer through 80 replays those bytes; force rebuild still matches with none.
+- First serve through 80: the hook's served entry has one earlier reminder.
+  The full engine also creates one reminder (its singular `1 spent tool output`
+  wording matters), saves its exact bytes and keeps them on the force rebuild.
+  Merely stripping the hook Append initially failed this chronology: the provider
+  omitted the engine's historical reminder. A pending-reconciliation scalar now
+  forces one engine observation even on a compaction step that ultimately answers
+  noop. It saves the engine-owned reminder without changing the host record's
+  earlier hook bytes; the later priced replacement matches the full engine.
+
+Linux runs passed the unchanged five-case
+`review_m5_veto_drop_and_age_heuristic_matrix_matches_full_engine` and new
+`chronology_hook_bytes_replay_on_defer_and_rebuild_matches_full_engine` (one test
+with both histories). Both source arrays contain at most one reminder, and the
+whole force replacement is compared as canonical native bytes. The original
+review file is not edited. Comment-review suggestions were resolved.
+
+**Checkpoint only:** the runner drained again before all-targets checking and
+full-engine vector/differential gates. Remaining mutation and broader gates are
+not yet claimed. The parent requested an explicitly unverified source checkpoint
+while MOTOR updates the runner; final verification/disposition follows below.
