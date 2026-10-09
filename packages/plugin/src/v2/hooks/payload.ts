@@ -432,7 +432,9 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                         ? originalsByID.get(message.info.id)
                         : undefined);
                 const template = saved && mid ? saved.metadata.get(mid) : original;
-                const id = message.info.syntheticHead ? HEAD_IDS[head++] : (original?.id ?? mid);
+                const id = message.info.syntheticHead
+                    ? HEAD_IDS[head++]
+                    : (original?.id ?? (saved ? mid : undefined));
                 const content: Part[] = [];
                 const following: V2Message[] = [];
                 for (const [index, candidate] of message.parts.entries()) {
