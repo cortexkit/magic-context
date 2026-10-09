@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 /// Section-inventory protocol version serialized in move manifests.
 pub const INVENTORY_VERSION: u32 = 4;
-pub const CONTEXT_SCHEMA_VERSION: u32 = 99;
-pub const STORE_SCHEMA_VERSION: u32 = 66;
+pub const CONTEXT_SCHEMA_VERSION: u32 = 100;
+pub const STORE_SCHEMA_VERSION: u32 = 67;
 pub const GLOBAL_USER_PROFILE_PROJECT_PATH: &str = "__global__";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1776,6 +1776,8 @@ pub const TABLES: &[TableInventory] = &[
             "total_input_tokens",
             "deferred_execute_state",
             "cached_m0_bytes",
+            "served_prefix",
+            "held_release",
             "cached_m0_score_selection_watermark",
             "cached_m0_project_memory_epoch",
             "cached_m0_workspace_fingerprint",
@@ -3675,7 +3677,7 @@ mod tests {
             import { runMigrations } from './packages/plugin/src/features/magic-context/migrations';
             const db = new Database(process.env.MOVE_TEST_CONTEXT);
             initializeDatabase(db); runMigrations(db);
-            if (LATEST_SUPPORTED_VERSION !== 99 || db.prepare('SELECT MAX(version) AS v FROM schema_migrations WHERE version < 10000').get().v !== 99) throw new Error('update the schema-pinned inventory');
+            if (LATEST_SUPPORTED_VERSION !== 100 || db.prepare('SELECT MAX(version) AS v FROM schema_migrations WHERE version < 10000').get().v !== 100) throw new Error('update the schema-pinned inventory');
             db.close();
         "#;
         let output = Command::new("bun")

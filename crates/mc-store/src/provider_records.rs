@@ -163,10 +163,14 @@ mod tests {
     fn provider_migration_upgrades_a_populated_previous_store_and_survives_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let descriptor = descriptor(dir.path());
-        let previous = &MIGRATIONS[..MIGRATIONS.len() - 2];
+        let previous: Vec<_> = MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version < 65)
+            .cloned()
+            .collect();
         let inner = open_sqlite(&descriptor).unwrap();
         inner.with_conn(register_legacy_trigger_functions).unwrap();
-        inner.migrate(NS, previous).unwrap();
+        inner.migrate(NS, &previous).unwrap();
         inner.with_conn(|conn| {
             assert_eq!(crate::single_store_schema::recorded_store_version(conn)?,previous.last().unwrap().version);
             assert!(!crate::single_store_schema::table_exists(conn,"main","mc_provider_sessions_v1")?);

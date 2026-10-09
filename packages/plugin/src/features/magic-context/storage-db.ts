@@ -164,7 +164,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastUnconfirmedMigrationHolders = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 99;
+export const LATEST_SUPPORTED_VERSION = 100;
 
 /**
  * Every runtime backend receives the same finite wait before the first schema
@@ -1832,6 +1832,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       -- deferred_execute_state was used by the removed turn-boundary execute hold.
       deferred_execute_state TEXT,
       cached_m0_bytes BLOB,
+      served_prefix TEXT,
+      held_release TEXT,
       cached_m0_score_selection_watermark INTEGER NOT NULL DEFAULT 0
         CHECK (cached_m0_score_selection_watermark BETWEEN 0 AND 9223372036854775807),
       cached_m0_project_memory_epoch INTEGER,
@@ -2283,6 +2285,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // NULL is the load-bearing absence sentinel and this column MUST NOT be
     // added to the healAllNullColumns fallback list.
     ensureColumn(db, "session_meta", "pending_pi_compaction_marker_state", "TEXT");
+    ensureColumn(db, "session_meta", "served_prefix", "TEXT");
+    ensureColumn(db, "session_meta", "held_release", "TEXT");
     ensureColumn(db, "session_meta", "new_work_tokens", "INTEGER NOT NULL DEFAULT 0");
     ensureColumn(db, "session_meta", "total_input_tokens", "INTEGER NOT NULL DEFAULT 0");
     // Boundary-execution deferred intent (plan v8). Intentionally NO DEFAULT

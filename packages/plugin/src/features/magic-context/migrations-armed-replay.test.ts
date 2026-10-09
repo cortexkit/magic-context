@@ -94,6 +94,18 @@ function applyExactlyOneMigration(db: DatabaseType, migration: (typeof MIGRATION
 // a distinctive column value, and each value must be present at walk end.
 const CLAIMED_ARM_SIGNATURES = [
     {
+        arm: "populateForVersion v100 served prefix",
+        table: "session_meta",
+        column: "served_prefix",
+        like: '{"prefix":"armed-v100"}',
+    },
+    {
+        arm: "populateForVersion v100 held release",
+        table: "session_meta",
+        column: "held_release",
+        like: '{"reason":"flush","obligations":["armed-v100"]}',
+    },
+    {
         arm: "populateForVersion v99",
         table: "memory_pending_facts",
         column: "content",
@@ -827,6 +839,25 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
                     )
                     .get(),
             ).toEqual({ state: "retryable", fact_attempts: 0 });
+            populateModuleOwnedRows(db, version, state);
+            return;
+        case 100:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            db.prepare(`INSERT INTO session_meta(session_id, served_prefix, held_release)
+                VALUES ('armed-v100', ?, ?)`).run(
+                '{"prefix":"armed-v100"}',
+                '{"reason":"flush","obligations":["armed-v100"]}',
+            );
+            expect(
+                db
+                    .prepare(
+                        "SELECT served_prefix, held_release FROM session_meta WHERE session_id='armed-v100'",
+                    )
+                    .get(),
+            ).toEqual({
+                served_prefix: '{"prefix":"armed-v100"}',
+                held_release: '{"reason":"flush","obligations":["armed-v100"]}',
+            });
             populateModuleOwnedRows(db, version, state);
             return;
         default:
