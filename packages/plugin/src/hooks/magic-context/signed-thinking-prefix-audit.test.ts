@@ -603,11 +603,9 @@ for (const generation of ["v1", "v2"] as const) {
                         console.log(
                             `AUDIT ${host} | ${scope} | ${lane}: ${error ?? "accepted"}; laneLanded=${edit}; nonThinkingEdit=${nonThinkingEdit}; pendingOps=${getPendingOps(f.db, f.sessionId).length}`,
                         );
-                        if (STRICT_AUDIT) {
-                            expect(error).toBeNull();
-                            return;
-                        }
-                        if (EXPOSED.has(lane)) {
+                        // Under MC_AUDIT_STRICT=1 every lane must behave as held,
+                        // which is the acceptance bar of docs/designs/signed-thinking-hold.md.
+                        if (!STRICT_AUDIT && EXPOSED.has(lane)) {
                             expect(edit).toBe(true);
                             expect(error).toBe(PREFIX_ERROR);
                             return;
@@ -622,9 +620,23 @@ for (const generation of ["v1", "v2"] as const) {
                             expect(edit).toBe(false);
                         if (lane.startsWith("ctx_reduce") || lane === "/ctx-flush")
                             expect(getPendingOps(f.db, f.sessionId).length).toBeGreaterThan(0);
+                        // A held edit is never recorded as served: repeating the pass
+                        // with no new response serves exactly the same bytes.
+                        expect(wire(await f.pass())).toEqual(after);
                         // The loop continues validly on the held pass's bytes.
                         f.served = afterMessages;
                         await toolLoop(f, 2);
+                        if (subagent) return;
+                        // The held edit is released, not lost: once the turn ends and a
+                        // real user message starts the next one, the same state (still
+                        // armed, nothing re-queued) lands the lane's edit validly.
+                        await nextUserTurn(f, "prompt-release");
+                        const released = wire(f.served);
+                        console.log(
+                            `AUDIT-RELEASE ${host} | next user turn | ${lane}: ${f.mock.check(released) ?? "accepted"}; laneLanded=${landed(f, lane, released)}`,
+                        );
+                        expect(f.mock.check(released)).toBeNull();
+                        expect(landed(f, lane, released)).toBe(true);
                     }),
                 );
             }

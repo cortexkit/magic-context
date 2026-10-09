@@ -12,7 +12,10 @@
  * MC_AUDIT_STRICT=1 to make every exposed lane fail on its strict-binding 400.
  */
 import { describe, expect, it } from "bun:test";
-import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
+import {
+	appendCompartments,
+	replaceAllCompartmentState,
+} from "@magic-context/core/features/magic-context/compartment-storage";
 import {
 	getOrCreateSessionMeta,
 	getPendingOps,
@@ -122,6 +125,7 @@ type Lane =
 	| "emergency 95% wall"
 	| "/ctx-flush"
 	| "HARD fold after historian publication"
+	| "m[0]/m[1] re-render after a recomp clears the cached pair"
 	| "synthetic todo"
 	| "caveman text compression"
 	| "reasoning clearing (keep_reasoning_tokens)"
@@ -134,6 +138,7 @@ type Lane =
  * request still carries, which a strict-binding provider rejects.
  */
 const EXPOSED = new Set<Lane>([
+	"m[0]/m[1] re-render after a recomp clears the cached pair",
 	"synthetic todo",
 	"frozen-sentinel first application",
 ]);
@@ -147,6 +152,7 @@ const PRIMARY_LANES: Lane[] = [
 	"emergency 95% wall",
 	"/ctx-flush",
 	"HARD fold after historian publication",
+	"m[0]/m[1] re-render after a recomp clears the cached pair",
 	"synthetic todo",
 	"caveman text compression",
 	"reasoning clearing (keep_reasoning_tokens)",
@@ -491,6 +497,28 @@ function armAndBust(f: Fixture, lane: Lane, subagent: boolean): void {
 			]);
 			signalPiHistoryRefresh(f.sessionId);
 			break;
+		case "m[0]/m[1] re-render after a recomp clears the cached pair":
+			// A recomp promotion (or a history-boundary repair) rewrites the
+			// compartments and clears the cached m[0]/m[1] pair in the same
+			// transaction. No bust is offered: the next pass is a defer pass.
+			replaceAllCompartmentState(
+				f.db,
+				f.sessionId,
+				[
+					{
+						sequence: 0,
+						startMessage: 1,
+						endMessage: 5,
+						startMessageId: "prompt-1",
+						endMessageId: "step-4",
+						title: COMPARTMENT_TITLE,
+						content:
+							"Read parser.ts, ast.ts and lexer.ts; error recovery never resynchronises.",
+					},
+				],
+				[],
+			);
+			return;
 		case "synthetic todo":
 			updateSessionMeta(f.db, f.sessionId, {
 				lastTodoState: JSON.stringify([
@@ -545,13 +573,15 @@ function landed(f: Fixture, lane: Lane, after: Wire): boolean {
 		case "supersession and dedup":
 			return old.some((id) => f.tagStatus(id) === "dropped");
 		case "HARD fold after historian publication":
+		case "m[0]/m[1] re-render after a recomp clears the cached pair":
 			return text.includes(COMPARTMENT_TITLE);
 		case "synthetic todo":
 			return text.includes("Repair error recovery");
 		case "caveman text compression":
 			return !text.includes(SUMMARY_TEXT);
 		case "reasoning clearing (keep_reasoning_tokens)":
-			return !text.includes("mock-signature-1");
+			// Quoted, so that a later "mock-signature-10" does not match.
+			return !text.includes('"mock-signature-1"');
 		case "processed image strip":
 			return !text.includes('"type":"image"');
 		case "stale ctx_reduce strip":
@@ -597,11 +627,9 @@ for (const subagent of [false, true]) {
 					console.log(
 						`AUDIT Pi/OMP | ${scope} | ${lane}: ${error ?? "accepted"}; laneLanded=${edit}; nonThinkingEdit=${nonThinkingEdit}; pendingOps=${getPendingOps(f.db, f.sessionId).length}`,
 					);
-					if (STRICT_AUDIT) {
-						expect(error).toBeNull();
-						return;
-					}
-					if (EXPOSED.has(lane)) {
+					// Under MC_AUDIT_STRICT=1 every lane must behave as held, which is
+					// the acceptance bar of docs/designs/signed-thinking-hold.md.
+					if (!STRICT_AUDIT && EXPOSED.has(lane)) {
 						expect(edit).toBe(true);
 						expect(error).toBe(PREFIX_ERROR);
 						return;
@@ -614,8 +642,22 @@ for (const subagent of [false, true]) {
 					if (lane === "emergency 95% wall")
 						expect(JSON.stringify(after)).toContain("[dropped §");
 					else expect(nonThinkingEdit).toBe(false);
+					// A held edit is never recorded as served: repeating the pass with
+					// no new response serves exactly the same bytes.
+					expect(wire(await f.pass())).toEqual(after);
 					f.served = afterMessages;
 					await toolLoop(f, 2);
+					if (subagent) return;
+					// The held edit is released, not lost: once a real user message
+					// starts the next turn, the same state (still armed, nothing
+					// re-queued) lands the lane's edit validly.
+					await nextUserTurn(f, "prompt-release");
+					const released = wire(f.served);
+					console.log(
+						`AUDIT-RELEASE Pi/OMP | next user turn | ${lane}: ${f.mock.check(released) ?? "accepted"}; laneLanded=${landed(f, lane, released)}`,
+					);
+					expect(f.mock.check(released)).toBeNull();
+					expect(landed(f, lane, released)).toBe(true);
 				}),
 			);
 		}

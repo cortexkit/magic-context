@@ -250,6 +250,9 @@ enum Lane {
     Wall95,
     Flush,
     HardFold,
+    /// A compartment rewrite (recomp promotion, boundary repair) with no bust offered: the next
+    /// pass is an ordinary defer pass.
+    Recomp,
     Todo,
     Caveman,
     Image,
@@ -553,7 +556,7 @@ impl Fixture {
             Lane::DropFull | Lane::Flush | Lane::Image => {
                 self.store.append_pending_agent_drops(&sid, &["step-2-result-0#0".into()], 1).unwrap();
             }
-            Lane::HardFold => {
+            Lane::HardFold | Lane::Recomp => {
                 // The historian published a compartment covering the first turn.
                 let end = self.req.messages.iter().find(|m| m.mid == "step-4").unwrap().ordinal as i64;
                 self.store
@@ -576,6 +579,9 @@ impl Fixture {
             self.store.arm_soft_refresh(&sid).unwrap();
             return;
         }
+        if self.lane == Lane::Recomp {
+            return;
+        }
         self.set_usage(match (self.lane, subagent) {
             (Lane::Wall95, _) => 95_000,
             (_, true) => 76_000,
@@ -593,7 +599,7 @@ impl Fixture {
         match self.lane {
             Lane::DropFull | Lane::Flush => pending == 0,
             Lane::Wall95 => without_thinking(before) != without_thinking(after),
-            Lane::HardFold => text.contains(COMPARTMENT_TITLE),
+            Lane::HardFold | Lane::Recomp => text.contains(COMPARTMENT_TITLE),
             Lane::Todo => text.contains("Repair error recovery"),
             Lane::Caveman => !text.contains(SUMMARY_TEXT),
             Lane::Image => !text.contains("\"media\""),
@@ -631,11 +637,10 @@ fn mid_loop(profile: &str, subagent: bool, lane: Lane) {
         );
     }
     println!("AUDIT {profile} | subagent={subagent} | {lane:?}: {error:?}; laneLanded={landed}; nonThinkingEdit={non_thinking_edit}");
-    if std::env::var("MC_AUDIT_STRICT").as_deref() == Ok("1") {
-        assert_eq!(error, None, "{profile} subagent={subagent} {lane:?}");
-        return;
-    }
-    if exposed(subagent, lane) {
+    // Under MC_AUDIT_STRICT=1 every lane must behave as held, which is the acceptance bar of
+    // docs/designs/signed-thinking-hold.md.
+    let strict = std::env::var("MC_AUDIT_STRICT").as_deref() == Ok("1");
+    if !strict && exposed(subagent, lane) {
         assert!(
             landed,
             "{profile} subagent={subagent} {lane:?}: the lane did not land"
@@ -656,10 +661,75 @@ fn mid_loop(profile: &str, subagent: bool, lane: Lane) {
         !landed,
         "{profile} subagent={subagent} {lane:?}: held lane landed"
     );
+    // A held edit is never recorded as served: repeating the pass with no new response serves
+    // exactly the same bytes.
+    f.served = f.pass();
+    assert_eq!(
+        f.wire(),
+        after,
+        "{profile} subagent={subagent} {lane:?}: a repeat pass changed the held bytes"
+    );
     f.tool_loop(2);
+    if subagent {
+        return;
+    }
+    // On Claude Code every bust at a new user turn is rejected today because older-turn thinking
+    // is kept (see `control`), so the release check runs there only in strict mode.
+    if !strict && profile == "claude-code-anthropic" {
+        return;
+    }
+    // A compartment rewrite with no ride is never rendered by the module, mid loop or at a new
+    // user turn, so there is nothing to release (see `control`).
+    if lane == Lane::Recomp {
+        return;
+    }
+    // The held edit is released, not lost: once a real user message starts the next turn, the
+    // same state (still armed, nothing re-queued) lands the lane's edit validly.
+    let before_release = f.wire();
+    f.next_user_turn("prompt-release");
+    let released = f.wire();
+    let released_landed = f.landed(&before_release, &released);
+    println!(
+        "AUDIT-RELEASE {profile} | next user turn | {lane:?}: {:?}; laneLanded={released_landed}",
+        f.mock.check(&released),
+    );
+    assert_eq!(f.mock.check(&released), None, "{profile} {lane:?} release");
+    // The 95% wall's landing predicate compares non-thinking bytes, which a new turn always
+    // changes, so it cannot show a release; its validity above is still checked.
+    if lane == Lane::Wall95 {
+        return;
+    }
+    if !strict && release_gap(lane) {
+        assert!(
+            !released_landed,
+            "{profile} {lane:?}: the held edit now lands at the next user turn; remove it from release_gap"
+        );
+        return;
+    }
+    assert!(
+        released_landed,
+        "{profile} {lane:?}: the held edit did not land at the next user turn"
+    );
+}
+
+/// Held lanes whose edit does not land at the next user turn today although the work is still
+/// queued and the same pressure or armed refresh is still in place: no pass at the next user
+/// turn re-offers the opportunity the held pass declined, so the work waits for an unrelated
+/// ride. TypeScript and Pi release the same lanes at the turn boundary, and the design requires
+/// it here too.
+fn release_gap(lane: Lane) -> bool {
+    matches!(
+        lane,
+        Lane::DropFull | Lane::Flush | Lane::Caveman | Lane::Image
+    )
 }
 
 fn control(profile: &str, lane: Lane) {
+    // A compartment rewrite with no ride is not rendered at a new user turn either; the lane is
+    // only a defer byte-identity check mid loop.
+    if lane == Lane::Recomp {
+        return;
+    }
     let mut f = Fixture::new(profile, false, lane);
     f.prepare();
     f.tool_loop(4);
@@ -698,11 +768,12 @@ fn control(profile: &str, lane: Lane) {
 // supersession, the 85% force band, reasoning clearing and the stale ctx_reduce strip
 // did not price a bust or select work here even at a new user turn, so a held result
 // for them would be vacuous; the report covers them from the code.
-const PRIMARY_LANES: [Lane; 8] = [
+const PRIMARY_LANES: [Lane; 9] = [
     Lane::DropFull,
     Lane::Wall95,
     Lane::Flush,
     Lane::HardFold,
+    Lane::Recomp,
     Lane::Todo,
     Lane::Caveman,
     Lane::Image,
