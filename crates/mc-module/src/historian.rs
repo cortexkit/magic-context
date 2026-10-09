@@ -749,13 +749,75 @@ pub fn persist_historian_state(
     session_id: &str,
     next_state: HistorianDurableState,
 ) -> Result<u64, HistorianStateError> {
-    let loaded = store.load_meta(session_id)?;
-    let mut meta = loaded.meta.clone();
-    meta.historian = next_state;
-    if meta == loaded.meta {
-        return Ok(loaded.row_version.unwrap_or(0));
+    persist_historian_state_inner(store, session_id, next_state, 0)
+}
+
+// Report transitions may race metadata syncs or no-fire audit observations.
+// Retry those writes without overwriting a phase or firing that another writer
+// changed, and retain the fresh audit evidence. The publication CAS still uses
+// the version returned by the Publishing transition.
+fn persist_historian_report_state(
+    store: &McStore,
+    session_id: &str,
+    next_state: HistorianDurableState,
+) -> Result<u64, HistorianStateError> {
+    persist_historian_state_inner(store, session_id, next_state, 2)
+}
+
+#[cfg(test)]
+type HistorianStateCommitHook = Box<dyn FnMut(&McStore, &str, &HistorianDurableState)>;
+
+#[cfg(test)]
+thread_local! {
+    static HISTORIAN_STATE_COMMIT_HOOK: std::cell::RefCell<Option<HistorianStateCommitHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn persist_historian_state_inner(
+    store: &McStore,
+    session_id: &str,
+    mut next_state: HistorianDurableState,
+    mut metadata_retries: usize,
+) -> Result<u64, HistorianStateError> {
+    let preserve_report_audit = metadata_retries > 0;
+    let mut loaded = store.load_meta(session_id)?;
+    loop {
+        if preserve_report_audit {
+            next_state.recent_decisions = loaded.meta.historian.recent_decisions.clone();
+            if next_state.state != HistorianPhase::Idle {
+                next_state.last_no_fire = loaded.meta.historian.last_no_fire.clone();
+            }
+        }
+        let mut meta = loaded.meta.clone();
+        meta.historian = next_state.clone();
+        if meta == loaded.meta {
+            return Ok(loaded.row_version.unwrap_or(0));
+        }
+        #[cfg(test)]
+        HISTORIAN_STATE_COMMIT_HOOK.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().as_mut() {
+                hook(store, session_id, &next_state);
+            }
+        });
+        match store.commit_meta(session_id, loaded.row_version, &meta) {
+            Ok(row_version) => return Ok(row_version),
+            Err(error @ McStoreError::CasConflict { .. }) if metadata_retries > 0 => {
+                let fresh = store.load_meta(session_id)?;
+                let mut expected = loaded.meta.historian.clone();
+                // Recovery preparation can record a no-fire observation after
+                // adoption starts. Only these audit fields may change while
+                // the same report transition is retried.
+                expected.recent_decisions = fresh.meta.historian.recent_decisions.clone();
+                expected.last_no_fire = fresh.meta.historian.last_no_fire.clone();
+                if fresh.meta.historian != expected {
+                    return Err(error.into());
+                }
+                loaded = fresh;
+                metadata_retries -= 1;
+            }
+            Err(error) => return Err(error.into()),
+        }
     }
-    Ok(store.commit_meta(session_id, loaded.row_version, &meta)?)
 }
 
 pub trait HistorianPublicationFence: Send + Sync {
@@ -2795,6 +2857,7 @@ pub fn adopt_historian_run_on_host(
         return Ok(HostRunAdoption::Released { run_id });
     }
 
+    let predicate = publish_predicate(&awaiting)?;
     let publish_result = publish_output_from_awaiting(PublishOutputRequest {
         store: request.store,
         session_id: request.session_id,
@@ -2820,6 +2883,20 @@ pub fn adopt_historian_run_on_host(
     // carried has been spent either way, and leaving it would offer the same
     // rejected document to the next pass forever.
     let _ = request.store.finish_historian_pending_run(&run_id);
+    if let Err(HistorianDriveError::State(HistorianStateError::Store(
+        McStoreError::CasConflict { .. },
+    ))) = &publish_result
+    {
+        // A transition can exhaust its retries before reaching the publication
+        // guard. The report is spent, so release only its matching firing; a
+        // replacement run must keep its durable state and veto.
+        abandon_matching_run_without_cooldown(
+            request.store,
+            request.session_id,
+            &predicate,
+            Some("host report state transition lost a metadata CAS race".to_string()),
+        )?;
+    }
     let row_version = publish_result?;
     Ok(HostRunAdoption::Published(Box::new(HistorianRunSuccess {
         row_version,
@@ -3067,7 +3144,7 @@ fn publish_output_from_awaiting(
         "historian response received"
     );
     let validating = output_received(&awaiting, &output.text)?;
-    persist_historian_state(store, session_id, validating.clone())?;
+    persist_historian_report_state(store, session_id, validating.clone())?;
 
     let validation_result = if output.length_capped {
         Err(HistorianValidationError {
@@ -3095,7 +3172,7 @@ fn publish_output_from_awaiting(
             } else {
                 ""
             };
-            persist_historian_state(
+            persist_historian_report_state(
                 store,
                 session_id,
                 abandon_with_detail(
@@ -3109,7 +3186,8 @@ fn publish_output_from_awaiting(
     };
 
     let publishing = validation_ok(&validating)?;
-    let publishing_row_version = persist_historian_state(store, session_id, publishing.clone())?;
+    let publishing_row_version =
+        persist_historian_report_state(store, session_id, publishing.clone())?;
     let predicate = publish_predicate(&publishing)?;
     // Commit-point freshness checks live INSIDE publish_validated_chunk, which abandons
     // the matching firing before returning a rejection. A separate pre-check could return
@@ -7528,6 +7606,207 @@ mod tests {
             panic!("the only claimant must win");
         };
         (claim.run_id, claim.token)
+    }
+
+    fn with_state_commit_hook<T>(
+        hook: impl FnMut(&McStore, &str, &HistorianDurableState) + 'static,
+        action: impl FnOnce() -> T,
+    ) -> T {
+        struct ResetHook;
+        impl Drop for ResetHook {
+            fn drop(&mut self) {
+                HISTORIAN_STATE_COMMIT_HOOK.with(|hook| *hook.borrow_mut() = None);
+            }
+        }
+        HISTORIAN_STATE_COMMIT_HOOK.with(|slot| {
+            assert!(slot.borrow().is_none());
+            *slot.borrow_mut() = Some(Box::new(hook));
+        });
+        let _reset = ResetHook;
+        action()
+    }
+
+    fn leave_output_report_for_adoption(store: &McStore) {
+        let (run_id, token) = claim_a_run_with_no_firing_task(store);
+        assert_eq!(
+            store
+                .record_historian_report(
+                    FIRE_PROJECT,
+                    &run_id,
+                    &token,
+                    &mc_store::HistorianRunReport::Output {
+                        text: historian_xml("survived the bounce"),
+                        length_capped: false,
+                    },
+                    123,
+                )
+                .unwrap(),
+            mc_store::HistorianRecordOutcome::Recorded
+        );
+    }
+
+    #[test]
+    fn host_report_adoption_retries_metadata_cas_conflicts() {
+        for phase in [HistorianPhase::Validating, HistorianPhase::Publishing] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            seed_prior_compartment(&store);
+            leave_output_report_for_adoption(&store);
+            let chunk = historian_chunk();
+            let prior = prior_ranges();
+            let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed_writes = std::sync::Arc::clone(&writes);
+            let result = with_state_commit_hook(
+                move |store, session_id, next| {
+                    if next.state == phase
+                        && writes.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
+                    {
+                        let mut loaded = store.load_meta(session_id).unwrap();
+                        loaded.meta.last_upgrade_state = "concurrent-sync".to_string();
+                        loaded.meta.historian.last_no_fire = Some("reattaching".to_string());
+                        loaded.meta.historian.record_recent_decision(
+                            mc_store::HistorianRecentDecision {
+                                at_ms: 123,
+                                request_observed_at_ms: 123,
+                                decision: mc_store::HistorianDecision::NoFire,
+                                cause: "restart_recovery_in_progress".to_string(),
+                                eligible_tokens: 0,
+                                bar_tokens: 0,
+                                pressure_pct: 0,
+                                drain_latch: false,
+                                chunk_range: None,
+                                producer_model: None,
+                                completed_at_ms: None,
+                                apply_row_version: None,
+                            },
+                        );
+                        store
+                            .commit_meta(session_id, loaded.row_version, &loaded.meta)
+                            .unwrap();
+                    }
+                },
+                || adopt_historian_run_on_host(reattach_request(&store, &chunk, &prior)),
+            );
+            assert!(
+                observed_writes.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+                "transition retried"
+            );
+            assert!(
+                matches!(result, Ok(HostRunAdoption::Published(_))),
+                "{result:?}"
+            );
+            let loaded = store.load_meta("ses").unwrap();
+            assert_eq!(loaded.meta.historian.state, HistorianPhase::Idle);
+            assert_eq!(loaded.meta.last_upgrade_state, "concurrent-sync");
+            assert_eq!(loaded.meta.historian.recent_decisions.len(), 1);
+            assert_eq!(
+                loaded.meta.historian.recent_decisions[0].cause,
+                "restart_recovery_in_progress"
+            );
+            assert_eq!(store.load_compartments("ses").unwrap().len(), 2);
+            assert!(store.load_parked_historian_run("ses").unwrap().is_none());
+            assert!(matches!(
+                adopt_historian_run_on_host(reattach_request(&store, &chunk, &prior)).unwrap(),
+                HostRunAdoption::NotParked
+            ));
+            assert_eq!(
+                store.load_compartments("ses").unwrap().len(),
+                2,
+                "published only once"
+            );
+        }
+    }
+
+    #[test]
+    fn host_report_adoption_releases_veto_after_metadata_cas_retry_exhaustion() {
+        for phase in [HistorianPhase::Validating, HistorianPhase::Publishing] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            seed_prior_compartment(&store);
+            leave_output_report_for_adoption(&store);
+            let chunk = historian_chunk();
+            let prior = prior_ranges();
+            let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed_writes = std::sync::Arc::clone(&writes);
+            let result = with_state_commit_hook(
+                move |store, session_id, next| {
+                    if next.state == phase {
+                        let attempt = writes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let mut loaded = store.load_meta(session_id).unwrap();
+                        loaded.meta.last_upgrade_state = format!("concurrent-sync-{attempt}");
+                        store
+                            .commit_meta(session_id, loaded.row_version, &loaded.meta)
+                            .unwrap();
+                    }
+                },
+                || adopt_historian_run_on_host(reattach_request(&store, &chunk, &prior)),
+            );
+            assert!(
+                matches!(
+                    result,
+                    Err(HistorianDriveError::State(HistorianStateError::Store(
+                        McStoreError::CasConflict { .. }
+                    )))
+                ),
+                "{result:?}"
+            );
+            assert_eq!(
+                observed_writes.load(std::sync::atomic::Ordering::SeqCst),
+                3,
+                "retry budget is bounded"
+            );
+            assert_eq!(
+                store.historian_state("ses").unwrap().state,
+                HistorianPhase::Idle,
+                "a spent report must not strand the durable veto"
+            );
+            assert_eq!(
+                store.load_compartments("ses").unwrap().len(),
+                1,
+                "no stale publication"
+            );
+            assert!(store.load_parked_historian_run("ses").unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn host_report_adoption_cas_conflict_preserves_replacement_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        seed_prior_compartment(&store);
+        leave_output_report_for_adoption(&store);
+        let chunk = historian_chunk();
+        let prior = prior_ranges();
+        let mut replacement = store.historian_state("ses").unwrap();
+        replacement.firing_seq += 1;
+        replacement.producer_run_id = Some("replacement-run".to_string());
+        let replacement_for_hook = replacement.clone();
+        let result = with_state_commit_hook(
+            move |store, session_id, _next| {
+                let mut loaded = store.load_meta(session_id).unwrap();
+                loaded.meta.historian = replacement_for_hook.clone();
+                store
+                    .commit_meta(session_id, loaded.row_version, &loaded.meta)
+                    .unwrap();
+            },
+            || adopt_historian_run_on_host(reattach_request(&store, &chunk, &prior)),
+        );
+        assert!(
+            matches!(
+                result,
+                Err(HistorianDriveError::State(HistorianStateError::Store(
+                    McStoreError::CasConflict { .. }
+                )))
+            ),
+            "{result:?}"
+        );
+        assert_eq!(
+            store.historian_state("ses").unwrap(),
+            replacement,
+            "neither retry nor cleanup may overwrite a replacement firing"
+        );
+        assert_eq!(store.load_compartments("ses").unwrap().len(), 1);
+        assert!(store.load_parked_historian_run("ses").unwrap().is_none());
     }
 
     /// The restart decision, end to end: a report that arrives with no firing task
