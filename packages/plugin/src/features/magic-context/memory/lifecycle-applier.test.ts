@@ -141,13 +141,13 @@ describe("memory lifecycle applier", () => {
             db.close();
         }
     });
-    test("curate and tool proposals preserve canonical rows rendering history links and embeddings", () => {
+    test("curate proposals preserve canonical rows rendering history links and embeddings", () => {
         const db = store();
         try {
             const memory = insertMemory(db, input);
             const rows = db.prepare("SELECT * FROM memories").all();
             const before = renderingState(db);
-            for (const writer of ["ctx_memory", "curate"] as const)
+            for (const writer of ["curate"] as const)
                 for (const operation of ["archive", "merge", "update"] as const) {
                     expect(
                         proposeMemoryMutation(db, {
@@ -167,7 +167,7 @@ describe("memory lifecycle applier", () => {
             expect(db.prepare("SELECT * FROM memories").all()).toEqual(rows);
             expect(renderingState(db)).toEqual(before);
             expect(db.prepare("SELECT COUNT(*) AS n FROM memory_tool_proposals").get()).toEqual({
-                n: 6,
+                n: 3,
             });
             expect(db.prepare("SELECT COUNT(*) AS n FROM memory_history").get()).toEqual({ n: 0 });
         } finally {

@@ -215,4 +215,9 @@ export function installMemoryLifecycleSchema(db: Database): void {
             PRIMARY KEY(session_id,harness,project_path,memory_id)
         );
     `);
+    ensureColumn(db, "memory_history", "after_text", "TEXT");
+    ensureColumn(db, "memory_history", "before_json", "TEXT");
+    ensureColumn(db, "memory_history", "after_json", "TEXT");
+    ensureColumn(db, "memory_journal", "before_json", "TEXT");
+    ensureColumn(db, "memory_journal", "after_json", "TEXT");
 }

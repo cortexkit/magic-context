@@ -10,7 +10,6 @@ import { Database, detectSqliteRuntime } from "../../shared/sqlite";
 import { createCtxMemoryTools } from "./tools";
 
 const project = "git:ctx-memory-sqlite-review";
-
 async function exerciseUpdate(authorityGuard: boolean): Promise<void> {
     const db = new Database(":memory:");
     try {
@@ -25,18 +24,37 @@ async function exerciseUpdate(authorityGuard: boolean): Promise<void> {
             category: "CONFIG_VALUES",
             content: "cache_ttl=5m",
         });
-        if (authorityGuard) {
-            db.exec(`CREATE TRIGGER review_authority_guard BEFORE UPDATE ON memories
-                BEGIN SELECT RAISE(ABORT, 'authority is draining'); END`);
-        }
-
+        if (authorityGuard)
+            db.exec(
+                "CREATE TRIGGER review_authority_guard BEFORE UPDATE ON memories BEGIN SELECT RAISE(ABORT, 'authority is draining'); END",
+            );
+        // Hide only the first duplicate probe so the real database, not the preflight, refuses the write.
         const prepare = db.prepare.bind(db);
-        let canonicalWrites = 0;
+        let nativeError: unknown;
+        let probes = 0;
         db.prepare = ((sql: string) => {
-            if (sql.includes("UPDATE memories SET content")) canonicalWrites++;
-            return prepare(sql);
+            const statement = prepare(sql);
+            if (
+                sql.includes(
+                    "FROM memories WHERE project_path = ? AND category = ? AND normalized_hash = ?",
+                )
+            ) {
+                const get = statement.get.bind(statement);
+                statement.get = (...args: unknown[]) => (++probes === 1 ? undefined : get(...args));
+            }
+            if (sql.startsWith("UPDATE memories SET")) {
+                const run = statement.run.bind(statement);
+                statement.run = (...args: unknown[]) => {
+                    try {
+                        return run(...args);
+                    } catch (error) {
+                        nativeError = error;
+                        throw error;
+                    }
+                };
+            }
+            return statement;
         }) as typeof db.prepare;
-
         const tool = createCtxMemoryTools({
             db,
             resolveProjectPath: () => project,
@@ -53,31 +71,21 @@ async function exerciseUpdate(authorityGuard: boolean): Promise<void> {
                 },
                 { sessionID: "review", agent: "general", directory: "/review" } as never,
             );
-
-        assert.match(String(await update()), /MEMORY_PENDING_PROPOSAL/);
-        assert.equal(canonicalWrites, 0);
-        assert.deepEqual(getMemoryById(db, existing.id), existing);
-        assert.deepEqual(db.prepare("SELECT COUNT(*) AS n FROM memory_tool_proposals").get(), {
-            n: 1,
-        });
-        assert.deepEqual(db.prepare("SELECT COUNT(*) AS n FROM memory_mutation_log").get(), {
-            n: 0,
-        });
-        let nativeError: unknown;
-        try {
-            prepare("UPDATE memories SET content=?,category=?,normalized_hash=? WHERE id=?").run(
-                existing.content,
-                existing.category,
-                existing.normalizedHash,
-                source.id,
+        if (authorityGuard) {
+            await assert.rejects(update, (error: unknown) => {
+                assert.equal(error, nativeError);
+                assert.match((error as Error).message, /authority is draining/);
+                return true;
+            });
+            assert.equal(probes, 1);
+        } else {
+            assert.equal(
+                await update(),
+                `Error: Memory content already exists as ID ${existing.id}; merge or archive duplicates instead.`,
             );
-        } catch (error) {
-            nativeError = error;
+            assert.equal(probes, 2);
         }
-        assert.ok(
-            nativeError instanceof Error,
-            "the canonical write still reaches the native guard",
-        );
+        assert.ok(nativeError instanceof Error, "the agent write must reach the real SQLite guard");
         assert.equal(
             (nativeError as Error & { code: string }).code,
             detectSqliteRuntime() === "Node.js"
@@ -86,15 +94,22 @@ async function exerciseUpdate(authorityGuard: boolean): Promise<void> {
                   ? "SQLITE_CONSTRAINT_TRIGGER"
                   : "SQLITE_CONSTRAINT_UNIQUE",
         );
-        assert.equal(getMemoryById(db, source.id)?.category, "CONFIG_VALUES");
-        assert.equal(getMemoryById(db, source.id)?.content, "cache_ttl=5m");
+        assert.deepEqual(getMemoryById(db, source.id), source);
+        assert.deepEqual(getMemoryById(db, existing.id), existing);
+        assert.equal(
+            (db.prepare("SELECT COUNT(*) AS n FROM memory_mutation_log").get() as { n: number }).n,
+            0,
+        );
+        assert.equal(
+            (db.prepare("SELECT COUNT(*) AS n FROM memory_history").get() as { n: number }).n,
+            0,
+        );
     } finally {
         db.close();
     }
 }
-
 console.log(`SQLite review checks: ${process.version}, ${detectSqliteRuntime()}`);
-test("ctx_memory records duplicate updates as pending without reaching a native UNIQUE violation", () =>
+test("ctx_memory returns the friendly duplicate response after a native UNIQUE violation", () =>
     exerciseUpdate(false));
-test("ctx_memory records pending work without exercising native memory authority writes", () =>
+test("ctx_memory preserves a native authority refusal even when a duplicate exists", () =>
     exerciseUpdate(true));

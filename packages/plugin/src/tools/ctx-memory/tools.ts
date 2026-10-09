@@ -13,6 +13,7 @@ import {
 import {
     CATEGORY_PRIORITY,
     getMemoriesByIds,
+    getMemoryByHash,
     getMemoryById,
     type Memory,
     type MemoryCategory,
@@ -25,7 +26,11 @@ import {
     getProjectEmbeddingSnapshot,
 } from "../../features/magic-context/memory/embedding";
 import {
+    type ApplierReceipt,
+    applyAgentMemoryMutation,
     applyMemoryAdmission,
+    getMemoryRevision,
+    MemoryContentDuplicateError,
     proposeMemoryMutation,
 } from "../../features/magic-context/memory/lifecycle-applier";
 import { createMemoryVisibilityPolicy } from "../../features/magic-context/memory/memory-visibility";
@@ -327,6 +332,15 @@ function inactiveMemoryError(id: number, action: "updating" | "merging" | "archi
     return `Error: Memory with ID ${id} is archived or superseded; restore it before ${action}.`;
 }
 
+function isMemoryUniqueConstraint(error: unknown): boolean {
+    return (
+        error instanceof Error &&
+        error.message.includes(
+            "UNIQUE constraint failed: memories.project_path, memories.category, memories.normalized_hash",
+        )
+    );
+}
+
 const ctxMemoryArgsShape = {
     // Advertise only primary actions. The separate ctx_memory_list tool reuses this
     // handler with the internal list action, while passthrough parsing keeps older
@@ -578,10 +592,57 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     return inactiveMemoryError(updateId, "updating");
                 }
 
+                if (toolContext.agent !== DREAMER_AGENT) {
+                    const category =
+                        args.category &&
+                        (V2_MEMORY_CATEGORIES as readonly string[]).includes(args.category)
+                            ? (args.category as MemoryCategory)
+                            : memory.category;
+                    let receipt: ApplierReceipt;
+                    try {
+                        receipt = applyAgentMemoryMutation(deps.db, {
+                            key: randomUUID(),
+                            projectPath,
+                            operation: "update",
+                            sourceSessionId: toolContext.sessionID,
+                            targets: [
+                                { id: memory.id, revision: getMemoryRevision(deps.db, memory.id)! },
+                            ],
+                            content,
+                            category,
+                            reason: args.reason,
+                        });
+                    } catch (error) {
+                        if (error instanceof MemoryContentDuplicateError)
+                            return `Error: ${error.message}`;
+                        if (isMemoryUniqueConstraint(error)) {
+                            const duplicate = getMemoryByHash(
+                                deps.db,
+                                rawProjectPath,
+                                category,
+                                computeNormalizedHash(content),
+                            );
+                            if (duplicate && duplicate.id !== memory.id)
+                                return `Error: Memory content already exists as ID ${duplicate.id}; merge or archive duplicates instead.`;
+                        }
+                        throw error;
+                    }
+                    if (receipt.state !== "applied")
+                        return `Error: ${receipt.reason}; memory [ID: ${memory.id}] is unchanged.`;
+                    queueMemoryEmbedding({
+                        deps,
+                        sessionId: toolContext.sessionID,
+                        projectPath: targetIdentityForStoredPath(rawProjectPath),
+                        memoryId: memory.id,
+                        content,
+                    });
+                    requestRustMemorySync(deps, toolContext.sessionID);
+                    return `Updated memory [ID: ${memory.id}] in ${category}.`;
+                }
                 const receipt = proposeMemoryMutation(deps.db, {
                     projectPath: targetIdentityForStoredPath(rawProjectPath),
                     sourceSessionId: toolContext.sessionID,
-                    writer: toolContext.agent === DREAMER_AGENT ? "curate" : "ctx_memory",
+                    writer: "curate",
                     operation: "update",
                     targetIds: [memory.id],
                     proposal: { content, category: args.category, reason: args.reason },
@@ -609,7 +670,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 if (sourceMemories.length !== ids.length) {
                     return "Error: One or more source memories were not found.";
                 }
-                // Primary agents may propose changes only to their own project's memories.
+                // Primary agents may apply changes only to their own project's memories.
                 // The dreamer may propose cross-project consolidation, but workspace sharing
                 // still controls which source rows it is allowed to read.
                 if (toolContext.agent !== DREAMER_AGENT) {
@@ -654,10 +715,43 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     return "Error: A valid category is required when action is 'merge'.";
                 }
 
+                if (toolContext.agent !== DREAMER_AGENT) {
+                    let receipt: ApplierReceipt;
+                    try {
+                        receipt = applyAgentMemoryMutation(deps.db, {
+                            key: randomUUID(),
+                            projectPath,
+                            operation: "merge",
+                            sourceSessionId: toolContext.sessionID,
+                            targets: sourceMemories.map((memory) => ({
+                                id: memory.id,
+                                revision: getMemoryRevision(deps.db, memory.id)!,
+                            })),
+                            content,
+                            category,
+                            reason: args.reason,
+                        });
+                    } catch (error) {
+                        if (error instanceof MemoryContentDuplicateError)
+                            return `Error: Memory content already exists as ID ${error.memoryId}; update or archive existing duplicates instead.`;
+                        throw error;
+                    }
+                    if (receipt.state !== "applied")
+                        return `Error: ${receipt.reason}; memories [${ids.join(", ")}] are unchanged.`;
+                    queueMemoryEmbedding({
+                        deps,
+                        sessionId: toolContext.sessionID,
+                        projectPath,
+                        memoryId: receipt.memoryId!,
+                        content,
+                    });
+                    requestRustMemorySync(deps, toolContext.sessionID);
+                    return `Merged memories [${ids.join(", ")}] into canonical memory [ID: ${receipt.memoryId}] in ${category}; superseded [${receipt.supersededIds?.join(", ")}].`;
+                }
                 const receipt = proposeMemoryMutation(deps.db, {
                     projectPath,
                     sourceSessionId: toolContext.sessionID,
-                    writer: toolContext.agent === DREAMER_AGENT ? "curate" : "ctx_memory",
+                    writer: "curate",
                     operation: "merge",
                     targetIds: ids,
                     proposal: { content, category, reason: args.reason },
@@ -677,8 +771,7 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                 // Preserve first-seen order and record each requested target only once.
                 const archiveIds = [...new Set(rawArchiveIds)];
 
-                // Validate the entire batch before recording a proposal, so a bad id cannot
-                // leave a partial archive request on the review list.
+                // Validate the entire batch first so a bad id cannot leave a partial archive.
                 const targets: Array<{ memoryId: number; projectIdentity: string }> = [];
                 for (const memoryId of archiveIds) {
                     const rawProjectPath = projectPathForMemoryId(deps.db, memoryId);
@@ -703,10 +796,30 @@ function createCtxMemoryTool(deps: CtxMemoryToolDeps): ToolDefinition {
                     });
                 }
 
+                if (toolContext.agent !== DREAMER_AGENT) {
+                    const receipt = applyAgentMemoryMutation(deps.db, {
+                        key: randomUUID(),
+                        projectPath,
+                        operation: "archive",
+                        sourceSessionId: toolContext.sessionID,
+                        targets: targets.map((target) => ({
+                            id: target.memoryId,
+                            revision: getMemoryRevision(deps.db, target.memoryId)!,
+                        })),
+                        reason: args.reason,
+                    });
+                    if (receipt.state !== "applied")
+                        return `Error: ${receipt.reason}; memories [${archiveIds.join(", ")}] are unchanged.`;
+                    requestRustMemorySync(deps, toolContext.sessionID);
+                    const plural = archiveIds.length > 1 ? "memories" : "memory";
+                    return args.reason?.trim()
+                        ? `Archived ${plural} [ID: ${archiveIds.join(", ")}] (${args.reason.trim()}).`
+                        : `Archived ${plural} [ID: ${archiveIds.join(", ")}].`;
+                }
                 const receipt = proposeMemoryMutation(deps.db, {
                     projectPath,
                     sourceSessionId: toolContext.sessionID,
-                    writer: toolContext.agent === DREAMER_AGENT ? "curate" : "ctx_memory",
+                    writer: "curate",
                     operation: "archive",
                     targetIds: archiveIds,
                     proposal: { reason: args.reason, supersededBy: args.superseded_by },

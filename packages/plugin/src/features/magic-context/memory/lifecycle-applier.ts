@@ -3,6 +3,7 @@ import type { Database } from "../../../shared/sqlite";
 import { queueMemoryMutation } from "../storage-memory-mutation-log";
 import { CATEGORY_DEFAULT_TTL } from "./constants";
 import { embedTextForProject } from "./embedding";
+import { invalidateMemory } from "./embedding-cache";
 import { checkMemoryRevision } from "./lifecycle-check-ledger";
 import { MAX_STAGE2_ATTEMPTS } from "./lifecycle-constants";
 import type { CheckReply, CheckRequest } from "./lifecycle-gates";
@@ -14,11 +15,15 @@ import {
 } from "./lifecycle-gates";
 import { lifecycleTextHash, splitMemoryClauses } from "./lifecycle-text";
 import { computeNormalizedHash } from "./normalize-hash";
+import { normalizeStoredProjectPath } from "./project-identity";
 import {
     archiveMemory,
     getMemoryByHash,
     getMemoryById,
     insertMemory,
+    ModuleMemoryAuthorityError,
+    mergeMemoryStats,
+    supersededMemory,
     updateMemoryContent,
     updateMemorySeenCount,
 } from "./storage-memory";
@@ -40,6 +45,7 @@ export interface ApplierReceipt {
     memoryId?: number;
     inserted?: boolean;
     adoptionClass: AdoptionClass;
+    supersededIds?: number[];
 }
 export interface AdmissionRequest {
     key: string;
@@ -222,7 +228,7 @@ export interface ProposalRequest {
     projectPath: string;
     sourceSessionId?: string;
     key?: string;
-    writer: "ctx_memory" | "curate";
+    writer: "curate";
     operation: "update" | "archive" | "merge";
     targetIds: number[];
     proposal: unknown;
@@ -253,6 +259,244 @@ export function proposeMemoryMutation(db: Database, request: ProposalRequest): A
                 reason: MEMORY_PENDING_PROPOSAL,
                 adoptionClass: memoryAdoptionClass(request.operation),
             };
+        })
+        .immediate();
+}
+
+export interface AgentMemoryMutation {
+    key: string;
+    projectPath: string;
+    operation: "update" | "merge" | "archive";
+    targets: Array<{ id: number; revision: number }>;
+    content?: string;
+    category?: MemoryInput["category"];
+    reason?: string;
+    sourceSessionId: string;
+}
+export class MemoryContentDuplicateError extends Error {
+    constructor(readonly memoryId: number) {
+        super(
+            `Memory content already exists as ID ${memoryId}; merge or archive duplicates instead.`,
+        );
+        this.name = "MemoryContentDuplicateError";
+    }
+}
+export function getMemoryRevision(db: Database, id: number): number | null {
+    const row = db.prepare("SELECT revision FROM memories WHERE id=?").get(id) as {
+        revision: number;
+    } | null;
+    return row?.revision ?? null;
+}
+function snapshotMemoryRow(db: Database, id: number): unknown {
+    return db.prepare("SELECT * FROM memories WHERE id=?").get(id) ?? null;
+}
+function clearAgentMutationDerivedData(db: Database, memory: Memory): void {
+    const columns = new Set(
+        (db.prepare("PRAGMA table_info(memories)").all() as Array<{ name: string }>).map(
+            (column) => column.name,
+        ),
+    );
+    if (columns.has("shareable"))
+        db.prepare("UPDATE memories SET shareable=0 WHERE id=?").run(memory.id);
+    if (columns.has("classified_at"))
+        db.prepare("UPDATE memories SET classified_at=NULL WHERE id=?").run(memory.id);
+    db.prepare("DELETE FROM memory_embeddings WHERE memory_id=?").run(memory.id);
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE name='memory_verifications'").get())
+        db.prepare("DELETE FROM memory_verifications WHERE memory_id=?").run(memory.id);
+    invalidateMemory(memory.projectPath, memory.id);
+}
+
+/** Agent tool calls authorize immediate changes; automated curation remains a proposal. */
+export function applyAgentMemoryMutation(
+    db: Database,
+    request: AgentMemoryMutation,
+): ApplierReceipt {
+    return db
+        .transaction(() => {
+            const recovered = readReceipt(db, request.key);
+            if (recovered) return recovered;
+            const record = (receipt: ApplierReceipt) =>
+                recordReceipt(
+                    db,
+                    {
+                        key: request.key,
+                        projectPath: request.projectPath,
+                        operation: `ctx_memory_${request.operation}`,
+                    },
+                    receipt,
+                );
+            const refuse = (reason: string) =>
+                record({ state: "decided_pending", reason, adoptionClass: "live" });
+            if (
+                request.targets.length === 0 ||
+                new Set(request.targets.map((target) => target.id)).size !==
+                    request.targets.length ||
+                (request.operation === "update" && request.targets.length !== 1) ||
+                (request.operation === "merge" && request.targets.length < 2)
+            )
+                return refuse("invalid_targets");
+            const sources: Memory[] = [];
+            for (const target of request.targets) {
+                const memory = getMemoryById(db, target.id);
+                if (
+                    !memory ||
+                    normalizeStoredProjectPath(memory.projectPath) !==
+                        normalizeStoredProjectPath(request.projectPath)
+                )
+                    return refuse("target_not_owned");
+                if (!tsOwnsMemory(db, memory.projectPath))
+                    throw new ModuleMemoryAuthorityError(memory.projectPath);
+                if (
+                    getMemoryRevision(db, target.id) !== target.revision ||
+                    memory.status === "archived" ||
+                    memory.supersededByMemoryId !== null
+                )
+                    return refuse("stale_revision");
+                sources.push(memory);
+            }
+            const content = request.content?.trim();
+            if (request.operation !== "archive" && !content) return refuse("empty_content");
+            if (
+                request.operation === "merge" &&
+                new Set(sources.map((source) => source.category)).size !== 1
+            )
+                return refuse("cross_category_merge");
+            const first = sources[0]!;
+            const category = request.category ?? first.category;
+            const hash = content ? computeNormalizedHash(content) : null;
+            const duplicate =
+                request.operation === "archive"
+                    ? null
+                    : getMemoryByHash(
+                          db,
+                          request.operation === "update" ? first.projectPath : request.projectPath,
+                          category,
+                          hash!,
+                      );
+            if (duplicate && !sources.some((source) => source.id === duplicate.id))
+                throw new MemoryContentDuplicateError(duplicate.id);
+            const before = sources.map((source) => snapshotMemoryRow(db, source.id));
+            // Take every revision before changing any row. A failed source CAS rolls the whole operation back.
+            for (const target of request.targets) {
+                db.prepare(
+                    "UPDATE memories SET revision=revision+1 WHERE id=? AND revision=? AND status!='archived' AND superseded_by_memory_id IS NULL",
+                ).run(target.id, target.revision);
+                const result = db.prepare("SELECT changes() AS n").get() as { n: number };
+                if (result.n !== 1) throw new Error("Memory revision changed during apply");
+            }
+            let canonical: Memory | null = null;
+            const supersededIds: number[] = [];
+            if (request.operation === "update") {
+                updateMemoryContent(db, first.id, content!, hash!);
+                db.prepare("UPDATE memories SET category=? WHERE id=?").run(category, first.id);
+                queueMemoryMutation(db, {
+                    projectPath: normalizeStoredProjectPath(first.projectPath),
+                    mutationType: "update",
+                    targetMemoryId: first.id,
+                    category,
+                    newContent: content!,
+                });
+                canonical = getMemoryById(db, first.id);
+            } else if (request.operation === "archive") {
+                for (const source of sources) {
+                    archiveMemory(db, source.id, request.reason);
+                    clearAgentMutationDerivedData(db, source);
+                    queueMemoryMutation(db, {
+                        projectPath: normalizeStoredProjectPath(source.projectPath),
+                        mutationType: "archive",
+                        targetMemoryId: source.id,
+                    });
+                }
+            } else {
+                canonical =
+                    duplicate ??
+                    insertMemory(db, {
+                        projectPath: request.projectPath,
+                        category,
+                        content: content!,
+                        sourceSessionId: request.sourceSessionId,
+                        sourceType: "agent",
+                    });
+                if (!duplicate) before.push(null);
+                const changed = canonical.content !== content || canonical.normalizedHash !== hash;
+                if (changed) {
+                    updateMemoryContent(db, canonical.id, content!, hash!);
+                    queueMemoryMutation(db, {
+                        projectPath: normalizeStoredProjectPath(canonical.projectPath),
+                        mutationType: "update",
+                        targetMemoryId: canonical.id,
+                        category,
+                        newContent: content!,
+                    });
+                }
+                const mergedFrom = new Set(sources.map((source) => source.id));
+                for (const source of sources) {
+                    try {
+                        const prior: unknown = JSON.parse(source.mergedFrom ?? "[]");
+                        if (Array.isArray(prior))
+                            for (const id of prior) if (typeof id === "number") mergedFrom.add(id);
+                    } catch {
+                        /* A malformed legacy ancestry never discards the current source ids. */
+                    }
+                    if (source.id !== canonical.id) {
+                        supersededMemory(db, source.id, canonical.id);
+                        clearAgentMutationDerivedData(db, source);
+                        db.prepare(
+                            "INSERT OR IGNORE INTO memory_successor_links(source_id,successor_id,decision_key) VALUES(?,?,?)",
+                        ).run(source.id, canonical.id, request.key);
+                        queueMemoryMutation(db, {
+                            projectPath: normalizeStoredProjectPath(source.projectPath),
+                            mutationType: "superseded",
+                            targetMemoryId: source.id,
+                            supersededById: canonical.id,
+                        });
+                        supersededIds.push(source.id);
+                    }
+                }
+                mergeMemoryStats(
+                    db,
+                    canonical.id,
+                    sources.reduce((sum, source) => sum + source.seenCount, 0),
+                    sources.reduce((sum, source) => sum + source.retrievalCount, 0),
+                    JSON.stringify([...mergedFrom].sort((a, b) => a - b)),
+                    sources.some((source) => source.status === "permanent")
+                        ? "permanent"
+                        : "active",
+                );
+                clearAgentMutationDerivedData(db, canonical);
+            }
+            const after = sources.map((source) => snapshotMemoryRow(db, source.id));
+            if (canonical && !sources.some((source) => source.id === canonical.id))
+                after.push(snapshotMemoryRow(db, canonical.id));
+            for (const [index, source] of sources.entries()) {
+                const afterRow = getMemoryById(db, source.id)!;
+                db.prepare(
+                    "INSERT INTO memory_history(memory_id,revision,previous_text,after_text,before_json,after_json,applied_at,reason,evidence_json,source_ids_json,decision_key) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                ).run(
+                    source.id,
+                    request.targets[index]!.revision,
+                    source.content,
+                    afterRow.content,
+                    JSON.stringify(before[index]),
+                    JSON.stringify(after[index]),
+                    Date.now(),
+                    request.reason ?? `ctx_memory_${request.operation}`,
+                    "[]",
+                    JSON.stringify(sources.map((memory) => memory.id)),
+                    request.key,
+                );
+            }
+            const receipt = record({
+                state: "applied",
+                reason: request.operation,
+                memoryId: canonical?.id ?? first.id,
+                adoptionClass: "live",
+                supersededIds,
+            });
+            db.prepare(
+                "UPDATE memory_journal SET before_json=?,after_json=? WHERE decision_key=?",
+            ).run(JSON.stringify(before), JSON.stringify(after), request.key);
+            return receipt;
         })
         .immediate();
 }

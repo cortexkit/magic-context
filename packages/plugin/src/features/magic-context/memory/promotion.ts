@@ -4,7 +4,6 @@ import type { Database } from "../../../shared/sqlite";
 import { PROMOTABLE_CATEGORIES } from "./constants";
 import { embedTextForProject } from "./embedding";
 import { type ApplierReceipt, applyMemoryAdmission } from "./lifecycle-applier";
-import { computeNormalizedHash } from "./normalize-hash";
 import { getMemoryById } from "./storage-memory";
 import { saveEmbeddingIfHashMatches } from "./storage-memory-embeddings";
 import type { MemoryCategory, MemoryInput } from "./types";
