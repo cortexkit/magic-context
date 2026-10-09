@@ -1127,3 +1127,13 @@ That is 240 transitions plus 30 independent bootstrap comparisons. The final
 provider selection passed all 83 tests and the S2/evaluator selection passed all
 13 tests on Linux. Strict package Clippy passes. The original regression bodies
 and their assertions are unchanged; only the passing appendix control was appended.
+
+Final gate record for this implementation follow-up: guarded Linux package tests
+passed 83 provider tests (including all unchanged review expectations and the random
+control), 9 protection tests, 13 S2/evaluator tests, 35 codec tests with one existing
+ignored benchmark, 17 provider-log tests, 5 fingerprint tests and 4 digest tests.
+Package library/binary compilation and strict Clippy passed. Repository build,
+four-workspace typecheck and lint gates passed; Pi, CLI and Retina test gates also
+passed (Retina: 27 tests). The root JavaScript test gate retained only the known
+unrelated migration-v87 twin-rule failure: plugin 7308 passed, 6 skipped, 1 failed.
+No package manifest, lockfile or generated output was changed.
