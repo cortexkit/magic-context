@@ -21,9 +21,12 @@ fn message(mid: &str, role: &str, parts: Value, ordinal: u64, completion: bool) 
     value
 }
 fn corpus(seed: u64) -> Vec<Vec<Value>> {
+    corpus_inputs(seed, PASSES, "bash")
+}
+fn corpus_inputs(seed: u64, passes: usize, mixed_tool: &str) -> Vec<Vec<Value>> {
     let mut random = seed;
     let mut ordinal = 1u64;
-    (0..PASSES).map(|pass| {
+    (0..passes).map(|pass| {
         let count = if pass < 4 { 3 } else { (next(&mut random) % 3 + 1) as usize };
         (0..count).map(|slot| {
             ordinal += 1;
@@ -36,7 +39,7 @@ fn corpus(seed: u64) -> Vec<Vec<Value>> {
                     let output = if pass < 4 || next(&mut random) & 1 == 1 { "spent payload ".repeat(30_000) } else { "small output".into() };
                     json!([{"id":format!("{mid}-tool"),"type":"tool","tool":"read","callID":format!("call-{mid}"),"state":{"status":"completed","input":{},"output":output}}])
                 },
-                2 => json!([{"id":format!("{mid}-a"),"type":"text","text":"§99§ response referencing §3§ inline"},{"id":format!("{mid}-tool"),"type":"tool","tool":"bash","callID":format!("call-{mid}"),"state":{"status":"completed","input":{},"output":"small output"}},{"id":format!("{mid}-b"),"type":"text","text":"café 🦀 continuation"}]),
+                2 => json!([{"id":format!("{mid}-a"),"type":"text","text":"§99§ response referencing §3§ inline"},{"id":format!("{mid}-tool"),"type":"tool","tool":mixed_tool,"callID":format!("call-{mid}"),"state":{"status":"completed","input":{},"output":"small output"}},{"id":format!("{mid}-b"),"type":"text","text":"café 🦀 continuation"}]),
                 _ => json!([{"id":format!("{mid}-a"),"type":"text","text":"first user block"},{"id":format!("{mid}-b"),"type":"text","text":"second user block"}]),
             };
             message(&mid, if choice == 0 || choice == 3 { "user" } else { "assistant" }, parts, ordinal, completed)
@@ -284,12 +287,35 @@ async fn host_message(h: &McHandler, raw: &Value, ordinal: u64, served: u64) -> 
 }
 
 async fn drive_overlay_corpus(queued: bool, calibrated: bool) {
+    drive_overlay_corpus_with(
+        queued,
+        calibrated,
+        &CorpusRun {
+            seeds: &SEEDS,
+            passes: PASSES,
+            mixed_tool: "bash",
+            frozen_reference: true,
+            real_reduce: false,
+        },
+    )
+    .await;
+}
+
+struct CorpusRun {
+    seeds: &'static [u64],
+    passes: usize,
+    mixed_tool: &'static str,
+    frozen_reference: bool,
+    real_reduce: bool,
+}
+
+async fn drive_overlay_corpus_with(queued: bool, calibrated: bool, run: &CorpusRun) -> usize {
     let frozen: BTreeMap<String, Vec<String>> = serde_json::from_str(include_str!(
         "../../testdata/provider-overlay-reference.json"
     ))
     .unwrap();
     let mut comparisons = 0;
-    for seed in SEEDS {
+    for &seed in run.seeds {
         let host_dir = tempfile::tempdir().unwrap();
         let full_dir = tempfile::tempdir().unwrap();
         let budget = if seed & 1 == 1 { 8000.0 } else { 0.0 };
@@ -325,7 +351,10 @@ async fn drive_overlay_corpus(queued: bool, calibrated: bool) {
             .unwrap();
         }
         served_native[0]["parts"][0]["text"] = json!("§1§ baseline");
-        for (pass, appended) in corpus(seed).into_iter().enumerate() {
+        for (pass, appended) in corpus_inputs(seed, run.passes, run.mixed_tool)
+            .into_iter()
+            .enumerate()
+        {
             let prior = raw.len() as u64;
             let search = pass % 3 != 0;
             if queued && (pass == 6 || pass == 13) {
@@ -343,11 +372,20 @@ async fn drive_overlay_corpus(queued: bool, calibrated: bool) {
                     .commit_meta("s", meta.row_version, &meta.meta)
                     .unwrap();
                 let key = super::host_tests::key(&host);
-                host.store
-                    .get()
-                    .unwrap()
-                    .queue_provider_drops(&key.store_key(), &[number])
-                    .unwrap();
+                if run.real_reduce {
+                    let reduced = super::host_tests::response(
+                        host.provider_host_reduce(key, &[number as u64])
+                            .await
+                            .unwrap(),
+                    );
+                    assert_eq!(reduced["isError"], false, "real provider reduce control");
+                } else {
+                    host.store
+                        .get()
+                        .unwrap()
+                        .queue_provider_drops(&key.store_key(), &[number])
+                        .unwrap();
+                }
             }
             let mut binding = host.facade_binding(7).unwrap();
             binding.config.auto_search.enabled = search;
@@ -403,7 +441,7 @@ async fn drive_overlay_corpus(queued: bool, calibrated: bool) {
                 assert!(actual==expected[&message.mid],"seed={seed:x} pass={pass} mid={} actual prefixes={:?} expected prefixes={:?} actual suffixes={:?} expected suffixes={:?}",message.mid,actual.iter().map(|(_,s)|s.chars().take(100).collect::<String>()).collect::<Vec<_>>(),expected[&message.mid].iter().map(|(_,s)|s.chars().take(100).collect::<String>()).collect::<Vec<_>>(),actual.iter().map(|(_,s)|s.chars().rev().take(180).collect::<String>()).collect::<Vec<_>>(),expected[&message.mid].iter().map(|(_,s)|s.chars().rev().take(180).collect::<String>()).collect::<Vec<_>>());
                 comparisons += 1;
             }
-            if !queued && !calibrated {
+            if run.frozen_reference && !queued && !calibrated {
                 assert_eq!(
                     digest(&expected),
                     frozen[&seed.to_string()][pass],
@@ -412,7 +450,8 @@ async fn drive_overlay_corpus(queued: bool, calibrated: bool) {
             }
         }
     }
-    println!("overlay parity: queued={queued}, calibrated={calibrated}, {} seeds {:?}, {} passes, {comparisons} per-message byte comparisons",SEEDS.len(),SEEDS,SEEDS.len()*PASSES);
+    println!("overlay parity: queued={queued}, calibrated={calibrated}, {} seeds {:?}, {} passes, {comparisons} per-message byte comparisons",run.seeds.len(),run.seeds,run.seeds.len()*run.passes);
+    comparisons
 }
 
 #[tokio::test]
@@ -972,4 +1011,97 @@ async fn exact_hard_model_adoption_shows_and_omits_reminders_like_full_engine() 
     )
     .await;
     assert_eq!(omitted, 0, "neutral model calibration is below the floor");
+}
+
+#[tokio::test]
+async fn r2_review_720_pass_differential_with_new_seeds_and_real_reduce() {
+    const REVIEW_SEEDS: [u64; 4] = [0x81ac0023, 0x519e72a0, 0x9c340162, 0xa107d891];
+    let run = CorpusRun {
+        seeds: &REVIEW_SEEDS,
+        passes: 60,
+        mixed_tool: "ctx_reduce",
+        frozen_reference: false,
+        real_reduce: true,
+    };
+    let mut comparisons = 0;
+    for (queued, calibrated) in [(false, false), (true, false), (false, true)] {
+        comparisons += drive_overlay_corpus_with(queued, calibrated, &run).await;
+    }
+    assert_eq!(comparisons, 46980);
+    println!("r2 review append differential: 720 passes, 46980 per-message comparisons, seeds={REVIEW_SEEDS:x?}");
+}
+
+#[tokio::test]
+async fn r2_published_hard_failures_and_new_seeded_switch_controls_match_full_engine() {
+    let failures: &[(usize, char, char, &[&str], usize)] = &[
+        (3, 'F', 'G', &["read", "bash", "ctx_reduce"], 30000),
+        (6, 'F', 'G', &["bash", "read"], 10000),
+        (7, 'N', 'F', &["read", "read"], 30000),
+        (9, 'F', 'N', &["bash", "ctx_reduce", "bash"], 30000),
+        (13, 'N', 'F', &["read", "read"], 20000),
+        (15, 'F', 'F', &["bash", "ctx_reduce", "bash", "bash"], 20000),
+        (17, 'F', 'G', &["bash", "read"], 20000),
+        (18, 'F', 'N', &["read", "bash", "read"], 20000),
+        (19, 'G', 'N', &["read", "bash", "ctx_reduce"], 30000),
+        (20, 'F', 'G', &["bash", "ctx_reduce", "bash", "read"], 20000),
+        (22, 'N', 'G', &["ctx_reduce", "read", "bash"], 30000),
+        (23, 'G', 'F', &["read"], 20000),
+        (24, 'F', 'N', &["read", "bash", "bash"], 30000),
+        (26, 'F', 'N', &["ctx_reduce", "ctx_reduce", "read"], 20000),
+        (27, 'F', 'N', &["read", "read"], 10000),
+        (28, 'F', 'G', &["bash"], 20000),
+        (29, 'N', 'G', &["ctx_reduce", "bash", "read", "read"], 30000),
+        (31, 'N', 'F', &["read", "ctx_reduce", "ctx_reduce"], 20000),
+        (33, 'N', 'N', &["ctx_reduce", "read", "bash"], 30000),
+        (35, 'F', 'G', &["read"], 30000),
+        (
+            36,
+            'G',
+            'N',
+            &["bash", "ctx_reduce", "ctx_reduce", "bash"],
+            20000,
+        ),
+        (37, 'G', 'N', &["read", "read", "bash"], 30000),
+        (38, 'F', 'N', &["bash"], 20000),
+        (42, 'N', 'N', &["bash", "read", "bash"], 10000),
+        (43, 'G', 'N', &["read", "bash", "ctx_reduce"], 10000),
+        (44, 'F', 'G', &["read", "bash", "read", "bash"], 30000),
+        (45, 'N', 'F', &["ctx_reduce", "read", "bash"], 20000),
+        (46, 'G', 'G', &["bash", "bash", "read"], 20000),
+        (47, 'G', 'F', &["read", "ctx_reduce", "read"], 10000),
+    ];
+    let model = |code| match code {
+        'F' => Some("anthropic/claude-fable-5-1"),
+        'G' => Some("openai/gpt-4.1"),
+        _ => None,
+    };
+    let mut comparisons = 0;
+    for &(case, old, new, tools, repeats) in failures {
+        comparisons += exact_hard_model_case(model(old), model(new), tools, repeats, case % 2 == 0)
+            .await
+            .0;
+    }
+    assert_eq!(
+        comparisons, 79,
+        "all29 published failing input recipes reached"
+    );
+    // The review did not persist its passing inputs. These are explicitly new,
+    // reproducible controls, not a reconstruction of an undocumented collector.
+    let mut random = 0x3e9bc027u64;
+    for case in 0..19 {
+        let models = ['N', 'F', 'G'];
+        let old = models[(next(&mut random) % 3) as usize];
+        let new = models[(next(&mut random) % 3) as usize];
+        let count = (next(&mut random) % 4 + 1) as usize;
+        let names = ["read", "bash", "ctx_reduce"];
+        let tools = (0..count)
+            .map(|_| names[(next(&mut random) % 3) as usize])
+            .collect::<Vec<_>>();
+        let repeats = [10000, 20000, 30000][(next(&mut random) % 3) as usize];
+        comparisons +=
+            exact_hard_model_case(model(old), model(new), &tools, repeats, case % 2 == 0)
+                .await
+                .0;
+    }
+    println!("r2 HARD companion: 29 published failures plus19 NEW controls, seed=0x3e9bc027,48 passes,{comparisons} exact new-message comparisons");
 }
