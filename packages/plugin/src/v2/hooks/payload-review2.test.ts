@@ -40,6 +40,7 @@ function childCapture(
     lane: string,
 ): Capture[] {
     const child = spawnSync(process.execPath, ["test", "src/v2/hooks/payload-review2.test.ts"], {
+        windowsHide: true,
         cwd: directory,
         env: {
             ...process.env,
@@ -86,7 +87,7 @@ function historicalCapture(
                 "scripts",
                 "package.json",
             ],
-            { cwd: root, maxBuffer: 128 * 1024 * 1024 },
+            { cwd: root, maxBuffer: 128 * 1024 * 1024, windowsHide: true },
         );
         if (archive.status !== 0) throw new Error(archive.stderr.toString());
         let extendedPath: string | undefined;
