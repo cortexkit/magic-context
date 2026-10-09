@@ -3884,6 +3884,8 @@ pub struct McHandler {
     #[cfg(test)]
     provider_historian_gate: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     #[cfg(test)]
+    provider_historian_scan_rows: Arc<AtomicU64>,
+    #[cfg(test)]
     guidance_now_ms: Mutex<Option<i64>>,
     #[cfg(test)]
     reduction_injection: Mutex<HashMap<String, Vec<ReductionDecision>>>,
@@ -4204,6 +4206,11 @@ struct HistorianPrepareContext<'a> {
     tag_snapshot: Option<Arc<Vec<McTagRow>>>,
     reclaim_ride_available: bool,
     timings: &'a mut HistorianTriggerTimings,
+}
+
+struct ReattachPublicationGuards {
+    snapshot_generation: Option<u64>,
+    log_fence: Option<Arc<dyn historian::HistorianPublicationFence>>,
 }
 
 #[derive(Default)]
@@ -4535,6 +4542,8 @@ impl McHandler {
             provider_historian_worker: OnceLock::new(),
             #[cfg(test)]
             provider_historian_gate: Mutex::new(None),
+            #[cfg(test)]
+            provider_historian_scan_rows: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             guidance_now_ms: Mutex::new(None),
             #[cfg(test)]
@@ -4944,6 +4953,7 @@ impl McHandler {
             provider_runner: Arc::new(session_resolver::MissingProviderRunner),
             provider_historian_worker: OnceLock::new(),
             provider_historian_gate: Mutex::new(None),
+            provider_historian_scan_rows: Arc::new(AtomicU64::new(0)),
             guidance_now_ms: Mutex::new(None),
             reduction_injection: Mutex::new(HashMap::new()),
             between_transform_and_prepare: Mutex::new(None),
@@ -5946,12 +5956,15 @@ impl McHandler {
         &self,
         store: Arc<McStore>,
         parsed: &TransformRequest,
-        snapshot_generation: Option<u64>,
-        log_publication_fence: Option<Arc<dyn historian::HistorianPublicationFence>>,
+        guards: ReattachPublicationGuards,
         binding: &SessionBinding,
         projection: &crate::ck_wire::FlatProjection,
         now: i64,
     ) -> Option<&'static str> {
+        let ReattachPublicationGuards {
+            snapshot_generation,
+            log_fence: log_publication_fence,
+        } = guards;
         let project_path = binding.project_root.to_string_lossy().to_string();
         let harness = binding.harness.clone();
         let config = self.effective_config(&binding.project_root);
@@ -6401,8 +6414,10 @@ impl McHandler {
                 .maybe_spawn_reattach(
                     Arc::clone(&store),
                     parsed,
-                    snapshot_generation,
-                    publication_fence.clone(),
+                    ReattachPublicationGuards {
+                        snapshot_generation,
+                        log_fence: publication_fence.clone(),
+                    },
                     binding,
                     projection,
                     now,

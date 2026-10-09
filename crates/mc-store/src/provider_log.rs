@@ -587,6 +587,34 @@ fn frontier_tx(conn: &Connection, conv: &str, lineage: &str) -> rusqlite::Result
     Ok(next)
 }
 
+/// A cached complete prefix cannot shrink within an immutable lineage. Check
+/// only ordinals at its frontier; lineage changes/legacy unknown cursors use
+/// the cold full ordinal scan before a new prefix is cached.
+fn extend_frontier_tx(
+    conn: &Connection,
+    conv: &str,
+    lineage: &str,
+    mut next: u64,
+) -> rusqlite::Result<u64> {
+    let ancestry = ancestry_tx(conn, conv, lineage)?;
+    loop {
+        let mut held = false;
+        for (row, cut) in &ancestry {
+            if next > *cut {
+                continue;
+            }
+            held = conn.query_row("SELECT EXISTS(SELECT 1 FROM mc_provider_messages_v1 WHERE conv_key=?1 AND lineage_id=?2 AND ordinal=?3)",params![conv,row.lineage_id,as_i64(next)?],|r|r.get(0))?;
+            if held {
+                break;
+            }
+        }
+        if !held {
+            return Ok(next);
+        }
+        next = next.checked_add(1).ok_or(rusqlite::Error::InvalidQuery)?;
+    }
+}
+
 /// Acknowledgement is bounded by held ordinals, not by the caller's newest
 /// claim. Reading MAX keeps this check independent of transcript payload size.
 fn acknowledged_through_tx(
@@ -881,7 +909,7 @@ impl McStore {
         lineage: &str,
         identities: &BTreeMap<String, Vec<crate::BlockIdentity>>,
     ) -> Result<usize, ProviderError> {
-        let result = self.inner.with_conn_fenced(|tx| {
+        self.inner.with_conn_fenced(|tx| {
             let c = conversation_tx(tx, key)?.ok_or(rusqlite::Error::InvalidQuery)?;
             if c.lineage_id != lineage {
                 return Ok(Err(ProviderError::Transient("provider lineage changed".into())));
@@ -909,8 +937,7 @@ impl McStore {
                 tx.execute("DELETE FROM mc_cache_state_digest WHERE session_id=?1", [&c.engine_namespace])?;
             }
             Ok(Ok(missing.len()))
-        }).map_err(|e| ProviderError::Storage(e.into()))?;
-        result
+        }).map_err(|e| ProviderError::Storage(e.into()))?
     }
 
     pub fn has_provider_namespace(&self, namespace: &str) -> Result<bool, McStoreError> {
@@ -1162,9 +1189,13 @@ impl McStore {
                 let new_lineage = lineage_tx(conn,&conv,&request.lineage.lineage_id)?.is_none();
                 ensure_lineage_tx(conn,&conv,request.lineage)?;
                 for m in messages {insert_message_tx(conn,&conv,&request.lineage.lineage_id,m)?;}
+                let frontier = if c.lineage_id==request.lineage.lineage_id && c.cursor_frontier>0 {
+                    extend_frontier_tx(conn,&conv,&request.lineage.lineage_id,c.cursor_frontier)?
+                } else {
+                    frontier_tx(conn,&conv,&request.lineage.lineage_id)?
+                };
                 if let Some(newest) = complete_through {
-                    let gap = frontier_tx(conn,&conv,&request.lineage.lineage_id)?;
-                    if gap <= newest {return Err(ProviderError::Transient(format!("provider history gap:{gap}")))}
+                    if frontier <= newest {return Err(ProviderError::Transient(format!("provider history gap:{frontier}")))}
                 }
                 if let Some(context)=pass_context {
                     let old=parse(&c.hook_counters_json)?;
@@ -1229,7 +1260,7 @@ impl McStore {
                 }
                 if !write.counters.is_object() {return Err(ProviderError::Transient("hook counters must be an object".into()))}
                 write.counters["tag_high_water"]=json!(high);
-                conn.execute("UPDATE mc_provider_conversations_v2 SET lineage_id=?2,served_through_ordinal=?3,hook_counters_json=?4 WHERE conv_key=?1",params![conv,request.lineage.lineage_id,acknowledged.map(as_i64).transpose()?,write.counters.to_string()])?;
+                conn.execute("UPDATE mc_provider_conversations_v2 SET lineage_id=?2,served_through_ordinal=?3,hook_counters_json=?4,cursor_frontier=?5 WHERE conv_key=?1",params![conv,request.lineage.lineage_id,acknowledged.map(as_i64).transpose()?,write.counters.to_string(),as_i64(frontier)?])?;
                 if let Some(metrics) = answer_policy.get("metrics") {
                     let metrics: ProviderPolicyTotals = serde_json::from_value(metrics.clone()).map_err(sql_json)?;
                     adjust_policy_tx(conn,&conv,&metrics,1)?;

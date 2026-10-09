@@ -237,8 +237,10 @@ fn non_tag_messages(
         // following a fulfilled reduction; replaying the hook text bypasses that
         // decision and can duplicate an engine-saved reminder.
         if answer.subject.hook == "post_tool" {
-            ops.retain(|op| !matches!(op, hooks::answer::Operation::Append { note, .. }
-                if note.as_deref().is_none_or(|note| note == super::step_transform::CHANNEL1_NOTE)));
+            ops.retain(|op| {
+                !matches!(op, hooks::answer::Operation::Append { note, .. }
+                if note.as_deref().is_none_or(|note| note == super::step_transform::CHANNEL1_NOTE))
+            });
         }
         let parts = message
             .message
@@ -357,14 +359,19 @@ fn can_skip_host_step(
     status: &transform::compaction::Status,
     relevant_not_applied: bool,
 ) -> Result<bool, HandlerOutcome> {
-    let pending_reminder = store.load_provider_conversation(&work.key.store_key()).map_err(transient)?
+    let pending_reminder = store
+        .load_provider_conversation(&work.key.store_key())
+        .map_err(transient)?
         .map(|c| serde_json::from_str::<Value>(&c.hook_counters_json).map_err(transient))
-        .transpose()?.is_some_and(|c| c["channel1_hook_append_pending"].as_bool()==Some(true));
+        .transpose()?
+        .is_some_and(|c| c["channel1_hook_append_pending"].as_bool() == Some(true));
     // A hook prepared a reminder that the engine has not yet reconciled.
     // Return false so the engine observes the complete input and saves its own
     // reminder decision. It may still answer noop; the host record's earlier
     // bytes change only when a replacement is actually applied.
-    if pending_reminder { return Ok(false); }
+    if pending_reminder {
+        return Ok(false);
+    }
     let meta = store.load_meta(namespace).map_err(transient)?.meta;
     let usage =
         status.usage().current_total_input_tokens as f64 * 100.0 / status.context_window as f64;
@@ -1175,9 +1182,12 @@ impl McHandler {
                     &normalized,
                     &lineage,
                 )?;
-                let current = store.load_provider_conversation(&work.key.store_key()).map_err(transient)?
+                let current = store
+                    .load_provider_conversation(&work.key.store_key())
+                    .map_err(transient)?
                     .ok_or_else(|| transient("provider conversation disappeared"))?;
-                let mut counters: Value = serde_json::from_str(&current.hook_counters_json).map_err(transient)?;
+                let mut counters: Value =
+                    serde_json::from_str(&current.hook_counters_json).map_err(transient)?;
                 counters["channel1_hook_append_pending"] = json!(false);
                 conversation.hook_counters_json = counters.to_string();
                 if let Some(view) = view {

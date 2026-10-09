@@ -50,6 +50,61 @@ pub(super) fn record_barrier(counters: &mut Value) {
         .saturating_add(1));
 }
 
+/// Advance raw-ingest cadence only for new contiguous ordinals. A replay is not
+/// another user/tool event. Legacy histories, gaps and descents stay unknown
+/// until one completed evaluation rebuilds these scalar watermarks from the log.
+pub(super) fn advance_ingest_watermarks(
+    counters: &mut Value,
+    lineage: &str,
+    messages: &[ck_wire::CkIngressMessage],
+) {
+    let Some(mut watermark) = counters
+        .get("historian_ingest")
+        .filter(|v| v.is_object())
+        .cloned()
+    else {
+        return;
+    };
+    if watermark["lineage"].as_str() != Some(lineage) {
+        counters["historian_ingest"] = Value::Null;
+        return;
+    }
+    let mut through = watermark["through"].as_u64().unwrap_or(0);
+    let mut tools = watermark["tools"].as_u64().unwrap_or(0);
+    for message in messages {
+        if message.ordinal <= through {
+            continue;
+        }
+        if message.ordinal != through.saturating_add(1) {
+            counters["historian_ingest"] = Value::Null;
+            return;
+        }
+        through = message.ordinal;
+        if !message.ck.meta.synthetic {
+            if message.ck.role == "user" {
+                watermark["user"] = json!([message.mid, message.ordinal]);
+            }
+            tools = tools.saturating_add(
+                message
+                    .ck
+                    .content
+                    .iter()
+                    .filter(|b| matches!(b.kind, mc_store::CkKind::ToolResult { .. }))
+                    .count() as u64,
+            );
+        }
+    }
+    watermark["through"] = json!(through);
+    watermark["tools"] = json!(tools);
+    counters["historian_ingest"] = watermark;
+}
+
+struct IngestSnapshot {
+    messages: Vec<ck_wire::CkIngressMessage>,
+    user: Value,
+    tools: u64,
+}
+
 struct LogPublicationFence {
     key: Key,
     lineage: String,
@@ -197,6 +252,8 @@ impl McHandler {
             #[cfg(test)]
             {
                 worker.fixed_config = self.fixed_config.clone();
+                worker.provider_historian_scan_rows =
+                    Arc::clone(&self.provider_historian_scan_rows);
             }
             Arc::new(worker)
         }))
@@ -308,11 +365,11 @@ impl McHandler {
         }
         let mut counters: Value =
             serde_json::from_str(&conversation.hook_counters_json).map_err(transient)?;
-        let barrier = &counters["pass_complete"];
-        if barrier.get("lineage_id").and_then(Value::as_str) != Some(&conversation.lineage_id) {
+        let barrier = counters["pass_complete"].clone();
+        if barrier["lineage_id"].as_str() != Some(&conversation.lineage_id) {
             return Ok(None);
         }
-        let Some(through) = barrier.get("through_ordinal").and_then(Value::as_u64) else {
+        let Some(through) = barrier["through_ordinal"].as_u64() else {
             return Ok(None);
         };
         let generation = counters["historian_barrier_generation"]
@@ -321,55 +378,105 @@ impl McHandler {
         if counters["historian_evaluated_barrier"].as_u64() == Some(generation) {
             return Ok(None);
         }
-        let barrier = barrier.clone();
-        drop(serial);
-        let held = store
-            .load_provider_messages(&key.store_key(), &conversation.lineage_id)
-            .map_err(transient)?;
-        // pass_complete marks the final ingested ordinal. Require every
-        // ordinal through it and reject messages beyond it. If a hook failed,
-        // evaluation stays deferred until a later complete pass fills the gap.
-        if held.last().is_some_and(|m| m.ordinal != through)
-            || (!held.is_empty()
-                && store
-                    .provider_frontier(&key.store_key(), &conversation.lineage_id)
-                    .map_err(transient)?
-                    != through.saturating_add(1))
+        // Admission maintains the complete frontier on this small row. A final
+        // ordinal cannot authorize a gap or an unbarriered later message.
+        if conversation.cursor_frontier != through.saturating_add(1)
+            && !(conversation.cursor_frontier == 0 && through == 0)
         {
             return Ok(None);
         }
-        let entries = held
-            .into_iter()
-            .map(|m| {
-                Ok(compact::status::StatusMessage {
-                    mid: m.mid,
-                    ordinal: m.ordinal,
-                    message: serde_json::from_slice(&m.message_bytes).map_err(transient)?,
-                })
-            })
-            .collect::<Result<Vec<_>, HandlerOutcome>>()?;
-        let decoded = codec_opencode::decode_messages(&entries)?;
-        let user = decoded
-            .messages
-            .iter()
-            .rev()
-            .find(|m| m.ck.role == "user" && !m.ck.meta.synthetic)
-            .map(|m| json!([m.mid, m.ordinal]))
-            .unwrap_or(Value::Null);
-        let tools = decoded
-            .messages
-            .iter()
-            .filter(|m| !m.ck.meta.synthetic)
-            .flat_map(|m| &m.ck.content)
-            .filter(|b| matches!(b.kind, mc_store::CkKind::ToolResult { .. }))
-            .count() as u64;
         let meta = store
             .load_meta(&conversation.engine_namespace)
             .map_err(transient)?;
-        let recovering = meta.meta.historian.state != HistorianPhase::Idle
-            && self
-                .live_historian_completion_wait(&conversation.engine_namespace)
-                .is_none();
+        let active = meta.meta.historian.state != HistorianPhase::Idle;
+        let live = self
+            .live_historian_completion_wait(&conversation.engine_namespace)
+            .is_some();
+        let recovering = active && !live;
+        let cadence = counters["historian_cadence"].clone();
+        let watermark = &counters["historian_ingest"];
+        let known = watermark["lineage"].as_str() == Some(&conversation.lineage_id)
+            && watermark["through"].as_u64() == Some(through);
+        let requested = counters["historian_evaluation_due"].as_bool() == Some(true)
+            || counters["historian_run_retry_due"].as_bool() == Some(true)
+            || counters["historian_launch_pending"].is_object()
+            || cadence.is_null()
+            || cadence["lineage"].as_str() != Some(&conversation.lineage_id)
+            || recovering;
+        let cadence_due = !known
+            || cadence["user"] != watermark["user"]
+            || watermark["tools"].as_u64().unwrap_or(0)
+                >= cadence["tools"].as_u64().unwrap_or(0).saturating_add(25);
+        // The debounce decision uses only admission watermarks and namespace
+        // phase. No transcript or ordinal query belongs to a skipped evaluation.
+        if (active && live) || (!requested && !cadence_due) {
+            counters["historian_evaluated_barrier"] = json!(generation);
+            conversation.hook_counters_json = counters.to_string();
+            store
+                .save_provider_conversation(&key.store_key(), &conversation)
+                .map_err(transient)?;
+            return Ok(None);
+        }
+        counters["historian_evaluated_barrier"] = json!(generation);
+        counters["historian_evaluation_due"] = json!(true);
+        conversation.hook_counters_json = counters.to_string();
+        store
+            .save_provider_conversation(&key.store_key(), &conversation)
+            .map_err(transient)?;
+        drop(serial);
+
+        let load_store = Arc::clone(store);
+        let load_key = key.store_key();
+        let lineage = conversation.lineage_id.clone();
+        #[cfg(test)]
+        let scan_rows = Arc::clone(&self.provider_historian_scan_rows);
+        let ingest = tokio::task::spawn_blocking(
+            move || -> Result<Option<IngestSnapshot>, HandlerOutcome> {
+                let held = load_store
+                    .load_provider_messages(&load_key, &lineage)
+                    .map_err(transient)?;
+                #[cfg(test)]
+                scan_rows.fetch_add(held.len() as u64, Ordering::Relaxed);
+                if held.last().is_some_and(|m| m.ordinal != through) {
+                    return Ok(None);
+                }
+                let entries = held
+                    .into_iter()
+                    .map(|m| {
+                        Ok(compact::status::StatusMessage {
+                            mid: m.mid,
+                            ordinal: m.ordinal,
+                            message: serde_json::from_slice(&m.message_bytes).map_err(transient)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, HandlerOutcome>>()?;
+                let decoded = codec_opencode::decode_messages(&entries)?;
+                let user = decoded
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.ck.role == "user" && !m.ck.meta.synthetic)
+                    .map(|m| json!([m.mid, m.ordinal]))
+                    .unwrap_or(Value::Null);
+                let tools = decoded
+                    .messages
+                    .iter()
+                    .filter(|m| !m.ck.meta.synthetic)
+                    .flat_map(|m| &m.ck.content)
+                    .filter(|b| matches!(b.kind, mc_store::CkKind::ToolResult { .. }))
+                    .count() as u64;
+                Ok(Some(IngestSnapshot {
+                    messages: decoded.messages,
+                    user,
+                    tools,
+                }))
+            },
+        )
+        .await
+        .map_err(transient)??;
+        let Some(ingest) = ingest else {
+            return Ok(None);
+        };
         let serial = self.provider_serial.lock_for(key).await;
         let Some(current) = store
             .load_provider_conversation(&key.store_key())
@@ -379,9 +486,8 @@ impl McHandler {
         };
         let current_counters: Value =
             serde_json::from_str(&current.hook_counters_json).map_err(transient)?;
-        // Read and decode the log without holding the conversation lock.
-        // Changes to the lineage, synchronized chain or pass-complete marker
-        // invalidate this snapshot; another evaluator may also have consumed it.
+        // A blocking snapshot is accepted only for the barrier this evaluator
+        // claimed. Opening another pass or changing chain/lineage invalidates it.
         if current.lineage_id != conversation.lineage_id
             || current.historian_model_chain_json != conversation.historian_model_chain_json
             || current_counters["pass_complete"] != barrier
@@ -389,23 +495,18 @@ impl McHandler {
                 .as_u64()
                 .unwrap_or(0)
                 != generation
-            || current_counters["historian_evaluated_barrier"].as_u64() == Some(generation)
+            || current_counters["historian_evaluated_barrier"].as_u64() != Some(generation)
         {
             return Ok(None);
         }
         conversation = current;
         counters = current_counters;
-        let cadence = &counters["historian_cadence"];
-        let due = counters["historian_evaluation_due"].as_bool() == Some(true)
-            || counters["historian_run_retry_due"].as_bool() == Some(true)
-            || counters["historian_launch_pending"].is_object()
-            || cadence.is_null()
-            || cadence["lineage"].as_str() != Some(&conversation.lineage_id)
-            || cadence["user"] != user
-            || tools >= cadence["tools"].as_u64().unwrap_or(0).saturating_add(25)
-            || recovering;
-        counters["historian_evaluated_barrier"] = json!(generation);
+        counters["historian_ingest"] = json!({"lineage":conversation.lineage_id,"through":through,"user":ingest.user,"tools":ingest.tools});
+        let due = requested
+            || cadence["user"] != ingest.user
+            || ingest.tools >= cadence["tools"].as_u64().unwrap_or(0).saturating_add(25);
         if !due {
+            counters["historian_evaluation_due"] = json!(false);
             conversation.hook_counters_json = counters.to_string();
             store
                 .save_provider_conversation(&key.store_key(), &conversation)
@@ -417,10 +518,7 @@ impl McHandler {
             .filter(|v| v.is_object())
             .cloned()
             .unwrap_or_else(|| json!({}));
-        let reclaim_ride_available = request
-            .get("reclaim_ride_available")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let reclaim_ride_available = request["reclaim_ride_available"].as_bool().unwrap_or(false);
         request["v"] = json!(2);
         request["session_id"] = json!(conversation.engine_namespace);
         request["render_config"] = json!("provider-policy");
@@ -433,19 +531,13 @@ impl McHandler {
             serde_json::from_str(&conversation.historian_model_chain_json).map_err(transient)?;
         request["messages"] = json!([]);
         let mut parsed: TransformRequest = decode(&request)?;
-        // Use the codec's in-memory conversation blocks, as the compaction
-        // engine does. Serializing and reparsing them loses retained native
-        // block representation, changing the content fingerprints used by CAS.
-        parsed.messages = decoded.messages;
-        // Claim this barrier for this process, but leave a durable retry marker
-        // until the trigger decision and any required launch intent are stored.
-        counters["historian_evaluation_due"] = json!(true);
+        // Keep the codec's retained native representation, as the engine does;
+        // a JSON round trip changes the fingerprints of those conversation blocks.
+        parsed.messages = ingest.messages;
         conversation.hook_counters_json = counters.to_string();
         store
             .save_provider_conversation(&key.store_key(), &conversation)
             .map_err(transient)?;
-        // Tokenization, trigger rules, assembly and run driving are never under
-        // the conversation lock: a slow historian must not queue a later hook.
         drop(serial);
         #[cfg(test)]
         {
@@ -459,35 +551,43 @@ impl McHandler {
                 release.notified().await;
             }
         }
-        let projection = ck_wire::project_messages(&parsed.messages).map_err(transient)?;
-        let mut timings = HistorianTriggerTimings::default();
-        let mut action = self.prepare_historian_fire(
-            Arc::clone(store),
-            &parsed,
-            binding,
-            &binding.project_root.to_string_lossy(),
-            &projection,
-            HistorianPrepareContext {
-                now: now_ms(),
-                snapshot_generation: None,
-                publication_fence: Some(Arc::new(LogPublicationFence {
-                    key: key.clone(),
-                    lineage: conversation.lineage_id.clone(),
-                    serial: Arc::clone(&self.provider_serial),
-                })),
-                tag_snapshot: None,
-                reclaim_ride_available,
-                timings: &mut timings,
+        let worker = self.provider_historian_worker();
+        let prepare_store = Arc::clone(store);
+        let prepare_binding = binding.clone();
+        let prepare_key = key.clone();
+        let prepare_lineage = conversation.lineage_id.clone();
+        let mut action = tokio::task::spawn_blocking(
+            move || -> Result<PreparedHistorianAction, HandlerOutcome> {
+                let projection = ck_wire::project_messages(&parsed.messages).map_err(transient)?;
+                let mut timings = HistorianTriggerTimings::default();
+                Ok(worker.prepare_historian_fire(
+                    prepare_store,
+                    &parsed,
+                    &prepare_binding,
+                    &prepare_binding.project_root.to_string_lossy(),
+                    &projection,
+                    HistorianPrepareContext {
+                        now: now_ms(),
+                        snapshot_generation: None,
+                        publication_fence: Some(Arc::new(LogPublicationFence {
+                            key: prepare_key,
+                            lineage: prepare_lineage,
+                            serial: Arc::clone(&worker.provider_serial),
+                        })),
+                        tag_snapshot: None,
+                        reclaim_ride_available,
+                        timings: &mut timings,
+                    },
+                ))
             },
-        );
+        )
+        .await
+        .map_err(transient)??;
         if let PreparedHistorianAction::FireReady(prepared) = &mut action {
             prepared.task.provider_completion = Some(RunCompletion {
                 key: key.clone(),
                 generation,
             });
-            // Persist content fingerprints only for messages this chunk selects.
-            // Previously compacted messages are not source for this publication;
-            // writing their fingerprints could conflict with a stored rendering.
             let identities = prepared
                 .task
                 .firing
@@ -507,7 +607,7 @@ impl McHandler {
         self.finish_provider_evaluation(
             key,
             generation,
-            json!({"user":user,"tools":tools,"lineage":conversation.lineage_id}),
+            json!({"user":ingest.user,"tools":ingest.tools,"lineage":conversation.lineage_id}),
             EvaluationOutcome::of(&action),
         )
         .await?;
@@ -592,65 +692,317 @@ mod tests {
         );
     }
 
-            #[tokio::test]
+    #[tokio::test]
     async fn chronology_hook_bytes_replay_on_defer_and_rebuild_matches_full_engine() {
-        for first_serve in [60,80] {
-            let dir = tempfile::tempdir().unwrap(); let reference_dir = tempfile::tempdir().unwrap();
-            let mut h = handler(dir.path()); let mut reference = handler(reference_dir.path());
-            for handler in [&mut h,&mut reference] {
-                let config = handler.fixed_config.as_mut().unwrap(); config.protected_tokens_user = Some(0); config.protected_tools.clear();
-                let mut b = binding(handler); b.config = handler.fixed_config.clone().unwrap(); handler.bind_route(7,b); declare(handler).await;
+        for first_serve in [60, 80] {
+            let dir = tempfile::tempdir().unwrap();
+            let reference_dir = tempfile::tempdir().unwrap();
+            let mut h = handler(dir.path());
+            let mut reference = handler(reference_dir.path());
+            for handler in [&mut h, &mut reference] {
+                let config = handler.fixed_config.as_mut().unwrap();
+                config.protected_tokens_user = Some(0);
+                config.protected_tools.clear();
+                let mut b = binding(handler);
+                b.config = handler.fixed_config.clone().unwrap();
+                handler.bind_route(7, b);
+                declare(handler).await;
             }
             let mut entries = corpus();
             entries[1].message = json!({"info":{"id":"m2","role":"assistant","time":{"created":2000}},"parts":[{"id":"p2","type":"tool","callID":"read-old","tool":"read","state":{"status":"completed","input":{"filePath":"old.txt"},"output":"old payload ".repeat(3000)}}]});
-            for ordinal in [40,50,60] { entries[ordinal-1].message = json!({"info":{"id":format!("m{ordinal}"),"role":"assistant","time":{"created":ordinal*1000}},"parts":[{"id":format!("p{ordinal}"),"type":"tool","callID":format!("read-new-{ordinal}"),"tool":"read","state":{"status":"completed","input":{"filePath":"old.txt"},"output":"fresh payload ".repeat(50)}}]}); }
+            for ordinal in [40, 50, 60] {
+                entries[ordinal - 1].message = json!({"info":{"id":format!("m{ordinal}"),"role":"assistant","time":{"created":ordinal*1000}},"parts":[{"id":format!("p{ordinal}"),"type":"tool","callID":format!("read-new-{ordinal}"),"tool":"read","state":{"status":"completed","input":{"filePath":"old.txt"},"output":"fresh payload ".repeat(50)}}]});
+            }
             let mut applied = Value::Null;
-            for handler in [&h,&reference] {
-                review_sync(handler,&entries[..3],json!({}));
-                for entry in &entries[..3] { review_hook_message(handler,entry).await; }
-                let view = warm(handler,&entries[..3]).await; if std::ptr::eq(handler,&h) { applied = view; }
-                let store = handler.store.get().unwrap(); let loaded = store.load_meta("s").unwrap(); let mut meta = loaded.meta; meta.last_execute_ordinal = 3; store.commit_meta("s",loaded.row_version,&meta).unwrap();
+            for handler in [&h, &reference] {
+                review_sync(handler, &entries[..3], json!({}));
+                for entry in &entries[..3] {
+                    review_hook_message(handler, entry).await;
+                }
+                let view = warm(handler, &entries[..3]).await;
+                if std::ptr::eq(handler, &h) {
+                    applied = view;
+                }
+                let store = handler.store.get().unwrap();
+                let loaded = store.load_meta("s").unwrap();
+                let mut meta = loaded.meta;
+                meta.last_execute_ordinal = 3;
+                store.commit_meta("s", loaded.row_version, &meta).unwrap();
             }
             let mut served_hook = Value::Null;
-            for handler in [&h,&reference] {
-                review_sync(handler,&entries[3..first_serve],json!({}));
-                for entry in &entries[3..first_serve] { let served = review_hook_message(handler,entry).await; if std::ptr::eq(handler,&h) && entry.ordinal==60 { served_hook = served; } }
-                let store = handler.store.get().unwrap(); let k = key(handler).store_key(); let lineage = store.load_provider_lineage(&k,"L").unwrap().unwrap();
-                store.commit_provider_status(&k,&lineage,&[],Some(first_serve as u64),&[]).unwrap();
+            for handler in [&h, &reference] {
+                review_sync(handler, &entries[3..first_serve], json!({}));
+                for entry in &entries[3..first_serve] {
+                    let served = review_hook_message(handler, entry).await;
+                    if std::ptr::eq(handler, &h) && entry.ordinal == 60 {
+                        served_hook = served;
+                    }
+                }
+                let store = handler.store.get().unwrap();
+                let k = key(handler).store_key();
+                let lineage = store.load_provider_lineage(&k, "L").unwrap().unwrap();
+                store
+                    .commit_provider_status(&k, &lineage, &[], Some(first_serve as u64), &[])
+                    .unwrap();
             }
-            let body = |messages: &Value| messages.as_array().unwrap().iter().find(|m|m["info"]["id"]=="m60").unwrap()["parts"][0]["state"]["output"].as_str().unwrap().to_string();
-            let hook_body = served_hook["parts"][0]["state"]["output"].as_str().unwrap().to_string();
-            assert!(hook_body.matches("<system-reminder>").count()<=1);
-            let (historical,permitted) = review_full_native(&reference,&entries[..first_serve],1000,false); assert!(!permitted);
-            let mut low = step("chronology-first",first_serve as u64); low["last_applied"] = applied["compaction"].clone();
-            assert_eq!(response(h.handle_provider_value(7,"compaction.step",&low).await)["answer"],"noop");
-            if first_serve==60 {
-                for handler in [&h,&reference] {
-                    review_sync(handler,&entries[60..],json!({}));
-                    for entry in &entries[60..] { review_hook_message(handler,entry).await; }
-                    let store = handler.store.get().unwrap(); let k = key(handler).store_key(); let lineage = store.load_provider_lineage(&k,"L").unwrap().unwrap(); store.commit_provider_status(&k,&lineage,&[],Some(80),&[]).unwrap();
+            let body = |messages: &Value| {
+                messages
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|m| m["info"]["id"] == "m60")
+                    .unwrap()["parts"][0]["state"]["output"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            };
+            let hook_body = served_hook["parts"][0]["state"]["output"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(hook_body.matches("<system-reminder>").count() <= 1);
+            let (historical, permitted) =
+                review_full_native(&reference, &entries[..first_serve], 1000, false);
+            assert!(!permitted);
+            let mut low = step("chronology-first", first_serve as u64);
+            low["last_applied"] = applied["compaction"].clone();
+            assert_eq!(
+                response(h.handle_provider_value(7, "compaction.step", &low).await)["answer"],
+                "noop"
+            );
+            if first_serve == 60 {
+                for handler in [&h, &reference] {
+                    review_sync(handler, &entries[60..], json!({}));
+                    for entry in &entries[60..] {
+                        review_hook_message(handler, entry).await;
+                    }
+                    let store = handler.store.get().unwrap();
+                    let k = key(handler).store_key();
+                    let lineage = store.load_provider_lineage(&k, "L").unwrap().unwrap();
+                    store
+                        .commit_provider_status(&k, &lineage, &[], Some(80), &[])
+                        .unwrap();
                 }
             }
-            let (deferred,permitted) = review_full_native(&reference,&entries,1000,false); assert!(!permitted); assert_eq!(body(&deferred),body(&historical));
-            let mut low = step("chronology-next",80); low["last_applied"] = applied["compaction"].clone();
-            assert_eq!(response(h.handle_provider_value(7,"compaction.step",&low).await)["answer"],"noop");
-            let held = h.store.get().unwrap().load_provider_hook_answers(&key(&h).store_key()).unwrap();
-            let hook_answer = held.iter().find(|a|a.answer.subject.subject_mid=="m60").unwrap();
-            let ops: Vec<hooks::answer::Operation> = serde_json::from_str(&hook_answer.answer.ops_json).unwrap();
-            let raw = entries[59].message["parts"][0]["state"]["output"].as_str().unwrap().to_string();
-            let mut stored = hooks::answer::apply_ops(&[raw],&ops).unwrap()[0].clone();
-            let tag = hook_answer.answer.tags[0].number; stored = format!("{}{}",transform::tag_prefix(tag),stored);
-            assert_eq!(stored,hook_body,"defer keeps exactly the hook bytes that were served");
-            for handler in [&h,&reference] { handler.store.get().unwrap().append_pending_agent_drops("s",&["m3#0".into()],2).unwrap(); }
-            let (expected,permitted) = review_full_native(&reference,&entries,90000,false); assert!(permitted);
-            let mut force = step("chronology-force",80); force["estimate"]["request_tokens"] = json!(90000); force["last_applied"] = applied["compaction"].clone();
-            let actual = response(h.handle_provider_value(7,"compaction.step",&force).await); assert_eq!(actual["answer"],"compaction_message");
-            let difference = review_byte_diff("chronology rebuild",&serde_json::to_vec(&actual["compaction"]["replacement"]).unwrap(),&serde_json::to_vec(&expected).unwrap());
+            let (deferred, permitted) = review_full_native(&reference, &entries, 1000, false);
+            assert!(!permitted);
+            assert_eq!(body(&deferred), body(&historical));
+            let mut low = step("chronology-next", 80);
+            low["last_applied"] = applied["compaction"].clone();
+            assert_eq!(
+                response(h.handle_provider_value(7, "compaction.step", &low).await)["answer"],
+                "noop"
+            );
+            let held = h
+                .store
+                .get()
+                .unwrap()
+                .load_provider_hook_answers(&key(&h).store_key())
+                .unwrap();
+            let hook_answer = held
+                .iter()
+                .find(|a| a.answer.subject.subject_mid == "m60")
+                .unwrap();
+            let ops: Vec<hooks::answer::Operation> =
+                serde_json::from_str(&hook_answer.answer.ops_json).unwrap();
+            let raw = entries[59].message["parts"][0]["state"]["output"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let mut stored = hooks::answer::apply_ops(&[raw], &ops).unwrap()[0].clone();
+            let tag = hook_answer.answer.tags[0].number;
+            stored = format!("{}{}", transform::tag_prefix(tag), stored);
+            assert_eq!(
+                stored, hook_body,
+                "defer keeps exactly the hook bytes that were served"
+            );
+            for handler in [&h, &reference] {
+                handler
+                    .store
+                    .get()
+                    .unwrap()
+                    .append_pending_agent_drops("s", &["m3#0".into()], 2)
+                    .unwrap();
+            }
+            let (expected, permitted) = review_full_native(&reference, &entries, 90000, false);
+            assert!(permitted);
+            let mut force = step("chronology-force", 80);
+            force["estimate"]["request_tokens"] = json!(90000);
+            force["last_applied"] = applied["compaction"].clone();
+            let actual = response(h.handle_provider_value(7, "compaction.step", &force).await);
+            assert_eq!(actual["answer"], "compaction_message");
+            let difference = review_byte_diff(
+                "chronology rebuild",
+                &serde_json::to_vec(&actual["compaction"]["replacement"]).unwrap(),
+                &serde_json::to_vec(&expected).unwrap(),
+            );
             eprintln!("M5_CHRONOLOGY before_assert first_serve={first_serve} hook_reminder={} full_defer_reminder={} rebuilt_reminders={} expected_reminders={}",hook_body.contains("<system-reminder>"),body(&historical).contains("<system-reminder>"),body(&actual["compaction"]["replacement"]).matches("<system-reminder>").count(),body(&expected).matches("<system-reminder>").count());
-            assert!(difference.is_none(),"rebuild follows the full engine's actual chronology: {difference:?}");
-            assert!(body(&actual["compaction"]["replacement"]).matches("<system-reminder>").count()<=1);
+            assert!(
+                difference.is_none(),
+                "rebuild follows the full engine's actual chronology: {difference:?}"
+            );
+            assert!(
+                body(&actual["compaction"]["replacement"])
+                    .matches("<system-reminder>")
+                    .count()
+                    <= 1
+            );
             eprintln!("M5_CHRONOLOGY first_serve={first_serve} hook_reminder={} full_defer_reminder={} hook_defer=exact_replay force_rebuild=full_engine_bytes",hook_body.contains("<system-reminder>"),body(&historical).contains("<system-reminder>"));
         }
+    }
+
+    #[tokio::test]
+    async fn debounced_evaluation_reads_zero_history_rows_and_pool_does_not_starve_timer() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = handler(dir.path());
+        declare(&h).await;
+        let entries = (1..=20000)
+            .map(|n| text(n, if n == 1 { "user" } else { "assistant" }, 12))
+            .collect::<Vec<_>>();
+        h.sync_provider_pass_inputs_locked(
+            &binding(&h),
+            h.store.get().unwrap(),
+            Some(&[]),
+            true,
+            Some(&json!({"lineage_id":"L","appended":entries})),
+        )
+        .unwrap();
+        let timer_start = Instant::now();
+        let timer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            timer_start.elapsed()
+        });
+        let action = h
+            .provider_historian_worker()
+            .prepare_provider_historian(&binding(&h), &key(&h))
+            .await
+            .unwrap();
+        assert!(matches!(action, Some(PreparedHistorianAction::Complete(_))));
+        let first_timer = timer.await.unwrap();
+        assert!(
+            first_timer < Duration::from_millis(100),
+            "heavy preparation must not occupy the async executor: {first_timer:?}"
+        );
+        assert_eq!(
+            h.provider_historian_scan_rows.load(Ordering::Relaxed),
+            20000
+        );
+        h.provider_historian_scan_rows.store(0, Ordering::Relaxed);
+        h.sync_provider_pass_inputs_locked(
+            &binding(&h),
+            h.store.get().unwrap(),
+            Some(&[]),
+            true,
+            Some(&json!({"lineage_id":"L","appended":[]})),
+        )
+        .unwrap();
+        assert!(h
+            .provider_historian_worker()
+            .prepare_provider_historian(&binding(&h), &key(&h))
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            h.provider_historian_scan_rows.load(Ordering::Relaxed),
+            0,
+            "debounce must skip the actual message-log SELECT"
+        );
+        let extra = [text(20001, "assistant", 12), text(20002, "assistant", 12)];
+        h.sync_provider_pass_inputs_locked(
+            &binding(&h),
+            h.store.get().unwrap(),
+            Some(&[]),
+            true,
+            Some(&json!({"lineage_id":"L","appended":extra})),
+        )
+        .unwrap();
+        assert!(h
+            .provider_historian_worker()
+            .prepare_provider_historian(&binding(&h), &key(&h))
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            h.provider_historian_scan_rows.load(Ordering::Relaxed),
+            0,
+            "same-user assistant appends must also debounce before log reads"
+        );
+        eprintln!("M5_COST first_payload_rows=20000 debounced_payload_rows=0 debounced_ordinal_rows=0 first_1ms_timer_ms={:.3}",first_timer.as_secs_f64()*1000.0);
+    }
+
+    #[tokio::test]
+    async fn cached_frontier_tracks_gap_fill_replay_and_descended_prefix() {
+        use mc_store::provider_records::{ProviderLineage, ProviderMessage};
+        let dir = tempfile::tempdir().unwrap();
+        let h = handler(dir.path());
+        declare(&h).await;
+        let store = h.store.get().unwrap();
+        let k = key(&h).store_key();
+        let row = |ordinal| {
+            let m = text(ordinal, "user", 1);
+            ProviderMessage {
+                mid: m.mid,
+                ordinal,
+                message_bytes: serde_json::to_vec(&m.message).unwrap(),
+            }
+        };
+        let root = ProviderLineage {
+            lineage_id: "L".into(),
+            first_ordinal: 4000,
+            descends_from: None,
+            through_ordinal: None,
+        };
+        store
+            .commit_provider_status(&k, &root, &[row(4000), row(4002)], None, &[])
+            .unwrap();
+        assert_eq!(
+            store
+                .load_provider_conversation(&k)
+                .unwrap()
+                .unwrap()
+                .cursor_frontier,
+            4001
+        );
+        store
+            .commit_provider_status(&k, &root, &[row(4001)], None, &[])
+            .unwrap();
+        assert_eq!(
+            store
+                .load_provider_conversation(&k)
+                .unwrap()
+                .unwrap()
+                .cursor_frontier,
+            4003
+        );
+        store
+            .commit_provider_status(&k, &root, &[row(4001)], None, &[])
+            .unwrap();
+        assert_eq!(
+            store
+                .load_provider_conversation(&k)
+                .unwrap()
+                .unwrap()
+                .cursor_frontier,
+            4003
+        );
+        let child = ProviderLineage {
+            lineage_id: "child".into(),
+            first_ordinal: 4001,
+            descends_from: Some("L".into()),
+            through_ordinal: Some(4000),
+        };
+        store
+            .commit_provider_status(&k, &child, &[row(4001)], None, &[])
+            .unwrap();
+        assert_eq!(
+            store
+                .load_provider_conversation(&k)
+                .unwrap()
+                .unwrap()
+                .cursor_frontier,
+            4002
+        );
+        assert_eq!(store.provider_frontier(&k, "child").unwrap(), 4002);
     }
 
     include!("m5_review_tests.rs");
@@ -741,9 +1093,9 @@ mod tests {
         }
         params
     }
-    fn signature(
-        action: &PreparedHistorianAction,
-    ) -> (bool, Option<String>, Option<String>, Option<(u64, u64)>) {
+    type FireSignature = (bool, Option<String>, Option<String>, Option<(u64, u64)>);
+
+    fn signature(action: &PreparedHistorianAction) -> FireSignature {
         match action {
             PreparedHistorianAction::FireReady(p) => (
                 true,

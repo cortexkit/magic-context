@@ -335,6 +335,7 @@ impl McHandler {
         // Opening a pass invalidates the preceding barrier even if no message
         // was appended. A queued evaluator must not read a half-synchronized pass.
         let mut inputs = None;
+        let mut admitted = None;
         if let Some(pass) = pass {
             let pass: ProviderPassInput = decode(pass)?;
             if let Some(value) = &pass.historian_inputs {
@@ -356,6 +357,7 @@ impl McHandler {
                     through_ordinal: pass.descends_from.as_ref().map(|d| d.through_ordinal),
                 });
             let decoded = super::codec_opencode::decode_messages(&pass.appended)?;
+            admitted = Some((pass.lineage_id.clone(), decoded.messages.clone()));
             let mut req: TransformRequest = decode(
                 &json!({"v":2,"session_id":c.engine_namespace,"render_config":"provider-policy","serializer_profile":"opencode-aisdk","messages":decoded.messages}),
             )?;
@@ -431,6 +433,9 @@ impl McHandler {
                 .ok_or_else(|| transient("provider conversation disappeared"))?;
         }
         let mut counters: Value = serde_json::from_str(&c.hook_counters_json).map_err(transient)?;
+        if let Some((lineage, messages)) = admitted {
+            super::historian::advance_ingest_watermarks(&mut counters, &lineage, &messages);
+        }
         counters["pass_complete"] = Value::Null;
         if let Some(inputs) = inputs {
             counters["historian_inputs"] = inputs;
@@ -451,10 +456,7 @@ impl McHandler {
             }
         }
         if pass_complete {
-            let through = store
-                .provider_frontier(&key.store_key(), &c.lineage_id)
-                .map_err(transient)?
-                .saturating_sub(1);
+            let through = c.cursor_frontier.saturating_sub(1);
             counters["pass_complete"] =
                 json!({"lineage_id":c.lineage_id,"through_ordinal":through});
             super::historian::record_barrier(&mut counters);
@@ -768,6 +770,7 @@ impl McHandler {
                 &policy_parts,
                 |ctx| {
                     let mut counters = ctx.counters.clone();
+                    super::historian::advance_ingest_watermarks(&mut counters, lineage_id, std::slice::from_ref(ingress));
                     let mut ops = Vec::new();
                     let mut tags = Vec::new();
                     let mut non_tag_ops = Vec::new();

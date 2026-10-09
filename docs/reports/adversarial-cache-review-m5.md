@@ -297,3 +297,67 @@ review file is not edited. Comment-review suggestions were resolved.
 full-engine vector/differential gates. Remaining mutation and broader gates are
 not yet claimed. The parent requested an explicitly unverified source checkpoint
 while MOTOR updates the runner; final verification/disposition follows below.
+
+### Cost source work and runner incident
+
+Debounce now consults scalar raw-ingest watermarks (latest real user, tool-result
+count, lineage and ordinal high-water) before any message-log SELECT. New
+contiguous admissions advance those facts from the already-decoded new messages;
+replays do not advance counts. Gaps, descents and legacy missing summaries take
+one cold reconstruction from a completed log. Payload load/decode and
+projection/tokenization/assembly are dispatched through `spawn_blocking`, with
+barrier/chain/lineage revalidation before accepting the blocking snapshot.
+
+The initial cached-frontier prerequisite was wrong: `cursor_frontier` had been
+maintained by compaction steps, but not ordinary hook/pass admission. Trusting
+that old scalar caused preparation to return before the unchanged F1 test's
+notification seam, so its unbounded wait hung until MOTOR's 30-minute job limit.
+No passing result is claimed for job `01a120f7-8ddc-7748-95de-3acf0299fcd8`.
+Admission now maintains the complete frontier in the same transaction: existing
+prefixes extend via indexed point probes; changed lineage and legacy unknown
+cursors take a cold ordinal scan. This is a correctness prerequisite, not a
+replacement of the test's notification or expectation. The corrected isolated
+F1 test ran one test and passed in **0.75 s**, under `timeout 600`; no local
+fallback or overlapping unknown Cargo process was used. MOTOR confirmed the old
+job terminated. An accidentally queued wider job was cancelled before tests,
+then verification resumed one exact review test at a time as requested.
+
+Corrected bounded review checks (fully qualified names, one background job at a
+time, `timeout 600`, collected with `bash_watch`): F1 **0.75 s**, F2 **6.11 s**,
+F3's five-case matrix **15.17 s**; each ran exactly one test and passed. Build
+startup is excluded from those harness timings. No single test took minutes.
+Review test blob remains exactly `3c6540c814a2a64db6868b4b1da8a7fccc53e881`, matching
+the cherry-picked review commit; the independent report also has no diff.
+
+The corrected isolated unchanged cost test passed in **14.10 s** (one test,
+`timeout 600`). Its post-fix debug measurements were: direct payload API
+**16.072 ms**, direct frontier API **4.562 ms**, first evaluation **3871.009 ms**,
+scheduled debounced evaluation **0.735 ms**, and same-runtime 1 ms timer
+**1.928 ms**. Compare the pre-fix **674.588 ms** debounce / **674.763 ms** timer.
+The review's printed 20,000 payload/20,000 ordinal row fields describe its two
+explicit standalone API probes; the evaluator now uses the transactionally
+maintained scalar frontier, and the skipped path calls neither history API.
+A separate counter/timer regression checks actual returned payload-row counts
+and first-evaluation executor responsiveness, rather than inferring success from
+elapsed time or reusing the review's descriptive row fields.
+
+The counter/timer regression passed: **20,000** payload rows on the first
+non-debounced evaluation, **zero** payload and ordinal rows on both an unchanged
+pass and same-user assistant appends, with the first-evaluation 1 ms timer firing
+in **11.397 ms** rather than waiting for CPU work. It completed in **12.43 s**.
+Cached-frontier gap-fill/replay/descent regression passed in **0.14 s**; chronology
+passed again in **4.19 s**. Strict Clippy found a let-and-return in the original
+M5 identity helper; it was mechanically simplified without changing persistence.
+
+Strict Clippy now passes for both changed crates and all targets, with
+`-D warnings` (Cargo 1.99.0). The two additional M5-only warnings were resolved
+without lint suppressions: publication guards are grouped for reattachment, and
+the existing tuple test signature has a type alias. Runtime behavior and all
+review assertions remain unchanged.
+
+The cost mutation bypasses the pre-history debounce while leaving late cadence
+checks intact. The zero-row regression fails with **20,000 actual payload rows
+instead of 0**; the cached-frontier gap/replay/descent control stays green. Applied
+`historian.rs` diff: 2 insertions / 1 deletion; checkout plus touch restores an
+empty unstaged diff. This proves the row assertion observes a real message-log
+SELECT, not a constant or timing-only proxy. Counter instrumentation is test-only.
