@@ -377,17 +377,19 @@ fn shape_summary_agrees_with_full_core_after_every_cache_write_path() {
         );
         assert_eq!(summary.boundary_id, actual.core.boundary_id);
     };
-    let mut core = CoreState::default();
-    core.frozen_units = ["m0", "m1"]
-        .into_iter()
-        .map(|key| FrozenUnit {
-            key: key.into(),
-            kind: "synthesized-region".into(),
-            frozen_payload: format!("{key} bytes"),
-            durability_class: cortexkit_cache_core::DurabilityClass::Lineage,
-            reset_rule: String::new(),
-        })
-        .collect();
+    let core = CoreState {
+        frozen_units: ["m0", "m1"]
+            .into_iter()
+            .map(|key| FrozenUnit {
+                key: key.into(),
+                kind: "synthesized-region".into(),
+                frozen_payload: format!("{key} bytes"),
+                durability_class: cortexkit_cache_core::DurabilityClass::Lineage,
+                reset_rule: String::new(),
+            })
+            .collect(),
+        ..Default::default()
+    };
     let meta = ModuleMeta {
         initialized: true,
         ..Default::default()

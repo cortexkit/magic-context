@@ -1111,6 +1111,7 @@ mod policy_tests {
             },
         )
     }
+    #[allow(clippy::too_many_arguments)] // test helper: each argument is one fixture dimension
     fn allocate(
         store: &McStore,
         key: &ProviderSessionKey,
