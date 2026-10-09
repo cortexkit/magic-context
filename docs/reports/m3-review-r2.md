@@ -191,3 +191,41 @@ Tools: cargo `1.99.0 (5f94df478 2026-08-27)`, rustc `1.99.0 (b940084d7 2026-09-2
 | `bun run --cwd packages/plugin test:serial src/hooks/magic-context/module-state-sync-review.test.ts src/hooks/magic-context/module-state-sync.test.ts` with temporary variations | 31 passed, 143 assertions; frozen install checked 1010 installs /1251 packages without manifest/lock changes. |
 
 Only the failing regressions survive in the test tree; all passing experiment modifications were restored. No existing test expectation was inverted. The four failures are direct byte/state assertions, not silent source guards. Full workspace compilation, native daemon end-to-end fault matrices and package-wide TypeScript typechecking were not repeated for this Rust-test/report-only delivery. The prepared worktree's build was already green. Results here are M3 correctness findings, not host pipeline enablement or performance acceptance.
+
+## Remediation of the four round-two blockers
+
+All four committed review expectations are unchanged. The pre-fix run reached and failed exactly the four named regressions; the post-fix run reaches and passes all four. Separate commits record the fixes:
+
+| Finding | Commit | Change and red-to-green result |
+|---|---|---|
+| Stale exact plan | `371cf56846` | `exact_plan_for_subject` requires the same lineage and membership in the synchronized appended IDs. `r2_temporal_plan_must_belong_to_the_current_hook_pass` changed from the unwanted five-minute prefix to the full engine's unmarked `§2§ second`. |
+| HARD baseline membership | `94d54edb11` | Full engine and projector share `refresh_channel1_baseline`. A scoped exact, prefix-mutating head plan selects bust refresh; absent/stale plans, workers and marker-HARD stay on defer semantics. `r2_three_tool_appends_use_full_pass_protection_and_carrier` now produces the engine's exact `2 spent tool outputs` count on only the last carrier. |
+| Model-switch calibration | `4ef3b5e72c` | State sync records the binding's pass model, and both lanes call `calibration_for_prefix_pass`: a bust adopts `for_model`, a defer retains the frozen epoch. `r2_model_switch_reminder_uses_the_exact_pass_calibration` now emits the exact ~62k reminder. A separate full-engine byte test covers the inverse switch, where the engine omits the reminder and the hook must omit it too. |
+| Consumed-number replay | `a465e5bb39` | The unreleased-v66 `mc_provider_consumed_tags_v1` fence is keyed by engine namespace and tag number, not answer sequence. Consumption writes it in the engine/provider transaction. Number resolution, requeue, metadata eligibility and tag promotion consult it even after a replay inserts another answer. `r2_replayed_served_hook_does_not_resurrect_a_consumed_drop` now retains replay bytes but refuses the consumed number and leaves the queue empty. |
+
+The consumed fence is must-move history: it cannot be reconstructed from potentially replayed answer rows. Its session owner is recorded for the store's ownership guard; namespace/number remain the primary key. The synthetic migration63 downgrade fixture drops the new table with the other v66 objects. Existing migration and forward-v65 round-trip assertions are preserved.
+
+### Crash-before-commit and namespace variation
+
+`provider_log::review_tests::r2_crash_before_commit_preserves_namespace_fence_and_applies_drop_once` runs a real child test process on a provider session `s` whose engine namespace is **`engine:r2`**. A SQLite abort before the engine drop DELETE forces the entire CAS, both queue drains, aggregate change and new consumed fence to roll back; the child exits91 without dropping the store. Reopen verifies the old version, both pending queues and the still-known number. A successful retry consumes once, later repeated IDs do not subtract again, and namespace `another-namespace` has no fence for number1. The original review's actual hook-replay test independently confirms that a new answer row cannot requeue the successfully consumed number.
+
+### Persistent differential, including the previously missing HARD coverage
+
+The original 288-pass corpus and its independent pre-extraction reference remain unchanged and green.
+
+`r2_review_720_pass_differential_with_new_seeds_and_real_reduce` reproduces the review's **720 ordinary/queued/stable-calibration passes and 46,980 exact message comparisons**: seeds `0x81ac0023`, `0x519e72a0`, `0x9c340162`, `0xa107d891`, sixty passes per seed per variant, the mixed tool renamed to `ctx_reduce`, and queued work delivered through the real `provider_host_reduce` adapter. It asserts zero mismatches and the exact comparison count; it does not replace the old pre-extraction digest artifact.
+
+The original temporary 48-HARD collector was not committed and its nineteen passing input cases were undocumented. Per the parent's explicit disposition, `r2_published_hard_failures_and_new_seeded_switch_controls_match_full_engine` re-runs **every one of the 29 published failure recipes** (79 comparisons), then adds **nineteen clearly NEW controls** from fixed seed `0x3e9bc027`. This persistent companion has 48 passes and **113 comparisons**, all exact byte assertions against independent full stores, not a mismatch collector that exits zero. Thus the re-run has **768 passes /47,093 comparisons**, not the review's original47,084: the nine-comparison difference belongs to the new, honestly labelled controls. Both missing-reminder and extra-reminder directions pass.
+
+### Final gates and unchanged deferrals
+
+All Cargo checks/tests used `runon: linux` and `test "$(uname -s)" = Linux || exit 97`; output confirms Linux. Heavy Cargo jobs were serialized and awaited.
+
+- `cargo check --locked -p mc-module --tests`: passed (library, binary and test targets).
+- `cargo test --locked -p mc-store --lib -- --test-threads=4`: **285 passed, five ignored**, zero failures. One ignored test is the subprocess crash helper, which the passing parent test invokes explicitly.
+- `cargo test --locked -p mc-module --lib -- --test-threads=4`: **1720 passed,26 ignored**, zero failures; this includes the old288-pass corpus,720-pass reproduction,48-HARD companion and all thirteen old/new module review cases.
+- Repository `npm run test`, `npm run build`, `npm run typecheck`, `npm run lint`: passed.
+- `cargo fmt --all` and its check: passed.
+- Strict Clippy remains the already-reviewed baseline failure at `admit_policy_parts_tx` (eight arguments versus seven). No waiver is used to label it green and no unrelated lint refactor is included.
+
+The stage-two bounded summaries, performance/enablement gate and labelled late-HARD temporal covering-view integration dependency remain deferred exactly as the parent authorized. This delivery fixes the four round-two blockers; it does not reinterpret those deferred items as completed campaign acceptance.
