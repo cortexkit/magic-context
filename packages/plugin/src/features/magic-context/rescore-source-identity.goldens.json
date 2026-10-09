@@ -1,0 +1,82 @@
+{
+    "protocol": "mc-rescore-source-v1",
+    "rubricVersion": 1,
+    "fixShippedAtMs": 1791281596000,
+    "vectors": [
+        {
+            "name": "tiered-whole-messages",
+            "source": {
+                "id": 7,
+                "sessionId": "session-a",
+                "createdAt": 1791200000123,
+                "title": "Design",
+                "episodeType": "design,feature",
+                "legacy": 0,
+                "content": "P1",
+                "p1": "P1",
+                "p2": "P2",
+                "p3": "P3",
+                "p4": "P4",
+                "sequence": 2,
+                "startMessage": 10,
+                "endMessage": 15,
+                "startMessageId": "m10",
+                "endMessageId": "m15",
+                "startBlockIndex": null,
+                "endBlockIndex": null,
+                "importance": 50
+            },
+            "sha256": "a5777acbd0670cce8e073e1d80560b3096d2b5070dfbff9ddbd437866a967ac2"
+        },
+        {
+            "name": "unicode-and-block-zero",
+            "source": {
+                "id": 42,
+                "sessionId": "pi-λ",
+                "createdAt": 1791200000999,
+                "title": "雪😀",
+                "episodeType": null,
+                "legacy": 0,
+                "content": "ignored tiered alias",
+                "p1": "é\n雪",
+                "p2": "",
+                "p3": null,
+                "p4": " ;:",
+                "sequence": 0,
+                "startMessage": 0,
+                "endMessage": 1,
+                "startMessageId": "α",
+                "endMessageId": "β",
+                "startBlockIndex": 0,
+                "endBlockIndex": 3,
+                "importance": 100
+            },
+            "sha256": "7b0a76d19f0f87f88ff5848e650ff3ae84d908f231b95ce7472d6ee744dcbf12"
+        },
+        {
+            "name": "legacy-flat-content",
+            "source": {
+                "id": 1,
+                "sessionId": "old",
+                "createdAt": 1600000000000,
+                "title": "",
+                "episodeType": null,
+                "legacy": 1,
+                "content": "flat\nbody",
+                "p1": null,
+                "p2": null,
+                "p3": null,
+                "p4": null,
+                "sequence": 1,
+                "startMessage": 1,
+                "endMessage": 9,
+                "startMessageId": "",
+                "endMessageId": "",
+                "startBlockIndex": null,
+                "endBlockIndex": null,
+                "importance": 1
+            },
+            "sha256": "f03b495eb2b58ae88a8121ee4543277603ed9f81c8f5a9f5c87ab17a91983c65"
+        }
+    ]
+}

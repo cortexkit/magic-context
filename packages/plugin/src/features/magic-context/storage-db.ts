@@ -64,6 +64,7 @@ import {
     SESSION_REPLAY_DECISIONS_DDL,
 } from "./migration-v94-write-split";
 import { installV95PerfSchema } from "./migration-v95-perf-indexes";
+import { installCompartmentRescoreSchema } from "./migration-v98-compartment-rescore";
 import { runMigrationsOffThread } from "./migration-worker-client";
 import {
     FORK_MIGRATION_VERSION_FLOOR,
@@ -162,7 +163,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastUnconfirmedMigrationHolders = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 97;
+export const LATEST_SUPPORTED_VERSION = 98;
 
 /**
  * Every runtime backend receives the same finite wait before the first schema
@@ -1830,6 +1831,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       -- deferred_execute_state was used by the removed turn-boundary execute hold.
       deferred_execute_state TEXT,
       cached_m0_bytes BLOB,
+      cached_m0_score_selection_watermark INTEGER NOT NULL DEFAULT 0
+        CHECK (cached_m0_score_selection_watermark BETWEEN 0 AND 9223372036854775807),
       cached_m0_project_memory_epoch INTEGER,
       cached_m0_workspace_fingerprint TEXT,
       cached_m0_project_user_profile_version INTEGER,
@@ -2548,6 +2551,10 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     // Fresh stores include the v95 temporal decision table. Older stores wait
     // for the same migration step rather than installing a new schema lane.
     if (version === 0 || version >= 95) installV95PerfSchema(db, false, version === 0);
+    // Existing stores install score revisions and jobs during migration v98.
+    // Fresh stores first record the timestamp before which compartments can be
+    // rescored; new historian compartments inserted by callers are not eligible.
+    if (version === 0 || version >= 98) installCompartmentRescoreSchema(db);
 }
 
 const CHANNEL2_CLAIM_TTL_MS = 10 * 60_000;
