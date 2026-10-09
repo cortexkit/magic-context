@@ -8672,6 +8672,36 @@ impl McStore {
         }
     }
 
+    /// Read the cache header and bounded shape summary, never chunk payloads.
+    /// Missing summaries are deliberately unknown, not an empty frozen set.
+    pub fn load_compaction_trigger_core(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<CoreState>, McStoreError> {
+        Ok(self.inner.with_conn(|conn| {
+            let Some(row) = cache_codec::read_small_row(conn, session_id)? else {
+                return Ok(None);
+            };
+            let Some(keys) =
+                cache_codec::SectionIndex::parse(&row.section_index).and_then(|i| i.shape)
+            else {
+                return Ok(None);
+            };
+            let mut core = cache_codec::decode_small_core(&row.core_state)?;
+            core.frozen_units = keys
+                .into_iter()
+                .map(|key| FrozenUnit {
+                    key,
+                    kind: String::new(),
+                    frozen_payload: String::new(),
+                    durability_class: DurabilityClass::Lineage,
+                    reset_rule: String::new(),
+                })
+                .collect();
+            Ok(Some(core))
+        })?)
+    }
+
     /// Commit a meta-only edit under the `row_version` CAS.
     ///
     /// It rewrites the small row's `meta` and nothing else: never `core_state`, never
@@ -11145,6 +11175,20 @@ impl McStore {
                        AND first_applied_at_ms IS NULL",
                     params![session_id, command_id, overlays.created_at_ms],
                 )?;
+            }
+            if !consumed_drop_ids.is_empty() {
+                // The engine and provider queues describe the same release in
+                // different coordinates. Drain both only with this engine CAS.
+                let mut query=tx.prepare("SELECT project_root,session,harness FROM mc_provider_conversations_v2 WHERE engine_namespace=?1")?;
+                let keys=query.query_map([session_id],|row|Ok(provider_records::ProviderSessionKey {project_root:row.get(0)?,session:row.get(1)?,harness:row.get(2)?}))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                if !keys.is_empty() {
+                    let mut numbers=Vec::new();
+                    for drop_id in consumed_drop_ids {
+                        let mut tags=tx.prepare("SELECT t.tag_number FROM pending_agent_drops d JOIN mc_tags t ON t.session_id=d.session_id AND t.block_id=d.target_id WHERE d.session_id=?1 AND d.id=?2")?;
+                        numbers.extend(tags.query_map(params![session_id,drop_id],|row|row.get::<_,i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?);
+                    }
+                    for key in keys {provider_records::consume_provider_drops_tx(tx,&key,&numbers)?;}
+                }
             }
             for drop_id in consumed_drop_ids {
                 tx.execute(

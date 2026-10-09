@@ -144,6 +144,17 @@ fn v65_blob_round_trips_messages_answers_views_pending_drops_and_empty_lineages(
     let c = store.load_provider_conversation(&key()).unwrap().unwrap();
     assert!(c.engine_namespace.starts_with("mc-provider:"));
     assert_eq!(c.version_high_water, 9);
+    store
+        .inner
+        .with_conn(|conn| {
+            let policies: Vec<String> = conn
+                .prepare("SELECT policy_json FROM mc_provider_hook_answers_v1 WHERE conv_key=?1")?
+                .query_map([key().conversation_key()], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            assert_eq!(policies, vec!["{}".to_string(); 2]);
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(store.provider_frontier(&key(), "L").unwrap(), 4001);
     store
         .save_provider_record(&key(), &record.to_string(), &c.engine_namespace, &[])
@@ -291,6 +302,193 @@ fn conflicting_status_refuses_before_promote_and_burn() {
         "pending"
     );
     assert!(store.load_tags_for_session("engine").unwrap().is_empty());
+}
+
+#[test]
+fn final_status_gap_rolls_back_admission_and_acknowledgement_in_the_conflict_fence() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    let l = lineage("L", 1);
+    hook(&store, &l, &message(1), "p1", None, false);
+    let before = serde_json::to_value(store.load_provider_conversation(&key()).unwrap()).unwrap();
+    assert_eq!(
+        store
+            .commit_provider_status_page(
+                &key(),
+                ProviderStatusPage {
+                    lineage: &l,
+                    messages: &[message(3)],
+                    served: Some(3),
+                    unserved: &[subject("m1", "p1")],
+                    newest: Some(3),
+                    more: false
+                }
+            )
+            .unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        store.load_provider_messages(&key(), "L").unwrap(),
+        vec![message(1)]
+    );
+    assert_eq!(
+        store.load_provider_hook_answers(&key()).unwrap()[0].state,
+        "pending"
+    );
+    assert!(store.load_tags_for_session("engine").unwrap().is_empty());
+    assert_eq!(
+        serde_json::to_value(store.load_provider_conversation(&key()).unwrap()).unwrap(),
+        before
+    );
+    let mut conflict = message(1);
+    conflict.mid = "other".into();
+    assert!(matches!(
+        store.commit_provider_status_page(
+            &key(),
+            ProviderStatusPage {
+                lineage: &l,
+                messages: &[message(3), conflict],
+                served: Some(3),
+                unserved: &[],
+                newest: Some(3),
+                more: false
+            }
+        ),
+        Err(ProviderError::InvalidParams {
+            field: "subject_ordinal"
+        })
+    ));
+    assert_eq!(
+        store.load_provider_messages(&key(), "L").unwrap(),
+        vec![message(1)]
+    );
+}
+
+#[test]
+fn acknowledgements_are_bounded_monotone_and_missing_never_promotes() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    let l = lineage("L", 4000);
+    hook(&store, &l, &message(4000), "p", None, false);
+    assert!(matches!(
+        store.commit_provider_status(&key(), &l, &[], Some(4001), &[]),
+        Err(ProviderError::InvalidParams {
+            field: "served_through_ordinal"
+        })
+    ));
+    assert_eq!(
+        store.load_provider_hook_answers(&key()).unwrap()[0].state,
+        "pending"
+    );
+    store
+        .commit_provider_status(&key(), &l, &[], Some(4000), &[])
+        .unwrap();
+    hook(&store, &l, &message(4001), "p", None, false);
+    assert_eq!(
+        store
+            .load_provider_conversation(&key())
+            .unwrap()
+            .unwrap()
+            .served_through_ordinal,
+        Some(4000)
+    );
+    assert_eq!(
+        store.load_provider_hook_answers(&key()).unwrap()[1].state,
+        "pending"
+    );
+    assert!(matches!(
+        store.commit_provider_status(&key(), &l, &[], Some(3999), &[subject("m4001", "p")]),
+        Err(ProviderError::InvalidParams {
+            field: "served_through_ordinal"
+        })
+    ));
+    assert_eq!(
+        store.load_provider_hook_answers(&key()).unwrap()[1].state,
+        "pending"
+    );
+    assert_eq!(store.load_tags_for_session("engine").unwrap().len(), 1);
+}
+
+#[test]
+fn acknowledgement_decreases_only_in_the_transaction_creating_a_descent() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    let root = lineage("L", 4000);
+    store
+        .commit_provider_status(
+            &key(),
+            &root,
+            &[message(4000), message(4001), message(4002)],
+            Some(4002),
+            &[],
+        )
+        .unwrap();
+    let child = ProviderLineage {
+        lineage_id: "child".into(),
+        first_ordinal: 4001,
+        descends_from: Some("L".into()),
+        through_ordinal: Some(4000),
+    };
+    store
+        .commit_provider_status(&key(), &child, &[], Some(4000), &[])
+        .unwrap();
+    assert_eq!(
+        store
+            .load_provider_conversation(&key())
+            .unwrap()
+            .unwrap()
+            .served_through_ordinal,
+        Some(4000)
+    );
+    store
+        .commit_provider_status(&key(), &child, &[message(4001)], Some(4001), &[])
+        .unwrap();
+    assert!(matches!(
+        store.commit_provider_status(&key(), &child, &[], Some(4000), &[]),
+        Err(ProviderError::InvalidParams {
+            field: "served_through_ordinal"
+        })
+    ));
+}
+
+#[test]
+fn view_state_changes_only_state_and_refuses_missing_or_illegal_transitions() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    let original = ProviderView {
+        version: 7,
+        lineage_id: "L".into(),
+        range_from: 4000,
+        range_to: 4001,
+        replacement_json: "[ { \"text\" : \"résumé \\u0061\" } ]".into(),
+        state: "produced".into(),
+    };
+    store.save_provider_view(&key(), &original).unwrap();
+    for state in ["applied", "applied", "not_applied", "not_applied"] {
+        store.set_provider_view_state(&key(), 7, state).unwrap();
+        let mut expected = original.clone();
+        expected.state = state.into();
+        assert_eq!(store.load_provider_views(&key()).unwrap(), vec![expected]);
+    }
+    assert!(store
+        .set_provider_view_state(&key(), 7, "produced")
+        .unwrap_err()
+        .to_string()
+        .contains("state"));
+    assert!(store
+        .set_provider_view_state(&key(), 7, "applied")
+        .unwrap_err()
+        .to_string()
+        .contains("state"));
+    assert!(store
+        .set_provider_view_state(&key(), 8, "applied")
+        .unwrap_err()
+        .to_string()
+        .contains("version"));
+    assert_eq!(
+        store.load_provider_views(&key()).unwrap()[0].replacement_json,
+        original.replacement_json
+    );
 }
 
 #[test]

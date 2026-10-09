@@ -194,6 +194,28 @@ pub struct FloorSnapshotResolution {
 type PreSnapshotInputsBySession = HashMap<(u64, String), (u64, u64)>;
 static PRE_SNAPSHOT_INPUTS: OnceLock<Mutex<PreSnapshotInputsBySession>> = OnceLock::new();
 
+fn pre_snapshot_tuple_changed(previous: Option<(u64, u64)>, current: (u64, u64)) -> bool {
+    previous.is_some_and(|previous| previous != current)
+}
+
+/// Inspect the same pre-epoch tuple the engine records, without recording an
+/// observation. A preflight must leave a changed tuple visible to the engine.
+pub fn pre_snapshot_inputs_would_change(
+    store_namespace: u64,
+    session: &str,
+    floor: u64,
+    usable_soft: u64,
+) -> bool {
+    let previous = PRE_SNAPSHOT_INPUTS.get().and_then(|inputs| {
+        inputs
+            .lock()
+            .expect("pre-snapshot inputs mutex")
+            .get(&(store_namespace, session.to_string()))
+            .copied()
+    });
+    pre_snapshot_tuple_changed(previous, (floor, usable_soft))
+}
+
 /// Remember only pre-epoch inputs, without writing durable state. Changed inputs must be surfaced
 /// as a bust; after a restart the first observation is computed from the same config and geometry.
 pub fn pre_snapshot_inputs_changed(
@@ -202,12 +224,12 @@ pub fn pre_snapshot_inputs_changed(
     floor: u64,
     usable_soft: u64,
 ) -> bool {
-    PRE_SNAPSHOT_INPUTS
+    let previous = PRE_SNAPSHOT_INPUTS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .expect("pre-snapshot inputs mutex")
-        .insert((store_namespace, session.to_string()), (floor, usable_soft))
-        .is_some_and(|previous| previous != (floor, usable_soft))
+        .insert((store_namespace, session.to_string()), (floor, usable_soft));
+    pre_snapshot_tuple_changed(previous, (floor, usable_soft))
 }
 
 pub fn pre_snapshot_floor(store_namespace: u64, session: &str) -> Option<u64> {
@@ -273,6 +295,40 @@ mod tests {
             token_count,
             created_at_ms: 0,
             source_bytes: Default::default(),
+        }
+    }
+
+    #[test]
+    fn pre_snapshot_peek_preserves_missing_floor_and_window_observations() {
+        let namespace = u64::MAX;
+        let session = "read-only-pre-snapshot-proof";
+        assert!(!pre_snapshot_inputs_would_change(
+            namespace, session, 4000, 100000
+        ));
+        assert!(!pre_snapshot_inputs_would_change(
+            namespace, session, 5000, 80000
+        ));
+        assert!(
+            !pre_snapshot_inputs_changed(namespace, session, 4000, 100000),
+            "a peek must not create an observation"
+        );
+        let mut previous = (4000, 100000);
+        for current in [(4000, 100000), (5000, 100000), (4000, 80000), (6000, 90000)] {
+            let expected = previous != current;
+            for _ in 0..3 {
+                assert_eq!(
+                    pre_snapshot_inputs_would_change(namespace, session, current.0, current.1),
+                    expected
+                );
+            }
+            assert_eq!(
+                pre_snapshot_inputs_changed(namespace, session, current.0, current.1),
+                expected
+            );
+            assert!(!pre_snapshot_inputs_would_change(
+                namespace, session, current.0, current.1
+            ));
+            previous = current;
         }
     }
 

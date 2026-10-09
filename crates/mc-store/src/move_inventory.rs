@@ -2324,6 +2324,7 @@ pub const TABLES: &[TableInventory] = &[
             "tags_json",
             "state",
             "legacy_json",
+            "policy_json",
             "session"
         ],
         &[],

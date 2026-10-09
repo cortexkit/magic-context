@@ -2256,6 +2256,77 @@ pub mod compaction {
     use super::*;
 
     pub(super) const PASS_KIND: &str = "compaction.step";
+    pub(super) const HOST_PASS_KIND: &str = "compaction.host";
+    pub(super) const HOST_REBUILD_KIND: &str = "compaction.host.rebuild";
+    pub(super) fn host_pass(req: &TransformRequest) -> bool {
+        req.serializer_profile == "opencode-aisdk"
+            && matches!(req.kind.as_str(), HOST_PASS_KIND | HOST_REBUILD_KIND)
+    }
+
+    /// Share the engine's classifier and concrete shape predicates. Unknown
+    /// legacy summaries must run the engine; pending deltas alone remain deferred.
+    pub fn can_skip_classified(input: &ClassifierInput) -> bool {
+        let plan = classify(input);
+        if input.reconcile_pending || plan != PassPlan::Defer {
+            // A conservative preflight candidate only requires an engine run;
+            // it is never permission to change bytes at hook time.
+            return false;
+        }
+        !super::pass_plan_permits_prefix_mutation(&plan, false)
+    }
+
+    pub fn skip_facts(
+        store: &McStore,
+        namespace: &str,
+        ctx: &ProducerContext<'_>,
+        model: &str,
+        window: u64,
+    ) -> Result<Option<ClassifierInput>, TransformError> {
+        let Some(core) = store.load_compaction_trigger_core(namespace)? else {
+            return Ok(None);
+        };
+        let meta = store.load_meta(namespace)?.meta;
+        let signal = crate::m1_compose::m1_revision_signal_parts_for_pass(
+            store,
+            ctx.project_path,
+            ctx.note_project_path,
+            namespace,
+            meta.user_profile_version,
+            ctx.memory_enabled,
+            ctx.now_ms,
+        )?;
+        let first_fold = core.boundary_id.is_empty() && store.has_compartments(namespace)?;
+        let external =
+            meta.m1_external_revision != 0 && meta.m1_external_revision != signal.external_revision;
+        let protection = meta
+            .protected_tokens_effective
+            .is_some_and(|n| n != ctx.protected_tokens_floor)
+            || (meta.protected_tokens_effective.is_none()
+                && crate::protection_window::pre_snapshot_inputs_would_change(
+                    store.tag_cache_namespace(),
+                    namespace,
+                    ctx.protected_tokens_floor,
+                    window,
+                ));
+        Ok(Some(ClassifierInput {
+            initialized: meta.initialized,
+            is_legacy_baseline: is_legacy_baseline(&core),
+            valid_m0m1_shape: valid_m0m1_shape(&core),
+            cached_m1_missing: cached_m1_missing(&core),
+            render_config_changed: meta.last_model_key != model
+                || metadata_render_epochs_changed(store, namespace, ctx, model, &meta)?,
+            hard_fold_requested: first_fold || external || protection || meta.project_memory_epoch_pending || meta.bootstrap_seed_fold_pending || meta.pending_rewrite.is_some()
+                // Replay treatments can need content-dependent repair. Without
+                // decoding content a preflight cannot prove them safe to skip.
+                || core.frozen_units.iter().any(|u| !matches!(u.key.as_str(), "m0" | "m1" | "m0-mural"))
+                || ctx.inject_docs,
+            boundary_present: true,
+            reconcile_pending: core.reconcile_pending,
+            m1_revision_changed: signal.revision != meta.m1_revision,
+            reductions_pending: false,
+            bust_opportunity: meta.soft_refresh_pending,
+        }))
+    }
     pub use crate::memory_render::{
         M0_EMPTY_BODY as M0_EMPTY_PLACEHOLDER, M1_PLACEHOLDER as M1_EMPTY_PLACEHOLDER,
     };
@@ -2285,6 +2356,7 @@ pub mod compaction {
         pub request_tokens: u64,
         pub context_window: u64,
         pub prefix_rebuilding: bool,
+        pub pipeline_switch: bool,
         pub last_applied_version: Option<u64>,
         pub last_not_applied: Option<NotApplied>,
     }
@@ -2354,6 +2426,36 @@ pub mod compaction {
                 last_produced: None,
                 last_applied: None,
             }
+        }
+
+        /// Rebase the served prefix onto a proved descendant. A cut inside the
+        /// applied range invalidates that prefix and requires a replacement;
+        /// an unobserved produced view above the cut must never be retried.
+        pub fn descend(
+            &mut self,
+            lineage_id: &str,
+            parent: &str,
+            through_ordinal: u64,
+        ) -> Result<bool, TransformError> {
+            let mut rebuild = false;
+            if let Some(applied) = &mut self.last_applied {
+                if applied.range.lineage_id != parent {
+                    return Err(TransformError::LineageProtocol(
+                        "compaction lineage changed without a held ancestor".into(),
+                    ));
+                }
+                rebuild = applied.range.to > 0 && through_ordinal < applied.range.to - 1;
+                applied.range.lineage_id = lineage_id.into();
+            }
+            if self.last_produced.as_ref().is_some_and(|view| {
+                view.range.lineage_id != parent
+                    || (view.range.to > 0 && through_ordinal < view.range.to - 1)
+            }) {
+                self.last_produced = None;
+            } else if let Some(produced) = &mut self.last_produced {
+                produced.range.lineage_id = lineage_id.into();
+            }
+            Ok(rebuild)
         }
 
         fn allocate(&mut self, mut view: View) -> Result<View, TransformError> {
@@ -2458,23 +2560,41 @@ pub mod compaction {
             >= status.context_window as f64 * ctx.execute_threshold_percentage;
         // A cold prefix, or an unapplied view on an execute opportunity, is concrete
         // rebuild work. Retain the epoch on later calls so it causes only one HARD.
-        if status.prefix_rebuilding || (rejected.is_some() && execute_due) {
+        let host = template.serializer_profile == "opencode-aisdk";
+        if (status.prefix_rebuilding && !(host && status.pipeline_switch))
+            || (rejected.is_some() && execute_due)
+        {
             state.rebuild_epoch = state.rebuild_epoch.checked_add(1).ok_or_else(|| {
                 TransformError::LineageProtocol("compaction rebuild epoch exhausted".to_string())
             })?;
         }
         let mut req = template.clone();
-        req.kind = PASS_KIND.to_string();
-        req.serializer_profile = "owned-broca".to_string();
+        req.kind = if host {
+            if state.rebuild_epoch == 0 {
+                HOST_PASS_KIND
+            } else {
+                HOST_REBUILD_KIND
+            }
+        } else {
+            PASS_KIND
+        }
+        .to_string();
+        if !host {
+            req.serializer_profile = "owned-broca".to_string();
+        }
         req.is_subagent = state.preset != Preset::Head;
         req.usage = Some(usage);
         req.geometry = None;
-        req.serve_native = false;
-        req.native_messages = None;
+        if !host {
+            req.serve_native = false;
+            req.native_messages = None;
+        }
         req.tail_delta = None;
         // Step hooks own appends and tags. Compaction must not first tag raw content
         // that the runner already served while compaction calls were gated off.
-        req.tool_present = false;
+        // Host hooks own minting; the engine still renders the durable tag
+        // overlay, including tags minted before a pipeline switch.
+        req.tool_present = host && template.tool_present;
         req.auto_search_enabled = false;
         req.todo_tool_present = Some(false);
         req.render_config = format!(
@@ -2715,6 +2835,22 @@ pub mod compaction {
             message.mark_modified();
         }
     }
+}
+
+/// Whether the engine's exact pass plan may change the provider-visible prefix.
+/// This is valid only for a plan produced by the engine's exact classifier,
+/// never a conservative preflight candidate. A caller without an exact plan at
+/// hook time must treat the pass as a defer and add no temporal marker; a later
+/// HARD or SOFT view supplies its shared temporal overlay over the covered range.
+/// This evaluator reads no messages, frozen payloads, or other store state.
+pub fn pass_plan_permits_prefix_mutation(
+    plan: &mc_core::PassPlan,
+    marker_hard_serves_frozen_prefix: bool,
+) -> bool {
+    matches!(
+        plan,
+        PassPlan::Hard | PassPlan::MigrateHard | PassPlan::Soft
+    ) && !marker_hard_serves_frozen_prefix
 }
 
 pub(crate) fn transform_with_projection_cached(
@@ -4413,7 +4549,10 @@ fn apply_once(
     let bootstrap_tagging_active = !loaded.meta.initialized;
     let suppress_bootstrap_reduction_tag_overlay = bootstrap_tagging_active
         && serializer_profile == Some(SerializerProfile::ClaudeCodeAnthropic);
-    let tagging_active = tagging_surface_requested;
+    // Host views render live hook tags even when the adopted full-request head
+    // did not advertise the tagger. Rendering is not a change of that frozen
+    // advertised surface or its versioned identity.
+    let tagging_active = tagging_surface_requested || compaction::host_pass(req);
     profile_end!(perf_render_context);
     // Previously stored overlay rows may still replay when boundary-lineage validation
     // later forces pass-through. Decisions from this request stay in memory until the
@@ -4737,6 +4876,10 @@ fn apply_once(
     // the provider response has no visible §N§ tags. Creating these rows does not change rendered
     // output; create the corresponding caveman units only during a bust pass.
     let caveman_tagging_requested = req.caveman_enabled && !req.is_subagent;
+    // Host hooks own tag allocation, but a view still owns temporal decisions
+    // over its entire working range. Hooks without an exact pass plan leave gap
+    // candidates unmarked; the shared overlay adopts them on a HARD or SOFT,
+    // and the exact defer gate below discards them without changing served bytes.
     if (tagging_active || caveman_tagging_requested)
         && !loaded.core.reconcile_pending
         && (loaded.meta.pending_rewrite.is_none() || clear_pending_rewrite_on_present)
@@ -4750,7 +4893,8 @@ fn apply_once(
             tag_rows: &mut tag_rows,
             temporal_rows: &mut temporal_marks,
             overlay_frontier,
-            tag_mint_enabled: tagging_active || caveman_tagging_requested,
+            tag_mint_enabled: (tagging_active || caveman_tagging_requested)
+                && !compaction::host_pass(req),
             temporal_enabled: temporal_active,
             rewrite_temporal_marks,
             mutation_exempt_mid,
@@ -4800,7 +4944,7 @@ fn apply_once(
         Some(&mut m1_revision_read_timings),
     )?;
     let effective_usage = effective_usage(req.usage.as_ref(), loaded.meta.last_usage.as_ref());
-    let context_limit_tokens = if req.kind == compaction::PASS_KIND {
+    let context_limit_tokens = if req.kind == compaction::PASS_KIND || compaction::host_pass(req) {
         effective_usage.context_limit_tokens as f64
     } else {
         effective_context_limit_tokens(&effective_usage, req.geometry.as_ref())
@@ -5693,10 +5837,8 @@ fn apply_once(
     // transition consumption, guidance date, and the hygiene/calibration adoption below.
     let marker_hard_serves_frozen_prefix =
         marker_hard_keeps_provider_cache && !supersession_ride_available && !reductions_pending_now;
-    let is_provider_prefix_mutation_pass = matches!(
-        plan,
-        PassPlan::Hard | PassPlan::MigrateHard | PassPlan::Soft
-    ) && !marker_hard_serves_frozen_prefix;
+    let is_provider_prefix_mutation_pass =
+        pass_plan_permits_prefix_mutation(&plan, marker_hard_serves_frozen_prefix);
     // The reductions-only child branch preserves inherited history and accepts
     // reduction units only. Image/system/age-reasoning strip units stay primary-only;
     // an execute ride must not silently widen that separate replay contract.
@@ -6877,7 +7019,7 @@ fn apply_once(
         }
     }
 
-    if tagging_active {
+    if tagging_active && !compaction::host_pass(req) {
         if let Some((row, unit)) = maybe_append_channel1_nudge(
             Channel1NudgeInputs {
                 ctx,
@@ -8212,6 +8354,19 @@ fn render_config_change(
         } else {
             effective_render_config != meta.last_render_config
         };
+    // Switching transports must replay the existing identity and frozen head,
+    // not fold an m1 delta merely to adopt provider-plan serialization. Explicit
+    // cold/flush/revert events use HOST_REBUILD_KIND and retain normal policy.
+    let changed = changed
+        && !(req.kind == compaction::HOST_PASS_KIND
+            && req.serializer_profile == "opencode-aisdk"
+            && meta.last_model_key == req.model_key.as_deref().unwrap_or("")
+            && meta.last_provider_id == req.provider_id.as_deref().unwrap_or("")
+            && meta.last_system_prompt_hash == req.system_prompt_hash
+            && meta.last_upgrade_state == req.upgrade_state
+            && versioned_render_epochs(&meta.last_render_config).is_some_and(|old| {
+                versioned_render_epochs(effective_render_config).as_ref() == Some(&old)
+            }));
     #[cfg(feature = "drive-fault")]
     tracing::debug!(
         "mc-module: render identity session={} changed={} observed={} coordinator={} transition={} tool_present={} profile={} effective={:?} persisted={:?}",
@@ -8254,6 +8409,95 @@ fn render_epoch_suffix(render_config: &str, ignore_upgrade: bool) -> String {
         .filter(|part| !part.starts_with("upg:"))
         .collect::<Vec<_>>()
         .join(";")
+}
+
+/// Decode the engine's length-prefixed epoch fields, not delimiter fragments
+/// inside an opaque plan or field value. Only a complete suffix is accepted.
+fn versioned_render_epochs(config: &str) -> Option<BTreeMap<String, String>> {
+    for (at, _) in config.match_indices("|m0epoch[") {
+        let mut rest = &config[at + "|m0epoch[".len()..];
+        let mut fields = BTreeMap::new();
+        while let Some(colon) = rest.find(':') {
+            let key = &rest[..colon];
+            if key.is_empty() || !key.bytes().all(|b| b.is_ascii_alphanumeric()) {
+                break;
+            }
+            rest = &rest[colon + 1..];
+            let Some(colon) = rest.find(':') else { break };
+            let Ok(length) = rest[..colon].parse::<usize>() else {
+                break;
+            };
+            rest = &rest[colon + 1..];
+            let Some(value) = rest.get(..length) else {
+                break;
+            };
+            if fields.insert(key.to_string(), value.to_string()).is_some() {
+                break;
+            }
+            rest = &rest[length..];
+            if rest == "]" {
+                if ["ws", "upg", "mem"]
+                    .iter()
+                    .all(|key| fields.contains_key(*key))
+                {
+                    return Some(fields);
+                }
+                break;
+            }
+            let Some(next) = rest.strip_prefix(';') else {
+                break;
+            };
+            rest = next;
+        }
+    }
+    None
+}
+
+/// Build versioned identity with the same epoch formatter as the full engine.
+/// Status lacks a new tool/system/upgrade observation, so those inputs come from
+/// the namespace's metadata. Opaque transport serialization is not an epoch.
+fn metadata_render_epochs_changed(
+    store: &McStore,
+    namespace: &str,
+    ctx: &ProducerContext<'_>,
+    model: &str,
+    meta: &ModuleMeta,
+) -> Result<bool, TransformError> {
+    if !meta.initialized {
+        return Ok(false);
+    }
+    let Some(old) = versioned_render_epochs(&meta.last_render_config) else {
+        return Ok(true);
+    };
+    let request: TransformRequest = serde_json::from_value(serde_json::json!({
+        "v":2,"kind":"compaction.host","session_id":namespace,"messages":[],
+        "serializer_profile":"opencode-aisdk","render_config":"","model_key":model,
+        "provider_id":(!meta.last_provider_id.is_empty()).then_some(&meta.last_provider_id),
+        "system_prompt_hash":meta.last_system_prompt_hash,"upgrade_state":meta.last_upgrade_state,
+        "tool_present":meta.tagging_surface_active || meta.cc_u1_active,"auto_search_enabled":false,
+    }))
+    .map_err(|e| TransformError::LineageProtocol(format!("invalid metadata render inputs: {e}")))?;
+    let epoch = m0_content_epoch_for_pass(
+        store,
+        &request,
+        ctx,
+        Some(SerializerProfile::OpencodeAiSdk),
+        request.tool_present,
+    )?;
+    let identity = fold_m0_content_epoch(
+        &render_identity_base(&request, &epoch.prompt_surface_epoch),
+        &epoch,
+    );
+    let Some(mut current) = versioned_render_epochs(&identity) else {
+        return Ok(true);
+    };
+    // The engine compares the persisted mural, not a newly requested mural.
+    // Its identity is already recorded in metadata, so no frozen payload read is
+    // needed to retain that same comparison input in the preflight.
+    if let Some(mural) = old.get("mur") {
+        current.insert("mur".into(), mural.clone());
+    }
+    Ok(old != current)
 }
 
 fn scheduler_config(execute_threshold_percentage: f64) -> SchedulerConfig {
@@ -16717,6 +16961,7 @@ pub(crate) mod tests {
                 request_tokens: 90_000,
                 context_window: 100_000,
                 prefix_rebuilding: false,
+                pipeline_switch: false,
                 last_applied_version: None,
                 last_not_applied: None,
             }
@@ -16740,6 +16985,53 @@ pub(crate) mod tests {
 
         fn wire_bytes(messages: &[CkWireMessage]) -> Vec<u8> {
             serde_json::to_vec(messages).unwrap()
+        }
+
+        #[test]
+        fn public_pass_plan_permission_matches_full_engine_defer_and_hard() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            let request = req("plan-permission", "cfg", vec![item("u", 0, "plain user")]);
+            let hard = transform_with_projection(&store, &request, &context()).unwrap();
+            assert_eq!(hard.response.action, "HARD");
+            assert_eq!(
+                pass_plan_permits_prefix_mutation(&PassPlan::Hard, false),
+                hard.response.prefix_bust_permitted,
+            );
+            let defer = transform_with_projection(&store, &request, &context()).unwrap();
+            assert_eq!(defer.response.action, "SOFT+");
+            assert_eq!(
+                pass_plan_permits_prefix_mutation(&PassPlan::Defer, false),
+                defer.response.prefix_bust_permitted,
+            );
+            assert!(!pass_plan_permits_prefix_mutation(&PassPlan::Hard, true));
+            assert!(pass_plan_permits_prefix_mutation(&PassPlan::Soft, false));
+            assert!(pass_plan_permits_prefix_mutation(
+                &PassPlan::MigrateHard,
+                false
+            ));
+            assert!(!pass_plan_permits_prefix_mutation(
+                &PassPlan::Reject("unsafe shape"),
+                false
+            ));
+        }
+
+        #[test]
+        fn versioned_epoch_metadata_decodes_values_not_opaque_delimiters() {
+            let epoch = M0ContentEpoch {
+                workspace_fingerprint: "workspace;:[]".into(),
+                upgrade_state: "rélease;|m0epoch[not-an-epoch]".into(),
+                memory_render_epoch: "mre3".into(),
+                profile_render_epoch: "mpe2".into(),
+                ..Default::default()
+            };
+            let config = fold_m0_content_epoch("opaque|m0epoch[forged]", &epoch);
+            let fields = versioned_render_epochs(&config).unwrap();
+            assert_eq!(fields["upg"], epoch.upgrade_state);
+            assert_eq!(fields["ws"], epoch.workspace_fingerprint);
+            assert_eq!(fields["mre"], "mre3");
+            assert_eq!(fields["mpe"], "mpe2");
+            assert!(versioned_render_epochs("opaque|m0epoch[ws:100:short]").is_none());
         }
 
         #[test]
