@@ -88,7 +88,8 @@ export class StrictBindingMock {
         if (kept.length > 0 && kept.at(-1)! - kept[0]! + 1 !== kept.length) return MIDDLE_ERROR;
         if (this.receipts.some((r) => r.turn === this.turn && !sentSignatures.has(r.signature)))
             return LATEST_TURN_ERROR;
-        // Legal thinking removals are not prefix edits; every other block is.
+        // Thinking blocks removed in a legal way (checked above) are ignored when
+        // comparing prefixes; any other difference in any block is an edit.
         const removed = new Set(
             this.receipts.filter((r) => !sentSignatures.has(r.signature)).map((r) => r.signature),
         );

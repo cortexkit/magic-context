@@ -28,7 +28,10 @@ const BYTES_ERROR: &str = "thinking bytes modified";
 /// One provider-visible block: `[role, kind]`.
 type Block = Value;
 
-/// The strict-binding provider. See the TypeScript mock for the rules it enforces.
+/// A provider that answers like Anthropic with strict thinking binding: each thinking block it
+/// returns is bound to the request it answered; a later request that changes anything before a
+/// kept block, removes a kept block from the middle, removes current-turn thinking or alters a
+/// block's bytes is rejected. Removing older thinking from the start of the history is allowed.
 #[derive(Default)]
 struct StrictMock {
     /// (thinking block, accepted request prefix, user turn)
@@ -400,8 +403,9 @@ impl Fixture {
         } else {
             vec![]
         };
-        // A realistic Rust-mode session already holds a compartment: the module
-        // only prices SOFT reductions against a published history boundary.
+        // A realistic Rust-mode session already holds a compartment (a historian
+        // summary of earlier messages). Without one the module never schedules the
+        // SOFT pass that applies reductions, so no lane could land at all.
         self.push(
             "seed-user",
             "user",
@@ -543,8 +547,9 @@ impl Fixture {
     fn arm_and_bust(&mut self, subagent: bool) {
         let sid = self.req.session_id.clone();
         match self.lane {
-            // The module strips a processed image on the same pass whose applied drop
-            // advances the image watermark past it, so the image lane rides a drop.
+            // An answered image is stripped once its tag is at or below the highest
+            // dropped tag number. The module computes that number after this pass's
+            // drops, so the image is stripped on the same pass as a drop.
             Lane::DropFull | Lane::Flush | Lane::Image => {
                 self.store.append_pending_agent_drops(&sid, &["step-2-result-0#0".into()], 1).unwrap();
             }
@@ -597,7 +602,8 @@ impl Fixture {
     }
 }
 
-/// Lanes the audit found landing an edit before kept signed thinking mid loop.
+/// Lanes whose mid-loop bust changes the request before a signed thinking block the request
+/// still carries, which a strict-binding provider rejects.
 fn exposed(subagent: bool, lane: Lane) -> bool {
     !subagent && matches!(lane, Lane::HardFold | Lane::Todo | Lane::Placeholder)
 }
@@ -702,8 +708,9 @@ const PRIMARY_LANES: [Lane; 8] = [
     Lane::Image,
     Lane::Placeholder,
 ];
-// Subagent passes price a bust on execute (`m1_delta`), so these held results are not
-// for want of permission.
+// A subagent pass at the execute threshold is already allowed to change the request
+// (the module reports a SOFT `m1_delta` pass), so a held result here is the thinking
+// guard declining the edit, not a missing permission.
 const SUBAGENT_LANES: [Lane; 3] = [Lane::DropFull, Lane::Wall95, Lane::Placeholder];
 
 /// `MC_AUDIT_LANE=<Lane>` restricts a diagnostic run to one lane.

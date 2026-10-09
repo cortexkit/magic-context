@@ -129,7 +129,10 @@ type Lane =
 	| "stale ctx_reduce strip"
 	| "frozen-sentinel first application";
 
-/** Lanes the audit found landing an edit before kept signed thinking. */
+/**
+ * Lanes whose mid-loop bust changes the request before a signed thinking block the
+ * request still carries, which a strict-binding provider rejects.
+ */
 const EXPOSED = new Set<Lane>([
 	"synthetic todo",
 	"frozen-sentinel first application",
@@ -456,8 +459,9 @@ function armAndBust(f: Fixture, lane: Lane, subagent: boolean): void {
 		case "ctx_reduce drop (full removal)":
 		case "/ctx-flush":
 		case "processed image strip":
-			// Pi strips a processed image on the same pass whose drop advances
-			// the watermark past it, so the image lane rides an applied drop.
+			// An answered image is stripped once its tag is at or below the
+			// highest dropped tag number; Pi computes that after this pass's
+			// drops, so the image is stripped on the same pass as a drop.
 			queuePendingOp(f.db, f.sessionId, f.tag("old-read-b"), "drop");
 			break;
 		case "frozen-sentinel first application":

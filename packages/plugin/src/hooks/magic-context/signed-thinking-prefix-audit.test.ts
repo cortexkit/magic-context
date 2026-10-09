@@ -116,7 +116,10 @@ type Lane =
     | "stale ctx_reduce strip"
     | "frozen-sentinel first application";
 
-/** Lanes the audit found landing an edit before kept signed thinking. */
+/**
+ * Lanes whose mid-loop bust changes the request before a signed thinking block the
+ * request still carries, which a strict-binding provider rejects.
+ */
 const EXPOSED = new Set<Lane>([
     "m[0]/m[1] re-render after a recomp clears the cached pair",
     "synthetic todo",
@@ -418,7 +421,7 @@ async function toolLoop(
     return f.served;
 }
 
-/** In the stale ctx_reduce lane the agent calls ctx_reduce three more times, aging out its first call. */
+/** In the stale ctx_reduce lane the agent calls ctx_reduce three more times, so its first call is no longer among the newest three that ctx_reduce keeps. */
 function loopParts(lane: Lane) {
     return lane === "stale ctx_reduce strip"
         ? (n: number, i: number) => (i < 3 ? [reducePart(`loop-reduce-${n}`, "1")] : undefined)
@@ -648,7 +651,7 @@ for (const generation of ["v1", "v2"] as const) {
                         );
                         expect(edit).toBe(true);
                         expect(error).toBeNull();
-                        // Every older signed block is gone, so the edit binds nothing.
+                        // Every older signed block is gone, so no kept block was bound to the edited bytes.
                         expect(thinkingLeft).toBe(false);
                         f.served = afterMessages;
                         await toolLoop(f, 3);
