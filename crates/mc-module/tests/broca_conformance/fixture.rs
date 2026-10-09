@@ -1,4 +1,5 @@
 use super::{harness::*, *};
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs};
 
 fn exchange(
@@ -228,6 +229,28 @@ async fn joint_fixture_committed_bytes_match_real_encoder() {
             fs::read(dir.join(name)).unwrap() == bytes,
             "{name} differs; run the documented fixture generator"
         );
+    }
+}
+
+#[test]
+fn joint_fixture_matches_commons_sha256sums() {
+    let dir = fixture_dir();
+    let mut checksums = BTreeMap::new();
+    for line in fs::read_to_string(dir.join("SHA256SUMS")).unwrap().lines() {
+        let (digest, name) = line
+            .split_once("  ")
+            .expect("SHA256SUMS uses the standard two-space separator");
+        assert!(checksums
+            .insert(name.to_owned(), digest.to_owned())
+            .is_none());
+    }
+    assert_eq!(
+        checksums.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["README.md", "exchanges.json", "transcript.json"]
+    );
+    for (name, expected) in checksums {
+        let actual = format!("{:x}", Sha256::digest(fs::read(dir.join(&name)).unwrap()));
+        assert_eq!(actual, expected, "{name} differs from commons SHA256SUMS");
     }
 }
 

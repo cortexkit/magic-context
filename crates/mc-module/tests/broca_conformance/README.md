@@ -57,6 +57,10 @@ cargo test -p mc-module --test broca_conformance --features drive-fault fixture:
 ```
 
 Fixture: `fixtures/compaction-provider-v1/joint/{transcript.json,exchanges.json,README.md}`.
+This local copy originates at commons `test-vectors/compaction-provider-v1/joint/`
+from revision `afe80c7ef4f16730be43d998f2ea708a481c411c`. Its `SHA256SUMS` is
+checked by `fixture::joint_fixture_matches_commons_sha256sums`; tests never fetch
+commons at runtime. The byte comparison includes the case README and final LF.
 Every answer except the explicitly named unknown-refusal caller control comes
 from the executable's real encoder. The unknown control uses the same pinned
 serde role type MC uses for refusals; MC has no branch emitting an unknown code.
@@ -66,7 +70,6 @@ its opaque compaction ID. Generation therefore normalizes **only** that ID to
 `mc-joint-v1`; replay remaps it to the real ID, then compares the answer after
 that same normalization. No message/range/operation rewriting, newline
 normalization after generation, or snapshot auto-accept occurs in a normal run.
-The byte comparison includes the case README and final LF.
 
 Each exchange has `name`, `call` (`setup` or `step`), a **method/params envelope**,
 `answer`, and `expected_view`. Step exchanges can be compaction steps or
@@ -93,7 +96,7 @@ small, portable fixture rather than committing megabytes of repeated padding.
 | Per-block tag strip, untouched signatures/reasoning/images/tool calls | `hooks::post_assistant_strips_only_addressed_text_preserves_signed_and_nontext_bytes` |
 | Appends on newest content only; disallowed answer unavailable | `hooks::pre_user_post_tool_append_only_new_content_and_disallowed_answer_is_unavailable` |
 | Three roles, versions, runner groups, existing tool surface | `role_describe_and_existing_tool_provider_surface` |
-| Reproducibility and shared-byte replay | `fixture::joint_fixture_committed_bytes_match_real_encoder`, `fixture::joint_fixture_replays_real_routes_and_unknown_refusal_decodes_without_retry` |
+| Reproducibility and shared-byte replay | `fixture::joint_fixture_committed_bytes_match_real_encoder`, `fixture::joint_fixture_matches_commons_sha256sums`, `fixture::joint_fixture_replays_real_routes_and_unknown_refusal_decodes_without_retry` |
 | Claude Code legacy regression | Existing `mc-module --lib` tests, unchanged |
 
 The eligible-drop scenario uses four tool-tag groups. The newest three remain
