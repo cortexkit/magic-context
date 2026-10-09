@@ -2602,7 +2602,7 @@ pub mod compaction {
             req.render_config, state.rebuild_epoch
         );
         let engine = transform_with_projection(store, &req, ctx)?;
-        let permitted = engine.response.prefix_bust_permitted || status.prefix_rebuilding;
+        let permitted = engine.response.prefix_bust_permitted;
         let mut answer = Answer::Noop;
         if initial || permitted {
             let replacement = replacement(&engine.response, &req, state.preset)?;

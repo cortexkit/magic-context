@@ -670,7 +670,11 @@ fn execute(
         "session_id":work.key.engine_key(),"render_config":serde_json::to_string(&setup.request.params).map_err(transient)?,
         "model_key":setup.request.model,"messages":messages,"tool_present":false,"auto_search_enabled":false}),
     )?;
-    let context = producer_context(work, &setup.request.model, status.context_window, false);
+    let mut context = producer_context(work, &setup.request.model, status.context_window, false);
+    // The runner reports cache expiry through prefix_rebuilding. It supplies no
+    // prior-response timestamp, so the scheduler's zero fallback would measure
+    // idle time from the Unix epoch and execute every step with nonzero usage.
+    context.cache_ttl = "never".into();
     let targets = record
         .pending_drops
         .iter()
@@ -2857,8 +2861,8 @@ mod host_tests {
         .unwrap();
         assert_eq!(saved.setup.request.params["cache_ttl"], "10m");
         let work = h.provider_work(&s, b, k).unwrap();
-        // The common context builder is also the Broca policy builder. Only
-        // execute_host applies the internal scheduling override.
+        // Transport-specific execution overrides internal TTL scheduling, not
+        // the configured policy returned by the common context builder.
         assert_eq!(
             producer_context(&work, "fixture", 100000, false).cache_ttl,
             "10m"
