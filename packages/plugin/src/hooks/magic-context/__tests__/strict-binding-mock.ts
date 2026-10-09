@@ -12,7 +12,9 @@
  * - removing thinking blocks is not a prefix edit when they are removed from
  *   the start, from the end, or all of them; removing one from the middle is;
  * - thinking produced inside the current user turn may not be removed or
- *   changed at all.
+ *   changed at all;
+ * - every tool_use is answered by a tool_result in the next message and every
+ *   tool_result answers a tool_use just before it (`ORPHAN_ERROR`).
  *
  * Receipts are minted from the request the provider accepted, never from the
  * client's later replay, so the mock cannot agree with a client that rewrites
@@ -29,6 +31,8 @@ export const MIDDLE_ERROR = "400: a thinking block was removed from the middle";
 export const LATEST_TURN_ERROR =
     "400: thinking blocks in the latest assistant turn cannot be modified";
 export const BYTES_ERROR = "400: thinking block bytes or signature were modified";
+export const ORPHAN_ERROR =
+    "400: tool_use ids were found without tool_result blocks immediately after";
 
 interface Receipt {
     signature: string;
@@ -75,6 +79,8 @@ export class StrictBindingMock {
 
     /** The rejection a strict-binding provider would return, or null when accepted. */
     check(request: Wire): string | null {
+        const orphan = toolPairingError(request);
+        if (orphan) return orphan;
         const sent = request.flatMap((m) => m.content).filter((b) => b.type === "thinking");
         const sentSignatures = new Set(sent.map((b) => b.signature as string));
         for (const block of sent) {
@@ -117,6 +123,49 @@ export class StrictBindingMock {
         }
         return null;
     }
+}
+
+/**
+ * The provider's tool pairing rule, checked on the request as the Anthropic SDK sends it
+ * (consecutive messages of one role are merged into one): every tool_use must be answered by
+ * a tool_result in the next message, and every tool_result must answer a tool_use in the
+ * message just before it. A reduction that removes one side of a tool arc, including one call
+ * of a parallel batch, fails here whatever the thinking binding says.
+ */
+function toolPairingError(request: Wire): string | null {
+    const merged: Wire = [];
+    for (const message of request) {
+        const last = merged.at(-1);
+        if (last && last.role === message.role) last.content.push(...message.content);
+        else merged.push({ role: message.role, content: [...message.content] });
+    }
+    const ids = (message: Wire[number] | undefined, type: string, key: string) =>
+        new Set((message?.content ?? []).filter((b) => b.type === type).map((b) => String(b[key])));
+    for (let i = 0; i < merged.length; i++) {
+        const calls = ids(merged[i], "tool_use", "id");
+        const answered = ids(merged[i + 1], "tool_result", "tool_use_id");
+        for (const id of calls) if (!answered.has(id)) return ORPHAN_ERROR;
+        const results = ids(merged[i], "tool_result", "tool_use_id");
+        const asked = ids(merged[i - 1], "tool_use", "id");
+        for (const id of results) if (!asked.has(id)) return ORPHAN_ERROR;
+    }
+    return null;
+}
+
+/**
+ * The non-thinking blocks before the last thinking block the request sends. A kept signed
+ * block binds them, so a held pass may change nothing here, while content after the last
+ * kept block (the newest tool results) may still be reduced.
+ */
+export function beforeLastThinking(wire: Wire): string {
+    const blocks = wire.flatMap((m) => m.content.map((b) => [m.role, b] as const));
+    let last = -1;
+    blocks.forEach(([, b], index) => {
+        if (b.type === "thinking") last = index;
+    });
+    return JSON.stringify(
+        blocks.slice(0, Math.max(last, 0)).filter(([, b]) => b.type !== "thinking"),
+    );
 }
 
 /** The request with every thinking block removed: what changed besides thinking. */

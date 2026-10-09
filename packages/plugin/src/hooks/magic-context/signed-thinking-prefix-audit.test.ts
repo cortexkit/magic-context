@@ -40,14 +40,16 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     type Block,
+    beforeLastThinking,
     PREFIX_ERROR,
     STRICT_AUDIT,
     StrictBindingMock,
     type Wire,
     withoutThinking,
 } from "./__tests__/strict-binding-mock";
+import { clearInjectionCache } from "./inject-compartments";
 import type { MessageLike } from "./tag-messages";
-import { createTransform, type TransformDeps } from "./transform";
+import { clearMessageTokensCache, createTransform, type TransformDeps } from "./transform";
 
 const MODEL = { providerID: "anthropic", modelID: "claude-opus-5-5" };
 
@@ -145,6 +147,23 @@ const PRIMARY_LANES: Lane[] = [
     "stale ctx_reduce strip",
     "frozen-sentinel first application",
 ];
+/**
+ * Obligation lanes whose held work must still be released at the next user turn when the
+ * plugin restarts in between.
+ */
+const RESTART_LANES: Lane[] = [
+    "ctx_reduce drop (full removal)",
+    "emergency 85% force band",
+    "/ctx-flush",
+    "HARD fold after historian publication",
+];
+
+/**
+ * Restart lanes whose release is lost today: the release signal lives only in process memory
+ * (`pendingMaterializationSessions`, `historyRefreshSessions`).
+ */
+const RESTART_GAP = new Set<Lane>(["/ctx-flush"]);
+
 // Subagents have no m[0]/m[1], synthetic todo, caveman or /ctx-flush, and no
 // later user turn to anchor a processed-image watermark.
 const SUBAGENT_LANES: Lane[] = [
@@ -175,6 +194,12 @@ interface Fixture {
     execute: (on: boolean) => void;
     pendingMaterialization: Set<string>;
     historyRefresh: Set<string>;
+    /**
+     * Model a plugin process restart: the database survives, while the in-memory release
+     * signals (`pendingMaterializationSessions`, `historyRefreshSessions`) and per-session
+     * caches start empty.
+     */
+    restart: () => void;
     tag: (callId: string) => number;
     tagStatus: (callId: string) => string | undefined;
 }
@@ -250,28 +275,40 @@ async function fixture(
     const pendingMaterialization = new Set<string>();
     const historyRefresh = new Set<string>();
     let decision: "execute" | "defer" = "defer";
-    const transform = createTransform({
-        db,
-        storeGeneration: generation,
-        tagger: createTagger(),
-        scheduler: { shouldExecute: () => decision } as never,
-        liveModelBySession: new Map([[sessionId, MODEL]]),
-        contextUsageMap: usage,
-        // The smallest accepted floor; the current loop's newer steps fill it,
-        // so the older work sits outside the protected tail.
-        protectedTokens: 4000,
-        historianRunnable: false,
-        directory: dir,
-        sessionDirectoryBySession: new Map([[sessionId, dir]]),
-        historyRefreshSessions: historyRefresh,
-        pendingMaterializationSessions: pendingMaterialization,
-        lastHeuristicsTurnId: new Map(),
-        smartDrops: true,
-        keepReasoningTokens: lane === "reasoning clearing (keep_reasoning_tokens)" ? 0 : 1_000_000,
-        ...(lane === "caveman text compression"
-            ? { cavemanTextCompression: { enabled: true, minChars: 40 } }
-            : {}),
-    });
+    // A new transform with fresh in-memory release signals over the same database is what
+    // the plugin has after a process restart (see `Fixture.restart`).
+    const makeTransform = () =>
+        createTransform({
+            db,
+            storeGeneration: generation,
+            tagger: createTagger(),
+            scheduler: { shouldExecute: () => decision } as never,
+            liveModelBySession: new Map([[sessionId, MODEL]]),
+            contextUsageMap: usage,
+            // The smallest accepted floor; the current loop's newer steps fill it,
+            // so the older work sits outside the protected tail.
+            protectedTokens: 4000,
+            historianRunnable: false,
+            directory: dir,
+            sessionDirectoryBySession: new Map([[sessionId, dir]]),
+            historyRefreshSessions: historyRefresh,
+            pendingMaterializationSessions: pendingMaterialization,
+            lastHeuristicsTurnId: new Map(),
+            smartDrops: true,
+            keepReasoningTokens:
+                lane === "reasoning clearing (keep_reasoning_tokens)" ? 0 : 1_000_000,
+            ...(lane === "caveman text compression"
+                ? { cavemanTextCompression: { enabled: true, minChars: 40 } }
+                : {}),
+        });
+    let transform = makeTransform();
+    const restart = () => {
+        pendingMaterialization.clear();
+        historyRefresh.clear();
+        clearInjectionCache(sessionId);
+        clearMessageTokensCache(sessionId);
+        transform = makeTransform();
+    };
     const raw: MessageLike[] = [];
     const mock = new StrictBindingMock();
     let step = 0;
@@ -402,6 +439,7 @@ async function fixture(
         execute,
         pendingMaterialization,
         historyRefresh,
+        restart,
         tag,
         tagStatus: (callId) => tagRow(callId)?.status,
     };
@@ -615,7 +653,11 @@ for (const generation of ["v1", "v2"] as const) {
                         // the next real user turn. Reasoning clearing is valid by
                         // construction: it removes an oldest contiguous run.
                         expect(error).toBeNull();
-                        expect(nonThinkingEdit).toBe(false);
+                        // At the 95% wall a reduction after the last kept thinking block (the
+                        // newest tool results) is admitted; nothing before that block may change.
+                        if (lane === "emergency 95% wall")
+                            expect(beforeLastThinking(after)).toBe(beforeLastThinking(before));
+                        else expect(nonThinkingEdit).toBe(false);
                         if (lane !== "reasoning clearing (keep_reasoning_tokens)")
                             expect(edit).toBe(false);
                         if (lane.startsWith("ctx_reduce") || lane === "/ctx-flush")
@@ -670,6 +712,85 @@ for (const generation of ["v1", "v2"] as const) {
                     }),
                 );
             }
+            for (const lane of RESTART_LANES) {
+                it(
+                    `release survives a restart: ${lane}`,
+                    withFixture(generation, false, lane, async (f) => {
+                        await prepareLane(f, lane);
+                        await toolLoop(f, 4, loopParts(lane));
+                        armAndBust(f, lane, false);
+                        const afterMessages = await f.pass();
+                        const after = wire(afterMessages);
+                        expect(f.mock.check(after)).toBeNull();
+                        expect(landed(f, lane, after)).toBe(false);
+                        f.served = afterMessages;
+                        await toolLoop(f, 2);
+                        // The plugin restarts while the work is held. Only what the database
+                        // holds survives; the next real user turn must still release the work.
+                        f.restart();
+                        await nextUserTurn(f, "prompt-release");
+                        const released = wire(f.served);
+                        const edit = landed(f, lane, released);
+                        console.log(
+                            `AUDIT-RESTART ${host} | next user turn after a restart | ${lane}: ${f.mock.check(released) ?? "accepted"}; laneLanded=${edit}`,
+                        );
+                        expect(f.mock.check(released)).toBeNull();
+                        if (!STRICT_AUDIT && RESTART_GAP.has(lane)) {
+                            expect(edit).toBe(false);
+                            return;
+                        }
+                        expect(edit).toBe(true);
+                    }),
+                );
+            }
+            it(
+                "mixed pass: a 95% tail reduction on a parallel tool arc lands while an older drop stays held",
+                withFixture(generation, false, "emergency 95% wall", async (f) => {
+                    await toolLoop(f, 3);
+                    // The newest step calls two tools at once.
+                    await toolLoop(f, 1, (n) => [
+                        readPart(
+                            `call-${n}-a`,
+                            `/project/src/file-${n}a.ts`,
+                            `export const a${n} = ${n};\n`.repeat(400),
+                        ),
+                        readPart(
+                            `call-${n}-b`,
+                            `/project/src/file-${n}b.ts`,
+                            `export const b${n} = ${n};\n`.repeat(400),
+                        ),
+                    ]);
+                    const before = wire(f.served);
+                    const older = f.tag("old-read-b");
+                    queuePendingOp(f.db, f.sessionId, older, "drop");
+                    f.execute(true);
+                    f.setUsage(95);
+                    const afterMessages = await f.pass();
+                    const after = wire(afterMessages);
+                    const tailLanded = withoutThinking(after) !== withoutThinking(before);
+                    console.log(
+                        `AUDIT-MIXED ${host} | 95% wall beside a held drop: ${f.mock.check(after) ?? "accepted"}; tailLanded=${tailLanded}; olderDropped=${f.tagStatus("old-read-b") === "dropped"}`,
+                    );
+                    // Valid, including tool pairing on both sides of the parallel arc.
+                    expect(f.mock.check(after)).toBeNull();
+                    expect(beforeLastThinking(after)).toBe(beforeLastThinking(before));
+                    // The older drop sits before kept thinking: held and still queued.
+                    expect(f.tagStatus("old-read-b")).not.toBe("dropped");
+                    expect(getPendingOps(f.db, f.sessionId).some((op) => op.tagId === older)).toBe(
+                        true,
+                    );
+                    // The admitted tail reduction lands in every runtime (Pi does it today), so
+                    // the pass really is mixed: something landed and something stayed held.
+                    if (STRICT_AUDIT) expect(tailLanded).toBe(true);
+                    expect(wire(await f.pass())).toEqual(after);
+                    f.served = afterMessages;
+                    await toolLoop(f, 2);
+                    // Landing the tail reduction did not spend the older drop's release.
+                    await nextUserTurn(f, "prompt-release");
+                    expect(f.mock.check(wire(f.served))).toBeNull();
+                    expect(f.tagStatus("old-read-b")).toBe("dropped");
+                }),
+            );
         });
     }
 }

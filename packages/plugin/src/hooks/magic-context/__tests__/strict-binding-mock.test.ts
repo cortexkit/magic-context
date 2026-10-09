@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import {
     BYTES_ERROR,
+    beforeLastThinking,
     LATEST_TURN_ERROR,
     MIDDLE_ERROR,
+    ORPHAN_ERROR,
     PREFIX_ERROR,
     StrictBindingMock,
     type Wire,
@@ -108,5 +110,46 @@ describe("strict binding mock follows the documented rules", () => {
         next[2]!.content[0]!.content = "o";
         next.push(user("third turn"));
         expect(mock.check(next)).toBeNull();
+    });
+
+    it("rejects one side of a parallel tool arc removed after the last thinking block", () => {
+        const { mock, wire } = loop([1, 2]);
+        // The newest step calls two tools at once; its results arrive as separate tool
+        // messages, which the SDK merges into one user message.
+        const block = mock.respond(wire);
+        const parallel: Wire = [
+            ...wire,
+            {
+                role: "assistant",
+                content: [
+                    block!,
+                    { type: "tool_use", id: "pa", name: "read", input: { path: "a" } },
+                    { type: "tool_use", id: "pb", name: "read", input: { path: "b" } },
+                ],
+            },
+            { role: "user", content: [{ type: "tool_result", tool_use_id: "pa", content: "a" }] },
+            { role: "user", content: [{ type: "tool_result", tool_use_id: "pb", content: "b" }] },
+        ];
+        expect(mock.check(parallel)).toBeNull();
+        // Shortening the newest result is after every kept block: valid.
+        const shortened = structuredClone(parallel);
+        shortened.at(-1)!.content[0]!.content = "[dropped]";
+        expect(mock.check(shortened)).toBeNull();
+        // Removing it orphans its call, which binding alone would allow.
+        expect(mock.check(parallel.slice(0, -1))).toBe(ORPHAN_ERROR);
+        // Removing the call instead orphans the result.
+        const withoutCall = structuredClone(parallel);
+        withoutCall.at(-3)!.content.splice(2, 1);
+        expect(mock.check(withoutCall)).toBe(ORPHAN_ERROR);
+    });
+
+    it("beforeLastThinking covers exactly the content a kept block binds", () => {
+        const { wire } = loop([1, 2]);
+        const tail = structuredClone(wire);
+        tail.at(-1)!.content[0]!.content = "shortened";
+        expect(beforeLastThinking(tail)).toBe(beforeLastThinking(wire));
+        const earlier = structuredClone(wire);
+        earlier[2]!.content[0]!.content = "shortened";
+        expect(beforeLastThinking(earlier)).not.toBe(beforeLastThinking(wire));
     });
 });

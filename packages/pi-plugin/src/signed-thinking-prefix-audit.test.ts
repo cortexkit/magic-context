@@ -26,6 +26,7 @@ import {
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import {
 	type Block,
+	beforeLastThinking,
 	PREFIX_ERROR,
 	STRICT_AUDIT,
 	StrictBindingMock,
@@ -160,6 +161,23 @@ const PRIMARY_LANES: Lane[] = [
 	"stale ctx_reduce strip",
 	"frozen-sentinel first application",
 ];
+/**
+ * Obligation lanes whose held work must still be released at the next user turn when the
+ * process restarts in between.
+ */
+const RESTART_LANES: Lane[] = [
+	"ctx_reduce drop (full removal)",
+	"emergency 85% force band",
+	"/ctx-flush",
+	"HARD fold after historian publication",
+];
+
+/**
+ * Restart lanes whose release is lost today: the release signal lives only in process memory
+ * (`signalPiPendingMaterialization`, `signalPiHistoryRefresh`).
+ */
+const RESTART_GAP = new Set<Lane>(["/ctx-flush"]);
+
 // Pi discovers placeholder-only messages on a history refresh, which a
 // subagent (no historian) does not receive; subagents also get no synthetic
 // todo, caveman, m[0]/m[1] or /ctx-flush.
@@ -639,9 +657,11 @@ for (const subagent of [false, true]) {
 						expect(edit).toBe(false);
 					// At the 95% wall Pi drops the newest tool result, which sits
 					// after every kept thinking block: valid, so not a prefix edit.
-					if (lane === "emergency 95% wall")
+					// Nothing before the last kept block may change.
+					if (lane === "emergency 95% wall") {
 						expect(JSON.stringify(after)).toContain("[dropped §");
-					else expect(nonThinkingEdit).toBe(false);
+						expect(beforeLastThinking(after)).toBe(beforeLastThinking(before));
+					} else expect(nonThinkingEdit).toBe(false);
 					// A held edit is never recorded as served: repeating the pass with
 					// no new response serves exactly the same bytes.
 					expect(wire(await f.pass())).toEqual(after);
@@ -684,5 +704,84 @@ for (const subagent of [false, true]) {
 				}),
 			);
 		}
+		for (const lane of RESTART_LANES) {
+			it(
+				`release survives a restart: ${lane}`,
+				withFixture(false, lane, async (f) => {
+					await prepareLane(f, lane);
+					await toolLoop(f, 4, lane);
+					armAndBust(f, lane, false);
+					const afterMessages = await f.pass();
+					const after = wire(afterMessages);
+					expect(f.mock.check(after)).toBeNull();
+					expect(landed(f, lane, after)).toBe(false);
+					f.served = afterMessages;
+					await toolLoop(f, 2);
+					// The process restarts while the work is held: every in-memory
+					// per-session state is dropped, the database survives. The next real
+					// user turn must still release the work.
+					clearContextHandlerSession(f.sessionId);
+					await nextUserTurn(f, "prompt-release");
+					const released = wire(f.served);
+					const edit = landed(f, lane, released);
+					console.log(
+						`AUDIT-RESTART Pi/OMP | next user turn after a restart | ${lane}: ${f.mock.check(released) ?? "accepted"}; laneLanded=${edit}`,
+					);
+					expect(f.mock.check(released)).toBeNull();
+					if (!STRICT_AUDIT && RESTART_GAP.has(lane)) {
+						expect(edit).toBe(false);
+						return;
+					}
+					expect(edit).toBe(true);
+				}),
+			);
+		}
+		it(
+			"mixed pass: a 95% tail reduction on a parallel tool arc lands while an older drop stays held",
+			withFixture(false, "emergency 95% wall", async (f) => {
+				await toolLoop(f, 3);
+				// The newest step calls two tools at once; Pi stores each result as its
+				// own toolResult message.
+				f.respond(
+					(n) => [
+						read(`call-${n}-a`, `/project/src/file-${n}a.ts`),
+						read(`call-${n}-b`, `/project/src/file-${n}b.ts`),
+					],
+					(n) => [
+						[`call-${n}-a`, `export const a${n} = ${n};\n`.repeat(400)],
+						[`call-${n}-b`, `export const b${n} = ${n};\n`.repeat(400)],
+					],
+				);
+				f.served = await f.pass();
+				expect(f.mock.check(wire(f.served))).toBeNull();
+				const before = wire(f.served);
+				const older = f.tag("old-read-b");
+				queuePendingOp(f.db, f.sessionId, older, "drop");
+				f.setPercent(95);
+				const afterMessages = await f.pass();
+				const after = wire(afterMessages);
+				const tailLanded = withoutThinking(after) !== withoutThinking(before);
+				console.log(
+					`AUDIT-MIXED Pi/OMP | 95% wall beside a held drop: ${f.mock.check(after) ?? "accepted"}; tailLanded=${tailLanded}; olderDropped=${f.tagStatus("old-read-b") === "dropped"}`,
+				);
+				// Valid, including tool pairing on both sides of the parallel arc.
+				expect(f.mock.check(after)).toBeNull();
+				expect(beforeLastThinking(after)).toBe(beforeLastThinking(before));
+				// The older drop sits before kept thinking: held and still queued.
+				expect(f.tagStatus("old-read-b")).not.toBe("dropped");
+				expect(
+					getPendingOps(f.db, f.sessionId).some((op) => op.tagId === older),
+				).toBe(true);
+				// Pi lands the admitted tail reduction, so the pass is really mixed.
+				expect(tailLanded).toBe(true);
+				expect(wire(await f.pass())).toEqual(after);
+				f.served = afterMessages;
+				await toolLoop(f, 2);
+				// Landing the tail reduction did not spend the older drop's release.
+				await nextUserTurn(f, "prompt-release");
+				expect(f.mock.check(wire(f.served))).toBeNull();
+				expect(f.tagStatus("old-read-b")).toBe("dropped");
+			}),
+		);
 	});
 }

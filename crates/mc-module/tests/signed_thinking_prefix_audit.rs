@@ -262,6 +262,14 @@ enum Lane {
 const SUMMARY_TEXT: &str = "I have finished reading the parser and the lexer. The parser consumes tokens from the lexer, and the error recovery path is incomplete because it never resynchronises after an unexpected token.";
 const COMPARTMENT_TITLE: &str = "Parser inspection";
 
+/// See [`Fixture::triggers`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Triggers {
+    soft_refresh_pending: bool,
+    has_prior_emergency_drop: bool,
+    pending_drops: usize,
+}
+
 struct Fixture {
     _dir: tempfile::TempDir,
     store: McStore,
@@ -501,6 +509,10 @@ impl Fixture {
                 true,
             );
             assert_eq!(self.mock.check(&self.wire()), None, "loop step {n}");
+            if std::env::var("MC_AUDIT_DEBUG").as_deref() == Ok("1") {
+                let bust = self.served.prefix_bust_permitted;
+                println!("META loop step {n}: bust={bust} {:?}", self.triggers());
+            }
         }
         self.wire()
     }
@@ -526,6 +538,22 @@ impl Fixture {
             json!({"current_total_input_tokens":tokens,"context_limit_tokens":100_000}),
         )
         .unwrap();
+    }
+
+    /// The persisted triggers that offer a bust: the armed `/ctx-flush` refresh, the
+    /// force-band episode latch and the queued agent drops. A held pass must leave them as it
+    /// found them, so the work it declined is offered again at the next user turn.
+    fn triggers(&self) -> Triggers {
+        let meta = self.store.load_meta(&self.req.session_id).unwrap().meta;
+        Triggers {
+            soft_refresh_pending: meta.soft_refresh_pending,
+            has_prior_emergency_drop: meta.has_prior_emergency_drop,
+            pending_drops: self
+                .store
+                .load_pending_agent_drops(&self.req.session_id)
+                .unwrap()
+                .len(),
+        }
     }
 
     fn todo(&self, state: &str, anchor: &str) {
@@ -619,6 +647,10 @@ fn mid_loop(profile: &str, subagent: bool, lane: Lane) {
     f.prepare();
     let before = f.tool_loop(4);
     f.arm_and_bust(subagent);
+    let armed = f.triggers();
+    if std::env::var("MC_AUDIT_DEBUG").as_deref() == Ok("1") {
+        println!("META armed {lane:?} subagent={subagent}: {armed:?}");
+    }
     f.served = f.pass();
     let after = f.wire();
     let error = f.mock.check(&after);
@@ -632,8 +664,11 @@ fn mid_loop(profile: &str, subagent: bool, lane: Lane) {
     if std::env::var("MC_AUDIT_DEBUG").as_deref() == Ok("1") {
         let meta = serde_json::to_value(&f.served).unwrap();
         println!(
-            "META mid-loop {lane:?} subagent={subagent}: action={} materialize={} bust={}",
-            meta["action"], meta["materialize_reason"], meta["prefix_bust_permitted"]
+            "META mid-loop {lane:?} subagent={subagent}: action={} materialize={} bust={} {:?}",
+            meta["action"],
+            meta["materialize_reason"],
+            meta["prefix_bust_permitted"],
+            f.triggers()
         );
     }
     println!("AUDIT {profile} | subagent={subagent} | {lane:?}: {error:?}; laneLanded={landed}; nonThinkingEdit={non_thinking_edit}");
@@ -685,9 +720,54 @@ fn mid_loop(profile: &str, subagent: bool, lane: Lane) {
     }
     // The held edit is released, not lost: once a real user message starts the next turn, the
     // same state (still armed, nothing re-queued) lands the lane's edit validly.
+    // The held pass and the passes after it in the same turn applied nothing, so they must not
+    // spend the trigger that offered the work: the armed refresh stays armed, the force episode
+    // stays available and the queued drops stay queued.
+    let held = f.triggers();
+    if std::env::var("MC_AUDIT_DEBUG").as_deref() == Ok("1") {
+        println!("META before release {lane:?}: {held:?}");
+    }
+    if strict {
+        assert_eq!(
+            held, armed,
+            "{profile} {lane:?}: a held pass spent the trigger that offered its work"
+        );
+    } else if release_gap(lane) {
+        // Today the trigger is spent before the next user turn, which is why the lane does not
+        // release (docs/designs/signed-thinking-hold.md, section 2). An armed `/ctx-flush` is
+        // cleared by the held pass itself: it runs as a SOFT bust whose only work the thinking
+        // guard exempts. The force-band episode is latched by the next tool-loop pass, which
+        // records the newest assistant's trailing-blank decision as a `strip:` unit that the
+        // latch counts as applied reclaim.
+        let expected = if lane == Lane::Flush {
+            Triggers {
+                soft_refresh_pending: false,
+                ..armed
+            }
+        } else {
+            Triggers {
+                has_prior_emergency_drop: true,
+                ..armed
+            }
+        };
+        assert_eq!(
+            held, expected,
+            "{profile} {lane:?}: the release gap's cause changed"
+        );
+    }
     let before_release = f.wire();
     f.next_user_turn("prompt-release");
     let released = f.wire();
+    if std::env::var("MC_AUDIT_DEBUG").as_deref() == Ok("1") {
+        let meta = serde_json::to_value(&f.served).unwrap();
+        println!(
+            "META release {lane:?}: action={} materialize={} bust={} {:?}",
+            meta["action"],
+            meta["materialize_reason"],
+            meta["prefix_bust_permitted"],
+            f.triggers()
+        );
+    }
     let released_landed = f.landed(&before_release, &released);
     println!(
         "AUDIT-RELEASE {profile} | next user turn | {lane:?}: {:?}; laneLanded={released_landed}",
@@ -713,10 +793,10 @@ fn mid_loop(profile: &str, subagent: bool, lane: Lane) {
 }
 
 /// Held lanes whose edit does not land at the next user turn today although the work is still
-/// queued and the same pressure or armed refresh is still in place: no pass at the next user
-/// turn re-offers the opportunity the held pass declined, so the work waits for an unrelated
-/// ride. TypeScript and Pi release the same lanes at the turn boundary, and the design requires
-/// it here too.
+/// queued: the trigger that offered it was spent before the turn ended (see the trigger
+/// assertion in `mid_loop`), so no pass at the next user turn re-offers the opportunity the held
+/// pass declined, and the work waits for an unrelated ride. TypeScript and Pi release the same
+/// lanes at the turn boundary, and the design requires it here too.
 fn release_gap(lane: Lane) -> bool {
     matches!(
         lane,
