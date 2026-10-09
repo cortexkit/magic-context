@@ -1,6 +1,7 @@
 import { isDroppedToolOutput } from "../../hooks/magic-context/ctx-reduce-nudge";
 import {
     getOpenCodeProviderProjection,
+    providerMessageSource,
     providerSubjectPart,
 } from "../../hooks/magic-context/host-runner/opencode-adapter";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
@@ -412,15 +413,16 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
             const nextRendered = new Map<string, { native: MessageLike; messages: V2Message[] }>();
             for (const message of messages) {
                 const mid = message.info.id;
-                const frozen = saved?.byNative.get(message);
+                const native = saved ? providerMessageSource(message) : message;
+                const frozen = saved?.byNative.get(native);
                 if (frozen) {
                     rendered.push(...frozen);
-                    if (mid) nextRendered.set(mid, { native: message, messages: frozen });
+                    if (mid) nextRendered.set(mid, { native, messages: frozen });
                     if (message.info.syntheticHead) head++;
                     continue;
                 }
                 const prior = mid ? saved?.rendered.get(mid) : undefined;
-                if (prior?.native === message) {
+                if (prior?.native === native) {
                     rendered.push(...prior.messages);
                     nextRendered.set(mid as string, prior);
                     continue;
@@ -588,8 +590,8 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                 rendered.push(...following);
                 if (saved) {
                     const owned = rendered.slice(start);
-                    saved.byNative.set(message, owned);
-                    if (mid) nextRendered.set(mid, { native: message, messages: owned });
+                    saved.byNative.set(native, owned);
+                    if (mid) nextRendered.set(mid, { native, messages: owned });
                 }
             }
             if (saved) {

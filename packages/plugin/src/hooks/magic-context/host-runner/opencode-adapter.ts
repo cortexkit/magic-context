@@ -86,8 +86,24 @@ export function providerSubjectPart(tool: Part, index: number): string {
 function toolTextField(state: Part): "error" | "output" {
     return state.status === "error" && typeof state.error === "string" ? "error" : "output";
 }
-function publishMessages(output: { messages: unknown[] }, managed: readonly unknown[]): void {
-    output.messages.splice(0, output.messages.length, ...managed);
+const publishedSources = new WeakMap<MessageLike, MessageLike>();
+/** Let v2 reuse its rendered content for the unchanged recorded message, even
+ * though each publication gives the host a new, independently mutable copy. */
+export function providerMessageSource(message: MessageLike): MessageLike {
+    return publishedSources.get(message) ?? message;
+}
+export function publishMessages(
+    output: { messages: unknown[] },
+    managed: readonly MessageLike[],
+): void {
+    // OpenCode may edit any object it receives. Copy only the live served window,
+    // never the retained history, and keep the host's array identity intact.
+    const published = managed.map((message) => {
+        const copy = structuredClone(message);
+        publishedSources.set(copy, message);
+        return copy;
+    });
+    output.messages.splice(0, output.messages.length, ...published);
 }
 export interface OpenCodeProviderProjection {
     /** Owns the front projection's pointer cache, never a legacy LKG slot. */
