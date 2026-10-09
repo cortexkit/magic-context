@@ -5,7 +5,8 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-pub const INVENTORY_VERSION: u32 = 3;
+/// Section-inventory protocol version serialized in move manifests.
+pub const INVENTORY_VERSION: u32 = 4;
 pub const CONTEXT_SCHEMA_VERSION: u32 = 99;
 pub const STORE_SCHEMA_VERSION: u32 = 66;
 pub const GLOBAL_USER_PROFILE_PROJECT_PATH: &str = "__global__";
