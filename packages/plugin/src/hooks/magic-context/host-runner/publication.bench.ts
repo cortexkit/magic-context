@@ -1,3 +1,4 @@
+import { clonePreservingInstances } from "../../../v2/hooks/payload";
 import type { MessageLike } from "../tag-messages";
 import { publishMessages } from "./opencode-adapter";
 import { assemble, createRecord } from "./record";
@@ -49,12 +50,18 @@ const live = assemble(record);
 if (live.length !== 900) throw new Error(`Expected 900 live rows, got ${live.length}`);
 const output = { messages: [] as unknown[] };
 const samples: number[] = [];
+const projectionSamples: number[] = [];
 for (let i = 0; i < 220; i++) {
     const start = performance.now();
     publishMessages(output, live);
     if (i >= 20) samples.push(performance.now() - start);
+    const projectionStart = performance.now();
+    const projected = clonePreservingInstances(live);
+    if (projected === live) throw new Error("Projection publication reused its cache array");
+    if (i >= 20) projectionSamples.push(performance.now() - projectionStart);
 }
 samples.sort((a, b) => a - b);
+projectionSamples.sort((a, b) => a - b);
 console.log(
     JSON.stringify({
         history: record.ids.size,
@@ -64,5 +71,7 @@ console.log(
         copy_p50_ms: samples[Math.floor(samples.length * 0.5)],
         copy_p95_ms: samples[Math.floor(samples.length * 0.95)],
         copy_max_ms: samples.at(-1),
+        projection_copy_p50_ms: projectionSamples[Math.floor(projectionSamples.length * 0.5)],
+        projection_copy_p95_ms: projectionSamples[Math.floor(projectionSamples.length * 0.95)],
     }),
 );

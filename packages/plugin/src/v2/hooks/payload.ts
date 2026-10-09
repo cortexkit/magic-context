@@ -70,7 +70,7 @@ function providerCache(owner: object): ProviderProjectionCache {
 }
 function metadataOnly(message: V2Message): V2Message {
     // Copy metadata without invoking the content getter of a retained host row.
-    return {
+    return clonePreservingInstances({
         ...Object.fromEntries(
             Object.keys(message)
                 .filter((key) => key !== "content")
@@ -79,7 +79,7 @@ function metadataOnly(message: V2Message): V2Message {
         content: [],
         id: message.id,
         role: message.role,
-    };
+    });
 }
 
 /** True for an object structuredClone would flatten: anything other than a plain object or
@@ -371,6 +371,7 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
         const bySubject = new Map<string, ToolBridge>();
         for (const [index, part] of parts.entries()) {
             const bridge = bridges.get(part);
+            if (bridge) bridge.inlineResult = bridge.resultMessage === message;
             if (bridge && typeof part.callID === "string") byCallID.set(part.callID, bridge);
             if (bridge && typeof part.callID === "string" && part.callID)
                 bySubject.set(providerSubjectPart(part, index), bridge);
@@ -436,7 +437,8 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                 for (const [id, original] of originalsByID) {
                     if (!saved.metadata.has(id)) saved.metadata.set(id, metadataOnly(original));
                 }
-                for (const [id, bridges] of bridgesBySubject) saved.bridges.set(id, bridges);
+                for (const [id, bridges] of bridgesBySubject)
+                    saved.bridges.set(id, new Map(clonePreservingInstances([...bridges])));
                 for (const [id, parts] of hostPartsByID) saved.hostParts.set(id, parts);
             }
             let head = 0;
@@ -635,7 +637,10 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                         saved.hostParts.delete(id);
                     }
             }
-            draft.messages.splice(0, draft.messages.length, ...rendered);
+            // Cache-owned plain objects must not escape to the host's mutable draft.
+            // Preserve Media.Asset instances because the host validates their prototypes.
+            const published = saved ? clonePreservingInstances(rendered) : rendered;
+            draft.messages.splice(0, draft.messages.length, ...published);
         },
     };
 }
