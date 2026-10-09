@@ -14,8 +14,10 @@ use crate::single_store_domain::CONTEXT_SCHEMA_SNAPSHOT;
 
 const GOLDENS: &str = include_str!("text_goldens.json");
 
-// In this host-versus-Broca routing memory, the trailing gap statement must be clause four.
-// Source: docs/reports/historian-merge-turn-trial-v6-sonnet.md:71 (#17639).
+// A real memory from the historian merge trial (docs/reports/historian-merge-turn-trial-v6-sonnet.md:71,
+// issue #17639). The trial numbered its clauses with the outdated "gap" statement as clause
+// four, and edits cite clauses by number, so the splitter must produce exactly that numbering
+// and must not split after the abbreviation "e.g.".
 const GAP_MEMORY: &str = "Rust transform mode must not require Broca (or any other CK module) to be running: every module under CK/subc stays decoupled unless coupling is necessary. Historian and dreamer completions in rust mode run by default in the same harness as the parent session (the host runs the prompt, e.g. OpenCode/Pi child session or the v2 child carrier), and route to the Broca runner only when the user configures it (Ufuk ruling, 2026-09-17). Today `crates/mc-module/src/historian_producer.rs` opens a route straight to `broca` (DEFAULT_RUNNER_MODULE_ID) — that is the gap to close with a host-runner default.";
 
 /// Every case of the shared goldens whose Rust output differs from the expected value
@@ -563,7 +565,8 @@ fn a_resolved_fact_records_its_state_on_the_pending_fact_row() {
 
 #[test]
 fn the_module_never_writes_memories_for_a_ts_owned_project() {
-    // Legacy authority armed: a marked project is the module's, an unmarked one is not.
+    // While any project has an `authority_managed` row, only projects with such a row are
+    // the module's; every other project's memories belong to the TypeScript host.
     let conn = context_db(true);
     mark_managed(&conn, OTHER);
     let refused = admit(
@@ -610,7 +613,8 @@ fn ownership_follows_the_markers_while_armed_and_the_migration_state_otherwise()
     assert!(!module_owns_memory(&repair, PROJECT).unwrap());
     assert!(module_owns_memory(&repair, OTHER).unwrap());
 
-    // Empty markers but no recorded single-store migration: not the module's.
+    // No `authority_managed` or `authority_repair_pending` rows, but `context.db` does not
+    // record a completed single-store migration either: the module owns nothing.
     let unmigrated = context_db(false);
     assert!(!module_owns_memory(&unmigrated, PROJECT).unwrap());
     unmigrated

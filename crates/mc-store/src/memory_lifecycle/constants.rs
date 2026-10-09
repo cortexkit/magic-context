@@ -60,8 +60,9 @@ pub const CONCRETE_UNITS: &[&str] = &[
 /// Abbreviations whose final `.` never ends a clause.
 pub const CLAUSE_ABBREVIATIONS: &[&str] = &["e.g.", "i.e.", "etc.", "vs."];
 
-/// The month-scale lifetimes the TypeScript `CATEGORY_DEFAULT_TTL` gives historian
-/// admissions, in milliseconds. Categories not listed never expire.
+/// How long a historian-admitted memory of `category` lives before it expires, in
+/// milliseconds; the same values as the TypeScript `CATEGORY_DEFAULT_TTL`. Categories not
+/// listed never expire.
 pub fn category_default_ttl_ms(category: &str) -> Option<i64> {
     const DAY_MS: i64 = 24 * 60 * 60 * 1000;
     match category {

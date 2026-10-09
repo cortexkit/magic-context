@@ -23,7 +23,9 @@ import {
     splitMemoryClauses,
 } from "../../../../packages/plugin/src/features/magic-context/memory/lifecycle-text";
 
-// Source: docs/reports/historian-merge-turn-trial-v6-sonnet.md:71 (#17639).
+// A real memory from the historian merge trial (docs/reports/historian-merge-turn-trial-v6-sonnet.md:71,
+// issue #17639). It exercises an abbreviation ("e.g."), backtick spans, a date and a spaced
+// em dash, and the trial numbered its outdated final statement as clause four.
 const GAP_MEMORY =
     "Rust transform mode must not require Broca (or any other CK module) to be running: every module under CK/subc stays decoupled unless coupling is necessary. Historian and dreamer completions in rust mode run by default in the same harness as the parent session (the host runs the prompt, e.g. OpenCode/Pi child session or the v2 child carrier), and route to the Broca runner only when the user configures it (Ufuk ruling, 2026-09-17). Today `crates/mc-module/src/historian_producer.rs` opens a route straight to `broca` (DEFAULT_RUNNER_MODULE_ID) — that is the gap to close with a host-runner default.";
 

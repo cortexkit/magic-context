@@ -2589,7 +2589,9 @@ mod tests {
     fn a_fold_for_a_ts_owned_project_writes_no_memory_but_still_publishes() {
         let dir = tempfile::tempdir().unwrap();
         let path = fixture_db(dir.path(), "context.db");
-        // Legacy authority is armed for another project, so this one belongs to the host.
+        // Mark a different project as module-managed in `authority_managed`. While any
+        // project carries that marker, every unmarked project's memories belong to the
+        // TypeScript host, so the module must not write this project's memories.
         mark_managed(&path, "git:someone-else");
         let mut store = HostStore::open(&path).unwrap();
         let outcome = store.publish_fold(&sample_publish()).unwrap();
