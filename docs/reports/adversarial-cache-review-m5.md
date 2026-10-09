@@ -361,3 +361,39 @@ instead of 0**; the cached-frontier gap/replay/descent control stays green. Appl
 `historian.rs` diff: 2 insertions / 1 deletion; checkout plus touch restores an
 empty unstaged diff. This proves the row assertion observes a real message-log
 SELECT, not a constant or timing-only proxy. Counter instrumentation is test-only.
+
+### F3 mutation coverage and full-request differential
+
+The parent accepted separate controls after the actual experiment:
+
+1. Restoring retained hook Append replay reddens the **unchanged review matrix**
+   at byte 226,317, reproducing both 182-byte force-band extras (309,124 versus
+   308,942 bytes). Only that selected test fails; the full-engine first-serve /
+   priced-pass / frozen-byte replay control stays green.
+2. Restoring **only** the engine's former host skip leaves the batched matrix
+   green: its first force observation applies drops and expects no new reminder.
+   The real chronology regression instead reddens, with zero rebuilt reminders
+   versus the full engine's one retained reminder (308,942 versus 309,158 bytes).
+   This is the positive history case missing from the matrix. The parent explicitly
+   corrected the earlier condition naming the matrix for this gate proof.
+
+Both mutations have nonempty applied diffs (2 insertions / 1 deletion) and empty
+checkout/touch restorations. The gate-only matrix result is recorded as
+**undefended**, not misreported red; the chronology is a reddened control reaching
+that same `transform.rs`/module target. All **14** existing `channel1_` vectors
+passed under the restored old gate, including the full-engine first-serve,
+compliance grace/refire and superseded-copy byte assertions. They are rerun under
+the new gate to complete the full-request differential. No original vector or
+review test was rewritten. Only provider host kinds change which decision owns
+their reminders; the full-request condition is unchanged.
+
+F3 final narrow verification is green after restoration: all **14** existing
+Channel-1 vectors passed under the new gate (same assertions as the old-gate run),
+the two-chronology regression passed, and the **whole unchanged 10-test independent
+M5 review suite** passed in **173.26 s**. It reproduced **200 sessions / 163
+publications / 117 reopens / zero decision, chunk and compartment-byte
+mismatches**, all four crash/claim/report/publish boundaries, and the whole-native
+served-array fire/next/published comparisons. All-target strict Clippy and final
+format checking passed. The broader provider/historian/store, drive-fault and
+conformance gates remain separately recorded below; the unverified F3 checkpoint
+is now backed by the finding-specific byte, chronology and mutation checks.
