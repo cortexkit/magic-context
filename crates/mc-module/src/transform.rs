@@ -17433,7 +17433,10 @@ pub(crate) mod tests {
             );
             assert_eq!(pass.answer, Answer::Noop);
             assert_eq!(
-                store.load_pending_agent_drops("host-permission").unwrap().len(),
+                store
+                    .load_pending_agent_drops("host-permission")
+                    .unwrap()
+                    .len(),
                 1
             );
         }
