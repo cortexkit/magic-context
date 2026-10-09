@@ -98,6 +98,19 @@ export function rememberOpenCodeHostReplay(message: MessageLike, read: () => unk
 export function providerMessageSource(message: MessageLike): MessageLike {
     return publishedSources.get(message) ?? message;
 }
+function copyPublishedData<T>(value: T): T {
+    if (Array.isArray(value)) return value.map(copyPublishedData) as T;
+    if (value && typeof value === "object") {
+        // Protocol messages are JSON data. An in-process transport's serializer
+        // method is not message data; copying must neither invoke nor publish it.
+        return Object.fromEntries(
+            Object.entries(value)
+                .filter(([key, entry]) => key !== "toJSON" || typeof entry !== "function")
+                .map(([key, entry]) => [key, copyPublishedData(entry)]),
+        ) as T;
+    }
+    return value;
+}
 export function publishMessages(
     output: { messages: unknown[] },
     managed: readonly MessageLike[],
@@ -105,7 +118,7 @@ export function publishMessages(
     // OpenCode may edit any object it receives. Copy only the live served window,
     // never the retained history, and keep the host's array identity intact.
     const published = managed.map((message) => {
-        const copy = structuredClone(message);
+        const copy = copyPublishedData(message);
         publishedSources.set(copy, message);
         return copy;
     });
