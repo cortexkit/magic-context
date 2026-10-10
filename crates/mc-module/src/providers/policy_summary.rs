@@ -1176,6 +1176,16 @@ thread_local! {
     static FULL_CHECK_OFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Replayed hooks checked against the full computation in this process. Corpus
+/// tests read it to show they exercised the replay rather than only rebuilds.
+#[cfg(test)]
+static REPLAY_CHECKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn replay_checks() -> u64 {
+    REPLAY_CHECKS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// While held, replayed hooks on this thread skip the full-computation check,
 /// so a test can measure the store reads of the replay alone.
 #[cfg(test)]
@@ -1242,5 +1252,6 @@ fn check_against_full(
         }
     }
     assert_eq!(comparable, rebuilt, "replayed policy summary");
+    REPLAY_CHECKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok(())
 }

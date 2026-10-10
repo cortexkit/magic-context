@@ -1151,12 +1151,17 @@ async fn r2_review_720_pass_differential_with_new_seeds_and_real_reduce() {
         frozen_reference: false,
         real_reduce: true,
     };
+    let replays = super::super::policy_summary::replay_checks();
     let mut comparisons = 0;
     for (queued, calibrated) in [(false, false), (true, false), (false, true)] {
         comparisons += drive_overlay_corpus_with(queued, calibrated, &run).await;
     }
     assert_eq!(comparisons, 46980);
-    println!("r2 review append differential: 720 passes, 46980 per-message comparisons, seeds={REVIEW_SEEDS:x?}");
+    // Hooks replay the stored policy summary; each replay was checked against
+    // the full computation, so the corpus covers that path too.
+    let replays = super::super::policy_summary::replay_checks() - replays;
+    assert!(replays > 0, "the corpus never replayed a policy summary");
+    println!("r2 review append differential: 720 passes, 46980 per-message comparisons, {replays} checked summary replays, seeds={REVIEW_SEEDS:x?}");
 }
 
 #[tokio::test]

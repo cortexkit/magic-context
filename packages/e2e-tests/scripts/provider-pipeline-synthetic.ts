@@ -9,6 +9,10 @@ import { buildDriver, Driver, fixture, message, tools } from "./provider-pipelin
 
 export async function syntheticReplay(count = 17000, samples = 20) {
     assert.ok(count >= 7500 && samples >= 5);
+    // The driver is a test build, where every replayed policy summary is also
+    // checked against a full recomputation. Timing runs measure the replay alone;
+    // the differential runs keep that check.
+    process.env.MC_POLICY_SUMMARY_SKIP_FULL_CHECK = "1";
     const root = resolve(import.meta.dir, "../../..");
     const work = join(root, "target/provider-pipeline-driver");
     mkdirSync(join(work, "synthetic"), { recursive: true });
