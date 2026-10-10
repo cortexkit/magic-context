@@ -8,6 +8,7 @@ import { OpenCode } from "@opencode/client";
 import { TestHarness } from "../../src/harness";
 import { spawnOpencode2, waitForPluginActive } from '../../src/opencode2-runner/spawn';
 import { gaDatabasePath, V2StoreReader } from "../../../plugin/src/v2/store-reader";
+import { getCompartmentLeaseBlocker } from "../../../plugin/src/features/magic-context/compartment-lease";
 
 const names = ["applyDeferredCompactionMarker", "reconcileMarkerRepresentation", "setPendingCompactionMarkerState", "updateCompactionMarkerAfterPublication"];
 async function instrument() {
@@ -100,7 +101,34 @@ test("I10 real-host counters: v2 fold plus historian publication plus ten turns 
         v1.mock.setDefault({ text: "normal", usage });
         await v1.sendPrompt(session, "Consume published marker");
         for(let index=0;index<10;index++) await v1.sendPrompt(session, `control defer ${index}`);
+        // A deferred chunk is not completion of its background run. Wait for its
+        // lease, then add enough new source to leave an eligible prefix outside
+        // the protected tail for the non-deferred publication control.
+        await until(() => getCompartmentLeaseBlocker(v1.contextDb() as never, session) === null);
+        for (let index=0;index<3;index++) await v1.sendPrompt(session, `direct source ${index} ${"bounded history ".repeat(700)}`);
+        await v1.waitForMockQuiescence();
+        await until(() => getCompartmentLeaseBlocker(v1.contextDb() as never, session) === null);
+        // Exercise the same short ownership overlap on every platform. A tool
+        // error is not a successful positive control merely because HTTP finished.
+        const leaseControl = new Database(v1.contextDbPath());
+        try {
+            leaseControl.prepare(`INSERT INTO compartment_state_lease
+                (session_id, holder_id, owner_pid, acquired_at, expires_at) VALUES (?, ?, ?, ?, ?)`)
+                .run(session, "s3-background-lease-control", process.pid, Date.now(), Date.now() + 1000);
+        } finally { leaseControl.close(); }
         await v1.sendPrompt(session, "Run direct marker control");
+        const controlSessionClient = v1.client.session as typeof v1.client.session & {
+            messages(options: { path: { id: string } }): Promise<{ data?: unknown }>;
+        };
+        const controlResponse = await controlSessionClient.messages({ path: { id: session } });
+        const controlMessages = controlResponse.data ?? [];
+        const controlParts = (Array.isArray(controlMessages) ? controlMessages : [])
+            .flatMap((message: any) => message.parts ?? [])
+            .filter((part: any) => part.type === "tool" && part.tool === "s3_direct_historian");
+        console.info("I10_V1_CONTROL", JSON.stringify(controlParts));
+        expect(controlParts).toHaveLength(1);
+        expect(controlParts[0].state.status).toBe("completed");
+        expect(controlParts[0].state.output).toBe("Control historian published");
         const called = new Set(fixture.calls(session).map(call => call.name));
         expect([...called].sort()).toEqual([...names].sort());
         const counts = Object.fromEntries(names.map(name => [name, fixture.calls(session).filter(call => call.name === name).length]));

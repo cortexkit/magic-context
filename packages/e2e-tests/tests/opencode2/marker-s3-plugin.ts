@@ -36,7 +36,14 @@ export default {
                         const db = openDatabase()!;
                         const sessionId = execution.sessionID;
                         const holder = "s3-direct-control";
-                        if (!acquireCompartmentLease(db, sessionId, holder)) throw new Error("control lease unavailable");
+                        // Background publication can finish a chunk before releasing the
+                        // session lease. The positive control must wait for that owner,
+                        // rather than turn a busy tool result into a missing marker call.
+                        const deadline = Date.now() + 15000;
+                        while (!acquireCompartmentLease(db, sessionId, holder)) {
+                            if (Date.now() >= deadline) throw new Error("control lease unavailable after waiting for background historian");
+                            await Bun.sleep(25);
+                        }
                         try {
                             const boundary = resolveWrapupProtectedTailBoundary({ db, sessionId, mode: "manual-wrapup", contextLimit: 16000, executeThresholdPercentage: 65, usage: { percentage: 0, inputTokens: 100 }, usageSource: "live", messagesToKeep: 1 });
                             await runCompartmentAgent({ client: context.client, db, sessionId, directory: context.directory, model: "mock-anthropic/mock-sonnet", historianChunkTokens: 20000, historianTimeoutMs: 15000, boundarySnapshot: boundary.snapshot, compartmentLeaseHolderId: holder, forceKeepLastCompartment: true, forceDrainQuota: true, memoryEnabled: false, preserveInjectionCacheUntilConsumed: args.deferred });

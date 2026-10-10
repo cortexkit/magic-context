@@ -129,3 +129,67 @@ HOME and unset `OPENCODE_DB`. Native-host and CI verification results follow.
 No v99 writer policy, rescore table or hidden-child shaping code was modified.
 The old applied-result format remains available for genuinely applied legacy
 results; pending proposals have their own count and progress wording.
+
+## CI follow-up: the marker positive control
+
+The pushed curator fix `dfe61aa45b3bd711d6e4cbcece0f2c80bc05b9e4` ran at
+https://github.com/cortexkit/magic-context/actions/runs/38051551157. All six dream
+commands and the timer test passed in that run, including the new proposal
+assertions. Twenty-one CI jobs passed. The sole failure was a different test:
+`marker-s3-runtime.test.ts`, whose v1 positive control recorded three legacy
+marker members but not `updateCompactionMarkerAfterPublication`. Its v2
+zero-counter assertions passed. Mutations run 38051551158 and Smoke run
+38051551075 both passed.
+
+The marker test's non-deferred direct tool is the only path intended to invoke
+that fourth member. The control had two unsatisfied preconditions:
+
+- A visible first compartment is not completion of the background historian.
+  The later pressure turn can start another historian holding the session's
+  exclusive lease. The direct fixture tool attempted acquisition once and
+  threw `control lease unavailable` if that writer was still running.
+- Background publication can also consume the eligible source before the
+  direct publication. Merely sending ten small turns does not establish an
+  eligible prefix outside the protected tail.
+
+These fixture and marker/lease files are identical between master 9d26c870 and
+the curator fix; no curator production code reaches this path. The unmodified
+marker test passed on native hosts, demonstrating its timing sensitivity. A
+controlled probe then inserted a one-second live lease into the **throwaway
+v1 context database only** before the direct call. The real provider transcript
+returned:
+
+```text
+{"type":"tool_result","tool_use_id":"tool_s3_direct","content":"control lease unavailable","is_error":true}
+```
+
+The test reproduced exactly the CI signature: only
+`updateCompactionMarkerAfterPublication` was missing, with one failed test.
+This establishes the fixture's false-negative path; the original CI run did
+not retain the direct tool result, so its precise interleaving cannot be
+reconstructed after cleanup. The controlled probe was restored before changes
+were committed.
+
+The repair is test-only. The direct fixture now waits at most 15 seconds for the
+background lease. The v1 scenario waits for background ownership to settle,
+adds three real source turns so the protected tail leaves an eligible prefix,
+and checks the actual direct tool result rather than treating a successful
+HTTP response as tool success. A one-second live ownership overlap is exercised
+on every platform, so removing the fixture's wait reliably breaks the positive
+control. All original zero-counter and four-member assertions remain intact;
+three completed-tool assertions strengthen the control.
+
+The deterministic contended scenario passes on real native OpenCode hosts:
+v2 counters `[0,0,0,0]`, v1 counters `[1,35,2,1]`, one completed direct tool,
+**1 pass / 12 expectations**, 16.42 seconds. No production marker, lease,
+historian or rescore code is changed by this follow-up.
+
+Restoring one-shot acquisition in the repaired fixture (with a temporary
+`NON-VACUITY BREAK`) fails exactly the I10 test: the direct tool has status
+`error`, error `control lease unavailable`, instead of `completed`; v2 zero
+counters still pass. The staged wait was restored with `git checkout` and
+`touch`, leaving an empty working diff. The final typed fixture passes again
+(1 test, 12 expectations); scoped TypeScript diagnostics report no errors in
+both changed fixture files. Comment review examined all three follow-up files
+and flagged none. The non-authoritative whole-e2e compiler failures described
+above are not expanded into unrelated cleanup.
