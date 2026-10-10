@@ -2894,8 +2894,9 @@ pub const TABLES: &[TableInventory] = &[
         Some(KeyPolicy::PreserveOrRefuseCollision),
         None
     ),
-    // Derived from the policy parts above: an absent summary makes the next hook
-    // rebuild it, and its change log is meaningless without it, so neither moves.
+    // Derived from mc_provider_policy_parts_v1: an absent summary makes the next
+    // hook rebuild it from those rows, and its change log only describes changes
+    // since that summary, so neither table moves with a session.
     table!(
         Module,
         "mc_provider_policy_summaries_v1",

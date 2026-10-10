@@ -174,7 +174,8 @@ pub(crate) fn save_engine_policy_tx(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for (conv, lineage, raw) in conversations {
-        // Every part is rewritten below; a summary would only log each one.
+        // Every policy part is rewritten below. Dropping the summary first means
+        // the change triggers log nothing, and the next hook rebuilds it.
         drop_policy_summary_tx(conn, &conv)?;
         // One prepared statement for the whole lineage, and an unchanged row is
         // left alone so its indexes need no maintenance.
@@ -430,10 +431,11 @@ pub fn consume_provider_drops_tx(
     Ok(())
 }
 
-/// A refrozen baseline restates the measurement of every frozen part. Rows
-/// whose stored measurement is already the same text are left unwritten: each
+/// When a hook refreezes the channel-1 tail-hygiene baseline, every part in
+/// the new frozen prefix stores the measurement it was frozen with. Rows whose
+/// stored measurement already has the same text are left unwritten. Each
 /// measurement is serialized in its struct's field order, as admission stored
-/// it, so an unchanged row compares equal.
+/// it, so an unchanged measurement compares equal.
 fn restate_baseline_measurements_tx(
     conn: &Connection,
     conv: &str,
@@ -458,9 +460,9 @@ fn restate_baseline_measurements_tx(
 pub struct ProviderHookWrite {
     pub answer: Option<ProviderHookAnswer>,
     pub counters: Value,
-    /// A policy summary describing the lineage after this write, including any
-    /// baseline measurement updates in `counters`. Saving it forgets the logged
-    /// changes it accounts for.
+    /// A policy summary describing the lineage after this write, including the
+    /// measurement updates in `counters["policy_baseline_updates"]`. Saving it
+    /// clears the conversation's logged policy-row changes, which it includes.
     pub policy_summary: Option<String>,
 }
 pub struct ProviderHookRequest<'a> {
@@ -1381,8 +1383,9 @@ impl McStore {
             rows
         })?)
     }
-    /// One view by version, without reading the conversation's other views:
-    /// each holds a whole replacement, and they accumulate with every rebuild.
+    /// One provider view by version. Unlike `load_provider_views`, it does not
+    /// read every stored view: each holds a whole replacement, and they
+    /// accumulate with every rebuild.
     pub fn load_provider_view(
         &self,
         key: &ProviderSessionKey,

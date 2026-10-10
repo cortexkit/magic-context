@@ -11480,8 +11480,8 @@ pub(crate) fn calibration_for_prefix_pass(
 
 /// Project stored measurements through the same protection, selection, calibrated
 /// refresh and oldest-tag functions as a full engine pass. No content is fetched.
-/// This correctness-stage projector walks the full active metadata lineage; it
-/// is not yet incremental. The bounded-summary integration gate remains closed.
+/// It walks the whole metadata lineage. Host hooks call it only to rebuild their
+/// policy summary (`providers::policy_summary`), whose replays must equal it.
 pub(crate) fn channel1_inputs_from_parts(
     parts: &[mc_store::provider_records::ProviderPolicyPart],
     settings: &Value,

@@ -34,7 +34,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-/// More logged changes than this rebuild the summary instead of replaying them.
+/// When more than this many policy rows changed since the summary was taken,
+/// rebuild it from every part instead of replaying the changes.
 const CHANGE_CAP: usize = 4096;
 /// Bound on parts read while propagating changes or refilling hint candidates.
 const READ_CAP: usize = 8192;
@@ -754,7 +755,9 @@ fn replay(
     }
     let changed: Vec<String> = views.previous.keys().cloned().collect();
 
-    // The protection window: replace each changed row's old membership.
+    // The tool-tag protection window (the newest served tool-result tags whose
+    // mass reaches the protected-token floor): move each changed row's tag from
+    // its old group to its current one, then recompute the cutoff.
     let mut groups = summary.window.clone();
     let mut below = summary.window_below;
     for block in &changed {
@@ -801,7 +804,8 @@ fn replay(
         .copied()
         .collect();
 
-    // Protected arcs: re-rank every arc a changed row belongs to, before or after.
+    // Protected tool arcs (the newest arcs of each keep-protected tool name):
+    // re-rank every arc a changed row belonged to or now belongs to.
     let touched: BTreeSet<String> = changed
         .iter()
         .flat_map(|block| [views.old(block), views.current.get(block)])
@@ -843,8 +847,9 @@ fn replay(
         let Some((held, Some(lowest))) = before.get(name) else {
             continue;
         };
-        // A full list that lost an arc, or gained one older than its old
-        // lowest member, may now be missing an arc it never tracked.
+        // A list holding its whole keep count tracks only the newest arcs. If it
+        // lost one, or gained one ranked below its previous lowest, an older arc
+        // that was never tracked may belong in it: rebuild instead.
         if *held == keep && (list.len() < keep || list.iter().any(|rank| rank < lowest)) {
             return Ok(None);
         }
@@ -857,9 +862,11 @@ fn replay(
         .cloned()
         .collect();
 
-    // Parts whose measurement can differ: changed rows, parts entering or
-    // leaving protection, parts crossing the cutoff, and everything sharing an
-    // arc or tag number with any of those.
+    // Parts whose derived measurement can differ: changed rows, parts whose tag
+    // entered or left the protection window, members of arcs that became or
+    // stopped being protected, parts whose tag number moved across the window
+    // cutoff (hint eligibility), and every part sharing an arc or a tag number
+    // with any of those.
     let mut loaded_numbers = window_moved.clone();
     views.add(index.parts_with_tag_numbers(&window_moved)?);
     let mut loaded_arcs = touched.clone();
@@ -1246,7 +1253,9 @@ fn check_against_full(
     let rebuilt = build(&parts, settings, replayed.key.clone(), None).expect("rebuilt summary");
     let mut comparable = replayed.clone();
     for (tier, list) in &mut comparable.hint {
-        // A replay may not know that a tracked tier holds every candidate.
+        // A replay keeps a tool tier's `complete` flag false once it has ever
+        // dropped candidates, even if no others remain; a rebuild can prove
+        // the tier holds all of them. Only that flag may differ.
         if rebuilt.hint.get(tier).is_some_and(|held| held.complete) {
             list.complete = true;
         }
