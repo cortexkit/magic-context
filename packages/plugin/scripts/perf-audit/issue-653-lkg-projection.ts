@@ -10,7 +10,7 @@
  * session appends one user/assistant turn first.
  */
 import { resolve } from "node:path";
-import { appendTurn, buildSession, loadMessages, rng } from "./issue-653-fixture";
+import { appendTurn, buildSession, loadMessages, rng, SHAPES, type Shape } from "./issue-653-fixture";
 
 const args = process.argv.slice(2);
 const flag = (name: string, fallback: string): string => {
@@ -29,15 +29,32 @@ const { captureSlot, noteEntry } = (await import(
     `${src}/hooks/magic-context/lkg-slot.ts`
 )) as typeof import("../../src/hooks/magic-context/lkg-slot");
 
+const shape = flag("--shape", "text") as Shape;
+if (!SHAPES.includes(shape)) throw new Error(`--shape must be one of ${SHAPES.join(", ")}`);
 const sessions = [
-    buildSession("A", 1, messageCount, megabytes * 1024 * 1024),
-    buildSession("B", 2, messageCount, megabytes * 1024 * 1024),
+    buildSession("A", 1, messageCount, megabytes * 1024 * 1024, shape),
+    buildSession("B", 2, messageCount, megabytes * 1024 * 1024, shape),
 ];
 for (const session of sessions) {
     console.log(
         `${session.sessionId}: ${session.json.length} messages, ${(session.totalChars / 1024 / 1024).toFixed(1)} MB JSON`,
     );
 }
+
+// Optional live heap standing in for the rest of a host process (other
+// sessions, caches): about 1 KB per entry of small objects and short strings.
+const ballastMb = Number(flag("--ballast-mb", "0"));
+const ballast: unknown[] = [];
+for (let index = 0; index < ballastMb * 1024; index += 1) {
+    ballast.push(
+        Array.from({ length: 8 }, (_, item) => ({
+            id: `ballast_${index}_${item}`,
+            n: item,
+            tags: [item, index],
+        })),
+    );
+}
+if (ballastMb > 0) console.log(`ballast entries: ${ballast.length}`);
 
 const last: { stats?: { reused: number; retained: number; retainedBytes: number } } = {};
 const project = createLkgEntryProjector({
@@ -46,7 +63,7 @@ const project = createLkgEntryProjector({
     },
 });
 const random = rng(99);
-console.log(`src=${src}`);
+console.log(`src=${src} shape=${shape}`);
 console.log("pass\tsession\tmessages\tnoteEntry_ms\tprojection_ms\treused\tretained\tretainedBytes");
 for (let pass = 0; pass < passes; pass += 1) {
     for (const session of sessions) {

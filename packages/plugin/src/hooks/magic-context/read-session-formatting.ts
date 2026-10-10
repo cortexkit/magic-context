@@ -7,6 +7,7 @@ import { COMMIT_VERB_PATTERN, createCommitHashExtractPattern } from "../../share
 import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
 import { log } from "../../shared/logger";
 import { isSystemDirective, removeSystemReminders } from "../../shared/system-directive";
+import { countTokensExactly } from "./token-count-exact";
 
 export interface SessionChunkLine {
     ordinal: number;
@@ -406,8 +407,10 @@ export function estimateTokens(text: string): number {
     if (!activeTokenizer) return estimateTokensHeuristically(text);
     try {
         // Encode with allowedSpecial="all" so literal special-token strings (e.g.
-        // `<EOT>` in tool output) are counted as text instead of throwing.
-        return activeTokenizer.encode(text, "all").length;
+        // `<EOT>` in tool output) are counted as text instead of throwing. The
+        // count is the library's, but long unbroken runs are merged without its
+        // quadratic loop (see token-count-exact.ts).
+        return countTokensExactly(activeTokenizer, text);
     } catch (error) {
         // Estimation must not fail a prompt. Latch the deterministic fallback for
         // the rest of this process so identical text does not alternate between

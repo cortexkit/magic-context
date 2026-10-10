@@ -13,7 +13,7 @@
  */
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { appendTurn, buildSession, loadMessages, rng } from "./issue-653-fixture";
+import { appendTurn, buildSession, loadMessages, rng, SHAPES, type Shape } from "./issue-653-fixture";
 
 const args = process.argv.slice(2);
 const flag = (name: string, fallback?: string): string | undefined => {
@@ -93,8 +93,16 @@ await refreshModelLimitsFromApi({
 } as never);
 
 const sessionCount = Number(flag("--sessions", "2"));
+const shape = flag("--shape", "text") as Shape;
+if (!SHAPES.includes(shape)) throw new Error(`--shape must be one of ${SHAPES.join(", ")}`);
 const sessions = Array.from({ length: sessionCount }, (_, index) =>
-    buildSession(String.fromCharCode(65 + index), index + 1, messageCount, megabytes * 1024 * 1024),
+    buildSession(
+        String.fromCharCode(65 + index),
+        index + 1,
+        messageCount,
+        megabytes * 1024 * 1024,
+        shape,
+    ),
 );
 // OpenCode 1's own store, which the raw-history readers (compartment trigger,
 // protected-tail boundary) query. It is created fresh under the root.
@@ -166,7 +174,7 @@ const WATCHED = [
     "postTransformPhase",
 ];
 const random = rng(7);
-console.log(`src=${src}`);
+console.log(`src=${src} shape=${shape}`);
 console.log(["pass", "session", "messages", "handler_ms", ...WATCHED].join("\t"));
 for (let pass = 0; pass < passes; pass += 1) {
     for (const session of sessions) {

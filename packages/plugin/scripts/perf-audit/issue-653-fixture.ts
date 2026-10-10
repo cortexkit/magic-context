@@ -146,6 +146,219 @@ export function assistantMessage(
 }
 
 /**
+ * Where a session's bulk content sits. `text` is the original fixture (code-like
+ * tool output). The others keep the same total size but move the bulk into the
+ * shapes a real coding session also carries, to look for a cost that depends on
+ * shape rather than size.
+ */
+export const SHAPES = [
+    "text",
+    "base64-text",
+    "file-parts",
+    "tiny-parts",
+    "wide-json",
+    "edit-args",
+    "deep-json",
+    "long-lines",
+    "unicode",
+    "reasoning",
+    "metadata",
+] as const;
+export type Shape = (typeof SHAPES)[number];
+
+function base64(random: () => number, chars: number): string {
+    const bytes = Buffer.alloc(Math.ceil((chars * 3) / 4));
+    for (let index = 0; index < bytes.length; index += 4) {
+        bytes.writeUInt32LE(Math.floor(random() * 0x100000000), Math.min(index, bytes.length - 4));
+    }
+    return bytes.toString("base64").slice(0, chars);
+}
+
+const UNICODE_WORDS = ["日本語の文章", "Ünïcödé", "😀🚀✨", "Ελληνικά", "русский текст", "中文字符", "🧪🔧"];
+
+function unicodeText(random: () => number, chars: number): string {
+    const pieces: string[] = [];
+    let length = 0;
+    while (length < chars) {
+        const word = UNICODE_WORDS[Math.floor(random() * UNICODE_WORDS.length)] as string;
+        pieces.push(word, random() < 0.1 ? "\n" : " ");
+        length += word.length + 1;
+    }
+    return pieces.join("");
+}
+
+function letters(random: () => number, chars: number): string {
+    // One line of letters with no spaces, digits or newlines.
+    const block = Array.from({ length: 4096 }, () =>
+        String.fromCharCode(97 + Math.floor(random() * 26)),
+    ).join("");
+    return block.repeat(Math.ceil(chars / block.length)).slice(0, chars);
+}
+
+/** Put `chars` characters of bulk into the turn in the given shape. */
+function addBulk(
+    shape: Shape,
+    user: FixtureMessage,
+    assistant: FixtureMessage,
+    random: () => number,
+    chars: number,
+): void {
+    const id = assistant.info.id as string;
+    const sessionID = assistant.info.sessionID;
+    const created = (assistant.info.time as { created: number }).created;
+    const toolPart = (state: Record<string, unknown>, tool = "read") => ({
+        id: `${id}_p2`,
+        sessionID,
+        messageID: id,
+        type: "tool",
+        callID: `call_${id}`,
+        tool,
+        state: {
+            status: "completed",
+            title: `src/file-${id}.ts`,
+            time: { start: created + 6, end: created + 30 },
+            ...state,
+        },
+    });
+    const at = assistant.parts.length - 1;
+    const insert = (...parts: Array<Record<string, unknown>>) => assistant.parts.splice(at, 0, ...parts);
+    switch (shape) {
+        case "text":
+            insert(
+                toolPart({
+                    input: { filePath: `/repo/src/file-${id}.ts` },
+                    output: codeText(random, chars),
+                    metadata: { preview: codeText(random, 400), truncated: false },
+                }),
+            );
+            return;
+        case "base64-text":
+            insert(
+                toolPart({
+                    input: { url: "https://example.test/shot.png" },
+                    output: `![screenshot](data:image/png;base64,${base64(random, chars)})`,
+                    metadata: {},
+                }),
+            );
+            return;
+        case "file-parts":
+            user.parts.push({
+                id: `${user.info.id}_f1`,
+                sessionID,
+                messageID: user.info.id,
+                type: "file",
+                mime: "image/png",
+                filename: "screenshot.png",
+                url: `data:image/png;base64,${base64(random, chars)}`,
+            });
+            return;
+        case "tiny-parts": {
+            const count = Math.max(1, Math.floor(chars / 110));
+            for (let index = 0; index < count; index += 1) {
+                insert({
+                    id: `${id}_t${index}`,
+                    sessionID,
+                    messageID: id,
+                    type: "text",
+                    text: `chunk ${index} ${random().toString(36).slice(2, 12)}`,
+                });
+            }
+            return;
+        }
+        case "wide-json": {
+            const input: Record<string, string> = {};
+            for (let index = 0; index < Math.floor(chars / 40); index += 1) {
+                input[`key_${index}_${random().toString(36).slice(2, 8)}`] = `value ${index}`;
+            }
+            insert(toolPart({ input, output: "ok", metadata: {} }, "batch"));
+            return;
+        }
+        case "edit-args":
+            insert(
+                toolPart(
+                    {
+                        input: {
+                            filePath: `/repo/src/file-${id}.ts`,
+                            oldString: codeText(random, chars / 2),
+                            newString: codeText(random, chars / 2),
+                        },
+                        output: "Edit applied successfully.",
+                        metadata: { diagnostics: {} },
+                    },
+                    "edit",
+                ),
+            );
+            return;
+        case "deep-json": {
+            // A chain 2,000 objects deep with the bulk at the bottom.
+            let node: Record<string, unknown> = { body: codeText(random, chars) };
+            for (let depth = 0; depth < 2_000; depth += 1) node = { child: node, depth };
+            insert(toolPart({ input: node, output: "ok", metadata: {} }, "mcp"));
+            return;
+        }
+        case "long-lines":
+            insert(
+                toolPart({
+                    input: { filePath: `/repo/dist/bundle-${id}.min.js` },
+                    output: letters(random, chars),
+                    metadata: {},
+                }),
+            );
+            return;
+        case "unicode":
+            insert(
+                toolPart({
+                    input: { filePath: `/repo/docs/${id}.md` },
+                    output: unicodeText(random, chars),
+                    metadata: {},
+                }),
+            );
+            return;
+        case "reasoning":
+            insert({
+                id: `${id}_r1`,
+                sessionID,
+                messageID: id,
+                type: "reasoning",
+                text: codeText(random, chars / 2),
+                metadata: { anthropic: { signature: base64(random, chars / 2) } },
+                time: { start: created, end: created + 5 },
+            });
+            return;
+        case "metadata": {
+            const third = Math.floor(chars / 3);
+            insert(
+                toolPart(
+                    {
+                        input: { filePath: `/repo/src/file-${id}.ts`, content: "x" },
+                        output: "Wrote file successfully.",
+                        metadata: {
+                            diff: codeText(random, third),
+                            filediff: {
+                                file: `/repo/src/file-${id}.ts`,
+                                before: codeText(random, third),
+                                after: codeText(random, third),
+                                additions: 10,
+                                deletions: 2,
+                            },
+                            diagnostics: {
+                                [`/repo/src/file-${id}.ts`]: Array.from({ length: 200 }, (_, line) => ({
+                                    range: { start: { line, character: 0 }, end: { line, character: 5 } },
+                                    message: "unused variable",
+                                    severity: 2,
+                                })),
+                            },
+                        },
+                    },
+                    "write",
+                ),
+            );
+            return;
+        }
+    }
+}
+
+/**
  * Build `messageCount` messages (user/assistant pairs). About one assistant in
  * eight carries a tool output; output sizes are drawn from 100 KB to 2 MB and
  * scaled so the session lands near `targetChars`.
@@ -155,6 +368,7 @@ export function buildSession(
     seed: number,
     messageCount = 606,
     targetChars = 56 * 1024 * 1024,
+    shape: Shape = "text",
 ): SessionFixture {
     const random = rng(seed);
     const sessionId = `ses_${sessionTag}`;
@@ -178,19 +392,27 @@ export function buildSession(
         const userId = messageId(sessionTag, pair * 2);
         const assistantId = messageId(sessionTag, pair * 2 + 1);
         const created = base + pair * 1000;
-        const user = JSON.stringify(
-            userMessage(sessionId, userId, created, codeText(random, 80 + random() * 400)),
+        const userValue = userMessage(
+            sessionId,
+            userId,
+            created,
+            codeText(random, 80 + random() * 400),
         );
-        const assistant = JSON.stringify(
-            assistantMessage(
-                sessionId,
-                assistantId,
-                userId,
-                created + 1,
-                random,
-                sizes.get(pair) ?? 0,
-            ),
+        const assistantValue = assistantMessage(
+            sessionId,
+            assistantId,
+            userId,
+            created + 1,
+            random,
+            0,
         );
+        const bulk = sizes.get(pair);
+        if (bulk) {
+            addBulk(shape, userValue, assistantValue, random, bulk);
+            (assistantValue.parts.at(-1) as { reason: string }).reason = "tool-calls";
+        }
+        const user = JSON.stringify(userValue);
+        const assistant = JSON.stringify(assistantValue);
         json.push(user, assistant);
         totalChars += user.length + assistant.length;
     }
