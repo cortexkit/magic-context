@@ -7,7 +7,7 @@ import {
   modelId,
   modelQualifier,
   thinkingLevelsForHarness,
-} from "./HarnessModelFields";
+} from "./harness-model-data";
 
 describe("harness model entries", () => {
   it("selects each harness catalog from one generation pair without cross-leakage", () => {
