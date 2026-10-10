@@ -57,6 +57,9 @@ const { refreshModelLimitsFromApi } = await imp<
 const { setLogLineForwarder } = await imp<typeof import("../../src/shared/logger")>(
     "shared/logger.ts",
 );
+const { getInMemorySlot } = await imp<typeof import("../../src/hooks/magic-context/lkg-slot")>(
+    "hooks/magic-context/lkg-slot.ts",
+);
 const { createTransform } = await imp<typeof import("../../src/hooks/magic-context/transform")>(
     "hooks/magic-context/transform.ts",
 );
@@ -178,7 +181,7 @@ const WATCHED = [
 ];
 const random = rng(7);
 console.log(`src=${src} shape=${shape}`);
-console.log(["pass", "session", "messages", "handler_ms", ...WATCHED].join("\t"));
+console.log(["pass", "session", "messages", "handler_ms", ...WATCHED, "lkg_slot_bytes"].join("\t"));
 for (let pass = 0; pass < passes; pass += 1) {
     for (const session of sessions) {
         if (pass > 0) appendTurn(session, random);
@@ -200,8 +203,35 @@ for (let pass = 0; pass < passes; pass += 1) {
             const match = line?.match(/elapsed=([\d.]+)ms/);
             return match ? match[1] : "-";
         });
+        // The last-known-good snapshot this pass left: its stored JSON length, or
+        // "none" when no capture fit.
+        const slot = getInMemorySlot(session.sessionId);
+        if (args.includes("--stringify")) {
+            // What serializing the served prefix costs whole and reduced to what
+            // the provider receives (the fixture serves its whole input).
+            const { providerVisibleMessage } = await import(
+                "../../src/hooks/magic-context/provider-visible-parts"
+            );
+            const fresh = loadMessages(session);
+            let started = performance.now();
+            const whole = JSON.stringify(fresh).length;
+            const wholeMs = performance.now() - started;
+            started = performance.now();
+            const reduced = JSON.stringify(fresh.map(providerVisibleMessage)).length;
+            const reducedMs = performance.now() - started;
+            console.log(
+                `    stringify whole=${wholeMs.toFixed(1)}ms (${whole} chars) reduced=${reducedMs.toFixed(1)}ms (${reduced} chars)`,
+            );
+        }
         console.log(
-            [pass, session.sessionId, messages.length, elapsed.toFixed(1), ...stages].join("\t"),
+            [
+                pass,
+                session.sessionId,
+                messages.length,
+                elapsed.toFixed(1),
+                ...stages,
+                slot ? slot.jsonPrefix.length : "none",
+            ].join("\t"),
         );
         if (slowMs !== undefined) {
             for (const line of stageLines) {
