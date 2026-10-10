@@ -400,6 +400,8 @@ export interface ProviderClientOptions {
     requestIdBytes?: number;
     now?: () => number;
     engineBudgetMs?: number;
+    /** Cold bootstrap pages may render a whole session; ordinary steps keep their cap. */
+    bootstrapBudgetMs?: number;
 }
 export type HostHookSubject =
     | { hook: "pre_user"; blocks: string[]; mark?: unknown; delivery?: string }
@@ -453,6 +455,11 @@ export class ProviderClient {
             this.idBytes > MAX_REQUEST_BYTES
         )
             throw new Error("Invalid request id byte budget");
+        if (
+            options.bootstrapBudgetMs !== undefined &&
+            (!Number.isSafeInteger(options.bootstrapBudgetMs) || options.bootstrapBudgetMs <= 0)
+        )
+            throw new Error("Invalid bootstrap budget");
     }
     private budget(ms: number): number {
         const engineBudget = this.options.engineBudgetMs ?? 2000;
@@ -625,7 +632,7 @@ export class ProviderClient {
             const fence = await this.fence(
                 record,
                 id,
-                this.budget(record.plan.compaction_budget_ms),
+                this.options.bootstrapBudgetMs ?? this.budget(record.plan.compaction_budget_ms),
             );
             return this.send("compaction.setup", encoded, id, fence.deadline_ms, record, signal);
         });
@@ -778,9 +785,13 @@ export class ProviderClient {
         record: RunnerRecord<M, FrozenProviderPlan>,
         page: StatusPage,
         signal?: AbortSignal,
+        bootstrapBudget?: number,
     ): Promise<PageResult> {
         const id = this.id();
-        const fence = await this.fence(record, id, this.budget(record.plan.compaction_budget_ms));
+        const budget = bootstrapBudget ?? this.budget(record.plan.compaction_budget_ms);
+        if (!Number.isSafeInteger(budget) || budget <= 0)
+            throw new Error("Invalid bootstrap budget");
+        const fence = await this.fence(record, id, budget);
         const encoded = encodeStatusPage(record, page);
         const result = await this.send(
             "compaction.step",
@@ -846,7 +857,12 @@ export class ProviderClient {
             const pages = this.planPages(record, inputs);
             if (!Array.isArray(pages)) return pages;
             for (const page of pages) {
-                const result = await this.page(record, page, signal);
+                const result = await this.page(
+                    record,
+                    page,
+                    signal,
+                    this.options.bootstrapBudgetMs,
+                );
                 await onPage(result);
                 if (result.status === "unavailable" || result.answer.answer !== "wait")
                     return result;

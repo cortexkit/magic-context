@@ -319,6 +319,13 @@ export interface OpenCodeProviderOptions {
     ) => Promise<void>;
 }
 
+// Bootstrap renders the complete retained session, unlike ordinary steps.
+// Keep its deadline separate so large-session cutovers can complete without
+// increasing the latency allowed for message hooks or ordinary status calls.
+// Offline Linux handler measurements: 17k rows took 9.61 s for all four pages,
+// with a 5.224 s slowest page. Each page gets over 5x measured headroom.
+export const OPENCODE_PROVIDER_BOOTSTRAP_BUDGET_MS = 30_000;
+
 /** All provider state is session-scoped; a failed write never installs staged bytes. */
 export function createOpenCodeProviderTransform(
     deps: TransformDeps,
@@ -427,6 +434,7 @@ export function createOpenCodeProviderTransform(
             projectRoot,
             harness,
             now,
+            bootstrapBudgetMs: OPENCODE_PROVIDER_BOOTSTRAP_BUDGET_MS,
             persistFence: async (fence) => {
                 commitHostRunnerFence(deps.db, key(id), fence.request_id, fence.newest);
                 s.state.issued_request_id = fence.request_id;
