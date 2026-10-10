@@ -480,6 +480,34 @@ fn execute_host(
         .load_meta(&conversation.engine_namespace)
         .map_err(transient)?
         .meta;
+    if let (Some(coverage), Some(first)) = (
+        meta.coverage_ordinal,
+        template
+            .messages
+            .iter()
+            .filter(|message| !message.ck.meta.synthetic)
+            .map(|message| message.ordinal)
+            .min(),
+    ) {
+        if coverage.checked_add(1) == Some(first) {
+            let core = store
+                .load(&conversation.engine_namespace)
+                .map_err(transient)?
+                .core;
+            if let Some((mid, _)) = core.boundary_id.rsplit_once('#') {
+                // The host may have removed the messages already covered by
+                // summaries. Declare their last block and ordinal, and the
+                // first remaining ordinal; the engine validates these against
+                // its stored boundary and applied summary before trusting them.
+                template.declared_trim = Some(transform::DeclaredTrim {
+                    flat_boundary_id: core.boundary_id.clone(),
+                    boundary_bare_message_id: mid.into(),
+                    boundary_absolute_ordinal: coverage,
+                    next_absolute_ordinal: first,
+                });
+            }
+        }
+    }
     // Provider status does not carry the full request's system/provider identity.
     // Preserve the namespace's observed inputs instead of treating their absence
     // as a system-prompt change during transport adoption.
@@ -1045,6 +1073,9 @@ impl McHandler {
             .map_err(transient)?
             .expect("committed conversation");
         if params.get("more").and_then(Value::as_bool) == Some(true) {
+            // In answer-observed paging, the durable status page is the work
+            // held for the next page; there is no background transcript scan.
+            fault("WaitWorkDurable");
             // Paging is an execution fence, not a statement about held bytes.
             // Hooks may already cover newest, but only the final page may render
             // a view or acknowledge the pass's hook answers.
@@ -1055,6 +1086,7 @@ impl McHandler {
             let answer = json!({"answer":"wait","request_id":request.request_id,"reason":"Awaiting the next host status page","bound_ms":1});
             conversation.last_answer_json = Some(answer.to_string());
             save_host_setup(store, &work.key, &mut conversation, &setup)?;
+            fault("WaitAnswered");
             fault("AnswerRecorded");
             return bytes(&answer);
         }
@@ -1073,6 +1105,20 @@ impl McHandler {
             },
         )?;
         setup.setup.request.model = request.model.clone();
+        if params
+            .pointer("/prefix_rebuilding/reason")
+            .and_then(Value::as_str)
+            == Some("flush")
+        {
+            // An explicit flush uses the same incremental refresh as a
+            // whole-history request. Changing the serialization epoch instead
+            // would rebuild the entire prefix and fold new summaries into m0
+            // rather than updating the incremental history frame (m1).
+            store
+                .arm_soft_refresh(&conversation.engine_namespace)
+                .map_err(transient)?;
+            normalized.prefix_rebuilding = false;
+        }
         if let Some(rejected) = normalized.last_not_applied.filter(|v| v.structural) {
             store
                 .set_provider_view_state(&work.key.store_key(), rejected.version, "not_applied")
@@ -1590,6 +1636,170 @@ mod host_tests {
     }
     fn answer(result: Result<Vec<u8>, HandlerOutcome>) -> Value {
         serde_json::from_slice(&result.unwrap()).unwrap()
+    }
+
+    fn full_request_native(
+        h: &McHandler,
+        binding: &SessionBinding,
+        store: &McStore,
+        native: &[Value],
+        model: &str,
+    ) -> (Value, String) {
+        let entries = native
+            .iter()
+            .enumerate()
+            .map(|(i, m)| compact::status::StatusMessage {
+                ordinal: i as u64 + 1,
+                mid: m["info"]["id"].as_str().unwrap().into(),
+                message: m.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut request: TransformRequest = decode(&json!({"v":2,"kind":"transform","session_id":"s",
+            "serializer_profile":"opencode-aisdk","render_config":"independent-full-request",
+            "model_key":model,"messages":[],"tool_present":true,"auto_search_enabled":false,
+            "protected_tokens_effective":0,"usage":{"current_total_input_tokens":1000,"context_limit_tokens":100000}})).unwrap();
+        Codec::OpencodeAiSdk
+            .prepare_request(&mut request, &entries)
+            .unwrap();
+        let key = Key::new(binding, "s", "opencode").unwrap();
+        let work = h.provider_work(store, binding.clone(), key).unwrap();
+        let mut context = producer_context(&work, model, 100000, false);
+        context.temporal_awareness = false;
+        context.cache_ttl = "never".into();
+        let mut engine = transform::transform_with_projection(store, &request, &context).unwrap();
+        crate::attach_native_messages_with_tags(
+            &mut engine.response,
+            &request,
+            &engine.reasoning_clear_units,
+            &engine.tag_numbers,
+            engine.mutation_exempt_mid.as_deref(),
+            engine.lineage_anchor_mid.as_deref(),
+            engine.transition_consumed,
+        );
+        (
+            serde_json::to_value(engine.response.native_messages.unwrap()).unwrap(),
+            engine.response.action,
+        )
+    }
+
+    #[tokio::test]
+    async fn model_switch_uses_current_step_model_and_matches_full_request_bytes() {
+        let actual = tempfile::tempdir().unwrap();
+        let oracle = tempfile::tempdir().unwrap();
+        let (h, mut binding, store, _) = handler(actual.path(), Arc::new(NoReads::default()));
+        let (oh, mut ob, os, _) = handler(oracle.path(), Arc::new(NoReads::default()));
+        binding.config.temporal_awareness = false;
+        ob.config.temporal_awareness = false;
+        let native = vec![message(1)["message"].clone(), message(2)["message"].clone()];
+        for _ in 0..2 {
+            assert_eq!(
+                full_request_native(&h, &binding, &store, &native, "fixture").0,
+                full_request_native(&oh, &ob, &os, &native, "fixture").0
+            );
+        }
+        answer(h.provider_setup(binding.clone(), &setup()).await);
+        let mut boot = step("boot-model", vec![message(1), message(2)], 2);
+        boot["prefix_rebuilding"] = json!({"reason":"pipeline_switch"});
+        let view = answer(h.provider_step(binding.clone(), &boot).await);
+        let mut switched = step("model-switch", vec![], 2);
+        switched["model"] = json!("next-model");
+        switched["last_applied"] = json!({"compaction_id":view["compaction"]["compaction_id"],"version":view["compaction"]["version"]});
+        switched["prefix_rebuilding"] = json!({"reason":"model_switch"});
+        let previous_core_version = store.load("s").unwrap().core.version;
+        let actual = answer(h.provider_step(binding, &switched).await);
+        let (expected, decision) = full_request_native(&oh, &ob, &os, &native, "next-model");
+        assert_eq!(decision, "HARD");
+        let served = if actual["answer"] == "noop" {
+            &view["compaction"]["replacement"]
+        } else {
+            assert_eq!(actual["answer"], "compaction_message");
+            &actual["compaction"]["replacement"]
+        };
+        assert_eq!(*served, expected);
+        assert!(
+            store.load("s").unwrap().core.version > previous_core_version,
+            "model eviction executes the HARD even when served bytes need no new view"
+        );
+        assert_eq!(
+            store.load_meta("s").unwrap().meta.last_model_key,
+            "next-model"
+        );
+    }
+
+    #[tokio::test]
+    async fn published_trimmed_prefix_bootstraps_then_flushes_like_full_request() {
+        let actual = tempfile::tempdir().unwrap();
+        let oracle = tempfile::tempdir().unwrap();
+        let (h, mut binding, store, _) = handler(actual.path(), Arc::new(NoReads::default()));
+        let (oh, mut ob, os, _) = handler(oracle.path(), Arc::new(NoReads::default()));
+        binding.config.temporal_awareness = false;
+        ob.config.temporal_awareness = false;
+        let native = (1..=3)
+            .map(|n| message(n)["message"].clone())
+            .collect::<Vec<_>>();
+        let baseline = mc_store::StoredCompartment {
+            sequence: 1,
+            start_message: 1,
+            end_message: 1,
+            end_message_id: "m1#0".into(),
+            title: "baseline".into(),
+            content: "summary".into(),
+            p1: Some("summary".into()),
+            importance: 50,
+            ..Default::default()
+        };
+        for s in [&store, &os] {
+            s.replace_compartments("s", &[baseline.clone()]).unwrap();
+        }
+        let mut expected = Value::Null;
+        for _ in 0..2 {
+            expected = full_request_native(&oh, &ob, &os, &native, "fixture").0;
+            assert_eq!(
+                full_request_native(&h, &binding, &store, &native, "fixture").0,
+                expected
+            );
+        }
+        answer(h.provider_setup(binding.clone(), &setup()).await);
+        let mut boot = step("published-switch", vec![message(2), message(3)], 3);
+        boot["prefix_rebuilding"] = json!({"reason":"pipeline_switch"});
+        let view = answer(h.provider_step(binding.clone(), &boot).await);
+        assert_eq!(view["answer"], "compaction_message");
+        assert_eq!(view["compaction"]["replacement"], expected);
+        let published = mc_store::StoredCompartment {
+            sequence: 2,
+            start_message: 2,
+            end_message: 2,
+            end_message_id: "m2#0".into(),
+            title: "new".into(),
+            content: "delta".into(),
+            p1: Some("delta".into()),
+            importance: 50,
+            ..Default::default()
+        };
+        for s in [&store, &os] {
+            s.replace_compartments("s", &[baseline.clone(), published.clone()])
+                .unwrap();
+        }
+        let mut ordinary = step("after-publication", vec![], 3);
+        ordinary["last_applied"] = json!({"compaction_id":view["compaction"]["compaction_id"],"version":view["compaction"]["version"]});
+        assert_eq!(
+            answer(h.provider_step(binding.clone(), &ordinary).await)["answer"],
+            "noop"
+        );
+        assert_eq!(
+            full_request_native(&oh, &ob, &os, &native, "fixture").0,
+            expected
+        );
+        let mut flush = ordinary;
+        flush["request_id"] = json!("published-flush");
+        flush["prefix_rebuilding"] = json!({"reason":"flush"});
+        os.arm_soft_refresh("s").unwrap();
+        let actual = answer(h.provider_step(binding, &flush).await);
+        assert_eq!(actual["answer"], "compaction_message");
+        assert_eq!(
+            actual["compaction"]["replacement"],
+            full_request_native(&oh, &ob, &os, &native, "fixture").0
+        );
     }
     fn field(result: Result<Vec<u8>, HandlerOutcome>) -> String {
         match result.unwrap_err() {

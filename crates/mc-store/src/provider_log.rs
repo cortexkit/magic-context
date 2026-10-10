@@ -969,6 +969,38 @@ impl McStore {
             Ok(false)
         })?)
     }
+
+    /// Look up a tag created by the full-request engine, using the namespace of
+    /// the stored project/session conversation rather than caller-supplied data.
+    /// Numbers claimed by provider answers are not engine tags; callers validate
+    /// those separately with provider_answer_tag_known. A stale mc_tags row must
+    /// not revive a discarded or already-consumed answer.
+    pub fn provider_engine_tag_block(
+        &self,
+        key: &ProviderSessionKey,
+        number: i64,
+    ) -> Result<Option<String>, McStoreError> {
+        Ok(self.inner.with_conn(|conn| {
+            let Some(c) = conversation_tx(conn, key)? else {
+                return Ok(None);
+            };
+            if tag_consumed_tx(conn, &c.engine_namespace, number)? {
+                return Ok(None);
+            }
+            conn.query_row(
+                "SELECT block_id FROM mc_tags WHERE session_id=?1 AND tag_number=?2
+                 AND NOT EXISTS (
+                   SELECT 1 FROM mc_provider_hook_answers_v1 a
+                   JOIN mc_provider_conversations_v2 owner ON owner.conv_key=a.conv_key,
+                   json_each(a.tags_json) t
+                   WHERE owner.engine_namespace=?1 AND a.legacy_json IS NULL
+                     AND json_extract(t.value,'$.number')=?2)",
+                params![c.engine_namespace, number],
+                |row| row.get(0),
+            )
+            .optional()
+        })?)
+    }
     pub fn load_provider_conversation(
         &self,
         key: &ProviderSessionKey,
@@ -1502,6 +1534,70 @@ mod policy_tests {
             },
         )
     }
+    fn seed_engine_tag(store: &McStore, namespace: &str, number: i64, block: &str) {
+        store.inner.with_conn(|conn| {
+            conn.execute("INSERT INTO mc_tags (session_id,tag_number,block_id,kind,token_count,created_at_ms,source_bytes) VALUES (?1,?2,?3,'message',1,1,x'61')",params![namespace,number,block])?;
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn engine_tag_lookup_is_namespace_scoped_and_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, key, _) = fixture(dir.path());
+        seed_engine_tag(&store, "s", 1, "engine#0");
+        seed_engine_tag(&store, "other-session", 2, "foreign#0");
+        let version = store.load("s").unwrap().row_version;
+        assert_eq!(
+            store.provider_engine_tag_block(&key, 1).unwrap(),
+            Some("engine#0".into())
+        );
+        assert_eq!(store.provider_engine_tag_block(&key, 2).unwrap(), None);
+        let foreign_project = ProviderSessionKey {
+            project_root: "/another-project".into(),
+            ..key.clone()
+        };
+        assert_eq!(
+            store
+                .provider_engine_tag_block(&foreign_project, 1)
+                .unwrap(),
+            None
+        );
+        assert_eq!(store.load("s").unwrap().row_version, version);
+        assert!(store.load_pending_agent_drops("s").unwrap().is_empty());
+    }
+
+    #[test]
+    fn engine_tag_lookup_honors_consumed_fence_after_answer_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, key, _) = fixture(dir.path());
+        seed_engine_tag(&store, "s", 7, "hook#0");
+        store.inner.with_conn(|conn| {
+            conn.execute("INSERT INTO mc_provider_consumed_tags_v1 (engine_namespace,tag_number,session) VALUES ('s',7,'s')",[])?;
+            conn.execute("DELETE FROM mc_provider_hook_answers_v1 WHERE conv_key=?1",[key.conversation_key()])?;
+            Ok(())
+        }).unwrap();
+        assert!(!store.provider_answer_tag_known(&key, 7).unwrap());
+        assert_eq!(store.provider_engine_tag_block(&key, 7).unwrap(), None);
+        assert_eq!(
+            store.load_tags_for_session("s").unwrap().len(),
+            1,
+            "stale tag row remains, so the consumed fence is necessary"
+        );
+    }
+
+    #[test]
+    fn engine_tag_lookup_excludes_burned_provider_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, key, _) = fixture(dir.path());
+        seed_engine_tag(&store, "s", 8, "hook#0");
+        store.inner.with_conn(|conn| {
+            conn.execute("INSERT INTO mc_provider_hook_answers_v1 (conv_key,answer_seq,lineage_id,subject_mid,hook,subject_part,ordinal,ops_json,tags_json,state,session) VALUES (?1,1,'L','hook','post_assistant','',1,'[]','[{\"number\":8}]','burned','s')",[key.conversation_key()])?;
+            Ok(())
+        }).unwrap();
+        assert_eq!(store.provider_engine_tag_block(&key, 8).unwrap(), None);
+    }
+
     #[allow(clippy::too_many_arguments)] // test helper: each argument is one fixture dimension
     fn allocate(
         store: &McStore,

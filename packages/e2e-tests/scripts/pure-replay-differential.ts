@@ -54,6 +54,20 @@ const priced = Bun.argv.includes("--priced");
 const neutral = Bun.argv.includes("--neutral");
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 
+// --provider-pipeline compares the whole-history Rust transform with the
+// message-hook/compaction path, using separate stores seeded with the same data.
+// It needs neither a running OpenCode host nor two Git refs. Existing ref-to-ref
+// comparisons and --priced wire captures keep their original path.
+// Run: bun packages/e2e-tests/scripts/pure-replay-differential.ts --provider-pipeline
+if (Bun.argv.includes("--provider-pipeline")) {
+	if (tsOnly || priced || neutral)
+		throw new Error("--provider-pipeline cannot be combined with TS/priced overrides");
+	const { runProviderPipelineDifferential } = await import("./provider-pipeline-differential");
+	const selected = Bun.argv.flatMap((arg, i) => arg === "--case" ? [Bun.argv[i + 1]!] : []);
+	await runProviderPipelineDifferential(selected);
+	process.exit(0);
+}
+
 function valueAfter(flag: string): string | undefined {
 	const index = Bun.argv.indexOf(flag);
 	return index === -1 ? undefined : Bun.argv[index + 1];

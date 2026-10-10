@@ -10286,8 +10286,16 @@ fn resolve_boundary_state(
     }
 
     let compartments = store.load_compartments(&req.session_id)?;
+    // The historian stores new summaries before the cached prompt is rebuilt.
+    // Match the host's trim proof to the compartment ending the already-served
+    // prefix, not to newer summaries the model has not seen. Older metadata
+    // without a recorded sequence keeps the previous last-compartment check.
+    let applied_sequence = meta
+        .coverage_compartment_seq
+        .or_else(|| (meta.folded_compartment_seq > 0).then_some(meta.folded_compartment_seq));
     let tail = compartments
         .iter()
+        .filter(|compartment| applied_sequence.is_none_or(|seq| compartment.sequence == seq))
         .max_by_key(|compartment| compartment.sequence);
     match tail {
         Some(tail)
@@ -43264,6 +43272,51 @@ pub(crate) mod tests {
         assert!(result.trim_mismatch.is_none());
         assert_eq!(result.response.action, "SOFT+");
         assert_eq!(store.load("decl").unwrap().meta.pending_rewrite, None);
+    }
+
+    #[test]
+    fn declared_trim_after_unapplied_publication_preserves_full_engine_bytes() {
+        let (_dir, store, request, ctx) = declared_trim_fixture();
+        let mut loaded = store.load("decl").unwrap();
+        loaded.meta.coverage_compartment_seq = Some(0);
+        store
+            .commit("decl", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        let before = transform_with_projection(&store, &request, &ctx).unwrap();
+        let bytes = serde_json::to_vec(&before.response.ck_messages).unwrap();
+        let mut rows = store.load_compartments("decl").unwrap();
+        rows.push(comp(1, 1, 1, "c", "new, unapplied history"));
+        store.replace_compartments("decl", &rows).unwrap();
+        let after = transform_with_projection(&store, &request, &ctx).unwrap();
+        assert_eq!(after.boundary_state, BoundaryState::DeclaredTrimValidated);
+        assert!(after.trim_mismatch.is_none());
+        assert_eq!(after.response.action, "SOFT+");
+        assert!(!after.response.prefix_bust_permitted);
+        assert_eq!(
+            serde_json::to_vec(&after.response.ck_messages).unwrap(),
+            bytes
+        );
+        assert_eq!(store.load("decl").unwrap().meta.pending_rewrite, None);
+    }
+
+    #[test]
+    fn declared_trim_applied_row_must_still_exist_and_match() {
+        for missing in [false, true] {
+            let (_dir, store, request, ctx) = declared_trim_fixture();
+            let mut loaded = store.load("decl").unwrap();
+            loaded.meta.coverage_compartment_seq = Some(0);
+            store
+                .commit("decl", loaded.row_version, &loaded.core, &loaded.meta)
+                .unwrap();
+            let mut rows = vec![comp(1, 1, 1, "c", "new history")];
+            if !missing {
+                rows.insert(0, comp(0, 0, 0, "wrong-boundary", "wrong"));
+            }
+            store.replace_compartments("decl", &rows).unwrap();
+            let actual = transform_with_projection(&store, &request, &ctx).unwrap();
+            assert_eq!(actual.boundary_state, BoundaryState::Absent);
+            assert_eq!(actual.trim_mismatch.unwrap().predicate, "tail_compartment");
+        }
     }
 
     #[test]

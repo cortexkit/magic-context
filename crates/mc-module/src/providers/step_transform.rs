@@ -478,15 +478,29 @@ impl McHandler {
             .await
             .map_err(StoreRefusal::into_outcome)?;
         let _serial = self.provider_serial.lock_for(&key).await;
+        let conversation = store
+            .load_provider_conversation(&key.store_key())
+            .map_err(transient)?
+            .ok_or_else(|| transient("provider conversation is missing"))?;
         let mut known = Vec::new();
         let mut unknown = Vec::new();
+        let mut engine_blocks = BTreeMap::new();
         for number in requested {
-            if i64::try_from(*number).ok().is_some_and(|n| {
-                store
-                    .provider_answer_tag_known(&key.store_key(), n)
-                    .unwrap_or(false)
-            }) {
+            let Ok(n) = i64::try_from(*number) else {
+                unknown.push(*number);
+                continue;
+            };
+            if store
+                .provider_answer_tag_known(&key.store_key(), n)
+                .map_err(transient)?
+            {
                 known.push(*number);
+            } else if let Some(block) = store
+                .provider_engine_tag_block(&key.store_key(), n)
+                .map_err(transient)?
+            {
+                known.push(*number);
+                engine_blocks.insert(*number, block);
             } else {
                 unknown.push(*number);
             }
@@ -494,15 +508,26 @@ impl McHandler {
         let pending = store
             .load_provider_pending_drops(&key.store_key())
             .map_err(transient)?;
+        let engine_pending = store
+            .load_pending_agent_drops(&conversation.engine_namespace)
+            .map_err(transient)?
+            .into_iter()
+            .map(|drop| drop.target_id)
+            .collect::<BTreeSet<_>>();
         let already = known
             .iter()
             .copied()
-            .filter(|n| pending.contains(&(*n as i64)))
+            .filter(|n| {
+                pending.contains(&(*n as i64))
+                    || engine_blocks
+                        .get(n)
+                        .is_some_and(|block| engine_pending.contains(block))
+            })
             .collect::<Vec<_>>();
         let queue = known
             .iter()
             .copied()
-            .filter(|n| !pending.contains(&(*n as i64)))
+            .filter(|n| !already.contains(n))
             .collect::<Vec<_>>();
         let detail = ctx_reduce_ack_details(&unknown, &already);
         if queue.is_empty() {
@@ -510,12 +535,35 @@ impl McHandler {
                 "Refused: no valid tags to queue. {detail}"
             )));
         }
-        store
-            .queue_provider_drops(
-                &key.store_key(),
-                &queue.iter().map(|n| *n as i64).collect::<Vec<_>>(),
-            )
-            .map_err(transient)?;
+        let hook_queue = queue
+            .iter()
+            .filter(|n| !engine_blocks.contains_key(n))
+            .map(|n| *n as i64)
+            .collect::<Vec<_>>();
+        if !hook_queue.is_empty() {
+            store
+                .queue_provider_drops(&key.store_key(), &hook_queue)
+                .map_err(transient)?;
+        }
+        let engine_queue = queue
+            .iter()
+            .filter_map(|n| engine_blocks.get(n).cloned())
+            .collect::<Vec<_>>();
+        if !engine_queue.is_empty() {
+            // Tags shown before provider hooks were enabled use ctx_reduce's
+            // existing durable block-ID queue. Enqueueing must not change any
+            // already-served bytes: the planner waits for the next independent
+            // cache-rebuild opportunity before releasing the requested content.
+            store
+                .append_pending_agent_drops_with_command(
+                    &conversation.engine_namespace,
+                    None,
+                    &engine_queue,
+                    now_ms(),
+                    false,
+                )
+                .map_err(transient)?;
+        }
         Ok(mcp_text_result(format!("Queued: drop {}. {detail} Marking QUEUES content for release. It stays fully visible until a compaction pass.",format_tag_numbers(&queue)),false))
     }
     async fn provider_host_hook(
@@ -1415,6 +1463,108 @@ mod host_tests {
         }
         p
     }
+    #[tokio::test]
+    async fn pre_switch_engine_tags_queue_in_full_request_delivery_lane() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = handler(dir.path());
+        admit(&h, 7).await;
+        let store = h.store.get().unwrap();
+        store
+            .seed_tags_for_test(
+                "s",
+                &[mc_store::TagMintInput {
+                    block_id: "old#0".into(),
+                    kind: "message".into(),
+                    token_count: 1,
+                    source_bytes: b"old".to_vec(),
+                }],
+                1,
+            )
+            .unwrap();
+        let answer = response(h.handle_provider_reduce(7, &[1]).await);
+        assert!(
+            answer["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Queued: drop §1§"),
+            "{answer}"
+        );
+        assert_eq!(
+            store.load_pending_agent_drops("s").unwrap()[0].target_id,
+            "old#0"
+        );
+        let key = Key::new(&h.facade_binding(7).unwrap(), "s", "opencode").unwrap();
+        assert!(store
+            .load_provider_pending_drops(&key.store_key())
+            .unwrap()
+            .is_empty());
+        let repeat = response(h.handle_provider_reduce(7, &[1]).await);
+        assert!(repeat["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("already queued"));
+        assert_eq!(store.load_pending_agent_drops("s").unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn consumed_hook_tag_is_refused_after_answer_row_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = handler(dir.path());
+        admit(&h, 7).await;
+        let p = hook("u", 1, "pre_user", &["hello"], text("u", "user", "hello"));
+        response(dispatch(&h, 7, "transform.hook", p).await);
+        let mut confirm = hook("v", 2, "pre_user", &["next"], text("v", "user", "next"));
+        confirm["served_through_ordinal"] = json!(1);
+        response(dispatch(&h, 7, "transform.hook", confirm).await);
+        let store = h.store.get().unwrap();
+        let key = Key::new(&h.facade_binding(7).unwrap(), "s", "opencode").unwrap();
+        store.queue_provider_drops(&key.store_key(), &[1]).unwrap();
+        store
+            .consume_provider_drops(&key.store_key(), &[1])
+            .unwrap();
+        store
+            .execute_tag_sql_for_test(
+                "DELETE FROM mc_provider_hook_answers_v1 WHERE subject_mid='u'",
+            )
+            .unwrap();
+        assert!(store
+            .load_tags_for_session("s")
+            .unwrap()
+            .iter()
+            .any(|tag| tag.tag_number == 1));
+        let answer = response(h.handle_provider_reduce(7, &[1]).await);
+        assert_eq!(answer["isError"], true);
+        assert!(answer["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("not found"));
+        assert!(store.load_pending_agent_drops("s").unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pre_switch_engine_tag_from_another_namespace_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = handler(dir.path());
+        admit(&h, 7).await;
+        let store = h.store.get().unwrap();
+        store
+            .seed_tags_for_test(
+                "t",
+                &[mc_store::TagMintInput {
+                    block_id: "foreign#0".into(),
+                    kind: "message".into(),
+                    token_count: 1,
+                    source_bytes: b"foreign".to_vec(),
+                }],
+                1,
+            )
+            .unwrap();
+        let answer = response(h.handle_provider_reduce(7, &[1]).await);
+        assert_eq!(answer["isError"], true);
+        assert!(store.load_pending_agent_drops("s").unwrap().is_empty());
+        assert!(store.load_pending_agent_drops("t").unwrap().is_empty());
+    }
+
     fn rendered(params: &Value, answer: Value) -> Vec<String> {
         let call: HookCall = decode(params).unwrap();
         let answer: HookAnswer = decode(&answer).unwrap();
