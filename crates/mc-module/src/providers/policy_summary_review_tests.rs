@@ -314,7 +314,7 @@ fn probe(
     if settings.previous.is_none() {
         return Ok(observation);
     }
-    let key = settings.key(index.ancestry());
+    let key = settings.key(index);
     let Some(held) = index
         .summary()?
         .and_then(|raw| serde_json::from_str::<PolicySummary>(&raw).ok())
@@ -941,10 +941,10 @@ fn production_writes_replay_equals_full_computation_over_600_sequences() {
     }
 }
 
-/// The same differential including writes no shipped writer performs today.
-/// Recorded failing: see docs/reports/provider-policy-summary-review.md.
+/// The same differential including writes no shipped writer performs today:
+/// each must be logged, drop the summary or take a replay fallback (F1-F3 in
+/// docs/reports/provider-policy-summary-review.md were the gaps).
 #[test]
-#[ignore = "recorded failing: out-of-band policy row writes the summary replay does not see"]
 fn out_of_band_writes_replay_equals_full_computation_over_600_sequences() {
     let found = report("out-of-band", 1_000..1_600, true);
     let mut minimal: BTreeMap<String, (u64, Vec<Op>, String)> = BTreeMap::new();
@@ -1186,6 +1186,26 @@ fn an_unparsable_summary_is_rebuilt_not_replayed() {
     assert_clean(&fixture.hook(false).unwrap(), true);
 }
 
+/// The first hook after an out-of-band write must rebuild (no stale replay)
+/// and match the full computation, and after one more logged change the next
+/// hook must replay the rebuilt summary exactly.
+fn assert_write_rebuilds_then_replays(seed: u64, write: Op) {
+    let mut fixture = Fixture::new();
+    fixture.append(seed);
+    assert_clean(&fixture.hook(false).unwrap(), false);
+    fixture.apply(&write);
+    assert_clean(&fixture.hook(false).unwrap(), false);
+    // A row still in the lineage: column moves detach a row or push its
+    // ordinal past 1,000.
+    fixture.update_one(
+        seed,
+        "lineage_id NOT LIKE 'detached%' AND ordinal < 1000",
+        "policy_json=json_set(policy_json,'$.created_at_ms',7)",
+    );
+    assert_eq!(fixture.logged_changes(), 1);
+    assert_clean(&fixture.hook(false).unwrap(), true);
+}
+
 fn assert_sequence_exact(ops: &[Op]) {
     let outcome = run(ops);
     assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
@@ -1198,19 +1218,12 @@ fn assert_sequence_exact(ops: &[Op]) {
     }
 }
 
-/// Finding: the summary key and the change triggers ignore the conversation's
-/// engine namespace, but the namespace decides which consumed tag numbers
-/// deactivate parts. Moving the conversation to a namespace with other
-/// consumed numbers changes the full computation with nothing logged.
+/// The engine namespace decides which consumed tag numbers deactivate parts,
+/// so it is part of the summary key: moving the conversation to a namespace
+/// with other consumed numbers rebuilds instead of replaying (review F1).
 #[test]
-#[ignore = "recorded failing: engine-namespace change is not in the summary key"]
 fn namespace_switch_is_seen_by_the_replay() {
-    assert_sequence_exact(&[
-        Op::Append(5683219820602439236),
-        Op::Hook,
-        Op::Namespace(14771867209009316838),
-        Op::Hook,
-    ]);
+    assert_write_rebuilds_then_replays(5683219820602439236, Op::Namespace(14771867209009316838));
 }
 
 /// Partner: consuming the same numbers in the conversation's own namespace is
@@ -1228,18 +1241,12 @@ fn consuming_the_same_numbers_in_the_own_namespace_replays_exactly() {
     ]);
 }
 
-/// Finding: a row whose `kind` changes between header and non-header keeps its
-/// ordinal and block index, so the replay accepts it, but every later
-/// non-header part moves one place in the frozen-baseline order.
+/// A row whose `kind` changes between header and non-header keeps its ordinal
+/// and block index but moves every later non-header part one place in the
+/// frozen-baseline order, so the replay falls back to a rebuild (review F2).
 #[test]
-#[ignore = "recorded failing: a header/non-header kind change shifts baseline ranks without a fallback"]
 fn kind_flip_is_seen_by_the_replay() {
-    assert_sequence_exact(&[
-        Op::Append(13707904503047187660),
-        Op::Hook,
-        Op::KindFlip(8882675692618232619),
-        Op::Hook,
-    ]);
+    assert_write_rebuilds_then_replays(13707904503047187660, Op::KindFlip(8882675692618232619));
 }
 
 /// Partner: the same row changed in any other policy field replays exactly.
@@ -1257,18 +1264,16 @@ fn changing_the_kind_flip_row_otherwise_replays_exactly() {
     assert_clean(&fixture.hook(false).unwrap(), true);
 }
 
-/// Finding: the update trigger fires only on `UPDATE OF policy_json`. A write
-/// that changes only the `ordinal` or `lineage_id` column moves the row in or
-/// out of the effective lineage with nothing logged.
+/// A write that changes only the `ordinal` or `lineage_id` column moves the
+/// row in or out of the effective lineage; a trigger drops the summary so the
+/// next hook rebuilds (review F3).
 #[test]
-#[ignore = "recorded failing: ordinal/lineage_id column updates are not logged"]
 fn row_column_moves_are_seen_by_the_replay() {
-    assert_sequence_exact(&[
-        Op::Append(4091705870740682164),
-        Op::Hook,
-        Op::OrdinalColumn(14493650589465211347),
-        Op::Hook,
-    ]);
+    // Both column moves: the odd selector detaches the row to another lineage,
+    // the even one moves its ordinal.
+    for selector in [14493650589465211347, 14493650589465211346] {
+        assert_write_rebuilds_then_replays(4091705870740682164, Op::OrdinalColumn(selector));
+    }
 }
 
 /// Partner: the same row changed through `policy_json` is logged and replays.

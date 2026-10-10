@@ -68,6 +68,18 @@ BEGIN
         WHERE d.conv_key = OLD.conv_key AND d.lineage_id = OLD.lineage_id
           AND d.block_id = OLD.block_id);
 END;
+-- A summary reads a part's conv_key, lineage_id, ordinal and block_id columns
+-- (lineage membership, cut and shadowing) and its policy_json. Only policy_json
+-- changes are logged. A row that moves to another key or ordinal cannot be
+-- replayed from its old copy, so it drops the summary of both conversations.
+CREATE TRIGGER mc_provider_policy_parts_change_move
+AFTER UPDATE OF conv_key, lineage_id, ordinal, block_id ON mc_provider_policy_parts_v1
+WHEN OLD.conv_key IS NOT NEW.conv_key OR OLD.lineage_id IS NOT NEW.lineage_id
+    OR OLD.ordinal IS NOT NEW.ordinal OR OLD.block_id IS NOT NEW.block_id
+BEGIN
+    DELETE FROM mc_provider_policy_summaries_v1 WHERE conv_key IN (OLD.conv_key, NEW.conv_key);
+    DELETE FROM mc_provider_policy_changes_v1 WHERE conv_key IN (OLD.conv_key, NEW.conv_key);
+END;
 -- A deleted part cannot be subtracted incrementally: drop the summary instead.
 CREATE TRIGGER mc_provider_policy_parts_change_delete
 AFTER DELETE ON mc_provider_policy_parts_v1
@@ -89,6 +101,36 @@ BEGIN
       AND NOT EXISTS (SELECT 1 FROM mc_provider_policy_changes_v1 d
         WHERE d.conv_key = p.conv_key AND d.lineage_id = p.lineage_id
           AND d.block_id = p.block_id);
+END;
+-- Releasing or renumbering a consumed tag would reactivate parts; it is never
+-- done, but if it were, the summaries in that namespace are dropped.
+CREATE TRIGGER mc_provider_consumed_tags_change_delete
+AFTER DELETE ON mc_provider_consumed_tags_v1
+BEGIN
+    DELETE FROM mc_provider_policy_changes_v1 WHERE conv_key IN (SELECT conv_key
+        FROM mc_provider_conversations_v2 WHERE engine_namespace = OLD.engine_namespace);
+    DELETE FROM mc_provider_policy_summaries_v1 WHERE conv_key IN (SELECT conv_key
+        FROM mc_provider_conversations_v2 WHERE engine_namespace = OLD.engine_namespace);
+END;
+CREATE TRIGGER mc_provider_consumed_tags_change_update
+AFTER UPDATE ON mc_provider_consumed_tags_v1
+BEGIN
+    DELETE FROM mc_provider_policy_changes_v1 WHERE conv_key IN (SELECT conv_key
+        FROM mc_provider_conversations_v2
+        WHERE engine_namespace IN (OLD.engine_namespace, NEW.engine_namespace));
+    DELETE FROM mc_provider_policy_summaries_v1 WHERE conv_key IN (SELECT conv_key
+        FROM mc_provider_conversations_v2
+        WHERE engine_namespace IN (OLD.engine_namespace, NEW.engine_namespace));
+END;
+-- Consumed tag numbers are recorded per engine namespace, and only numbers
+-- consumed in the conversation's current namespace are logged. A conversation
+-- that changes namespace, even back to an earlier one, cannot replay: drop it.
+CREATE TRIGGER mc_provider_conversations_policy_namespace_change
+AFTER UPDATE OF engine_namespace ON mc_provider_conversations_v2
+WHEN OLD.engine_namespace IS NOT NEW.engine_namespace
+BEGIN
+    DELETE FROM mc_provider_policy_summaries_v1 WHERE conv_key = OLD.conv_key;
+    DELETE FROM mc_provider_policy_changes_v1 WHERE conv_key = OLD.conv_key;
 END;
 CREATE TRIGGER mc_provider_conversations_policy_summary_delete
 AFTER DELETE ON mc_provider_conversations_v2

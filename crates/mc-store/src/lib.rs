@@ -3282,6 +3282,33 @@ pub const LATEST_MIGRATION_VERSION: u32 = {
     latest
 };
 
+/// The first bundled migration whose SQL creates `table`, or `None` when no
+/// migration's text does (a table created some other way).
+pub(crate) fn migration_creating_table(table: &str) -> Option<u32> {
+    MIGRATIONS
+        .iter()
+        .filter(|migration| {
+            let mut rest = migration.statements;
+            while let Some(at) = rest.find("CREATE TABLE") {
+                rest = &rest[at + "CREATE TABLE".len()..];
+                let named = rest.trim_start();
+                let named = named
+                    .strip_prefix("IF NOT EXISTS")
+                    .unwrap_or(named)
+                    .trim_start();
+                let end = named
+                    .find(|c: char| c.is_whitespace() || c == '(')
+                    .unwrap_or(named.len());
+                if named[..end].trim_matches('"') == table {
+                    return true;
+                }
+            }
+            false
+        })
+        .map(|migration| migration.version)
+        .min()
+}
+
 /// Whether this binary can serve a store whose project rows have been moved into the host's
 /// database ("single-store mode").
 ///

@@ -216,10 +216,13 @@ impl Settings {
         }
     }
 
-    /// Everything besides the policy rows that a summary's contents depend on.
-    fn key(&self, ancestry: &[(String, u64)]) -> String {
+    /// Everything besides the policy rows that a summary's contents depend on:
+    /// the lineage ancestry and cuts, the engine namespace (whose consumed tag
+    /// numbers deactivate parts) and the resolved settings.
+    fn key(&self, index: &ProviderPolicyIndex<'_>) -> String {
         serde_json::json!([
-            ancestry,
+            index.ancestry(),
+            index.engine_namespace(),
             self.coverage,
             self.floor,
             self.tools_ratio.to_bits(),
@@ -749,7 +752,12 @@ fn replay(
                 }
                 inserted.push(current.clone());
             }
-            (Some(old), Some(new)) if part_key(old) == part_key(new) => {}
+            // A part becoming or ceasing to be a header keeps its position but
+            // moves every later non-header part one place in the frozen-baseline
+            // order, which only a rebuild recounts.
+            (Some(old), Some(new))
+                if part_key(old) == part_key(new)
+                    && (old.kind == "header") == (new.kind == "header") => {}
             _ => return Ok(None),
         }
         if let Some(current) = current {
@@ -1117,7 +1125,7 @@ pub(crate) fn channel1_inputs(
         cache_busting,
         model_key,
     );
-    let key = settings.key(index.ancestry());
+    let key = settings.key(index);
     if !cache_busting && settings.previous.is_some() {
         let held = index
             .summary()?
@@ -1175,7 +1183,7 @@ pub(crate) fn channel1_inputs(
     let summary = build(
         &parts,
         &next,
-        next.key(index.ancestry()),
+        next.key(index),
         froze.then_some(inputs.baseline.baseline_parts.as_slice()),
     )
     .map(|summary| serde_json::to_string(&summary).expect("summary JSON"));

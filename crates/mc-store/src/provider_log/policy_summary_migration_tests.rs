@@ -386,13 +386,11 @@ fn an_intact_latest_store_guards_both_summary_tables() {
     );
 }
 
-/// Finding: the writer-guard installer now skips any inventory table missing
-/// from the schema, whatever the recorded version. Before, a latest-version
-/// store missing a session table failed to open ("no such table" while
-/// creating its guard); now it opens, unguarded, and the first write that needs
-/// the table fails later.
+/// The writer-guard installer skips a missing inventory table only when the
+/// store's recorded version predates the migration that creates it. A
+/// latest-version store missing a session table fails to open while creating
+/// that table's guard (review F4).
 #[test]
-#[ignore = "recorded failing: a latest-version store missing an inventory table opens silently"]
 fn a_latest_store_missing_an_inventory_table_refuses_to_open() {
     let dir = tempfile::tempdir().unwrap();
     let descriptor = descriptor(dir.path());
@@ -405,5 +403,126 @@ fn a_latest_store_missing_an_inventory_table_refuses_to_open() {
     assert!(
         McStore::open_for_test(&descriptor).is_err(),
         "a version-68 store without mc_provider_policy_changes_v1 opened"
+    );
+}
+
+/// The guard installer decides whether a missing table is expected from the
+/// migration that creates it, so every guarded session table must be found in
+/// some migration's SQL. A table it cannot place is never skipped.
+#[test]
+fn every_guarded_inventory_table_names_its_creating_migration() {
+    use crate::move_inventory::{tables, Class, RowSelector, Store};
+    for table in tables(Store::Module) {
+        if !matches!(table.rows, RowSelector::Predicate(_)) || table.class == Class::NotSession {
+            continue;
+        }
+        assert!(
+            crate::migration_creating_table(table.table).is_some(),
+            "{} has no creating migration",
+            table.table
+        );
+    }
+    assert_eq!(
+        crate::migration_creating_table("mc_provider_policy_parts_v1"),
+        Some(66)
+    );
+    assert_eq!(
+        crate::migration_creating_table("mc_provider_policy_summaries_v1"),
+        Some(68)
+    );
+    assert_eq!(
+        crate::migration_creating_table("mc_provider_policy_changes_v1"),
+        Some(68)
+    );
+    assert_eq!(crate::migration_creating_table("no_such_table"), None);
+}
+
+/// Releasing a consumed tag number would reactivate parts the summary counts
+/// as inactive. No writer does it, but if one did, the summaries of that
+/// namespace are dropped rather than replayed stale; renumbering does the same.
+#[test]
+fn releasing_or_renumbering_a_consumed_tag_drops_the_namespace_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+    populate(&store);
+    for release in [
+        "DELETE FROM mc_provider_consumed_tags_v1 WHERE tag_number=2",
+        "UPDATE mc_provider_consumed_tags_v1 SET tag_number=9 WHERE tag_number=2",
+    ] {
+        store
+            .execute_tag_sql_for_test(
+                "INSERT INTO mc_provider_consumed_tags_v1 VALUES ('s',2,'s') ON CONFLICT DO NOTHING",
+            )
+            .unwrap();
+        hook(&store, Some(r#"{"probe":true}"#));
+        assert_eq!(
+            count(
+                &store,
+                "SELECT count(*) FROM mc_provider_policy_summaries_v1"
+            ),
+            1
+        );
+        store.execute_tag_sql_for_test(release).unwrap();
+        assert_eq!(
+            count(
+                &store,
+                "SELECT count(*) FROM mc_provider_policy_summaries_v1"
+            ),
+            0,
+            "{release}"
+        );
+        assert_eq!(
+            count(&store, "SELECT count(*) FROM mc_provider_policy_changes_v1"),
+            0,
+            "{release}"
+        );
+        store
+            .execute_tag_sql_for_test("DELETE FROM mc_provider_consumed_tags_v1")
+            .unwrap();
+    }
+}
+
+/// `INSERT OR REPLACE` deletes the old row without firing the delete trigger,
+/// so its change is logged as a new row and the pre-change copy is lost (see
+/// `upsert_keeps_the_first_copy_and_replace_logs_a_new_row`). The replay is
+/// exact only through its newest-position fallback, so no shipped writer may
+/// replace policy rows: writers use `ON CONFLICT DO UPDATE` instead.
+#[test]
+fn no_shipped_writer_replaces_policy_rows() {
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut pending = vec![crates];
+    let mut offenders = Vec::new();
+    let mut scanned = 0;
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if name != "target" && !name.starts_with('.') {
+                    pending.push(path);
+                }
+                continue;
+            }
+            // Test sources may replace rows on purpose to pin this behaviour.
+            if !(name.ends_with(".rs") || name.ends_with(".sql")) || name.contains("test") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap().to_ascii_uppercase();
+            scanned += 1;
+            let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            for statement in [
+                "REPLACE INTO MC_PROVIDER_POLICY_PARTS_V1",
+                "REPLACE INTO \"MC_PROVIDER_POLICY_PARTS_V1\"",
+            ] {
+                if compact.contains(statement) {
+                    offenders.push(path.display().to_string());
+                }
+            }
+        }
+    }
+    assert!(scanned > 100, "scanned only {scanned} source files");
+    assert!(
+        offenders.is_empty(),
+        "policy rows replaced in {offenders:?}"
     );
 }

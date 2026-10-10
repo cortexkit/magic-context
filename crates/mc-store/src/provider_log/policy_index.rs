@@ -25,6 +25,8 @@ pub struct ProviderPolicyChange {
 pub struct ProviderPolicyIndex<'c> {
     conn: &'c Connection,
     conv: String,
+    /// The engine namespace whose consumed tag numbers deactivate parts.
+    namespace: String,
     /// Leaf first: (lineage id, highest ordinal it contributes), ending with the
     /// legacy empty lineage.
     ancestry: Vec<(String, u64)>,
@@ -46,9 +48,18 @@ impl<'c> ProviderPolicyIndex<'c> {
             .map(|(row, cut)| (row.lineage_id, cut))
             .chain(std::iter::once((String::new(), legacy)))
             .collect();
+        let namespace = conn
+            .query_row(
+                "SELECT engine_namespace FROM mc_provider_conversations_v2 WHERE conv_key=?1",
+                [conv],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or_default();
         Ok(Self {
             conn,
             conv: conv.to_string(),
+            namespace,
             ancestry,
             rows_read: Cell::new(0),
         })
@@ -58,6 +69,12 @@ impl<'c> ProviderPolicyIndex<'c> {
     /// with the legacy empty lineage.
     pub fn ancestry(&self) -> &[(String, u64)] {
         &self.ancestry
+    }
+
+    /// The conversation's engine namespace. Consumed tag numbers are recorded
+    /// per namespace, so a summary is valid only for the namespace it was taken in.
+    pub fn engine_namespace(&self) -> &str {
+        &self.namespace
     }
 
     /// Policy rows read through this index so far. Tests use it to show that a
