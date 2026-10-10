@@ -7,8 +7,9 @@
  * function of them, so equal results here mean equal provider requests.
  *
  * Every read of a part or tool-state field is kept as the host makes it. Two
- * things are reduced to what the tests exercise: the assistant error rule (the
- * host also keeps an aborted assistant that produced parts) and the provider
+ * things are reduced to what the tests exercise: an assistant message with an
+ * error is always skipped here, where the host keeps one whose error is an
+ * abort and that produced parts other than step starts and reasoning; and the provider
  * media rules (only the Anthropic and OpenAI adapters are listed); the
  * synthetic attachment message gets no generated id.
  */

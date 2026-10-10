@@ -292,6 +292,11 @@ const DIGEST_CHUNK_BYTES = 64 * 1024;
 let digestChunk: Buffer | undefined;
 
 /**
+ * The digest a replay compares to decide whether a message is unchanged, so
+ * two different token lists must never encode to the same bytes (or a changed
+ * message could replay stale content), and it runs over every new or changed
+ * message, so it must be cheap per token.
+ *
  * sha256 over an unambiguous binary encoding of the tokens: a one-byte tag per
  * token, then for a string its length in UTF-16 units (uint32) and its UTF-16
  * code units (so lone surrogates stay distinct), for a number its float64
