@@ -21,7 +21,7 @@ describe("mode manifest validator", () => {
         // Bump this with the manifest whenever a tests/**/*.test.ts file is added or
         // removed. Moving a file between excluded and ts-only changes the invocation
         // counts and excluded list below, but not the total number of files.
-        expect(validation.files.length).toBe(184);
+        expect(validation.files.length).toBe(186);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -33,7 +33,7 @@ describe("mode manifest validator", () => {
         const ts = filesForMode(validation, "ts");
         const rust = filesForMode(validation, "rust");
         expect(ts).toHaveLength(67);
-        expect(rust).toHaveLength(59);
+        expect(rust).toHaveLength(61);
         expect(rust).toContain("tests/rust-tool-attachments.test.ts");
         expect(rust).toContain("tests/rust-tool-attachment-upgrade.test.ts");
         expect(rust).toContain("tests/idle-ttl-restart.test.ts");

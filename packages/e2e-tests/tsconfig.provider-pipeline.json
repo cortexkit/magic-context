@@ -1,0 +1,10 @@
+{
+    "extends": "./tsconfig.json",
+    "include": [
+        "src/provider-pipeline-host-lane.ts",
+        "scripts/provider-pipeline-gate.test.ts",
+        "scripts/provider-pipeline-synthetic.ts",
+        "tests/rust-provider-pipeline-opencode1.test.ts",
+        "tests/rust-provider-pipeline-opencode2.test.ts"
+    ]
+}

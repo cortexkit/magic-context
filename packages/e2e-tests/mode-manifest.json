@@ -3,6 +3,22 @@
     "header": "CI push workflows run the manifest-derived TypeScript suites and Rust hermetic suite through scripts/run-rust-hermetic-e2e.sh; tag releases run the same Rust invocation. Cargo.lock pins the Rust dependency versions and git revisions. CI mc-module daemon tests and push/release builders use the locked subconscious source to build ck-subc; the scheduled CI builder intentionally probes default-branch HEAD as drift, while test shards consume its prebuilt artifact.",
     "entries": [
         {
+            "path": "tests/rust-provider-pipeline-opencode1.test.ts",
+            "tier": "rust-only",
+            "invocation": { "ts": false, "rust": true },
+            "rationale": "Real OpenCode 1 1.18.x provider pipeline with a recording mock, hermetic ck-mc and prebuilt ck-subc; durable runner rows and tagged provider bytes prove routing, two turns assert served-prefix stability. No live stores or credentials. P1-P4 measurements remain a separate fail-closed cutover gate.",
+            "contract_refs": ["PROVIDER-PIPELINE-T2"],
+            "hosts": ["opencode"]
+        },
+        {
+            "path": "tests/rust-provider-pipeline-opencode2.test.ts",
+            "tier": "rust-only",
+            "invocation": { "ts": false, "rust": true },
+            "rationale": "Real OpenCode 2 2.0.x provider pipeline with a recording mock, hermetic ck-mc and prebuilt ck-subc; durable runner rows and tagged provider bytes prove routing, two turns assert served-prefix stability; host runner checks throwaway descriptors. P1-P4 measurements remain a separate fail-closed cutover gate.",
+            "contract_refs": ["PROVIDER-PIPELINE-T2"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/latest-turn-thinking.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
