@@ -116,6 +116,7 @@ import {
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import { isStrictGapHealingMessage } from "./read-session-raw";
+import { readEffectiveReferenceCompartments } from "./score-projection";
 import { sendStatusNotification } from "./send-session-notification";
 
 const inconsistentProducerWindows = new Set<string>();
@@ -554,7 +555,11 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             sessionId,
             chunkStart: Math.max(1, offset),
             lastOrdinal: eligibleEndOrdinal - 1,
-            sessionCompartments: priorCompartments,
+            sessionCompartments: readEffectiveReferenceCompartments(
+                db,
+                sessionId,
+                priorCompartments,
+            ),
             memories,
             memoryEnabled: deps.memoryEnabled !== false,
         });

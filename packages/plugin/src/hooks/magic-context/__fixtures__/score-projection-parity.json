@@ -1,0 +1,13 @@
+{
+    "historyBudgetTokens": 1250,
+    "baseScores": [1, 50, 50, 50, 50, 50, 50, 50],
+    "steps": [
+        { "action": "fold", "effective": [1, 50, 50, 50, 50, 50, 50, 50], "watermark": 0, "tiers": [4, 2, 2, 2, 1, 1, 1, 1], "pressure": 1.4904 },
+        { "action": "publish", "row": 0, "score": 100, "effective": [100, 50, 50, 50, 50, 50, 50, 50] },
+        { "action": "publish", "row": 1, "score": 1, "effective": [100, 1, 50, 50, 50, 50, 50, 50] },
+        { "action": "change-source", "row": 1, "effective": [100, 50, 50, 50, 50, 50, 50, 50] },
+        { "action": "fold", "effective": [100, 50, 50, 50, 50, 50, 50, 50], "watermark": 2, "tiers": [1, 2, 2, 2, 2, 1, 1, 1], "pressure": 1.72 },
+        { "action": "undo", "row": 0, "effective": [1, 50, 50, 50, 50, 50, 50, 50] },
+        { "action": "publish", "row": 2, "score": 100, "effective": [1, 50, 100, 50, 50, 50, 50, 50] }
+    ]
+}

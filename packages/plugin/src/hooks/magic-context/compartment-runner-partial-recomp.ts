@@ -36,6 +36,7 @@ import {
 import { describeHistorianPromptTrim, fitRecompHistorianPrompt } from "./historian-prompt-fit";
 import { clearInjectionCache } from "./inject-compartments";
 import { readSessionChunk } from "./read-session-chunk";
+import { readEffectiveReferenceCompartments } from "./score-projection";
 import { sendStatusNotification } from "./send-session-notification";
 
 export interface PartialRecompRange {
@@ -399,7 +400,16 @@ export async function executePartialRecompInternal(
                 sessionId,
                 chunkStart: offset,
                 lastOrdinal: snapEnd,
-                sessionCompartments: candidateCompartments,
+                sessionCompartments: [
+                    // Preserve base scores in staging; overlays are prompt-only copies.
+                    ...readEffectiveReferenceCompartments(db, sessionId, priorCompartments).map(
+                        (row, i) => ({
+                            ...candidateCompartments[i],
+                            importance: row.importance,
+                        }),
+                    ),
+                    ...candidateCompartments.slice(priorCompartments.length),
+                ],
             });
             if (!promptFit.ok) {
                 log(

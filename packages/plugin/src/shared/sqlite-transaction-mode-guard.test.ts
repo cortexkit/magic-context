@@ -19,6 +19,12 @@ import ts from "typescript";
  * block every writer for the length of the read.
  */
 const READ_ONLY_DEFERRED_TRANSACTIONS: Record<string, string> = {
+    "packages/plugin/src/hooks/magic-context/inject-compartments.ts#renderFreshM0NonPersisted":
+        "reads base compartments, score revisions, selections and the committed watermark; hashes and copies rows without writing",
+    "packages/plugin/src/hooks/magic-context/score-projection.ts#readEffectiveReferenceCompartments":
+        "reads base compartments and score selections for calibration copies; schema discovery is read-only and nothing is published",
+    "packages/pi-plugin/src/inject-compartments-pi.ts#renderM0Pi":
+        "reads base compartments, score selections and the committed watermark for a non-persisted render; never writes",
     "packages/plugin/src/hooks/magic-context/lkg-served-marker.ts#checkLkgDurability":
         "reads the served marker and durable slot id in one snapshot; never hydrates, repairs or writes",
     "packages/plugin/src/v2/store-reader.ts#window":
