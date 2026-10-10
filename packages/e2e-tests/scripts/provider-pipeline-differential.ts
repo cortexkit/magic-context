@@ -1742,6 +1742,58 @@ const cases: Case[] = [
         },
     },
     {
+        name: "A10.legacy-tool-identity-switch",
+        async run(f) {
+            for (const shape of ["single", "parallel", "attachments", "many-parts", "live-newest"] as const) {
+                const lane = await fixture(f.moduleDriver, f.host);
+                try {
+                    const covered = tools("covered");
+                    if (shape === "single") covered.parts = covered.parts.slice(1, 2);
+                    if (shape === "attachments") (covered.parts[1] as any).state.attachments = [
+                        { type: "file", mime: "image/png", url: "data:image/png;base64,aGVsbG8=", filename: "fixture.png" },
+                    ];
+                    if (shape === "many-parts") for (let i = 3; i <= 32; i++) covered.parts.push(canonical({
+                        ...(covered.parts[1] as any), id: `part-${i}`, callID: `call-${i}`,
+                    }) as any);
+                    const newest = message("newest", "assistant");
+                    if (shape === "live-newest") {
+                        delete (newest.info as any).time.completed;
+                        newest.parts.push(canonical({ id: "running", type: "tool", tool: "bash", callID: "running-call",
+                            state: { status: "completed", input: {}, output: "newest tool output" } }) as any);
+                    }
+                    const raw = [covered, newest];
+                    await lane.full(raw);
+                    // Only unprotected tail messages may adopt changed source
+                    // identities. Summarize the first message so incompatible
+                    // decoder identities must refuse instead of being adopted.
+                    await lane.event("publish", { start: 1, end: 1, mid: "covered" });
+                    const expected = await lane.full(raw);
+                    const identities = await lane.sql("SELECT mid,identities FROM mc_block_identities ORDER BY mid");
+                    const served = await lane.pass(raw);
+                    assert.equal(lane.adapter.isProviderSession("session"), true, `${shape}: ${JSON.stringify(lane.callErrors)}`);
+                    assert.equal(lane.fallbacks.length, 0, `${shape}: no full-request fallback`);
+                    assert.deepEqual(bytes(served), bytes(expected), shape);
+                    assert.deepEqual(await lane.sql("SELECT mid,identities FROM mc_block_identities ORDER BY mid"), identities,
+                        `${shape}: identities must match, not be re-adopted`);
+                    await lane.noReads();
+                } finally { await lane.close(); }
+            }
+        },
+    },
+    {
+        name: "A10.legacy-tool-genuine-drift-refuses",
+        async run(f) {
+            const raw = [tools("covered"), message("newest", "assistant")];
+            await f.full(raw);
+            await f.event("publish", { start: 1, end: 1, mid: "covered" });
+            await f.full(raw);
+            (raw[0]!.parts[1] as any).state.output = "genuinely changed source output";
+            await assert.rejects(f.pass(raw), /CK message block identity drift for mid covered/);
+            assert.equal(f.adapter.isProviderSession("session"), false);
+            assert.deepEqual(f.callErrors.at(-1), { code: "transient", message: "CK message block identity drift for mid covered" });
+        },
+    },
+    {
         name: "A10.paged-7500-bootstrap-restart",
         async run(f) {
             // Native metadata contributes to encoded page size without inventing a

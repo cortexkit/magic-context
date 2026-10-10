@@ -697,7 +697,7 @@ fn project_messages_from_state(
             if !flat.synthetic {
                 identities.push(BlockIdentity {
                     kind_tag: flat.kind_tag.clone(),
-                    byte_fingerprint: fingerprint_digest(&flat.content_hash),
+                    byte_fingerprint: block_identity_fingerprint(msg, block, &flat)?,
                 });
             }
             builder.blocks.push(flat);
@@ -829,6 +829,59 @@ pub fn text_from_message(msg: &CkWireMessage) -> Option<&str> {
         CkKind::Text { ref text } => Some(text.as_str()),
         _ => None,
     }
+}
+
+fn block_identity_fingerprint(
+    msg: &CkIngressMessage,
+    block: &CkWireBlock,
+    flat: &FlatBlock,
+) -> Result<String, CkWireError> {
+    if msg
+        .ck
+        .provider_extras
+        .get("_cortexkit_codec")
+        .and_then(|extras| extras.get("ingressProfile"))
+        .and_then(Value::as_str)
+        != Some("opencode")
+    {
+        return Ok(fingerprint_digest(&flat.content_hash));
+    }
+    // Full-request OpenCode passes ingest CK JSON from TypeScript, without the
+    // origin coordinates that Rust's native decoder adds for lossless rendering.
+    // Persist the same source-content identity across a pipeline switch: sorted
+    // JSON without those coordinates or the default false tool flag omitted by
+    // TypeScript. Keep actual content and all other provider extras, and leave
+    // served bytes/content_hash untouched for native-part alignment.
+    let mut value = serde_json::to_value(block).map_err(|_| CkWireError::UnsupportedBlock {
+        mid: flat.mid.clone(),
+        block_index: flat.block_index,
+        kind: flat.kind_tag.clone(),
+    })?;
+    if let Some(extras) = value
+        .get_mut("provider_extras")
+        .and_then(Value::as_object_mut)
+    {
+        extras.remove("_cortexkit_codec");
+        if extras.is_empty() {
+            value.as_object_mut().unwrap().remove("provider_extras");
+        }
+    }
+    if matches!(
+        block.kind,
+        CkKind::ToolCall {
+            provider_executed: false,
+            ..
+        } | CkKind::ToolResult {
+            provider_executed: false,
+            ..
+        }
+    ) {
+        value["kind"]
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_executed");
+    }
+    Ok(fingerprint(&value.to_string()))
 }
 
 fn flatten_block(
