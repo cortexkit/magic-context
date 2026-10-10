@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import type { TagEntry } from "../../features/magic-context/types";
 import * as formatting from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
-import { refreshTailHygieneBaseline, type TailHygieneBaseline } from "./tail-hygiene-walk";
+import { refreshTailHygieneBaseline } from "./tail-hygiene-walk";
 
 const OUTPUT_CHARS = 1_000_000;
 const ARCS_PER_SESSION = 20;
@@ -76,20 +76,26 @@ describe("tail hygiene measurement across two large sessions", () => {
         );
         restores.push(() => tokenize.mockRestore());
         const sessions = [session("alpha"), session("beta")];
-        const baselines = new Map<string, TailHygieneBaseline>();
         const callsPerPass: number[] = [];
         for (let pass = 0; pass < 4; pass += 1) {
             for (const [index, current] of sessions.entries()) {
                 const name = index === 0 ? "alpha" : "beta";
+                // Each pass adds a turn, as an ordinary conversation step does.
+                current.messages.push({
+                    info: { id: `${name}-turn-${pass}`, role: "user" },
+                    parts: [{ type: "text", text: `next step ${pass}` }],
+                });
                 tokenize.mockClear();
-                const baseline = refreshTailHygieneBaseline({
+                // No previous baseline: the replay snapshot of whole messages
+                // (128 MiB for every session together) holds neither of two
+                // sessions this size served in turn, so each pass measures part by
+                // part through the content memo, which is what this test bounds.
+                refreshTailHygieneBaseline({
                     messages: reloaded(current.messages),
                     tags: current.tags,
                     protectedTagNumbers: new Set(),
-                    cacheBusting: pass === 0,
-                    previous: baselines.get(name),
+                    cacheBusting: false,
                 });
-                baselines.set(name, baseline);
                 const outputCalls = tokenize.mock.calls.filter(
                     ([text]) => text.length >= OUTPUT_CHARS,
                 ).length;

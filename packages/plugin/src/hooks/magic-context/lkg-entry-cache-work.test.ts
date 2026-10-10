@@ -12,7 +12,6 @@ import { createLkgEntryProjector, projectLkgEntry } from "./lkg-replay";
 import {
     captureSlot,
     getLkgEntryWorkForTest,
-    LKG_ENTRY_CACHE_TOTAL_BYTES,
     LkgEntryDigestCache,
     type LkgEntryWork,
     lkgContentDigest,
@@ -169,7 +168,6 @@ describe("entry digest cache work per pass", () => {
                 });
             }
         }
-        expect(LKG_ENTRY_CACHE_TOTAL_BYTES).toBeGreaterThanOrEqual(256 * 1024 * 1024);
     });
 
     it("trims sessions to a fair share when another joins, and never exceeds the ceiling", () => {
