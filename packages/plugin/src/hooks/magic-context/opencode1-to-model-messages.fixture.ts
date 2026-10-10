@@ -1,221 +1,141 @@
 /**
- * OpenCode 1's conversion of session messages to model messages, vendored from
- * `toModelMessagesEffect` in packages/opencode/src/session/message-v2.ts at tag
- * v1.18.35 for tests (read-only copy; the Effect wrapper and the final
- * `convertToModelMessages` call are left out). It returns the UI messages that
- * function hands to the AI SDK's `convertToModelMessages`, which is a pure
- * function of them, so equal results here mean equal provider requests.
+ * OpenCode 1's own conversion of session messages to provider messages, run
+ * from a verbatim copy of its source for tests.
  *
- * Every read of a part or tool-state field is kept as the host makes it. Two
- * things are reduced to what the tests exercise: an assistant message with an
- * error is always skipped here, where the host keeps one whose error is an
- * abort and that produced parts other than step starts and reasoning; and the provider
- * media rules (only the Anthropic and OpenAI adapters are listed); the
- * synthetic attachment message gets no generated id.
+ * `__fixtures__/opencode-v1.18.35-to-model-messages.txt` holds, byte for byte,
+ * from OpenCode at tag v1.18.35 (commit 53d1eabb61e21162157817bf677da0a4ad3332e3):
+ * `packages/opencode/src/util/media.ts` and `packages/opencode/src/util/iife.ts`
+ * whole, then lines 46, 49-53 and 125-436 of
+ * `packages/opencode/src/session/message-v2.ts`: `SYNTHETIC_ATTACHMENT_PROMPT`,
+ * `truncateToolOutput`, `providerMeta`, `toModelMessagesEffect` and
+ * `toModelMessages`. {@link OPENCODE1_EXCERPT_SHA256} pins that text; the
+ * fidelity test fails if the copy changes, and, when an OpenCode checkout is
+ * available, if the copy differs from upstream at the tag.
+ *
+ * The excerpt runs unchanged: its type annotations are stripped by Bun's
+ * transpiler and its imports are supplied here. `convertToModelMessages` is the
+ * AI SDK's (`ai` 6.0.168, the version OpenCode 1.18.35 pins) and `Effect` is
+ * Effect 4; `MessageID.ascending` and `AbortedError.isInstance` stand in for
+ * OpenCode's id generator and named-error check.
  */
 
-// biome-ignore lint/suspicious/noExplicitAny: a vendored copy of untyped host code.
-type Any = Record<string, any>;
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 
-interface Model {
+// Loaded at run time rather than imported: Effect's type declarations augment
+// the global Error type, which would change type checking across the package.
+const requireFromHere = createRequire(import.meta.url);
+const { convertToModelMessages } = requireFromHere("ai") as { convertToModelMessages: unknown };
+const { Effect } = requireFromHere("effect") as { Effect: unknown };
+
+/** An AI SDK model message, as the conversion returns it. */
+export type ModelMessage = { role: string; content: unknown };
+
+export const OPENCODE1_TAG = "v1.18.35";
+export const OPENCODE1_COMMIT = "53d1eabb61e21162157817bf677da0a4ad3332e3";
+/** Upstream files the excerpt is cut from, with their git blob ids at the tag. */
+export const OPENCODE1_SOURCES = {
+    media: {
+        path: "packages/opencode/src/util/media.ts",
+        blob: "566ac843a6342925e3e3d53f9b7dedf90c2d4a8e",
+    },
+    iife: {
+        path: "packages/opencode/src/util/iife.ts",
+        blob: "ca9ae6c10b44cfcfa5241048196675039ef8f8ec",
+    },
+    messages: {
+        path: "packages/opencode/src/session/message-v2.ts",
+        blob: "75f2d89379d79a847d684ad7def5b7215474dec7",
+        lines: [
+            [46, 46],
+            [49, 53],
+            [125, 436],
+        ] as const,
+    },
+} as const;
+export const OPENCODE1_EXCERPT_SHA256 =
+    "e530c77ec018d8ed9628e1d416a1ef8fbfbadd72569f562264b4380d782b0ecb";
+export const OPENCODE1_EXCERPT_URL = new URL(
+    "./__fixtures__/opencode-v1.18.35-to-model-messages.txt",
+    import.meta.url,
+);
+
+/** Assemble the excerpt from upstream file contents, the same way the fixture was cut. */
+export function assembleOpencode1Excerpt(read: (path: string) => string): string {
+    const lines = read(OPENCODE1_SOURCES.messages.path).split("\n");
+    const pieces = OPENCODE1_SOURCES.messages.lines.map(([from, to]) =>
+        lines.slice(from - 1, to).join("\n"),
+    );
+    return `${[
+        read(OPENCODE1_SOURCES.media.path).replace(/\n+$/, ""),
+        read(OPENCODE1_SOURCES.iife.path).replace(/\n+$/, ""),
+        ...pieces,
+    ].join("\n")}\n`;
+}
+
+export function readOpencode1Excerpt(): string {
+    return readFileSync(OPENCODE1_EXCERPT_URL, "utf8");
+}
+
+export interface Opencode1Model {
     providerID: string;
     id: string;
     api: { npm: string; id: string };
 }
 
-const SYNTHETIC_ATTACHMENT_PROMPT = "Attached image(s) from tool result:";
+type ToModelMessages = (
+    input: unknown[],
+    model: Opencode1Model,
+    options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
+) => Promise<ModelMessage[]>;
 
-function isMedia(mime: string): boolean {
-    return mime.startsWith("image/") || mime === "application/pdf";
-}
+let compiled: { toModelMessages: ToModelMessages; syntheticPrompt: string } | undefined;
 
-function providerMeta(metadata: Any | undefined) {
-    if (!metadata) return undefined;
-    const { providerExecuted: _, ...rest } = metadata;
-    return Object.keys(rest).length > 0 ? rest : undefined;
-}
-
-function truncateToolOutput(text: string, maxChars?: number): string {
-    if (!maxChars || text.length <= maxChars) return text;
-    const omitted = text.length - maxChars;
-    return `${text.slice(0, maxChars)}\n[Tool output truncated for compaction: omitted ${omitted} chars]`;
-}
-
-export function opencode1UiMessages(input: Any[], model: Model): Any[] {
-    const result: Any[] = [];
-    const supportsMediaInToolResult = (_attachment: Any) => {
-        if (model.api.npm === "@ai-sdk/anthropic") return true;
-        if (model.api.npm === "@ai-sdk/openai") return true;
-        return false;
+function compile(): NonNullable<typeof compiled> {
+    if (compiled) return compiled;
+    // Module syntax is the only thing removed: the excerpt runs as a function
+    // body whose free identifiers are the imports supplied below.
+    const body = readOpencode1Excerpt().replace(/^export /gm, "");
+    const javascript = new Bun.Transpiler({ loader: "ts" }).transformSync(body);
+    let syntheticId = 0;
+    const factory = new Function(
+        "Effect",
+        "convertToModelMessages",
+        "MessageID",
+        "AbortedError",
+        `${javascript}\nreturn { toModelMessages, SYNTHETIC_ATTACHMENT_PROMPT };`,
+    ) as (...deps: unknown[]) => {
+        toModelMessages: ToModelMessages;
+        SYNTHETIC_ATTACHMENT_PROMPT: string;
     };
-    const rejectedByProvider = (attachment: Any) =>
-        model.api.npm === "@ai-sdk/xai" &&
-        attachment.mime.startsWith("image/") &&
-        !["image/png", "image/jpeg", "image/webp"].includes(attachment.mime);
+    const module = factory(
+        Effect,
+        convertToModelMessages,
+        { ascending: () => `msg_synthetic_${++syntheticId}` },
+        // OpenCode's NamedError.isInstance compares the error's name.
+        {
+            isInstance: (error: unknown) =>
+                typeof error === "object" &&
+                error !== null &&
+                (error as { name?: unknown }).name === "MessageAbortedError",
+        },
+    );
+    compiled = {
+        toModelMessages: module.toModelMessages,
+        syntheticPrompt: module.SYNTHETIC_ATTACHMENT_PROMPT,
+    };
+    return compiled;
+}
 
-    for (const msg of input) {
-        if (msg.parts.length === 0) continue;
-        if (msg.info.role === "user") {
-            const userMessage: Any = { id: msg.info.id, role: "user", parts: [] };
-            for (const part of msg.parts) {
-                if (part.type === "text" && !part.ignored && part.text !== "")
-                    userMessage.parts.push({ type: "text", text: part.text });
-                if (
-                    part.type === "file" &&
-                    part.mime !== "text/plain" &&
-                    part.mime !== "application/x-directory"
-                ) {
-                    userMessage.parts.push({
-                        type: "file",
-                        url: part.url,
-                        mediaType: part.mime,
-                        filename: part.filename,
-                    });
-                }
-                if (part.type === "compaction")
-                    userMessage.parts.push({ type: "text", text: "What did we do so far?" });
-                if (part.type === "subtask")
-                    userMessage.parts.push({
-                        type: "text",
-                        text: "The following tool was executed by the user",
-                    });
-            }
-            if (userMessage.parts.length > 0) result.push(userMessage);
-        }
+/** OpenCode 1.18.35's `MessageV2.toModelMessages`, run from the verbatim excerpt. */
+export function opencode1ToModelMessages(
+    input: unknown[],
+    model: Opencode1Model,
+    options?: { stripMedia?: boolean; toolOutputMaxChars?: number },
+): Promise<ModelMessage[]> {
+    return compile().toModelMessages(input, model, options);
+}
 
-        if (msg.info.role === "assistant") {
-            const differentModel =
-                `${model.providerID}/${model.id}` !== `${msg.info.providerID}/${msg.info.modelID}`;
-            const media: Any[] = [];
-            if (msg.info.error) continue;
-            const assistantMessage: Any = { id: msg.info.id, role: "assistant", parts: [] };
-            const hasSignedReasoning = msg.parts.some((part: Any) => {
-                if (part.type !== "reasoning") return false;
-                return part.metadata?.anthropic?.signature != null;
-            });
-            for (const part of msg.parts) {
-                if (part.type === "text") {
-                    const text = part.text === "" && hasSignedReasoning ? " " : part.text;
-                    assistantMessage.parts.push({
-                        type: "text",
-                        text,
-                        ...(differentModel ? {} : { providerMetadata: part.metadata }),
-                    });
-                }
-                if (part.type === "step-start") assistantMessage.parts.push({ type: "step-start" });
-                if (part.type === "tool") {
-                    if (part.state.status === "completed") {
-                        const outputText = part.state.time.compacted
-                            ? "[Old tool result content cleared]"
-                            : truncateToolOutput(part.state.output, undefined);
-                        const attachments = part.state.time.compacted
-                            ? []
-                            : (part.state.attachments ?? []).filter(
-                                  (a: Any) => !rejectedByProvider(a),
-                              );
-                        const mediaAttachments = attachments.filter((a: Any) => isMedia(a.mime));
-                        const extractedMedia = mediaAttachments.filter(
-                            (a: Any) => !supportsMediaInToolResult(a),
-                        );
-                        if (extractedMedia.length > 0) media.push(...extractedMedia);
-                        const finalAttachments = attachments.filter(
-                            (a: Any) => !isMedia(a.mime) || supportsMediaInToolResult(a),
-                        );
-                        const output =
-                            finalAttachments.length > 0
-                                ? { text: outputText, attachments: finalAttachments }
-                                : outputText;
-                        assistantMessage.parts.push({
-                            type: `tool-${part.tool}`,
-                            state: "output-available",
-                            toolCallId: part.callID,
-                            input: part.state.input,
-                            output,
-                            ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
-                            ...(differentModel
-                                ? {}
-                                : { callProviderMetadata: providerMeta(part.metadata) }),
-                        });
-                    }
-                    if (part.state.status === "error") {
-                        const output =
-                            part.state.metadata?.interrupted === true
-                                ? part.state.metadata.output
-                                : undefined;
-                        if (typeof output === "string") {
-                            assistantMessage.parts.push({
-                                type: `tool-${part.tool}`,
-                                state: "output-available",
-                                toolCallId: part.callID,
-                                input: part.state.input,
-                                output,
-                                ...(part.metadata?.providerExecuted
-                                    ? { providerExecuted: true }
-                                    : {}),
-                                ...(differentModel
-                                    ? {}
-                                    : { callProviderMetadata: providerMeta(part.metadata) }),
-                            });
-                        } else {
-                            assistantMessage.parts.push({
-                                type: `tool-${part.tool}`,
-                                state: "output-error",
-                                toolCallId: part.callID,
-                                input: part.state.input,
-                                errorText: part.state.error,
-                                ...(part.metadata?.providerExecuted
-                                    ? { providerExecuted: true }
-                                    : {}),
-                                ...(differentModel
-                                    ? {}
-                                    : { callProviderMetadata: providerMeta(part.metadata) }),
-                            });
-                        }
-                    }
-                    if (part.state.status === "pending" || part.state.status === "running")
-                        assistantMessage.parts.push({
-                            type: `tool-${part.tool}`,
-                            state: "output-error",
-                            toolCallId: part.callID,
-                            input: part.state.input,
-                            errorText: "[Tool execution was interrupted]",
-                            ...(part.metadata?.providerExecuted ? { providerExecuted: true } : {}),
-                            ...(differentModel
-                                ? {}
-                                : { callProviderMetadata: providerMeta(part.metadata) }),
-                        });
-                }
-                if (part.type === "reasoning") {
-                    if (differentModel) {
-                        if (part.text.trim().length > 0)
-                            assistantMessage.parts.push({ type: "text", text: part.text });
-                        continue;
-                    }
-                    assistantMessage.parts.push({
-                        type: "reasoning",
-                        text: part.text,
-                        providerMetadata: part.metadata,
-                    });
-                }
-            }
-            if (assistantMessage.parts.length > 0) {
-                result.push(assistantMessage);
-                if (media.length > 0) {
-                    result.push({
-                        role: "user",
-                        parts: [
-                            { type: "text", text: SYNTHETIC_ATTACHMENT_PROMPT },
-                            ...media.map((attachment) => ({
-                                type: "file",
-                                url: attachment.url,
-                                mediaType: attachment.mime,
-                                filename: attachment.filename,
-                            })),
-                        ],
-                    });
-                }
-            }
-        }
-    }
-    return result.filter((msg) => msg.parts.some((part: Any) => part.type !== "step-start"));
+export function opencode1SyntheticAttachmentPrompt(): string {
+    return compile().syntheticPrompt;
 }

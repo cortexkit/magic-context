@@ -108,8 +108,14 @@ sending has to be added to the allowlist.
      tag per token; strings as a uint32 length plus UTF-16 code units, so lone
      surrogates stay distinct; numbers as float64. Tokens are packed in 64 KiB
      chunks, which replaces a text per token and three hash updates per token.
-     Digest values change once, so a persisted slot misses one replay after an
-     upgrade.
+     Current digests carry a `2.` format marker. A durable slot written before
+     the marker existed holds unmarked digests over the whole message, in the
+     old text encoding. Such a slot is verified with that legacy computation,
+     which is kept only for reading old slots, so an upgrade does not turn a
+     replayable turn into a refusal. (An independent review found that a
+     SQLITE_BUSY first pass after the upgrade refused where 0.47.0 replayed.)
+     A legacy slot that genuinely mismatches is still refused, and the next
+     healthy capture writes the current format.
    - The stored LKG prefix holds the provider view of the served messages.
      These sessions' snapshots shrink from about 840 MB, which was refused, to
      about 850 KB, which is stored. A healthy pass no longer serializes the
@@ -128,15 +134,23 @@ sending has to be added to the allowlist.
 A replay serves the stored prefix: the provider view of the messages that were
 served, followed by the current pristine tail. Compared with the array the
 transform returned, the replayed JSON lacks only the dropped tool-state fields.
-The provider request is the same: `provider-visible-replay.test.ts` runs whole
-and reduced messages through a vendored copy of OpenCode 1's
-`toModelMessagesEffect` and through Magic Context's OpenCode 2 commit, and the
-outputs are identical. It covers tool parts that are completed, compacted,
-errored, interrupted, pending and running, plus reasoning with a signature,
-text with provider metadata, image file parts, and compaction and subtask
-parts. The replay fit check (`estimateFinalWireInputTokens`) reads only fields
-the provider view keeps, so it measures the reduced snapshot as the same
-request. A test asserts the equal estimate.
+The provider messages are the same. `provider-visible-replay.test.ts` runs whole
+and reduced messages through OpenCode 1.18.35's `MessageV2.toModelMessages`,
+executed from a verbatim copy of its source (`media.ts`, `iife.ts` and the
+conversion's lines of `message-v2.ts`, pinned by sha256 and compared with
+upstream at the tag when an OpenCode checkout is available), including the AI
+SDK `convertToModelMessages` step (`ai` 6.0.168, the version that tag pins). It
+also runs them through Magic Context's OpenCode 2 commit. These are copies and
+local runs of the host code, not the hosts themselves; no provider transport
+serializer runs. The OpenCode 1 cases cover Anthropic, Gemini 3, Bedrock,
+Vertex Anthropic and an OpenAI-compatible model (media extracted into a
+synthetic user message), the `stripMedia` and `toolOutputMaxChars` options, an
+aborted assistant, and tool parts that are completed, compacted, errored,
+interrupted, pending and running, plus reasoning with a signature, text with
+provider metadata, image file parts, and compaction and subtask parts. The
+replay fit check (`estimateFinalWireInputTokens`) reads only fields the
+provider view keeps, so it measures the reduced snapshot as the same request.
+A test asserts the equal estimate.
 
 ## Other content shapes, v0.47.0 and after the third fix
 

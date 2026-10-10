@@ -182,7 +182,9 @@ function localCounts(
                 tokenizer: tk as any,
                 model: m,
                 messages: [{ role: "user", content: "x" }],
-                tools,
+                // ai-tokenizer types this against the AI SDK it peers with (5.x);
+                // the 6.x installed for tests types tools as a record.
+                tools: tools as never,
             });
             toolsSdk = toolsResult.total;
         } catch {

@@ -12,7 +12,10 @@ import {
     registerLkgPersistence,
     resetLkgSlotsForTest,
 } from "./lkg-slot";
-import { opencode1UiMessages } from "./opencode1-to-model-messages.fixture";
+import {
+    opencode1SyntheticAttachmentPrompt,
+    opencode1ToModelMessages,
+} from "./opencode1-to-model-messages.fixture";
 import { providerVisibleMessage } from "./provider-visible-parts";
 import { estimateTokens } from "./read-session-formatting";
 import { STORAGE_BUSY_MESSAGE } from "./storage-busy-refusal";
@@ -280,6 +283,8 @@ describe("issue 653 independent upgrade review", () => {
 });
 
 describe("issue 653 upstream conversion proof review", () => {
+    // These run OpenCode 1.18.35's own conversion from its verbatim source (see
+    // opencode1-to-model-messages.fixture.ts), through the AI SDK step.
     const png = "data:image/png;base64,iVBORw0KGgo=";
     function mediaHistory(): MessageLike[] {
         const messages = history();
@@ -292,26 +297,56 @@ describe("issue 653 upstream conversion proof review", () => {
         id: "gemini-3-pro",
         api: { npm: "@ai-sdk/google", id: "gemini-3-pro" },
     };
+    const text = (messages: unknown) => JSON.stringify(messages);
 
-    test("Google attachment fixture partner exposes its synthetic-user routing", () => {
+    test("attachment partner: a provider without tool-result media gets the synthetic user message", async () => {
+        const compatible = {
+            providerID: "local",
+            id: "model",
+            api: { npm: "@ai-sdk/openai-compatible", id: "model" },
+        };
         const input = mediaHistory();
-        const converted = opencode1UiMessages(input, google);
-        expect(converted).toHaveLength(4);
-        expect(converted[2]!.parts[0].text).toBe("Attached image(s) from tool result:");
-        expect(opencode1UiMessages(input.map(providerVisibleMessage), google)).toEqual(converted);
+        const converted = await opencode1ToModelMessages(input, compatible);
+        expect(text(converted)).toContain(opencode1SyntheticAttachmentPrompt());
+        expect(opencode1SyntheticAttachmentPrompt()).toBe("Attached media from tool result:");
+        expect(
+            await opencode1ToModelMessages(input.map(providerVisibleMessage), compatible),
+        ).toEqual(converted);
     });
 
-    // OpenCode 1.18.35 keeps Gemini 3 image attachments inside tool output,
+    // OpenCode 1.18.35 keeps Gemini 3 image attachments inside tool output
     // rather than extracting them into a synthetic user message (message-v2.ts:
-    // 137-163). Check that the vendored conversion implements that routing rule;
-    // providerVisibleMessage itself retains the attachment unchanged.
-    test.failing("vendored OC1 conversion should keep Gemini 3 attachments inside tool results", () => {
-        const converted = opencode1UiMessages(mediaHistory(), google);
-        expect(converted).toHaveLength(3);
-        expect(converted[1]!.parts[0].output.attachments[0].url).toBe(png);
+    // 137-163); providerVisibleMessage keeps the attachment unchanged.
+    test("OC1 conversion keeps Gemini 3 attachments inside tool results", async () => {
+        const input = mediaHistory();
+        const converted = await opencode1ToModelMessages(input, google);
+        expect(text(converted)).not.toContain(opencode1SyntheticAttachmentPrompt());
+        const tool = converted.find((message) => message.role === "tool");
+        expect(text(tool)).toContain("iVBORw0KGgo=");
+        expect(await opencode1ToModelMessages(input.map(providerVisibleMessage), google)).toEqual(
+            converted,
+        );
     });
 
-    test("aborted assistant fixture partner confirms the entire message is skipped", () => {
+    test("aborted-assistant partner: an aborted assistant with only reasoning is skipped", async () => {
+        const input = history();
+        (input[1]!.info as Record<string, unknown>).error = {
+            name: "MessageAbortedError",
+            data: { message: "aborted" },
+        };
+        input[1]!.parts = [{ type: "step-start" }, { type: "reasoning", text: "thinking" }];
+        const model = {
+            providerID: "test",
+            id: "model",
+            api: { npm: "@ai-sdk/anthropic", id: "model" },
+        };
+        const converted = await opencode1ToModelMessages(input, model);
+        expect(converted.map((message) => message.role)).toEqual(["user", "user"]);
+    });
+
+    // OpenCode 1.18.35 keeps an aborted assistant's text and tool output in the
+    // request (message-v2.ts:258-266).
+    test("OC1 conversion retains tool output from an aborted assistant", async () => {
         const input = history();
         (input[1]!.info as Record<string, unknown>).error = {
             name: "MessageAbortedError",
@@ -322,24 +357,17 @@ describe("issue 653 upstream conversion proof review", () => {
             id: "model",
             api: { npm: "@ai-sdk/anthropic", id: "model" },
         };
-        expect(opencode1UiMessages(input, model).map((m) => m.id)).toEqual(["u1", "u2"]);
-    });
-
-    // OpenCode 1.18.35 preserves an aborted assistant's tool/text output in
-    // the model request (message-v2.ts:258-266). The fixture should not omit
-    // that whole message just because the assistant has an abort error.
-    test.failing("vendored OC1 conversion should retain tool output from an aborted assistant", () => {
-        const input = history();
-        (input[1]!.info as Record<string, unknown>).error = {
-            name: "MessageAbortedError",
-            data: { message: "aborted" },
-        };
-        const model = {
-            providerID: "test",
-            id: "model",
-            api: { npm: "@ai-sdk/anthropic", id: "model" },
-        };
-        expect(opencode1UiMessages(input, model).map((m) => m.id)).toEqual(["u1", "a1", "u2"]);
+        const converted = await opencode1ToModelMessages(input, model);
+        expect(converted.map((message) => message.role)).toEqual([
+            "user",
+            "assistant",
+            "tool",
+            "user",
+        ]);
+        expect(text(converted)).toContain("Edit applied successfully.");
+        expect(await opencode1ToModelMessages(input.map(providerVisibleMessage), model)).toEqual(
+            converted,
+        );
     });
 });
 

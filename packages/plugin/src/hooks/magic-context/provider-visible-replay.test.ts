@@ -3,9 +3,10 @@
 /**
  * The last-known-good snapshot stores the served messages as the provider
  * receives them (provider-visible-parts.ts). These tests run whole and reduced
- * messages through the hosts' own conversions and show the provider request is
- * the same, for tool parts in every state and the other part kinds a request
- * carries.
+ * messages through OpenCode 1.18.35's conversion (run from a verbatim, hash-pinned
+ * copy of its source, AI SDK step included) and through Magic Context's
+ * OpenCode 2 commit, and show the resulting messages are the same, for tool
+ * parts in every state and the other part kinds a request carries.
  */
 
 import { beforeEach, describe, expect, it } from "bun:test";
@@ -14,7 +15,10 @@ import type { SessionContext, V2Message } from "../../v2/hooks/types";
 import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
 import { captureLkgSlot, projectLkgEntry, replayLkg } from "./lkg-replay";
 import { getSlot, resetLkgSlotsForTest } from "./lkg-slot";
-import { opencode1UiMessages } from "./opencode1-to-model-messages.fixture";
+import {
+    type Opencode1Model,
+    opencode1ToModelMessages,
+} from "./opencode1-to-model-messages.fixture";
 import { providerVisibleMessage } from "./provider-visible-parts";
 import type { MessageLike } from "./transform-operations";
 
@@ -157,36 +161,79 @@ function roundTrip<T>(value: T): T {
 describe("provider-visible last-known-good snapshots", () => {
     beforeEach(() => resetLkgSlotsForTest());
 
-    it("give OpenCode 1 the same model messages as the whole messages", () => {
-        const whole = roundTrip(session());
-        const reduced = roundTrip(session().map(providerVisibleMessage));
-        // The reduction removed the diagnostics and other UI data.
-        expect(JSON.stringify(reduced).length).toBeLessThan(JSON.stringify(whole).length / 10);
-        const wholeRequest = opencode1UiMessages(whole, MODEL);
-        expect(JSON.stringify(opencode1UiMessages(reduced, MODEL))).toBe(
-            JSON.stringify(wholeRequest),
-        );
-        // Every part kind above reached the request.
-        const kinds = wholeRequest.flatMap((message) =>
-            (message.parts as Array<{ type: string; state?: string }>).map(
-                (part) => `${part.type}${part.state ? `:${part.state}` : ""}`,
-            ),
-        );
-        expect(kinds).toEqual(
-            expect.arrayContaining([
-                "text",
-                "file",
-                "reasoning",
-                "tool-edit:output-available",
-                "tool-read:output-available",
-                "tool-bash:output-error",
-                "tool-bash:output-available",
-                "tool-write:output-error",
-            ]),
-        );
+    // Models that route tool-result media differently in OpenCode 1
+    // (message-v2.ts 137-170), plus the conversion's two options.
+    const routes: Array<{ label: string; model: Opencode1Model; options?: object }> = [
+        { label: "anthropic", model: MODEL },
+        {
+            label: "gemini 3",
+            model: {
+                providerID: "google",
+                id: "gemini-3-pro",
+                api: { npm: "@ai-sdk/google", id: "gemini-3-pro" },
+            },
+        },
+        {
+            label: "bedrock anthropic",
+            model: {
+                providerID: "amazon-bedrock",
+                id: "anthropic.claude",
+                api: { npm: "@ai-sdk/amazon-bedrock", id: "anthropic.claude-sonnet-4" },
+            },
+        },
+        {
+            label: "vertex anthropic",
+            model: {
+                providerID: "google-vertex-anthropic",
+                id: "claude",
+                api: { npm: "@ai-sdk/google-vertex/anthropic", id: "claude" },
+            },
+        },
+        {
+            label: "openai-compatible (media extracted)",
+            model: {
+                providerID: "local",
+                id: "m",
+                api: { npm: "@ai-sdk/openai-compatible", id: "m" },
+            },
+        },
+        { label: "stripMedia", model: MODEL, options: { stripMedia: true } },
+        { label: "toolOutputMaxChars", model: MODEL, options: { toolOutputMaxChars: 8 } },
+    ];
+
+    for (const route of routes) {
+        it(`give OpenCode 1 the same provider messages as the whole messages (${route.label})`, async () => {
+            const whole = roundTrip(session());
+            const reduced = roundTrip(session().map(providerVisibleMessage));
+            // The reduction removed the diagnostics and other UI data.
+            expect(JSON.stringify(reduced).length).toBeLessThan(JSON.stringify(whole).length / 10);
+            const wholeRequest = await opencode1ToModelMessages(whole, route.model, route.options);
+            expect(
+                JSON.stringify(await opencode1ToModelMessages(reduced, route.model, route.options)),
+            ).toBe(JSON.stringify(wholeRequest));
+            expect(JSON.stringify(wholeRequest)).toContain("partial output");
+        });
+    }
+
+    it("covers every tool state and part kind in the provider messages", async () => {
+        const request = JSON.stringify(await opencode1ToModelMessages(roundTrip(session()), MODEL));
+        for (const expected of [
+            "fix the build",
+            "thinking",
+            "sig-1",
+            "Edit applied successfully.",
+            "[Old tool result content cleared]",
+            "exit 1",
+            "partial output",
+            "[Tool execution was interrupted]",
+            "What did we do so far?",
+            "The following tool was executed by the user",
+        ]) {
+            expect(request).toContain(expected);
+        }
     });
 
-    it("replays a stored snapshot that gives OpenCode 1 the same model messages as the served array", () => {
+    it("replays a stored snapshot that gives OpenCode 1 the same provider messages as the served array", async () => {
         const served = session();
         expect(
             captureLkgSlot({
@@ -221,9 +268,9 @@ describe("provider-visible last-known-good snapshots", () => {
         });
         expect(replay.ok).toBe(true);
         if (!replay.ok) return;
-        expect(JSON.stringify(opencode1UiMessages(roundTrip(replay.messages), MODEL))).toBe(
-            JSON.stringify(opencode1UiMessages(roundTrip(next), MODEL)),
-        );
+        expect(
+            JSON.stringify(await opencode1ToModelMessages(roundTrip(replay.messages), MODEL)),
+        ).toBe(JSON.stringify(await opencode1ToModelMessages(roundTrip(next), MODEL)));
     });
 
     it("measures a reduced snapshot as the same request size", () => {
