@@ -5353,8 +5353,11 @@ fn apply_once(
     // HARD/reconcile advisories cannot price automatic reductions without a fold.
     let admission = edit_admission_for_request(&loaded.core, req);
     let protected_signed_prefix = !admission.admit(crate::edit_admission::EditCoord::Prefix);
-    // Claude Code still resends older signed thinking on a new-turn bust, which is rejected.
-    // Keep flush consumption and trigger parking unchanged until that history can be stripped safely.
+    // For models whose signatures bind thinking to preceding bytes, Anthropic rejects
+    // changes before a resent block. The Claude Code serializer keeps completed-turn
+    // blocks, so releasing a parked /ctx-flush at the next user turn would be rejected.
+    // Rollout step 8 in docs/designs/signed-thinking-hold.md removes completed-turn
+    // thinking before parking withheld flushes. Until then, consume flushes without parking.
     let trigger_holds_enabled = serializer_profile != Some(SerializerProfile::ClaudeCodeAnthropic);
     let mut held_release = HeldRelease::from_meta(&loaded.meta);
     held_release.cancel_inactive(
@@ -5536,9 +5539,9 @@ fn apply_once(
                     || hard_fold_prices_mutations
                     || cached_m1_missing_due,
             );
-        // Keep selection deferred when the producer gate blocks it.
-        // An execute selection class still needs the separate ride permission above
-        // before it can choose automatic reductions.
+        // A closed producer gate or an all-held plan selects Defer, which emits no
+        // reductions. Execute selection still needs pass_already_busting or
+        // supersession_ride_available to permit shortening or dropping content.
         let selection_class = if producer_gate && !all_held {
             selection_pass_class(scheduler_outcome.pass)
         } else {
@@ -5569,9 +5572,9 @@ fn apply_once(
             },
             loaded.meta.protected_tokens_effective,
             ctx.protected_tokens_floor,
-            // The floor snapshot is decision metadata, not served bytes. A marker HARD that keeps
-            // the provider cache still snapshots it (changed floor inputs raise exactly such a
-            // HARD), while the lanes that would act on the new floor stay closed until a real bust.
+            // This snapshot stores the minimum token mass protected from automatic reductions.
+            // A metadata-only head rebuild may refresh it without changing cached request bytes.
+            // An all-held pass keeps any saved value instead of adopting new host input.
             if pass_already_busting || marker_hard_keeps_provider_cache {
                 FloorPass::CacheBust
             } else {
@@ -5613,8 +5616,9 @@ fn apply_once(
                 timings.emergency_reasoning_exclusions = excluded_arcs;
             }
         }
-        // The same pure selection pass computes protection for acknowledgements on
-        // defer too. Its Defer class emits no reductions and never prices a rewrite.
+        // Even when rewrites are deferred, selection must report which tool blocks cannot
+        // be changed. PassClass::Defer returns that protection information without proposing
+        // reductions or granting permission to rewrite the cached prefix.
         let mut selection_outcome = {
             let frozen = frozen_red_targets(&loaded.core);
             // No per-request gate here: producer_gate already requires
@@ -5717,8 +5721,8 @@ fn apply_once(
         // publications still need Execute or an independently authorized repair/force/flush.
         let independent_bust_opportunity = supersession_ride_available;
         let bust_opportunity = independent_bust_opportunity || reductions_pending_now;
-        // Discover non-tool lanes before classification: a force batch containing only
-        // text compression or strip work must not need a tool drop to open its own gate.
+        // Discover text-compression and content-strip candidates before classifying the pass.
+        // A force-band request may have only that work, with no tool-result drop to select.
         let non_tool_bust_opportunity = bust_opportunity
             || cached_m1_missing_due
             || is_legacy_baseline(&loaded.core)
@@ -5837,9 +5841,12 @@ fn apply_once(
         if cache_sections_discarded {
             plan = PassPlan::Hard;
         }
-        // Kept thinking prevented rebuilding the head, and no remaining planner produced a
-        // byte-changing edit. Repeat selection without bust permission so model calibration,
-        // the protected-token snapshot and selection's age cutoff remain frozen.
+        // The kept current-turn thinking is bound to the bytes before it, so the cached
+        // history head cannot be rebuilt. The two head messages are m[0] (the cumulative
+        // baseline) and m[1] (history/memory updates since that baseline). No remaining
+        // planner found an edit to apply. Repeat selection without permission to rewrite
+        // the cached prefix, preserving token-estimation ratios, the protected-token
+        // minimum and the age cutoff used to select old content for reduction.
         if !all_held
             && trigger_holds_enabled
             && protected_signed_prefix
@@ -6101,8 +6108,11 @@ fn apply_once(
         pending_overlays.max_seen_ordinal = None;
     }
     if !prefix_replay_must_be_preserved {
-        // Pending IDs suppress tag/hint rendering. Preserve Claude Code's existing behavior:
-        // its mutation passes drain those IDs, even when current-turn thinking is kept.
+        // These block IDs suppress tag/hint rendering; clearing them allows those
+        // additions to be rendered. Claude Code keeps this legacy drain behavior until
+        // rollout step 8 in docs/designs/signed-thinking-hold.md removes thinking from
+        // completed turns. A deferred prefix rewrite can then proceed without resending
+        // signatures bound to old bytes.
         meta.pending_tag_block_ids
             .retain(|id| trigger_holds_enabled && !admit_block_id(&admission, id));
     } else if matches!(

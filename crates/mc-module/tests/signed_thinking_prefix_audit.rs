@@ -376,8 +376,11 @@ impl Fixture {
             .is_none();
         let eligibility = json!({
             "defer": !response.prefix_bust_permitted, "noBoundary": !has_boundary,
-            // Saved head/summary/cut validation is not implemented in this harness;
-            // validatingRecord is true independently of trigger parking.
+            // validatingRecord is an eligibility flag for comparing captured request bytes,
+            // not a validation result here. A saved request-prefix record would cover the
+            // messages at the start, compaction summary and history-removal boundary.
+            // This fixture never validates that record, so the flag is always true;
+            // noParkedTrigger separately checks held_release for delayed triggers.
             "noParkedTrigger": no_parked_trigger, "validatingRecord": true,
         });
         let mode = if std::env::var("MC_AUDIT_STRICT").as_deref() == Ok("1") {
@@ -945,7 +948,9 @@ fn force_latch_ignores_bookkeeping_without_thinking() {
         Lane::DropFull,
         "force-latch-no-thinking",
     );
-    // A protection window larger than the request leaves the force pass no reclaim to apply.
+    // Set the protection count above the request size so no request content can be
+    // shortened or dropped. Trailing-blank bookkeeping must not consume the one
+    // rewrite opportunity offered when usage reaches the force band.
     f.req.protected_tokens_effective = Some(1_000_000_000);
     f.served = f.pass();
     let before = f.store.load(&f.req.session_id).unwrap().core;
@@ -1058,9 +1063,11 @@ fn parked_force_and_flush_are_not_standing_permissions() {
             .meta
             .held_release
             .is_some());
-        // The new call/result pairs follow kept thinking. No token mass protects them,
-        // and three newer tool tags move the oldest beyond the mandatory three-tag window.
-        // If a held force episode or flush stayed armed, it could rewrite that old result.
+        // The fixture requests a zero-token protection floor; selection still protects
+        // the three newest tool tags. All new call/result pairs follow kept thinking,
+        // and three newer pairs make the first result eligible for the queued drop.
+        // The earlier held force episode or flush must not authorize dropping that
+        // result in this same turn.
         let tail_step = f.step + 1;
         for suffix in ["tail", "window-1", "window-2", "window-3"] {
             let id = format!("parking-{suffix}");
@@ -1159,8 +1166,12 @@ fn step2_review_claude_code_gate_preserves_guidance_adoption() {
     assert!(f.served.prefix_bust_permitted);
     assert!(!meta.soft_refresh_pending);
     assert!(meta.held_release.is_none());
-    // Claude Code is excluded from this rollout: its existing flush also adopts the
-    // guidance date used by the next system prompt, not just the flush and parking flags.
+    // Planned Claude Code behavior keeps a blocked flush pending until a pass can
+    // rewrite the prefix without current-turn thinking. Rollout step 8 in
+    // docs/designs/signed-thinking-hold.md also removes completed-turn thinking so
+    // that release does not resend invalidated old signatures. Until then, preserve
+    // the existing flush: adopt the next system-prompt date and consume the refresh
+    // flag without parking it.
     assert_eq!(
         meta.guidance_date, "2026-09-02",
         "Claude Code guidance behavior changed despite the profile gate"
@@ -1195,8 +1206,12 @@ fn step2_review_claude_code_gate_preserves_pending_overlay_drain() {
     assert!(f.served.prefix_bust_permitted);
     assert!(!meta.soft_refresh_pending);
     assert!(meta.held_release.is_none());
-    // Pending overlays were drained on a Claude Code mutation pass before this rollout.
-    // A profile gate must cover these fields as well as the trigger flags.
+    // Planned behavior keeps pending tag/hint IDs while their blocks cannot safely
+    // change under kept current-turn thinking. Rollout step 8 in
+    // docs/designs/signed-thinking-hold.md adds that delay for Claude Code and removes
+    // completed-turn thinking before release. Until then, preserve the existing
+    // behavior: clear pending_tag_block_ids and pending_user_hint_block_ids on
+    // mutation passes so tags/hints can render, while a flush consumes its refresh flag.
     assert!(
         meta.pending_tag_block_ids.is_empty() && meta.pending_user_hint_block_ids.is_empty(),
         "Claude Code pending overlays changed despite the profile gate: tags={:?}, hints={:?}",
@@ -1233,8 +1248,9 @@ fn step2_review_parked_lanes_replay_and_release_after_store_reopen() {
         }
         f.tool_loop(3);
         let before_reopen = f.wire();
-        // Reopen the on-disk store with a new cache namespace; no obligation is re-queued.
-        // This prices persisted parking, not a full daemon/process restart.
+        // Close and reopen the on-disk store without re-queuing work. The original held
+        // triggers must survive that database reopen, even with a fresh cache namespace.
+        // This tests a database reopen, not a daemon or process restart.
         let placeholder = McStore::open_for_test(&StorageDescriptor {
             module_id: "prefix-audit-reopen-placeholder".into(),
             storage_namespace: "mc_cache".into(),
