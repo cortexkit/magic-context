@@ -25,6 +25,7 @@ import {
 	suggestRegisteredPiModel,
 } from "./model-chain-health";
 import { MAGIC_CONTEXT_PI_SUBAGENT_ENV } from "./subagent-runner";
+import { LiveConfigReader } from "@magic-context/core/config/live-snapshot";
 
 // The registry an operator had: the antigravity-auth extension registers its
 // provider as `google-antigravity`, and pi-ollama-cloud's catalog carries
@@ -710,6 +711,92 @@ describe("Pi extension reports an empty historian chain at session start", () =>
 		await runtime.agentTurn(ctx);
 		expect(triggerLines(logs)).toEqual([
 			expect.stringContaining("(model=litellm/openai/gpt-4.1-mini"),
+		]);
+		expect(notify).toHaveBeenCalledTimes(0);
+	}, 20_000);
+
+	it("warns instead of rejecting when the settled re-check throws", async () => {
+		// The settled callback runs resolveProjectDepsForDir and poll()
+		// outside reportPiModelChains' own try/catch; a throw there used to
+		// escape as an unhandled rejection on the void chain. The re-check is
+		// guarded, the settled marker stands (the await really finished), and
+		// the next session_start reports directly.
+		const root = isolatedConfig({
+			historian: { pi: { model: "litellm/google/gemini-3.1-flash-lite" } },
+			dreamer: { disable: true },
+		});
+		const logs: string[] = [];
+		spyOn(loggerModule, "log").mockImplementation((message: unknown) => {
+			logs.push(String(message));
+		});
+		dreamerTest.setStartDreamScheduleTimerFactory(async () => () => {});
+
+		let hydrated = false;
+		let resolveRefresh!: () => void;
+		const refreshing = new Promise<void>((resolve) => {
+			resolveRefresh = resolve;
+		});
+		const lateRegistry = {
+			find: (provider: string, id: string) =>
+				(hydrated
+					? [{ provider: "litellm", id: "google/gemini-3.1-flash-lite" }]
+					: []
+				).find((model) => model.provider === provider && model.id === id),
+			getAll: () =>
+				hydrated
+					? [{ provider: "litellm", id: "google/gemini-3.1-flash-lite" }]
+					: [],
+			awaitBackgroundRefresh: () => refreshing,
+		};
+
+		const runtime = createPi();
+		await magicContextPiExtension(runtime.pi);
+		const notify = mock((_message: string, _level?: string) => undefined);
+		const cwd = projectCwd(root, "repo-settle-throw", {
+			dreamer: { disable: true },
+		});
+		const ctx = {
+			cwd,
+			hasUI: true,
+			modelRegistry: lateRegistry,
+			sessionManager: { getSessionId: () => "ses-settle-throw" },
+			ui: { notify, setStatus: () => undefined },
+		};
+		await runtime.emit("session_start", ctx);
+
+		// Make the settle-time re-check throw: reportPiModelChainsAfterRefresh
+		// calls liveReaderFor(...).poll() outside reportPiModelChains' own
+		// try/catch, so this is the call that used to escape as an unhandled
+		// rejection on the void chain. The spy goes in after the schedule
+		// pass (which polls too, but inside its guard) so only the settle
+		// trips it.
+		const pollSpy = spyOn(
+			LiveConfigReader.prototype,
+			"poll",
+		).mockImplementation(() => {
+			throw new Error("settle-time config load failure");
+		});
+
+		resolveRefresh();
+		await macrotask();
+		pollSpy.mockRestore();
+
+		// The run survived the settle: no trigger line from the crashed
+		// re-check, and the failure was warned through the logger, not thrown
+		// (bun fails a test on an unhandled rejection, so the guard is also
+		// proven by this test completing).
+		expect(triggerLines(logs)).toEqual([]);
+		expect(
+			logs.some((line) =>
+				line.includes("WARN model chain post-refresh check failed"),
+			),
+		).toBe(true);
+
+		hydrated = true;
+		await runtime.emit("session_start", ctx);
+		await macrotask();
+		expect(triggerLines(logs)).toEqual([
+			expect.stringContaining("(model=litellm/google/gemini-3.1-flash-lite"),
 		]);
 		expect(notify).toHaveBeenCalledTimes(0);
 	}, 20_000);

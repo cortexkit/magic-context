@@ -1703,7 +1703,18 @@ async function startPiMagicContextRuntime(
 						// trustworthy and later passes may report it.
 						modelChainRefreshPending.delete(waitingDir);
 						modelChainReadinessWaited.add(waitingDir);
-						reportPiModelChainsAfterRefresh(waitingDir);
+						try {
+							reportPiModelChainsAfterRefresh(waitingDir);
+						} catch (err) {
+							// The re-check resolves deps and polls the config
+							// outside reportPiModelChains' own try/catch; a
+							// throw here must not escape as an unhandled
+							// rejection on the void chain. The settled marker
+							// stands (the await really finished), so the next
+							// session_start or agent turn re-runs the check and
+							// reports directly.
+							warn("model chain post-refresh check failed:", err);
+						}
 					});
 				}
 				return;
