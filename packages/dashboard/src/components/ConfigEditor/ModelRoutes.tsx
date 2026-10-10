@@ -1,17 +1,8 @@
 import { createSignal, Index, Show } from "solid-js";
 import ModelSelect from "./ModelSelect";
+import { editRoute } from "./route-edit";
 
-export function editRoute(
-  value: Record<string, unknown>,
-  previous: string,
-  route: string,
-  preset: unknown,
-): Record<string, unknown> {
-  const next = { ...value };
-  delete next[previous];
-  if (route) next[route] = preset;
-  return next;
-}
+export { editRoute } from "./route-edit";
 
 export default function ModelRoutes(props: {
   value: Record<string, unknown> | undefined;

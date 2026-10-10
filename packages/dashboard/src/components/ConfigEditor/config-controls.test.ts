@@ -6,9 +6,9 @@ import manifest from "../../generated/tool-descriptions.json";
 import { CONFIG_HELP, docsUrl } from "./config-help";
 import { configDefault, defaultLabel } from "./config-schema";
 import { LANGUAGE_CODES, LANGUAGE_OPTIONS } from "./languages";
-import { editRoute } from "./ModelRoutes";
-import { editToolDescription, normalizeToolDescriptions } from "./ToolDescriptions";
-import { qualifierOptions } from "./VariantSelect";
+import { editRoute } from "./route-edit";
+import { editToolDescription, normalizeToolDescriptions } from "./tool-description-config";
+import { qualifierOptions } from "./variant-options";
 
 describe("config controls", () => {
   it("every help link includes the deployment base and targets an existing docs page", () => {

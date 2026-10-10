@@ -17,7 +17,7 @@ import {
   cacheSessionVisible,
   sessionModelLabel,
   sessionModelSummary,
-} from "./CacheDiagnostics";
+} from "./cache-diagnostics-model";
 
 const brocaRow: SessionCacheStats = {
   harness: "broca",
