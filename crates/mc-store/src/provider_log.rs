@@ -1253,9 +1253,12 @@ impl McStore {
                 let policy_parts=policy_index.parts_for_mids(&mids)?;
                 let (mut write,value) = decide(&ProviderHookContext {counters,policy,tag_high_water:reserved_high,parts:policy_parts.clone(),policy_index})?;
                 if let Some(updates)=write.counters.as_object_mut().and_then(|c|c.remove("policy_baseline_updates")).and_then(|v|v.as_array().cloned()) {
+                    // A refrozen baseline restates every frozen part. Rows whose
+                    // stored measurement already matches are left unwritten.
+                    let mut update_measurement=conn.prepare_cached("UPDATE mc_provider_policy_parts_v1 SET policy_json=json_set(policy_json,'$.measurement',json(?3)) WHERE conv_key=?1 AND block_id=?2 AND json_extract(policy_json,'$.measurement') IS NOT json(?3)")?;
                     for update in updates {
                         if let Some(id)=update.get("block_id").and_then(Value::as_str) {
-                            conn.execute("UPDATE mc_provider_policy_parts_v1 SET policy_json=json_set(policy_json,'$.measurement',json(?3)) WHERE conv_key=?1 AND block_id=?2",params![conv,id,update["measurement"].to_string()])?;
+                            update_measurement.execute(params![conv,id,update["measurement"].to_string()])?;
                         }
                     }
                 }
