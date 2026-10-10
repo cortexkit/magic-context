@@ -14742,6 +14742,7 @@ fn new_frozen_strip_units(
     let mut units = BTreeMap::<String, FrozenUnit>::new();
     let protected_thinking = protected_thinking_turn_mids(req);
     let unsafe_content = active_thinking_prefix_edit_ids(core, req);
+    let active_turn = active_anthropic_turn_mids(req);
     let mut has_assistant_response = false;
 
     for index in (0..req.messages.len()).rev() {
@@ -14806,7 +14807,7 @@ fn new_frozen_strip_units(
             // this already-busting pass and replays unchanged on defers; selection.rs continues to
             // exclude every reasoning block from ReductionDecision targets.
             let cc_aged = message.ck.role == "assistant"
-                && !in_active_anthropic_turn(req, &message.mid)
+                && !active_turn.contains(message.mid.as_str())
                 && scope.visible(message)
                 && !protected_thinking.contains(message.mid.as_str())
                 && reasoning_mutation_exempt_mid != Some(message.mid.as_str())
@@ -14948,6 +14949,7 @@ fn opencode_reasoning_removal_mids<'a>(
     let newest = latest_assistant_mid(&req.messages);
     let exempt = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
     let protected_thinking = protected_thinking_turn_mids(req);
+    let active_turn = active_anthropic_turn_mids(req);
     // `@openrouter/ai-sdk-provider` keeps copies of the reasoning as
     // `metadata.openrouter.reasoning_details` on other parts of the message. This lane
     // cannot strip those, so such messages are skipped whatever the provider id is.
@@ -14989,7 +14991,7 @@ fn opencode_reasoning_removal_mids<'a>(
             && Some(mid) != newest
             && Some(mid) != exempt
             && Some(mid) != scope.anchor
-            && !in_active_anthropic_turn(req, mid)
+            && !active_turn.contains(mid)
             && tag > 0
             && tag <= cutoff
             && message.ck.content.iter().any(has_meaningful_content);
@@ -17353,6 +17355,7 @@ fn is_mutable_merged_reasoning_block(block: &CkWireBlock) -> bool {
 /// returned, so it does not make a message immutable.
 fn protected_thinking_turn_mids(req: &TransformRequest) -> HashSet<&str> {
     let route = active_turn_route_request(req);
+    let active_turn = active_anthropic_turn_mids(&route);
     req.messages
         .iter()
         .filter(|m| {
@@ -17362,7 +17365,7 @@ fn protected_thinking_turn_mids(req: &TransformRequest) -> HashSet<&str> {
                     .iter()
                     .any(|block| is_reasoning_block(block) && !is_structural_noise(block))
         })
-        .filter(|m| in_active_anthropic_turn(&route, &m.mid))
+        .filter(|m| active_turn.contains(m.mid.as_str()))
         .map(|m| m.mid.as_str())
         .collect()
 }

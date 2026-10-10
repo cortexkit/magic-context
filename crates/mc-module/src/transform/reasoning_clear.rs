@@ -121,6 +121,7 @@ fn new_reasoning_clear_units(
         });
     let mut units = Vec::new();
     let protected_thinking = protected_thinking_turn_mids(req);
+    let active_turn = active_anthropic_turn_mids(req);
     for message in &req.messages {
         let tag = message_tag_number(message, tag_numbers);
         // Legacy served evidence is replay, not new selection. Becoming newest
@@ -132,7 +133,7 @@ fn new_reasoning_clear_units(
             || message.mid.is_empty()
             || (!already_served_clear
                 && (newest == Some(message.mid.as_str())
-                    || in_active_anthropic_turn(req, &message.mid)
+                    || active_turn.contains(message.mid.as_str())
                     || lineage_anchor_mid == Some(message.mid.as_str())))
             || tag == 0
             || tag > cutoff

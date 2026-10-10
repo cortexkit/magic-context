@@ -210,23 +210,40 @@ fn non_tag_messages(
             })
         })
         .collect::<Result<Vec<_>, HandlerOutcome>>()?;
+    // A long provider session holds one live answer per hooked message. Index the
+    // messages and memoize ancestor cuts so replaying answers stays linear; the
+    // index keeps the first message for a (mid, ordinal) pair, as a scan would.
+    let mut index: HashMap<(String, u64), usize> = HashMap::new();
+    for (position, message) in messages.iter().enumerate() {
+        index
+            .entry((message.mid.clone(), message.ordinal))
+            .or_insert(position);
+    }
+    let mut cuts: HashMap<String, Option<u64>> = HashMap::new();
     for stored in store
         .load_provider_hook_answers(&key.store_key())
         .map_err(transient)?
     {
-        if stored.state != "live"
-            || ancestor_cut(store, key, lineage, &stored.lineage_id)?
-                .is_none_or(|cut| stored.answer.ordinal > cut)
-        {
+        if stored.state != "live" {
+            continue;
+        }
+        let cut = match cuts.get(&stored.lineage_id) {
+            Some(cut) => *cut,
+            None => {
+                let cut = ancestor_cut(store, key, lineage, &stored.lineage_id)?;
+                cuts.insert(stored.lineage_id.clone(), cut);
+                cut
+            }
+        };
+        if cut.is_none_or(|cut| stored.answer.ordinal > cut) {
             continue;
         }
         let answer = stored.answer;
-        let Some(message) = messages
-            .iter_mut()
-            .find(|m| m.mid == answer.subject.subject_mid && m.ordinal == answer.ordinal)
+        let Some(&position) = index.get(&(answer.subject.subject_mid.clone(), answer.ordinal))
         else {
             continue;
         };
+        let message = &mut messages[position];
         let mut ops: Vec<hooks::answer::Operation> =
             serde_json::from_str(&answer.ops_json).map_err(transient)?;
         // The host record keeps its earlier hook answer unchanged when a step
