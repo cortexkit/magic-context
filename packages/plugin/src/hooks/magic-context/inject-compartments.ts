@@ -853,7 +853,11 @@ function isDroppedPlaceholder(text: string): boolean {
 }
 
 export interface M0SnapshotMarkers {
-    /** Highest score-selection sequence rendered into these bytes; never requests a cache rebuild. */
+    /**
+     * Highest staged `/ctx-rescore` selection rendered into these bytes. Selections
+     * staged later wait for the next natural rebuild of this head; a difference here
+     * never triggers one on its own.
+     */
     scoreSelectionWatermark?: number;
     projectMemoryEpoch: number;
     workspaceFingerprint: string | null;

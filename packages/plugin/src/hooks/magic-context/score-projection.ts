@@ -6,7 +6,14 @@ import {
 import { getCompartments } from "../../features/magic-context/storage";
 import type { Database } from "../../shared/sqlite";
 
-/** Highest score-selection sequence included in the persisted m[0] bytes. */
+/**
+ * `/ctx-rescore` stages new compartment importance scores as numbered selections; it
+ * never rewrites the compartment rows. This returns the highest selection number that
+ * the session's cached history head (the frozen m[0] block of the prompt) was rendered
+ * with. Selections above it are still pending: they show up only when the next
+ * cache-rebuilding history fold renders the head again, so a rescore never causes a
+ * rebuild of its own.
+ */
 export function readAppliedScoreWatermark(db: Database, sessionId: string): number {
     const row = db
         .prepare(
@@ -77,8 +84,10 @@ export function projectCompartmentScores<T extends RescoreSource>(
 }
 
 /**
- * Copy compartments with their latest valid scores for examples in the historian's
- * next summary prompt. This does not update the primary agent's cached m[0]/m[1].
+ * Returns copies of the compartments carrying their latest valid scores, for the
+ * example summaries the historian sees in its next prompt. The stored rows and the
+ * primary session's cached history head (m[0]/m[1]) are not touched, so this read
+ * can never change what the main session sends.
  */
 export function readEffectiveReferenceCompartments(
     db: Database,
@@ -90,8 +99,11 @@ export function readEffectiveReferenceCompartments(
             const raw = getCompartments(db, sessionId);
             const projected = projectCompartmentScores(db, sessionId, raw, "latest").compartments;
             if (!sources) return projected;
-            // A retained or staged reference can predate a source rewrite. Only use a
-            // score if its full creation/source identity still belongs to that row.
+            // The caller's reference rows may be older copies, and a compartment can be
+            // rewritten in place (for example by /ctx-recomp) after a score was staged
+            // for it. A staged score applies only while the row's identity (its id,
+            // creation time, title and summary text) still matches the row it was
+            // computed for; otherwise the reference keeps its own score.
             const scores = new Map(
                 raw.map((row, i) => [computeRescoreSourceIdentity(row), projected[i].importance]),
             );
