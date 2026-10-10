@@ -360,4 +360,64 @@ describe("Pi extension reports an empty historian chain at session start", () =>
 			"openai/gpt-6.1-sol (did you mean openai-codex/gpt-6.1-sol?)",
 		);
 	}, 20_000);
+
+	it("waits for the host's discovery refresh before declaring the chain dead", async () => {
+		// The OMP shape seen in the field: `litellm` is a dynamic-only extension
+		// provider, so its models exist only after the boot-time
+		// refreshInBackground() merge settles -- which nothing on the startup path
+		// awaits -- and extension registerProvider calls are queued until after
+		// extension loading. One synchronous find() there is a "not yet", not an
+		// "absent"; reporting it as `registered historian trigger: DISABLED` told
+		// operators their working historian config was broken.
+		const root = isolatedConfig({
+			historian: { pi: { model: "litellm/google/gemini-3.1-flash-lite" } },
+			dreamer: { disable: true },
+		});
+		const logs: string[] = [];
+		spyOn(loggerModule, "log").mockImplementation((message: unknown) => {
+			logs.push(String(message));
+		});
+		dreamerTest.setStartDreamScheduleTimerFactory(async () => () => {});
+
+		let hydrated = false;
+		const hydratedModels = [
+			{ provider: "litellm", id: "google/gemini-3.1-flash-lite" },
+		];
+		const lateRegistry = {
+			find: (provider: string, id: string) =>
+				(hydrated ? hydratedModels : []).find(
+					(m) => m.provider === provider && m.id === id,
+				),
+			getAll: () => (hydrated ? hydratedModels : []),
+			awaitBackgroundRefresh: async () => {
+				hydrated = true;
+			},
+		};
+
+		const runtime = createPi();
+		await magicContextPiExtension(runtime.pi);
+		const notify = mock((_message: string, _level?: string) => undefined);
+		const ctx = {
+			cwd: root,
+			hasUI: true,
+			modelRegistry: lateRegistry,
+			sessionManager: { getSessionId: () => "ses-hydrating" },
+			ui: { notify, setStatus: () => undefined },
+		};
+		await runtime.emit("session_start", ctx);
+		const { promise: settled, resolve: resolveSettled } =
+			Promise.withResolvers<void>();
+		setImmediate(resolveSettled);
+		await settled;
+
+		// Exactly one trigger line, and it is the running one: a first pass that
+		// announced DISABLED would leave a second element here.
+		const historianLines = logs.filter((line) =>
+			line.includes("registered historian trigger"),
+		);
+		expect(historianLines).toEqual([
+			expect.stringContaining("(model=litellm/google/gemini-3.1-flash-lite"),
+		]);
+		expect(notify).toHaveBeenCalledTimes(0);
+	}, 20_000);
 });

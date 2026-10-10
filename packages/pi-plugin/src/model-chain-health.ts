@@ -29,6 +29,8 @@ type PiHarness = "pi" | "omp";
 export interface PiModelRegistryLike {
 	find(provider: string, modelId: string): unknown;
 	getAll?: () => ReadonlyArray<{ provider?: unknown; id?: unknown }>;
+	/** OMP only: resolves once the boot-time discovery merge has settled. */
+	awaitBackgroundRefresh?: () => Promise<unknown>;
 }
 
 export interface DroppedPiModel {
@@ -68,6 +70,39 @@ export function isPiModelRegistered(
 			registry.find(model.slice(0, separator), model.slice(separator + 1)),
 		)
 	);
+}
+
+/**
+ * Wait for the host's discovery-backed catalogue to settle before treating a
+ * `find()` miss as proof a model does not exist.
+ *
+ * OMP composes its catalogue in two phases: the `ModelRegistry` constructor
+ * loads only the synchronous layers, and a dynamic-only extension provider such
+ * as `litellm` appears only after the boot-time `refreshInBackground()` merge
+ * runs -- which OMP deliberately never awaits on the startup path, and whose
+ * extension `registerProvider` calls are themselves queued until after
+ * extension loading. So a synchronous lookup during extension registration can
+ * miss a model that exists, and it does so intermittently (observed: four OMP
+ * processes inside one minute, two registering the historian and two
+ * reporting `registered historian trigger: DISABLED` for the same config).
+ *
+ * OMP's own consumers re-check after awaiting this (session/agent-session.ts
+ * `#retryInactiveAdvisorAfterModelDiscovery`, task/executor.ts). An extension
+ * that trusts one synchronous miss disables the feature for the life of the
+ * process. Resolves immediately where the API is absent (Pi, or a registry with
+ * no refresh in flight) and never rejects: a failed refresh leaves the caller's
+ * next synchronous check to report the miss.
+ */
+export async function waitForPiModelRegistryRefresh(
+	registry: Pick<PiModelRegistryLike, "awaitBackgroundRefresh">,
+): Promise<void> {
+	const refresh = registry.awaitBackgroundRefresh;
+	if (typeof refresh !== "function") return;
+	try {
+		await refresh.call(registry);
+	} catch {
+		// Swallowed on purpose: the caller re-reads the registry either way.
+	}
 }
 
 function registeredModels(

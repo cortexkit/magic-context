@@ -192,6 +192,7 @@ import {
 	formatEmptyPiModelChain,
 	formatEmptyPiModelChainsNotice,
 	type PiModelRegistryLike,
+	waitForPiModelRegistryRefresh,
 } from "./model-chain-health";
 import { bootPiRuntimeWithDeadline } from "./pi-boot-deadline";
 import {
@@ -1624,11 +1625,17 @@ async function startPiMagicContextRuntime(
 
 	// Config generation last checked per project directory.
 	const modelChainsCheckedGeneration = new Map<string, number>();
+	// Project directories whose chain report already waited once for the host's
+	// discovery-backed catalogue to settle.
+	const modelChainReadinessRechecked = new Set<string>();
 	/**
 	 * Validate the historian and dreamer chains against Pi's model registry:
 	 * log the historian chain that will actually run, and notify the session
 	 * once per process for each set of chains left empty (see
 	 * model-chain-health.ts). Runs at session start and after a config reload.
+	 * An empty chain is first re-checked after one background-refresh await,
+	 * because a registration-time miss on a discovery-backed provider means
+	 * "not hydrated yet" far more often than "not configured".
 	 */
 	function reportPiModelChains(
 		ctx: {
@@ -1654,6 +1661,23 @@ async function startPiMagicContextRuntime(
 				registry,
 				harness: PI_HARNESS_KIND,
 			});
+
+			// Nothing is logged or notified from a first pass that found an empty
+			// chain: on OMP the provider that owns these models is queued during
+			// extension loading and merged by a boot refresh nobody awaits, so
+			// announcing "will not run" here is usually wrong and, once notified,
+			// sticky for the process. Wait for that refresh once per project and
+			// report from the settled catalogue.
+			if (
+				empty.length > 0 &&
+				!modelChainReadinessRechecked.has(project.projectDir)
+			) {
+				modelChainReadinessRechecked.add(project.projectDir);
+				void waitForPiModelRegistryRefresh(registry).then(() =>
+					reportPiModelChains(ctx, project),
+				);
+				return;
+			}
 			const emptyHistorian = empty.find((chain) => chain.owner === "historian");
 			const historianLine = historian
 				? `registered historian trigger (model=${historian.model}${historian.fallbackModels?.length ? `, fallbacks=${historian.fallbackModels.join(",")}` : ""}, executeThreshold=${formatExecuteThresholdForLog(historian.executeThresholdPercentage)})`

@@ -370,6 +370,32 @@ describe("Pi dreamer wiring", () => {
 		expect(tasks[0].modelChainUnavailable).toBe(true);
 	});
 
+	test("re-probes a model that becomes registered after an early miss", () => {
+		// OMP queues a dynamic-only extension provider (`litellm`) during extension
+		// loading and merges its catalogue in a fire-and-forget boot refresh, so a
+		// miss at registration normally means "not hydrated yet". Caching the miss
+		// kept the historian chain empty for the whole process even after the model
+		// appeared -- observed in the field as `registered historian trigger:
+		// DISABLED` in two of four OMP processes started within one minute.
+		let hydrated = false;
+		const registry = {
+			find: (_provider: string, model: string) =>
+				hydrated && model === "historian" ? {} : undefined,
+		};
+		const task = {
+			task: "classify-memories" as const,
+			schedule: "0 4 * * *",
+			timeoutMinutes: 20,
+			model: "litellm/historian",
+		};
+		expect(validatePiDreamerModels([task], registry)[0].model).toBeUndefined();
+		hydrated = true;
+		expect(validatePiDreamerModels([task], registry)[0]).toMatchObject({
+			model: "litellm/historian",
+			modelChainUnavailable: false,
+		});
+	});
+
 	test("does not register the filesystem root or home for dreaming", () => {
 		db = createDb();
 		let starts = 0;
