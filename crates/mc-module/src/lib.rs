@@ -101,23 +101,26 @@ use chrono::{DateTime, Local, NaiveDate, TimeZone, Utc};
 use cortexkit_lease::LeaseError;
 use cortexkit_store::StoreError;
 use cortexkit_store_types::{sqlite_store_path, Isolation, StorageBackend, StorageDescriptor};
+use mc_store::memory_lifecycle::applier::{AdmissionOperation, AdmissionRequest};
 use mc_store::single_store_schema::{
     SINGLE_STORE_MIGRATION_REQUIRED_REASON, SINGLE_STORE_MIGRATION_REQUIRED_SENTENCE,
     SINGLE_STORE_STATE_SPLIT_REASON,
 };
 #[cfg(test)]
+use mc_store::InsertMemoryInput;
+#[cfg(test)]
 use mc_store::TagNumberRow;
 use mc_store::{
     canonical_root, validate_state_import_compartments, DeferredExecuteState,
     FacadeMemoryMutationError, FacadeMutationOutcome, HistorianChunkRange, HistorianDecision,
-    HistorianPhase, HistorianRecentDecision, InsertMemoryInput, MappingUpdate, McStore,
-    McStoreError, McTagRow, ModuleDropSeedRow, ModuleStateSyncError, ModuleStateSyncRequest,
-    ModuleStripSeedRow, NoteCasOutcome, NoteDismissOutcome, NoteEvaluationInput, NoteInput,
-    NoteNudgeAnchorSeed, NoteWriteInput, PendingAgentDrop, PendingAgentDropSeedRow,
-    PendingCompactionMarkerState, RecordWrapupCommandOutcome, StateImportError,
-    StateImportPreflight, StateImportValidationError, StoredChunkTranscript, StoredCompartment,
-    StoredNote, TodoStateSetOutcome, UserHintSeedRow, VerificationUpdate, WrapupCommandRecord,
-    LATEST_MIGRATION_VERSION, STORE_AHEAD_OF_BINARY_REFUSAL_REASON,
+    HistorianPhase, HistorianRecentDecision, MappingUpdate, McStore, McStoreError, McTagRow,
+    ModuleDropSeedRow, ModuleStateSyncError, ModuleStateSyncRequest, ModuleStripSeedRow,
+    NoteCasOutcome, NoteDismissOutcome, NoteEvaluationInput, NoteInput, NoteNudgeAnchorSeed,
+    NoteWriteInput, PendingAgentDrop, PendingAgentDropSeedRow, PendingCompactionMarkerState,
+    RecordWrapupCommandOutcome, StateImportError, StateImportPreflight, StateImportValidationError,
+    StoredChunkTranscript, StoredCompartment, StoredNote, TodoStateSetOutcome, UserHintSeedRow,
+    VerificationUpdate, WrapupCommandRecord, LATEST_MIGRATION_VERSION,
+    STORE_AHEAD_OF_BINARY_REFUSAL_REASON,
 };
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -13454,24 +13457,47 @@ impl McHandler {
                     action,
                     command_id.as_deref(),
                     |tx| {
-                        let id = tx
-                            .insert_memory(InsertMemoryInput {
-                                project_path: memory_project,
-                                route_project_root: Some(facade_scope.route_project_root.as_str()),
-                                category,
-                                content,
-                                source_session_id: Some(conversation_key),
-                                source_type: Some("agent"),
-                                importance: Some(50),
-                                expires_at: None,
-                                metadata_json: None,
-                                now_ms: now_ms(),
-                            })
-                            .map_err(|error| {
-                                request_context.render_mutation_error(
-                                    FacadeMemoryMutationError::Storage(error),
-                                )
-                            })?;
+                        // A save is the applier's `agent_save`. A retried command reuses its
+                        // decision key, so it replays the recorded receipt instead of
+                        // counting the memory as seen twice.
+                        let saved_at = now_ms();
+                        let key = match command_id.as_deref() {
+                            Some(command_id) => {
+                                format!("ctx_memory:write:{conversation_key}:{command_id}")
+                            }
+                            None => mc_store::memory_lifecycle::applier::fresh_decision_key(
+                                "ctx_memory:write",
+                                saved_at,
+                            ),
+                        };
+                        let mut admission = AdmissionRequest::new(
+                            &key,
+                            AdmissionOperation::AgentSave,
+                            memory_project,
+                            category,
+                            content,
+                            saved_at,
+                        );
+                        admission.importance = Some(50);
+                        admission.source_session_id = Some(conversation_key);
+                        let receipt = tx.admit_memory(&admission).map_err(|error| {
+                            request_context
+                                .render_mutation_error(FacadeMemoryMutationError::Storage(error))
+                        })?;
+                        let Some(id) = receipt.applied_memory_id() else {
+                            // Nothing was written; the receipt records why, as the host's
+                            // own save reports it.
+                            return mcp_memory_result(
+                                format!("{}: memory was not saved.", receipt.reason),
+                                false,
+                                json!({
+                                    "action": "write",
+                                    "saved": false,
+                                    "reason": receipt.reason,
+                                    "category": category,
+                                }),
+                            );
+                        };
                         let text = format!("Saved memory [ID: {id}] in {category}.");
                         mcp_memory_result(
                             text,
@@ -20897,7 +20923,7 @@ mod tests {
         let line = supported_fences_line();
         assert_eq!(
             line,
-            format!("context.db=99 store.db={LATEST_MIGRATION_VERSION}")
+            format!("context.db=100 store.db={LATEST_MIGRATION_VERSION}")
         );
     }
 

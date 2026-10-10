@@ -60,6 +60,39 @@ function identityFilter(overrides: Partial<CloneSessionStateFilter> = {}): Clone
 }
 
 describe("copySessionStateForClone", () => {
+    for (const existingDestination of [false, true]) {
+        it(`nulls served prefix and held release for a ${existingDestination ? "pre-existing" : "new"} clone destination`, () => {
+            const db = createDb();
+            seedSessionMeta(db, SOURCE);
+            db.prepare(
+                "UPDATE session_meta SET served_prefix = ?, held_release = ? WHERE session_id = ?",
+            ).run('{"prefix":"source"}', '{"reason":"flush"}', SOURCE);
+            if (existingDestination) {
+                seedSessionMeta(db, DESTINATION);
+                db.prepare(
+                    "UPDATE session_meta SET served_prefix = ?, held_release = ? WHERE session_id = ?",
+                ).run('{"prefix":"stale-destination"}', '{"reason":"force"}', DESTINATION);
+            }
+
+            copySessionStateForClone(db, SOURCE, DESTINATION, identityFilter());
+
+            expect(
+                db
+                    .prepare(
+                        "SELECT served_prefix, held_release FROM session_meta WHERE session_id = ?",
+                    )
+                    .get(DESTINATION),
+            ).toEqual({ served_prefix: null, held_release: null });
+            expect(
+                db
+                    .prepare(
+                        "SELECT served_prefix, held_release FROM session_meta WHERE session_id = ?",
+                    )
+                    .get(SOURCE),
+            ).toEqual({ served_prefix: '{"prefix":"source"}', held_release: '{"reason":"flush"}' });
+        });
+    }
+
     it("keeps queued drops keyed by tag number when tag ids are remapped", () => {
         const db = createDb();
         // A row in another session makes the source tag's row id differ from its tag number.

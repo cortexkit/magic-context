@@ -41,6 +41,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use mc_store::memory_lifecycle::applier::{
+    apply_memory_admission_tx, AdmissionOperation, AdmissionRequest,
+};
+use mc_store::memory_lifecycle::authority::install_module_memory_authority_guard;
+use mc_store::memory_lifecycle::text::lifecycle_text_hash;
 use mc_store::private_permissions::{
     create_file, ensure_directory, tighten_directory, tighten_tree,
 };
@@ -61,7 +66,7 @@ pub const SINGLE_STORE_CAPABLE: bool = mc_store::SINGLE_STORE_CAPABLE;
 /// this binary was built; whether that migration changed anything these writers depend
 /// on is answered per table by the fingerprints, so a migration that touched only tables
 /// the module never writes does not stop the module writing.
-pub const BUILT_CONTEXT_FENCE_VERSION: i64 = 99;
+pub const BUILT_CONTEXT_FENCE_VERSION: i64 = 100;
 
 /// Versions at or above this number belong to downstream forks and are excluded when
 /// reading the persisted lane, matching the host's own fence arithmetic.
@@ -79,6 +84,11 @@ pub const CONTEXT_BUSY_TIMEOUT_MS: u32 = 5_000;
 /// `user_memories` holds the promoted ones. Both are listed because the fingerprint is a
 /// per-table fence and the module refuses per table, not per file.
 ///
+/// The `memory_*` lifecycle tables are the ones the module's memory applier writes
+/// (receipts, journal, pending-fact resolution, conflict links, classification items);
+/// `memory_mutation_log` and `memory_verifications` are written beside `memories` by the
+/// module's update, archive, merge and verification paths.
+///
 /// The module also writes one non-domain table, [`BRACKET_TABLE`], in every transaction,
 /// so that table is fingerprinted too.
 pub const DOMAIN_TABLES: &[&str] = &[
@@ -86,7 +96,14 @@ pub const DOMAIN_TABLES: &[&str] = &[
     "compartment_events",
     "compartments",
     "memories",
+    "memory_classification_items",
+    "memory_conflict_links",
+    "memory_decision_receipts",
     "memory_embedding_watermarks",
+    "memory_journal",
+    "memory_mutation_log",
+    "memory_pending_facts",
+    "memory_verifications",
     "notes",
     "primer_candidates",
     "session_facts",
@@ -323,11 +340,39 @@ pub const DOMAIN_TABLE_FINGERPRINTS: &[(&str, &str)] = &[
     ),
     (
         "memories",
-        "a5b13611e93768e4f53e78e4831a58d74d6c79e078a1a85c5cfbf269a0eb417c",
+        "58c79f0e321c82007bebfe3fb250e318786c920ac36320e6883d44013d051fd5",
+    ),
+    (
+        "memory_classification_items",
+        "f414a42b0dd8a73e859c8687089c5616abe3ae12fb4fe33e2fbbbb30646c57cc",
+    ),
+    (
+        "memory_conflict_links",
+        "3d308f6b95bcefc97e5464c472375262c922c9193f9ff4a78d351fabe30d48bb",
+    ),
+    (
+        "memory_decision_receipts",
+        "86a4a15bd8b225f239ae2726b7111c26387f167b0dc0dbed071a5f67d97ed415",
     ),
     (
         "memory_embedding_watermarks",
         "b3012ecd26bbc261bbd51ce0e7cdfaa9068864b0d32701c23d7b4704cf9560cc",
+    ),
+    (
+        "memory_journal",
+        "2f123fe99d3f82f66538c56e43e225068d693977eabb754895c22d0737a7b983",
+    ),
+    (
+        "memory_mutation_log",
+        "17c675a535e7b8ea1589c769c0cd82c7f1524a32b7b8a471154dfb8f97b6a83f",
+    ),
+    (
+        "memory_pending_facts",
+        "aea2c0879d21921958b5d4266604d658fb8ac5a1256b004b76a0567735cdea27",
+    ),
+    (
+        "memory_verifications",
+        "e559c4cbe733627673d9ff0ccd7f5a498eff616c77a4e8d7b44d2b2b3a5e4132",
     ),
     (
         "notes",
@@ -631,11 +676,12 @@ impl FenceState {
     }
 
     /// Allow writes only when the privilege-state table, target table and tables
-    /// written by its triggers match this binary's expected schema fingerprints.
+    /// written by its triggers or companion writers match this binary's expected schema
+    /// fingerprints.
     fn check_write(&self, table: &str) -> Result<(), HostStoreError> {
         self.check_table(BRACKET_TABLE)?;
-        if table == "compartments" {
-            self.check_table("compartment_history_versions")?;
+        for companion in companion_tables(table) {
+            self.check_table(companion)?;
         }
         self.check_table(table)
     }
@@ -940,6 +986,14 @@ impl HostStore {
             })?;
 
         let fence = FenceState::read(&conn, path, built_version)?;
+        // Every memory write on this connection, through the applier or not, is refused for
+        // a project whose memories the TypeScript host owns.
+        install_module_memory_authority_guard(&conn).map_err(|error| {
+            HostStoreError::OpenFailed {
+                path: path.display().to_string(),
+                reason: format!("could not install the memory authority guard: {error}"),
+            }
+        })?;
         let root_after = tighten_directory(storage_dir, true);
         let tree_after = tighten_tree(storage_dir, enforce_private_permissions);
         tracing::info!(
@@ -991,9 +1045,9 @@ impl HostStore {
     }
 
     /// Run `writes` in one `BEGIN IMMEDIATE` transaction under the privileged-writer bracket,
-    /// after re-checking the schema of the fingerprinted tables among `tables`. A table the
-    /// module writes but does not fingerprint (the mutation logs, `memory_verifications`)
-    /// is not a fence input and is skipped here.
+    /// after re-checking the schema of the fingerprinted tables among `tables` and of the
+    /// tables they imply (see `companion_tables`). A table outside [`DOMAIN_TABLES`] is not
+    /// a fence input and is skipped here.
     pub fn with_domain_transaction(
         &mut self,
         tables: &[&str],
@@ -1038,6 +1092,18 @@ impl HostStore {
     }
 }
 
+/// Tables a write to `table` also writes without naming them. Compartment triggers write
+/// the revision table; the module's memory update, archive, merge and verification paths
+/// write the mutation log and the verification rows in the same transaction as the
+/// memory row, and declare only `memories`.
+fn companion_tables(table: &str) -> &'static [&'static str] {
+    match table {
+        "compartments" => &["compartment_history_versions"],
+        "memories" => &["memory_mutation_log", "memory_verifications"],
+        _ => &[],
+    }
+}
+
 // ── The privileged write bracket ────────────────────────────────────────────
 
 /// Take the privileged-writer bracket, run `writes`, and drop it again, all inside one
@@ -1070,9 +1136,10 @@ fn with_privileged_transaction<T>(
     for table in tables {
         live_fence.check_table(table)?;
     }
-    // Compartment triggers write the revision table even when the callback does not.
-    if tables.contains(&"compartments") {
-        live_fence.check_table("compartment_history_versions")?;
+    for table in tables {
+        for companion in companion_tables(table) {
+            live_fence.check_table(companion)?;
+        }
     }
 
     transaction.execute(
@@ -1272,75 +1339,51 @@ fn insert_compartment_events(
     Ok(())
 }
 
-/// Append project memories.
+/// Append project memories through the module's memory applier.
 ///
-/// The column list and every default here mirrors the host's memory writer exactly,
-/// because a memory row is compared column-for-column between the two writers. The FTS
-/// index is maintained by triggers on this table, so the insert keeps it correct without
-/// this code knowing the index exists.
+/// The applier's insert mirrors the host's memory writer column for column, because a
+/// memory row is compared column-for-column between the two writers. The FTS index is
+/// maintained by triggers on this table, so the insert keeps it correct without this code
+/// knowing the index exists.
 ///
-/// A retried publish finds the rows an interrupted attempt already wrote: a live memory
-/// last seen at this publish's own instant was recorded by this publish, so it is neither
-/// inserted again nor counted as seen a second time. Its id is still reported when this
-/// publish created it, so the embedding watermark covers it.
+/// Each memory is one admission decision keyed by this publish's session, instant and the
+/// memory's exact text. A retried publish replays the receipts an interrupted attempt
+/// already committed instead of inserting again or counting the memory as seen a second
+/// time; a memory this publish created is still reported, so the embedding watermark
+/// covers it. A project the module does not own gets no memory row at all: the applier
+/// records `authority_elsewhere` and the rest of the publish proceeds.
 fn insert_memories(
     tx: &Transaction<'_>,
     publish: &FoldPublish,
 ) -> Result<Vec<i64>, HostStoreError> {
     let mut ids = Vec::with_capacity(publish.memories.len());
-    let mut existing = tx.prepare(
-        "SELECT id, last_seen_at, created_at FROM memories
-          WHERE project_path = ?1 AND status IN ('active', 'permanent') AND content = ?2",
-    )?;
-    let mut bump_seen = tx.prepare(
-        "UPDATE memories SET seen_count = seen_count + 1, last_seen_at = ?1, updated_at = ?1
-          WHERE id = ?2",
-    )?;
-    let mut statement = tx.prepare(
-        "INSERT INTO memories
-           (project_path, category, content, normalized_hash, importance, source_session_id,
-            source_type, seen_count, retrieval_count, first_seen_at, created_at, updated_at,
-            last_seen_at, last_retrieved_at, status, expires_at, verification_status,
-            verified_at, superseded_by_memory_id, merged_from, metadata_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'historian', 1, 0, ?7, ?7, ?7, ?7, NULL, 'active',
-                 ?8, 'unverified', NULL, NULL, NULL, ?9)",
-    )?;
     for memory in &publish.memories {
-        // A fact whose exact text is already a live memory for this project is seen again,
-        // not learned again. This is the same durable de-duplication the module's own
-        // publish performs, and it is what keeps a re-run of the same fold from either
-        // duplicating a memory or aborting the whole chunk on the dedup constraint.
-        if let Some((id, last_seen_at, created_at)) = existing
-            .query_row(params![publish.project_path, memory.content], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })
-            .optional()?
-        {
-            if last_seen_at == publish.now_ms {
-                if created_at == publish.now_ms {
-                    ids.push(id);
-                }
-                continue;
-            }
-            bump_seen.execute(params![publish.now_ms, id])?;
-            continue;
-        }
-        statement.execute(params![
+        let key = format!(
+            "host-fold:{}:{}:{}:{}:{}",
             publish.project_path,
-            memory.category,
-            memory.content,
-            compute_normalized_hash(&memory.content),
-            memory.importance.unwrap_or(50),
-            memory.source_session_id,
+            publish.session_id,
             publish.now_ms,
-            memory.expires_at,
-            memory.metadata_json,
-        ])?;
-        ids.push(tx.last_insert_rowid());
+            memory.category,
+            lifecycle_text_hash(&memory.content)
+        );
+        let mut request = AdmissionRequest::new(
+            &key,
+            AdmissionOperation::New,
+            &publish.project_path,
+            &memory.category,
+            &memory.content,
+            publish.now_ms,
+        );
+        request.importance = memory.importance;
+        request.source_session_id = memory.source_session_id.as_deref();
+        request.expires_at = memory.expires_at;
+        request.metadata_json = memory.metadata_json.as_deref();
+        let receipt = apply_memory_admission_tx(tx, &request)?;
+        if receipt.inserted == Some(true) {
+            if let Some(id) = receipt.applied_memory_id() {
+                ids.push(id);
+            }
+        }
     }
     Ok(ids)
 }
@@ -1685,7 +1728,7 @@ impl Chunk<'_> {
             } => {
                 let mut tables = Vec::new();
                 if !memories.is_empty() {
-                    tables.extend(["memories", "memory_embedding_watermarks"]);
+                    tables.extend(mc_store::memory_lifecycle::applier::ADMISSION_TABLES);
                 }
                 if !notes.is_empty() {
                     tables.push("notes");
@@ -2529,6 +2572,108 @@ mod tests {
         assert_eq!(verification, "unverified");
         assert_eq!(scope, "project");
         assert_eq!(expires, Some(1_800_000_000_000));
+    }
+
+    fn memory_count(path: &Path, project_path: &str) -> i64 {
+        Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE project_path = ?1",
+                [project_path],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn a_fold_for_a_ts_owned_project_writes_no_memory_but_still_publishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_db(dir.path(), "context.db");
+        // Mark a different project as module-managed in `authority_managed`. While any
+        // project carries that marker, every unmarked project's memories belong to the
+        // TypeScript host, so the module must not write this project's memories.
+        mark_managed(&path, "git:someone-else");
+        let mut store = HostStore::open(&path).unwrap();
+        let outcome = store.publish_fold(&sample_publish()).unwrap();
+        assert!(outcome.memory_ids.is_empty());
+        assert_eq!(memory_count(&path, "git:fixture"), 0);
+        assert!(
+            !outcome.compartment_ids.is_empty(),
+            "the fold itself publishes"
+        );
+        let conn = Connection::open(&path).unwrap();
+        let reasons: Vec<String> = conn
+            .prepare("SELECT json_extract(receipt_json, '$.reason') FROM memory_decision_receipts")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(!reasons.is_empty());
+        assert!(reasons.iter().all(|reason| reason == "authority_elsewhere"));
+
+        // A memory write that bypasses the applier aborts on the writer's connection guard.
+        let raw = store.with_domain_transaction(&["memories"], &mut |tx| {
+            tx.execute(
+                "INSERT INTO memories(project_path, category, content, normalized_hash,
+                   first_seen_at, created_at, updated_at, last_seen_at)
+                 VALUES ('git:fixture', 'CONSTRAINTS', 'raw', 'h', 1, 1, 1, 1)",
+                [],
+            )
+            .map(|_| ())
+        });
+        assert!(raw
+            .unwrap_err()
+            .to_string()
+            .contains(mc_store::memory_lifecycle::authority::MODULE_MEMORY_AUTHORITY_ELSEWHERE));
+        assert_eq!(memory_count(&path, "git:fixture"), 0);
+    }
+
+    #[test]
+    fn with_no_markers_only_a_migrated_single_store_lets_the_module_write_memories() {
+        let dir = tempfile::tempdir().unwrap();
+        let unmigrated = fixture_db(dir.path(), "unmigrated.db");
+        HostStore::open(&unmigrated)
+            .unwrap()
+            .publish_fold(&sample_publish())
+            .unwrap();
+        assert_eq!(memory_count(&unmigrated, "git:fixture"), 0);
+
+        let migrated = fixture_db(dir.path(), "migrated.db");
+        Connection::open(&migrated)
+            .unwrap()
+            .execute(
+                "INSERT INTO single_store_state(id, state, migrated_at, migrated_by, report_json)
+                 VALUES (1, 'migrated', 1, 'test', '{}')",
+                [],
+            )
+            .unwrap();
+        let outcome = HostStore::open(&migrated)
+            .unwrap()
+            .publish_fold(&sample_publish())
+            .unwrap();
+        assert!(!outcome.memory_ids.is_empty());
+        assert_eq!(
+            memory_count(&migrated, "git:fixture"),
+            outcome.memory_ids.len() as i64
+        );
+    }
+
+    #[test]
+    fn a_drifted_memory_companion_table_refuses_memory_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_db(dir.path(), "context.db");
+        mark_managed(&path, "git:fixture");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("ALTER TABLE memory_mutation_log ADD COLUMN drifted TEXT")
+            .unwrap();
+        let mut store = HostStore::open(&path).unwrap();
+        let error = store.publish_fold(&sample_publish()).unwrap_err();
+        assert_eq!(error.code(), "single_store_fingerprint_mismatch");
+        assert!(error.to_string().contains("memory_mutation_log"), "{error}");
+        assert!(!store.writable_tables().contains(&"memories"));
+        assert_eq!(memory_count(&path, "git:fixture"), 0);
     }
 
     #[test]

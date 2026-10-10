@@ -109,9 +109,12 @@ fn v65_blob_round_trips_messages_answers_views_pending_drops_and_empty_lineages(
     let descriptor = descriptor(dir.path());
     let inner = open_sqlite(&descriptor).unwrap();
     inner.with_conn(register_legacy_trigger_functions).unwrap();
-    inner
-        .migrate(NS, &MIGRATIONS[..MIGRATIONS.len() - 1])
-        .unwrap();
+    let previous: Vec<_> = MIGRATIONS
+        .iter()
+        .filter(|migration| migration.version < 66)
+        .cloned()
+        .collect();
+    inner.migrate(NS, &previous).unwrap();
     let view = |v: u64| json!({"compaction_id":"c","version":v,"range":{"lineage_id":"L","from":4000,"to":4001},"replacement":[{"content":"frozen"}]});
     let record = json!({
         "catalog":{"compacting":true,"tools":["ctx_reduce"]},

@@ -21,6 +21,7 @@ pub mod context_boundaries;
 pub use context_boundaries::ResolvedContextBoundary;
 pub mod context_writes;
 mod historian_claim;
+pub mod memory_lifecycle;
 pub mod move_inventory;
 pub mod move_snapshot;
 pub mod move_store;
@@ -3248,6 +3249,12 @@ const MIGRATIONS: &[Migration] = &[
         version: 66,
         statements: include_str!("migrations/store_066_provider_log.sql"),
     },
+    Migration {
+        version: 67,
+        // ModuleMeta::held_release records edits delayed to preserve a signed thinking prefix.
+        // Advance the fence so older binaries cannot silently discard it when rewriting meta.
+        statements: "SELECT 1;",
+    },
 ];
 
 /// The highest `mc_cache` schema migration this binary ships.
@@ -4752,6 +4759,11 @@ pub struct ModuleMeta {
     /// Set by session.flush and consumed by the next eligible transform as a SOFT refresh.
     #[serde(default)]
     pub soft_refresh_pending: bool,
+    /// Release-request JSON for edits delayed to preserve bytes before a kept signed thinking
+    /// block. Carries the original cache-bust reason and outstanding work obligations.
+    /// The JSON payload can gain optional fields without another schema migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_release: Option<serde_json::Value>,
     /// This session's `Today's date: ...` guidance line. Because it changes with the
     /// wall clock, we update it only during a pass that already rewrites cached content.
     #[serde(default)]
@@ -6606,6 +6618,19 @@ impl std::fmt::Display for FacadeMemoryMutationError {
 
 impl std::error::Error for FacadeMemoryMutationError {}
 
+/// The `context.db` tables a facade command may write: memories and notes, plus every
+/// table the memory applier writes when a command admits a memory.
+const FACADE_COMMAND_TABLES: &[&str] = &[
+    "memories",
+    "notes",
+    "memory_embedding_watermarks",
+    "memory_decision_receipts",
+    "memory_journal",
+    "memory_pending_facts",
+    "memory_conflict_links",
+    "memory_classification_items",
+];
+
 /// Transaction-scoped ports used by the module facade. Every method operates on the
 /// `context.db` transaction owned by `with_facade_command`, so a command's writes commit
 /// together.
@@ -6614,58 +6639,25 @@ pub struct FacadeMutationTxn<'a> {
 }
 
 impl<'a> FacadeMutationTxn<'a> {
+    /// Insert a memory through the memory applier, under a fresh decision key. Returns the
+    /// row's id when the admission applied (an insert or a live same-category match).
+    /// Any other outcome is an error, which rolls back the enclosing facade transaction;
+    /// a caller that must keep the receipt uses [`FacadeMutationTxn::admit_memory`].
     pub fn insert_memory(&self, input: InsertMemoryInput<'_>) -> Result<i64, String> {
-        let normalized_hash = compute_normalized_memory_hash(input.content);
-        let existing: Option<i64> = self
-            .tx
-            .query_row(
-                "SELECT id FROM memories
-                  WHERE project_path = ?1 AND category = ?2 AND normalized_hash = ?3",
-                params![input.project_path, input.category, normalized_hash],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| error.to_string())?;
-        if let Some(id) = existing {
-            self.tx
-                .execute(
-                    "UPDATE memories
-                        SET seen_count = COALESCE(seen_count, 0) + 1,
-                            last_seen_at = ?1,
-                            updated_at = ?1
-                      WHERE id = ?2",
-                    params![input.now_ms, id],
-                )
-                .map_err(|error| error.to_string())?;
-            return Ok(id);
-        }
-        self.tx
-            .execute(
-                "INSERT INTO memories
-                   (project_path, category, content, normalized_hash, importance,
-                    source_session_id, source_type, seen_count, retrieval_count,
-                    first_seen_at, created_at, updated_at, last_seen_at, status,
-                    expires_at, verification_status, metadata_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, ?8, ?8, ?8, ?8,
-                         'active', ?9, 'unverified', ?10)",
-                params![
-                    input.project_path,
-                    input.category,
-                    input.content,
-                    normalized_hash,
-                    input.importance.map(i64::from),
-                    input.source_session_id,
-                    input.source_type.unwrap_or("historian"),
-                    input.now_ms,
-                    input.expires_at,
-                    input.metadata_json,
-                ],
-            )
-            .map_err(|error| error.to_string())?;
-        let id = self.tx.last_insert_rowid();
-        raise_embedding_watermark_tx(self.tx, input.project_path, id, input.now_ms)
-            .map_err(|error| error.to_string())?;
-        Ok(id)
+        let key = memory_lifecycle::applier::fresh_decision_key("facade-insert", input.now_ms);
+        let receipt = self.admit_memory(&admission_for_insert(&input, &key))?;
+        receipt
+            .applied_memory_id()
+            .ok_or_else(|| format!("{}: memory was not saved", receipt.reason))
+    }
+
+    /// Run one admission through the memory applier inside this facade transaction, and
+    /// raise the embedding watermark when it inserted a row.
+    pub fn admit_memory(
+        &self,
+        request: &memory_lifecycle::applier::AdmissionRequest<'_>,
+    ) -> Result<memory_lifecycle::applier::ApplierReceipt, String> {
+        admit_memory_tx(self.tx, request).map_err(|error| error.to_string())
     }
 
     pub fn update_memory_content(
@@ -7917,6 +7909,14 @@ impl McStore {
         descriptor: &StorageDescriptor,
         enforce_private_permissions: bool,
     ) -> Result<Self, McStoreError> {
+        Self::open_with_migrations(descriptor, enforce_private_permissions, MIGRATIONS)
+    }
+
+    fn open_with_migrations(
+        descriptor: &StorageDescriptor,
+        enforce_private_permissions: bool,
+        migrations: &[Migration],
+    ) -> Result<Self, McStoreError> {
         let mut storage_root = None;
         let mut before = private_permissions::TightenReport::default();
         if let cortexkit_store_types::StorageBackend::Sqlite { path } = &descriptor.backend {
@@ -7969,7 +7969,7 @@ impl McStore {
                 return Err(error);
             }
         }
-        let migration = inner.migrate(NS, MIGRATIONS)?;
+        let migration = inner.migrate(NS, migrations)?;
         // A store written by a longer chain than this binary carries is refused here, before the
         // repair below or anything else reads or writes a row. On such a store the migrator has
         // applied nothing and only read the recorded version, so returning now leaves the file
@@ -8234,7 +8234,7 @@ impl McStore {
             }
         }
 
-        let response = self.context_write(&["memories", "notes"], |tx| {
+        let response = self.context_write(FACADE_COMMAND_TABLES, |tx| {
             mutation(&FacadeMutationTxn { tx }).map_err(|error| {
                 rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(error)))
             })
@@ -13139,59 +13139,31 @@ impl McStore {
         Ok(rows)
     }
 
-    /// Insert a memory row unless an existing row already matches the project, category,
-    /// and normalized content hash. Duplicate hits update only bookkeeping fields such as
-    /// `seen_count` and timestamps, and skip the mutation log because the rendered content
-    /// did not change.
+    /// Insert a memory through the memory applier, under a fresh decision key. A live row
+    /// with the same project, category and normalized content hash is seen again instead:
+    /// its `seen_count` and timestamps move and no mutation-log row is written, because the
+    /// rendered content did not change. An outcome that applies nothing (the module is not
+    /// the project's memory authority, or the text matches an archived row or a live row in
+    /// another category) commits its receipt and is returned as an error.
     pub fn insert_memory(&self, input: InsertMemoryInput<'_>) -> Result<i64, McStoreError> {
-        let memory_id = self.context_write(&["memories", "memory_embedding_watermarks"], |tx| {
-            let normalized_hash = compute_normalized_memory_hash(input.content);
-            let existing: Option<i64> = tx
-                .query_row(
-                    "SELECT id FROM memories
-                     WHERE project_path = ?1 AND category = ?2 AND normalized_hash = ?3",
-                    params![input.project_path, input.category, normalized_hash],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if let Some(id) = existing {
-                tx.execute(
-                    "UPDATE memories
-                        SET seen_count = COALESCE(seen_count, 0) + 1,
-                            last_seen_at = ?1,
-                            updated_at = ?1
-                      WHERE id = ?2",
-                    params![input.now_ms, id],
-                )?;
-                return Ok(id);
-            }
+        let key = memory_lifecycle::applier::fresh_decision_key("store-insert", input.now_ms);
+        let receipt = self.admit_memory(&admission_for_insert(&input, &key))?;
+        receipt.applied_memory_id().ok_or_else(|| {
+            single_store_domain::context_error(
+                "memory_not_admitted",
+                format!("{}: memory was not saved", receipt.reason),
+            )
+        })
+    }
 
-            tx.execute(
-                "INSERT INTO memories
-                   (project_path, category, content, normalized_hash, importance,
-                    source_session_id, source_type, seen_count, retrieval_count,
-                    first_seen_at, created_at, updated_at, last_seen_at, status,
-                    expires_at, verification_status, metadata_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 0, ?8, ?8, ?8, ?8,
-                         'active', ?9, 'unverified', ?10)",
-                params![
-                    input.project_path,
-                    input.category,
-                    input.content,
-                    normalized_hash,
-                    input.importance.map(i64::from),
-                    input.source_session_id,
-                    input.source_type.unwrap_or("historian"),
-                    input.now_ms,
-                    input.expires_at,
-                    input.metadata_json,
-                ],
-            )?;
-            let id = tx.last_insert_rowid();
-            raise_embedding_watermark_tx(tx, input.project_path, id, input.now_ms)?;
-            Ok(id)
-        })?;
-        Ok(memory_id)
+    /// Run one admission through the memory applier in its own `context.db` transaction.
+    pub fn admit_memory(
+        &self,
+        request: &memory_lifecycle::applier::AdmissionRequest<'_>,
+    ) -> Result<memory_lifecycle::applier::ApplierReceipt, McStoreError> {
+        self.context_write(memory_lifecycle::applier::ADMISSION_TABLES, |tx| {
+            admit_memory_tx(tx, request)
+        })
     }
 
     /// Replace an owned primary memory's content/category and append its cache-visible mutation
@@ -16443,12 +16415,60 @@ fn load_note_tx(tx: &rusqlite::Connection, id: i64) -> rusqlite::Result<StoredNo
     )
 }
 
+/// The admission a plain memory insert stands for: an agent save when the caller says
+/// the row comes from an agent, a historian admission otherwise.
+fn admission_for_insert<'a>(
+    input: &InsertMemoryInput<'a>,
+    key: &'a str,
+) -> memory_lifecycle::applier::AdmissionRequest<'a> {
+    use memory_lifecycle::applier::{AdmissionOperation, AdmissionRequest};
+    let operation = if input.source_type == Some("agent") {
+        AdmissionOperation::AgentSave
+    } else {
+        AdmissionOperation::New
+    };
+    let mut request = AdmissionRequest::new(
+        key,
+        operation,
+        input.project_path,
+        input.category,
+        input.content,
+        input.now_ms,
+    );
+    request.importance = input.importance.map(i64::from);
+    request.source_session_id = input.source_session_id;
+    request.source_type = input.source_type;
+    request.expires_at = input.expires_at;
+    request.metadata_json = input.metadata_json;
+    request
+}
+
+/// Apply one admission and, when it inserted a row, move the project's embedding
+/// watermark in the same transaction so the host's backfill sees the new row.
+fn admit_memory_tx(
+    tx: &rusqlite::Connection,
+    request: &memory_lifecycle::applier::AdmissionRequest<'_>,
+) -> rusqlite::Result<memory_lifecycle::applier::ApplierReceipt> {
+    let receipt = memory_lifecycle::applier::apply_memory_admission_tx(tx, request)?;
+    if receipt.inserted == Some(true) {
+        if let Some(id) = receipt.applied_memory_id() {
+            raise_embedding_watermark_tx(tx, request.project_path, id, request.now_ms)?;
+        }
+    }
+    Ok(receipt)
+}
+
 fn promote_facts_tx(
     tx: &rusqlite::Connection,
     project_path: &str,
     facts: &[FactCandidate],
     now_ms: i64,
 ) -> rusqlite::Result<Vec<PromotedRef>> {
+    // The module writes no memory for a project whose memories the TypeScript host owns.
+    // The rest of the fold (compartments, facts, events) still publishes.
+    if !memory_lifecycle::authority::module_owns_memory(tx, project_path)? {
+        return Ok(Vec::new());
+    }
     let mut active_content = HashSet::new();
     // Probe only this fold's exact contents. Large folds are split below SQLite's
     // parameter limit; ordinary folds make one scan without copying the project pool.
@@ -20160,6 +20180,89 @@ mod tests {
     }
 
     #[test]
+    fn held_release_defaults_for_legacy_meta_and_survives_store_restart() {
+        // Serialize the pre-field shape, rather than relying on an absent field being emitted.
+        let mut legacy = serde_json::to_value(ModuleMeta::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("held_release");
+        let legacy: ModuleMeta = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.held_release, None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let descriptor = descriptor(dir.path());
+        let request = serde_json::json!({
+            "reason": "flush",
+            "obligations": [{ "lane": "flush", "pending": true }],
+        });
+        {
+            let store = McStore::open_for_test(&descriptor).unwrap();
+            let meta = ModuleMeta {
+                held_release: Some(request.clone()),
+                ..legacy
+            };
+            store
+                .commit("held-release", None, &CoreState::default(), &meta)
+                .unwrap();
+        }
+        let reopened = McStore::open_for_test(&descriptor).unwrap();
+        assert_eq!(
+            reopened.load("held-release").unwrap().meta.held_release,
+            Some(request)
+        );
+    }
+
+    #[test]
+    fn migration_67_fences_held_release_from_a_version_66_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let descriptor = descriptor(dir.path());
+        let db_path = dir.path().join("store.db");
+        let old_chain: Vec<Migration> = MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= 66)
+            .cloned()
+            .collect();
+        {
+            let older = McStore::open_with_migrations(&descriptor, false, &old_chain).unwrap();
+            assert_eq!(older.module_store_schema_version().unwrap(), 66);
+            older
+                .commit(
+                    "legacy",
+                    None,
+                    &CoreState::default(),
+                    &ModuleMeta::default(),
+                )
+                .unwrap();
+        }
+        let request = serde_json::json!({ "reason": "flush", "obligations": ["flush"] });
+        {
+            let current = McStore::open_for_test(&descriptor).unwrap();
+            assert_eq!(current.module_store_schema_version().unwrap(), 67);
+            let mut loaded = current.load("legacy").unwrap();
+            assert_eq!(loaded.meta.held_release, None);
+            loaded.meta.held_release = Some(request.clone());
+            current
+                .commit("legacy", loaded.row_version, &loaded.core, &loaded.meta)
+                .unwrap();
+        }
+        let before = std::fs::read(&db_path).unwrap();
+        let Err(refusal) = McStore::open_with_migrations(&descriptor, false, &old_chain) else {
+            panic!("a version 66 binary must not open a store carrying held release requests");
+        };
+        assert!(matches!(
+            refusal,
+            McStoreError::StoreAheadOfBinary {
+                db_version: 67,
+                binary_max: 66,
+            }
+        ));
+        assert_eq!(std::fs::read(&db_path).unwrap(), before);
+        let current = McStore::open_for_test(&descriptor).unwrap();
+        assert_eq!(
+            current.load("legacy").unwrap().meta.held_release,
+            Some(request)
+        );
+    }
+
+    #[test]
     fn protected_tool_selection_snapshot_round_trips_without_a_schema_migration() {
         let dir = tempfile::tempdir().unwrap();
         let descriptor = descriptor(dir.path());
@@ -21900,20 +22003,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let descriptor = descriptor(dir.path());
         let older = open_sqlite(&descriptor).unwrap();
-        older
-            .with_conn(|conn| {
-                for name in [
-                    "mc_note_caller_project",
-                    "mc_facade_authority_domain",
-                    "mc_facade_authority_route",
-                ] {
-                    conn.create_scalar_function(name, 0, FunctionFlags::SQLITE_UTF8, |_context| {
-                        Ok(String::new())
-                    })?;
-                }
-                Ok(())
-            })
-            .unwrap();
+        older.with_conn(register_legacy_trigger_functions).unwrap();
         let behind = older
             .migrate(NS, &MIGRATIONS[..MIGRATIONS.len() - 1])
             .unwrap();

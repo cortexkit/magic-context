@@ -120,6 +120,10 @@ impl SqliteContextDomain {
             })
             .map_err(context_sql_error)?;
         set_wal_synchronous_normal(&writer).map_err(context_sql_error)?;
+        // Refuse any memory write on this connection for a project whose memories the
+        // TypeScript host owns, exactly as the module's fenced `HostStore` writer does.
+        crate::memory_lifecycle::authority::install_module_memory_authority_guard(&writer)
+            .map_err(context_sql_error)?;
         let reader = open().map_err(context_sql_error)?;
         set_wal_synchronous_normal(&reader).map_err(context_sql_error)?;
         Ok(Self {

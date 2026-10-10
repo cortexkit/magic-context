@@ -350,11 +350,15 @@ test.each([
 			"host_runner_views",
 			"host_runner_state",
 		];
-		// Model a valid v96 database by removing only v97's version row and
-		// host-runner tables below. Keep git_commit_fts_rowid_map: v96 already
-		// committed its migration, so deleting that FTS identity map is corruption
-		// and startup must refuse it instead of rebuilding it.
-		expect(LATEST_SUPPORTED_VERSION).toBe(97);
+		// The newest migration adds these session_meta columns. Removing them and
+		// the newest version row models a valid database one migration behind.
+		const newestColumns = ["served_prefix", "held_release"];
+		// Model a valid v99 database by removing only v100's version row and its
+		// columns below. Keep git_commit_fts_rowid_map: an earlier migration already
+		// committed it, so deleting that FTS identity map is corruption and startup
+		// must refuse it instead of rebuilding it. When a newer migration lands,
+		// update this pin and the objects it removes together.
+		expect(LATEST_SUPPORTED_VERSION).toBe(100);
 		const dbPath = join(fixture.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db");
 		if (!openDatabase(dbPath))
 			throw new Error("could not seed isolated storage");
@@ -366,7 +370,8 @@ test.each([
 				.run(LATEST_SUPPORTED_VERSION);
 			// Remove new schema objects as well as the version marker: the packaged
 			// worker must actually install them, not just report an already-current DB.
-			for (const name of hostRunnerTables) seed.run(`DROP TABLE ${name}`);
+			for (const name of newestColumns)
+				seed.run(`ALTER TABLE session_meta DROP COLUMN ${name}`);
 		} finally {
 			seed.close();
 		}
@@ -404,7 +409,7 @@ test.each([
 				"async open main-thread migration-body count: 0",
 			);
 			expect(log).toContain("migration worker ready");
-			expect(log).toContain("[migrations] applied v97:");
+			expect(log).toContain("[migrations] applied v100:");
 			expect(log).not.toContain("storage fatal:");
 			expect(log).toContain("async open main-thread migration-body count: 0");
 			expect(log).not.toContain("migration worker could not start");
@@ -426,6 +431,13 @@ test.each([
 							.query("SELECT name FROM sqlite_master WHERE name = ?")
 							.get(name),
 					).toEqual({ name });
+				const sessionMetaColumns = (
+					checked.query("PRAGMA table_info(session_meta)").all() as {
+						name: string;
+					}[]
+				).map((column) => column.name);
+				for (const name of newestColumns)
+					expect(sessionMetaColumns).toContain(name);
 			} finally {
 				checked.close();
 			}

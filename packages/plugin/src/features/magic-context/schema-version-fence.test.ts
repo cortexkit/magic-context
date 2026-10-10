@@ -12,7 +12,7 @@ import { formatSchemaFenceBootLog, LATEST_SUPPORTED_VERSION } from "./storage-db
 describe("schema version fence", () => {
     it("LATEST_SUPPORTED_VERSION equals the highest migration version", () => {
         expect(LATEST_SUPPORTED_VERSION).toBe(LATEST_MIGRATION_VERSION);
-        expect(LATEST_SUPPORTED_VERSION).toBe(99);
+        expect(LATEST_SUPPORTED_VERSION).toBe(100);
     });
 
     it("keeps every upstream migration below the downstream floor", () => {

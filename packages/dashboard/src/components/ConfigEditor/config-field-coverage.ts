@@ -141,6 +141,8 @@ export const OMITTED_BY_DESIGN: Readonly<Record<string, string>> = {
   shadow_embedding: "developer-only shadow embedding lane; raw JSONC and never a dashboard knob",
   transform_mode:
     "experimental project-wide Rust runtime cutover; requires user-level subc configuration and is not exposed in the dashboard yet",
+  rust_pipeline:
+    "experimental user-only Rust provider pipeline; applies only to OpenCode with Rust transform mode and remains editable in Raw JSONC",
   fail_closed_blocking:
     "user-only inoperability policy; raw JSONC because project configs cannot change it",
   "smart_notes.retina_handoff":
