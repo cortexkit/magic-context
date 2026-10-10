@@ -337,3 +337,41 @@ first model as the old reverse/map/find.
 - Real process crashes and multi-process writers.
 - A full per-version step-through migration replay.
 - The move paths, which were established by reading and not executed.
+
+## Follow-up: findings closed
+
+The four findings and I1 were closed after this review. The recorded-failing
+tests are no longer ignored and pass; the out-of-band differential
+(`out_of_band_writes_replay_equals_full_computation_over_600_sequences`) now
+reports 600 sequences, 10,488 hooks, 4,004 replays compared and 0 mismatches.
+The production differential is unchanged at 0 mismatches over 4,651 replays.
+
+- **F1.** The summary key includes the conversation's engine namespace, and
+  migration 68's `mc_provider_conversations_policy_namespace_change` trigger
+  drops the summary whenever `engine_namespace` changes. The key alone was not
+  enough: the out-of-band differential found switches away and back
+  (`[Namespace, Namespace]`), where numbers consumed in the original namespace
+  while the conversation was elsewhere were never logged.
+- **F2.** A change between `header` and a non-header kind falls back to a
+  rebuild, like a change of position.
+- **F3.** `mc_provider_policy_parts_change_move` drops the summary when a policy
+  row's `conv_key`, `lineage_id`, `ordinal` or `block_id` changes. The summary
+  reads those columns and `policy_json` of a part (the change trigger already
+  logs `policy_json`), the conversation's `engine_namespace` (F1), the lineage
+  rows (their ids and cuts are in the key) and the consumed-tag table. Releasing
+  or renumbering a consumed tag now also drops the namespace's summaries
+  (`releasing_or_renumbering_a_consumed_tag_drops_the_namespace_summary`).
+- **F4.** `install_writer_guards` skips a missing inventory table only when the
+  store's recorded version is below the first migration whose SQL creates it
+  (`migration_creating_table`). Every guarded session table must resolve to a
+  migration (`every_guarded_inventory_table_names_its_creating_migration`).
+- **I1.** `no_shipped_writer_replaces_policy_rows` scans the non-test Rust and
+  SQL sources and fails if any writes policy rows with `REPLACE`.
+
+The three replay tests (`namespace_switch_is_seen_by_the_replay`,
+`kind_flip_is_seen_by_the_replay`, `row_column_moves_are_seen_by_the_replay`)
+used to require that their short sequence replay at least once. With the fixes
+the hook after each write rebuilds instead, so they now assert that this hook
+rebuilds and matches the full computation, and that a later logged change
+replays exactly. `row_column_moves_are_seen_by_the_replay` covers both the
+`lineage_id` and the `ordinal` move.
