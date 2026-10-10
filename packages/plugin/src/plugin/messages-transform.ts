@@ -219,20 +219,161 @@ function preserveUserTerminatedTail(
     moveUserToTail(messages, userIndex >= 0 ? messages[userIndex] : inputTail, userIndex);
 }
 
+class LkgAdmissionReplay extends Error {}
+
+/** Replay a validated saved request that fits, before a writer retry or after a failed transform. */
+export function tryMessagesTransformLkgReplay(args: {
+    output: MessagesTransformOutput;
+    sessionId: string;
+    error: unknown;
+    rust?: RustLkgReplayParticipant;
+    agent?: string;
+    onLkgReplay?: () => void;
+    entry?: ReturnType<typeof noteEntry> | null;
+    /** Host-owned envelope validation, before adopting any saved messages. */
+    replayFits?: (messages: MessageLike[]) => boolean;
+}): boolean {
+    const { output, sessionId, error, agent } = args;
+    const slotAtEntry = getSlot(sessionId);
+    let entry = args.entry;
+    if (entry === undefined && slotAtEntry) {
+        try {
+            entry = noteEntry(sessionId, output.messages as MessageLike[]);
+        } catch {
+            entry = null;
+        }
+    }
+    if (sessionId && slotAtEntry && !entry) {
+        dropSlot(sessionId, "lkg_invalidated_reshape");
+        sessionLog(sessionId, "lkg_invalidated_reshape");
+    } else if (sessionId && entry) {
+        let replayBlocked = false;
+        try {
+            const db = openDatabase();
+            // In Rust mode the adapter tracks whether the session is serving a frozen
+            // replay, and it only replays when the replay fits the context limit.
+            // A replay served here must update that tracking and pass the same check.
+            const rust = args.rust;
+            if (
+                (error instanceof StorageBusyRefusalError &&
+                    error.stage === "rust-mode-emergency") ||
+                rust?.emergencyFailClosed(sessionId, output.messages as MessageLike[])
+            ) {
+                // The adapter refused while failing closed (usage at or above 95%
+                // of the model's limit, or a proven provider overflow); there it
+                // admits no last-known-good replay, so serving one here would
+                // bypass its refusal.
+                replayBlocked = true;
+                sessionLog(sessionId, "lkg_emergency_band_refused");
+            } else if (
+                !db ||
+                isEmergencyRecoveryArmed(sessionId) ||
+                getOverflowState(db, sessionId).needsEmergencyRecovery
+            ) {
+                replayBlocked = true;
+                sessionLog(sessionId, "lkg_emergency_armed");
+            } else {
+                const inputMessages = output.messages as MessageLike[];
+                const inputCount = inputMessages.length;
+                const keys = resolveLkgModelKeys(inputMessages);
+                const replay = replayLkg({
+                    sessionId,
+                    messages: inputMessages,
+                    modelKey: keys.modelKey,
+                    providerKey: keys.providerKey,
+                    entry,
+                    prepareReplay: (messages) =>
+                        rust
+                            ? rust.stripPersistedReasoning(sessionId, messages, inputMessages)
+                            : replayRustModeBindingMismatchStrips({
+                                  db,
+                                  sessionId,
+                                  messages,
+                                  resolvedProviderID: keys.providerKey ?? undefined,
+                              }),
+                });
+                // TypeScript mode has no Rust result to check, but replaying
+                // the saved request for a known model still has to pass the
+                // same fit check as Rust mode: measured size of the saved
+                // request plus an estimate for the messages added since.
+                let tsFit = true;
+                if (replay.ok && !rust && keys.providerKey && keys.modelKey) {
+                    const model = {
+                        providerID: keys.providerKey,
+                        modelID: keys.modelKey.slice(keys.providerKey.length + 1),
+                    };
+                    if (
+                        lkgReplayLimit({
+                            db,
+                            sessionId,
+                            model,
+                            modelKey: keys.modelKey,
+                        }) !== undefined
+                    ) {
+                        const fit = lkgReplayFits({
+                            db,
+                            sessionId,
+                            messages: replay.messages,
+                            model,
+                            modelKey: keys.modelKey,
+                            systemPromptTokens: getOrCreateSessionMeta(db, sessionId)
+                                .systemPromptTokens,
+                            agentName: agent,
+                        });
+                        tsFit = fit.fits;
+                        if (!fit.fits && fit.detail) sessionLog(sessionId, fit.detail);
+                    }
+                }
+                if (
+                    replay.ok &&
+                    (!tsFit ||
+                        args.replayFits?.(replay.messages) === false ||
+                        (rust && !rust.replayFits(sessionId, replay.messages, inputMessages)))
+                ) {
+                    replayBlocked = true;
+                    sessionLog(sessionId, "lkg_replay_does_not_fit");
+                } else if (replay.ok) {
+                    args.onLkgReplay?.();
+                    replaceMessagesInPlace(
+                        output,
+                        replay.messages as unknown as MessageWithParts[],
+                    );
+                    // The provider has now cached the replayed bytes. Tell a Rust
+                    // adapter, so its next successful pass keeps serving them instead
+                    // of switching to module output, which would bust that cache.
+                    noteExternalLkgReplay(rust, sessionId, inputCount);
+                    sessionLog(sessionId, "lkg_replay_served");
+                    return true;
+                } else {
+                    sessionLog(sessionId, replay.reason);
+                }
+            }
+        } catch (replayError) {
+            replayBlocked = true;
+            sessionLog(sessionId, "lkg_replay_unavailable", replayError);
+        }
+        if (replayBlocked) {
+            sessionLog(sessionId, "lkg_replay_declined");
+        }
+    } else if (sessionId) {
+        sessionLog(sessionId, "lkg_miss");
+    }
+    return false;
+}
+
 /**
- * Top-level transform wrapper. Every failed managed pass replays LKG or
- * refuses the turn. See issue #23:
- * https://github.com/cortexkit/magic-context/issues/23
+ * Top-level transform wrapper. Every failed managed pass replays the
+ * last-known-good (LKG) request or refuses the turn.
  *
  * Error handling is tiered:
  *
  * - **FailClosedBlockingError / EmergencyFailClosedError / RawFallbackContextLimitError /
- *   AssistantTerminalRetryError**: Intentional loud aborts. Rethrown so the TUI surfaces the
+ *   AssistantTerminalRetryError**: Intentional loud aborts. Rethrown so the terminal UI surfaces the
  *   message and the turn does not silently fall through to native compaction or a
  *   provider-rejected raw prompt.
  *
- * - **SQLITE_BUSY / SQLITE_LOCKED**: Writer acquisition already retried before
- *   any callback ran. Replay LKG or refuse; never retry the mutating transform.
+ * - **SQLITE_BUSY / SQLITE_LOCKED**: Try validated LKG before backing off on
+ *   writer acquisition. Replay or refuse; never retry the mutating transform.
  *
  * - **UnresolvedHistoryBoundaryError / UnmanagedOverWindowError / DegradedPassRefusalError**: The pass
  *   could not produce a request that is safe to send. Replay LKG or refuse.
@@ -273,6 +414,8 @@ export function createMessagesTransformHandler(args: {
      */
     compactionOff?: boolean;
     onStorageBusyRefusal?: (sessionId: string, message: string) => Promise<void>;
+    /** Fit saved messages against the host's current tools and paired system prompt. */
+    replayFits?: (messages: MessageLike[]) => boolean;
     /** Validate and restore host-owned prompt segments before adopting replayed messages. */
     onLkgReplay?: () => void;
     internalChildSessions?: Set<string>;
@@ -371,27 +514,50 @@ export function createMessagesTransformHandler(args: {
         const providerAtEntry = sessionId
             ? provider?.isProviderSession?.(sessionId) === true
             : false;
-        const slotAtEntry = sessionId && !providerAtEntry ? getSlot(sessionId) : undefined;
-        const entry = slotAtEntry
-            ? (() => {
-                  try {
-                      return noteEntry(sessionId as string, output.messages as MessageLike[]);
-                  } catch (error) {
-                      sessionLog(
-                          sessionId as string,
-                          "lkg entry snapshot failed; replay unavailable",
-                          error,
-                      );
-                      return null;
-                  }
-              })()
-            : null;
+        const captureEntry = (): ReturnType<typeof noteEntry> => {
+            if (
+                !sessionId ||
+                providerAtEntry ||
+                provider?.isProviderSession?.(sessionId) ||
+                !getSlot(sessionId)
+            )
+                return null;
+            try {
+                return noteEntry(sessionId, output.messages as MessageLike[]);
+            } catch (error) {
+                sessionLog(sessionId, "lkg entry snapshot failed; replay unavailable", error);
+                return null;
+            }
+        };
+        let entry = captureEntry();
+        let admissionRetried = false;
         try {
             if (magicContext) {
                 const admissionDb = openDatabase();
                 if (admissionDb) {
                     if (!args.compactionOff) {
-                        await withAsyncPrivilegedWriter(admissionDb, () => undefined);
+                        await withAsyncPrivilegedWriter(admissionDb, () => undefined, {
+                            beforeRetry: (error) => {
+                                admissionRetried = true;
+                                entry = captureEntry();
+                                if (
+                                    sessionId &&
+                                    !providerAtEntry &&
+                                    !provider?.isProviderSession?.(sessionId) &&
+                                    tryMessagesTransformLkgReplay({
+                                        output,
+                                        sessionId,
+                                        error,
+                                        entry,
+                                        rust: resolveRust(sessionId),
+                                        agent,
+                                        replayFits: args.replayFits,
+                                        onLkgReplay: args.onLkgReplay,
+                                    })
+                                )
+                                    throw new LkgAdmissionReplay();
+                            },
+                        });
                     }
                 } else {
                     const fence = getSchemaFenceRejection();
@@ -423,9 +589,13 @@ export function createMessagesTransformHandler(args: {
                     }
                 }
             }
+            // A yielded writer wait can let the host reshape history. Preserve
+            // the new pre-transform entry for recovery, not the pre-wait one.
+            if (admissionRetried) entry = captureEntry();
             await magicContext?.["experimental.chat.messages.transform"]?.(input, output);
             return output.messages;
         } catch (error) {
+            if (error instanceof LkgAdmissionReplay) return output.messages;
             if (sessionId && (providerAtEntry || provider?.isProviderSession?.(sessionId))) {
                 // The durable runner record is the provider session's only replay.
                 // Explicit turn refusals must not be bypassed by any replay.
@@ -471,124 +641,20 @@ export function createMessagesTransformHandler(args: {
                 // "return the input messages unmodified", never a cached
                 // transformed array.
                 restoreCompactionOffInput();
-            } else if (sessionId && slotAtEntry && !entry) {
-                dropSlot(sessionId, "lkg_invalidated_reshape");
-                sessionLog(sessionId, "lkg_invalidated_reshape");
-            } else if (sessionId && entry) {
-                let replayBlocked = false;
-                try {
-                    const db = openDatabase();
-                    // In Rust mode the adapter tracks whether the session is serving a frozen
-                    // replay, and it only replays when the replay fits the context limit.
-                    // A replay served here must update that tracking and pass the same check.
-                    const rust = resolveRust(sessionId);
-                    if (
-                        (error instanceof StorageBusyRefusalError &&
-                            error.stage === "rust-mode-emergency") ||
-                        rust?.emergencyFailClosed(sessionId, output.messages as MessageLike[])
-                    ) {
-                        // The adapter refused while failing closed (usage at or above 95%
-                        // of the model's limit, or a proven provider overflow); there it
-                        // admits no last-known-good replay, so serving one here would
-                        // bypass its refusal.
-                        replayBlocked = true;
-                        sessionLog(sessionId, "lkg_emergency_band_refused");
-                    } else if (
-                        !db ||
-                        isEmergencyRecoveryArmed(sessionId) ||
-                        getOverflowState(db, sessionId).needsEmergencyRecovery
-                    ) {
-                        replayBlocked = true;
-                        sessionLog(sessionId, "lkg_emergency_armed");
-                    } else {
-                        const inputMessages = output.messages as MessageLike[];
-                        const inputCount = inputMessages.length;
-                        const keys = resolveLkgModelKeys(inputMessages);
-                        const replay = replayLkg({
-                            sessionId,
-                            messages: inputMessages,
-                            modelKey: keys.modelKey,
-                            providerKey: keys.providerKey,
-                            entry,
-                            prepareReplay: (messages) =>
-                                rust
-                                    ? rust.stripPersistedReasoning(
-                                          sessionId,
-                                          messages,
-                                          inputMessages,
-                                      )
-                                    : replayRustModeBindingMismatchStrips({
-                                          db,
-                                          sessionId,
-                                          messages,
-                                          resolvedProviderID: keys.providerKey ?? undefined,
-                                      }),
-                        });
-                        // TypeScript mode has no Rust result to check, but replaying
-                        // the saved request for a known model still has to pass the
-                        // same fit check as Rust mode: measured size of the saved
-                        // request plus an estimate for the messages added since.
-                        let tsFit = true;
-                        if (replay.ok && !rust && keys.providerKey && keys.modelKey) {
-                            const model = {
-                                providerID: keys.providerKey,
-                                modelID: keys.modelKey.slice(keys.providerKey.length + 1),
-                            };
-                            if (
-                                lkgReplayLimit({
-                                    db,
-                                    sessionId,
-                                    model,
-                                    modelKey: keys.modelKey,
-                                }) !== undefined
-                            ) {
-                                const fit = lkgReplayFits({
-                                    db,
-                                    sessionId,
-                                    messages: replay.messages,
-                                    model,
-                                    modelKey: keys.modelKey,
-                                    systemPromptTokens: getOrCreateSessionMeta(db, sessionId)
-                                        .systemPromptTokens,
-                                    agentName: agent,
-                                });
-                                tsFit = fit.fits;
-                                if (!fit.fits && fit.detail) sessionLog(sessionId, fit.detail);
-                            }
-                        }
-                        if (
-                            replay.ok &&
-                            (!tsFit ||
-                                (rust &&
-                                    !rust.replayFits(sessionId, replay.messages, inputMessages)))
-                        ) {
-                            replayBlocked = true;
-                            sessionLog(sessionId, "lkg_replay_does_not_fit");
-                        } else if (replay.ok) {
-                            args.onLkgReplay?.();
-                            replaceMessagesInPlace(
-                                output,
-                                replay.messages as unknown as MessageWithParts[],
-                            );
-                            // The provider has now cached the replayed bytes. Tell a Rust
-                            // adapter, so its next successful pass keeps serving them instead
-                            // of switching to module output, which would bust that cache.
-                            noteExternalLkgReplay(rust, sessionId, inputCount);
-                            sessionLog(sessionId, "lkg_replay_served");
-                            return output.messages;
-                        } else {
-                            sessionLog(sessionId, replay.reason);
-                        }
-                    }
-                } catch (replayError) {
-                    replayBlocked = true;
-                    sessionLog(sessionId, "lkg_replay_unavailable", replayError);
-                }
-                if (replayBlocked) {
-                    sessionLog(sessionId, "lkg_replay_declined");
-                }
-            } else if (sessionId) {
-                sessionLog(sessionId, "lkg_miss");
+            } else if (
+                sessionId &&
+                tryMessagesTransformLkgReplay({
+                    output,
+                    sessionId,
+                    error,
+                    entry,
+                    rust: resolveRust(sessionId),
+                    agent,
+                    replayFits: args.replayFits,
+                    onLkgReplay: args.onLkgReplay,
+                })
+            ) {
+                return output.messages;
             }
             // The LKG replay above (the last request this session served
             // successfully) could not stand in, and the pass could not produce a

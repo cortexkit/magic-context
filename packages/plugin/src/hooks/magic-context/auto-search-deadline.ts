@@ -3,7 +3,7 @@ import {
     appendAutoSearchHintDecision,
 } from "../../features/magic-context/storage-meta-persisted";
 import { cancelAutoSearchWork } from "../../shared/auto-search-lifecycle";
-import type { Database } from "../../shared/sqlite";
+import { assertTransformWrite, type Database } from "../../shared/sqlite";
 
 export const AUTO_SEARCH_TIMEOUT_MS = 3_000;
 const operationDeadlines = new WeakMap<AbortSignal, number>();
@@ -30,13 +30,14 @@ export function clearAutoSearchTimeoutForSession(sessionId?: string): void {
     else skippedTurns.delete(sessionId);
 }
 
-/** Freeze the skip even if another writer owns SQLite at the deadline. */
+/** Preserve a no-hint decision for replay while its originating pass is still valid. */
 export function persistAutoSearchSkip(
     db: Database,
     sessionId: string,
     messageId: string,
     reason: AutoSearchHintNoHintReason = "timeout",
 ): Promise<boolean> {
+    assertTransformWrite();
     let turns = skippedTurns.get(sessionId);
     if (!turns) {
         turns = new WeakMap();
@@ -49,9 +50,9 @@ export function persistAutoSearchSkip(
     }
     const prior = messages.get(messageId);
     if (prior) return prior;
-    // Persist on the owner, exactly like ordinary hint decisions. There is no
-    // queued writer that can recreate a deleted/replaced session later. A failed
-    // durable write must still leave this message frozen in the owner's cache.
+    // Write on the calling pass, without a queued writer that could recreate a
+    // deleted session. If SQLite is busy, retain the no-hint result in memory for
+    // byte-stable retries, but only while this pass's publication guard permits it.
     let ok = false;
     try {
         const outcome = appendAutoSearchHintDecision(db, sessionId, {
@@ -63,6 +64,9 @@ export function persistAutoSearchSkip(
     } catch {
         // A contended store must not erase the already-served no-hint decision.
     }
+    // The SQLite write may have failed because the pass expired. Recheck before
+    // suppressing future searches for this message in the process-local cache.
+    assertTransformWrite();
     const persistence = Promise.resolve(ok);
     messages.set(messageId, persistence);
     return persistence;

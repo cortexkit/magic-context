@@ -8,16 +8,13 @@
  * latest user message. The hint is deliberately not inline retrieved data;
  * it nudges the agent to call `ctx_search` for full context if relevant.
  *
- * ## Per-turn cache
+ * ## Per-turn decisions
  *
- * Pi can re-fire `pi.on("context", ...)` multiple times for the same user
- * turn. We mirror OpenCode's per-session cache (OpenCode lines 33-38,
- * 182-187, 271-272): `sessionId -> { messageId, hint }`. A cached empty
- * hint means “this turn was already evaluated and skipped”; a cached
- * non-empty hint is replayed through the same idempotent append guard. The
- * cache is intentionally process-local and lasts until either a different
- * latest user message id is seen or `clearAutoSearchForPiSession()` is
- * called from Pi session cleanup.
+ * Pi can re-fire `pi.on("context", ...)` for the same user turn. Decisions
+ * are persisted by session and entry ID, and concurrent callers share one
+ * reader-worker search. Replaying a persisted hint restores the same bytes;
+ * a timed-out or cold/unregistered turn stays skipped on later passes.
+ * Session cleanup cancels pending work without deleting persisted decisions.
  *
  * ## Timeout
  *
@@ -271,8 +268,11 @@ export async function runAutoSearchHintForPi(args: {
 	ensureProjectRegistered?: () => Promise<void>;
 	/** Per-context projection loaded with note anchors so sticky replay reads session_meta once. */
 	decisions?: readonly AutoSearchHintDecision[];
+	passGuard?: { assert(): void; wait<T>(pending: Promise<T>): Promise<T> };
 }): Promise<AgentMessage[]> {
 	const startedAt = performance.now();
+	args.passGuard?.assert();
+	const wait = args.passGuard?.wait ?? (<T>(pending: Promise<T>) => pending);
 	const { sessionId, db, messages, options, entryIdByRef } = args;
 	const entryIds =
 		args.entryIds === undefined
@@ -298,238 +298,256 @@ export async function runAutoSearchHintForPi(args: {
 	if (found === null) return messages;
 
 	const { message: userMsg, messageId: userMsgId } = found;
-	await coalesceAutoSearchTurn(
-		db,
-		sessionId,
-		userMsgId,
-		async (lifecycleSignal): Promise<AgentMessage[]> => {
-			if (lifecycleSignal.aborted) return messages;
-			if (wasAutoSearchSkipped(db, sessionId, userMsgId)) return messages;
+	await wait(
+		coalesceAutoSearchTurn(
+			db,
+			sessionId,
+			userMsgId,
+			async (lifecycleSignal): Promise<AgentMessage[]> => {
+				args.passGuard?.assert();
+				if (lifecycleSignal.aborted) return messages;
+				if (wasAutoSearchSkipped(db, sessionId, userMsgId)) return messages;
 
-			const existing =
-				args.decisions ?? getAutoSearchHintDecisions(db, sessionId);
-			const existingForMessage =
-				existing.find((decision) => decision.messageId === userMsgId) ??
-				(args.decisions
-					? getAutoSearchHintDecisions(db, sessionId).find(
-							(decision) => decision.messageId === userMsgId,
-						)
-					: undefined);
-			if (existingForMessage) {
-				if (existingForMessage.decision === "hint") {
-					appendHintToUserMessage(userMsg, existingForMessage.text);
+				const existing =
+					args.decisions ?? getAutoSearchHintDecisions(db, sessionId);
+				const existingForMessage =
+					existing.find((decision) => decision.messageId === userMsgId) ??
+					(args.decisions
+						? getAutoSearchHintDecisions(db, sessionId).find(
+								(decision) => decision.messageId === userMsgId,
+							)
+						: undefined);
+				if (existingForMessage) {
+					if (existingForMessage.decision === "hint") {
+						appendHintToUserMessage(userMsg, existingForMessage.text);
+					}
+					return messages;
 				}
-				return messages;
-			}
-			if (strictResolutionFailed) {
-				sessionLog(
-					sessionId,
-					"Pi auto-search: strict entry-id resolution failed; replayed persisted decisions only",
-				);
-				return messages;
-			}
-
-			// A retryable search may finish on a later tool continuation. Compute a new
-			// decision only while the target user is still the live array tail; otherwise
-			// appending the recovered hint would rewrite an already-served cache prefix.
-			// Persisted decisions were replayed above because replay is byte restoration,
-			// not a new mutation.
-			if (found.index !== messages.length - 1) return messages;
-			// A directory outside any project has no identity to search memories,
-			// commits or history embeddings under; never search the blank key.
-			if (!isUsableProjectIdentity(options.projectPath)) return messages;
-
-			const snapshot = getProjectEmbeddingSnapshot(options.projectPath);
-			if (!snapshot) {
-				queueAutoSearchRegistration(
-					db,
-					options.projectPath,
-					args.ensureProjectRegistered,
-				);
-				void persistAutoSearchSkip(db, sessionId, userMsgId, "empty");
-				return messages;
-			}
-
-			const writeNoHintAndReconcile = async (
-				reason: AutoSearchHintNoHintReason,
-			): Promise<void> => {
-				const outcome = persistAutoSearchDecision(
-					db,
-					sessionId,
-					{
-						messageId: userMsgId,
-						decision: "no-hint",
-						reason,
-					},
-					startedAt,
-				);
-				if (outcome === null) {
-					void persistAutoSearchSkip(db, sessionId, userMsgId);
-					return;
+				if (strictResolutionFailed) {
+					sessionLog(
+						sessionId,
+						"Pi auto-search: strict entry-id resolution failed; replayed persisted decisions only",
+					);
+					return messages;
 				}
-				if (!outcome.ok) return;
-				if (
-					outcome.kind === "already-present" &&
-					outcome.decision.decision === "hint"
-				) {
-					appendHintToUserMessage(userMsg, outcome.decision.text);
+
+				// A retryable search may finish on a later tool continuation. Compute a new
+				// decision only while the target user is still the live array tail; otherwise
+				// appending the recovered hint would rewrite an already-served cache prefix.
+				// Persisted decisions were replayed above because replay is byte restoration,
+				// not a new mutation.
+				if (found.index !== messages.length - 1) return messages;
+				// A directory outside any project has no identity to search memories,
+				// commits or history embeddings under; never search the blank key.
+				if (!isUsableProjectIdentity(options.projectPath)) return messages;
+
+				const snapshot = getProjectEmbeddingSnapshot(options.projectPath);
+				if (!snapshot) {
+					queueAutoSearchRegistration(
+						db,
+						options.projectPath,
+						args.ensureProjectRegistered,
+					);
+					void persistAutoSearchSkip(db, sessionId, userMsgId, "empty");
+					return messages;
 				}
-			};
 
-			// Suppression check runs on raw text before stripping; OpenCode does the
-			// same at lines 189-198 because stripping removes the signal tags.
-			const rawPartsText = collectUserPromptParts(userMsg);
-			if (hasStackedAugmentation(rawPartsText)) {
-				sessionLog(
-					sessionId,
-					"auto-search: skipping — user message already carries augmentation/hint",
-				);
-				await writeNoHintAndReconcile("stacked");
-				return messages;
-			}
+				const writeNoHintAndReconcile = async (
+					reason: AutoSearchHintNoHintReason,
+				): Promise<void> => {
+					args.passGuard?.assert();
+					const outcome = persistAutoSearchDecision(
+						db,
+						sessionId,
+						{
+							messageId: userMsgId,
+							decision: "no-hint",
+							reason,
+						},
+						startedAt,
+					);
+					args.passGuard?.assert();
+					if (outcome === null) {
+						void persistAutoSearchSkip(db, sessionId, userMsgId);
+						return;
+					}
+					if (!outcome.ok) return;
+					if (
+						outcome.kind === "already-present" &&
+						outcome.decision.decision === "hint"
+					) {
+						appendHintToUserMessage(userMsg, outcome.decision.text);
+					}
+				};
 
-			const rawPrompt = extractUserPromptText(userMsg);
-			const minPromptChars = options.minPromptChars ?? DEFAULT_MIN_PROMPT_CHARS;
-			if (rawPrompt.length < minPromptChars) {
-				await writeNoHintAndReconcile("too-short");
-				return messages;
-			}
+				// Check raw text before stripping because stripping removes the
+				// augmentation tags that tell us a hint was already attached.
+				const rawPartsText = collectUserPromptParts(userMsg);
+				if (hasStackedAugmentation(rawPartsText)) {
+					sessionLog(
+						sessionId,
+						"auto-search: skipping — user message already carries augmentation/hint",
+					);
+					await writeNoHintAndReconcile("stacked");
+					return messages;
+				}
 
-			let results: UnifiedSearchResult[] | null;
-			try {
-				results = await withAutoSearchDeadline(
-					async (signal, checkDeadline) => {
-						if (checkDeadline()) return null;
-						const memoryEnabled = snapshot?.features.memoryEnabled ?? true;
-						// Use the snapshot's history setting for query embedding, independently
-						// of memory.enabled. Memory and git-commit retrieval have separate gates.
-						const embeddingEnabled = snapshot ? snapshot.historyEnabled : true;
-						const gitCommitsEnabled = snapshot?.gitCommitEnabled ?? false;
-						const searchOptions: UnifiedSearchOptions = {
-							limit: 10,
-							memoryEnabled,
-							embeddingEnabled,
-							gitCommitsEnabled,
-							embedQuery: async (text, signal) => {
-								const result = await embedTextForProject(
-									options.projectPath,
-									text,
+				const rawPrompt = extractUserPromptText(userMsg);
+				const minPromptChars =
+					options.minPromptChars ?? DEFAULT_MIN_PROMPT_CHARS;
+				if (rawPrompt.length < minPromptChars) {
+					await writeNoHintAndReconcile("too-short");
+					return messages;
+				}
+
+				let results: UnifiedSearchResult[] | null;
+				try {
+					results = await wait(
+						withAutoSearchDeadline(async (signal, checkDeadline) => {
+							args.passGuard?.assert();
+							if (checkDeadline()) return null;
+							const memoryEnabled = snapshot?.features.memoryEnabled ?? true;
+							// Use the snapshot's history setting for query embedding, independently
+							// of memory.enabled. Memory and git-commit retrieval have separate gates.
+							const embeddingEnabled = snapshot
+								? snapshot.historyEnabled
+								: true;
+							const gitCommitsEnabled = snapshot?.gitCommitEnabled ?? false;
+							const searchOptions: UnifiedSearchOptions = {
+								limit: 10,
+								memoryEnabled,
+								embeddingEnabled,
+								gitCommitsEnabled,
+								embedQuery: async (text, signal) => {
+									const result = await wait(
+										embedTextForProject(
+											options.projectPath,
+											text,
+											signal,
+											"query",
+										),
+									);
+									args.passGuard?.assert();
+									checkDeadline();
+									return result;
+								},
+								isEmbeddingRuntimeEnabled: () => embeddingEnabled === true,
+								visibleMemoryIds: options.visibleMemoryIds ?? null,
+								// Leave primers out of automatic hints so primer updates cannot rewrite
+								// cached request prefixes. Explicit ctx_search and the dashboard expose them.
+								sources: ["memory", "message", "git_commit"],
+							};
+							return searchAutoHint(
+								db,
+								sessionId,
+								options.projectPath,
+								rawPrompt,
+								{
+									...searchOptions,
 									signal,
-									"query",
-								);
-								checkDeadline();
-								return result;
-							},
-							isEmbeddingRuntimeEnabled: () => embeddingEnabled === true,
-							visibleMemoryIds: options.visibleMemoryIds ?? null,
-							// Leave primers out of automatic hints so primer updates cannot rewrite
-							// cached request prefixes. Explicit ctx_search and the dashboard expose them.
-							sources: ["memory", "message", "git_commit"],
-						};
-						return searchAutoHint(
+									countRetrievals: false,
+								},
+							);
+						}, startedAt),
+					);
+				} catch (error) {
+					args.passGuard?.assert();
+					// Retryable failure — do not persist a permanent no-hint decision, or the
+					// same user message would be suppressed even though a later pass may succeed.
+					log(
+						`[auto-search] unified search failed for session ${sessionId} (will retry next pass): ${error instanceof Error ? error.message : String(error)}`,
+					);
+					return messages;
+				}
+
+				args.passGuard?.assert();
+				if (lifecycleSignal.aborted) return messages;
+				try {
+					if (results === null) {
+						// The request was served without a hint; retries of this turn must
+						// keep those bytes rather than append a late search result.
+						sessionLog(
+							sessionId,
+							`auto-search: timed out after ${AUTO_SEARCH_TIMEOUT_MS}ms, skipping hint for this turn`,
+						);
+						void persistAutoSearchSkip(db, sessionId, userMsgId);
+						return messages;
+					}
+
+					if (results.length === 0) {
+						await writeNoHintAndReconcile("empty");
+						return messages;
+					}
+
+					const scoreThreshold =
+						options.scoreThreshold ?? DEFAULT_SCORE_THRESHOLD;
+					if (results[0].score < scoreThreshold) {
+						sessionLog(
+							sessionId,
+							`auto-search: top score ${results[0].score.toFixed(3)} below threshold ${scoreThreshold}`,
+						);
+						await writeNoHintAndReconcile("below-threshold");
+						return messages;
+					}
+
+					const hintText = buildAutoSearchHint(results, {
+						wordRules: options.wordRules,
+					});
+					if (!hintText) {
+						await writeNoHintAndReconcile("empty");
+						return messages;
+					}
+
+					// Prefix with two newlines so the hint is a separate text block.
+					const payload = `\n\n${hintText}`;
+					args.passGuard?.assert();
+					const outcome = persistAutoSearchDecision(
+						db,
+						sessionId,
+						{
+							messageId: userMsgId,
+							decision: "hint",
+							text: payload,
+						},
+						startedAt,
+					);
+					args.passGuard?.assert();
+					if (outcome === null) {
+						void persistAutoSearchSkip(db, sessionId, userMsgId);
+						return messages;
+					}
+					if (!outcome.ok) return messages;
+					if (outcome.decision.decision === "hint") {
+						appendHintToUserMessage(userMsg, outcome.decision.text);
+					}
+					sessionLog(
+						sessionId,
+						`auto-search: attached hint to ${userMsgId} (${results.length} fragments, top score ${results[0].score.toFixed(3)})`,
+					);
+
+					return messages;
+				} finally {
+					if (!lifecycleSignal.aborted && results !== null) {
+						args.passGuard?.assert();
+						void queueAutoSearchBackfill(
 							db,
 							sessionId,
 							options.projectPath,
 							rawPrompt,
-							{
-								...searchOptions,
-								signal,
-								countRetrievals: false,
-							},
 						);
-					},
-					startedAt,
+					}
+				}
+			},
+			() => {
+				args.passGuard?.assert();
+				if (wasAutoSearchSkipped(db, sessionId, userMsgId)) return;
+				const decision = getAutoSearchHintDecisions(db, sessionId).find(
+					(entry) => entry.messageId === userMsgId,
 				);
-			} catch (error) {
-				// Retryable failure — do not persist a permanent no-hint decision, or the
-				// same user message would be suppressed even though a later pass may succeed.
-				log(
-					`[auto-search] unified search failed for session ${sessionId} (will retry next pass): ${error instanceof Error ? error.message : String(error)}`,
-				);
-				return messages;
-			}
-
-			if (lifecycleSignal.aborted) return messages;
-			try {
-				if (results === null) {
-					// Preserve the served skip: replay must never add a late hint to this turn.
-					sessionLog(
-						sessionId,
-						`auto-search: timed out after ${AUTO_SEARCH_TIMEOUT_MS}ms, skipping hint for this turn`,
-					);
-					void persistAutoSearchSkip(db, sessionId, userMsgId);
-					return messages;
-				}
-
-				if (results.length === 0) {
-					await writeNoHintAndReconcile("empty");
-					return messages;
-				}
-
-				const scoreThreshold =
-					options.scoreThreshold ?? DEFAULT_SCORE_THRESHOLD;
-				if (results[0].score < scoreThreshold) {
-					sessionLog(
-						sessionId,
-						`auto-search: top score ${results[0].score.toFixed(3)} below threshold ${scoreThreshold}`,
-					);
-					await writeNoHintAndReconcile("below-threshold");
-					return messages;
-				}
-
-				const hintText = buildAutoSearchHint(results, {
-					wordRules: options.wordRules,
-				});
-				if (!hintText) {
-					await writeNoHintAndReconcile("empty");
-					return messages;
-				}
-
-				// Prefix with double newline so the hint is a separate block, matching
-				// OpenCode lines 268-270.
-				const payload = `\n\n${hintText}`;
-				const outcome = persistAutoSearchDecision(
-					db,
-					sessionId,
-					{
-						messageId: userMsgId,
-						decision: "hint",
-						text: payload,
-					},
-					startedAt,
-				);
-				if (outcome === null) {
-					void persistAutoSearchSkip(db, sessionId, userMsgId);
-					return messages;
-				}
-				if (!outcome.ok) return messages;
-				if (outcome.decision.decision === "hint") {
-					appendHintToUserMessage(userMsg, outcome.decision.text);
-				}
-				sessionLog(
-					sessionId,
-					`auto-search: attached hint to ${userMsgId} (${results.length} fragments, top score ${results[0].score.toFixed(3)})`,
-				);
-
-				return messages;
-			} finally {
-				if (!lifecycleSignal.aborted && results !== null)
-					void queueAutoSearchBackfill(
-						db,
-						sessionId,
-						options.projectPath,
-						rawPrompt,
-					);
-			}
-		},
-		() => {
-			if (wasAutoSearchSkipped(db, sessionId, userMsgId)) return;
-			const decision = getAutoSearchHintDecisions(db, sessionId).find(
-				(entry) => entry.messageId === userMsgId,
-			);
-			if (decision?.decision === "hint")
-				appendHintToUserMessage(userMsg, decision.text);
-		},
+				if (decision?.decision === "hint")
+					appendHintToUserMessage(userMsg, decision.text);
+			},
+		),
 	);
 	return messages;
 }

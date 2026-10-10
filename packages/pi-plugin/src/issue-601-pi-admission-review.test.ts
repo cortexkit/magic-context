@@ -24,8 +24,8 @@ import {
 } from "./test-utils.test";
 
 // Explicit transactions and autocommit writes share a 250 ms synchronous
-// acquisition budget for the entire turn. Execution and scheduler time are not
-// lock waiting; this fixture allows overhead but must finish before the writer.
+// acquisition budget for later writes in the turn. The first session-meta write
+// also has the shared 16.5 s yielding budget, after trying a valid LKG.
 // Pi's 5000 ms connection setting must be restored after every bounded attempt.
 const PRODUCTION_PI_BUSY_TIMEOUT_MS = 5000;
 const BACKGROUND_HOLD_MS = 3200;
@@ -296,7 +296,10 @@ describe("Pi in-turn lock wait at the production busy timeout", () => {
 								refused: host.controller.signal.aborted,
 							}),
 						);
-					expect(elapsedMs).toBeLessThan(TURN_BUDGET_MS);
+					const replayable =
+						mode === "complete" || mode === "different-model usage";
+					expect(elapsedMs).toBeLessThan(replayable ? TURN_BUDGET_MS : 18000);
+					if (!replayable) expect(elapsedMs).toBeGreaterThanOrEqual(16500);
 					expect(writer.isHeld()).toBe(true);
 					if (mode === "complete" || mode === "different-model usage") {
 						expect(logs.join("\n")).toContain("LKG replay served");
@@ -325,7 +328,7 @@ describe("Pi in-turn lock wait at the production busy timeout", () => {
 		}, 30000);
 	}
 
-	it("does not block a first turn for the whole of a 3.2 s background writer hold", async () => {
+	it("waits for a 3.2 s writer and serves a managed first turn without refusal", async () => {
 		const dir = createTestTempDirFromPath(
 			join(tmpdir(), "pi-production-timeout-"),
 		);
@@ -357,9 +360,12 @@ describe("Pi in-turn lock wait at the production busy timeout", () => {
 							refused: host.controller.signal.aborted,
 						}),
 					);
-				expect(Math.round(elapsedMs)).toBeLessThan(TURN_BUDGET_MS);
-				expect(writer.isHeld()).toBe(true);
-				host.assertRefused(served, raw);
+				expect(elapsedMs).toBeGreaterThanOrEqual(BACKGROUND_HOLD_MS);
+				expect(elapsedMs).toBeLessThan(5500);
+				expect(writer.isHeld()).toBe(false);
+				expect(host.controller.signal.aborted).toBe(false);
+				expect(host.entries).toHaveLength(0);
+				expect(JSON.stringify(served)).toContain("§1§ first turn");
 				expect(db.prepare("PRAGMA busy_timeout").get()).toEqual({
 					timeout: PRODUCTION_PI_BUSY_TIMEOUT_MS,
 				});

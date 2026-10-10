@@ -62,9 +62,9 @@
             "path": "tests/checkout-claim.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
-            "rationale": "Agent checkout claim: real OpenCode 1 and Pi hosts against a wire-level fake subc daemon playing ALF agent.for_host_session and engram claim.read refuse a held-elsewhere session before any Magic Context write or provider call, then serve it once the claim moves back; PID lsof proves throwaway-store containment. OpenCode 2 runs the same gate in its context hook (unit-tested against the same fake daemon); OMP shares Pi's plugin; Rust mode goes through the TypeScript plugin's pass",
+            "rationale": "Agent checkout claim: real OpenCode 1, Pi and OMP hosts against a wire-level fake subc daemon playing ALF agent.for_host_session and engram claim.read refuse a held-elsewhere session before any Magic Context write or provider call, then serve it once the claim moves back; PID lsof proves throwaway-store containment. OpenCode 2 runs the same gate in its context hook (unit-tested against the same fake daemon); Rust mode goes through the TypeScript plugin's pass",
             "contract_refs": ["AGENT-CHECKOUT-CLAIM"],
-            "hosts": ["opencode", "pi"]
+            "hosts": ["opencode", "pi", "omp"]
         },
         {
             "path": "tests/cache-ttl-live-config.test.ts",
@@ -145,6 +145,14 @@
             "invocation": { "ts": true, "rust": false },
             "rationale": "Issue 612: native OpenCode 2.0.22 task-tool children freeze reduced mode before their first request; allowed children retain tags and reduced guidance, denied children and a denied primary suppress unavailable ctx_reduce surfaces, and children never run the historian; throwaway roots with host PID lsof containment",
             "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
+            "path": "tests/opencode2/dreamer-task-context.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "native OpenCode 2 runs all six dreamer tasks (manual, timer, two locations, tool-using retrospective and curate) and asserts every hidden child receives its task context; throwaway roots with host PID lsof containment",
+            "contract_refs": ["S2-MIGRATION"],
             "hosts": ["opencode2"]
         },
         {

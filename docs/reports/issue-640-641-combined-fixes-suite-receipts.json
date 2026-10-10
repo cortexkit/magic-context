@@ -1,0 +1,69 @@
+{
+  "bun": "1.4.2 (744846f84)",
+  "platform": "Linux",
+  "baseline": "5292c42f030202a77dfc7ec8080158166acfc17c",
+  "taskBase": "763cadb2561ff191ba4770ad31d08ee1abe1c4c3",
+  "isolation": "Each suite used its own throwaway HOME/XDG/storage roots; OPENCODE_DB was unset. Both source revisions were built in the same job before the suites. Git safe.directory was supplied for this worktree through command-local GIT_CONFIG variables.",
+  "suites": [
+    {
+      "revision": "master archive",
+      "command": "bun run --cwd .review-baseline/packages/plugin test",
+      "exit": 1,
+      "pass": 7458,
+      "skip": 9,
+      "fail": 1,
+      "assertions": 218185,
+      "tests": 7468,
+      "files": 732,
+      "durationSeconds": 154.26,
+      "failureNames": [
+        "Node WASM Transformers fixture > builds with real fs and persists a model for offline reuse"
+      ]
+    },
+    {
+      "revision": "master archive",
+      "command": "bun run --cwd .review-baseline/packages/pi-plugin test",
+      "exit": 0,
+      "pass": 1684,
+      "skip": 3,
+      "fail": 0,
+      "assertions": 84855,
+      "tests": 1687,
+      "files": 166,
+      "durationSeconds": 55.37,
+      "failureNames": []
+    },
+    {
+      "revision": "repaired task tree",
+      "command": "bun run --cwd packages/plugin test",
+      "exit": 1,
+      "pass": 7471,
+      "skip": 9,
+      "fail": 1,
+      "assertions": 218244,
+      "tests": 7481,
+      "files": 737,
+      "durationSeconds": 174.71,
+      "failureNames": [
+        "Node WASM Transformers fixture > builds with real fs and persists a model for offline reuse"
+      ]
+    },
+    {
+      "revision": "repaired task tree",
+      "command": "bun run --cwd packages/pi-plugin test",
+      "exit": 0,
+      "pass": 1758,
+      "skip": 9,
+      "fail": 0,
+      "assertions": 85171,
+      "tests": 1767,
+      "files": 182,
+      "durationSeconds": 242.32,
+      "failureNames": []
+    }
+  ],
+  "comparisons": [
+    { "package": "plugin", "addedFailureNames": [], "removedFailureNames": [] },
+    { "package": "pi-plugin", "addedFailureNames": [], "removedFailureNames": [] }
+  ]
+}

@@ -10,6 +10,7 @@ import {
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { readHostSystemPrompt } from "./host-system-prompt";
 import type { PiFitEnvelope } from "./pi-raw-fallback";
+import type { PiToolWireSchema } from "./pi-tool-wire-schema";
 
 /** Only complete current host metadata can make a replay admissible. Counting
  * every registered tool (including inactive tools) and serialized wrappers is
@@ -19,6 +20,7 @@ export function readPiLkgFitEnvelope(
 	pi: { getAllTools?: () => unknown; getActiveTools?: () => unknown },
 	modelKey: string | null | undefined,
 	frozen: DecisionCalibration,
+	wireSchema?: PiToolWireSchema,
 ): PiFitEnvelope | undefined {
 	try {
 		if (!modelKey || typeof pi.getAllTools !== "function") return;
@@ -37,7 +39,8 @@ export function readPiLkgFitEnvelope(
 		}> = [];
 		for (const tool of allTools) {
 			if (!tool || typeof tool !== "object") return;
-			const { name, description, parameters } = tool;
+			const { name, description } = tool;
+			const parameters = wireSchema ? wireSchema(tool) : tool.parameters;
 			if (
 				typeof name !== "string" ||
 				!name.length ||

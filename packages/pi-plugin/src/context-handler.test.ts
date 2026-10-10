@@ -17,6 +17,7 @@ import {
 	isSessionReconciled,
 } from "@magic-context/core/features/magic-context/message-index-async";
 import { readEpochFloorSnapshot } from "@magic-context/core/features/magic-context/protection-window";
+import { recordSessionProjectIdentity } from "@magic-context/core/features/magic-context/session-project-storage";
 import {
 	acquireWrapupInProgress,
 	addNote,
@@ -99,6 +100,7 @@ import {
 } from "./ctx-reduce-nudge-pi";
 import { injectM0M1Pi, mustMaterializePi } from "./inject-compartments-pi";
 import * as piHistorian from "./pi-historian-runner";
+import { capturePiServedArray } from "./served-array-ledger";
 import {
 	assistantMessage,
 	assistantToolCall,
@@ -357,6 +359,117 @@ for (const configured of [true, false]) {
 }
 
 describe("Pi project binding retry", () => {
+	it("logs an actual binding change once and stays quiet for an unchanged pass", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-pi-binding-change-log";
+		const logger = await import("@magic-context/core/shared/logger");
+		const log = spyOn(logger, "sessionLog");
+		try {
+			recordSessionProjectIdentity(db, sessionId, "git:old");
+			contextHandlerInternals.updateSessionProjectTracking(
+				sessionId,
+				"git:new",
+				db,
+				"/workspace/new",
+			);
+
+			const changeLogs = () =>
+				log.mock.calls.filter(([, message]) =>
+					String(message).startsWith("project binding changed"),
+				);
+			expect(changeLogs()).toHaveLength(1);
+			expect(changeLogs()[0]).toEqual([
+				sessionId,
+				"project binding changed harness=pi cwd=/workspace/new old=git:old new=git:new",
+			]);
+
+			contextHandlerInternals.updateSessionProjectTracking(
+				sessionId,
+				"git:new",
+				db,
+				"/workspace/new",
+			);
+			expect(changeLogs()).toHaveLength(1);
+		} finally {
+			log.mockRestore();
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+
+	it("rate-limits failed writes and logs one recovery", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-pi-binding-write-log";
+		const logger = await import("@magic-context/core/shared/logger");
+		const log = spyOn(logger, "sessionLog");
+		const clock = spyOn(Date, "now").mockReturnValue(1_000);
+		const schema = (
+			db
+				.prepare(
+					"SELECT sql FROM sqlite_master WHERE name = 'session_projects'",
+				)
+				.get() as { sql: string }
+		).sql;
+		try {
+			db.exec("DROP TABLE session_projects");
+			const observe = () =>
+				contextHandlerInternals.updateSessionProjectTracking(
+					sessionId,
+					"git:retry",
+					db,
+					"/workspace/retry",
+				);
+			observe();
+			const failureLogs = () =>
+				log.mock.calls.filter(([, message]) =>
+					String(message).startsWith("project binding write failed"),
+				);
+			expect(failureLogs()).toHaveLength(1);
+			expect(failureLogs()[0][1]).toContain(
+				"project binding write failed harness=pi cwd=/workspace/retry attempted=git:retry:",
+			);
+			expect(failureLogs()[0][1]).toContain("no such table: session_projects");
+
+			clock.mockReturnValue(1_000 + 599_999);
+			observe();
+			expect(failureLogs()).toHaveLength(1);
+
+			clock.mockReturnValue(1_000 + 600_000);
+			observe();
+			expect(failureLogs()).toHaveLength(2);
+
+			db.exec(schema);
+			clock.mockReturnValue(1_000 + 600_001);
+			observe();
+			const recoveryLogs = log.mock.calls.filter(([, message]) =>
+				String(message).startsWith("project binding write recovered"),
+			);
+			expect(recoveryLogs).toHaveLength(1);
+			expect(recoveryLogs[0]).toEqual([
+				sessionId,
+				"project binding write recovered harness=pi cwd=/workspace/retry identity=git:retry",
+			]);
+			const changeLogs = log.mock.calls.filter(([, message]) =>
+				String(message).startsWith("project binding changed"),
+			);
+			expect(changeLogs).toHaveLength(1);
+			// Recovery is also the first successful binding write, so it reports the
+			// actual no-binding → project transition.
+			expect(changeLogs[0][1]).toContain("old=none new=git:retry");
+			const persisted = db
+				.prepare(
+					"SELECT project_path FROM session_projects WHERE session_id = ? AND harness = 'pi'",
+				)
+				.get(sessionId) as { project_path: string };
+			expect(persisted.project_path).toBe("git:retry");
+		} finally {
+			clock.mockRestore();
+			log.mockRestore();
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+
 	it("retries a failed first write without adding steady-state writes", () => {
 		const db = createTestDb();
 		const sessionId = "ses-pi-retry-binding";
@@ -365,7 +478,9 @@ describe("Pi project binding retry", () => {
 				.prepare(
 					"SELECT sql FROM sqlite_master WHERE name = 'session_projects'",
 				)
-				.get() as { sql: string }
+				.get() as {
+				sql: string;
+			}
 		).sql;
 		try {
 			db.exec("DROP TABLE session_projects");
@@ -1177,7 +1292,9 @@ describe("Pi fallback tag adoption", () => {
 				sessionId,
 				tagger,
 				fingerprints,
-				{ hasFallbackMessageTags: false },
+				{
+					hasFallbackMessageTags: false,
+				},
 			);
 			expect(readTagRow(db, sessionId, 7)?.messageId).toBe(`${realId}:p0`);
 			expect(tagger.getTag(sessionId, `${realId}:p0`, "message")).toBe(7);
@@ -1551,7 +1668,11 @@ describe("Pi fallback tag adoption", () => {
 				0,
 				null,
 				null,
-				{ tokenCount: 9, inputTokenCount: null, reasoningTokenCount: null },
+				{
+					tokenCount: 9,
+					inputTokenCount: null,
+					reasoningTokenCount: null,
+				},
 			);
 			db.prepare(
 				"UPDATE tags SET status = 'dropped' WHERE session_id = ? AND tag_number = 71",
@@ -1560,6 +1681,9 @@ describe("Pi fallback tag adoption", () => {
 			queuePendingOp(db, sessionId, 71, "drop", 200);
 			tagger.bindTag(sessionId, `${fallbackId}:p0`, 70);
 			tagger.bindTag(sessionId, `${realId}:p0`, 71);
+			capturePiServedArray(sessionId, [userMessage("§71§ hello", 70)], {
+				servedTagNumbers: [71],
+			});
 
 			contextHandlerInternals.adoptPiFallbackTags(
 				db,
@@ -1698,7 +1822,7 @@ describe("Pi fallback tag adoption", () => {
 		}
 	});
 
-	it("cheap-gate: does not build the owner map when no pi-msg tool owners exist", () => {
+	it("prepares tool owners outside the writer even if discovery found no synthetic owners", () => {
 		const db = createTestDb();
 		try {
 			const sessionId = "ses-pi-tool-owner-cheap-gate";
@@ -1716,8 +1840,9 @@ describe("Pi fallback tag adoption", () => {
 				0,
 				"entry-real",
 			);
-			// Split a gate hole from a wrong test premise: the tool-owner gate MUST
-			// be false here (no pi-msg-* owners), so the branch-walk never runs.
+			// A sibling can add a synthetic tool-owner tag before BEGIN. Prepare
+			// assistant/call identities even when no such tag is visible yet, so
+			// resolving the new tag needs no branch walk while holding the writer.
 			expect(hasPiFallbackToolOwnerTags(db, sessionId)).toBe(false);
 
 			let resolverCalls = 0;
@@ -1729,15 +1854,14 @@ describe("Pi fallback tag adoption", () => {
 				{
 					messages: [assistantToolCall("call-real", "Read", {}, 90)],
 					resolveStableId: () => {
+						expect(db.inTransaction).toBe(false);
 						resolverCalls += 1;
 						return "entry-real";
 					},
 				},
 			);
 
-			// The cheap hasPiFallbackToolOwnerTags gate short-circuits before any
-			// branch walk, so the resolver is never consulted.
-			expect(resolverCalls).toBe(0);
+			expect(resolverCalls).toBe(1);
 		} finally {
 			closeQuietly(db);
 		}
@@ -2915,7 +3039,9 @@ describe("registerPiContextHandler", () => {
 			);
 			expect(
 				db.prepare("SELECT status FROM notes WHERE id=?").get(notice.id),
-			).toEqual({ status: "dismissed" });
+			).toEqual({
+				status: "dismissed",
+			});
 			clearContextHandlerSession(sessionId);
 			onNoteTrigger(db, sessionId, "todos_complete");
 			await turn("entry-3");
@@ -4427,6 +4553,8 @@ describe("registerPiContextHandler", () => {
 			await expect(
 				handler(throwingEvent, fakeContext("ses-context") as never),
 			).rejects.toMatchObject({ name: "PiStorageBusyError" });
+			// Refusal is immediate; storage diagnostics are deliberately deferred.
+			await new Promise<void>((resolve) => setImmediate(resolve));
 			expect(getOrCreateSessionMeta(db, "ses-context").lastTransformError).toBe(
 				"boom messages",
 			);

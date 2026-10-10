@@ -1,0 +1,30 @@
+#!/usr/bin/env bun
+// Compare replay with the real provider request captured before the late context handler returned.
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+const root = realpathSync(process.argv[2] ?? "");
+if (!root.startsWith(join(realpathSync(tmpdir()),"magic-context","issue-641")+"/")) throw new Error("supply the disposable late-mc host root");
+Object.assign(process.env,{HOME:root,XDG_DATA_HOME:join(root,"data"),XDG_CONFIG_HOME:join(root,"config"),MAGIC_CONTEXT_STORAGE_DIR:join(root,"data/cortexkit/magic-context"),NODE_ENV:"test"});
+const { Database } = await import("../../../../packages/plugin/src/shared/sqlite");
+const { createPiLkgCoordinator } = await import("../../../../packages/pi-plugin/src/pi-lkg");
+const db = new Database(join(root,"data/cortexkit/magic-context/context.db"),{readonly:true});
+const slot = db.prepare("SELECT * FROM lkg_slots").get() as any;
+const glob = new Bun.Glob("**/*.jsonl");
+const sessionFile = Array.from(glob.scanSync(join(root,".omp/agent/sessions")))[0];
+if (!sessionFile) throw new Error("no captured host session");
+const entries = readFileSync(join(root,".omp/agent/sessions",sessionFile),"utf8").trim().split("\n").map(line=>JSON.parse(line));
+const messages = entries.filter(e=>e.type==="message");
+const original = messages[0].message;
+const followup = {id:"followup",parentId:messages.at(-1).id,message:{role:"user",content:"Continue safely",timestamp:Date.now()}};
+const parents = new Map(entries.map(e=>[e.id,e.parentId])); parents.set(followup.id,followup.parentId);
+const coordinator = createPiLkgCoordinator(db as never);
+const snapshot = coordinator.beginPass({sessionId:slot.session_id,messages:[...messages.map(e=>e.message),followup.message],entryIds:[...messages.map(e=>e.id),followup.id],modelKey:slot.model_key,providerKey:slot.provider_key});
+const replay = coordinator.replay(snapshot,id=>parents.get(id));
+const request = JSON.parse(readFileSync(join(root,"provider-requests.json"),"utf8"))[0];
+const result = {root,slot:{capturedAt:slot.captured_at,modelKey:slot.model_key},providerReceivedAt:request.receivedAt,original,providerMessages:request.body.messages,replay};
+const outDir = join(import.meta.dir,"evidence"); mkdirSync(outDir,{recursive:true});
+writeFileSync(join(outDir,"late-host-replay.json"),JSON.stringify(result,null,2)+"\n");
+console.log(JSON.stringify({ok:replay.ok,reason:!replay.ok?replay.reason:null,originalOnWire:JSON.stringify(request.body.messages).includes("MC641_ORIGINAL"),replayMessageCount:replay.ok?replay.messages.length:null}));
+if (!replay.ok) throw new Error("late-host LKG did not replay: "+replay.reason);
+db.close();

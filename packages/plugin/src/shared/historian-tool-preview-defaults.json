@@ -1,0 +1,13 @@
+{
+  "ctx_note": "Note ${input.action} ${input.note_ids}: ${input.content} → ${output.truncate(160)}",
+  "ctx_memory": "Memory ${input.action} ${input.category} ${input.ids}: ${input.content} → ${output.truncate(160)}",
+  "todowrite": "Todos (${input.todos.count}): ${input.todos.each(\"${status}: ${content}\")}",
+  "question": "Asked user: ${input.questions[*].question.join(\" / \")} → ${output}",
+  "task": "Task ${input.subagent_type}: ${input.prompt} → ${output.truncate(200)}",
+  "ask": "Asked: ${input.question.truncate(250)} [options: ${input.options.join(\" / \")}] ${input.resolution} → ${output.truncate(300)}",
+  "peer_send": "PM to ${input.agent}${input.agent_id}: ${input.message.truncate(400)}",
+  "board": "Board ${input.verb}: ${input.ops.each(\"${op} ${item}${lane.title} ${state}${lane.status}${props.text} ${lane.items[*].text}\")}",
+  "room": "Room ${input.action} ${input.room_id}: ${input.text.truncate(400)}",
+  "work": "Work ${input.action} ${input.id}: ${input.prompt_file}${input.prompt.truncate(200)}${input.notes.truncate(200)} → ${output.truncate(160)}",
+  "knowhow": "Looked up how-to: ${input.query}${input.id}"
+}

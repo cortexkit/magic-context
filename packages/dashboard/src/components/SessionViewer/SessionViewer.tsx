@@ -27,6 +27,12 @@ import {
   updateSessionFact,
 } from "../../lib/api";
 import { LoadMoreTrigger } from "../../lib/load-more";
+import type { HarnessFilter } from "./session-filter";
+import { parseStoredHarnessFilter, sessionHarnessOptions } from "./session-filter";
+
+export type { HarnessFilter } from "./session-filter";
+export { parseStoredHarnessFilter, sessionHarnessOptions } from "./session-filter";
+
 import { ask } from "../../lib/platform";
 import type {
   Compartment,
@@ -145,7 +151,6 @@ function hasTiers(comp: Compartment): boolean {
 }
 
 type ActiveTab = "messages" | "compartments" | "facts" | "notes" | "historian" | "tokens";
-type HarnessFilter = "all" | Harness;
 type SelectedSession = { harness: Harness; sessionId: string };
 
 // Module-level SWR cache for the project dropdown. `get_projects` is heavy (a
@@ -177,19 +182,6 @@ function loadStoredValue(key: string): string {
   } catch {
     return "";
   }
-}
-
-export const sessionHarnessOptions: { value: HarnessFilter; label: string }[] = [
-  { value: "all", label: "Harness: All" },
-  { value: "opencode", label: "OpenCode" },
-  { value: "opencode2", label: "OpenCode 2" },
-  { value: "pi", label: "Pi" },
-  { value: "omp", label: "OMP" },
-];
-
-/** The saved harness filter, or "all" when nothing (or an unknown value) is saved. */
-export function parseStoredHarnessFilter(stored: string): HarnessFilter {
-  return sessionHarnessOptions.find((option) => option.value === stored)?.value ?? "all";
 }
 
 function loadHarnessFilter(): HarnessFilter {

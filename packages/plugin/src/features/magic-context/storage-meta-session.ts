@@ -84,14 +84,26 @@ function getSessionMetaSelectColumns(db: Database): string {
     return projection;
 }
 
-export function getOrCreateSessionMeta(db: Database, sessionId: string): SessionMeta {
+function findSessionMeta(db: Database, sessionId: string): SessionMeta | undefined {
     const result = db
         .prepare(`SELECT ${getSessionMetaSelectColumns(db)} FROM session_meta WHERE session_id = ?`)
         .get(sessionId);
 
-    if (isSessionMetaRow(result)) {
-        return toSessionMeta(result);
-    }
+    return isSessionMetaRow(result) ? toSessionMeta(result) : undefined;
+}
+
+/**
+ * Read session metadata, returning defaults instead of inserting a row. The
+ * history-head fallback that runs when another process holds the database write
+ * lock uses this: inserting would need that same lock, fail, and refuse the turn.
+ */
+export function readSessionMeta(db: Database, sessionId: string): SessionMeta {
+    return findSessionMeta(db, sessionId) ?? getDefaultSessionMeta(sessionId);
+}
+
+export function getOrCreateSessionMeta(db: Database, sessionId: string): SessionMeta {
+    const existing = findSessionMeta(db, sessionId);
+    if (existing) return existing;
 
     // Fresh row creation: bridge the race between OpenCode creating the
     // session (which writes `parent_id` synchronously) and the async

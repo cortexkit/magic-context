@@ -429,7 +429,7 @@ describe("Pi context handler LKG replay", () => {
 			closeQuietly(locker);
 			closeQuietly(db);
 		}
-	});
+	}, 40000);
 
 	it("refuses divergent LKG and unmeasured raw fallback", async () => {
 		const dir = createTestTempDirFromPath(join(tmpdir(), "pi-lkg-diverged-"));

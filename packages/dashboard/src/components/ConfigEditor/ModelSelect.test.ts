@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { commitTypedModelValue, getTypedModelSelection } from "./ModelSelect";
+import { commitTypedModelValue, getTypedModelSelection } from "./model-selection";
 
 describe("ModelSelect custom model entries", () => {
   it("commits an unlisted provider/model ID when discovered models exist", () => {

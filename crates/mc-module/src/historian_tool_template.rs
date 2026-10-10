@@ -1,4 +1,4 @@
-//! Non-executable, bounded templates. Twin of shared/historian-tool-template.ts.
+//! Non-executable historian templates. Twin of shared/historian-tool-template.ts.
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -16,7 +16,7 @@ struct Expression {
     each: Option<Vec<Node>>,
     join: Option<String>,
     count: bool,
-    cap: usize,
+    cap: Option<usize>,
 }
 #[derive(Clone)]
 enum Node {
@@ -131,7 +131,7 @@ impl<'a> Parser<'a> {
             each: None,
             join: None,
             count: false,
-            cap: 300,
+            cap: None,
         };
         if self.take(".each(") {
             if relative {
@@ -155,7 +155,7 @@ impl<'a> Parser<'a> {
             expr.count = true;
         }
         if self.take(".truncate(") {
-            expr.cap = self.integer()?;
+            expr.cap = Some(self.integer()?);
             if !self.take(")") {
                 return Err(());
             }
@@ -185,7 +185,7 @@ fn parse(source: &str, relative: bool) -> Result<Vec<Node>, ()> {
 pub fn valid_template(source: &str) -> bool {
     parse(source, false).is_ok()
 }
-fn truncate(source: &str, cap: usize) -> String {
+fn truncate(source: &str, cap: Option<usize>) -> String {
     let mut normalized = String::new();
     let mut newline = false;
     for ch in source.chars() {
@@ -199,10 +199,38 @@ fn truncate(source: &str, cap: usize) -> String {
             newline = false;
         }
     }
-    if normalized.chars().count() <= cap {
+    let Some(cap) = cap else {
+        return normalized;
+    };
+    let chars: Vec<char> = normalized.chars().collect();
+    if chars.len() <= cap {
         return normalized;
     }
-    format!("{}…", normalized.chars().take(cap).collect::<String>())
+    // Explicit caps stop after sentence-ending punctuation so a cut is not
+    // mistaken for an intact tool message. If no sentence fits, show only the marker.
+    let mut end = 0;
+    for i in 0..cap.min(chars.len()) {
+        if !".!?。！？".contains(chars[i]) {
+            continue;
+        }
+        let mut next = i + 1;
+        while next < chars.len() && "\"'”’)]".contains(chars[next]) {
+            next += 1;
+        }
+        if next <= cap
+            && ("。！？".contains(chars[i])
+                || next == chars.len()
+                || matches!(chars[next], ' ' | '\t'))
+        {
+            end = next;
+        }
+    }
+    let prefix: String = chars[..end].iter().collect();
+    format!(
+        "{prefix}{}[… {} more characters]",
+        if end > 0 { " " } else { "" },
+        chars.len() - end
+    )
 }
 fn scalar(value: Option<&Value>) -> String {
     match value {
@@ -285,23 +313,16 @@ fn render(nodes: &[Node], root: Option<&Value>, output_text: Option<&str>) -> St
                     let Some(array) = array else {
                         return String::new();
                     };
-                    let mut elements: Vec<String> = array
+                    let elements: Vec<String> = array
                         .iter()
-                        .take(10)
                         .map(|v| {
-                            truncate(
-                                &if let Some(each) = &expr.each {
-                                    render(each, v.as_ref(), None)
-                                } else {
-                                    scalar(v.as_ref())
-                                },
-                                300,
-                            )
+                            if let Some(each) = &expr.each {
+                                render(each, v.as_ref(), None)
+                            } else {
+                                scalar(v.as_ref())
+                            }
                         })
                         .collect();
-                    if array.len() > 10 {
-                        elements.push(format!("… +{} more", array.len() - 10));
-                    }
                     return truncate(
                         &elements.join(expr.join.as_deref().unwrap_or(if expr.each.is_some() {
                             "; "
@@ -332,7 +353,7 @@ pub fn render_template(source: &str, input: &Value, output: Option<&Value>) -> O
     }
     Some(truncate(
         &render(&nodes, Some(&Value::Object(root)), Some(&text)),
-        1000,
+        None,
     ))
 }
 pub fn defaults() -> &'static ExpansionMap {
@@ -354,7 +375,89 @@ pub fn expand(
         .get(name)
         .or_else(|| defaults().get(name))?
         .as_str()?;
-    render_template(template, input, output)
+    let labeled = if overrides.contains_key(name) {
+        input.clone()
+    } else {
+        builtin_input(name, input)
+    };
+    render_template(template, &labeled, output)
+}
+
+// Room actions, private-message addresses and board lanes have multiple input
+// shapes. Derive readable labels only for built-ins; configured template overrides
+// keep the unmodified tool input, just as they do in the TypeScript renderer.
+fn builtin_input(name: &str, input: &Value) -> Value {
+    let Some(mut labeled) = input.as_object().cloned() else {
+        return input.clone();
+    };
+    let text = |key: &str| input[key].as_str().filter(|s| !s.is_empty());
+    match name {
+        "peer_send" => {
+            let recipient = if let Some(reply) = text("reply_to_pmid") {
+                format!("reply to {reply}")
+            } else if let Some(agent) = text("agent").or_else(|| text("agent_id")) {
+                format!("to {agent}")
+            } else if let Some(session) = input["external"]["session_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .or_else(|| text("session_id"))
+            {
+                format!("to session {session}")
+            } else {
+                "to unknown recipient".into()
+            };
+            labeled.insert("recipient".into(), Value::String(recipient));
+        }
+        "room" => {
+            labeled.insert(
+                "room_label".into(),
+                Value::String(
+                    text("room_id")
+                        .or_else(|| text("title"))
+                        .unwrap_or_default()
+                        .into(),
+                ),
+            );
+            let detail = if matches!(text("action"), Some("create" | "invite")) {
+                Value::String(format!(
+                    "invitees: {}",
+                    render_template("${input.invitees}", input, None).unwrap_or_default()
+                ))
+            } else {
+                input["text"].clone()
+            };
+            if !detail.is_null() {
+                labeled.insert("room_detail".into(), detail);
+            }
+        }
+        "board" => {
+            labeled.insert(
+                "board_lane".into(),
+                Value::String(text("lane").map(|s| format!(" {s}")).unwrap_or_default()),
+            );
+            if let Some(ops) = input["ops"].as_array() {
+                let ops = ops
+                    .iter()
+                    .map(|op| {
+                        let Some(mut op_labeled) = op.as_object().cloned() else {
+                            return op.clone();
+                        };
+                        let lane = op["lane"]
+                            .as_str()
+                            .or_else(|| op["lane"]["title"].as_str())
+                            .or_else(|| op["lane"]["id"].as_str());
+                        if let Some(lane) = lane {
+                            op_labeled.insert("lane_label".into(), Value::String(lane.into()));
+                        }
+                        Value::Object(op_labeled)
+                    })
+                    .collect();
+                labeled.insert("ops".into(), Value::Array(ops));
+            }
+        }
+        _ => {}
+    }
+    Value::Object(labeled)
 }
 
 #[cfg(test)]
@@ -379,6 +482,20 @@ mod tests {
                 case["expected"].as_str().unwrap(),
                 "{}",
                 case["tool"]
+            );
+        }
+        for case in fixture["variants"].as_array().unwrap() {
+            assert_eq!(
+                expand(
+                    case["tool"].as_str().unwrap(),
+                    &case["input"],
+                    case.get("output"),
+                    &BTreeMap::new()
+                )
+                .unwrap(),
+                case["expected"].as_str().unwrap(),
+                "{}",
+                case["label"]
             );
         }
         for case in fixture["templates"].as_array().unwrap() {

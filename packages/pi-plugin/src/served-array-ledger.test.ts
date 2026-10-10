@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
-import { readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
@@ -11,6 +17,8 @@ import {
 	flushPiServedArrayLedger,
 	getPiServedArrayBodyPath,
 	getPiServedArrayLedgerPath,
+	getPiServedTagNumbers,
+	getPiServedTagNumbersPath,
 	PI_SERVED_ARRAY_TAIL_MESSAGES,
 } from "./served-array-ledger";
 
@@ -40,6 +48,82 @@ function message(index: number): Record<string, unknown> {
 }
 
 describe("Pi served-array digest ledger", () => {
+	test("unreadable identity storage refuses instead of forgetting served numbers", () => {
+		const storageDir = temporaryDirectory();
+		capturePiServedArray("corrupt", ["§1§ served"], {
+			storageDir,
+			servedTagNumbers: [1],
+		});
+		writeFileSync(
+			getPiServedTagNumbersPath("corrupt", storageDir),
+			"not a served record\n",
+		);
+		clearPiServedArraySession("corrupt");
+		expect(() => getPiServedTagNumbers("corrupt", storageDir)).toThrow();
+		expect(() =>
+			capturePiServedArray("corrupt", [], {
+				storageDir,
+				servedTagNumbers: [9],
+			}),
+		).toThrow();
+	});
+	test("fresh process reconstructs served numbers without captured bodies", () => {
+		const storageDir = temporaryDirectory();
+		const modulePath = join(import.meta.dir, "served-array-ledger.ts");
+		const run = (code: string) => {
+			const result = Bun.spawnSync(
+				[
+					process.execPath,
+					"--tsconfig-override",
+					join(import.meta.dir, "../tsconfig.json"),
+					"-e",
+					code,
+				],
+				{ windowsHide: true },
+			);
+			expect(result.exitCode, result.stderr.toString()).toBe(0);
+			return result.stdout.toString().trim();
+		};
+		run(`import { capturePiServedArray } from ${JSON.stringify(modulePath)};
+capturePiServedArray("restart", ["§1§ quoted §9§"], { storageDir: ${JSON.stringify(storageDir)}, servedTagNumbers: [1] });`);
+		expect(
+			run(`import { getPiServedTagNumbers } from ${JSON.stringify(modulePath)};
+console.log(JSON.stringify([...getPiServedTagNumbers("restart", ${JSON.stringify(storageDir)})]));`),
+		).toBe("[1]");
+		expect(readdirSync(storageDir)).not.toContain("pi-served-array-bodies");
+	});
+	test("literal markers do not create served identities", () => {
+		const storageDir = temporaryDirectory();
+		capturePiServedArray("literal", ["quoted §9§"], { storageDir });
+		expect([...getPiServedTagNumbers("literal", storageDir)]).toEqual([]);
+		capturePiServedArray("literal", ["§1§ quoted §9§"], {
+			storageDir,
+			servedTagNumbers: [1],
+		});
+		expect([...getPiServedTagNumbers("literal", storageDir)]).toEqual([1]);
+	});
+	test("records served numbers across normal and detached LKG arrays after cleanup", () => {
+		const storageDir = temporaryDirectory();
+		expect(getPiServedTagNumbers("numbers", storageDir).size).toBe(0);
+		capturePiServedArray("numbers", ["§3§ served"], {
+			storageDir,
+			servedTagNumbers: [3],
+		});
+		capturePiServedArray("numbers", [], {
+			storageDir,
+			servedTagNumbers: [8],
+			serializedOutput: {
+				jsonMessages: ['"[dropped §8§]"'],
+				json: '["[dropped §8§]"]',
+			},
+		});
+		expect([...getPiServedTagNumbers("numbers", storageDir)]).toEqual([3, 8]);
+		clearPiServedArraySession("numbers");
+		expect([...getPiServedTagNumbers("numbers", storageDir)]).toEqual([3, 8]);
+		expect(
+			readFileSync(getPiServedTagNumbersPath("numbers", storageDir), "utf8"),
+		).toContain('"tag_numbers":[3]');
+	});
 	test("creates every ledger artifact without group or world access", () => {
 		if (process.platform === "win32") return;
 		const storageDir = join(
@@ -50,6 +134,7 @@ describe("Pi served-array digest ledger", () => {
 		temporaryDirectories.push(storageDir);
 		capturePiServedArray("private", [message(0)], {
 			storageDir,
+			servedTagNumbers: [1],
 			fullBodyCapture: true,
 		});
 		flushPiServedArrayLedger();

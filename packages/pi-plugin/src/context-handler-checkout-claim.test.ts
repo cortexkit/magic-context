@@ -8,6 +8,7 @@ import {
 	registerPiContextHandler,
 } from "./context-handler";
 import { registerPiGuardedContext } from "./pi-context-refusal";
+import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import {
 	createFakePi,
 	createTestDb,
@@ -42,6 +43,7 @@ describe("Pi context handler: checkout claim", () => {
 	afterEach(() => {
 		for (const sessionId of sessions) clearContextHandlerSession(sessionId);
 		sessions.clear();
+		__setPiHarnessKindForTesting(undefined);
 		resetLkgSlotsForTest();
 	});
 
@@ -81,6 +83,7 @@ describe("Pi context handler: checkout claim", () => {
 				(value) => ({ ok: true as const, value }),
 				(error: unknown) => ({ ok: false as const, error }),
 			);
+			await new Promise<void>((resolve) => setImmediate(resolve));
 			return { result, asked, rows: sessionRows(db, sessionId) };
 		} finally {
 			closeQuietly(db);
@@ -100,6 +103,50 @@ describe("Pi context handler: checkout claim", () => {
 		expect(result.ok).toBe(true);
 		expect(rows.session_meta).toBe(1);
 	});
+
+	for (const harness of ["pi", "omp"] as const) {
+		it(`held-elsewhere refusal never schedules diagnostic storage writes [${harness}]`, async () => {
+			const db = createTestDb();
+			const sessionId = `claim-no-diagnostic-${harness}`;
+			sessions.add(sessionId);
+			__setPiHarnessKindForTesting(harness);
+			try {
+				const fake = createFakePi();
+				const entries: unknown[] = [];
+				let aborted = false;
+				registerPiContextHandler(
+					{
+						...fake.pi,
+						appendEntry: (_type: string, data: unknown) => entries.push(data),
+					} as never,
+					{ db },
+					{ checkoutClaim: { refusal: async () => REFUSAL } },
+				);
+				const raw = [userMessage("work on a moved checkout", 1)];
+				const ctx = {
+					...fakeContext(sessionId, "/work/project", ["u"], raw),
+					abort: () => {
+						aborted = true;
+					},
+				};
+				await (fake.handlers.get("context") as PiHandler)(
+					{ messages: raw as never[] },
+					ctx as never,
+				);
+				// Persisting the refused-turn error used to create session_meta on the
+				// next event-loop tick. Drain that callback before checking for writes.
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				expect(aborted).toBe(true);
+				expect(entries).toEqual([{ message: REFUSAL.message }]);
+				expect(sessionRows(db, sessionId)).toEqual({
+					session_meta: 0,
+					tags: 0,
+				});
+			} finally {
+				closeQuietly(db);
+			}
+		});
+	}
 });
 
 describe("Pi guarded context: checkout-claim refusal", () => {

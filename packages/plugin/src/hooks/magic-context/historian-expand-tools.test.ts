@@ -52,6 +52,73 @@ test("shared golden covers every default's actual fields and result shape", () =
             }),
         ).toBe(c.expected);
     }
+    for (const c of fixture.variants) {
+        expect(expandToolPart({ type: "tool", tool: c.tool, state: { input: c.input } })).toBe(
+            c.expected,
+        );
+    }
+});
+
+test("historian keeps long room posts and peer replies whole instead of host titles", () => {
+    const body =
+        fixture.longMessage.sentence.repeat(fixture.longMessage.count) + fixture.longMessage.tail;
+    expect(body.length).toBeGreaterThan(1000);
+    const parts = [
+        {
+            type: "tool",
+            tool: "room",
+            callID: "r",
+            state: {
+                input: { action: "post", room_id: "rm_review", text: body },
+                title: "Room title…",
+                metadata: { description: "Room description…" },
+            },
+        },
+        {
+            type: "tool",
+            tool: "peer_send",
+            callID: "p",
+            state: {
+                input: { reply_to_pmid: "pm_42", message: body },
+                metadata: { description: "PM title…" },
+            },
+        },
+        { type: "text", text: "Tail text." },
+    ];
+    const messages = [{ ordinal: 1, id: "a", role: "assistant", parts }];
+    const original = JSON.stringify(messages);
+    const chunk = withRawMessageProvider(
+        "whole-post",
+        { readMessages: () => messages, getMessageCount: () => 1 },
+        () => readSessionChunk("whole-post", 10_000),
+    );
+    expect(chunk.text).toBe(
+        `[1] A: TC: Room post rm_review: ${body} / TC: PM reply to pm_42: ${body} / Tail text.`,
+    );
+    expect(JSON.stringify(messages)).toBe(original);
+});
+
+test("verbose ctx_expand preserves legacy preview bytes and custom template limits", () => {
+    const body = "word ".repeat(300);
+    const part = {
+        type: "tool",
+        tool: "room",
+        state: { input: { action: "post", room_id: "rm_review", text: body } },
+    };
+    const messages = [{ ordinal: 1, id: "a", role: "assistant", parts: [part] }];
+    withRawMessageProvider(
+        "legacy-preview",
+        { readMessages: () => messages, getMessageCount: () => 1 },
+        () => {
+            const preview = renderVerboseRange("legacy-preview", 1, 1, 10_000);
+            expect(preview.text).toContain(
+                `    • tool room: Room post rm_review: ${"word ".repeat(80)}…`,
+            );
+            expect(preview.text).not.toContain("more characters]");
+        },
+    );
+    expect(expandToolPart(part, { room: "${input.text}" }, true)).toBe(`${"word ".repeat(60)}…`);
+    expect(expandToolPart(part, { room: "${input.text}" })).toBe(body);
 });
 
 test("shared golden templates cover arrays, caps, missing fields and newlines", () => {

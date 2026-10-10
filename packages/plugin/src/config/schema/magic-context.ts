@@ -682,7 +682,7 @@ export const HistorianConfigSchema = AgentMetadataSchema.extend({
         )
         .optional()
         .describe(
-            'Readable historian tool expansions, keyed by exact host tool name. Templates override built-in defaults; false disables an expansion. Supports ${input.path}, ${output.path}, bare ${output}, array [N], [*].field, .each("${field}"), .join("separator"), .count and final .truncate(N). Missing fields are empty; placeholders default to 300 characters, lists to 10 elements, expansions to 1000 characters. Valid in user and project config; affects historian/recomp and verbose ctx_expand only, never the wire or default ctx_expand transcript.',
+            'Readable historian tool expansions, keyed by exact host tool name. Templates override built-in defaults; false disables an expansion. Supports ${input.path}, ${output.path}, bare ${output}, array [N], [*].field, .each("${field}"), .join("separator"), .count and final .truncate(N). Missing fields are empty. Historian text and lists have no implicit caps; explicit .truncate(N) keeps complete sentences and marks omitted characters, or emits only the marker if no sentence fits. When the ctx_expand history-recovery tool is called in verbose mode, its tool-call previews retain their original built-in templates and limits (300 characters per placeholder, 10 list elements, 1000 characters per expansion). Valid in user and project config; never changes the wire or default ctx_expand transcript.',
         ),
     opencode: OpenCodeHarnessBlockSchema.optional(),
     pi: PiHarnessBlockSchema.optional(),

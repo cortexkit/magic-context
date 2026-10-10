@@ -2440,9 +2440,10 @@ function resolveMuralForM0(
     projectPath: string | undefined,
     modelKey: string,
     budgetTokens: number,
+    mode: "persist" | "read-only" = "persist",
 ): MuralWireOptions | undefined {
     if (options.memoryEnabled === false || !options.muralEnabled) return undefined;
-    return resolveMuralWire(options.db, projectPath, modelKey, true, budgetTokens);
+    return resolveMuralWire(options.db, projectPath, modelKey, true, budgetTokens, mode);
 }
 
 export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
@@ -3486,7 +3487,13 @@ function renderFreshM0NonPersisted(options: M0M1RenderOptions): {
         options.memoryEnabled === false
             ? undefined
             : (options.mural ??
-              resolveMuralForM0(options, projectPath, snapshotMarkers.modelKey, memoryBudget));
+              resolveMuralForM0(
+                  options,
+                  projectPath,
+                  snapshotMarkers.modelKey,
+                  memoryBudget,
+                  "read-only",
+              ));
     let decayPressureMultiplier = 1;
     let m0Text = renderM0({
         projectDocs: docs.renderedBlock,

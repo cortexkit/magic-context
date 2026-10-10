@@ -53,6 +53,7 @@ import {
 	persistCachedM0,
 	readProjectDocsCanonical,
 } from "@magic-context/core/features/magic-context/storage";
+import { readSessionMeta } from "@magic-context/core/features/magic-context/storage-meta-session";
 import {
 	getActiveUserMemories,
 	type UserMemory,
@@ -700,6 +701,7 @@ function resolveMuralForM0Pi(
 	db: ContextDatabase,
 	modelKey: string,
 	budgetTokens: number,
+	mode: "persist" | "read-only" = "persist",
 ): MuralWireOptions | undefined {
 	if (state.memoryEnabled === false) return undefined;
 	if (state.mural) return state.mural;
@@ -710,6 +712,7 @@ function resolveMuralForM0Pi(
 		modelKey,
 		true,
 		budgetTokens,
+		mode,
 	);
 }
 
@@ -1590,7 +1593,7 @@ function renderFreshM0PiNonPersisted(
 } {
 	const docs = readProjectDocsForPiM0(state);
 	const cachedMaterializedAt =
-		getOrCreateSessionMeta(db, state.sessionId).cachedM0MaterializedAt ?? 0;
+		readSessionMeta(db, state.sessionId).cachedM0MaterializedAt ?? 0;
 	const frozen = readFrozenM0InputsPi(state, db, docs, cachedMaterializedAt);
 	// CACHE STABILITY: materializedAt feeds the m[1] expiry cutoff. It must be
 	// stable across consecutive fallback passes, so reuse the last persisted value
@@ -1602,13 +1605,15 @@ function renderFreshM0PiNonPersisted(
 	);
 	const memoryBudget =
 		state.injectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS;
-	// Fresh fallback is a last-resort HARD-equivalent render: resolve mural once
-	// so the non-persisted pair still carries the image when the feature is on.
+	// Render the same mural image a full history rebuild would, so the bytes match
+	// what the next saved rebuild serves, but without saving it: this fallback runs
+	// only because another process holds the database write lock.
 	const mural = resolveMuralForM0Pi(
 		state,
 		db,
 		frozen.markers.modelKey,
 		memoryBudget,
+		"read-only",
 	);
 	rememberPiMural(state.sessionId, mural);
 	let dpm = 1;
@@ -2278,8 +2283,7 @@ export function createPiM0M1PassSnapshot(args: {
 			? [...args.compartments]
 			: getCompartments(args.db, args.sessionId);
 	return {
-		sessionMeta:
-			args.sessionMeta ?? getOrCreateSessionMeta(args.db, args.sessionId),
+		sessionMeta: args.sessionMeta ?? readSessionMeta(args.db, args.sessionId),
 		compartments,
 		projectDocs: args.projectDocs,
 		cachedRow: readCachedPiM0M1Row(args.db, args.sessionId),

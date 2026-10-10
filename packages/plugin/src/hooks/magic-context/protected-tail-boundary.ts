@@ -503,12 +503,16 @@ export function applyHeadCap(args: {
         },
     );
     diagnostics.completedRefence.to = end;
-    diagnostics.eligibleEnd = end <= offset ? offset : Math.min(end, protectedTailStart);
+    // A component beginning before offset may fence forward past the protected
+    // tail. Clamping it back would split the same arc again. There is no valid
+    // head in that interval, so wait for a later pass instead.
+    if (end > protectedTailStart) end = offset;
+    diagnostics.eligibleEnd = end <= offset ? offset : end;
     args.observeDiagnostics?.(diagnostics);
     if (end <= offset && offset < protectedTailStart) {
         return { eligibleEndOrdinal: offset, oversizeAtomicUnit };
     }
-    return { eligibleEndOrdinal: Math.min(end, protectedTailStart), oversizeAtomicUnit };
+    return { eligibleEndOrdinal: end, oversizeAtomicUnit };
 }
 
 export function resolveProtectedTailBoundary(
@@ -733,6 +737,13 @@ export function resolveProtectedTailBoundary(
     // message. On OpenCode 2 that is often an instruction-update row, which the
     // host never serves by id; keep such rows in the protected tail.
     protectedTailStart = retreatPastHostUnservedRows(messages, protectedTailStart, offset);
+    // The live-user floor and host-row retreat run after the initial tool fence.
+    // Either can land inside a parallel tool batch. Re-fence toward older history
+    // so neither the live prompt nor any result is pulled into the eligible head.
+    protectedTailStart = Math.max(
+        offset,
+        fenceBoundaryForCompletedToolArcs(protectedTailStart, arcs, 1),
+    );
     const perRunCap = selectPerRunCap({
         usagePercentage,
         N: scaledN,
@@ -752,10 +763,10 @@ export function resolveProtectedTailBoundary(
         capTokens: perRunCap,
         recentOpenArcCutoff,
     });
-    const eligibleEndOrdinal = retreatPastHostUnservedRows(
-        messages,
-        head.eligibleEndOrdinal,
+    const servedEndOrdinal = retreatPastHostUnservedRows(messages, head.eligibleEndOrdinal, offset);
+    const eligibleEndOrdinal = Math.max(
         offset,
+        fenceBoundaryForCompletedToolArcs(servedEndOrdinal, arcs, 1),
     );
     const rawRangeFingerprint = computeRawRangeFingerprint(messages, offset, eligibleEndOrdinal);
     return {
@@ -784,7 +795,7 @@ export function resolveProtectedTailBoundary(
         cacheNamespace: ctx.cacheNamespace,
         createdAt,
         rawRangeFingerprint,
-        trueRawEligibleTokens: index.rangeTokens(offset, protectedTailStart),
+        trueRawEligibleTokens: index.rangeTokens(offset, eligibleEndOrdinal),
         oversizeAtomicUnit: head.oversizeAtomicUnit,
         boundaryReason,
         diagnostics: boundaryDiagnostics({
@@ -1125,6 +1136,7 @@ export function hasProtectedEligibleHead(snapshot: ProtectedTailBoundarySnapshot
 
 export function hasRunnableCompartmentWindow(snapshot: ProtectedTailBoundarySnapshot): boolean {
     if (snapshot.offset >= snapshot.protectedTailStart) return false;
+    if (snapshot.eligibleEndOrdinal <= snapshot.offset) return false;
     const forceMaterializationPercentage = escalationBands(
         snapshot.executeThresholdPercentage,
     ).forceMaterializationPercentage;

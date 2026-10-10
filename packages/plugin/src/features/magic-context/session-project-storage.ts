@@ -77,8 +77,15 @@ export function findMisScopedCompartmentChunkEmbeddingIdsForProject(
     ).map(({ id }) => id);
 }
 
+export interface SessionProjectIdentityChange {
+    previousProjectPath: string | undefined;
+    projectPath: string;
+}
+
 /**
- * Persist the immutable session→project binding resolved from the host session.
+ * Persist the host session's current project binding. A host session can move
+ * between projects, so a later observation deliberately replaces its earlier
+ * project path.
  * Chunk backfills use this mapping as the project-scope authority: without it, a
  * project-wide drain cannot safely distinguish same-process sessions from other
  * projects and must not stamp arbitrary compartments with its own identity.
@@ -87,8 +94,8 @@ export function recordSessionProjectIdentity(
     db: Database,
     sessionId: string,
     projectPath: string | undefined,
-): void {
-    if (!sessionId || !projectPath) return;
+): SessionProjectIdentityChange | undefined {
+    if (!sessionId || !projectPath) return undefined;
     // A session started exactly at the user's home directory is not a project.
     // The guard is repeated here because background backfills can call this
     // function without passing through the transform resolver.
@@ -100,7 +107,14 @@ export function recordSessionProjectIdentity(
         return;
     const harness = getHarness();
     const now = Date.now();
+    let previousProjectPath: string | undefined;
     db.transaction(() => {
+        const existing = db
+            .prepare(
+                "SELECT project_path FROM session_projects WHERE session_id = ? AND harness = ?",
+            )
+            .get(sessionId, harness) as { project_path: string } | null;
+        previousProjectPath = existing?.project_path;
         getUpsertSessionProjectStatement(db).run(sessionId, harness, projectPath, now);
         // Repair a bounded slice of chunks stamped with a project other than the
         // session's recorded owner. Repeated observations resume the repair
@@ -113,6 +127,7 @@ export function recordSessionProjectIdentity(
             SESSION_CHUNK_REPAIR_BATCH_SIZE,
         );
     }).immediate();
+    return previousProjectPath === projectPath ? undefined : { previousProjectPath, projectPath };
 }
 
 /**

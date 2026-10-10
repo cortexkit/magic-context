@@ -6,7 +6,7 @@
  * A wire-level fake subc daemon plays ALF (`prefrontal-core`
  * agent.for_host_session) and engram (`agent-sync` claim.read). It maps every
  * session to one agent whose claim another machine holds. Against the real
- * OpenCode 1 server and the real Pi RPC host, the turn must be refused before
+ * OpenCode 1 server and the real Pi/OMP RPC hosts, the turn must be refused before
  * Magic Context writes anything for the session and before the provider is
  * called. Moving the claim back to this machine must let the next turn
  * through once the short refusal period has passed. lsof on the host PID

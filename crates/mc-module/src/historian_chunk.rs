@@ -1930,6 +1930,45 @@ mod tests {
     use serde_json::json;
     use sha2::Digest;
 
+    #[test]
+    fn historian_keeps_long_room_posts_and_peer_replies_whole() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../testdata/historian-tool-expansions.json"))
+                .unwrap();
+        let spec = &fixture["longMessage"];
+        let body = spec["sentence"]
+            .as_str()
+            .unwrap()
+            .repeat(spec["count"].as_u64().unwrap() as usize)
+            + spec["tail"].as_str().unwrap();
+        assert!(body.len() > 1000);
+        let messages = vec![msg(
+            "a",
+            1,
+            "assistant",
+            vec![
+                CkKind::ToolCall {
+                    id: "r".into(),
+                    name: "room".into(),
+                    input: json!({"action": "post", "room_id": "rm_review", "text": body, "description": "Room title…"}),
+                    provider_executed: false,
+                },
+                CkKind::ToolCall {
+                    id: "p".into(),
+                    name: "peer_send".into(),
+                    input: json!({"reply_to_pmid": "pm_42", "message": body, "description": "PM title…"}),
+                    provider_executed: false,
+                },
+                CkKind::Text {
+                    text: "Tail text.".into(),
+                },
+            ],
+        )];
+        let projection = project_messages(&messages).unwrap();
+        let chunk = build_historian_chunk(&messages, &projection.blocks, 1, 10_000, 2);
+        assert_eq!(chunk.text, format!("[1] A: TC: Room post rm_review: {body} / TC: PM reply to pm_42: {body} / Tail text."));
+    }
+
     /// The historian chunk follows the TypeScript formatter: ASCII word boundaries for
     /// commit hashes and verbs, and key arguments truncated in UTF-16 units.
     #[test]

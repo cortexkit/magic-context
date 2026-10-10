@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { CANONICAL_DREAM_TASKS } from "../../../../plugin/src/features/magic-context/dreamer/task-registry";
-import { TASKS } from "./DreamerTasksField";
+import { TASKS } from "./dreamer-task-data";
 
 const RUST_CONFIG_PATH = resolve(import.meta.dir, "../../../src-tauri/src/config.rs");
 

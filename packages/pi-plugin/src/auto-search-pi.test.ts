@@ -13,6 +13,7 @@ import {
 	clearAutoSearchForPiSession,
 	runAutoSearchHintForPi,
 } from "./auto-search-pi";
+import { PiContextBudget, PiContextDeadlineError } from "./pi-context-budget";
 import {
 	assistantMessage,
 	createTestDb,
@@ -91,6 +92,76 @@ describe("runAutoSearchHintForPi", () => {
 			expect(textOf(first[0])).toContain("<ctx-search-hint>");
 			expect(textOf(second[0])).toBe(textOf(first[0]));
 			expect(spy).toHaveBeenCalledTimes(1);
+		} finally {
+			spy.mockRestore();
+			closeQuietly(db);
+		}
+	});
+
+	it("does not publish a worker hint beyond the pass optional cutoff", async () => {
+		const db = createTestDb();
+		let now = 0;
+		const budget = new PiContextBudget(0, () => now);
+		const spy = spyOn(searchModule, "searchAutoHint").mockImplementation(
+			async () => {
+				now = 21_001;
+				return [memoryResult()];
+			},
+		);
+		const messages = [userMessage("explain the historian cache wiring", 1)];
+		try {
+			await expect(
+				runAutoSearchHintForPi({
+					db,
+					sessionId: "ses-auto",
+					messages,
+					entryIds: ["cutoff-user"],
+					options: baseOptions,
+					passGuard: { assert: budget.assert, wait: budget.wait },
+				}),
+			).rejects.toBeInstanceOf(PiContextDeadlineError);
+			expect(spy).toHaveBeenCalledTimes(1);
+			expect(textOf(messages[0])).not.toContain("<ctx-search-hint>");
+			expect(getAutoSearchHintDecisions(db, "ses-auto")).toEqual([]);
+		} finally {
+			spy.mockRestore();
+			closeQuietly(db);
+		}
+	});
+
+	it("does not replay a coalesced hint into an expired joining pass", async () => {
+		const db = createTestDb();
+		let now = 0;
+		const budget = new PiContextBudget(0, () => now);
+		const spy = spyOn(searchModule, "searchAutoHint").mockImplementation(
+			async () => {
+				now = 21_001;
+				return [memoryResult()];
+			},
+		);
+		const owner = [userMessage("explain the historian cache wiring", 1)];
+		const joined = [userMessage("explain the historian cache wiring", 1)];
+		try {
+			const first = runAutoSearchHintForPi({
+				db,
+				sessionId: "ses-auto",
+				messages: owner,
+				entryIds: ["joined-user"],
+				options: baseOptions,
+			});
+			const second = runAutoSearchHintForPi({
+				db,
+				sessionId: "ses-auto",
+				messages: joined,
+				entryIds: ["joined-user"],
+				options: baseOptions,
+				passGuard: { assert: budget.assert, wait: budget.wait },
+			});
+			await first;
+			await expect(second).rejects.toBeInstanceOf(PiContextDeadlineError);
+			expect(spy).toHaveBeenCalledTimes(1);
+			expect(textOf(owner[0])).toContain("<ctx-search-hint>");
+			expect(textOf(joined[0])).not.toContain("<ctx-search-hint>");
 		} finally {
 			spy.mockRestore();
 			closeQuietly(db);

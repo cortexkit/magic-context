@@ -1,3 +1,4 @@
+import { sessionLog } from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { configureContextDatabasePragmas } from "../../shared/sqlite-context-pragmas";
 import { closeQuietly } from "../../shared/sqlite-helpers";
@@ -98,6 +99,7 @@ interface TransformDecisionRow extends PendingTransformDecision {
 
 interface PendingPiTransformDecision extends PendingTransformDecision {
     snapshotNewestAssistantEntryId: string | null;
+    publicationGuard?: () => void;
 }
 
 type TransformDecisionWriter = (dbPath: string, row: TransformDecisionRow) => void;
@@ -246,11 +248,14 @@ export function recordPendingPiTransformDecision(
     sessionId: string,
     decision: PendingTransformDecision,
     snapshotNewestAssistantEntryId: string | null,
+    publicationGuard?: () => void,
 ): void {
+    publicationGuard?.();
     if (!decision.bustedThisPass) return;
     pendingPiDecisionBySession.set(sessionId, {
         ...decision,
         snapshotNewestAssistantEntryId,
+        publicationGuard,
     });
 }
 
@@ -315,9 +320,18 @@ export function schedulePiTransformDecisionResolve(args: {
     db: Database;
     sessionId: string;
     branchEntries: readonly unknown[] | null;
+    assertCurrentPass?: () => void;
 }): boolean {
     const pending = pendingPiDecisionBySession.get(args.sessionId);
     if (!pending) return false;
+    try {
+        pending.publicationGuard?.();
+        args.assertCurrentPass?.();
+    } catch {
+        pendingPiDecisionBySession.delete(args.sessionId);
+        sessionLog(args.sessionId, "DISCARDED CONTEXT RESULT: pending Pi transform decision");
+        return false;
+    }
     const targetMessageId = findNewestPiAssistantEntryIdAfter(
         args.branchEntries,
         pending.snapshotNewestAssistantEntryId,
@@ -331,6 +345,16 @@ export function schedulePiTransformDecisionResolve(args: {
     setTimeout(() => {
         try {
             if (!hasScheduledWriteToken(args.sessionId, token)) return;
+            try {
+                pending.publicationGuard?.();
+                args.assertCurrentPass?.();
+            } catch {
+                sessionLog(
+                    args.sessionId,
+                    "DISCARDED CONTEXT RESULT: queued Pi transform decision",
+                );
+                return;
+            }
             writeTransformDecisionBestEffort(dbPath, {
                 ...pending,
                 sessionId: args.sessionId,

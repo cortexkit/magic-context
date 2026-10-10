@@ -142,10 +142,14 @@ describe("source contract: peek-then-drain in runPipeline (history)", () => {
 	const code = stripComments(CONTEXT_HANDLER_SRC);
 
 	test("runPipeline does NOT eager-delete historyRefreshSessions before work", () => {
-		// The eager-delete used to live in the outer pi.on("context") handler
-		// (around line 1052) before runPipeline. Confirm it's gone.
-		// Find the outer ctx-handler lifecycle area, before runPipeline call.
-		const before = code.split("await runPipeline(")[0];
+		// The outer handler must retain the signal until the pipeline succeeds,
+		// whether the pipeline promise is awaited directly or through the pass guard.
+		const pipeline =
+			/await\s+(?:\b(?:guardAwait|budget\.waitMandatory)\(\s*)?runPipeline\(/.exec(
+				code,
+			);
+		expect(pipeline).not.toBeNull();
+		const before = code.slice(0, pipeline?.index);
 		expect(before).not.toContain("historyRefreshSessions.delete(sessionId)");
 	});
 
@@ -224,7 +228,9 @@ describe("source contract: peek-then-drain in runPipeline (history)", () => {
 		// The rolling/sticky reminders were removed in the ctx_reduce nudge
 		// redesign (replaced by Channel 1 tool-result append + Channel 2
 		// sendUserMessage). Note nudges still run after the pipeline completes.
-		const pipelineIdx = code.indexOf("const result = await runPipeline(");
+		const pipelineIdx = code.search(
+			/const\s+result\s*=\s*await\s+(?:\b(?:guardAwait|budget\.waitMandatory)\(\s*)?runPipeline\(/,
+		);
 		const noteIdx = code.indexOf("applyNoteNudges(");
 		expect(pipelineIdx).toBeGreaterThan(0);
 		expect(noteIdx).toBeGreaterThan(pipelineIdx);

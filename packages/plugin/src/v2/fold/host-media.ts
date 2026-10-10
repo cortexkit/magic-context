@@ -23,7 +23,7 @@
 import { getOpenCodeProviderProjection } from "../../hooks/magic-context/host-runner/opencode-adapter";
 
 type Part = Record<string, unknown>;
-type AssetConstructor = new (input: { source: Part }) => object;
+type AssetConstructor = new (input: Part & { source: Part }) => object;
 
 const isRecord = (value: unknown): value is Part =>
     typeof value === "object" && value !== null && !Array.isArray(value);
@@ -91,7 +91,8 @@ export function hostUsesMediaAssets(): boolean {
     return uses;
 }
 
-function decodeThroughHostSchema(source: Part): object | string {
+function decodeThroughHostSchema(encoded: Part & { source: Part }): object | string {
+    const source = encoded.source;
     const messageClass = rememberedMessageClass as Part | undefined;
     if (!messageClass) return "no host message class seen";
     const fields = messageClass.fields as Part | undefined;
@@ -110,7 +111,7 @@ function decodeThroughHostSchema(source: Part): object | string {
         : undefined;
     const run = (decode as Part | undefined)?.run;
     if (typeof run !== "function") return "host media schema has no decode transformation";
-    const result = run.call(decode, { _tag: "Some", value: { source } }, {}) as Part | undefined;
+    const result = run.call(decode, { _tag: "Some", value: encoded }, {}) as Part | undefined;
     const option = result?._tag === "Success" ? (result.value as Part | undefined) : undefined;
     const asset = option?._tag === "Some" ? option.value : undefined;
     if (!isClassInstance(asset) || (asset as Part).source !== source)
@@ -123,18 +124,30 @@ function decodeThroughHostSchema(source: Part): object | string {
  * produced one.
  */
 export function hostMediaAsset(data: string, mediaType: string): object | string {
-    const source = { type: "base64", data, mediaType };
+    return hostMediaFromEncoded({ source: { type: "base64", data, mediaType } });
+}
+
+/** Decode the complete host codec record, including caller-owned bindings/info. */
+export function hostMediaFromEncoded(value: Part): object | string {
+    if (!isRecord(value.source)) return "missing Media.Asset source";
+    const encoded = structuredClone(value) as Part & { source: Part };
+    if (encoded.source.type === "bytes") {
+        if (typeof encoded.source.data !== "string") return "bytes media has no JSON codec payload";
+        encoded.source.data = new Uint8Array(Buffer.from(encoded.source.data, "base64"));
+    }
+    if (!["bytes", "base64", "url", "ref"].includes(String(encoded.source.type)))
+        return "unknown Media.Asset source";
     let first = "no Media.Asset seen in this process";
     if (rememberedAssetClass) {
         try {
-            return new rememberedAssetClass({ source });
+            return new rememberedAssetClass(encoded);
         } catch (error) {
             first = `remembered asset class threw: ${String(error)}`;
         }
     }
     let second: string;
     try {
-        const decoded = decodeThroughHostSchema(source);
+        const decoded = decodeThroughHostSchema(encoded);
         if (typeof decoded !== "string") return decoded;
         second = decoded;
     } catch (error) {

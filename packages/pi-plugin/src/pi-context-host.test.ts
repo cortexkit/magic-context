@@ -67,10 +67,11 @@ export function contextHost() {
 		assertRefused(served: unknown[], pristine: unknown[]) {
 			expect(controller.signal.aborted).toBe(true);
 			expect(entries).toHaveLength(1);
-			expect(entries[0]?.data).toEqual({
-				message:
-					"Magic Context could not safely prepare this turn; send your message again.",
-			});
+			const data = entries[0]?.data as { message?: string } | undefined;
+			expect(data?.message).toStartWith(
+				"Magic Context could not safely prepare this turn; send your message again.",
+			);
+			expect(data?.message).toMatch(/stage=.+ elapsed=\d+ms recovery=.+/);
 			expect(renderers.has(entries[0]?.customType ?? "")).toBe(true);
 			expect(served).toBe(original);
 			expect(served).toEqual(pristine);

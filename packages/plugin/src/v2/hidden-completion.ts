@@ -685,9 +685,10 @@ export async function createV2HiddenCompletionExecutor(
                     ...(budget ? [budgetStopped] : []),
                 ]);
                 if (!attempt.shaped) {
+                    const task = run.identity.title.replace(/^magic-context-dream-/, "");
                     throw new HiddenCompletionRefusal(
                         "hidden_prompt_unrecognized",
-                        "Host did not dispatch the hidden child context hook",
+                        `Host did not dispatch the hidden child context hook (task=${task}, agent=${run.identity.agent}, child=${run.child.id}, directory=${run.identity.directory}, stage=context/HiddenChildHook.apply). Check that the child's location loads the owning Magic Context instance; changing models cannot repair missing context shaping.`,
                         true,
                     );
                 }

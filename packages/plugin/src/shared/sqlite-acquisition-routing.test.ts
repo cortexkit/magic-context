@@ -4,12 +4,30 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
     Database,
+    SqliteAcquisitionBusyError,
     withAsyncPrivilegedWriter,
     withPrivilegedWriter,
     withSqliteTransformPass,
 } from "./sqlite";
 import { startSqliteWriteLocker } from "./sqlite-write-locker-test-support";
 import { createTestTempDirFromPath } from "./test-temp-dir";
+
+test("async writer never retries callback acquisition errors after work began", async () => {
+    const db = new Database(":memory:");
+    db.exec("CREATE TABLE context_privilege_state(id INTEGER PRIMARY KEY, enabled INTEGER)");
+    let calls = 0;
+    try {
+        await expect(
+            withAsyncPrivilegedWriter(db, () => {
+                calls++;
+                throw new SqliteAcquisitionBusyError(new Error("nested BEGIN"));
+            }),
+        ).rejects.toThrow("acquisition remained busy");
+        expect(calls).toBe(1);
+    } finally {
+        db.close();
+    }
+});
 
 for (const mode of ["default", "immediate", "exclusive", "literal"] as const) {
     test(`shared SQLite retries ${mode} acquisition before running any writes`, async () => {

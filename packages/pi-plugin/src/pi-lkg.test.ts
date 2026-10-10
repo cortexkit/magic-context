@@ -94,6 +94,84 @@ describe("Pi incremental LKG capture", () => {
 			checkLkgDurability(harness.db, "pi-unmanaged", { compactionOff: true }),
 		).toEqual({ durable: true, servedCaptureId: null, certified: false });
 	});
+	it("uncertified serialization failure preserves the prior served marker", () => {
+		const harness = createHarness();
+		databases.push(harness.db);
+		const args = {
+			sessionId: "pi-uncertified-failed-capture",
+			messages: [message("served input")],
+			entryIds: ["u"],
+			modelKey: "test/model",
+			providerKey: "test",
+		};
+		const snapshot = harness.coordinator.beginPass(args);
+		harness.coordinator.captureAppliedPass({
+			snapshot,
+			outputMessages: args.messages,
+			cacheBusting: false,
+		});
+		harness.flushCapture();
+		const marker = readServedMarker(harness.db, args.sessionId);
+		expect(marker?.fullCoverage).toBe(true);
+		expect(
+			harness.coordinator.captureAppliedPass({
+				snapshot,
+				outputMessages: [
+					{
+						toJSON: () => {
+							throw new Error("serialize failed");
+						},
+					},
+				],
+				cacheBusting: false,
+				certify: false,
+				assertCurrentPass: () => undefined,
+			}),
+		).toBeUndefined();
+		expect(getSlot(args.sessionId)).toBeUndefined();
+		expect(readServedMarker(harness.db, args.sessionId)).toEqual(marker);
+	});
+	it("expired serialization failure preserves the certified last-good move identity", () => {
+		const harness = createHarness();
+		databases.push(harness.db);
+		const args = {
+			sessionId: "pi-expired-failed-capture",
+			messages: [message("served input")],
+			entryIds: ["u"],
+			modelKey: "test/model",
+			providerKey: "test",
+		};
+		const snapshot = harness.coordinator.beginPass(args);
+		harness.coordinator.captureAppliedPass({
+			snapshot,
+			outputMessages: args.messages,
+			cacheBusting: false,
+		});
+		harness.flushCapture();
+		const slot = getSlot(args.sessionId);
+		const marker = readServedMarker(harness.db, args.sessionId);
+		let expired = false;
+		expect(() =>
+			harness.coordinator.captureAppliedPass({
+				snapshot,
+				outputMessages: [
+					{
+						toJSON: () => {
+							expired = true;
+							throw new Error("serialize failed");
+						},
+					},
+				],
+				cacheBusting: false,
+				certify: true,
+				assertCurrentPass: () => {
+					if (expired) throw new Error("pass expired");
+				},
+			}),
+		).toThrow("pass expired");
+		expect(getSlot(args.sessionId)).toEqual(slot);
+		expect(readServedMarker(harness.db, args.sessionId)).toEqual(marker);
+	});
 	it("marks a native tool-result frontier before deferred capture without changing served bytes", () => {
 		const harness = createHarness();
 		databases.push(harness.db);

@@ -1,4 +1,4 @@
-import { TASKS } from "./DreamerTasksField";
+import { TASKS } from "./dreamer-task-data";
 
 // Single source of truth for which magic-context config fields the dashboard
 // ConfigEditor surfaces. Enforced by config-parity.test.ts against the

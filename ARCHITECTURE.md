@@ -74,7 +74,7 @@ shouldApplyPendingOps / shouldRunHeuristics =
   && (!compartmentRunning || emergencyBypassCompartmentGate)                            // VETO clause: is the historian mid-run?
 ```
 - **BUST clause** — only mutate (drop tools, run heuristics) on a pass that is *already* busting the prefix, so the mutation rides that one bust instead of causing its own. `foldExecutedThisPass` is true only after off-wire fold pre-execution reports that m[0] actually materialized; a `mustMaterialize` advisory by itself never opens mutation gates.
-- **VETO clause — `compartmentRunning`** — block mutation while the historian is summarizing the tail, so we don't change the bytes it's reading mid-run. Bypassed by `emergencyBypassCompartmentGate`.
+- **VETO clause — `compartmentRunning`** — block mutation while the historian is summarizing the tail, so we don't change the bytes it's reading mid-run. Bypassed by `emergencyBypassCompartmentGate`, and by an explicit `/ctx-flush`, a deliberate user action whose drain is safe per the disjoint-DB model below.
 - **`emergencyBypassCompartmentGate`** bypasses the veto when `forceMaterialization` (≥85%) **OR `foldExecutedThisPass`** — i.e. a hard fold drains pending ops + runs heuristics even while the historian runs, because the prefix is busting regardless (see "drain into the known bust" invariant). This is safe per the disjoint-DB model below; both harness twins use the shared executed-fold predicate.
 
 ### Load-bearing invariants (memorize these)

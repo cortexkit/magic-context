@@ -2,6 +2,55 @@ import { expect, spyOn, test } from "bun:test";
 import { calibrationForModelKey } from "@magic-context/core/hooks/magic-context/decision-calibration";
 import * as formatting from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { readPiLkgFitEnvelope } from "./pi-lkg-fit-envelope";
+
+test("callable tool schemas use the host wire resolver without invoking validators", () => {
+	let validated = 0;
+	let resolved = 0;
+	const parameters = Object.assign(
+		() => {
+			validated++;
+			throw new Error("not a factory");
+		},
+		{
+			toJsonSchema: () => ({
+				type: "object",
+				properties: { path: { type: "string" } },
+			}),
+			assert: () => {},
+		},
+	);
+	const host = {
+		getAllTools: () => [{ name: "read", description: "read file", parameters }],
+	};
+	const system = { getSystemPrompt: () => "system" };
+	const freeze = calibrationForModelKey(null);
+	const envelope = readPiLkgFitEnvelope(
+		system,
+		host,
+		"test/model",
+		freeze,
+		(tool) => {
+			resolved++;
+			expect(tool.parameters).toBe(parameters);
+			return parameters.toJsonSchema();
+		},
+	);
+	expect(envelope).toBeDefined();
+	expect(resolved).toBe(1);
+	expect(validated).toBe(0);
+	expect(
+		readPiLkgFitEnvelope(system, host, "test/model", freeze),
+	).toBeUndefined();
+	expect(
+		readPiLkgFitEnvelope(system, host, "test/model", freeze, () => {
+			throw new Error("unresolvable");
+		}),
+	).toBeUndefined();
+	expect(
+		readPiLkgFitEnvelope(system, host, "test/model", freeze, () => undefined),
+	).toBeUndefined();
+});
+
 import { assertPiRawFallbackFits } from "./pi-raw-fallback";
 
 const key = "anthropic/claude-fable-5-1";

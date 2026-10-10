@@ -214,6 +214,8 @@ export function wireContentBytes(
 export interface FinalWireTokenEstimateInput {
     messages: readonly MessageLike[];
     systemPromptTokens: number;
+    /** Detached measurement of this request's complete tool set, including an empty set. */
+    toolDefinitionTokens?: number;
     providerID: string | undefined;
     modelID: string | undefined;
     agentName: string | undefined;
@@ -437,9 +439,10 @@ export function estimateFinalWireInputTokens(
         { conversation: 0, toolCall: 0 },
     );
     const measuredToolDefinitions =
-        input.providerID && input.modelID
+        input.toolDefinitionTokens ??
+        (input.providerID && input.modelID
             ? getMeasuredToolDefinitionTokens(input.providerID, input.modelID, input.agentName)
-            : undefined;
+            : undefined);
     const calibration = resolveDecisionCalibration(input.providerID, input.modelID);
     const largestToolDefinitions =
         measuredToolDefinitions === undefined

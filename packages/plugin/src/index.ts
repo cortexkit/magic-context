@@ -69,6 +69,7 @@ import { createDreamTimerModuleClient } from "./plugin/dream-timer-module-client
 import { ensureProjectRegisteredFromOpenCodeDirectory } from "./plugin/embedding-bootstrap";
 import { createEventHandler } from "./plugin/event";
 import { createSessionHooksAsync } from "./plugin/hooks/create-session-hooks";
+import { startHostStallProfilerSwitch } from "./plugin/host-stall-profiler";
 import { isDisposedInstanceDirectory } from "./plugin/instance-disposal";
 import { createMessagesTransformHandler } from "./plugin/messages-transform";
 import { disableNativeAutoCompaction } from "./plugin/native-compaction-guard";
@@ -135,6 +136,10 @@ const server: Plugin = async (ctx) => {
     // host), this throws at boot instead of letting the seat tag every
     // session-scoped row under the wrong harness.
     setHarness("opencode");
+    // Off-by-default diagnostic for multi-second host main-thread stalls. Without
+    // its enable file this is one existsSync every 30 s; see
+    // docs/reports/host-stall-profiler.md. Process-wide and idempotent.
+    startHostStallProfilerSwitch();
 
     const configStartedAt = performance.now();
     beginBootQuietPeriod();

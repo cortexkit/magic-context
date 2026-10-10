@@ -157,7 +157,9 @@ function reasoningOf(part: Record<string, unknown>): string | null {
 /** One per-part PREVIEW line for the verbose range view (bounded). */
 function renderPartPreview(part: unknown, expandTools?: ToolExpansionMap): string | null {
     if (!isRecord(part)) return null;
-    const expansion = expandToolPart(part, expandTools);
+    // Keep verbose ctx_expand's existing templates and length limits because its
+    // tool result goes to the main model. Historian input has no implicit limits.
+    const expansion = expandToolPart(part, expandTools, true);
     if (expansion !== null) return `    • tool ${part.tool}: ${expansion}`;
     const text = textOf(part);
     if (text !== null) {

@@ -216,6 +216,8 @@ export interface PiLkgCoordinator {
 		entryIds: readonly (string | undefined)[] | null;
 		modelKey: string | null;
 		providerKey: string | null;
+		apiKey?: string | null;
+		transport?: string | null;
 	}): PiLkgPassSnapshot;
 	replay(
 		snapshot: PiLkgPassSnapshot,
@@ -228,6 +230,7 @@ export interface PiLkgCoordinator {
 		parentOf?: (id: string) => string | null | undefined,
 	): PiMeasuredPrefixFit | undefined;
 	captureAppliedPass(args: {
+		assertCurrentPass?: () => void;
 		snapshot: PiLkgPassSnapshot;
 		outputMessages: readonly unknown[];
 		outputEntryIds?: readonly (string | null | undefined)[];
@@ -423,6 +426,7 @@ function plainOutputFields(
 function snapshotInputs(
 	messages: readonly unknown[],
 	entryIds: readonly (string | undefined)[] | null,
+	omitsBookkeeping: boolean,
 ): { inputs: PiLkgInputSnapshot[]; failure: string | null } {
 	if (!entryIds || entryIds.length !== messages.length) {
 		return { inputs: [], failure: "lkg_entry_ids_unavailable" };
@@ -436,7 +440,9 @@ function snapshotInputs(
 	const inputs: PiLkgInputSnapshot[] = [];
 	const seen = new Set<string>();
 	for (let index = 0; index < entryIds.length; index += 1) {
-		const fields = lkgContentFields(messages[index]);
+		const fields = lkgContentFields(
+			omitsBookkeeping ? piProviderInput(messages[index]) : messages[index],
+		);
 		if (!fields) return { inputs: [], failure: "lkg_content_snapshot_failed" };
 		// Host extensions can inject entries absent from JSONL. A detached full-
 		// content digest gives those entries a stable identity without guessing a
@@ -455,6 +461,55 @@ function snapshotInputs(
 		});
 	}
 	return { inputs, failure: null };
+}
+
+// Explicit constructors, not whole-context transports. References are to
+// @earendil-works/pi-ai 0.83 dist/api and @oh-my-pi/pi-ai 18.8.5 src/providers.
+const bookkeepingOmittingApis = new Set([
+	// Pi anthropic-messages.js:838; OMP anthropic.ts:5136.
+	"anthropic-messages",
+	// Pi google-shared.js:77; OMP google-shared.ts:161.
+	"google-generative-ai",
+	// Pi openai-completions.js:764; OMP openai-completions.ts:2278.
+	"openai-completions",
+	// Pi openai-responses-shared.js:61; OMP openai-shared.ts:2076.
+	"openai-responses",
+	// Pi uses openai-responses-shared.js:61; OMP Codex builder:1545 / converter:4936.
+	"openai-codex-responses",
+]);
+
+function omitsRootBookkeeping(
+	args: Parameters<PiLkgCoordinator["beginPass"]>[0],
+): boolean {
+	// OMP pi-native-client.ts:184 and Pi pi-messages.js:248 serialize the entire
+	// context. Any transport override or unproved API therefore keeps all fields.
+	if (args.transport != null) return false;
+	let api = args.apiKey;
+	if (api === undefined) {
+		// Standalone coordinators may have only native assistant records. Require
+		// one unambiguous API; production always supplies the current model's API.
+		const apis = new Set(
+			args.messages.flatMap((message) => {
+				const value = message as { role?: unknown; api?: unknown } | null;
+				return value?.role === "assistant" && typeof value.api === "string"
+					? [value.api]
+					: [];
+			}),
+		);
+		if (apis.size === 1) api = [...apis][0];
+	}
+	return typeof api === "string" && bookkeepingOmittingApis.has(api);
+}
+
+function piProviderInput(message: unknown): unknown {
+	if (!message || typeof message !== "object" || Array.isArray(message))
+		return message;
+	// Called only for the explicit constructors above. Exclude their two omitted
+	// root bookkeeping fields, never identically named nested tool arguments.
+	const descriptors = Object.getOwnPropertyDescriptors(message);
+	delete descriptors.completedAt;
+	delete descriptors.contextSnapshot;
+	return Object.create(Object.getPrototypeOf(message), descriptors);
 }
 
 /** Compact JSON arrays preserve the exact serialized rows before their closing
@@ -500,7 +555,11 @@ export function createPiLkgCoordinator(
 	};
 
 	const beginPass: PiLkgCoordinator["beginPass"] = (args) => {
-		const snapped = snapshotInputs(args.messages, args.entryIds);
+		const snapped = snapshotInputs(
+			args.messages,
+			args.entryIds,
+			omitsRootBookkeeping(args),
+		);
 		const slot = getSlot(args.sessionId);
 		if (snapped.failure || !slot) {
 			return {
@@ -722,6 +781,7 @@ export function createPiLkgCoordinator(
 	};
 
 	const captureAppliedPass: PiLkgCoordinator["captureAppliedPass"] = (args) => {
+		args.assertCurrentPass?.();
 		const { snapshot } = args;
 		if (snapshot.preparationFailure || snapshot.inputs.length === 0) return;
 		const state = stateFor(snapshot.sessionId);
@@ -749,6 +809,7 @@ export function createPiLkgCoordinator(
 						prefix === priorOutput.inputs.length
 					? priorOutput.json
 					: `[${jsonMessages.join(",")}]`;
+			args.assertCurrentPass?.();
 			state.outputSnapshot = plainOutput
 				? {
 						inputs: outputs,
@@ -757,6 +818,7 @@ export function createPiLkgCoordinator(
 					}
 				: null;
 		} catch (error) {
+			args.assertCurrentPass?.();
 			dropSlot(
 				snapshot.sessionId,
 				"lkg_snapshot_serialize_failed",
@@ -795,6 +857,7 @@ export function createPiLkgCoordinator(
 			)
 				? ([...outputIds] as (string | null)[])
 				: undefined;
+		args.assertCurrentPass?.();
 		state.captureSequence += 1;
 		const plan: PiLkgCapturePlan = {
 			sessionId: snapshot.sessionId,
@@ -829,6 +892,7 @@ export function createPiLkgCoordinator(
 			exactReusablePrefix(plan.inputs, state.acceptedInputs) ===
 				plan.inputs.length &&
 			JSON.stringify(livePrior.piOutputEntryIds) === JSON.stringify(ownership);
+		args.assertCurrentPass?.();
 		if (unchanged && !state.syncCaptureRequired) {
 			// Provider usage can arrive before the deferred commit. Refresh the
 			// replay slot's identity in memory now without rewriting unchanged
@@ -874,6 +938,18 @@ export function createPiLkgCoordinator(
 		// supersedes this callback or invalidates reuse at its first id/field mismatch,
 		// while session cleanup increments and clears this session's capture state.
 		const commit = (): void => {
+			// A queued capture must not overwrite replay state after this turn has
+			// been cancelled or replaced, even if its synchronous transform finished.
+			try {
+				args.assertCurrentPass?.();
+			} catch (error) {
+				sessionLog(
+					plan.sessionId,
+					"DISCARDED CONTEXT RESULT: queued LKG capture",
+					error,
+				);
+				return;
+			}
 			if (plan.captureSequence !== state.captureSequence) return;
 			const startedAt = performance.now();
 			let reusedPrefix = 0;
@@ -926,6 +1002,7 @@ export function createPiLkgCoordinator(
 					prior.jsonPrefix === plan.jsonPrefix &&
 					JSON.stringify(prior.piOutputEntryIds) === JSON.stringify(ownership)
 				) {
+					args.assertCurrentPass?.();
 					state.acceptedInputs = plan.inputs;
 					return;
 				}
@@ -946,6 +1023,7 @@ export function createPiLkgCoordinator(
 						moveMessageDigestFromFields(input.fields),
 					),
 				};
+				args.assertCurrentPass?.();
 				if (!captureSlot(plan.sessionId, slot)) {
 					throw new Error("LKG slot rejected the Pi snapshot");
 				}
@@ -954,6 +1032,16 @@ export function createPiLkgCoordinator(
 				const persisted = saveLkgSlotToDb(db, plan.sessionId, slot);
 				state.syncCaptureRequired = !persisted;
 			} catch (error) {
+				try {
+					args.assertCurrentPass?.();
+				} catch (discarded) {
+					sessionLog(
+						plan.sessionId,
+						"DISCARDED CONTEXT RESULT: LKG publication",
+						discarded,
+					);
+					return;
+				}
 				if (plan.captureSequence !== state.captureSequence) return;
 				dropSlot(
 					plan.sessionId,

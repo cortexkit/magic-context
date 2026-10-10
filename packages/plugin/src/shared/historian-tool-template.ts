@@ -1,4 +1,4 @@
-/** A deliberately non-executable language for readable, bounded historian tool lines. */
+/** A deliberately non-executable language for readable historian tool lines. */
 export type ToolExpansionMap = Record<string, string | false>;
 type Step = { field: string } | { index: number } | { project: string };
 type Expression = {
@@ -6,7 +6,7 @@ type Expression = {
     each?: Template;
     join?: string;
     count?: boolean;
-    cap: number;
+    cap?: number;
 };
 type Template = Array<string | Expression>;
 
@@ -78,7 +78,7 @@ class Parser {
                 if (this.source[this.pos] === "(") return this.error();
             } else break;
         }
-        const expression: Expression = { steps, cap: 300 };
+        const expression: Expression = { steps };
         if (this.take(".each(")) {
             if (relative) return this.error();
             expression.each = parseTemplate(this.quoted(), true);
@@ -145,9 +145,24 @@ function compiled(source: string): Template | null {
 function oneLine(value: string): string {
     return value.replace(/[\r\n\u2028\u2029]+/g, " ");
 }
-function truncate(value: string, cap: number): string {
+function truncate(value: string, cap?: number, legacyPreview = false): string {
     const chars = Array.from(oneLine(value));
-    return chars.length > cap ? `${chars.slice(0, cap).join("")}…` : chars.join("");
+    if (cap === undefined || chars.length <= cap) return chars.join("");
+    if (legacyPreview) return `${chars.slice(0, cap).join("")}…`;
+    // Explicit caps stop after sentence-ending punctuation so a cut is not
+    // mistaken for an intact tool message. If no sentence fits, show only the marker.
+    let end = 0;
+    for (let i = 0; i < Math.min(cap, chars.length); i++) {
+        if (!".!?。！？".includes(chars[i])) continue;
+        let next = i + 1;
+        while (next < chars.length && "\"'”’)]".includes(chars[next])) next++;
+        if (
+            next <= cap &&
+            ("。！？".includes(chars[i]) || next === chars.length || /[ \t]/.test(chars[next]))
+        )
+            end = next;
+    }
+    return `${end ? `${chars.slice(0, end).join("")} ` : ""}[… ${chars.length - end} more characters]`;
 }
 function scalar(value: unknown): string {
     if (value === undefined) return "";
@@ -174,10 +189,11 @@ function field(value: unknown, key: string): unknown {
         ? (value as Record<string, unknown>)[key]
         : undefined;
 }
-function render(nodes: Template, root: unknown): string {
+function render(nodes: Template, root: unknown, legacyPreview: boolean): string {
     return nodes
         .map((node) => {
             if (typeof node === "string") return node;
+            const cap = node.cap ?? (legacyPreview ? 300 : undefined);
             let value = root;
             let list = false;
             for (const step of node.steps) {
@@ -196,18 +212,31 @@ function render(nodes: Template, root: unknown): string {
                 }
             }
             if (node.count)
-                return truncate(Array.isArray(value) ? String(value.length) : "", node.cap);
+                return truncate(
+                    Array.isArray(value) ? String(value.length) : "",
+                    cap,
+                    legacyPreview,
+                );
             if (node.each || list || node.join !== undefined) {
                 if (!Array.isArray(value)) return "";
                 const elements = value
-                    .slice(0, 10)
+                    .slice(0, legacyPreview ? 10 : undefined)
                     .map((item) =>
-                        truncate(node.each ? render(node.each, item) : scalar(item), 300),
+                        truncate(
+                            node.each ? render(node.each, item, legacyPreview) : scalar(item),
+                            legacyPreview ? 300 : undefined,
+                            legacyPreview,
+                        ),
                     );
-                if (value.length > 10) elements.push(`… +${value.length - 10} more`);
-                return truncate(elements.join(node.join ?? (node.each ? "; " : ", ")), node.cap);
+                if (legacyPreview && value.length > 10)
+                    elements.push(`… +${value.length - 10} more`);
+                return truncate(
+                    elements.join(node.join ?? (node.each ? "; " : ", ")),
+                    cap,
+                    legacyPreview,
+                );
             }
-            return truncate(scalar(value), node.cap);
+            return truncate(scalar(value), cap, legacyPreview);
         })
         .join("");
 }
@@ -216,6 +245,7 @@ export function renderToolTemplate(
     source: string,
     input: unknown,
     output?: unknown,
+    legacyPreview = false,
 ): string | null {
     const nodes = compiled(source);
     if (!nodes) return null;
@@ -241,8 +271,12 @@ export function renderToolTemplate(
         !node.each &&
         !node.count &&
         node.join === undefined
-            ? truncate(text ?? "", node.cap)
+            ? truncate(text ?? "", node.cap ?? (legacyPreview ? 300 : undefined), legacyPreview)
             : node,
     );
-    return truncate(render(bareOutputNodes, root), 1000);
+    return truncate(
+        render(bareOutputNodes, root, legacyPreview),
+        legacyPreview ? 1000 : undefined,
+        legacyPreview,
+    );
 }

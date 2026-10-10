@@ -226,6 +226,7 @@ async function setup(
          */
         owner?: unknown;
         keepSubagents?: boolean;
+        skipContextHook?: boolean;
     } = {},
 ) {
     const db = new Database(":memory:");
@@ -299,7 +300,7 @@ async function setup(
                     { role: "user", content: [{ type: "text", text: input.text }] },
                 ],
             };
-            hook.apply(draft);
+            if (!capabilities.skipContextHook) hook.apply(draft);
             requests.push(structuredClone(draft));
             if (failPrompt) throw new Error("provider unavailable");
             if (promptError) throw promptError;
@@ -437,6 +438,55 @@ async function close(
 }
 
 describe("OpenCode 2 hidden child completion", () => {
+    test("names retrospective and curate at the missed context-shaping stage without model fallback", async () => {
+        for (const [task, agent] of [
+            ["retrospective", "dreamer-retrospective"],
+            ["curate", "dreamer"],
+        ]) {
+            // Simulate a host that settles a carrier turn without invoking its context hook.
+            // This exercises the executor's last-resort check, not the before-provider guard.
+            const state = await setup("missing-context", { skipContextHook: true });
+            let handle: Awaited<ReturnType<typeof state.executor.open>> | null = null;
+            try {
+                handle = await state.executor.open({
+                    ...dreamerRun,
+                    agent,
+                    title: `magic-context-dream-${task}`,
+                });
+                let caught: unknown;
+                try {
+                    await promptSyncWithValidatedOutputRetry(undefined, request(), {
+                        transport: (args) => state.executor.attempt(handle!, args),
+                        fallbackModels: ["mock/fallback"],
+                        callContext: `dreamer:${task}`,
+                        fetchOutput: () => state.executor.collect(handle!, 50),
+                        validateOutput: (completion) => completion.text,
+                    });
+                } catch (error) {
+                    caught = error;
+                }
+                expect(caught).toBeInstanceOf(HiddenCompletionRefusal);
+                expect(caught).toMatchObject({
+                    code: "hidden_prompt_unrecognized",
+                    terminal: true,
+                });
+                expect((caught as Error).message).toContain(`task=${task}`);
+                expect((caught as Error).message).toContain("stage=context/HiddenChildHook.apply");
+                expect((caught as Error).message).toContain(`child=${handle.id}`);
+                expect((caught as Error).message).toContain("directory=/project");
+                expect(getPromptFailureDetail(caught)).toMatchObject({
+                    failureClass: "local_refusal",
+                    modelsTried: ["mock/cheap"],
+                });
+                expect(state.requests).toHaveLength(1);
+                expect(state.creates).toHaveLength(1);
+                expect(state.switches).toEqual([]);
+            } finally {
+                if (handle) await close(state.executor, handle, false);
+                state.db.close();
+            }
+        }
+    });
     test.each([
         "historian",
         "dreamer-task",

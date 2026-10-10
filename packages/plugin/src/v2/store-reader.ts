@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
+import { hostname } from "node:os";
 import { resolve } from "node:path";
 import type { Statement } from "better-sqlite3";
 import type { RawMessageOrdinalAnchor } from "../hooks/magic-context/read-session-raw";
@@ -295,6 +297,8 @@ interface ReaderConnection {
 }
 
 function connect(path: string, identity = ""): ReaderConnection {
+    const stat = statSync(path);
+    const acquiredIdentity = identity || `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
     const db = new Database(path, { readonly: true, fileMustExist: true });
     try {
         assertOpenCodeStoreGeneration(db, "v2", path);
@@ -306,7 +310,7 @@ function connect(path: string, identity = ""): ReaderConnection {
     counters.openReaders += 1;
     counters.readersOpened += 1;
     counters.maxOpenReaders = Math.max(counters.maxOpenReaders, counters.openReaders);
-    return { db, statements: new Map(), identity, leases: 0, retired: false };
+    return { db, statements: new Map(), identity: acquiredIdentity, leases: 0, retired: false };
 }
 
 function closeConnection(connection: ReaderConnection): void {
@@ -384,11 +388,25 @@ export class V2StoreReader {
     private readonly connection: ReaderConnection;
     private closed = false;
     constructor(
-        path: string,
+        private readonly path: string,
         private readonly pool?: V2StoreReaderPool,
     ) {
         this.connection = pool ? pool.acquire(path) : connect(path);
         this.db = this.connection.db;
+    }
+
+    /** Identifies the database file this reader's connection actually opened: the
+     * machine's host name, the resolved path, and the file's device, inode and
+     * creation time recorded when the connection was opened.
+     * If OpenCode's database file is later replaced (for example a new file moved
+     * over the same path), a connection opened earlier keeps reading the old file.
+     * Recording identity at open time, rather than checking the path again, stops
+     * that old connection from reporting the new file's identity, so the fold cache
+     * cannot pair rows read from one file with history cached for the other. */
+    hostIdentity(): string {
+        return createHash("sha256")
+            .update(JSON.stringify([hostname(), resolve(this.path), this.connection.identity]))
+            .digest("hex");
     }
 
     private prepare(sql: string): Statement {
@@ -663,6 +681,18 @@ export class V2StoreReader {
             time_created: number;
             text: string;
         }>;
+    }
+
+    /** Count session_message rows after a sequence. This counts stored rows, not
+     * model messages: it includes idle rows (OpenCode's marker that a run finished)
+     * and compaction rows (checkpoints), and one stored assistant row can render as
+     * several model messages, such as the assistant message plus a tool message for
+     * each tool result. */
+    storedRowsAfter(sessionID: string, after: number): number {
+        const row = this.prepare(
+            "SELECT COUNT(*) AS count FROM session_message WHERE session_id = ? AND seq > ?",
+        ).get(sessionID, after) as { count: number };
+        return row.count;
     }
 
     storedMessageCount(sessionID: string): number {

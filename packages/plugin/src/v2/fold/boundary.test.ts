@@ -17,11 +17,16 @@ import {
 import { setRawMessageProvider } from "../../hooks/magic-context/read-session-chunk";
 import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
+import { HEAD_IDS } from "../hooks/payload";
+import type { SessionContext, V2Message } from "../hooks/types";
+import type { V2StoreReader } from "../store-reader";
 import {
     createV2RustCompactionMarkerStrategy,
     resolveBoundaryUserMessage,
     trimToRecordedBoundary,
 } from "./boundary";
+import { nativeFoldCache } from "./memory-cache";
+import { NativeFoldReplay } from "./native-replay";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -535,4 +540,95 @@ describe("trimToRecordedBoundary", () => {
 
         expect(adapterTrimmed).toEqual(hostTrimmed);
     });
+});
+
+// The ck-mc Rust module composes its own history summary. A host checkpoint must
+// preserve the retained messages after its recorded boundary, rather than replace
+// that input with a TypeScript-rendered summary.
+it("native fold replay preserves the module boundary and baseline on repeated passes", async () => {
+    const db = useTempDataHome();
+    getOrCreateSessionMeta(db, "s");
+    db.prepare(
+        "INSERT INTO compartments(session_id,sequence,start_message,end_message,title,content,created_at) VALUES ('s',0,1,2,'covered','covered',1)",
+    ).run();
+    setPersistedCompactionMarkerState(db, "s", {
+        boundaryMessageId: "b",
+        summaryMessageId: "",
+        compactionPartId: "",
+        summaryPartId: "",
+        boundaryOrdinal: 2,
+        targetEndMessageId: "a",
+    });
+    const native: V2Message[] = [
+        { id: "u", ordinal: 1, role: "user", content: [{ type: "text", text: "covered user" }] },
+        {
+            id: "a",
+            ordinal: 2,
+            role: "assistant",
+            content: [{ type: "text", text: "covered answer" }],
+        },
+        { id: "b", ordinal: 3, role: "user", content: [{ type: "text", text: "module boundary" }] },
+        {
+            id: "c",
+            ordinal: 4,
+            role: "assistant",
+            content: [{ type: "text", text: "retained answer" }],
+        },
+    ];
+    expect(trimToRecordedBoundary(db, "s", native)).toBe(2);
+    const expected = structuredClone(native);
+    const storage = nativeFoldCache(db);
+    const reader = {
+        close() {},
+        latestCompaction: () => undefined,
+        rowStampsThrough: () =>
+            native.map((message) => ({
+                id: message.id,
+                type: message.role,
+                seq: message.ordinal,
+                time_created: 0,
+            })),
+        replayRowStamps: () =>
+            new Map(native.map((message) => [message.ordinal, JSON.stringify(message)])),
+        sequenceForId: (_sid: string, id: string) =>
+            native.find((message) => message.id === id)?.ordinal,
+        latestSequence: () => 4,
+        range: () => [],
+        latestRunningCompaction: () => ({ id: "cut" }),
+    } as unknown as V2StoreReader;
+    const replay = new NativeFoldReplay(storage, () => reader);
+    const draft: SessionContext = {
+        sessionID: "s",
+        model: { providerID: "p", id: "m" },
+        agent: "build",
+        options: {},
+        system: [],
+        tools: {},
+        messages: [
+            {
+                id: HEAD_IDS[0],
+                role: "user",
+                content: [{ type: "text", text: "module-owned baseline" }],
+            },
+            ...native,
+        ],
+    };
+    await replay.capture(draft, native);
+    await replay.supply({ draft, reader, summary: "module-owned baseline" });
+    const restarted = replay;
+    expect(await restarted.baseline("s")).toBe("module-owned baseline");
+    const restored = await restarted.restore(
+        "s",
+        {
+            id: "cut",
+            session_id: "s",
+            type: "compaction",
+            seq: 5,
+            data: { status: "completed", summary: "module-owned baseline" },
+        },
+        "p/m",
+    );
+    expect(restored).toEqual(expected);
+    expect(trimToRecordedBoundary(db, "s", restored!)).toBe(0);
+    expect(restored).toEqual(expected);
 });

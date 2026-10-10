@@ -3,11 +3,11 @@
   "ctx_memory": "Memory ${input.action} ${input.category} ${input.ids}: ${input.content} → ${output.truncate(160)}",
   "todowrite": "Todos (${input.todos.count}): ${input.todos.each(\"${status}: ${content}\")}",
   "question": "Asked user: ${input.questions[*].question.join(\" / \")} → ${output}",
-  "task": "Task ${input.subagent_type}: ${input.prompt} → ${output.truncate(200)}",
-  "ask": "Asked: ${input.question.truncate(250)} [options: ${input.options.join(\" / \")}] ${input.resolution} → ${output.truncate(300)}",
-  "peer_send": "PM to ${input.agent}${input.agent_id}: ${input.message.truncate(400)}",
-  "board": "Board ${input.verb}: ${input.ops.each(\"${op} ${item}${lane.title} ${state}${lane.status}${props.text} ${lane.items[*].text}\")}",
-  "room": "Room ${input.action} ${input.room_id}: ${input.text.truncate(400)}",
-  "work": "Work ${input.action} ${input.id}: ${input.prompt_file}${input.prompt.truncate(200)}${input.notes.truncate(200)} → ${output.truncate(160)}",
+  "task": "Task ${input.subagent_type}: ${input.prompt.truncate(600)} → ${output.truncate(200)}",
+  "ask": "Asked: ${input.question} [options: ${input.options.join(\" / \")}] ${input.text}${input.resolution} → ${output.truncate(300)}",
+  "peer_send": "PM ${input.recipient}: ${input.message}",
+  "board": "Board ${input.verb}${input.board_lane}: ${input.ops.each(\"${op} ${lane_label} ${item}${props.text}${lane.items} ${state}${props.state}${lane.status}${id}${title}\")}",
+  "room": "Room ${input.action} ${input.room_label}: ${input.room_detail}",
+  "work": "Work ${input.action} ${input.title}${input.id}: ${input.prompt.truncate(600)}${input.notes.truncate(600)} → ${output.truncate(160)}",
   "knowhow": "Looked up how-to: ${input.query}${input.id}"
 }

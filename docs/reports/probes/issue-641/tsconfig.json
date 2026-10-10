@@ -1,0 +1,9 @@
+{
+  "extends": "../../../../packages/pi-plugin/tsconfig.json",
+  "compilerOptions": {
+    "types": ["node", "bun"],
+    "typeRoots": ["../../../../packages/pi-plugin/node_modules/@types"]
+  },
+  "include": ["./*.ts"],
+  "exclude": []
+}

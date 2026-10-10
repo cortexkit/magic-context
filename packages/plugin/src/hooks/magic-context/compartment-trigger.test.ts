@@ -4,8 +4,10 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import {
     closeDatabase,
+    getHistorianFailureState,
     getPendingOps,
     getTagsBySession,
     insertTag,
@@ -24,7 +26,85 @@ import {
     formatProjectedPostDropPercentage,
     type InMemoryTailSource,
 } from "./compartment-trigger";
+import { resolveOpenCodeProtectedTailBoundary } from "./protected-tail-boundary";
+import { withRawMessageProvider } from "./read-session-chunk";
 import type { RawMessage } from "./read-session-raw";
+
+it("does not fire at 88.3% for a tiny capped head even when later eligible history is large", () => {
+    useTempDataHome("compartment-trigger-capped-head-");
+    const db = openDatabase();
+    const sessionId = "ses-capped-299";
+    seedTriggerPolicy(db, sessionId);
+    appendCompartments(db, sessionId, [
+        {
+            sequence: 0,
+            startMessage: 1,
+            endMessage: 298,
+            startMessageId: "m1",
+            endMessageId: "m298",
+            title: "Earlier history",
+            content: "Earlier history",
+        },
+    ]);
+    const messages = Array.from({ length: 473 }, (_, index) =>
+        rawTextMessage(
+            index + 1,
+            `m${index + 1}`,
+            index === 0 || index === 472 ? "user" : "assistant",
+            index === 298
+                ? "small ".repeat(250)
+                : index === 299
+                  ? "large ".repeat(100_000)
+                  : "history ".repeat(400),
+        ),
+    );
+    for (const message of messages) {
+        insertCoveredMessageTag(
+            db,
+            sessionId,
+            message.id,
+            message.ordinal,
+            message.ordinal === 299 ? 258 : message.ordinal === 300 ? 100_000 : 400,
+        );
+    }
+    const oldNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    try {
+        withRawMessageProvider(sessionId, { readMessages: () => messages }, () => {
+            const usage = { percentage: 88.3, inputTokens: 180_138 };
+            const boundary = resolveOpenCodeProtectedTailBoundary({
+                db,
+                sessionId,
+                mode: "trigger",
+                contextLimit: 204_000,
+                executeThresholdPercentage: 90,
+                usage,
+                usageSource: "live",
+            });
+            expect(boundary.eligibleEndOrdinal).toBe(300);
+            for (let turn = 0; turn < 2; turn++) {
+                const result = checkCompartmentTrigger(
+                    db,
+                    sessionId,
+                    makeSessionMeta(sessionId, 88.3),
+                    usage,
+                    88.3,
+                    90,
+                    20_000,
+                    undefined,
+                    { enabled: false, min_clusters: 3 },
+                    [],
+                    204_000,
+                );
+                expect(result.shouldFire).toBe(false);
+            }
+            expect(getHistorianFailureState(db, sessionId).failureCount).toBe(0);
+        });
+    } finally {
+        if (oldNodeEnv === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = oldNodeEnv;
+    }
+});
 
 it("formats an unavailable post-drop projection without a percent suffix", () => {
     expect(formatProjectedPostDropPercentage(null)).toBe("none");

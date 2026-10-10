@@ -400,7 +400,9 @@ function getUnsummarizedTailInfo(
                           usageSource: "live",
                           taggerFloor,
                       });
-            const hasProtectedEligibleHead = boundary.offset < boundary.protectedTailStart;
+            const hasProtectedEligibleHead =
+                boundary.offset <
+                Math.min(boundary.protectedTailStart, boundary.eligibleEndOrdinal);
 
             if (!hasProtectedEligibleHead) {
                 return {
@@ -423,7 +425,7 @@ function getUnsummarizedTailInfo(
                 sessionId,
                 scanBudget,
                 rawEligibility.offset,
-                boundary.protectedTailStart,
+                boundary.eligibleEndOrdinal,
             );
             const isMeaningful =
                 chunk.hasMore ||
