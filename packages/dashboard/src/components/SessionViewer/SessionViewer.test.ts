@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseStoredHarnessFilter, sessionHarnessOptions } from "./SessionViewer";
+import { parseStoredHarnessFilter, sessionHarnessOptions } from "./session-filter";
 
 describe("Sessions harness filter", () => {
   test("offers OpenCode 2 beside OpenCode", () => {
