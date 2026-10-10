@@ -1208,7 +1208,10 @@ fn check_against_full(
     inputs: &Channel1PolicyInputs,
     replayed: &PolicySummary,
 ) -> Result<(), ProviderError> {
-    if FULL_CHECK_OFF.with(std::cell::Cell::get) {
+    // The test-built pipeline driver also serves timing runs, which opt out.
+    if FULL_CHECK_OFF.with(std::cell::Cell::get)
+        || std::env::var_os("MC_POLICY_SUMMARY_SKIP_FULL_CHECK").is_some()
+    {
         return Ok(());
     }
     let parts = index.all_parts()?;

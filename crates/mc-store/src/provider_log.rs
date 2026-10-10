@@ -176,8 +176,17 @@ pub(crate) fn save_engine_policy_tx(
     for (conv, lineage, raw) in conversations {
         // Every part is rewritten below; a summary would only log each one.
         drop_policy_summary_tx(conn, &conv)?;
+        // One prepared statement for the whole lineage, and an unchanged row is
+        // left alone so its indexes need no maintenance.
+        let mut upsert = conn.prepare_cached("INSERT INTO mc_provider_policy_parts_v1 VALUES (?1,?2,?3,?4,?5,json_extract(?1,'$[1]')) ON CONFLICT(conv_key,lineage_id,block_id) DO UPDATE SET policy_json=excluded.policy_json WHERE mc_provider_policy_parts_v1.policy_json IS NOT excluded.policy_json")?;
         for part in &policy.parts {
-            conn.execute("INSERT INTO mc_provider_policy_parts_v1 VALUES (?1,?2,?3,?4,?5,json_extract(?1,'$[1]')) ON CONFLICT(conv_key,lineage_id,block_id) DO UPDATE SET policy_json=excluded.policy_json",params![conv,lineage,as_i64(part.ordinal)?,part.block_id,serde_json::to_string(part).map_err(sql_json)?])?;
+            upsert.execute(params![
+                conv,
+                lineage,
+                as_i64(part.ordinal)?,
+                part.block_id,
+                serde_json::to_string(part).map_err(sql_json)?
+            ])?;
         }
         let mut counters = parse(&raw)?;
         counters["engine_policy"] = policy.settings.clone();
