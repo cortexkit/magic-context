@@ -219,6 +219,37 @@ describe("Pi extension reports an empty historian chain at session start", () =>
 		return root;
 	}
 
+	// A second, independently configured project: Pi hands every session
+	// context the operator's cwd, and the report machinery keys its reader and
+	// deps caches on that directory, so a switch between projects needs a
+	// distinct cwd -- and the project tier must sit under it, not under the
+	// temp root.
+	function projectCwd(root: string, name: string, config: unknown): string {
+		const cwd = join(root, name);
+		mkdirSync(join(cwd, ".cortexkit"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".cortexkit", "magic-context.jsonc"),
+			JSON.stringify(config),
+		);
+		return cwd;
+	}
+
+	// Only the historian trigger lines, so an assertion names what the report
+	// decided instead of incidental boot logging.
+	function triggerLines(logs: string[]): string[] {
+		return logs.filter((line) =>
+			line.includes("registered historian trigger"),
+		);
+	}
+
+	// Yield until queued microtasks -- the settled refresh's re-check chain --
+	// have run: setImmediate is the first macrotask after them.
+	function macrotask(): Promise<void> {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setImmediate(resolve);
+		return promise;
+	}
+
 	it("/ctx-status lists only chains that can run, with suggestions and the inert drain latch", async () => {
 		const root = isolatedConfig({
 			historian: { pi: HISTORIAN_CHAIN },
@@ -417,6 +448,236 @@ describe("Pi extension reports an empty historian chain at session start", () =>
 		);
 		expect(historianLines).toEqual([
 			expect.stringContaining("(model=litellm/google/gemini-3.1-flash-lite"),
+		]);
+		expect(notify).toHaveBeenCalledTimes(0);
+	}, 20_000);
+
+	it("holds every report back while the discovery refresh is still pending", async () => {
+		// The second-event bypass the fix removes: the settled marker used to be
+		// set when the await was *scheduled*, so a session_start arriving
+		// inside the refresh window skipped the wait and pinned
+		// `registered historian trigger: DISABLED` for the process from a
+		// catalogue that was still hydrating.
+		const root = isolatedConfig({
+			historian: { pi: { model: "litellm/google/gemini-3.1-flash-lite" } },
+			dreamer: { disable: true },
+		});
+		const logs: string[] = [];
+		spyOn(loggerModule, "log").mockImplementation((message: unknown) => {
+			logs.push(String(message));
+		});
+		dreamerTest.setStartDreamScheduleTimerFactory(async () => () => {});
+
+		let hydrated = false;
+		let resolveRefresh!: () => void;
+		const refreshing = new Promise<void>((resolve) => {
+			resolveRefresh = resolve;
+		});
+		const lateRegistry = {
+			find: (provider: string, id: string) =>
+				(hydrated
+					? [{ provider: "litellm", id: "google/gemini-3.1-flash-lite" }]
+					: []
+				).find((model) => model.provider === provider && model.id === id),
+			getAll: () =>
+				hydrated ? [{ provider: "litellm", id: "google/gemini-3.1-flash-lite" }] : [],
+			awaitBackgroundRefresh: () => refreshing,
+		};
+
+		const runtime = createPi();
+		await magicContextPiExtension(runtime.pi);
+		const notify = mock((_message: string, _level?: string) => undefined);
+		const ctx = {
+			cwd: projectCwd(root, "repo-pending", { dreamer: { disable: true } }),
+			hasUI: true,
+			modelRegistry: lateRegistry,
+			sessionManager: { getSessionId: () => "ses-pending" },
+			ui: { notify, setStatus: () => undefined },
+		};
+		// First pass schedules the await; a second session_start and a turn
+		// arrive while it is still in flight.
+		await runtime.emit("session_start", ctx);
+		await runtime.emit("session_start", ctx);
+		await runtime.agentTurn(ctx);
+
+		expect(triggerLines(logs)).toEqual([]);
+		expect(notify).toHaveBeenCalledTimes(0);
+
+		// The refresh settles: one report, from the settled catalogue.
+		hydrated = true;
+		resolveRefresh();
+		await macrotask();
+
+		expect(triggerLines(logs)).toEqual([
+			expect.stringContaining("(model=litellm/google/gemini-3.1-flash-lite"),
+		]);
+		expect(notify).toHaveBeenCalledTimes(0);
+	}, 20_000);
+
+	it("re-checks the settled catalogue against current state after a session switch", async () => {
+		// The stale replay the fix removes: the deferred report used to invoke
+		// the session context captured when the wait was scheduled. After a
+		// switch into another session that capture belongs to a dead session,
+		// and re-reading its registry -- not the live catalogue -- reported
+		// DISABLED for a model the running session can resolve.
+		// One operator config: historian model selection is user-tier by
+		// design (a repository cannot choose the historian's model), so both
+		// sessions share it -- deliberately the same chain, so the live
+		// session's healthy line and the settled re-check's line have equal
+		// content and the log's line count is the discriminator: a replay of
+		// the captured stale registry would add a DISABLED line, while a
+		// deferred report that never fired would leave a single line.
+		const root = isolatedConfig({
+			historian: { pi: { model: "litellm/deepseek-v4-flash" } },
+			dreamer: { disable: true },
+		});
+		const logs: string[] = [];
+		spyOn(loggerModule, "log").mockImplementation((message: unknown) => {
+			logs.push(String(message));
+		});
+		dreamerTest.setStartDreamScheduleTimerFactory(async () => () => {});
+
+		let resolveRefresh!: () => void;
+		const refreshing = new Promise<void>((resolve) => {
+			resolveRefresh = resolve;
+		});
+		// The switched-away session's catalogue never gains the model.
+		const stalledRegistry = {
+			find: () => undefined,
+			getAll: () => [],
+			awaitBackgroundRefresh: () => refreshing,
+		};
+
+		const runtime = createPi();
+		await magicContextPiExtension(runtime.pi);
+		const staleNotify = mock(() => undefined);
+		const staleCwd = projectCwd(root, "repo-stale", {
+			dreamer: { disable: true },
+		});
+		await runtime.emit("session_start", {
+			cwd: staleCwd,
+			hasUI: true,
+			modelRegistry: stalledRegistry,
+			sessionManager: { getSessionId: () => "ses-stale" },
+			ui: { notify: staleNotify, setStatus: () => undefined },
+		});
+
+		const liveNotify = mock(() => undefined);
+		const liveCwd = projectCwd(root, "repo-live", { dreamer: { disable: true } });
+		await runtime.emit("session_start", {
+			cwd: liveCwd,
+			hasUI: true,
+			modelRegistry: registry([
+				{ provider: "openai-codex", id: "gpt-6.1-sol" },
+				{ provider: "litellm", id: "deepseek-v4-flash" },
+			]),
+			sessionManager: { getSessionId: () => "ses-live" },
+			ui: { notify: liveNotify, setStatus: () => undefined },
+		});
+
+		resolveRefresh();
+		await macrotask();
+
+		// The switched-away project's settled re-check resolved the *current*
+		// registry: its chain reports as running -- and with the live
+		// session's line deduplicated by the once-per-process log, exactly
+		// this one healthy line exists. No DISABLED line, and no warning ever
+		// reached the captured stale session's ui.
+		expect(triggerLines(logs)).toEqual([
+			expect.stringContaining("(model=litellm/deepseek-v4-flash"),
+		]);
+		expect(staleNotify).toHaveBeenCalledTimes(0);
+		expect(liveNotify).toHaveBeenCalledTimes(0);
+	}, 20_000);
+
+	it("leaves a replaced config's deferred report to the reload-aware path", async () => {
+		// Config generation verification: the refresh was awaited for one
+		// configuration, but the operator reloaded the file before it settled.
+		// Replaying the scheduled pass after the wait would warn about chains
+		// that no longer describe the config on disk; the generation gate owns
+		// the new file, and the next agent turn gets the single report.
+		const root = isolatedConfig({
+			historian: { pi: { model: "litellm/google/gemini-3.1-flash-lite" } },
+			dreamer: { disable: true },
+		});
+		const cwd = projectCwd(root, "repo-reload", { dreamer: { disable: true } });
+		const logs: string[] = [];
+		spyOn(loggerModule, "log").mockImplementation((message: unknown) => {
+			logs.push(String(message));
+		});
+		dreamerTest.setStartDreamScheduleTimerFactory(async () => () => {});
+
+		// Unhydrated while the refresh is pending, so the scheduled pass finds
+		// the empty chain; the refresh settles the catalogue either way.
+		let hydrated = false;
+		let resolveRefresh!: () => void;
+		const refreshing = new Promise<void>((resolve) => {
+			resolveRefresh = () => {
+				hydrated = true;
+				resolve();
+			};
+		});
+		const lateRegistry = {
+			find: (provider: string, id: string) =>
+				(hydrated
+					? [
+							{ provider: "litellm", id: "google/gemini-3.1-flash-lite" },
+							{ provider: "litellm", id: "openai/gpt-4.1-mini" },
+						]
+					: []
+				).find((model) => model.provider === provider && model.id === id),
+			getAll: () =>
+				hydrated
+					? [
+							{ provider: "litellm", id: "google/gemini-3.1-flash-lite" },
+							{ provider: "litellm", id: "openai/gpt-4.1-mini" },
+						]
+					: [],
+			awaitBackgroundRefresh: () => refreshing,
+		};
+
+		const runtime = createPi();
+		await magicContextPiExtension(runtime.pi);
+		const notify = mock((_message: string, _level?: string) => undefined);
+		const ctx = {
+			cwd,
+			hasUI: true,
+			modelRegistry: lateRegistry,
+			sessionManager: { getSessionId: () => "ses-reloaded" },
+			ui: { notify, setStatus: () => undefined },
+		};
+		await runtime.emit("session_start", ctx);
+
+		// The operator's reload moves both tiers: poll() re-reads the effective
+		// config from disk, and the generation the deferred report verifies
+		// against must have visibly moved.
+		writeFileSync(
+			join(root, "config", "cortexkit", "magic-context.jsonc"),
+			JSON.stringify({
+				historian: { pi: { model: "litellm/openai/gpt-4.1-mini" } },
+				dreamer: { disable: true },
+			}),
+		);
+		writeFileSync(
+			join(cwd, ".cortexkit", "magic-context.jsonc"),
+			JSON.stringify({
+				historian: { pi: { model: "litellm/openai/gpt-4.1-mini" } },
+				dreamer: { disable: true },
+			}),
+		);
+
+		resolveRefresh();
+		await macrotask();
+
+		// Nothing announced for the replaced configuration.
+		expect(triggerLines(logs)).toEqual([]);
+		expect(notify).toHaveBeenCalledTimes(0);
+
+		// The reload-aware path (agent_start's generation gate) reports the
+		// current file once.
+		await runtime.agentTurn(ctx);
+		expect(triggerLines(logs)).toEqual([
+			expect.stringContaining("(model=litellm/openai/gpt-4.1-mini"),
 		]);
 		expect(notify).toHaveBeenCalledTimes(0);
 	}, 20_000);

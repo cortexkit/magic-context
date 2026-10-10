@@ -1623,11 +1623,28 @@ async function startPiMagicContextRuntime(
 		| { find(provider: string, modelId: string): unknown }
 		| undefined;
 
+	// The latest session context Pi handed the extension, kept alongside the
+	// active registry. A report deferred behind a discovery refresh resolves
+	// its dependencies through this instead of replaying the context captured
+	// when the wait was scheduled: after a session switch that capture belongs
+	// to a dead session (its `ui` reaches nowhere, its registry is not the
+	// live catalogue), and after a config reload its project is stale.
+	type PiModelChainReportContext = {
+		modelRegistry?: PiModelRegistryLike;
+		hasUI?: boolean;
+		ui?: { notify?: (message: string, level?: "warning") => unknown };
+	};
+	let activeModelChainContext: PiModelChainReportContext | undefined;
+
 	// Config generation last checked per project directory.
 	const modelChainsCheckedGeneration = new Map<string, number>();
-	// Project directories whose chain report already waited once for the host's
-	// discovery-backed catalogue to settle.
-	const modelChainReadinessRechecked = new Set<string>();
+	// Project directories whose chain report already awaited the host's
+	// discovery-backed catalogue once. Set only when that await has settled.
+	const modelChainReadinessWaited = new Set<string>();
+	// Project directories with a discovery await still in flight. Reports
+	// defer to it while it is pending; it is the only thing allowed to
+	// schedule the settled re-check.
+	const modelChainRefreshPending = new Set<string>();
 	/**
 	 * Validate the historian and dreamer chains against Pi's model registry:
 	 * log the historian chain that will actually run, and notify the session
@@ -1635,14 +1652,12 @@ async function startPiMagicContextRuntime(
 	 * model-chain-health.ts). Runs at session start and after a config reload.
 	 * An empty chain is first re-checked after one background-refresh await,
 	 * because a registration-time miss on a discovery-backed provider means
-	 * "not hydrated yet" far more often than "not configured".
+	 * "not hydrated yet" far more often than "not configured". While that
+	 * await is in flight every further report defers to it, and it re-checks
+	 * through current lifecycle state, never the pass that scheduled it.
 	 */
 	function reportPiModelChains(
-		ctx: {
-			modelRegistry?: PiModelRegistryLike;
-			hasUI?: boolean;
-			ui?: { notify?: (message: string, level?: "warning") => unknown };
-		},
+		ctx: PiModelChainReportContext,
 		project: ResolvedPiProjectDeps,
 	): void {
 		const registry = ctx.modelRegistry;
@@ -1662,20 +1677,33 @@ async function startPiMagicContextRuntime(
 				harness: PI_HARNESS_KIND,
 			});
 
-			// Nothing is logged or notified from a first pass that found an empty
-			// chain: on OMP the provider that owns these models is queued during
-			// extension loading and merged by a boot refresh nobody awaits, so
-			// announcing "will not run" here is usually wrong and, once notified,
-			// sticky for the process. Wait for that refresh once per project and
-			// report from the settled catalogue.
+			// Nothing is logged or notified from a pass that found an empty
+			// chain before the host's discovery has settled: on OMP the provider
+			// that owns these models is queued during extension loading and
+			// merged by a boot refresh nobody awaits, so announcing "will not
+			// run" from an unsettled catalogue is usually wrong and, once
+			// notified, sticky for the process through
+			// loggedPiModelChainLines/notifiedPiModelChainKeys. One await per
+			// project: any event arriving inside the refresh window -- a second
+			// session_start, or the reload-driven agent_start gate -- defers to
+			// the in-flight await instead of skipping the wait and reporting the
+			// miss.
 			if (
 				empty.length > 0 &&
-				!modelChainReadinessRechecked.has(project.projectDir)
+				!modelChainReadinessWaited.has(project.projectDir)
 			) {
-				modelChainReadinessRechecked.add(project.projectDir);
-				void waitForPiModelRegistryRefresh(registry).then(() =>
-					reportPiModelChains(ctx, project),
-				);
+				if (!modelChainRefreshPending.has(project.projectDir)) {
+					modelChainRefreshPending.add(project.projectDir);
+					const waitingDir = project.projectDir;
+					void waitForPiModelRegistryRefresh(registry).then(() => {
+						// Marked settled only now: the await has actually
+						// finished, so a miss remaining from here on is
+						// trustworthy and later passes may report it.
+						modelChainRefreshPending.delete(waitingDir);
+						modelChainReadinessWaited.add(waitingDir);
+						reportPiModelChainsAfterRefresh(waitingDir);
+					});
+				}
 				return;
 			}
 			const emptyHistorian = empty.find((chain) => chain.owner === "historian");
@@ -1703,6 +1731,29 @@ async function startPiMagicContextRuntime(
 		} catch (err) {
 			warn("model chain check failed:", err);
 		}
+	}
+	/**
+	 * Re-run the chain report once a scheduled discovery refresh has settled.
+	 * Nothing from the scheduled pass is replayed: the session may have been
+	 * switched and the config reloaded while the await was open, so the
+	 * report resolves the current session context and this directory's
+	 * dependencies from the lifecycle state above. If the config's generation
+	 * has moved past the last checked one, the refresh was awaited for a
+	 * replaced configuration and its report is left to the reload-aware path
+	 * (agent_start's generation gate, or the next session_start) instead of
+	 * announcing chains that no longer describe the file on disk.
+	 */
+	function reportPiModelChainsAfterRefresh(projectDir: string): void {
+		const ctx = activeModelChainContext;
+		const registry = ctx?.modelRegistry;
+		if (!ctx || !registry) return;
+		const project = resolveProjectDepsForDir(projectDir);
+		const generation = liveReaderFor(
+			project.projectDir,
+			project.config,
+		).poll().generation;
+		if (modelChainsCheckedGeneration.get(projectDir) !== generation) return;
+		reportPiModelChains(ctx, project);
 	}
 	function resolveContextOptionsForProject(
 		dir: string,
@@ -1853,6 +1904,7 @@ async function startPiMagicContextRuntime(
 		projectDepsByDir.delete(ctx.cwd);
 		const current = resolveCurrentProjectDeps(ctx);
 		activeModelRegistry = ctx.modelRegistry;
+		activeModelChainContext = ctx;
 		reportPiModelChains(ctx, current);
 		if (ctx.hasUI) syncDreamerProjectRegistration(current, ctx.modelRegistry);
 		syncCtxMemoryToolEnabled(pi, current.config.memory.enabled);
@@ -2276,6 +2328,7 @@ async function startPiMagicContextRuntime(
 			// shared helper releases that ownership explicitly.
 			try {
 				activeModelRegistry = ctx.modelRegistry;
+				activeModelChainContext = ctx;
 				if (ctx.hasUI)
 					syncDreamerProjectRegistration(
 						effectiveProjectDeps,
