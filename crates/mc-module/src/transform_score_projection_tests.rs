@@ -147,10 +147,11 @@ fn ttl_and_model_cache_loss_adopt_latest_even_when_w_render_matches() {
         )
         .unwrap();
         assert_eq!(probe.m0_bytes, m0_bytes(&baseline));
-        // The probe above shows a render at the applied watermark would match the
-        // served m0. The memory-epoch marker also requests a rebuild, but once the
-        // cache has expired or the model changed the prefix is lost anyway, so
-        // the rebuild must adopt the pending score.
+        // The probe above renders m0 at the applied watermark (score selection 0)
+        // and matches the bytes already served. The memory-epoch marker also
+        // requests a rebuild. An expired cache TTL or a different model means the
+        // provider no longer holds the cached prefix, so keeping the old bytes saves
+        // nothing and the rebuild must adopt the pending score.
         mark_epoch(&s);
         if ttl {
             ctx.now_ms = 600_000;
@@ -534,10 +535,12 @@ fn review_downgrade_meta_rewrite_must_not_adopt_unserved_scores_on_marker_hard()
     drop(s);
     let before = std::fs::read(dir.path().join("store.db")).unwrap();
     // This opener carries only store.db migrations through v63, the newest that
-    // the last ck-mc build released before score support knows. It must refuse
-    // this store (now at the newest version) before it could rewrite metadata and
-    // drop W. context.db's own table-shape compatibility checks are separate and
-    // do not override this store.db refusal.
+    // the last ck-mc build released before score support knows. That build does
+    // not know the `score_selection_watermark` meta key (W), so a metadata rewrite
+    // by it would drop W while keeping the rescored m0. It must refuse this store
+    // (now at the newest version) before it can rewrite anything. context.db's own
+    // table-shape compatibility checks are separate and do not override this
+    // store.db refusal.
     let descriptor = crate::test_support::descriptor(dir.path());
     let Err(refusal) = McStore::open_with_schema_ceiling_for_test(&descriptor, 63) else {
         panic!("the pre-rescore writer must be refused before it can discard W");
