@@ -2883,11 +2883,12 @@ export async function runPostTransformPhase(
             // compartmentRunning had blocked us above, this drain is
             // intentionally NOT reached — the flag survives so the next
             // safe pass picks up the work.
-            // A frozen m[0]/m[1] pass did not materialize, so the request
-            // stays pending for the next pass that can.
+            // Keep the request when kept signed thinking prevents rebuilding the synthetic
+            // history head or applying a queued message drop. Subagents have no history
+            // head, so an empty request has no remaining work and must be consumed.
             if (
                 pendingMaterializationAtPassStart &&
-                !freezeM0M1 &&
+                !(freezeM0M1 && m0M1EnabledForFold) &&
                 !pendingOps.some((op) => newTargets.get(op.tagId)?.thinkingDropProtected)
             ) {
                 args.pendingMaterializationSessions.delete(args.sessionId);
