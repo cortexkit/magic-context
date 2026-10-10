@@ -638,6 +638,8 @@ export interface TransformDeps {
      * host's input messages: the request these messages belong to is being built.
      */
     onMessagesPassStarted?: (sessionId: string, messages: readonly MessageLike[]) => void;
+    /** Report postprocessing's actual cache-bust permission; changed bytes alone do not authorize a bust. */
+    onPostprocess?: (result: { bustedThisPass: boolean }) => void;
     /** Resolved project mode. Rust mode bypasses every TS mutation below. */
     transformMode?: "ts" | "rust";
     /** Prompt-surface routing and USER description overrides forwarded to Rust mode. */
@@ -3412,6 +3414,7 @@ export function createTransform(deps: TransformDeps) {
                 agentName: notificationParams.agent,
                 systemPromptHash: sessionMeta.systemPromptHash,
             });
+        deps.onPostprocess?.({ bustedThisPass: postTransformResult.bustedThisPass });
     };
 
     return Object.assign(transform, {

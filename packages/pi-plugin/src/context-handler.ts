@@ -1265,6 +1265,8 @@ export interface PiSchedulerOptions {
 }
 
 export interface PiContextHandlerOptions {
+	/** Report postprocessing's actual cache-bust permission; changed bytes alone do not authorize a bust. */
+	onPostprocess?: (result: { bustedThisPass: boolean }) => void;
 	cacheTtlConfig?: import("@magic-context/core/shared/model-cache-ttl").CacheTtlConfig;
 	cacheTtlConfigured?: boolean;
 	db: ContextDatabase;
@@ -4166,6 +4168,7 @@ export function registerPiContextHandler(
 					);
 				}
 			}
+			options.onPostprocess?.({ bustedThisPass: result.bustedThisPass });
 			return { messages: outputMessages } as {
 				messages: typeof event.messages;
 			};

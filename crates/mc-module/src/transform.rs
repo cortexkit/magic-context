@@ -17419,6 +17419,10 @@ fn active_thinking_prefix_edit_ids(core: &CoreState, req: &TransformRequest) -> 
     let mut last = None;
     let mut coordinates = Vec::new();
     let mut previous_assistant = false;
+    // Continue selecting protected targets by block order. In debug builds, verify that the new
+    // stable-message coordinates protect every target this existing walk protects.
+    #[cfg(debug_assertions)]
+    let mut admission_messages = Vec::new();
     for message in &req.messages {
         let mut replay = message.ck.clone();
         replay_reasoning_clear(&lookup, &message.mid, &mut replay);
@@ -17439,6 +17443,37 @@ fn active_thinking_prefix_edit_ids(core: &CoreState, req: &TransformRequest) -> 
                 );
             }
         }
+        #[cfg(debug_assertions)]
+        admission_messages.push(crate::edit_admission::Message {
+            id: Some(message.mid.clone()),
+            real_user: message.ck.role == "user"
+                && !message.ck.meta.synthetic
+                && !message.mid.starts_with("synth-user-")
+                && !message
+                    .ck
+                    .content
+                    .iter()
+                    .all(|b| matches!(b.kind, ck_wire::CkKind::ToolResult { .. })),
+            parts: message
+                .ck
+                .content
+                .iter()
+                .map(|block| crate::edit_admission::Part {
+                    retained: active.contains(message.mid.as_str())
+                        && is_reasoning_block(block)
+                        && replay.content.iter().any(|kept| kept == block),
+                    anchor: match &block.kind {
+                        ck_wire::CkKind::Reasoning { signature, .. } => {
+                            signature.clone().filter(|s| !s.is_empty())
+                        }
+                        ck_wire::CkKind::RedactedReasoning { data } => {
+                            Some(data.clone()).filter(|s| !s.is_empty())
+                        }
+                        _ => None,
+                    },
+                })
+                .collect(),
+        });
         for (index, block) in message.ck.content.iter().enumerate() {
             coordinates.push((ordinal, ck_wire::block_id(&message.mid, index)));
             if active.contains(message.mid.as_str())
@@ -17451,10 +17486,26 @@ fn active_thinking_prefix_edit_ids(core: &CoreState, req: &TransformRequest) -> 
         }
         previous_assistant = message.ck.role == "assistant";
     }
-    coordinates
+    let protected: HashSet<String> = coordinates
         .into_iter()
         .filter_map(|(position, id)| last.is_some_and(|last| position < last).then_some(id))
-        .collect()
+        .collect();
+    #[cfg(debug_assertions)]
+    {
+        use crate::edit_admission::{BlockPos, EditAdmission, EditCoord};
+        let admission = EditAdmission::new(&admission_messages, true);
+        for id in &protected {
+            let (mid, block) = id.rsplit_once('#').expect("block id has an index");
+            debug_assert!(
+                !admission.admit(EditCoord::Message {
+                    mid: Some(mid),
+                    block: BlockPos::Index(block.parse().expect("block index")),
+                }),
+                "served-coordinate protection lost the issue-630 target {id}"
+            );
+        }
+    }
+    protected
 }
 
 fn latest_assistant_mid(messages: &[CkIngressMessage]) -> Option<&str> {

@@ -42,6 +42,7 @@ interface Receipt {
 }
 
 export class StrictBindingMock {
+    constructor(private readonly mintOnly = false) {}
     private receipts: Receipt[] = [];
     private turn = 0;
     /** Every request the mock answered, in order. */
@@ -59,7 +60,7 @@ export class StrictBindingMock {
      */
     respond(request: Wire, withThinking = true): Block | null {
         const rejection = this.check(request);
-        if (rejection) throw new Error(rejection);
+        if (rejection && !this.mintOnly) throw new Error(rejection);
         this.accepted.push(structuredClone(request));
         if (!withThinking) return null;
         const n = this.receipts.length + 1;
@@ -122,6 +123,12 @@ export class StrictBindingMock {
             }
         }
         return null;
+    }
+
+    /** Only retained receipts from the current real user turn define the audit boundary. */
+    hasCurrentTurnThinking(request: Wire): boolean {
+        const signatures = new Set(request.flatMap((m) => m.content).map((b) => b.signature));
+        return this.receipts.some((r) => r.turn === this.turn && signatures.has(r.signature));
     }
 }
 

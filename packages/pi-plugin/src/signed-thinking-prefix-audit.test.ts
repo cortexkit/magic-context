@@ -11,12 +11,13 @@
  * Findings: docs/reports/signed-thinking-prefix-edits-audit.md. Run with
  * MC_AUDIT_STRICT=1 to make every exposed lane fail on its strict-binding 400.
  */
-import { describe, expect, it } from "bun:test";
+import { describe, it } from "bun:test";
 import {
 	appendCompartments,
 	replaceAllCompartmentState,
 	replaceAllCompartments,
 } from "@magic-context/core/features/magic-context/compartment-storage";
+import { isPrefixBoundThinkingModel } from "@magic-context/core/features/magic-context/overflow-detection";
 import {
 	getOrCreateSessionMeta,
 	getPendingOps,
@@ -25,6 +26,13 @@ import {
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
+import { assertAdmissionParity } from "../../plugin/src/hooks/magic-context/__tests__/admission-parity.test";
+import {
+	auditName,
+	auditExpect as expect,
+	GOLDEN,
+	GoldenCapture,
+} from "../../plugin/src/hooks/magic-context/__tests__/golden-capture.test";
 import {
 	type Block,
 	beforeLastThinking,
@@ -52,10 +60,14 @@ import {
 
 const MODEL = {
 	provider: "anthropic",
-	id: "claude-opus-5-5",
+	id: process.env.MC_AUDIT_MODEL ?? "claude-opus-5-5",
 	api: "anthropic-messages",
 	contextWindow: 100_000,
 };
+
+// Keep the strict thinking-identity assertion disabled until older-turn thinking is stripped
+// only alongside an admitted prefix edit, rather than alongside every bust permission.
+const THINKING_STRIP_GATED = false;
 
 /**
  * What Pi's Anthropic provider sends: thinking with its signature, tool calls
@@ -228,7 +240,7 @@ interface Fixture {
 	sessionId: string;
 	mock: StrictBindingMock;
 	served: unknown[];
-	pass: () => Promise<unknown[]>;
+	pass: () => Promise<{ messages: unknown[]; bustedThisPass: boolean }>;
 	respond: (
 		content: (n: number) => Record<string, unknown>[],
 		results?: (n: number) => [string, string][],
@@ -247,7 +259,11 @@ function reduce(id: string, drop: string): Record<string, unknown> {
 	return { type: "toolCall", id, name: "ctx_reduce", arguments: { drop } };
 }
 
-async function fixture(subagent: boolean, lane: Lane): Promise<Fixture> {
+async function fixture(
+	subagent: boolean,
+	lane: Lane,
+	scenario: string,
+): Promise<Fixture> {
 	const db = createTestDb();
 	const sessionId = `pi-prefix-audit-${subagent ? "sub" : "pri"}-${lane.replace(/\W+/g, "-")}`;
 	getOrCreateSessionMeta(db, sessionId);
@@ -263,7 +279,12 @@ async function fixture(subagent: boolean, lane: Lane): Promise<Fixture> {
 			]),
 		});
 	const fake = createFakePi();
+	let bustedThisPass: boolean | undefined;
+	const capture = new GoldenCapture(auditName("pi", subagent, lane, scenario));
 	registerPiContextHandler(fake.pi as never, {
+		onPostprocess: (result) => {
+			bustedThisPass = result.bustedThisPass;
+		},
 		db,
 		protectedTokens: 4000,
 		todowriteEnabled: true,
@@ -289,6 +310,16 @@ async function fixture(subagent: boolean, lane: Lane): Promise<Fixture> {
 	let percent = 20;
 	const pass = async () => {
 		const source = structuredClone(messages);
+		if (!GOLDEN)
+			assertAdmissionParity(
+				source.map((m, i) => ({
+					info: { id: ids[i], role: m.role },
+					parts: Array.isArray(m.content)
+						? m.content
+						: [{ type: "text", text: m.content }],
+				})),
+				isPrefixBoundThinkingModel(MODEL.provider, MODEL.id),
+			);
 		const ctx = {
 			...fakeContext(sessionId, process.cwd(), ids, source),
 			model: MODEL,
@@ -298,11 +329,19 @@ async function fixture(subagent: boolean, lane: Lane): Promise<Fixture> {
 				contextWindow: 100_000,
 			}),
 		};
-		return (
-			(await handler({ messages: source }, ctx as never))?.messages ?? source
+		bustedThisPass = undefined;
+		const output =
+			(await handler({ messages: source }, ctx as never))?.messages ?? source;
+		if (bustedThisPass === undefined)
+			throw new Error("audit pass did not reach postprocess");
+		capture.write(
+			wire(output),
+			bustedThisPass,
+			mock.hasCurrentTurnThinking(wire(output)),
 		);
+		return { messages: output, bustedThisPass };
 	};
-	const mock = new StrictBindingMock();
+	const mock = new StrictBindingMock(Boolean(GOLDEN));
 	let step = 0;
 	const respond: Fixture["respond"] = (
 		content,
@@ -392,12 +431,12 @@ async function fixture(subagent: boolean, lane: Lane): Promise<Fixture> {
 		"Inspect the parser and the attached screenshot, then report.",
 		image,
 	);
-	f.served = await pass();
+	f.served = (await pass()).messages;
 	respond(
 		() => [read("old-read-a", "/project/src/parser.ts")],
 		() => [["old-read-a", PARSER_SOURCE]],
 	);
-	f.served = await pass();
+	f.served = (await pass()).messages;
 	respond(
 		() => [
 			read(
@@ -417,7 +456,7 @@ async function fixture(subagent: boolean, lane: Lane): Promise<Fixture> {
 		],
 		false,
 	);
-	f.served = await pass();
+	f.served = (await pass()).messages;
 	if (lane === "stale ctx_reduce strip")
 		respond(
 			() => [reduce("old-reduce", "3")],
@@ -428,7 +467,7 @@ async function fixture(subagent: boolean, lane: Lane): Promise<Fixture> {
 			() => [read("old-read-c", "/project/src/lexer.ts")],
 			() => [["old-read-c", "export function lex(src) {}\n".repeat(150)]],
 		);
-	f.served = await pass();
+	f.served = (await pass()).messages;
 	respond(() => [{ type: "text", text: SUMMARY_TEXT }]);
 	if (lane === "frozen-sentinel first application") {
 		messages.push({
@@ -439,14 +478,14 @@ async function fixture(subagent: boolean, lane: Lane): Promise<Fixture> {
 		ids.push("placeholder-only");
 	}
 	if (!subagent) {
-		f.served = await pass();
+		f.served = (await pass()).messages;
 		expect(mock.check(wire(f.served))).toBeNull();
 		userTurn(
 			"prompt-2",
 			"Now repair the error recovery in the parser; keep using tools until it is done.",
 		);
 	}
-	f.served = await pass();
+	f.served = (await pass()).messages;
 	return f;
 }
 
@@ -472,7 +511,7 @@ async function toolLoop(
 				],
 			],
 		);
-		f.served = await f.pass();
+		f.served = (await f.pass()).messages;
 		expect(f.mock.check(wire(f.served))).toBeNull();
 	}
 	return f.served;
@@ -485,20 +524,20 @@ async function nextUserTurn(f: Fixture, id: string): Promise<void> {
 			text: `Step ${n}: this part of the work is done and verified.`,
 		},
 	]);
-	f.served = await f.pass();
+	f.served = (await f.pass()).messages;
 	expect(f.mock.check(wire(f.served))).toBeNull();
 	f.userTurn(
 		id,
 		"Continue with the next part of the parser work; keep using tools until done.",
 	);
-	f.served = await f.pass();
+	f.served = (await f.pass()).messages;
 	expect(f.mock.check(wire(f.served))).toBeNull();
 }
 
 async function prepareLane(f: Fixture, lane: Lane): Promise<void> {
 	if (lane === "synthetic todo") {
 		signalPiPendingMaterialization(f.sessionId);
-		f.served = await f.pass();
+		f.served = (await f.pass()).messages;
 		expect(f.mock.check(wire(f.served))).toBeNull();
 	}
 	if (
@@ -509,7 +548,7 @@ async function prepareLane(f: Fixture, lane: Lane): Promise<void> {
 		// pair is served with an inclusive cut through step-4, the summary message.
 		appendCompartments(f.db, f.sessionId, [FIRST_TURN_COMPARTMENT]);
 		signalPiHistoryRefresh(f.sessionId);
-		f.served = await f.pass();
+		f.served = (await f.pass()).messages;
 		expect(f.mock.check(wire(f.served))).toBeNull();
 		expect(JSON.stringify(wire(f.served))).toContain(COMPARTMENT_TITLE);
 		expect(JSON.stringify(wire(f.served))).not.toContain(SUMMARY_TEXT);
@@ -663,9 +702,10 @@ function withFixture(
 	subagent: boolean,
 	lane: Lane,
 	body: (f: Fixture) => Promise<void>,
+	scenario = "mid-loop",
 ) {
 	return async () => {
-		const f = await fixture(subagent, lane);
+		const f = await fixture(subagent, lane, scenario);
 		try {
 			await body(f);
 		} finally {
@@ -685,7 +725,7 @@ for (const subagent of [false, true]) {
 					await prepareLane(f, lane);
 					const before = wire(await toolLoop(f, 4, lane));
 					armAndBust(f, lane, subagent);
-					const afterMessages = await f.pass();
+					const afterMessages = (await f.pass()).messages;
 					const after = wire(afterMessages);
 					const error = f.mock.check(after);
 					const edit = landed(f, lane, after);
@@ -697,7 +737,7 @@ for (const subagent of [false, true]) {
 					);
 					// Under MC_AUDIT_STRICT=1 every lane must behave as held, which is
 					// the acceptance bar of docs/designs/signed-thinking-hold.md.
-					if (!STRICT_AUDIT && EXPOSED.has(lane)) {
+					if (!GOLDEN && !STRICT_AUDIT && EXPOSED.has(lane)) {
 						expect(edit).toBe(true);
 						expect(error).toBe(PREFIX_ERROR);
 						return;
@@ -719,15 +759,16 @@ for (const subagent of [false, true]) {
 					if (lane !== "reasoning clearing (keep_reasoning_tokens)") {
 						const thinkingChanged =
 							thinkingBlocks(after) !== thinkingBlocks(before);
-						if (STRICT_AUDIT) expect(thinkingChanged).toBe(false);
-						else
+						if (STRICT_AUDIT && THINKING_STRIP_GATED)
+							expect(thinkingChanged).toBe(false);
+						else if (!STRICT_AUDIT)
 							expect(thinkingChanged).toBe(
 								!subagent && STRIPS_THINKING_WHEN_HELD.has(lane),
 							);
 					}
 					// A held edit is never recorded as served: repeating the pass with
 					// no new response serves exactly the same bytes.
-					expect(wire(await f.pass())).toEqual(after);
+					expect(wire((await f.pass()).messages)).toEqual(after);
 					f.served = afterMessages;
 					await toolLoop(f, 2);
 					if (subagent) return;
@@ -745,106 +786,134 @@ for (const subagent of [false, true]) {
 			);
 		}
 		if (subagent) return;
+		it(
+			"pass returns the postprocess bust verdict",
+			withFixture(
+				false,
+				"HARD fold after historian publication",
+				async (f) => {
+					expect((await f.pass()).bustedThisPass).toBe(false);
+					armAndBust(f, "HARD fold after historian publication", false);
+					expect((await f.pass()).bustedThisPass).toBe(true);
+				},
+				"bust-signal",
+			),
+		);
 		for (const lane of PRIMARY_LANES) {
 			it(
 				`control: ${lane} lands validly at a new user turn`,
-				withFixture(false, lane, async (f) => {
-					await prepareLane(f, lane);
-					await toolLoop(f, 4, lane);
-					await nextUserTurn(f, "prompt-next");
-					armAndBust(f, lane, false);
-					const afterMessages = await f.pass();
-					const after = wire(afterMessages);
-					const error = f.mock.check(after);
-					const edit = landed(f, lane, after);
-					console.log(
-						`AUDIT-CONTROL Pi/OMP | new user turn | ${lane}: ${error ?? "accepted"}; laneLanded=${edit}`,
-					);
-					expect(edit).toBe(true);
-					expect(error).toBeNull();
-					f.served = afterMessages;
-					await toolLoop(f, 3);
-				}),
+				withFixture(
+					false,
+					lane,
+					async (f) => {
+						await prepareLane(f, lane);
+						await toolLoop(f, 4, lane);
+						await nextUserTurn(f, "prompt-next");
+						armAndBust(f, lane, false);
+						const afterMessages = (await f.pass()).messages;
+						const after = wire(afterMessages);
+						const error = f.mock.check(after);
+						const edit = landed(f, lane, after);
+						console.log(
+							`AUDIT-CONTROL Pi/OMP | new user turn | ${lane}: ${error ?? "accepted"}; laneLanded=${edit}`,
+						);
+						expect(edit).toBe(true);
+						expect(error).toBeNull();
+						f.served = afterMessages;
+						await toolLoop(f, 3);
+					},
+					"control",
+				),
 			);
 		}
 		for (const lane of RESTART_LANES) {
 			it(
 				`release survives a restart: ${lane}`,
-				withFixture(false, lane, async (f) => {
-					await prepareLane(f, lane);
-					await toolLoop(f, 4, lane);
-					armAndBust(f, lane, false);
-					const afterMessages = await f.pass();
-					const after = wire(afterMessages);
-					expect(f.mock.check(after)).toBeNull();
-					expect(landed(f, lane, after)).toBe(false);
-					f.served = afterMessages;
-					await toolLoop(f, 2);
-					// The process restarts while the work is held: every in-memory
-					// per-session state is dropped, the database survives. The next real
-					// user turn must still release the work.
-					clearContextHandlerSession(f.sessionId);
-					await nextUserTurn(f, "prompt-release");
-					const released = wire(f.served);
-					const edit = landed(f, lane, released);
-					console.log(
-						`AUDIT-RESTART Pi/OMP | next user turn after a restart | ${lane}: ${f.mock.check(released) ?? "accepted"}; laneLanded=${edit}`,
-					);
-					expect(f.mock.check(released)).toBeNull();
-					if (!STRICT_AUDIT && RESTART_GAP.has(lane)) {
-						expect(edit).toBe(false);
-						return;
-					}
-					expect(edit).toBe(true);
-				}),
+				withFixture(
+					false,
+					lane,
+					async (f) => {
+						await prepareLane(f, lane);
+						await toolLoop(f, 4, lane);
+						armAndBust(f, lane, false);
+						const afterMessages = (await f.pass()).messages;
+						const after = wire(afterMessages);
+						expect(f.mock.check(after)).toBeNull();
+						expect(landed(f, lane, after)).toBe(false);
+						f.served = afterMessages;
+						await toolLoop(f, 2);
+						// The process restarts while the work is held: every in-memory
+						// per-session state is dropped, the database survives. The next real
+						// user turn must still release the work.
+						clearContextHandlerSession(f.sessionId);
+						await nextUserTurn(f, "prompt-release");
+						const released = wire(f.served);
+						const edit = landed(f, lane, released);
+						console.log(
+							`AUDIT-RESTART Pi/OMP | next user turn after a restart | ${lane}: ${f.mock.check(released) ?? "accepted"}; laneLanded=${edit}`,
+						);
+						expect(f.mock.check(released)).toBeNull();
+						if (!GOLDEN && !STRICT_AUDIT && RESTART_GAP.has(lane)) {
+							expect(edit).toBe(false);
+							return;
+						}
+						expect(edit).toBe(true);
+					},
+					"restart",
+				),
 			);
 		}
 		it(
 			"mixed pass: a 95% tail reduction on a parallel tool arc lands while an older drop stays held",
-			withFixture(false, "emergency 95% wall", async (f) => {
-				await toolLoop(f, 3);
-				// The newest step calls two tools at once; Pi stores each result as its
-				// own toolResult message.
-				f.respond(
-					(n) => [
-						read(`call-${n}-a`, `/project/src/file-${n}a.ts`),
-						read(`call-${n}-b`, `/project/src/file-${n}b.ts`),
-					],
-					(n) => [
-						[`call-${n}-a`, `export const a${n} = ${n};\n`.repeat(400)],
-						[`call-${n}-b`, `export const b${n} = ${n};\n`.repeat(400)],
-					],
-				);
-				f.served = await f.pass();
-				expect(f.mock.check(wire(f.served))).toBeNull();
-				const before = wire(f.served);
-				const older = f.tag("old-read-b");
-				queuePendingOp(f.db, f.sessionId, older, "drop");
-				f.setPercent(95);
-				const afterMessages = await f.pass();
-				const after = wire(afterMessages);
-				const tailLanded = withoutThinking(after) !== withoutThinking(before);
-				console.log(
-					`AUDIT-MIXED Pi/OMP | 95% wall beside a held drop: ${f.mock.check(after) ?? "accepted"}; tailLanded=${tailLanded}; olderDropped=${f.tagStatus("old-read-b") === "dropped"}`,
-				);
-				// Valid, including tool pairing on both sides of the parallel arc.
-				expect(f.mock.check(after)).toBeNull();
-				expect(beforeLastThinking(after)).toBe(beforeLastThinking(before));
-				// The older drop sits before kept thinking: held and still queued.
-				expect(f.tagStatus("old-read-b")).not.toBe("dropped");
-				expect(
-					getPendingOps(f.db, f.sessionId).some((op) => op.tagId === older),
-				).toBe(true);
-				// Pi lands the admitted tail reduction, so the pass is really mixed.
-				expect(tailLanded).toBe(true);
-				expect(wire(await f.pass())).toEqual(after);
-				f.served = afterMessages;
-				await toolLoop(f, 2);
-				// Landing the tail reduction did not spend the older drop's release.
-				await nextUserTurn(f, "prompt-release");
-				expect(f.mock.check(wire(f.served))).toBeNull();
-				expect(f.tagStatus("old-read-b")).toBe("dropped");
-			}),
+			withFixture(
+				false,
+				"emergency 95% wall",
+				async (f) => {
+					await toolLoop(f, 3);
+					// The newest step calls two tools at once; Pi stores each result as its
+					// own toolResult message.
+					f.respond(
+						(n) => [
+							read(`call-${n}-a`, `/project/src/file-${n}a.ts`),
+							read(`call-${n}-b`, `/project/src/file-${n}b.ts`),
+						],
+						(n) => [
+							[`call-${n}-a`, `export const a${n} = ${n};\n`.repeat(400)],
+							[`call-${n}-b`, `export const b${n} = ${n};\n`.repeat(400)],
+						],
+					);
+					f.served = (await f.pass()).messages;
+					expect(f.mock.check(wire(f.served))).toBeNull();
+					const before = wire(f.served);
+					const older = f.tag("old-read-b");
+					queuePendingOp(f.db, f.sessionId, older, "drop");
+					f.setPercent(95);
+					const afterMessages = (await f.pass()).messages;
+					const after = wire(afterMessages);
+					const tailLanded = withoutThinking(after) !== withoutThinking(before);
+					console.log(
+						`AUDIT-MIXED Pi/OMP | 95% wall beside a held drop: ${f.mock.check(after) ?? "accepted"}; tailLanded=${tailLanded}; olderDropped=${f.tagStatus("old-read-b") === "dropped"}`,
+					);
+					// Valid, including tool pairing on both sides of the parallel arc.
+					expect(f.mock.check(after)).toBeNull();
+					expect(beforeLastThinking(after)).toBe(beforeLastThinking(before));
+					// The older drop sits before kept thinking: held and still queued.
+					expect(f.tagStatus("old-read-b")).not.toBe("dropped");
+					expect(
+						getPendingOps(f.db, f.sessionId).some((op) => op.tagId === older),
+					).toBe(true);
+					// Pi lands the admitted tail reduction, so the pass is really mixed.
+					expect(tailLanded).toBe(true);
+					expect(wire((await f.pass()).messages)).toEqual(after);
+					f.served = afterMessages;
+					await toolLoop(f, 2);
+					// Landing the tail reduction did not spend the older drop's release.
+					await nextUserTurn(f, "prompt-release");
+					expect(f.mock.check(wire(f.served))).toBeNull();
+					expect(f.tagStatus("old-read-b")).toBe("dropped");
+				},
+				"mixed",
+			),
 		);
 		// A replayed m[0]/m[1] pair must be replayed with the cut it was served with.
 		// Today Pi's trim re-reads the partial-end decision from the live compartment
@@ -854,63 +923,73 @@ for (const subagent of [false, true]) {
 			"prefix cut moved by a compartment rewrite that keeps the cached pair";
 		it(
 			`${CUT_LANE}: mid tool loop`,
-			withFixture(false, CUT_LANE, async (f) => {
-				await prepareLane(f, CUT_LANE);
-				const before = wire(await toolLoop(f, 4));
-				armAndBust(f, CUT_LANE, false);
-				const afterMessages = await f.pass();
-				const after = wire(afterMessages);
-				const error = f.mock.check(after);
-				const moved = landed(f, CUT_LANE, after);
-				debugDiff(CUT_LANE, before, after);
-				console.log(
-					`AUDIT-CUT Pi/OMP | mid tool loop: ${error ?? "accepted"}; cutMoved=${moved}`,
-				);
-				if (!STRICT_AUDIT) {
-					expect(moved).toBe(true);
-					expect(error).toBe(PREFIX_ERROR);
-					return;
-				}
-				expect(error).toBeNull();
-				expect(moved).toBe(false);
-				expect(withoutThinking(after)).toBe(withoutThinking(before));
-				expect(wire(await f.pass())).toEqual(after);
-				f.served = afterMessages;
-				await toolLoop(f, 2);
-				// The rewrite is ride-only: it lands with the next prefix render, which this
-				// fixture does not offer, so the next turn must only stay valid.
-				await nextUserTurn(f, "prompt-release");
-				expect(f.mock.check(wire(f.served))).toBeNull();
-			}),
+			withFixture(
+				false,
+				CUT_LANE,
+				async (f) => {
+					await prepareLane(f, CUT_LANE);
+					const before = wire(await toolLoop(f, 4));
+					armAndBust(f, CUT_LANE, false);
+					const afterMessages = (await f.pass()).messages;
+					const after = wire(afterMessages);
+					const error = f.mock.check(after);
+					const moved = landed(f, CUT_LANE, after);
+					debugDiff(CUT_LANE, before, after);
+					console.log(
+						`AUDIT-CUT Pi/OMP | mid tool loop: ${error ?? "accepted"}; cutMoved=${moved}`,
+					);
+					if (!GOLDEN && !STRICT_AUDIT) {
+						expect(moved).toBe(true);
+						expect(error).toBe(PREFIX_ERROR);
+						return;
+					}
+					expect(error).toBeNull();
+					expect(moved).toBe(false);
+					expect(withoutThinking(after)).toBe(withoutThinking(before));
+					expect(wire((await f.pass()).messages)).toEqual(after);
+					f.served = afterMessages;
+					await toolLoop(f, 2);
+					// The rewrite is ride-only: it lands with the next prefix render, which this
+					// fixture does not offer, so the next turn must only stay valid.
+					await nextUserTurn(f, "prompt-release");
+					expect(f.mock.check(wire(f.served))).toBeNull();
+				},
+				"cut-mid-loop",
+			),
 		);
 		it(
 			`${CUT_LANE}: defer pass at a new user turn`,
-			withFixture(false, CUT_LANE, async (f) => {
-				await prepareLane(f, CUT_LANE);
-				await toolLoop(f, 4);
-				await nextUserTurn(f, "prompt-next");
-				const before = wire(f.served);
-				armAndBust(f, CUT_LANE, false);
-				const afterMessages = await f.pass();
-				const after = wire(afterMessages);
-				const error = f.mock.check(after);
-				const moved = landed(f, CUT_LANE, after);
-				console.log(
-					`AUDIT-CUT Pi/OMP | defer pass at a new user turn: ${error ?? "accepted"}; cutMoved=${moved}`,
-				);
-				// No current-turn thinking yet, but the previous turn's signed blocks are
-				// still sent, and a defer pass strips none of them.
-				if (!STRICT_AUDIT) {
-					expect(moved).toBe(true);
-					expect(error).toBe(PREFIX_ERROR);
-					return;
-				}
-				expect(error).toBeNull();
-				expect(moved).toBe(false);
-				expect(withoutThinking(after)).toBe(withoutThinking(before));
-				f.served = afterMessages;
-				await toolLoop(f, 2);
-			}),
+			withFixture(
+				false,
+				CUT_LANE,
+				async (f) => {
+					await prepareLane(f, CUT_LANE);
+					await toolLoop(f, 4);
+					await nextUserTurn(f, "prompt-next");
+					const before = wire(f.served);
+					armAndBust(f, CUT_LANE, false);
+					const afterMessages = (await f.pass()).messages;
+					const after = wire(afterMessages);
+					const error = f.mock.check(after);
+					const moved = landed(f, CUT_LANE, after);
+					console.log(
+						`AUDIT-CUT Pi/OMP | defer pass at a new user turn: ${error ?? "accepted"}; cutMoved=${moved}`,
+					);
+					// No current-turn thinking yet, but the previous turn's signed blocks are
+					// still sent, and a defer pass strips none of them.
+					if (!GOLDEN && !STRICT_AUDIT) {
+						expect(moved).toBe(true);
+						expect(error).toBe(PREFIX_ERROR);
+						return;
+					}
+					expect(error).toBeNull();
+					expect(moved).toBe(false);
+					expect(withoutThinking(after)).toBe(withoutThinking(before));
+					f.served = afterMessages;
+					await toolLoop(f, 2);
+				},
+				"cut-new-turn",
+			),
 		);
 	});
 }

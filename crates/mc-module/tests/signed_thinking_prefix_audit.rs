@@ -20,6 +20,18 @@ use mc_store::{McStore, StoredCompartment};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
+fn golden() -> bool {
+    std::env::var_os("MC_AUDIT_GOLDEN").is_some()
+}
+
+// Capture mode records every served request even when current-behavior or strict-binding assertions would fail.
+macro_rules! audit_assert {
+    ($($args:tt)*) => { if !golden() { assert!($($args)*); } };
+}
+macro_rules! audit_assert_eq {
+    ($($args:tt)*) => { if !golden() { assert_eq!($($args)*); } };
+}
+
 const PREFIX_ERROR: &str = "bound to a different conversation";
 const MIDDLE_ERROR: &str = "thinking removed from the middle";
 const LATEST_TURN_ERROR: &str = "latest assistant turn thinking modified";
@@ -45,7 +57,7 @@ impl StrictMock {
     }
 
     fn respond(&mut self, request: &[Block]) -> Value {
-        if let Some(error) = self.check(request) {
+        if let Some(error) = self.check(request).filter(|_| !golden()) {
             panic!("the provider rejected a bootstrap request: {error}");
         }
         let n = self.receipts.len() + 1;
@@ -283,10 +295,12 @@ struct Fixture {
     profile: String,
     /// Assistants whose reasoning the OpenCode Rust-mode host stripped (see `observe`).
     host_stripped: BTreeSet<String>,
+    scenario: String,
+    pass_number: u64,
 }
 
 impl Fixture {
-    fn new(profile: &str, subagent: bool, lane: Lane) -> Self {
+    fn new(profile: &str, subagent: bool, lane: Lane, scenario: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = McStore::open_for_test(&StorageDescriptor {
             module_id: "prefix-audit".into(),
@@ -299,7 +313,7 @@ impl Fixture {
         .unwrap();
         let req: TransformRequest = serde_json::from_value(json!({
             "serializer_profile": profile, "session_id": "prefix-audit", "render_config": "stable",
-            "provider_id": "anthropic", "model_key": "anthropic/claude-opus-5-5",
+            "provider_id": "anthropic", "model_key": format!("anthropic/{}", std::env::var("MC_AUDIT_MODEL").unwrap_or_else(|_| "claude-opus-5-5".into())),
             "is_subagent": subagent, "tool_present": true, "todo_tool_present": true,
             "auto_search_enabled": false, "clear_reasoning_age": 1000,
             "keep_reasoning_tokens_effective": 1_000_000,
@@ -323,6 +337,8 @@ impl Fixture {
             lane,
             profile: profile.to_string(),
             host_stripped: BTreeSet::new(),
+            scenario: scenario.into(),
+            pass_number: 0,
         };
         fixture.build_history(subagent);
         fixture
@@ -338,7 +354,49 @@ impl Fixture {
     fn pass(&mut self) -> TransformResponse {
         let response = transform(&self.store, &self.req, &self.ctx).unwrap();
         self.observe(&response);
+        self.capture(&response);
         response
+    }
+
+    fn capture(&mut self, response: &TransformResponse) {
+        let Some(root) = std::env::var_os("MC_AUDIT_GOLDEN") else {
+            return;
+        };
+        self.pass_number += 1;
+        let wire = wire_with(response, &self.host_stripped);
+        let has_boundary = self.mock.receipts.iter().any(|r| {
+            r.2 == self.mock.turn && wire.iter().any(|b| b[1]["signature"] == r.0["signature"])
+        });
+        let eligibility = json!({
+            "defer": !response.prefix_bust_permitted, "noBoundary": !has_boundary,
+            // No trigger parking or served-prefix validation is implemented yet, so these conditions are vacuously true.
+            "noParkedTrigger": true, "validatingRecord": true,
+        });
+        let mode = if std::env::var("MC_AUDIT_STRICT").as_deref() == Ok("1") {
+            "strict"
+        } else {
+            "default"
+        };
+        let dir = std::path::PathBuf::from(root)
+            .join(&self.profile)
+            .join(if self.req.is_subagent {
+                "subagent"
+            } else {
+                "primary"
+            })
+            .join(&self.scenario)
+            .join(format!("{:?}", self.lane));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("pass-{:04}.{mode}.json", self.pass_number));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .unwrap();
+        use std::io::Write;
+        writeln!(file, "{}", json!({"wire": wire, "wireBytes": serde_json::to_string(&wire).unwrap(), "bustedThisPass": response.prefix_bust_permitted,
+            "identityEligible": !response.prefix_bust_permitted && !has_boundary,
+            "eligibility": eligibility})).unwrap();
     }
 
     fn wire(&self) -> Vec<Block> {
@@ -390,7 +448,7 @@ impl Fixture {
         let thinking = if with_thinking {
             Some(self.mock.respond(&request))
         } else {
-            if let Some(error) = self.mock.check(&request) {
+            if let Some(error) = self.mock.check(&request).filter(|_| !golden()) {
                 panic!("the provider rejected a bootstrap request: {error}");
             }
             None
@@ -485,7 +543,7 @@ impl Fixture {
             self.served = self.pass();
         }
         if !subagent {
-            assert_eq!(self.mock.check(&self.wire()), None);
+            audit_assert_eq!(self.mock.check(&self.wire()), None);
             self.user_turn(
                 "prompt-2",
                 "Now repair the error recovery in the parser; keep using tools until it is done.",
@@ -508,7 +566,7 @@ impl Fixture {
                 )],
                 true,
             );
-            assert_eq!(self.mock.check(&self.wire()), None, "loop step {n}");
+            audit_assert_eq!(self.mock.check(&self.wire()), None, "loop step {n}");
             if std::env::var("MC_AUDIT_DEBUG").as_deref() == Ok("1") {
                 let bust = self.served.prefix_bust_permitted;
                 println!("META loop step {n}: bust={bust} {:?}", self.triggers());
@@ -523,14 +581,14 @@ impl Fixture {
             self.step + 1
         );
         self.respond(vec![json!({"type":"text","text":text})], vec![], true);
-        assert_eq!(self.mock.check(&self.wire()), None);
+        audit_assert_eq!(self.mock.check(&self.wire()), None);
         self.user_turn(
             mid,
             "Continue with the next part of the parser work; keep using tools until done.",
             vec![],
         );
         self.served = self.pass();
-        assert_eq!(self.mock.check(&self.wire()), None);
+        audit_assert_eq!(self.mock.check(&self.wire()), None);
     }
 
     fn set_usage(&mut self, tokens: u64) {
@@ -571,7 +629,7 @@ impl Fixture {
             );
             self.store.arm_soft_refresh(&self.req.session_id).unwrap();
             self.served = self.pass();
-            assert_eq!(self.mock.check(&self.wire()), None);
+            audit_assert_eq!(self.mock.check(&self.wire()), None);
         }
     }
 
@@ -643,7 +701,7 @@ fn exposed(subagent: bool, lane: Lane) -> bool {
 }
 
 fn mid_loop(profile: &str, subagent: bool, lane: Lane) {
-    let mut f = Fixture::new(profile, subagent, lane);
+    let mut f = Fixture::new(profile, subagent, lane, "mid-loop");
     f.prepare();
     let before = f.tool_loop(4);
     f.arm_and_bust(subagent);
@@ -675,31 +733,31 @@ fn mid_loop(profile: &str, subagent: bool, lane: Lane) {
     // Under MC_AUDIT_STRICT=1 every lane must behave as held, which is the acceptance bar of
     // docs/designs/signed-thinking-hold.md.
     let strict = std::env::var("MC_AUDIT_STRICT").as_deref() == Ok("1");
-    if !strict && exposed(subagent, lane) {
-        assert!(
+    if !golden() && !strict && exposed(subagent, lane) {
+        audit_assert!(
             landed,
             "{profile} subagent={subagent} {lane:?}: the lane did not land"
         );
-        assert_eq!(
+        audit_assert_eq!(
             error,
             Some(PREFIX_ERROR),
             "{profile} subagent={subagent} {lane:?}"
         );
         return;
     }
-    assert_eq!(error, None, "{profile} subagent={subagent} {lane:?}");
-    assert!(
+    audit_assert_eq!(error, None, "{profile} subagent={subagent} {lane:?}");
+    audit_assert!(
         !non_thinking_edit,
         "{profile} subagent={subagent} {lane:?}: held lane changed bytes"
     );
-    assert!(
+    audit_assert!(
         !landed,
         "{profile} subagent={subagent} {lane:?}: held lane landed"
     );
     // A held edit is never recorded as served: repeating the pass with no new response serves
     // exactly the same bytes.
     f.served = f.pass();
-    assert_eq!(
+    audit_assert_eq!(
         f.wire(),
         after,
         "{profile} subagent={subagent} {lane:?}: a repeat pass changed the held bytes"
@@ -710,12 +768,12 @@ fn mid_loop(profile: &str, subagent: bool, lane: Lane) {
     }
     // On Claude Code every bust at a new user turn is rejected today because older-turn thinking
     // is kept (see `control`), so the release check runs there only in strict mode.
-    if !strict && profile == "claude-code-anthropic" {
+    if !golden() && !strict && profile == "claude-code-anthropic" {
         return;
     }
     // A compartment rewrite with no ride is never rendered by the module, mid loop or at a new
     // user turn, so there is nothing to release (see `control`).
-    if lane == Lane::Recomp {
+    if !golden() && lane == Lane::Recomp {
         return;
     }
     // The held edit is released, not lost: once a real user message starts the next turn, the
@@ -727,12 +785,13 @@ fn mid_loop(profile: &str, subagent: bool, lane: Lane) {
     if std::env::var("MC_AUDIT_DEBUG").as_deref() == Ok("1") {
         println!("META before release {lane:?}: {held:?}");
     }
-    if strict {
-        assert_eq!(
-            held, armed,
+    if !golden() && strict {
+        audit_assert_eq!(
+            held,
+            armed,
             "{profile} {lane:?}: a held pass spent the trigger that offered its work"
         );
-    } else if release_gap(lane) {
+    } else if !golden() && release_gap(lane) {
         // Today the trigger is spent before the next user turn, which is why the lane does not
         // release (docs/designs/signed-thinking-hold.md, section 2). An armed `/ctx-flush` is
         // cleared by the held pass itself: it runs as a SOFT bust whose only work the thinking
@@ -750,8 +809,9 @@ fn mid_loop(profile: &str, subagent: bool, lane: Lane) {
                 ..armed
             }
         };
-        assert_eq!(
-            held, expected,
+        audit_assert_eq!(
+            held,
+            expected,
             "{profile} {lane:?}: the release gap's cause changed"
         );
     }
@@ -773,20 +833,20 @@ fn mid_loop(profile: &str, subagent: bool, lane: Lane) {
         "AUDIT-RELEASE {profile} | next user turn | {lane:?}: {:?}; laneLanded={released_landed}",
         f.mock.check(&released),
     );
-    assert_eq!(f.mock.check(&released), None, "{profile} {lane:?} release");
+    audit_assert_eq!(f.mock.check(&released), None, "{profile} {lane:?} release");
     // The 95% wall's landing predicate compares non-thinking bytes, which a new turn always
     // changes, so it cannot show a release; its validity above is still checked.
     if lane == Lane::Wall95 {
         return;
     }
-    if !strict && release_gap(lane) {
-        assert!(
+    if !golden() && !strict && release_gap(lane) {
+        audit_assert!(
             !released_landed,
             "{profile} {lane:?}: the held edit now lands at the next user turn; remove it from release_gap"
         );
         return;
     }
-    assert!(
+    audit_assert!(
         released_landed,
         "{profile} {lane:?}: the held edit did not land at the next user turn"
     );
@@ -807,10 +867,10 @@ fn release_gap(lane: Lane) -> bool {
 fn control(profile: &str, lane: Lane) {
     // A compartment rewrite with no ride is not rendered at a new user turn either; the lane is
     // only a defer byte-identity check mid loop.
-    if lane == Lane::Recomp {
+    if !golden() && lane == Lane::Recomp {
         return;
     }
-    let mut f = Fixture::new(profile, false, lane);
+    let mut f = Fixture::new(profile, false, lane, "control");
     f.prepare();
     f.tool_loop(4);
     f.next_user_turn("prompt-next");
@@ -826,21 +886,23 @@ fn control(profile: &str, lane: Lane) {
         println!("META control {lane:?}: action={} decision={} scheduler={} defer={} materialize={} bust={} pending={}", meta["action"], meta["decision"], meta["scheduler_decision"], meta["scheduler_defer_reason"], meta["materialize_reason"], meta["prefix_bust_permitted"], f.store.load_pending_agent_drops(&f.req.session_id).unwrap().len());
     }
     println!("AUDIT-CONTROL {profile} | new user turn | {lane:?}: {error:?}; laneLanded={landed}");
-    assert!(
+    audit_assert!(
         landed,
         "{profile} {lane:?}: the control did not land the lane's edit"
     );
-    if std::env::var("MC_AUDIT_STRICT").as_deref() != Ok("1") && profile == "claude-code-anthropic"
+    if !golden()
+        && std::env::var("MC_AUDIT_STRICT").as_deref() != Ok("1")
+        && profile == "claude-code-anthropic"
     {
         // The module keeps every older signed thinking block on a Claude Code bust:
         // the profile has no binding strip (reasoning_clear_cutoff_with_tags returns
         // None for prefix-bound models) and this repository has no Claude Code host
         // step that strips it. Whether the Claude Code client replays earlier-turn
         // thinking at all is for the gateway owner to confirm.
-        assert_eq!(error, Some(PREFIX_ERROR), "{profile} {lane:?}");
+        audit_assert_eq!(error, Some(PREFIX_ERROR), "{profile} {lane:?}");
         return;
     }
-    assert_eq!(error, None, "{profile} {lane:?}");
+    audit_assert_eq!(error, None, "{profile} {lane:?}");
     f.tool_loop(3);
 }
 
