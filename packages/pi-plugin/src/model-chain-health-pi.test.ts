@@ -514,22 +514,24 @@ describe("Pi extension reports an empty historian chain at session start", () =>
 		expect(notify).toHaveBeenCalledTimes(0);
 	}, 20_000);
 
-	it("re-checks the settled catalogue against current state after a session switch", async () => {
-		// The stale replay the fix removes: the deferred report used to invoke
-		// the session context captured when the wait was scheduled. After a
-		// switch into another session that capture belongs to a dead session,
-		// and re-reading its registry -- not the live catalogue -- reported
-		// DISABLED for a model the running session can resolve.
+	it("pairs the deferred report with the active session and never spends its notice budget", async () => {
+		// The cross-project leak the fix removes: the settled re-check combined
+		// the latest session's context with the *waiting* project's
+		// configuration, so a switch from A (awaiting discovery) to B announced
+		// A's missing models through B's UI -- even a B that has dreaming
+		// disabled -- and consumed A's once-per-process notice, which hid A's
+		// own warning when the session came back. The context and project are
+		// kept paired: an inactive project's deferred report is skipped, and
+		// the budget survives for the next session_start of that project.
 		// One operator config: historian model selection is user-tier by
 		// design (a repository cannot choose the historian's model), so both
-		// sessions share it -- deliberately the same chain, so the live
-		// session's healthy line and the settled re-check's line have equal
-		// content and the log's line count is the discriminator: a replay of
-		// the captured stale registry would add a DISABLED line, while a
-		// deferred report that never fired would leave a single line.
+		// projects share it and differ by cwd and registry.
 		const root = isolatedConfig({
 			historian: { pi: { model: "litellm/deepseek-v4-flash" } },
-			dreamer: { disable: true },
+			dreamer: {
+				pi: { model: "litellm/curate-missing" },
+				tasks: { curate: { schedule: "0 4 * * 0" } },
+			},
 		});
 		const logs: string[] = [];
 		spyOn(loggerModule, "log").mockImplementation((message: unknown) => {
@@ -541,18 +543,30 @@ describe("Pi extension reports an empty historian chain at session start", () =>
 		const refreshing = new Promise<void>((resolve) => {
 			resolveRefresh = resolve;
 		});
-		// The switched-away session's catalogue never gains the model.
+		// The awaiting session's catalogue never gains the models.
 		const stalledRegistry = {
 			find: () => undefined,
 			getAll: () => [],
 			awaitBackgroundRefresh: () => refreshing,
 		};
+		// B's catalogue knows the historian but never the dreamer task: the
+		// waiting project's warning must not leak through this UI.
+		const partialRegistry = {
+			find: (provider: string, id: string) =>
+				[{ provider: "litellm", id: "deepseek-v4-flash" }].find(
+					(model) => model.provider === provider && model.id === id,
+				),
+			getAll: () => [{ provider: "litellm", id: "deepseek-v4-flash" }],
+		};
 
 		const runtime = createPi();
 		await magicContextPiExtension(runtime.pi);
 		const staleNotify = mock(() => undefined);
+		// A schedules with the dreamer enabled (both projects read the same
+		// operator config); the return leg re-resolves A after B disabled it,
+		// so the per-directory deps cache must not still hold the old object.
 		const staleCwd = projectCwd(root, "repo-stale", {
-			dreamer: { disable: true },
+			dreamer: { disable: false },
 		});
 		await runtime.emit("session_start", {
 			cwd: staleCwd,
@@ -561,16 +575,16 @@ describe("Pi extension reports an empty historian chain at session start", () =>
 			sessionManager: { getSessionId: () => "ses-stale" },
 			ui: { notify: staleNotify, setStatus: () => undefined },
 		});
+		expect(triggerLines(logs)).toEqual([]);
 
 		const liveNotify = mock(() => undefined);
-		const liveCwd = projectCwd(root, "repo-live", { dreamer: { disable: true } });
+		const liveCwd = projectCwd(root, "repo-live", {
+			dreamer: { disable: true },
+		});
 		await runtime.emit("session_start", {
 			cwd: liveCwd,
 			hasUI: true,
-			modelRegistry: registry([
-				{ provider: "openai-codex", id: "gpt-6.1-sol" },
-				{ provider: "litellm", id: "deepseek-v4-flash" },
-			]),
+			modelRegistry: partialRegistry,
 			sessionManager: { getSessionId: () => "ses-live" },
 			ui: { notify: liveNotify, setStatus: () => undefined },
 		});
@@ -578,16 +592,34 @@ describe("Pi extension reports an empty historian chain at session start", () =>
 		resolveRefresh();
 		await macrotask();
 
-		// The switched-away project's settled re-check resolved the *current*
-		// registry: its chain reports as running -- and with the live
-		// session's line deduplicated by the once-per-process log, exactly
-		// this one healthy line exists. No DISABLED line, and no warning ever
-		// reached the captured stale session's ui.
+		// The switched-away project's report was skipped: nothing reached B's
+		// UI and A's UI was not replayed either; the one line logged is B's
+		// own session reporting its registered historian. Pre-fix, the settle
+		// pass announced A's chains (DISABLED for the unregistered dreamer
+		// task) through B's UI and spent A's once-per-process notice.
+		expect(staleNotify).toHaveBeenCalledTimes(0);
+		expect(liveNotify).toHaveBeenCalledTimes(0);
 		expect(triggerLines(logs)).toEqual([
 			expect.stringContaining("(model=litellm/deepseek-v4-flash"),
 		]);
-		expect(staleNotify).toHaveBeenCalledTimes(0);
-		expect(liveNotify).toHaveBeenCalledTimes(0);
+
+		// A's notice budget survived: returning to A reports A's own still
+		// empty dreamer chain through A's UI (the historian line deduplicates,
+		// and A's settled-catalogue marker suppresses a second await).
+		await runtime.emit("session_start", {
+			cwd: staleCwd,
+			hasUI: true,
+			modelRegistry: partialRegistry,
+			sessionManager: { getSessionId: () => "ses-stale-again" },
+			ui: { notify: staleNotify, setStatus: () => undefined },
+		});
+		expect(triggerLines(logs)).toEqual([
+			expect.stringContaining("(model=litellm/deepseek-v4-flash"),
+		]);
+		expect(staleNotify).toHaveBeenCalledTimes(1);
+		const notice = String(staleNotify.mock.calls[0]?.[0]);
+		expect(notice).toContain("curate");
+		expect(notice).toContain("litellm/curate-missing");
 	}, 20_000);
 
 	it("leaves a replaced config's deferred report to the reload-aware path", async () => {

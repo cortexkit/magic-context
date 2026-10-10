@@ -1622,15 +1622,17 @@ async function startPiMagicContextRuntime(
 	let activeModelRegistry:
 		| { find(provider: string, modelId: string): unknown }
 		| undefined;
-
 	// The latest session context Pi handed the extension, kept alongside the
 	// active registry. A report deferred behind a discovery refresh resolves
 	// its dependencies through this instead of replaying the context captured
 	// when the wait was scheduled: after a session switch that capture belongs
 	// to a dead session (its `ui` reaches nowhere, its registry is not the
-	// live catalogue), and after a config reload its project is stale.
+	// live catalogue), and after a config reload its project is stale. The
+	// context and its cwd stay paired: reports belong to the session's
+	// current project, never to a project merely cached in the process.
 	type PiModelChainReportContext = {
 		modelRegistry?: PiModelRegistryLike;
+		cwd?: string;
 		hasUI?: boolean;
 		ui?: { notify?: (message: string, level?: "warning") => unknown };
 	};
@@ -1737,16 +1739,21 @@ async function startPiMagicContextRuntime(
 	 * Nothing from the scheduled pass is replayed: the session may have been
 	 * switched and the config reloaded while the await was open, so the
 	 * report resolves the current session context and this directory's
-	 * dependencies from the lifecycle state above. If the config's generation
-	 * has moved past the last checked one, the refresh was awaited for a
-	 * replaced configuration and its report is left to the reload-aware path
-	 * (agent_start's generation gate, or the next session_start) instead of
-	 * announcing chains that no longer describe the file on disk.
+	 * dependencies from the lifecycle state above. The context and project
+	 * stay paired -- if the session switched to another project, this one's
+	 * warning must not reach that project's UI, and the once-per-process
+	 * notice must not be spent here; the next session_start of this
+	 * directory re-checks (the settled-catalogue marker is process-wide, so
+	 * it reports directly). A config whose generation moved past the last
+	 * checked one was replaced while the await was open, and its report is
+	 * left to the reload-aware path (agent_start's generation gate, or the
+	 * next session_start) rather than announced from a superseded file.
 	 */
 	function reportPiModelChainsAfterRefresh(projectDir: string): void {
 		const ctx = activeModelChainContext;
 		const registry = ctx?.modelRegistry;
 		if (!ctx || !registry) return;
+		if (ctx.cwd !== undefined && ctx.cwd !== projectDir) return;
 		const project = resolveProjectDepsForDir(projectDir);
 		const generation = liveReaderFor(
 			project.projectDir,
