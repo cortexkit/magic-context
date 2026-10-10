@@ -149,6 +149,7 @@ import {
     postprocessReplaySnapshot,
     postprocessTailTags,
 } from "./postprocess-read-cache";
+import { providerVisiblePart } from "./provider-visible-parts";
 import { estimateTokens } from "./read-session-formatting";
 import { DEFAULT_KEEP_REASONING_TOKENS, opencodeReasoningBudgetCutoff } from "./reasoning-budget";
 import { captureOpencodeReasoningBudgetStatus } from "./reasoning-budget-status";
@@ -653,8 +654,12 @@ function isPartDroppedBeforeWire(part: unknown, providerID: string | undefined):
 function servedMessageKey(message: unknown, providerID: string | undefined): string {
     const record = isRecord(message) ? message : {};
     const info = isRecord(record.info) ? record.info : {};
+    // Fields of a part the provider never receives (tool metadata such as LSP
+    // diagnostics) are left out as well; see provider-visible-parts.ts.
     const parts = Array.isArray(record.parts)
-        ? record.parts.filter((part) => !isPartDroppedBeforeWire(part, providerID))
+        ? record.parts
+              .filter((part) => !isPartDroppedBeforeWire(part, providerID))
+              .map(providerVisiblePart)
         : (record.parts ?? null);
     // The JSON round trip drops undefined fields and shared references, so a live
     // object and its JSON snapshot compare equal when they would serialize equal.

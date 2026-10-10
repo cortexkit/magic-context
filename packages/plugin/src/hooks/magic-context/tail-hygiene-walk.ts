@@ -7,6 +7,7 @@ import {
     estimateImageTokensFromDataUrl,
     estimateToolAttachmentImageTokens,
 } from "./image-token-estimate";
+import { providerVisibleMessage, providerVisiblePart } from "./provider-visible-parts";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
 import { isSyntheticTodoPart } from "./todo-view";
@@ -134,7 +135,12 @@ interface ContentMemoEntry {
 }
 
 const MAX_CONTENT_MEMO_ENTRIES = 100_000;
-const MAX_CONTENT_MEMO_BYTES = 64 * 1024 * 1024;
+// Every pass measures the whole rendered tail, and a miss tokenizes the text
+// again, which costs about a second per 50 MB. The memo holds each session's
+// tail across passes, so it must fit the tails of the sessions a process serves
+// in turn: at 64 MiB, two sessions with about 30 MB of tool output each evicted
+// each other's entries and every pass tokenized everything again.
+const MAX_CONTENT_MEMO_BYTES = 256 * 1024 * 1024;
 const contentMemo = new Map<TailHygienePartKind, Map<string, ContentMemoEntry>>();
 const contentMemoOrder = new Set<ContentMemoEntry>();
 let contentMemoBytes = 0;
@@ -345,8 +351,15 @@ export function stripChannel1ReminderSpans(output: string): string {
 }
 
 function isDropSentinel(content: string): boolean {
-    const stripped = content.trimStart().replace(TAG_PREFIX, "").trimStart().toLowerCase();
-    return DROP_PREFIXES.some((prefix) => stripped.startsWith(prefix));
+    // Only the head can match. Lowercasing the whole text copied every tool
+    // output on every pass; the prefixes are ASCII, so lowercasing their
+    // length of the head gives the same answer.
+    let stripped = content.trimStart();
+    const tag = TAG_PREFIX.exec(stripped);
+    if (tag) stripped = stripped.slice(tag[0].length).trimStart();
+    return DROP_PREFIXES.some(
+        (prefix) => stripped.slice(0, prefix.length).toLowerCase() === prefix,
+    );
 }
 
 function toolOutputText(part: Record<string, unknown>): string | null {
@@ -611,7 +624,10 @@ export function tailHygieneStructuralSignature(
     let totalBytes = 0;
     for (const message of messages) {
         partCounts.push(message.parts.length);
-        totalBytes += structuralSize(message);
+        // Fields the provider never receives (tool metadata such as LSP
+        // diagnostics) are left out: they do not change what is measured, and
+        // walking them cost seconds per pass on diagnostics-heavy sessions.
+        totalBytes += structuralSize(providerVisibleMessage(message));
     }
     return { messageCount: messages.length, partCounts, totalBytes };
 }
@@ -1059,13 +1075,26 @@ function sameNumbers(before: ReadonlySet<number>, after: ReadonlySet<number>): b
     return true;
 }
 
+/**
+ * `left` is a snapshot made by {@link replaySnapshotParts}; `right` is a live
+ * message, compared through the same provider-visible view.
+ */
 function sameReplayMessage(left: MessageLike, right: MessageLike): boolean {
     return (
         left.info.id === right.info.id &&
         left.info.role === right.info.role &&
         left.info.summary === right.info.summary &&
-        sameReplayValue(left.parts, right.parts)
+        sameReplayValue(left.parts, right.parts.map(providerVisiblePart))
     );
+}
+
+/**
+ * The parts a replay snapshot keeps: what the provider sees of each part (see
+ * provider-visible-parts.ts), copied so a later in-place edit cannot change the
+ * snapshot. Nothing the measurement reads is left out.
+ */
+function replaySnapshotParts(parts: readonly unknown[]): unknown[] {
+    return copyReplayValue(parts.map(providerVisiblePart)) as unknown[];
 }
 
 function sameReplayMessages(
@@ -1235,14 +1264,16 @@ export function refreshTailHygieneBaseline(input: {
                                 role: message.info.role,
                                 summary: message.info.summary,
                             },
-                            parts: copyReplayValue(message.parts) as unknown[],
+                            parts: replaySnapshotParts(message.parts),
                         },
               ),
               tags: structuredClone(input.tags),
               protectedTagNumbers: new Set(input.protectedTagNumbers),
               pendingDropTagNumbers: new Set(pendingDropTagNumbers),
               measured: rawMeasured,
-              size: 2 * structuralSize(input.messages) + 512 * input.tags.length,
+              size:
+                  2 * structuralSize(input.messages.map(providerVisibleMessage)) +
+                  512 * input.tags.length,
           };
     // The replay snapshot owns separate wrappers; associate contextual identities
     // with those wrappers, not mutable host parts from the pass just served.

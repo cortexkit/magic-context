@@ -99,6 +99,40 @@ export function isRawCompactionSummaryInfo(info: unknown): boolean {
     return candidate.summary === true && candidate.finish === "stop";
 }
 
+/** Tool metadata up to this many characters is loaded whole. */
+const RAW_METADATA_KEEP_CHARS = 16_384;
+/** The metadata keys raw-history readers use: tool line labels and user answers. */
+const RAW_METADATA_KEPT_KEYS = [
+    "description",
+    "title",
+    "userAnswer",
+    "answers",
+    "answer",
+    "selectedOptions",
+    "customInput",
+    "results",
+] as const;
+
+/**
+ * A part's stored JSON for the session readers below. Edit and write tools
+ * store workspace-wide LSP diagnostics, diffs and file snapshots in
+ * `state.metadata`, often several MiB per part, which the provider never sees
+ * (see provider-visible-parts.ts) and no reader here uses. Large metadata on a
+ * non-error tool part is reduced inside SQLite to the keys readers do use
+ * (absent keys stay absent), so the JavaScript side never parses it. An error
+ * part keeps its metadata: OpenCode sends an interrupted call's output from it.
+ */
+const RAW_PART_DATA_SQL = `CASE
+    WHEN json_valid(data) = 1
+     AND json_type(data, '$.state.metadata') = 'object'
+     AND COALESCE(json_extract(data, '$.state.status'), '') <> 'error'
+     AND length(json_extract(data, '$.state.metadata')) > ${RAW_METADATA_KEEP_CHARS}
+    THEN json_set(data, '$.state.metadata', json_patch('{}', json_object(${RAW_METADATA_KEPT_KEYS.map(
+        (key) => `'${key}', json_extract(data, '$.state.metadata.${key}')`,
+    ).join(", ")})))
+    ELSE data
+END`;
+
 function parseJsonUnknown(value: string): unknown {
     try {
         return JSON.parse(value);
@@ -141,7 +175,7 @@ export function readRawSessionMessagesFromDb(db: Database, sessionId: string): R
         const placeholders = messageIds.map(() => "?").join(", ");
         const partRows = db
             .prepare(
-                `SELECT message_id, data, time_updated
+                `SELECT message_id, ${RAW_PART_DATA_SQL} AS data, time_updated
                  FROM part
                  WHERE +session_id = ?
                    AND likelihood(message_id IN (${placeholders}), 0.000001)
@@ -208,7 +242,7 @@ export function readRawSessionMessagePageFromDb(
     const placeholders = messageRows.map(() => "?").join(", ");
     const partRows = db
         .prepare(
-            `SELECT message_id, data, time_updated
+            `SELECT message_id, ${RAW_PART_DATA_SQL} AS data, time_updated
              FROM part
              WHERE +session_id = ?
                AND likelihood(message_id IN (${placeholders}), 0.000001)
@@ -594,7 +628,7 @@ export function readRawSessionTailFromDb(
             const placeholders = slice.map(() => "?").join(",");
             const partRows = db
                 .prepare(
-                    `SELECT message_id, data, time_updated FROM part WHERE +session_id = ? AND likelihood(message_id IN (${placeholders}), 0.000001) ORDER BY time_created ASC, id ASC`,
+                    `SELECT message_id, ${RAW_PART_DATA_SQL} AS data, time_updated FROM part WHERE +session_id = ? AND likelihood(message_id IN (${placeholders}), 0.000001) ORDER BY time_created ASC, id ASC`,
                 )
                 .all(sessionId, ...slice)
                 .filter(isRawPartRow);

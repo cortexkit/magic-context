@@ -1,5 +1,6 @@
 import { isRecord } from "../../shared/record-type-guard";
 import { stableStringify } from "../../shared/stable-json";
+import { providerVisiblePart } from "./provider-visible-parts";
 import { estimateTokens } from "./read-session-formatting";
 import type { RawMessage } from "./read-session-raw";
 
@@ -253,7 +254,13 @@ function callIdFromPart(part: Record<string, unknown>): string {
         : "";
 }
 
-function toolSignalFromPart(part: unknown): ToolSignal | null {
+/**
+ * The call id, input/output presence and, unless `withText` is false, the input
+ * and output text of a tool part. Callers that only pair invocations with
+ * results pass false: rendering the text serializes the whole tool input,
+ * which on large or deeply nested inputs dominated every trigger pass.
+ */
+function toolSignalFromPart(part: unknown, withText = true): ToolSignal | null {
     if (!isRecord(part)) return null;
     const type = partType(part);
     const state = isRecord(part.state) ? part.state : null;
@@ -279,8 +286,8 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
             callId,
             hasInput: hasInput || openInvocation,
             hasOutput,
-            inputText: hasInput && state ? stringValue(state.input) : "",
-            outputText: hasOutput ? stringValue(outputValue) : "",
+            inputText: withText && hasInput && state ? stringValue(state.input) : "",
+            outputText: withText && hasOutput ? stringValue(outputValue) : "",
         };
     }
 
@@ -290,7 +297,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
             callId,
             hasInput: args !== undefined,
             hasOutput: false,
-            inputText: args !== undefined ? stringValue(args) : "",
+            inputText: withText && args !== undefined ? stringValue(args) : "",
             outputText: "",
         };
     }
@@ -301,7 +308,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
             callId,
             hasInput: input !== undefined,
             hasOutput: false,
-            inputText: input !== undefined ? stringValue(input) : "",
+            inputText: withText && input !== undefined ? stringValue(input) : "",
             outputText: "",
         };
     }
@@ -313,7 +320,7 @@ function toolSignalFromPart(part: unknown): ToolSignal | null {
             hasInput: false,
             hasOutput: content !== undefined,
             inputText: "",
-            outputText: content !== undefined ? textFromToolResultContent(content) : "",
+            outputText: withText && content !== undefined ? textFromToolResultContent(content) : "",
         };
     }
 
@@ -324,7 +331,10 @@ function partCheapFingerprint(part: unknown): string {
     if (!isRecord(part)) return `${typeof part}:${recursiveByteLength(part)}`;
     const version = rawPartVersion(part);
     const type = typeof part.type === "string" ? part.type : "";
-    return `${type}:${String(version)}:${recursiveByteLength(part)}`;
+    // The size covers only what the provider sees (see provider-visible-parts.ts):
+    // no estimate reads tool metadata, and sizing workspace diagnostics on
+    // every pass cost seconds.
+    return `${type}:${String(version)}:${recursiveByteLength(providerVisiblePart(part))}`;
 }
 
 function messageCacheKey(
@@ -480,7 +490,7 @@ export function buildToolArcs(messages: readonly RawMessage[]): ToolArc[] {
     const arcs: ToolArc[] = [];
     for (const message of messages) {
         for (const part of message.parts) {
-            const signal = toolSignalFromPart(part);
+            const signal = toolSignalFromPart(part, false);
             if (!signal || signal.callId.length === 0) continue;
             if (signal.hasInput && signal.hasOutput) {
                 arcs.push({

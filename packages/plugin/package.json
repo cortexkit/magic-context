@@ -81,6 +81,7 @@
     "@opencode/client": "2.0.22",
     "effect": "4.0.0-rc.112",
     "@ai-sdk/anthropic": "3.0.82",
+    "ai": "6.0.168",
     "@huggingface/transformers": "^4.3.0",
     "@ai-sdk/openai-compatible": "2.0.41",
     "@biomejs/biome": "^2.5.1",

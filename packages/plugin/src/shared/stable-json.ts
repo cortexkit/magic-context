@@ -18,12 +18,38 @@
  * signing), build a separate utility — do NOT widen this contract.
  */
 export function stableStringify(value: unknown, seen = new WeakSet<object>()): string {
-    if (value === undefined) return "undefined";
-    if (value === null || typeof value !== "object") return JSON.stringify(value) ?? String(value);
-    if (seen.has(value)) return '"[Circular]"';
+    // Collect pieces and join once. Joining at every level copied each nested
+    // value's text once per enclosing level, so a large value N levels deep cost
+    // N copies of itself.
+    const pieces: string[] = [];
+    writeStable(value, seen, pieces);
+    return pieces.join("");
+}
+
+function writeStable(value: unknown, seen: WeakSet<object>, pieces: string[]): void {
+    if (value === undefined) {
+        pieces.push("undefined");
+        return;
+    }
+    if (value === null || typeof value !== "object") {
+        pieces.push(JSON.stringify(value) ?? String(value));
+        return;
+    }
+    // Any object met a second time, shared or cyclic, is written as "[Circular]".
+    if (seen.has(value)) {
+        pieces.push('"[Circular]"');
+        return;
+    }
     seen.add(value);
     if (Array.isArray(value)) {
-        return `[${value.map((item) => stableStringify(item, seen)).join(",")}]`;
+        pieces.push("[");
+        for (let index = 0; index < value.length; index += 1) {
+            if (index > 0) pieces.push(",");
+            // A hole writes nothing between its commas, as joining a mapped array did.
+            if (index in value) writeStable(value[index], seen, pieces);
+        }
+        pieces.push("]");
+        return;
     }
     // Code-point sort (NOT localeCompare). Stable across runtimes/locales.
     const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => {
@@ -31,7 +57,11 @@ export function stableStringify(value: unknown, seen = new WeakSet<object>()): s
         if (a > b) return 1;
         return 0;
     });
-    return `{${entries
-        .map(([key, child]) => `${JSON.stringify(key)}:${stableStringify(child, seen)}`)
-        .join(",")}}`;
+    pieces.push("{");
+    entries.forEach(([key, child], index) => {
+        if (index > 0) pieces.push(",");
+        pieces.push(JSON.stringify(key), ":");
+        writeStable(child, seen, pieces);
+    });
+    pieces.push("}");
 }

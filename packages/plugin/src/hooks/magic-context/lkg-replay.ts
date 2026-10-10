@@ -3,18 +3,18 @@ import { claimLkgRequestIdentity, noteCapturedLkgRequest } from "./lkg-measured-
 import {
     captureSlot,
     dropSlot,
-    exactReusablePrefix,
     getSlot,
+    isLegacyLkgDigest,
+    LkgEntryDigestCache,
+    type LkgEntryDigestStats,
     type LkgEntryNote,
-    type LkgInputSnapshot,
     type LkgSlot,
     lkgContentDigest,
-    lkgContentDigestFromFields,
-    lkgContentFields,
-    memoizedLkgContentDigestFromFields,
     noteEntry,
+    sharedLkgEntryDigests,
 } from "./lkg-slot";
 import { assertOpenAiCompatAdjacency } from "./openai-compat-adjacency";
+import { providerVisibleMessage } from "./provider-visible-parts";
 import type { MessageLike } from "./transform-operations";
 
 export interface LkgModelKeys {
@@ -67,90 +67,28 @@ export function projectLkgEntry(messages: MessageLike[]): LkgEntryProjection[] {
     return projectEntryWithDigests(messages, messages.map(lkgContentDigest));
 }
 
-/** Keep exact pristine tokens in memory: ids or rolling hashes alone cannot prove reuse. */
+/**
+ * Project each pass's pristine input with per-message digests reused from the
+ * previous pass. Reuse needs the exact retained tokens of a message, not its id
+ * or a rolling hash; see {@link LkgEntryDigestCache}. By default the projector
+ * shares the cache {@link noteEntry} fills earlier in the same pass, so the
+ * messages it already digested are only compared again. An explicit `maxBytes`
+ * gives the projector its own cache bounded to that many bytes.
+ */
 export function createLkgEntryProjector(
-    options: {
-        maxBytes?: number;
-        onReuse?: (stats: { reused: number; retained: number; retainedBytes: number }) => void;
-    } = {},
+    options: { maxBytes?: number; onReuse?: (stats: LkgEntryDigestStats) => void } = {},
 ) {
-    const priors = new Map<
-        string,
-        {
-            entries: Map<string, { snapshot: LkgInputSnapshot; digest: string | null }>;
-            bytes: number;
-        }
-    >();
-    const maxBytes = options.maxBytes ?? 64 * 1024 * 1024;
-    let bytes = 0;
+    const cache =
+        options.maxBytes === undefined
+            ? sharedLkgEntryDigests
+            : new LkgEntryDigestCache({
+                  sessionMaxBytes: options.maxBytes,
+                  totalMaxBytes: options.maxBytes,
+                  maxSessions: 16,
+              });
     return (sessionId: string, messages: MessageLike[]): LkgEntryProjection[] => {
-        const prior = priors.get(sessionId);
-        const snapshots = messages.map((message) => ({
-            id: typeof message.info?.id === "string" ? message.info.id : "",
-            fields: lkgContentFields(message),
-        }));
-        let reused = 0;
-        // Each digest describes one complete message, not the preceding history.
-        // A changed leading entry must not force hashing thousands of unchanged
-        // successors. Still compare every typed field, including metadata.
-        const digests = snapshots.map((snapshot) => {
-            const cached = prior?.entries.get(snapshot.id);
-            if (
-                snapshot.fields &&
-                cached &&
-                exactReusablePrefix([snapshot as LkgInputSnapshot], [cached.snapshot]) === 1
-            ) {
-                reused += 1;
-                return cached.digest;
-            }
-            if (!snapshot.fields) return null;
-            // An explicit projector budget must not retain entries in the
-            // separate shared memo beyond that caller's requested bound.
-            return options.maxBytes === undefined
-                ? memoizedLkgContentDigestFromFields(snapshot.id, snapshot.fields)
-                : lkgContentDigestFromFields(snapshot.fields);
-        });
-        if (prior) {
-            bytes -= prior.bytes;
-            priors.delete(sessionId);
-        }
-        let size = 0;
-        let retainedCount = 0;
-        // Oversized history used to discard the entire reuse state every pass.
-        // Keep as many exact entries as fit; an oversized entry is always hashed.
-        const retained = new Map<string, { snapshot: LkgInputSnapshot; digest: string | null }>();
-        snapshots.forEach((snapshot, index) => {
-            const entrySize =
-                snapshot.id.length * 2 +
-                (snapshot.fields?.reduce<number>(
-                    (sum, field) => sum + 16 + (typeof field === "string" ? field.length * 2 : 0),
-                    0,
-                ) ?? 0) +
-                80 +
-                86;
-            if (!snapshot.fields || retained.has(snapshot.id) || size + entrySize > maxBytes)
-                return;
-            size += entrySize;
-            retainedCount += 1;
-            retained.set(snapshot.id, {
-                snapshot: snapshot as LkgInputSnapshot,
-                digest: digests[index] ?? null,
-            });
-        });
-        if (size <= maxBytes && retainedCount > 0) {
-            while (priors.size >= 16 || bytes + size > maxBytes) {
-                const oldest = priors.entries().next().value;
-                if (!oldest) break;
-                bytes -= oldest[1].bytes;
-                priors.delete(oldest[0]);
-            }
-            priors.set(sessionId, {
-                entries: retained,
-                bytes: size,
-            });
-            bytes += size;
-        }
-        options.onReuse?.({ reused, retained: retainedCount, retainedBytes: size });
+        const { digests, stats } = cache.digests(sessionId, messages);
+        options.onReuse?.(stats);
         return projectEntryWithDigests(messages, digests);
     };
 }
@@ -357,7 +295,9 @@ function outputMessageIsPostAnchor(
 /**
  * Build the replay prefix and serialize it once. The returned `jsonPrefix` is
  * the exact artifact stored in the last-known-good replay entry; callers must
- * use it as-is rather than serialize the prefix again.
+ * use it as-is rather than serialize the prefix again. It holds the served
+ * messages as the provider receives them: tool-state fields no host sends are
+ * left out.
  */
 export function buildLkgPrefix(
     input: LkgEntryProjection[] | MessageLike[],
@@ -386,7 +326,13 @@ export function buildLkgPrefix(
     for (const message of output) {
         const postAnchor = outputMessageIsPostAnchor(message, inputIndexById, anchorIndex);
         if (postAnchor === null) return null;
-        if (!postAnchor) prefix.push(message);
+        // Store only what the provider receives (see provider-visible-parts.ts).
+        // The hosts build the request from the replayed array through conversions
+        // that read none of the removed tool-state fields, so a replay sends the
+        // same request; tool metadata such as workspace diagnostics made the
+        // snapshot hundreds of MiB, too large to keep, and serializing it cost
+        // every pass.
+        if (!postAnchor) prefix.push(providerVisibleMessage(message));
     }
     let jsonPrefix: string;
     try {
@@ -450,10 +396,19 @@ function entryIdsAreValid(slot: LkgSlot, entryIds: string[]): boolean {
     return true;
 }
 
-function entryContentIsValid(slot: LkgSlot, entryDigests: string[]): boolean {
+/**
+ * Every captured message is unchanged. A digest in the legacy format (a slot
+ * written before the current format) is compared with the entry's legacy
+ * digest of the same message; with none to compare, it does not match.
+ */
+function entryContentIsValid(slot: LkgSlot, entry: LkgEntryNote): boolean {
     return (
-        entryDigests.length >= slot.inputContentDigests.length &&
-        slot.inputContentDigests.every((digest, index) => entryDigests[index] === digest)
+        entry.entryContentDigests.length >= slot.inputContentDigests.length &&
+        slot.inputContentDigests.every((digest, index) =>
+            isLegacyLkgDigest(digest)
+                ? entry.entryLegacyContentDigests?.[index] === digest
+                : entry.entryContentDigests[index] === digest,
+        )
     );
 }
 
@@ -659,7 +614,7 @@ export function replayLkg(args: {
         dropSlot(args.sessionId, "lkg_invalidated_reshape");
         return { ok: false, reason: "lkg_invalidated_reshape" };
     }
-    if (!entryContentIsValid(slot, entry.entryContentDigests)) {
+    if (!entryContentIsValid(slot, entry)) {
         dropSlot(args.sessionId, "lkg_content_mismatch");
         return { ok: false, reason: "lkg_content_mismatch" };
     }
