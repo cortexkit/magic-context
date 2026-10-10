@@ -134,7 +134,12 @@ interface ContentMemoEntry {
 }
 
 const MAX_CONTENT_MEMO_ENTRIES = 100_000;
-const MAX_CONTENT_MEMO_BYTES = 64 * 1024 * 1024;
+// Every pass measures the whole rendered tail, and a miss tokenizes the text
+// again, which costs about a second per 50 MB. The memo holds each session's
+// tail across passes, so it must fit the tails of the sessions a process serves
+// in turn: at 64 MiB, two sessions with about 30 MB of tool output each evicted
+// each other's entries and every pass tokenized everything again.
+const MAX_CONTENT_MEMO_BYTES = 256 * 1024 * 1024;
 const contentMemo = new Map<TailHygienePartKind, Map<string, ContentMemoEntry>>();
 const contentMemoOrder = new Set<ContentMemoEntry>();
 let contentMemoBytes = 0;
@@ -345,8 +350,15 @@ export function stripChannel1ReminderSpans(output: string): string {
 }
 
 function isDropSentinel(content: string): boolean {
-    const stripped = content.trimStart().replace(TAG_PREFIX, "").trimStart().toLowerCase();
-    return DROP_PREFIXES.some((prefix) => stripped.startsWith(prefix));
+    // Only the head can match. Lowercasing the whole text copied every tool
+    // output on every pass; the prefixes are ASCII, so lowercasing their
+    // length of the head gives the same answer.
+    let stripped = content.trimStart();
+    const tag = TAG_PREFIX.exec(stripped);
+    if (tag) stripped = stripped.slice(tag[0].length).trimStart();
+    return DROP_PREFIXES.some(
+        (prefix) => stripped.slice(0, prefix.length).toLowerCase() === prefix,
+    );
 }
 
 function toolOutputText(part: Record<string, unknown>): string | null {

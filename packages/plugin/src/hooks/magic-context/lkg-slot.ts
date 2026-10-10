@@ -628,12 +628,17 @@ export function noteEntry(sessionId: string, messages: MessageLike[]): LkgEntryN
     });
     const anchorIndex = entryInputIds.indexOf(slot.lastInputMessageId);
     if (anchorIndex < 0) return null;
-    const entryContentDigests = digestEntryPrefix(
-        sessionId,
-        messages.slice(0, anchorIndex + 1),
-        entryInputIds,
-    );
-    if (!entryContentDigests) return null;
+    // Digest the whole input, not only the prefix the slot needs: the entry
+    // projection later in this pass reads the same messages from the same
+    // cache, and a cache stored with only the prefix would make it flatten and
+    // hash every message after the anchor again.
+    const digests = sharedLkgEntryDigests.digests(sessionId, messages).digests;
+    const entryContentDigests: string[] = [];
+    for (let index = 0; index <= anchorIndex; index += 1) {
+        const digest = digests[index];
+        if (digest === null || digest === undefined) return null;
+        entryContentDigests.push(digest);
+    }
     const pristineTail = structuredClone(messages.slice(anchorIndex + 1)) as MessageLike[];
     return {
         pristineTail,
@@ -643,116 +648,304 @@ export function noteEntry(sessionId: string, messages: MessageLike[]): LkgEntryN
     };
 }
 
-interface NotedEntryMessage {
-    /**
-     * {@link lkgContentCompareKey} of the message. Equal keys mean equal
-     * {@link lkgContentKey} text, and so an equal digest.
-     */
-    key: string;
-    digest: string;
-}
-
 /**
- * A compact, unambiguous encoding of what a digest hashes: per token a one
- * letter type tag, then the length and `String()` form of its value (the
- * description, for a symbol). Two token lists have equal keys exactly when
- * their {@link lkgContentKey} texts are equal, but the key is a fraction of
- * that text's size, so a whole session's prefix can be kept for comparison.
+ * Whether `value` flattens to exactly `fields`, the tokens
+ * {@link lkgContentFields} produced for it earlier, so the earlier digest is
+ * the one a recompute would give.
+ *
+ * Walks the value the way {@link lkgContentFields} does but builds nothing: an
+ * unchanged message costs one visit per token and one string comparison per
+ * string, and a string the host hands over again as the same object compares in
+ * constant time. A cyclic value never matches, because the walk runs past the
+ * end of the finite token list; that and any other failure fall back to
+ * flattening, which reports the cycle.
+ *
+ * Strings that compare equal are written back into `fields`, so the cache holds
+ * the newest pass's string objects: the previous pass's copies can be freed,
+ * and a second walk over the same messages in the same pass compares them by
+ * identity.
  */
-function lkgContentCompareKey(fields: readonly LkgContentField[]): string {
-    let key = "";
-    for (const field of fields) {
-        if (typeof field === "boolean") {
-            key += field ? "T" : "F";
-            continue;
+function contentMatchesFields(value: unknown, fields: LkgContentField[]): boolean {
+    let cursor = 0;
+    const visit = (child: unknown): boolean => {
+        if (child === null) return fields[cursor++] === LKG_SNAPSHOT_NULL;
+        switch (typeof child) {
+            case "string": {
+                if (fields[cursor] !== LKG_SNAPSHOT_STRING) return false;
+                const prior = fields[cursor + 1];
+                if (typeof prior !== "string" || prior.length !== child.length) return false;
+                if (prior !== child) return false;
+                lkgEntryWork.comparedChars += child.length;
+                fields[cursor + 1] = child;
+                cursor += 2;
+                return true;
+            }
+            case "number":
+                if (fields[cursor] !== LKG_SNAPSHOT_NUMBER) return false;
+                if (!Object.is(fields[cursor + 1], child)) return false;
+                cursor += 2;
+                return true;
+            case "boolean":
+                if (fields[cursor] !== LKG_SNAPSHOT_BOOLEAN || fields[cursor + 1] !== child) {
+                    return false;
+                }
+                cursor += 2;
+                return true;
+            case "object": {
+                if (Array.isArray(child)) {
+                    if (fields[cursor] !== LKG_SNAPSHOT_ARRAY) return false;
+                    if (fields[cursor + 1] !== child.length) return false;
+                    cursor += 2;
+                    for (const item of child) {
+                        if (!visit(item)) return false;
+                    }
+                    return true;
+                }
+                if (fields[cursor] !== LKG_SNAPSHOT_OBJECT) return false;
+                // The same entries, in the same order, that Object.entries gives
+                // lkgContentFields: own enumerable string keys.
+                const keys = Object.keys(child);
+                let entryCount = 0;
+                for (const key of keys) {
+                    if (isSnapshotObjectChild((child as Record<string, unknown>)[key])) {
+                        entryCount += 1;
+                    }
+                }
+                if (fields[cursor + 1] !== entryCount) return false;
+                cursor += 2;
+                for (const key of keys) {
+                    const entry = (child as Record<string, unknown>)[key];
+                    if (!isSnapshotObjectChild(entry)) continue;
+                    if (fields[cursor] !== LKG_SNAPSHOT_KEY || fields[cursor + 1] !== key) {
+                        return false;
+                    }
+                    cursor += 2;
+                    if (!visit(entry)) return false;
+                }
+                return true;
+            }
+            default:
+                // undefined, function, symbol and bigint all flatten to this marker.
+                return fields[cursor++] === LKG_SNAPSHOT_UNDEFINED;
         }
-        const value = typeof field === "symbol" ? (field.description ?? "") : String(field);
-        const tag = typeof field === "string" ? "s" : typeof field === "number" ? "n" : "y";
-        key += `${tag}${value.length}:${value}`;
+    };
+    try {
+        return visit(contentSnapshotValue(value)) && cursor === fields.length;
+    } catch {
+        return false;
+    } finally {
+        lkgEntryWork.comparedFields += Math.min(cursor, fields.length);
     }
-    return key;
-}
-
-/** Bytes a retained key holds: one per character when Latin-1, two otherwise. */
-function retainedStringBytes(value: string): number {
-    // biome-ignore lint/suspicious/noControlCharactersInRegex: the range is the Latin-1 test.
-    return /[^\u0000-\u00ff]/.test(value) ? value.length * 2 : value.length;
 }
 
 /**
- * The prefix each session's last {@link noteEntry} digested, keyed by message id.
- * The shared digest memo is bounded per message (20,000 entries, 16 MiB), so a
- * session whose prefix is larger than the memo (or several sessions together)
- * evicted its own entries on every pass and every message was hashed again.
- * Keeping each session's prefix whole, and evicting whole sessions, lets an
- * ordinary pass hash only the messages it has not seen. Each message keeps one
- * compact comparison key, so a 150k-message session fits within the budget.
+ * Work the entry digest cache did since the last reset, for tests and the
+ * issue 653 benchmark: how many messages were flattened and hashed (and how many
+ * string characters that covered), and how many tokens and string characters
+ * were compared against retained tokens.
  */
-const notedEntryPrefixes = new Map<
-    string,
-    { messages: Map<string, NotedEntryMessage>; bytes: number }
->();
-let notedEntryPrefixBytes = 0;
-const NOTED_ENTRY_PREFIX_MAX_BYTES = 128 * 1024 * 1024;
-const NOTED_ENTRY_PREFIX_MAX_SESSIONS = 1_000;
+export interface LkgEntryWork {
+    flattenedMessages: number;
+    flattenedChars: number;
+    hashedMessages: number;
+    comparedMessages: number;
+    comparedFields: number;
+    comparedChars: number;
+}
+
+const lkgEntryWork: LkgEntryWork = {
+    flattenedMessages: 0,
+    flattenedChars: 0,
+    hashedMessages: 0,
+    comparedMessages: 0,
+    comparedFields: 0,
+    comparedChars: 0,
+};
+
+/** @internal */
+export function getLkgEntryWorkForTest(): LkgEntryWork {
+    return { ...lkgEntryWork };
+}
+
+interface LkgEntryCacheEntry {
+    /** Exact tokens of the pristine message; never handed out. */
+    fields: LkgContentField[];
+    digest: string;
+    bytes: number;
+}
+
+interface LkgEntrySession {
+    entries: Map<string, LkgEntryCacheEntry>;
+    bytes: number;
+}
+
+export interface LkgEntryDigestStats {
+    reused: number;
+    retained: number;
+    retainedBytes: number;
+}
+
+/** Estimated heap bytes one retained entry holds, counting strings at two bytes per character. */
+function lkgEntryBytes(id: string, fields: readonly LkgContentField[]): number {
+    let bytes = id.length * 2 + 166;
+    for (const field of fields) {
+        bytes += 16;
+        if (typeof field === "string") bytes += field.length * 2;
+    }
+    return bytes;
+}
+
+/**
+ * Per-message pristine digests for each session, reused from one pass to the
+ * next.
+ *
+ * Each retained message keeps its exact typed tokens. A message reuses its
+ * digest only when it has the same id as a retained entry and its content still
+ * flattens to that entry's tokens, checked by {@link contentMatchesFields}
+ * without building anything; neither the id nor the object alone is trusted.
+ * Anything else is flattened and hashed. So an ordinary pass flattens and hashes
+ * only new or changed messages, and compares the rest at memory speed.
+ *
+ * Retention is per session. A session keeps entries in message order up to
+ * its share of the total budget (the total divided by the number of sessions
+ * retained, never more than the per-session cap); when a session joins,
+ * sessions above the new share are trimmed rather than dropped. Two large
+ * sessions served alternately therefore both keep their entries, instead of
+ * evicting each other on every pass, and the total never exceeds its ceiling.
+ * Messages beyond a session's share are hashed on every pass.
+ */
+export class LkgEntryDigestCache {
+    private readonly sessions = new Map<string, LkgEntrySession>();
+    private totalBytes = 0;
+
+    constructor(
+        private readonly limits: {
+            sessionMaxBytes: number;
+            totalMaxBytes: number;
+            maxSessions: number;
+        },
+    ) {}
+
+    digests(
+        sessionId: string,
+        messages: readonly MessageLike[],
+    ): { digests: (string | null)[]; stats: LkgEntryDigestStats } {
+        const prior = this.sessions.get(sessionId);
+        const sessionCount = this.sessions.size + (prior ? 0 : 1);
+        const share = Math.min(
+            this.limits.sessionMaxBytes,
+            Math.floor(this.limits.totalMaxBytes / Math.min(sessionCount, this.limits.maxSessions)),
+        );
+        const retained = new Map<string, LkgEntryCacheEntry>();
+        const digests: (string | null)[] = [];
+        let reused = 0;
+        let size = 0;
+        for (const message of messages) {
+            const rawId = message.info?.id;
+            const id = typeof rawId === "string" ? rawId : "";
+            let entry = prior?.entries.get(id);
+            if (entry) lkgEntryWork.comparedMessages += 1;
+            if (entry && contentMatchesFields(message, entry.fields)) {
+                reused += 1;
+            } else {
+                entry = undefined;
+                const fields = lkgContentFields(message);
+                lkgEntryWork.flattenedMessages += 1;
+                if (fields) {
+                    for (const field of fields) {
+                        if (typeof field === "string") lkgEntryWork.flattenedChars += field.length;
+                    }
+                    lkgEntryWork.hashedMessages += 1;
+                    entry = {
+                        fields,
+                        digest: lkgContentDigestFromFields(fields),
+                        bytes: lkgEntryBytes(id, fields),
+                    };
+                }
+            }
+            digests.push(entry?.digest ?? null);
+            if (!entry || retained.has(id) || size + entry.bytes > share) continue;
+            retained.set(id, entry);
+            size += entry.bytes;
+        }
+        this.store(sessionId, retained, size, share);
+        return { digests, stats: { reused, retained: retained.size, retainedBytes: size } };
+    }
+
+    private store(
+        sessionId: string,
+        entries: Map<string, LkgEntryCacheEntry>,
+        bytes: number,
+        share: number,
+    ): void {
+        const prior = this.sessions.get(sessionId);
+        if (prior) {
+            this.totalBytes -= prior.bytes;
+            this.sessions.delete(sessionId);
+        }
+        if (entries.size === 0) return;
+        while (this.sessions.size >= this.limits.maxSessions) {
+            const oldest = this.sessions.entries().next().value;
+            if (!oldest) break;
+            this.totalBytes -= oldest[1].bytes;
+            this.sessions.delete(oldest[0]);
+        }
+        // Sessions retained when there were fewer of them may hold more than
+        // the share now; keep the leading entries that fit.
+        for (const other of this.sessions.values()) {
+            if (other.bytes <= share) continue;
+            let kept = 0;
+            for (const [id, entry] of other.entries) {
+                if (kept + entry.bytes > share) other.entries.delete(id);
+                else kept += entry.bytes;
+            }
+            this.totalBytes -= other.bytes - kept;
+            other.bytes = kept;
+        }
+        while (this.totalBytes + bytes > this.limits.totalMaxBytes) {
+            const oldest = this.sessions.entries().next().value;
+            if (!oldest) break;
+            this.totalBytes -= oldest[1].bytes;
+            this.sessions.delete(oldest[0]);
+        }
+        this.sessions.set(sessionId, { entries, bytes });
+        this.totalBytes += bytes;
+    }
+
+    /** Retained bytes per session and in total, for tests and diagnostics. */
+    stats(): { totalBytes: number; sessions: Array<{ sessionId: string; bytes: number }> } {
+        return {
+            totalBytes: this.totalBytes,
+            sessions: [...this.sessions].map(([sessionId, session]) => ({
+                sessionId,
+                bytes: session.bytes,
+            })),
+        };
+    }
+
+    clear(): void {
+        this.sessions.clear();
+        this.totalBytes = 0;
+    }
+}
+
+/**
+ * Ceiling for the cache {@link noteEntry} and the transform's entry projection
+ * share. One session may use up to half of it, so two large sessions served
+ * alternately both stay resident; a 64 MiB total used to make two sessions of
+ * over 32 MiB evict each other on every pass.
+ */
+export const LKG_ENTRY_CACHE_TOTAL_BYTES = 256 * 1024 * 1024;
+export const LKG_ENTRY_CACHE_SESSION_BYTES = 128 * 1024 * 1024;
+const LKG_ENTRY_CACHE_MAX_SESSIONS = 16;
+
+export const sharedLkgEntryDigests = new LkgEntryDigestCache({
+    sessionMaxBytes: LKG_ENTRY_CACHE_SESSION_BYTES,
+    totalMaxBytes: LKG_ENTRY_CACHE_TOTAL_BYTES,
+    maxSessions: LKG_ENTRY_CACHE_MAX_SESSIONS,
+});
+
 let lkgDigestsComputed = 0;
-
-/**
- * Digest each message of the entry prefix. A message whose id and comparison
- * key match the session's previous note reuses that digest, which is the value
- * a recompute would give. Anything else is hashed through the shared memo as
- * before.
- */
-function digestEntryPrefix(
-    sessionId: string,
-    prefix: readonly MessageLike[],
-    ids: readonly string[],
-): string[] | null {
-    const prior = notedEntryPrefixes.get(sessionId)?.messages;
-    const noted = new Map<string, NotedEntryMessage>();
-    const digests: string[] = [];
-    let bytes = 0;
-    for (let index = 0; index < prefix.length; index += 1) {
-        const fields = lkgContentFields(prefix[index]);
-        if (!fields) return null;
-        const id = ids[index] ?? "";
-        const key = lkgContentCompareKey(fields);
-        const previous = prior?.get(id);
-        const digest =
-            previous?.key === key
-                ? previous.digest
-                : memoizedLkgContentDigestFromFields(id, fields);
-        digests.push(digest);
-        noted.set(id, { key, digest });
-        bytes += 96 + (id.length + digest.length) * 2 + retainedStringBytes(key);
-    }
-    rememberNotedEntryPrefix(sessionId, noted, bytes);
-    return digests;
-}
-
-function rememberNotedEntryPrefix(
-    sessionId: string,
-    messages: Map<string, NotedEntryMessage>,
-    bytes: number,
-): void {
-    const prior = notedEntryPrefixes.get(sessionId);
-    if (prior) {
-        notedEntryPrefixes.delete(sessionId);
-        notedEntryPrefixBytes -= prior.bytes;
-    }
-    if (bytes > NOTED_ENTRY_PREFIX_MAX_BYTES) return;
-    while (
-        notedEntryPrefixBytes + bytes > NOTED_ENTRY_PREFIX_MAX_BYTES ||
-        notedEntryPrefixes.size >= NOTED_ENTRY_PREFIX_MAX_SESSIONS
-    ) {
-        const oldest = notedEntryPrefixes.entries().next().value;
-        if (!oldest) break;
-        notedEntryPrefixes.delete(oldest[0]);
-        notedEntryPrefixBytes -= oldest[1].bytes;
-    }
-    notedEntryPrefixes.set(sessionId, { messages, bytes });
-    notedEntryPrefixBytes += bytes;
-}
 
 /** @internal sha256 digests computed since the last reset. */
 export function getLkgDigestsComputedForTest(): number {
@@ -762,8 +955,10 @@ export function getLkgDigestsComputedForTest(): number {
 export function resetLkgSlotsForTest(): void {
     digestMemo.clear();
     digestMemoBytes = 0;
-    notedEntryPrefixes.clear();
-    notedEntryPrefixBytes = 0;
+    sharedLkgEntryDigests.clear();
+    for (const key of Object.keys(lkgEntryWork) as Array<keyof LkgEntryWork>) {
+        lkgEntryWork[key] = 0;
+    }
     lkgDigestsComputed = 0;
     lkgHeapHolder.entries.clear();
     totalBytes = 0;
