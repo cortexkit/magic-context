@@ -458,7 +458,7 @@ impl Fixture {
             .unwrap_or_else(|e| panic!("{e}: {sql}"));
     }
 
-    /// Rows of this conversation, as a SQL predicate on table alias-free columns.
+    /// SQL predicate selecting this conversation's rows (unqualified column names).
     fn mine(&self) -> String {
         format!("conv_key={}", q(&self.conv))
     }
