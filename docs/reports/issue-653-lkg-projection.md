@@ -207,3 +207,33 @@ the walkers, the digest encoding, retention, reuse, the memo ceilings), and at
 least one named test turned red. One mutation was not caught by a test:
 comparing tail-hygiene replay snapshots without the provider view. It costs a
 replay miss but reads no metadata, because the key counts already differ.
+
+## Independent review follow-up
+
+The independent review (`docs/reports/issue-653-review.md`) raised two findings.
+
+1. **Upgrade refusal.** Fixed by the digest format marker and legacy-slot
+   verification described above. Its witness, `legacy-format upgrade retains
+   managed replay availability on BUSY`, is now an ordinary test. Next to it,
+   a test checks that a legacy slot whose input really changed is still
+   refused on BUSY, and another that a healthy pass rewrites the slot in the
+   current format.
+2. **Vendored OpenCode 1 fixture.** It now runs a verbatim, hash-pinned copy
+   of the upstream code, including the AI SDK step (see "What a replay serves
+   now"). The review's two fidelity witnesses are now ordinary tests: Gemini 3
+   attachments stay in the tool result, and an aborted assistant's tool
+   output is kept.
+
+The review's offline driver (`scripts/perf-audit/issue-653-review-cycle.ts`)
+was run again after both fixes. Each revision had its own throwaway root, and
+the baseline was the base commit 2a40c58e. The driver ran seed and restart
+phases for both revisions, then an upgrade run: the baseline seeded a root and
+the current revision restarted from it. All 64 paired checks were equal:
+true-raw totals, boundary positions, the full tail measurement, m[0]
+breakdowns, provider-view and full served-byte hashes on every pass, and
+stored-prefix provider views. The upgrade restart served the same bytes as a
+current-only restart. The full served-message SHA-256 was
+`299fd5d174f539153d3aadf91e70b2536036950cf45bb3f3462a51f19be165fc`, the same
+value the review recorded. The stored prefix was 41,696 characters, against
+4,501,022 at the base commit. Every run's `lsof` listed only `.db` files under
+its throwaway root.
