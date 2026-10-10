@@ -278,7 +278,8 @@ describe("entry digest cache against the v0.47.0 projector", () => {
                     history.push(newMessage(random, created++, "assistant"));
                     history.push(newMessage(random, created++, "user"));
                 }
-                // OpenCode 1 hands over fresh copies; another host may hand over the
+                // OpenCode 1 reloads every message from its database for each request, so
+                // it hands over fresh copies; another host may hand over the
                 // same objects, edited in place. Neither may be trusted on its own.
                 const served = random() < 0.7 ? clone(history) : history;
                 history = served;

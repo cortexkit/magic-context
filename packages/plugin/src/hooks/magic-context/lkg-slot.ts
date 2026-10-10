@@ -306,7 +306,11 @@ const digestMemo = new Map<
 const DIGEST_MEMO_MAX_BYTES = 16 * 1024 * 1024;
 let digestMemoBytes = 0;
 
-/** Share pristine digests across entry capture and projection after exact typed-field comparison. */
+/**
+ * Id-keyed digest memo, bounded to 16 MiB, that reuses a digest only after an
+ * exact typed-field comparison. Entry capture and the entry projection now use
+ * {@link LkgEntryDigestCache} instead.
+ */
 export function memoizedLkgContentDigestFromFields(
     id: string,
     fields: readonly LkgContentField[],

@@ -43,7 +43,7 @@ function history(session: string, length: number, chars: number): MessageLike[] 
     return Array.from({ length }, (_, index) => message(session, index, chars));
 }
 
-/** Fresh objects and strings with the same content, as OpenCode 1 builds every request. */
+/** Fresh objects and strings with the same content, as OpenCode 1 gives by reloading the session from its database for every request. */
 function reloaded(messages: MessageLike[]): MessageLike[] {
     return JSON.parse(JSON.stringify(messages)) as MessageLike[];
 }
