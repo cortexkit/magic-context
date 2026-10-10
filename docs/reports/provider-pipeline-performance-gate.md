@@ -257,6 +257,146 @@ in `/tmp/provider-identity-t2-delivery.json`, `/tmp/provider-identity-t1.log`,
 `/tmp/provider-identity-mutation.log`, `/tmp/provider-identity-switch-mutation.log`
 and `/tmp/provider-rebuild-diagnose-{7500,15000,16000,17000-complete}.log`.
 
+### Per-pass cost profile and bounded hook policy (follow-up)
+
+All numbers in this section are **synthetic Mac measurements** (darwin/arm64,
+Bun 1.4.2, Cargo 1.99.0, optimized test driver, the same 17,000-message
+tool-dense fixture as above). They are not live, real-host or ALF acceptance.
+The Mac was shared with other workers; absolute times varied by up to about 2×
+between runs, so compare columns of one table, not across tables.
+
+**Method.** Temporary, environment-gated wall timers (never committed) wrapped
+each stage of `provider_host_hook` and `commit_provider_delta`, the host
+`compaction.step` handler, the engine's existing per-pass profile spans and the
+TypeScript adapter's `run`. One driver (`/tmp/ppperf/profile.ts`) bootstraps the
+fixture, runs ordinary passes of three appends (five hooks per pass) and then
+publication/model-switch rebuilds. A stage whose cost roughly doubles from 7.5k
+to 17k messages is classed O(session).
+
+Ordinary pass, OpenCode 1, base commit `a424544a`, ms per pass:
+
+| Stage | 7.5k | 17k | Class |
+| --- | ---: | ---: | --- |
+| Five `transform.hook` calls in the module | 825 | 1618 | O(session) |
+| ⤷ `policy_parts_tx`: read and JSON-decode every policy part of the lineage | 440 | 858 | O(session) |
+| ⤷ `promote_tx`: `json_extract(tag_number)` UPDATE scans every part per promoted answer | 181 | 320 | O(session) |
+| ⤷ `channel1_inputs_from_parts` over all parts | 74 | 159 | O(session) |
+| ⤷ rest of the hook decision (cloning all parts, counters) | 48 | 102 | O(session) |
+| ⤷ conversation row load/rewrite and policy totals (row carried the 3.3 MB last step answer) | 36 | 85 | O(session) |
+| ⤷ `host_channel1` (clones the baseline with every frozen part) | 12 | 23 | O(session) |
+| ⤷ message insert, lineage, plan, frontier, burns, answer insert | ≈12 | ≈18 | O(new) + row loads |
+| TS `publishMessages` deep copy of the served window | — | 28.8 | O(session) |
+| TS `scanWindow` id classification | — | 2.6 | O(session), host contract |
+| TS `providerIncoming` map over the incoming array | — | 1.8 | O(session), host contract |
+| TS save, model/inputs, manifest/flush, assemble | — | <1 | O(new)/O(1) |
+
+One `compaction.step` rebuild at 15,000 messages, OpenCode 1, ms:
+
+| Stage | Base `a424544a` | This change | Class |
+| --- | ---: | ---: | --- |
+| Whole `compaction.step` | 44,439 (host gave up at 30,000) | 5,606 | O(session) |
+| Engine planning | 38,588 | 378 | was O(n²) |
+| ⤷ `reasoning_budget_cutoff`: per-message native/frozen-unit searches | 38,269 | 22 | O(n²) → O(session) |
+| Engine store commit (frozen state, tags, policy parts) | 2,037 | 1,506 | O(session) |
+| Engine state evolution / protected floor / build output / projection | 880 / 739 / 320 / 160 | 841 / 697 / 300 / 179 | O(session) |
+| Encode view (native replacement) | 645 | 721 | O(session) |
+| Load applied/produced views and live answers | 422 | 433 | O(session) |
+| Prepare request / commit status page / normalize | 194 / 242 / 66 | 197 / 241 / 74 | O(session) |
+| Hook in the same pass | 555 | 2 | O(session) → O(new) |
+
+**Fixes.**
+
+- Host hooks keep a bounded policy summary (`providers/policy_summary.rs`) in
+  the new `mc_provider_policy_summaries_v1` table: the per-part sums behind the
+  channel-1 baseline, buckets, real-user and reclaimable-output counts, the
+  tool-tag protection window groups, the newest protected arcs per tool and the
+  four smallest hint candidates per tool tier. Triggers on the policy parts and
+  consumed-tag tables log each changed row once, with its pre-change copy, in
+  `mc_provider_policy_changes_v1`, but only while a summary exists. A hook
+  replays only the changed rows and the parts sharing an arc or tag number with
+  them, parts entering or leaving the window or a protected arc, and tags that
+  cross the window cutoff. It rebuilds from every part when it cannot replay
+  exactly: no summary, changed settings or lineage, a cache-busting pass, a
+  baseline that must be refrozen, new rows ordered before known rows, more than
+  4,096 logged changes, or a protected-arc or hint list that would need an
+  untracked member. `ProviderHookContext.parts` now holds only the hooked and
+  pass-appended messages' parts; lineage reads go through the bounded
+  `ProviderPolicyIndex`.
+- Store migration **68** (`store_068_provider_policy_summaries.sql`) adds the
+  two tables, the triggers, and expression indexes on policy-part tag number and
+  arc, a partial index for unserved parts and two partial indexes for the newest
+  cadence answers. The schema-pinned move inventory is now version 68; both new
+  tables are `LocalReset` (derived; an absent summary is rebuilt). Writer guards
+  skip inventory tables a shorter migration chain has not created, so a
+  migration-fence test can still open a version-66 store.
+- The per-hook pending/live answer count (unused) is removed. The conversation
+  row keeps a receipt of the last step answer (request id, answer kind,
+  compaction id and version) instead of the multi-megabyte view, which stays in
+  its view row. A step loads one view by version instead of every stored view.
+- An engine rewrite of the policy parts uses one cached statement and leaves
+  unchanged rows alone; a baseline refreeze restates measurements with a cached
+  statement and skips rows whose stored text already matches.
+- `reasoning_budget_cutoff`, the active Anthropic turn checks and
+  `non_tag_messages` use per-pass maps instead of per-message linear searches.
+- TypeScript: `publishMessages` copies with plain loops (same keys, order and
+  `toJSON`/`__proto__` handling); the model fallback walks back from the newest
+  message instead of copying and mapping the whole array.
+
+**Remaining O(session) work.** No module work in an ordinary hook grows with the
+session: SQLite steps per ordinary hook are 5,884 at both 1,000 and 17,000
+messages, while the summary rebuild that the first hook performs costs 369,211
+and 6,241,211 (`ordinary_hook_store_reads_do_not_grow_with_the_session`). After
+the change an ordinary 17k pass spends about 2 ms per hook. The adapter still
+does three O(window) things the host contract requires on every pass: it reads
+every incoming id to detect appends, holes and reverts (≈2–4 ms at 17k), maps
+the incoming array (≈2 ms), and deep-copies the served window it publishes
+(≈7 ms at 17k), because OpenCode or later transforms may mutate published
+objects. Reusing earlier copies would change that defensive contract and is not
+done here. The first hook after a bootstrap or after a rebuild that rewrote the
+policy parts rebuilds the summary; after a rebuild it usually also refreezes the
+tail-hygiene baseline (the engine and host measurements disagree for covered
+parts), restating every frozen part's measurement. That hook took 520–630 ms
+at 17k, inside its 1,500 ms budget; before the cached change-only restatement
+it took about 1.6 s, the hook timed out, and the host served that message
+untagged, which failed the paired rebuild comparison at 17k. A HARD rebuild
+itself re-renders the whole prefix, so the remaining ≈5.6 s at 15k is engine
+work proportional to the session (store commit, state evolution, protection
+floor, view encoding, view and answer loads).
+
+Before/after, synthetic, `provider-pipeline-synthetic.ts` at each size (20
+ordinary samples of three appends after three warmups; five paired rebuilds);
+ms, p50 / p95:
+
+| Binding, messages | Ordinary before | Ordinary after | Provider rebuild before | Provider rebuild after | Full-request engine+codec after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| OpenCode 1, 7,500 | 836 / 977 | 13.5 / 21.3 | 7,789 / 12,570 | 2,283 / 3,140 | 1,664 / 1,906 |
+| OpenCode 2, 7,500 | 729 / 803 | 10.4 / 15.2 | 7,044 / 7,673 | 2,347 / 2,435 | 1,601 / 1,675 |
+| OpenCode 1, 17,000 | 1,512 / 1,767 | 15.8 / 29.8 | blocked: 31,074 timeout, retry 28,426 | 5,968 / 6,283 | 4,793 / 4,823 |
+| OpenCode 2, 17,000 | 1,838 / 1,981 | 19.1 / 29.0 | blocked: 30,795 timeout, retry 30,041 not applied | 5,792 / 6,089 | 4,498 / 4,983 |
+
+Before, the base full-request arm measured 6,865 / 10,448 (OpenCode 1) and
+6,046 / 6,507 (OpenCode 2) at 7,500 messages and 23,875 / 33,643 (two samples)
+and 39,215 (one sample) at 17,000. After, every paired rebuild at both sizes
+applied a view, did not fall back and served bytes equal to the full-request
+output. Hook round trips were p50 1 ms, p95 2–5 ms. The synthetic ordinary
+results are inside P1's thresholds, but P1 still requires the live,
+instrumented measurement described below. P2 is still not met: the provider
+rebuild is 1.25–1.47 × the full-request engine+codec time (the gate allows
+1.10 ×); the extra is the host step's own O(session) work listed above.
+
+**Correctness evidence (Linux unless noted).** `cargo test -p mc-module --lib`:
+1,860 passed, 24 ignored. Every replayed summary in tests is checked against
+the full computation (inputs and summary); the 720-pass corpus asserts 46,980
+comparisons and replayed summaries 1,850 times, the HARD companion keeps 48
+passes and 113 comparisons (768 total), and M4's
+`r3_randomized_host_full_engine_240_passes` had 0 mismatches. The previously
+ignored `bounded_policy_summary_does_not_return_the_entire_known_metadata_lineage`
+now runs and passes. `cargo test -p mc-store`: 314 passed, 5 ignored. On the
+Mac, `pure-replay-differential.ts --provider-pipeline` passed all 90 checks
+with no failures (the earlier record counted 88 cases: the original 84 plus the
+four identity cases), and the signed-thinking prefix audit's golden capture
+(`MC_AUDIT_GOLDEN`, 706 captured passes) is byte-identical to the base commit.
+
 ## Fail-closed gate and input contract
 
 ```sh
@@ -448,11 +588,12 @@ independent. This report does not claim that production currently emits them.
 
 ### Outstanding gates
 
-P1, P2, P3 and P4 remain unpassed. The identity refusal is resolved, but the
-synthetic P1 signal is over budget and P2 is blocked by the separate rebuild
-transport deadline described above. Next actions are: profile large provider
-rebuild latency and deadline/retry behavior; run the two real-host lanes with the
-matching binaries;
+P1, P2, P3 and P4 remain unpassed. The identity refusal is resolved. After the
+per-pass cost follow-up, the synthetic ordinary pass is inside P1's thresholds
+and 17,000-message rebuilds apply within the bootstrap budget, but P2's
+rebuild-to-full ratio (1.25–1.47 ×) is still above 1.10 ×, and none of this is a
+live measurement. Next actions are: reduce the host step's own work in a
+rebuild; run the two real-host lanes with the matching binaries;
 land the separate production instrumentation/capture collector; ship; obtain an
 authorized ALF copy and live session id; then run and retain the paired measurement
 and full 24-hour canary. Switching the default to the provider pipeline is not
