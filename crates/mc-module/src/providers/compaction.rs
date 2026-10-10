@@ -363,10 +363,8 @@ fn load_host_view(
     summary: &ViewSummary,
 ) -> Result<HostView, HandlerOutcome> {
     let row = store
-        .load_provider_views(&key.store_key())
+        .load_provider_view(&key.store_key(), summary.version)
         .map_err(|e| transient(format!("load provider views: {e}")))?
-        .into_iter()
-        .find(|v| v.version == summary.version)
         .ok_or_else(|| transient("recorded provider view is missing"))?;
     let mut view: HostView = serde_json::from_str(&row.replacement_json).map_err(transient)?;
     // Immutable bytes are shared by a descent; only the in-memory range's

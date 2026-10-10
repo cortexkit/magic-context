@@ -1363,6 +1363,17 @@ impl McStore {
             rows
         })?)
     }
+    /// One view by version, without reading the conversation's other views:
+    /// each holds a whole replacement, and they accumulate with every rebuild.
+    pub fn load_provider_view(
+        &self,
+        key: &ProviderSessionKey,
+        version: u64,
+    ) -> Result<Option<ProviderView>, McStoreError> {
+        Ok(self.inner.with_conn(|conn| {
+            conn.query_row("SELECT version,lineage_id,range_from,range_to,replacement_json,state FROM mc_provider_views_v1 WHERE conv_key=?1 AND version=?2", params![key.conversation_key(), as_i64(version)?], |r| Ok(ProviderView {version:r.get(0)?,lineage_id:r.get(1)?,range_from:r.get(2)?,range_to:r.get(3)?,replacement_json:r.get(4)?,state:r.get(5)?})).optional()
+        })?)
+    }
     pub fn queue_provider_drops(
         &self,
         key: &ProviderSessionKey,
