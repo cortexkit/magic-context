@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
 import { sessionLog } from "../../shared/logger";
 import { clearCapturedLkgMeasurement } from "./lkg-measured-request";
+import { providerVisibleMessage } from "./provider-visible-parts";
 import type { MessageLike } from "./transform-operations";
 
 export interface LkgSlot {
@@ -266,32 +267,85 @@ export function lkgContentFields(value: unknown): LkgContentField[] | null {
     }
 }
 
-/**
- * The exact text {@link lkgContentDigestFromFields} hashes: each token as
- * `<type>:<length>:<value>\0`. Type and length prefixes make it unambiguous, so
- * two token lists with the same key always have the same digest.
- */
-export function lkgContentKey(fields: readonly LkgContentField[]): string {
-    let key = "";
-    for (const field of fields) {
-        const value = typeof field === "symbol" ? (field.description ?? "") : String(field);
-        key += `${typeof field}:${value.length}:${value}\0`;
-    }
-    return key;
-}
+const DIGEST_TAG_STRING = 1;
+const DIGEST_TAG_NUMBER = 2;
+const DIGEST_TAG_TRUE = 3;
+const DIGEST_TAG_FALSE = 4;
+const DIGEST_TAG_OTHER_SYMBOL = 5;
+const DIGEST_SYMBOL_TAGS = new Map<symbol, number>([
+    [LKG_SNAPSHOT_ARRAY, 16],
+    [LKG_SNAPSHOT_OBJECT, 17],
+    [LKG_SNAPSHOT_KEY, 18],
+    [LKG_SNAPSHOT_STRING, 19],
+    [LKG_SNAPSHOT_NUMBER, 20],
+    [LKG_SNAPSHOT_BOOLEAN, 21],
+    [LKG_SNAPSHOT_NULL, 22],
+    [LKG_SNAPSHOT_UNDEFINED, 23],
+]);
+const DIGEST_CHUNK_BYTES = 64 * 1024;
+let digestChunk: Buffer | undefined;
 
 /**
- * sha256 of {@link lkgContentKey}. Hashing the joined text in one update gives
- * the same bytes as the three updates per token this used to make: every token
- * value is bracketed by ASCII, so no surrogate pair can straddle a boundary.
+ * sha256 over an unambiguous binary encoding of the tokens: a one-byte tag per
+ * token, then for a string its length in UTF-16 units (uint32) and its UTF-16
+ * code units (so lone surrogates stay distinct), for a number its float64
+ * bytes, and for a marker symbol nothing more. Tokens are packed into a 64 KiB
+ * chunk and hashed one chunk at a time; a string too large for the chunk is
+ * hashed on its own. Building a text per token and updating the hash three times
+ * per token ran at about 44 MB/s on diagnostics-heavy tool parts with about a
+ * million tokens each.
  */
 export function lkgContentDigestFromFields(fields: readonly LkgContentField[]): string {
-    return lkgContentDigestFromKey(lkgContentKey(fields));
-}
-
-function lkgContentDigestFromKey(key: string): string {
     lkgDigestsComputed += 1;
-    return createHash("sha256").update(key).digest("base64url");
+    const hash = createHash("sha256");
+    digestChunk ??= Buffer.allocUnsafe(DIGEST_CHUNK_BYTES);
+    const chunk = digestChunk;
+    let offset = 0;
+    const room = (bytes: number): void => {
+        if (offset + bytes <= chunk.length) return;
+        hash.update(chunk.subarray(0, offset));
+        offset = 0;
+    };
+    const writeString = (tag: number, value: string): void => {
+        const bytes = value.length * 2;
+        room(5);
+        chunk[offset] = tag;
+        chunk.writeUInt32LE(value.length, offset + 1);
+        offset += 5;
+        if (bytes <= chunk.length - offset) {
+            chunk.write(value, offset, bytes, "utf16le");
+            offset += bytes;
+            return;
+        }
+        hash.update(chunk.subarray(0, offset));
+        offset = 0;
+        hash.update(Buffer.from(value, "utf16le"));
+    };
+    for (const field of fields) {
+        if (typeof field === "string") {
+            writeString(DIGEST_TAG_STRING, field);
+        } else if (typeof field === "number") {
+            room(9);
+            chunk[offset] = DIGEST_TAG_NUMBER;
+            chunk.writeDoubleLE(field, offset + 1);
+            offset += 9;
+        } else if (typeof field === "boolean") {
+            room(1);
+            chunk[offset] = field ? DIGEST_TAG_TRUE : DIGEST_TAG_FALSE;
+            offset += 1;
+        } else {
+            const tag = DIGEST_SYMBOL_TAGS.get(field);
+            if (tag === undefined) {
+                writeString(DIGEST_TAG_OTHER_SYMBOL, field.description ?? "");
+            } else {
+                room(1);
+                chunk[offset] = tag;
+                offset += 1;
+            }
+        }
+    }
+    if (offset > 0) hash.update(chunk.subarray(0, offset));
+    return hash.digest("base64url");
 }
 
 export interface LkgInputSnapshot {
@@ -425,9 +479,13 @@ export function incrementalLkgContentDigests(
     return { digests, reusedPrefix };
 }
 
-/** Digest the full message tree to detect input drift before an LKG replay. */
+/**
+ * Digest what the provider sees of a message to detect input drift before an
+ * LKG replay. Fields OpenCode never sends (see provider-visible-parts.ts) are
+ * left out, so they cost nothing and a change to them does not block a replay.
+ */
 export function lkgContentDigest(message: MessageLike): string | null {
-    const fields = lkgContentFields(message);
+    const fields = lkgContentFields(providerVisibleMessage(message));
     return fields ? lkgContentDigestFromFields(fields) : null;
 }
 
@@ -803,9 +861,10 @@ function lkgEntryBytes(id: string, fields: readonly LkgContentField[]): number {
  * Per-message pristine digests for each session, reused from one pass to the
  * next.
  *
- * Each retained message keeps its exact typed tokens. A message reuses its
- * digest only when it has the same id as a retained entry and its content still
- * flattens to that entry's tokens, checked by {@link contentMatchesFields}
+ * Tokens cover only what the provider sees of a message (see
+ * provider-visible-parts.ts). Each retained message keeps its exact typed
+ * tokens. A message reuses its digest only when it has the same id as a
+ * retained entry and its visible content still flattens to that entry's tokens, checked by {@link contentMatchesFields}
  * without building anything; neither the id nor the object alone is trusted.
  * Anything else is flattened and hashed. So an ordinary pass flattens and hashes
  * only new or changed messages, and compares the rest at memory speed.
@@ -847,13 +906,15 @@ export class LkgEntryDigestCache {
         for (const message of messages) {
             const rawId = message.info?.id;
             const id = typeof rawId === "string" ? rawId : "";
+            // Only what the provider sees is compared and digested.
+            const visible = providerVisibleMessage(message);
             let entry = prior?.entries.get(id);
             if (entry) lkgEntryWork.comparedMessages += 1;
-            if (entry && contentMatchesFields(message, entry.fields)) {
+            if (entry && contentMatchesFields(visible, entry.fields)) {
                 reused += 1;
             } else {
                 entry = undefined;
-                const fields = lkgContentFields(message);
+                const fields = lkgContentFields(visible);
                 lkgEntryWork.flattenedMessages += 1;
                 if (fields) {
                     for (const field of fields) {

@@ -166,6 +166,9 @@ const handler = createMessagesTransformHandler({
     magicContext: { "experimental.chat.messages.transform": transform },
 } as never);
 
+// With --slow-ms N, every logged stage of at least N ms is listed under its pass.
+const slowMsFlag = flag("--slow-ms");
+const slowMs = slowMsFlag === undefined ? undefined : Number(slowMsFlag);
 const WATCHED = [
     "lkg.entryProjection",
     "compartmentTrigger",
@@ -200,6 +203,12 @@ for (let pass = 0; pass < passes; pass += 1) {
         console.log(
             [pass, session.sessionId, messages.length, elapsed.toFixed(1), ...stages].join("\t"),
         );
+        if (slowMs !== undefined) {
+            for (const line of stageLines) {
+                const match = line.match(/stage=(\S+) elapsed=([\d.]+)ms/);
+                if (match && Number(match[2]) >= slowMs) console.log(`    slow: ${match[1]} ${match[2]}ms`);
+            }
+        }
     }
 }
 if (args.includes("--stages")) console.log(stageLines.join(""));

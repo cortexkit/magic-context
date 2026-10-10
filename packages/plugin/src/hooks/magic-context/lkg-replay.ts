@@ -13,6 +13,7 @@ import {
     sharedLkgEntryDigests,
 } from "./lkg-slot";
 import { assertOpenAiCompatAdjacency } from "./openai-compat-adjacency";
+import { providerVisibleMessage } from "./provider-visible-parts";
 import type { MessageLike } from "./transform-operations";
 
 export interface LkgModelKeys {
@@ -293,7 +294,9 @@ function outputMessageIsPostAnchor(
 /**
  * Build the replay prefix and serialize it once. The returned `jsonPrefix` is
  * the exact artifact stored in the last-known-good replay entry; callers must
- * use it as-is rather than serialize the prefix again.
+ * use it as-is rather than serialize the prefix again. It holds the served
+ * messages as the provider receives them: tool-state fields no host sends are
+ * left out.
  */
 export function buildLkgPrefix(
     input: LkgEntryProjection[] | MessageLike[],
@@ -322,7 +325,13 @@ export function buildLkgPrefix(
     for (const message of output) {
         const postAnchor = outputMessageIsPostAnchor(message, inputIndexById, anchorIndex);
         if (postAnchor === null) return null;
-        if (!postAnchor) prefix.push(message);
+        // Store only what the provider receives (see provider-visible-parts.ts).
+        // The hosts build the request from the replayed array through conversions
+        // that read none of the removed tool-state fields, so a replay sends the
+        // same request; tool metadata such as workspace diagnostics made the
+        // snapshot hundreds of MiB, too large to keep, and serializing it cost
+        // every pass.
+        if (!postAnchor) prefix.push(providerVisibleMessage(message));
     }
     let jsonPrefix: string;
     try {

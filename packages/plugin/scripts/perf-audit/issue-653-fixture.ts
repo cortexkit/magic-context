@@ -163,6 +163,7 @@ export const SHAPES = [
     "unicode",
     "reasoning",
     "metadata",
+    "lsp-metadata",
 ] as const;
 export type Shape = (typeof SHAPES)[number];
 
@@ -325,6 +326,64 @@ function addBulk(
                 time: { start: created, end: created + 5 },
             });
             return;
+        case "lsp-metadata": {
+            // Workspace-wide LSP diagnostics, as OpenCode's edit and write tools
+            // attach them: per file, an array of diagnostics of about 150
+            // characters (about 40 flattened fields) each.
+            const diagnostics: Record<string, unknown[]> = {};
+            let size = 0;
+            let file = 0;
+            while (size < chars) {
+                const path = `/repo/packages/app/src/module-${file}/file-${random().toString(36).slice(2, 8)}.ts`;
+                const list: unknown[] = [];
+                for (let index = 0; index < 40 && size < chars; index += 1) {
+                    const line = Math.floor(random() * 2000);
+                    list.push({
+                        range: {
+                            start: { line, character: Math.floor(random() * 80) },
+                            end: { line, character: Math.floor(random() * 120) },
+                        },
+                        severity: 1 + Math.floor(random() * 4),
+                        code: 2300 + Math.floor(random() * 700),
+                        source: "ts",
+                        message: `Property 'x${Math.floor(random() * 1e6)}' does not exist on type 'Record<string, ComponentProps<typeof Widget>>'. Did you mean 'y${Math.floor(random() * 1e6)}'?`,
+                    });
+                    size += 270;
+                }
+                diagnostics[path] = list;
+                size += path.length;
+                file += 1;
+            }
+            const tool = random() < 0.85 ? "edit" : "write";
+            insert(
+                toolPart(
+                    {
+                        input:
+                            tool === "edit"
+                                ? {
+                                      filePath: `/repo/src/file-${id}.ts`,
+                                      oldString: codeText(random, 300),
+                                      newString: codeText(random, 320),
+                                  }
+                                : { filePath: `/repo/src/file-${id}.ts`, content: codeText(random, 2000) },
+                        output: tool === "edit" ? "Edit applied successfully." : "Wrote file successfully.",
+                        metadata: {
+                            diagnostics,
+                            diff: codeText(random, 600),
+                            filediff: {
+                                file: `/repo/src/file-${id}.ts`,
+                                before: codeText(random, 300),
+                                after: codeText(random, 320),
+                                additions: 3,
+                                deletions: 1,
+                            },
+                        },
+                    },
+                    tool,
+                ),
+            );
+            return;
+        }
         case "metadata": {
             const third = Math.floor(chars / 3);
             insert(
@@ -374,17 +433,28 @@ export function buildSession(
     const sessionId = `ses_${sessionTag}`;
     const pairs = Math.floor(messageCount / 2);
     const toolPairs = new Set<number>();
-    while (toolPairs.size < Math.max(1, Math.round(pairs / 8))) {
-        toolPairs.add(Math.floor(random() * pairs));
-    }
-    const rawSizes = [...toolPairs].map(() => 100 * 1024 + Math.floor(random() * 1948 * 1024));
-    const rawTotal = rawSizes.reduce((sum, size) => sum + size, 0);
-    const scale = (targetChars * 0.97) / rawTotal;
     const sizes = new Map<number, number>();
-    [...toolPairs].forEach((pair, index) => {
-        const size = Math.min(2 * 1024 * 1024, Math.max(100 * 1024, rawSizes[index] * scale));
-        sizes.set(pair, Math.floor(size));
-    });
+    if (shape === "lsp-metadata") {
+        // The reported sessions: most edit/write parts carry 4.5-5.4 MiB of
+        // workspace diagnostics, about 175 of them in 873 MiB. The part count
+        // follows the target size.
+        const count = Math.min(pairs, Math.max(1, Math.round(targetChars / (5 * 1024 * 1024))));
+        while (toolPairs.size < count) toolPairs.add(Math.floor(random() * pairs));
+        for (const pair of toolPairs) {
+            sizes.set(pair, Math.floor((4.5 + random() * 0.9) * 1024 * 1024));
+        }
+    } else {
+        while (toolPairs.size < Math.max(1, Math.round(pairs / 8))) {
+            toolPairs.add(Math.floor(random() * pairs));
+        }
+        const rawSizes = [...toolPairs].map(() => 100 * 1024 + Math.floor(random() * 1948 * 1024));
+        const rawTotal = rawSizes.reduce((sum, size) => sum + size, 0);
+        const scale = (targetChars * 0.97) / rawTotal;
+        [...toolPairs].forEach((pair, index) => {
+            const size = Math.min(2 * 1024 * 1024, Math.max(100 * 1024, rawSizes[index] * scale));
+            sizes.set(pair, Math.floor(size));
+        });
+    }
     const json: string[] = [];
     let totalChars = 0;
     const base = 1_760_000_000_000;

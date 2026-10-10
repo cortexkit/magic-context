@@ -7,6 +7,7 @@ import {
     estimateImageTokensFromDataUrl,
     estimateToolAttachmentImageTokens,
 } from "./image-token-estimate";
+import { providerVisibleMessage, providerVisiblePart } from "./provider-visible-parts";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
 import { isSyntheticTodoPart } from "./todo-view";
@@ -623,7 +624,10 @@ export function tailHygieneStructuralSignature(
     let totalBytes = 0;
     for (const message of messages) {
         partCounts.push(message.parts.length);
-        totalBytes += structuralSize(message);
+        // Fields the provider never receives (tool metadata such as LSP
+        // diagnostics) are left out: they do not change what is measured, and
+        // walking them cost seconds per pass on diagnostics-heavy sessions.
+        totalBytes += structuralSize(providerVisibleMessage(message));
     }
     return { messageCount: messages.length, partCounts, totalBytes };
 }
@@ -1071,13 +1075,26 @@ function sameNumbers(before: ReadonlySet<number>, after: ReadonlySet<number>): b
     return true;
 }
 
+/**
+ * `left` is a snapshot made by {@link replaySnapshotParts}; `right` is a live
+ * message, compared through the same provider-visible view.
+ */
 function sameReplayMessage(left: MessageLike, right: MessageLike): boolean {
     return (
         left.info.id === right.info.id &&
         left.info.role === right.info.role &&
         left.info.summary === right.info.summary &&
-        sameReplayValue(left.parts, right.parts)
+        sameReplayValue(left.parts, right.parts.map(providerVisiblePart))
     );
+}
+
+/**
+ * The parts a replay snapshot keeps: what the provider sees of each part (see
+ * provider-visible-parts.ts), copied so a later in-place edit cannot change the
+ * snapshot. Nothing the measurement reads is left out.
+ */
+function replaySnapshotParts(parts: readonly unknown[]): unknown[] {
+    return copyReplayValue(parts.map(providerVisiblePart)) as unknown[];
 }
 
 function sameReplayMessages(
@@ -1247,14 +1264,16 @@ export function refreshTailHygieneBaseline(input: {
                                 role: message.info.role,
                                 summary: message.info.summary,
                             },
-                            parts: copyReplayValue(message.parts) as unknown[],
+                            parts: replaySnapshotParts(message.parts),
                         },
               ),
               tags: structuredClone(input.tags),
               protectedTagNumbers: new Set(input.protectedTagNumbers),
               pendingDropTagNumbers: new Set(pendingDropTagNumbers),
               measured: rawMeasured,
-              size: 2 * structuralSize(input.messages) + 512 * input.tags.length,
+              size:
+                  2 * structuralSize(input.messages.map(providerVisibleMessage)) +
+                  512 * input.tags.length,
           };
     // The replay snapshot owns separate wrappers; associate contextual identities
     // with those wrappers, not mutable host parts from the pass just served.

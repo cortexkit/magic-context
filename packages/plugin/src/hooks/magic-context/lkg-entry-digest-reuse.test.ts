@@ -1,7 +1,6 @@
 /// <reference types="bun-types" />
 
 import { beforeEach, describe, expect, it } from "bun:test";
-import { createHash } from "node:crypto";
 import {
     captureSlot,
     getLkgDigestsComputedForTest,
@@ -59,32 +58,34 @@ function hashesForNextPass(sessionLength: number, appended: number): number {
     return hashed;
 }
 
-/** The digest as it was computed before: three hash updates per token. */
-function frozenDigest(fields: readonly LkgContentField[]): string {
-    const hash = createHash("sha256");
-    for (const field of fields) {
-        const value = typeof field === "symbol" ? (field.description ?? "") : String(field);
-        hash.update(`${typeof field}:${value.length}:`)
-            .update(value)
-            .update("\0");
-    }
-    return hash.digest("base64url");
-}
-
 describe("LKG entry digests", () => {
     beforeEach(() => resetLkgSlotsForTest());
 
-    it("hashes the joined token text to the same digest as per-token updates", () => {
-        const values: unknown[] = [
-            { info: { id: "m", role: "user" }, parts: [{ type: "text", text: "plain" }] },
-            { text: "pair \ud83d\ude00 and lone \ud83d", tail: "\ude00 lone low", n: -0, f: 1.5 },
-            { nested: [null, true, false, 0, "", [], {}], key: "a\u0000b", utf: "çé日本" },
-            ["\ud800", "\udfff", "x\ud800", "\udc00x"],
+    it("gives distinct digests to token lists that differ only in type, split or encoding", () => {
+        // The digest encoding is binary and length-prefixed; these pairs would
+        // collide under an encoding that joined token texts or replaced lone
+        // surrogates.
+        const pairs: Array<[LkgContentField[], LkgContentField[]]> = [
+            [["1"], [1]],
+            [[true], ["true"]],
+            [
+                ["ab", "c"],
+                ["a", "bc"],
+            ],
+            [["a\u0000b"], ["a", "b"]],
+            [["\ud800"], ["\ufffd"]],
+            [["\ud83d\ude00"], ["\ud83d", "\ude00"]],
+            [[0], [-0]],
+            [["x".repeat(70_000)], ["x".repeat(69_999), "x"]],
+            [[Symbol("other")], ["other"]],
         ];
-        for (const value of values) {
-            const fields = lkgContentFields(value)!;
-            expect(lkgContentDigestFromFields(fields)).toBe(frozenDigest(fields));
+        for (const [left, right] of pairs) {
+            expect(lkgContentDigestFromFields(left)).not.toBe(lkgContentDigestFromFields(right));
         }
+        // Equal token lists give equal digests whether a string fits the hashing
+        // chunk or is hashed on its own.
+        const big: LkgContentField[] = ["x".repeat(70_000), 1, "tail"];
+        expect(lkgContentDigestFromFields(big)).toBe(lkgContentDigestFromFields([...big]));
     });
 
     it("hashes only the messages added since the last pass, however long the prefix", () => {

@@ -33,6 +33,7 @@ import {
     noteEntry,
     resetLkgSlotsForTest,
 } from "./lkg-slot";
+import { providerVisibleMessage } from "./provider-visible-parts";
 import type { MessageLike } from "./transform-operations";
 
 /** The v0.47.0 projector's digest selection, without its shared memo (which returns the same digests). */
@@ -47,9 +48,11 @@ function frozenProjector(maxBytes = 64 * 1024 * 1024) {
     let bytes = 0;
     return (sessionId: string, messages: MessageLike[]): (string | null)[] => {
         const prior = priors.get(sessionId);
+        // The selection logic is v0.47.0's; the input is reduced to what the
+        // provider sees first, as the digest itself now is.
         const snapshots = messages.map((message) => ({
             id: typeof message.info?.id === "string" ? message.info.id : "",
-            fields: lkgContentFields(message),
+            fields: lkgContentFields(providerVisibleMessage(message)),
         }));
         const digests = snapshots.map((snapshot) => {
             const cached = prior?.entries.get(snapshot.id);
@@ -148,14 +151,38 @@ function newMessage(random: Random, created: number, role?: "user" | "assistant"
         { type: "text", text: `${id} says ${"lorem ".repeat(1 + Math.floor(random() * 20))}` },
     ];
     if (chosenRole === "assistant" && random() < 0.6) {
+        const failed = random() < 0.2;
+        const time: Record<string, number> = { start: created, end: created + 1 };
+        if (random() < 0.2) time.compacted = created + 2;
         parts.push({
             type: "tool",
             callID: `call_${id}`,
+            tool: random() < 0.5 ? "edit" : "bash",
             state: {
-                status: "completed",
+                status: failed ? "error" : "completed",
                 input: { path: `src/${id}.ts`, flag: leaf(random) },
-                output:
-                    random() < 0.5 ? "output ".repeat(50) : { rows: [leaf(random), leaf(random)] },
+                ...(failed
+                    ? { error: "aborted" }
+                    : {
+                          output:
+                              random() < 0.5
+                                  ? "output ".repeat(50)
+                                  : { rows: [leaf(random), leaf(random)] },
+                      }),
+                title: `src/${id}.ts`,
+                time,
+                // UI data the provider never receives, except an interrupted
+                // call's output on an error state.
+                metadata: failed
+                    ? { interrupted: true, output: "partial output", preview: leaf(random) }
+                    : {
+                          diagnostics: {
+                              [`src/${id}.ts`]: [
+                                  { range: { start: { line: 1, character: 0 } }, message: "x" },
+                              ],
+                          },
+                          diff: leaf(random),
+                      },
                 extra: leaf(random),
             },
         });
@@ -216,6 +243,30 @@ function editMessage(random: Random, message: MessageLike): void {
         },
         () => {
             (message.info as unknown as Record<string, unknown>).summary = { diffs: [] };
+        },
+        // Provider-invisible edits: tool metadata, title and times.
+        () => {
+            const state = part.state as Record<string, unknown> | undefined;
+            if (!state) return;
+            const metadata = (state.metadata ?? {}) as Record<string, unknown>;
+            state.metadata = { ...metadata, diagnostics: { "src/other.ts": [leaf(random)] } };
+        },
+        () => {
+            const state = part.state as Record<string, unknown> | undefined;
+            if (state) state.title = `${String(state.title ?? "")} (renamed)`;
+        },
+        () => {
+            const state = part.state as Record<string, unknown> | undefined;
+            const time = state?.time as Record<string, unknown> | undefined;
+            if (time) time.end = Number(time.end ?? 0) + 5;
+        },
+        // Provider-visible: an interrupted call's output on an error state.
+        () => {
+            const state = part.state as Record<string, unknown> | undefined;
+            const metadata = state?.metadata as Record<string, unknown> | undefined;
+            if (state?.status === "error" && metadata) {
+                metadata.output = `${String(metadata.output)}!`;
+            }
         },
     ];
     pick(random, edits)();

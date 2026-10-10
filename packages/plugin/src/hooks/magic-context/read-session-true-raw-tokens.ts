@@ -1,5 +1,6 @@
 import { isRecord } from "../../shared/record-type-guard";
 import { stableStringify } from "../../shared/stable-json";
+import { providerVisiblePart } from "./provider-visible-parts";
 import { estimateTokens } from "./read-session-formatting";
 import type { RawMessage } from "./read-session-raw";
 
@@ -330,7 +331,10 @@ function partCheapFingerprint(part: unknown): string {
     if (!isRecord(part)) return `${typeof part}:${recursiveByteLength(part)}`;
     const version = rawPartVersion(part);
     const type = typeof part.type === "string" ? part.type : "";
-    return `${type}:${String(version)}:${recursiveByteLength(part)}`;
+    // The size covers only what the provider sees (see provider-visible-parts.ts):
+    // no estimate reads tool metadata, and sizing workspace diagnostics on
+    // every pass cost seconds.
+    return `${type}:${String(version)}:${recursiveByteLength(providerVisiblePart(part))}`;
 }
 
 function messageCacheKey(

@@ -8,7 +8,7 @@
  */
 
 import { beforeEach, describe, expect, it } from "bun:test";
-import { createLkgEntryProjector, projectLkgEntry } from "./lkg-replay";
+import { captureLkgSlot, createLkgEntryProjector, projectLkgEntry, replayLkg } from "./lkg-replay";
 import {
     captureSlot,
     getLkgEntryWorkForTest,
@@ -126,6 +126,102 @@ describe("entry digest cache work per pass", () => {
         const projected = workDuring(() => project("s", served));
         expect(projected.hashedMessages).toBe(0);
         expect(projected.flattenedMessages).toBe(0);
+    });
+
+    it("neither digests nor invalidates a replay for a tool-metadata-only change", () => {
+        // An edit tool part carrying about 1 MB of workspace diagnostics, which
+        // the provider never receives, followed by the newest user message.
+        const turn = (diagnosticsText: string, errorOutput = "partial"): MessageLike[] => [
+            {
+                info: { id: "u1", role: "user", time: { created: 1 } } as never,
+                parts: [{ type: "text", text: "fix it" }],
+            },
+            {
+                info: {
+                    id: "a1",
+                    role: "assistant",
+                    time: { created: 2 },
+                    finish: "stop",
+                } as never,
+                parts: [
+                    {
+                        type: "tool",
+                        callID: "call-edit",
+                        tool: "edit",
+                        state: {
+                            status: "completed",
+                            input: { filePath: "/repo/a.ts" },
+                            output: "Edit applied successfully.",
+                            title: "a.ts",
+                            time: { start: 3, end: 4 },
+                            metadata: {
+                                diagnostics: Object.fromEntries(
+                                    Array.from({ length: 2_000 }, (_, file) => [
+                                        `/repo/src/f${file}.ts`,
+                                        [{ line: file, message: diagnosticsText.repeat(10) }],
+                                    ]),
+                                ),
+                            },
+                        },
+                    },
+                    {
+                        type: "tool",
+                        callID: "call-sleep",
+                        tool: "bash",
+                        state: {
+                            status: "error",
+                            input: { command: "sleep 9" },
+                            error: "aborted",
+                            metadata: { interrupted: true, output: errorOutput },
+                        },
+                    },
+                ],
+            },
+            {
+                info: { id: "u2", role: "user", time: { created: 5 } } as never,
+                parts: [{ type: "text", text: "next" }],
+            },
+        ];
+        const project = createLkgEntryProjector();
+        const first = turn("Cannot find name 'x'. ");
+        const firstWork = workDuring(() => {
+            expect(
+                captureLkgSlot({
+                    sessionId: "s",
+                    input: project("s", first),
+                    output: first,
+                    modelKey: "m/m",
+                    providerKey: "m",
+                    capturedAt: 1,
+                }),
+            ).toBe(true);
+        });
+        // The diagnostics were never flattened, even on the first pass.
+        expect(firstWork.flattenedChars).toBeLessThan(1_000);
+        const changed = turn("Property 'y' does not exist. ");
+        const work = workDuring(() => {
+            expect(project("s", changed).map((entry) => entry.contentDigest?.())).toEqual(
+                project("s", first).map((entry) => entry.contentDigest?.()),
+            );
+        });
+        expect(work.hashedMessages).toBe(0);
+        expect(work.comparedChars).toBeLessThan(1_000);
+        const replay = replayLkg({
+            sessionId: "s",
+            messages: changed,
+            modelKey: "m/m",
+            providerKey: "m",
+        });
+        expect(replay.ok).toBe(true);
+
+        // An interrupted call's output is provider-visible: it is digested and
+        // refuses a replay of the old bytes.
+        const interrupted = turn("Property 'y' does not exist. ", "partial, then more");
+        const visibleWork = workDuring(() => project("s", interrupted));
+        expect(visibleWork.hashedMessages).toBe(1);
+        expect(
+            replayLkg({ sessionId: "s", messages: interrupted, modelKey: "m/m", providerKey: "m" }),
+        ).toEqual({ ok: false, reason: "lkg_content_mismatch" });
     });
 
     it("hashes a message served again as the same object after an in-place edit", () => {
