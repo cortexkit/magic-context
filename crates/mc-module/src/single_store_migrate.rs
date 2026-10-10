@@ -2649,6 +2649,7 @@ fn render_check(
             .cloned()
             .unwrap_or_default();
         let inputs = M0ComposeInputs {
+            score_selector: mc_store::ScoreSelector::Base,
             session_id: &sample.session_id,
             project_path: &project,
             project_directory: "",

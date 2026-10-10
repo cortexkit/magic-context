@@ -2127,3 +2127,23 @@ fn commit_over_session(
         )
         .unwrap();
 }
+#[test]
+fn meta_unknown_keys_are_ignored_and_absent_score_watermark_is_base() {
+    let mut json = serde_json::to_value(ModuleMeta::default()).unwrap();
+    json.as_object_mut()
+        .unwrap()
+        .remove("score_selection_watermark");
+    json["future_score_projection_field"] = serde_json::json!({"anything": [1, 2]});
+    let meta = decode_small_meta(&json.to_string()).unwrap();
+    assert_eq!(meta.score_selection_watermark, 0);
+    let meta = ModuleMeta {
+        score_selection_watermark: 17,
+        ..meta
+    };
+    assert_eq!(
+        decode_small_meta(&encode_small_meta(&meta).unwrap())
+            .unwrap()
+            .score_selection_watermark,
+        17
+    );
+}

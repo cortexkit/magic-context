@@ -1073,7 +1073,13 @@ pub fn assemble_historian_firing(
     );
     let reference_compartments: Vec<ReferenceCompartment> = compartments
         .iter()
-        .map(ReferenceCompartment::from)
+        .map(|compartment| {
+            let mut reference = ReferenceCompartment::from(compartment);
+            if let Some(importance) = snapshot.importance_by_sequence.get(&compartment.sequence) {
+                reference.importance = Some(*importance);
+            }
+            reference
+        })
         .collect();
     let prompt_fit = fit_historian_prompt(&HistorianPromptFitInput {
         session_id: &config.session_id,
@@ -1918,6 +1924,10 @@ fn space_before_punct_regex() -> &'static Regex {
 
 #[cfg(test)]
 mod tests {
+    mod score_projection {
+        use super::*;
+        include!("historian_score_projection_tests.rs");
+    }
     use super::*;
 
     use crate::ck_wire::{

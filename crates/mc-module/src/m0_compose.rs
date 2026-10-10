@@ -50,6 +50,8 @@ impl From<McStoreError> for M0ComposeError {
 /// [`mc_store::ModuleMeta`] atomically with those bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct M0Composition {
+    /// The score-selection view captured with the history rows, not re-read at CAS.
+    pub score_selection_watermark: i64,
     /// The frozen m0 baseline bytes (docs + profile + decayed compartments + memories).
     pub m0_bytes: String,
     /// Optional image block appended after the m0 text block on the OpenCode wire.
@@ -106,6 +108,7 @@ pub struct M0MuralBlock {
 /// config).
 pub struct M0ComposeInputs<'a> {
     pub session_id: &'a str,
+    pub score_selector: mc_store::ScoreSelector,
     /// The project the store reads key off (resolved from the route binding, never the
     /// request body).
     pub project_path: &'a str,
@@ -429,6 +432,15 @@ fn render_m0_retry(
 /// check composes both sides with this same composer.
 pub trait M0Source {
     fn load_compartments(&self, session_id: &str) -> Result<Vec<StoredCompartment>, McStoreError>;
+    fn load_compartment_score_snapshot(
+        &self,
+        session_id: &str,
+        _selector: mc_store::ScoreSelector,
+    ) -> Result<mc_store::CompartmentScoreSnapshot, McStoreError> {
+        Ok(mc_store::CompartmentScoreSnapshot::base(
+            self.load_compartments(session_id)?,
+        ))
+    }
     fn resolve_workspace_membership(
         &self,
         project_path: &str,
@@ -443,6 +455,13 @@ pub trait M0Source {
 }
 
 impl M0Source for McStore {
+    fn load_compartment_score_snapshot(
+        &self,
+        session_id: &str,
+        selector: mc_store::ScoreSelector,
+    ) -> Result<mc_store::CompartmentScoreSnapshot, McStoreError> {
+        McStore::load_compartment_score_snapshot(self, session_id, selector)
+    }
     fn load_compartments(&self, session_id: &str) -> Result<Vec<StoredCompartment>, McStoreError> {
         McStore::load_compartments(self, session_id)
     }
@@ -489,7 +508,9 @@ pub(crate) fn compose_m0_from_store_timed<S: M0Source + ?Sized>(
     timings: &mut ComposeTimings,
 ) -> Result<M0Composition, M0ComposeError> {
     // --- compartments: the session history, coverage anchor, and folded watermark ---
-    let compartments = store.load_compartments(inputs.session_id)?;
+    let score_snapshot =
+        store.load_compartment_score_snapshot(inputs.session_id, inputs.score_selector)?;
+    let compartments = score_snapshot.compartments;
     // Store-pure coverage checks enforce strict ordering without assuming integer
     // contiguity: consumer producers may retire ordinal numbers permanently. The
     // transform layer has the live array and fails loud if a present message below
@@ -571,6 +592,12 @@ pub(crate) fn compose_m0_from_store_timed<S: M0Source + ?Sized>(
         .iter()
         .map(|compartment| {
             let mut rendered = DecayRenderCompartment::from(compartment);
+            if let Some(importance) = score_snapshot
+                .importance_by_sequence
+                .get(&compartment.sequence)
+            {
+                rendered.importance = Some(*importance);
+            }
             if !inputs.temporal_awareness {
                 rendered.start_date = None;
                 rendered.end_date = None;
@@ -605,6 +632,7 @@ pub(crate) fn compose_m0_from_store_timed<S: M0Source + ?Sized>(
     }
 
     Ok(M0Composition {
+        score_selection_watermark: score_snapshot.watermark,
         m0_bytes,
         mural,
         boundary_id,
@@ -771,6 +799,7 @@ mod tests {
             content_hash: None,
         };
         let inputs = M0ComposeInputs {
+            score_selector: mc_store::ScoreSelector::Base,
             session_id: "ses",
             project_path: "git:proj",
             project_directory: fixture.dir.path().to_str().unwrap(),
@@ -827,6 +856,7 @@ mod tests {
             .unwrap();
 
         let inputs = M0ComposeInputs {
+            score_selector: mc_store::ScoreSelector::Base,
             session_id: "ses_a",
             project_path: project,
             project_directory: project_dir.to_str().unwrap(),
@@ -860,6 +890,7 @@ mod tests {
         let store = &fixture.store;
         std::fs::write(dir.path().join("ARCHITECTURE.md"), "secret docs").unwrap();
         let inputs = M0ComposeInputs {
+            score_selector: mc_store::ScoreSelector::Base,
             session_id: "docs-off",
             project_path: "git:docs-off",
             project_directory: dir.path().to_str().unwrap(),
@@ -888,6 +919,7 @@ mod tests {
         std::fs::create_dir_all(&project_dir).unwrap();
 
         let inputs = M0ComposeInputs {
+            score_selector: mc_store::ScoreSelector::Base,
             session_id: "ses_empty",
             project_path: "git:proj",
             project_directory: project_dir.to_str().unwrap(),
@@ -937,6 +969,7 @@ mod tests {
             content_hash: Some("memory-off-mural".to_string()),
         };
         let inputs = M0ComposeInputs {
+            score_selector: mc_store::ScoreSelector::Base,
             session_id: "ses",
             project_path: "git:proj",
             project_directory: dir.path().to_str().unwrap(),
@@ -975,6 +1008,7 @@ mod tests {
                 content_hash: Some("legend-test".to_string()),
             };
             let active_inputs = M0ComposeInputs {
+                score_selector: mc_store::ScoreSelector::Base,
                 memory_enabled: true,
                 mural: Some(&image),
                 ..inputs
@@ -1002,6 +1036,7 @@ mod tests {
             .replace_compartments("ses_gap", &[comp(1, 1, 10, "m10"), comp(2, 20, 30, "m30")])
             .unwrap();
         let inputs = M0ComposeInputs {
+            score_selector: mc_store::ScoreSelector::Base,
             session_id: "ses_gap",
             project_path: "git:proj",
             project_directory: project_dir.to_str().unwrap(),
@@ -1054,6 +1089,7 @@ mod tests {
             .replace_compartments("pressure", &compartments)
             .unwrap();
         let inputs = M0ComposeInputs {
+            score_selector: mc_store::ScoreSelector::Base,
             session_id: "pressure",
             project_path: "git:pressure",
             project_directory: project_dir.to_str().unwrap(),
@@ -1318,6 +1354,7 @@ mod tests {
             .unwrap();
         let _ = ModuleMeta::default(); // (meta unused by the byte producer)
         let inputs = M0ComposeInputs {
+            score_selector: mc_store::ScoreSelector::Base,
             session_id: "ses_d",
             project_path: "git:proj",
             project_directory: project_dir.to_str().unwrap(),
