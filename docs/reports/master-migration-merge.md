@@ -119,3 +119,94 @@ establishes they are not introduced by this merge. Examples include pre-existing
 sidebar/historian/Pi tool fixtures, the temp-directory Node WASM dependency
 resolution failure, the `git rev-list` probe in the remote snapshot, and the
 CLI corrupted-page salvage fixture.
+
+## Subsequent signed-thinking step 2b merge
+
+The second merge parent is `210cd45941f363b66fa54742d43dda984a0df86b`, based on
+the same migration revision. It is merged after the master merge commit
+`9787c592bdb5cdfad2ce3fcc20aad2a84c98c624`, not squashed into that merge.
+`trigger-parking.ts` is the reviewed new module at
+`packages/plugin/src/hooks/magic-context/trigger-parking.ts`; no compatibility
+shim was added.
+
+There is one conflict, in `packages/pi-plugin/src/context-handler.ts` just before
+the pipeline result:
+
+- Master's `visibleCallIds` loop and `servedTagNumbers` calculation retain only
+  tag identities represented in the returned structured messages. A removed
+  call/result pair cannot certify its number merely because raw text quotes a
+  marker. Every line of that block is retained from the master merge.
+- Step 2b's `parkedTriggers.settle(pending-or-deferred-materialization,
+  emergency-eligible-and-unspent)` call and conditional map deletion retain
+  process-local parked permission while its underlying work is still pending.
+  Every line of that block is retained from the step-2b parent, after the tag
+  calculation and before returning the same result.
+- The result retains master's `servedTagNumbers`, migration's postprocess fields,
+  and step 2b's bust verdict: a pending materialization signal alone no longer
+  claims an edit unless `isCacheBustingPass` permits it.
+
+All other step-2b changes merged without conflict: the parked materialization /
+force permission masks; first-render-held and execute-held parking; the two Pi
+materialization drain guards; the OpenCode drift-watcher `!freezeM0M1` guard; and
+the empty-subagent drain condition
+`!(freezeM0M1 && m0M1EnabledForFold)` before consuming a materialization signal.
+The latter deliberately allows an empty subagent flush to finish because there
+is no synthetic history head or protected queued drop left to rebuild. The live
+95% force wall remains outside the parked 85% permission mask.
+
+The step-2b delta also imports golden-capture-compatible Rust audit assertions;
+it changes no Rust production source, schema constant, fingerprint or inventory.
+The Rust audit, Clippy and fmt are rerun for that fixture delta. TS and Pi full
+suites, typechecks, parking unit tests, and the v1/v2/Pi signed audits (including
+all `step2b_review_...` tests) are rerun for the final combined tree. Their
+failure names are compared against the independently executed parent receipts,
+not declared passing merely because their scripts exited nonzero on known
+fixtures.
+
+### Final combined receipts
+
+On Linux with Bun 1.4.2, the full final plugin suite reports 8,191 pass / 33
+baseline failures / 19 skip (8,243 tests, 779 files). Pi reports 1,682 pass / 144
+baseline failures / nine skip (1,835 tests, 184 files), plus its successful nested
+pure-replay test. CLI again reports 613 pass / two skip and the separate nine
+pass / one baseline repair-db failure; dashboard reports 162 pass. A name-set
+comparison against both parent runs is exact for every suite: no introduced or
+silently resolved failures. In particular, all three master admission-test
+names repaired by the explicit TypeScript-only mock method are now green in
+the complete suite, not only the focused rerun.
+
+The final default TS audit plus parking unit selection passes 119 tests; Pi
+passes 55. Strict mode reports 95 pass / the same 24 known TS failures and 49
+pass / the same six known Pi failures. All signed-prefix-parking and step-2b
+review tests, including both OpenCode generations' empty-subagent tests, pass
+in both modes. `bun run build`, the eight typecheck invocations and the final
+Rust audit/Clippy/fmt fixture gates pass or retain precisely the three documented
+Rust strict failures. The mc-module library and mc-store production code did
+not change in the second merge, so their earlier 1,856-test and 314-test passes
+remain applicable without repeating the expensive library parity run.
+
+AFT inspection remains partial because its checkout graph and Biome producer
+are unavailable. Its Rust analyzer reports a missing `injected_reductions`
+field in the integration fixture, but that field is `#[cfg(test)]` on the
+library-only build: both Cargo audit compilations and all-targets Clippy pass.
+No source change was made to satisfy that non-authoritative cfg diagnostic.
+Package-local Biome 2.5.1 checks supplement the authoritative compiler gates;
+the two warnings in the earlier Pi LKG check are pre-existing non-null assertions.
+The comment review found no unclear newly merged source comment; inherited
+historical review prose is retained rather than rewritten as part of a merge.
+
+The final-tree non-vacuity controls also restore the old empty-subagent drain
+predicate and remove the frozen-prefix drift-watcher guard independently. Each
+mutation fails exactly its selected named v1 audit test:
+`step2b review: v1 empty subagent flush leaves no standing signal under thinking`
+and `signed prefix parking: v1 > m0 drift watcher does not signal under kept thinking`.
+No other selected test fails (115 other audit tests are filtered out in each
+single-test control). Both changes are restored from the staged implementation
+with `touch` and an empty working diff before the final positive parking/review
+selection. None of the `NON-VACUITY BREAK` mutations is committed.
+
+After restoring both step-2b mutants, the focused `signed prefix parking|step2b
+review` selection passes 29 tests across the TS v1/v2 and Pi files (3,776
+expectations). Final Biome checks pass on five TS files and two Pi files, with
+one inherited unused `contextRefusalError` import warning in the postprocess
+module; no out-of-scope cleanup was applied.

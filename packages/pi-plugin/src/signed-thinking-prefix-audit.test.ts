@@ -19,6 +19,7 @@ import {
 } from "@magic-context/core/features/magic-context/compartment-storage";
 import { isPrefixBoundThinkingModel } from "@magic-context/core/features/magic-context/overflow-detection";
 import {
+	clearCachedM0M1,
 	getOrCreateSessionMeta,
 	getPendingOps,
 	getTagsBySession,
@@ -44,7 +45,10 @@ import {
 	withoutThinking,
 } from "../../plugin/src/hooks/magic-context/__tests__/strict-binding-mock";
 import {
+	__test,
 	clearContextHandlerSession,
+	hasPendingMaterialization,
+	hasPiParkedBustTrigger,
 	registerPiContextHandler,
 	signalPiHistoryRefresh,
 	signalPiPendingMaterialization,
@@ -248,6 +252,7 @@ interface Fixture {
 	) => void;
 	userTurn: (id: string, text: string) => void;
 	setPercent: (percent: number) => void;
+	setModel: (modelID: string) => void;
 	tagStatus: (callId: string) => string | undefined;
 	tag: (callId: string) => number;
 }
@@ -263,6 +268,7 @@ async function fixture(
 	subagent: boolean,
 	lane: Lane,
 	scenario: string,
+	injectionEnabled = true,
 ): Promise<Fixture> {
 	const db = createTestDb();
 	const sessionId = `pi-prefix-audit-${subagent ? "sub" : "pri"}-${lane.replace(/\W+/g, "-")}`;
@@ -288,11 +294,13 @@ async function fixture(
 		db,
 		protectedTokens: 4000,
 		todowriteEnabled: true,
-		injection: {
-			injectionBudgetTokens: 4000,
-			memoryEnabled: false,
-			injectDocs: false,
-		},
+		injection: injectionEnabled
+			? {
+					injectionBudgetTokens: 4000,
+					memoryEnabled: false,
+					injectDocs: false,
+				}
+			: undefined,
 		heuristics: {
 			keepReasoningTokens:
 				lane === "reasoning clearing (keep_reasoning_tokens)" ? 0 : 1_000_000,
@@ -308,6 +316,7 @@ async function fixture(
 	const messages: PiMessage[] = [];
 	const ids: string[] = [];
 	let percent = 20;
+	let liveModel = { ...MODEL };
 	const pass = async () => {
 		const source = structuredClone(messages);
 		if (!GOLDEN)
@@ -322,7 +331,7 @@ async function fixture(
 			);
 		const ctx = {
 			...fakeContext(sessionId, process.cwd(), ids, source),
-			model: MODEL,
+			model: liveModel,
 			getContextUsage: () => ({
 				tokens: percent * 1000,
 				percent,
@@ -338,6 +347,7 @@ async function fixture(
 			wire(output),
 			bustedThisPass,
 			mock.hasCurrentTurnThinking(wire(output)),
+			hasPiParkedBustTrigger(sessionId),
 		);
 		return { messages: output, bustedThisPass };
 	};
@@ -403,6 +413,9 @@ async function fixture(
 		sessionId,
 		mock,
 		served: [],
+		setModel: (id) => {
+			liveModel = { ...MODEL, id };
+		},
 		pass,
 		respond,
 		userTurn,
@@ -703,9 +716,10 @@ function withFixture(
 	lane: Lane,
 	body: (f: Fixture) => Promise<void>,
 	scenario = "mid-loop",
+	injectionEnabled = true,
 ) {
 	return async () => {
-		const f = await fixture(subagent, lane, scenario);
+		const f = await fixture(subagent, lane, scenario, injectionEnabled);
 		try {
 			await body(f);
 		} finally {
@@ -993,3 +1007,201 @@ for (const subagent of [false, true]) {
 		);
 	});
 }
+
+describe("signed prefix parking: Pi/OMP", () => {
+	for (const trigger of [
+		"flush-and-force",
+		"held-execute",
+		"first-render",
+	] as const) {
+		it(
+			`${trigger} is not a standing permission`,
+			withFixture(
+				false,
+				"/ctx-flush",
+				async (f) => {
+					await toolLoop(f, 4);
+					queuePendingOp(f.db, f.sessionId, f.tag("old-read-b"), "drop");
+					if (trigger === "first-render") {
+						clearCachedM0M1(f.db, f.sessionId);
+					} else {
+						if (trigger === "flush-and-force")
+							signalPiPendingMaterialization(f.sessionId);
+						f.setPercent(trigger === "held-execute" ? 76 : 85);
+						f.served = (await f.pass()).messages;
+						expect(f.mock.check(wire(f.served))).toBeNull();
+						expect(hasPiParkedBustTrigger(f.sessionId)).toBe(true);
+						if (trigger === "held-execute") f.setPercent(20);
+						else signalPiPendingMaterialization(f.sessionId);
+					}
+					let gate:
+						| { shouldApplyPendingOps: boolean; shouldRunHeuristics: boolean }
+						| undefined;
+					const stop = __test.setMutationGateObserverForTests((snapshot) => {
+						gate = snapshot;
+					});
+					try {
+						const held = await f.pass();
+						expect(gate?.shouldApplyPendingOps).toBe(false);
+						expect(gate?.shouldRunHeuristics).toBe(false);
+						expect(hasPendingMaterialization(f.sessionId)).toBe(true);
+						expect(getPendingOps(f.db, f.sessionId).length).toBe(1);
+						if (trigger !== "first-render") {
+							expect(held.bustedThisPass).toBe(false);
+							expect(f.mock.check(wire(held.messages))).toBeNull();
+						}
+						expect(wire((await f.pass()).messages)).toEqual(
+							wire(held.messages),
+						);
+						f.userTurn(
+							`parking-release-${trigger}`,
+							"Continue the parser work.",
+						);
+						const release = await f.pass();
+						expect(gate?.shouldApplyPendingOps).toBe(true);
+						expect(release.bustedThisPass).toBe(true);
+						expect(f.mock.check(wire(release.messages))).toBeNull();
+						expect(getPendingOps(f.db, f.sessionId).length).toBe(0);
+						expect(hasPendingMaterialization(f.sessionId)).toBe(false);
+						expect(hasPiParkedBustTrigger(f.sessionId)).toBe(false);
+						expect((await f.pass()).bustedThisPass).toBe(false);
+					} finally {
+						stop();
+					}
+				},
+				`parking-${trigger}`,
+			),
+		);
+	}
+
+	it(
+		"parked force cancels when pressure ends with no bust",
+		withFixture(
+			false,
+			"ctx_reduce drop (full removal)",
+			async (f) => {
+				await toolLoop(f, 4);
+				queuePendingOp(f.db, f.sessionId, f.tag("old-read-b"), "drop");
+				f.setPercent(85);
+				f.served = (await f.pass()).messages;
+				expect(hasPiParkedBustTrigger(f.sessionId)).toBe(true);
+				f.setPercent(20);
+				const cancelled = await f.pass();
+				expect(cancelled.bustedThisPass).toBe(false);
+				expect(hasPiParkedBustTrigger(f.sessionId)).toBe(false);
+				expect(f.mock.check(wire(cancelled.messages))).toBeNull();
+				f.userTurn("cancelled-release", "Continue the parser work.");
+				const next = await f.pass();
+				expect(next.bustedThisPass).toBe(false);
+				expect(f.mock.check(wire(next.messages))).toBeNull();
+				expect(getPendingOps(f.db, f.sessionId).length).toBe(1);
+			},
+			"parking-cancelled",
+		),
+	);
+});
+
+describe("step2b review: Pi/OMP", () => {
+	for (const subagent of [false, true]) {
+		it(
+			`model switch releases held work without a new user (${subagent ? "subagent" : "primary"})`,
+			withFixture(
+				subagent,
+				"/ctx-flush",
+				async (f) => {
+					await toolLoop(f, 4);
+					queuePendingOp(f.db, f.sessionId, f.tag("old-read-b"), "drop");
+					f.setPercent(76);
+					f.served = (await f.pass()).messages;
+					f.setPercent(20);
+					expect(getPendingOps(f.db, f.sessionId).length).toBe(1);
+					expect(hasPiParkedBustTrigger(f.sessionId)).toBe(true);
+					for (let i = 0; i < 3; i++) {
+						const held = await f.pass();
+						expect(held.bustedThisPass).toBe(false);
+						expect(wire(held.messages)).toEqual(wire(f.served));
+					}
+					f.setModel("claude-opus-4-6");
+					const release = await f.pass();
+					expect(release.bustedThisPass).toBe(true);
+					expect(getPendingOps(f.db, f.sessionId).length).toBe(0);
+					expect(hasPendingMaterialization(f.sessionId)).toBe(false);
+					expect(hasPiParkedBustTrigger(f.sessionId)).toBe(false);
+					expect((await f.pass()).bustedThisPass).toBe(false);
+				},
+				`review-model-${subagent}`,
+			),
+		);
+	}
+	it(
+		"85 parking does not disable the live 95 wall",
+		withFixture(
+			false,
+			"/ctx-flush",
+			async (f) => {
+				await toolLoop(f, 4);
+				queuePendingOp(f.db, f.sessionId, f.tag("old-read-b"), "drop");
+				signalPiPendingMaterialization(f.sessionId);
+				f.setPercent(85);
+				f.served = (await f.pass()).messages;
+				expect(hasPiParkedBustTrigger(f.sessionId)).toBe(true);
+				f.setPercent(90);
+				const held = await f.pass();
+				expect(held.bustedThisPass).toBe(false);
+				expect(wire(held.messages)).toEqual(wire(f.served));
+				f.setPercent(95);
+				const wall = await f.pass();
+				expect(wall.bustedThisPass).toBe(true);
+				expect(f.mock.check(wire(wall.messages))).toBeNull();
+				expect(getPendingOps(f.db, f.sessionId).length).toBe(1);
+				expect(hasPiParkedBustTrigger(f.sessionId)).toBe(true);
+				f.userTurn("review-wall-release", "Continue.");
+				const release = await f.pass();
+				expect(getPendingOps(f.db, f.sessionId).length).toBe(0);
+				expect(f.mock.check(wire(release.messages))).toBeNull();
+				f.setPercent(20);
+				expect((await f.pass()).bustedThisPass).toBe(false);
+			},
+			"review-wall",
+		),
+	);
+	it(
+		"pending signal with no held work drains normally",
+		withFixture(
+			false,
+			"/ctx-flush",
+			async (f) => {
+				expect(getPendingOps(f.db, f.sessionId).length).toBe(0);
+				signalPiPendingMaterialization(f.sessionId);
+				const result = await f.pass();
+				expect(f.mock.hasCurrentTurnThinking(wire(result.messages))).toBe(
+					false,
+				);
+				expect(hasPendingMaterialization(f.sessionId)).toBe(false);
+				expect(hasPiParkedBustTrigger(f.sessionId)).toBe(false);
+				expect((await f.pass()).bustedThisPass).toBe(false);
+			},
+			"review-empty-signal",
+		),
+	);
+});
+
+it(
+	"step2b review: Pi/OMP empty subagent flush leaves no standing signal under thinking",
+	withFixture(
+		true,
+		"/ctx-flush",
+		async (f) => {
+			await toolLoop(f, 4);
+			expect(getPendingOps(f.db, f.sessionId).length).toBe(0);
+			signalPiPendingMaterialization(f.sessionId);
+			const pass = await f.pass();
+			expect(f.mock.check(wire(pass.messages))).toBeNull();
+			expect(hasPendingMaterialization(f.sessionId)).toBe(false);
+			expect(hasPiParkedBustTrigger(f.sessionId)).toBe(false);
+			expect((await f.pass()).bustedThisPass).toBe(false);
+		},
+		"review-empty-subagent",
+		false,
+	),
+);

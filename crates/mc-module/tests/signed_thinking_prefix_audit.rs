@@ -1228,9 +1228,9 @@ fn step2_review_parked_lanes_replay_and_release_after_store_reopen() {
         f.arm_and_bust(false);
         let before = f.wire();
         f.served = f.pass();
-        assert_eq!(f.wire(), before, "{lane:?}: held pass changed bytes");
-        assert!(!f.served.prefix_bust_permitted);
-        assert!(f
+        audit_assert_eq!(f.wire(), before, "{lane:?}: held pass changed bytes");
+        audit_assert!(!f.served.prefix_bust_permitted);
+        audit_assert!(f
             .store
             .load_meta(&f.req.session_id)
             .unwrap()
@@ -1239,12 +1239,12 @@ fn step2_review_parked_lanes_replay_and_release_after_store_reopen() {
             .is_some());
         for _ in 0..3 {
             f.served = f.pass();
-            assert_eq!(
+            audit_assert_eq!(
                 f.wire(),
                 before,
                 "{lane:?}: pass without a new user changed bytes"
             );
-            assert!(!f.served.prefix_bust_permitted);
+            audit_assert!(!f.served.prefix_bust_permitted);
         }
         f.tool_loop(3);
         let before_reopen = f.wire();
@@ -1277,24 +1277,24 @@ fn step2_review_parked_lanes_replay_and_release_after_store_reopen() {
         })
         .unwrap();
         f.served = f.pass();
-        assert_eq!(
+        audit_assert_eq!(
             f.wire(),
             before_reopen,
             "{lane:?}: reopen changed held bytes"
         );
-        assert!(!f.served.prefix_bust_permitted);
+        audit_assert!(!f.served.prefix_bust_permitted);
         f.next_user_turn("review-reopen-release");
-        assert!(
+        audit_assert!(
             f.served.prefix_bust_permitted,
             "{lane:?}: release lost its permission"
         );
-        assert!(
+        audit_assert!(
             f.landed(&before_reopen, &f.wire()),
             "{lane:?}: release lost work"
         );
-        assert_eq!(f.mock.check(&f.wire()), None);
+        audit_assert_eq!(f.mock.check(&f.wire()), None);
         f.served = f.pass();
-        assert!(
+        audit_assert!(
             !f.served.prefix_bust_permitted,
             "{lane:?}: release needed a second bust"
         );
@@ -1307,16 +1307,16 @@ fn step2_review_model_switch_releases_parked_permission_without_new_user() {
     f.tool_loop(4);
     f.arm_and_bust(false);
     f.served = f.pass();
-    assert!(!f.served.prefix_bust_permitted);
+    audit_assert!(!f.served.prefix_bust_permitted);
     let turn = f.mock.turn;
     f.req.model_key = Some("anthropic/claude-opus-4-6".into());
     f.served = f.pass();
-    assert_eq!(f.mock.turn, turn);
-    assert!(f.served.prefix_bust_permitted);
+    audit_assert_eq!(f.mock.turn, turn);
+    audit_assert!(f.served.prefix_bust_permitted);
     let meta = f.store.load_meta(&f.req.session_id).unwrap().meta;
-    assert!(!meta.soft_refresh_pending);
-    assert!(meta.held_release.is_none());
-    assert!(f
+    audit_assert!(!meta.soft_refresh_pending);
+    audit_assert!(meta.held_release.is_none());
+    audit_assert!(f
         .store
         .load_pending_agent_drops(&f.req.session_id)
         .unwrap()
@@ -1348,17 +1348,17 @@ fn step2_review_subagent_inherited_delta_cannot_spend_all_held_permission() {
     let before_meta = f.store.load_meta(&f.req.session_id).unwrap().meta;
     for _ in 0..3 {
         f.served = f.pass();
-        assert_eq!(
+        audit_assert_eq!(
             f.wire(),
             before,
             "child changed the served prefix for inherited history work"
         );
-        assert!(!f.served.prefix_bust_permitted);
+        audit_assert!(!f.served.prefix_bust_permitted);
         let meta = f.store.load_meta(&f.req.session_id).unwrap().meta;
-        assert_eq!(meta.last_execute_ordinal, before_meta.last_execute_ordinal);
-        assert_eq!(meta.m1_revision, before_meta.m1_revision);
-        assert_eq!(meta.coverage_ordinal, before_meta.coverage_ordinal);
-        assert_eq!(
+        audit_assert_eq!(meta.last_execute_ordinal, before_meta.last_execute_ordinal);
+        audit_assert_eq!(meta.m1_revision, before_meta.m1_revision);
+        audit_assert_eq!(meta.coverage_ordinal, before_meta.coverage_ordinal);
+        audit_assert_eq!(
             f.store
                 .load_pending_agent_drops(&f.req.session_id)
                 .unwrap()
@@ -1383,12 +1383,12 @@ fn step2_review_parked_force_crosses_live_95_wall_without_spending_held_work() {
     for tokens in [90_000, 95_000, 96_000, 85_000] {
         f.set_usage(tokens);
         f.served = f.pass();
-        assert_eq!(f.wire(), before, "usage={tokens}: held work changed bytes");
-        assert_eq!(f.mock.check(&f.wire()), None);
+        audit_assert_eq!(f.wire(), before, "usage={tokens}: held work changed bytes");
+        audit_assert_eq!(f.mock.check(&f.wire()), None);
         let meta = f.store.load_meta(&f.req.session_id).unwrap().meta;
-        assert!(!meta.has_prior_emergency_drop);
-        assert!(meta.held_release.is_some());
-        assert_eq!(
+        audit_assert!(!meta.has_prior_emergency_drop);
+        audit_assert!(meta.held_release.is_some());
+        audit_assert_eq!(
             f.store
                 .load_pending_agent_drops(&f.req.session_id)
                 .unwrap()
@@ -1399,8 +1399,8 @@ fn step2_review_parked_force_crosses_live_95_wall_without_spending_held_work() {
     // Caller usage is not provider-proven final-wire overflow evidence; it must not
     // invent a refusal. Separate host tests price known-over frozen requests.
     f.next_user_turn("review-band-release");
-    assert!(f.served.prefix_bust_permitted);
-    assert!(f
+    audit_assert!(f.served.prefix_bust_permitted);
+    audit_assert!(f
         .store
         .load_pending_agent_drops(&f.req.session_id)
         .unwrap()

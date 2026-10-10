@@ -216,6 +216,7 @@ import {
     type TagTarget,
 } from "./transform-operations";
 import { logTransformTiming } from "./transform-stage-logger";
+import { ParkedBustTriggers } from "./trigger-parking";
 
 const DEGRADE_CACHE_WARNING_THRESHOLD = 10;
 /**
@@ -227,10 +228,16 @@ const SYSTEM_INJECTION_ACTIONABLE_TAIL_MESSAGES = 40;
 // forever in a long-running process — matches the other per-session caches.
 const degradedCacheCountBySession = new BoundedSessionMap<number>(100);
 const routinePressureAppliedBySession = new BoundedSessionMap<boolean>(100);
+const parkedBustTriggersBySession = new Map<string, ParkedBustTriggers>();
+
+export function hasParkedBustTrigger(sessionId: string): boolean {
+    return parkedBustTriggersBySession.get(sessionId)?.pending === true;
+}
 
 export function resetDegradedCacheCount(sessionId: string): void {
     degradedCacheCountBySession.delete(sessionId);
     routinePressureAppliedBySession.delete(sessionId);
+    parkedBustTriggersBySession.delete(sessionId);
 }
 
 export type DeferredCompactionMarkerClearOutcome =
@@ -1930,7 +1937,7 @@ export async function runPostTransformPhase(
     const deferredMaterializationAtPassStart = args.deferredMaterializationSessions.has(
         args.sessionId,
     );
-    const isExplicitFlush = pendingMaterializationAtPassStart;
+    let isExplicitFlush = pendingMaterializationAtPassStart;
     const deferredMaterializationWasPending = deferredMaterializationAtPassStart;
     const alreadyRanThisTurn =
         args.currentTurnId !== null &&
@@ -1977,7 +1984,7 @@ export async function runPostTransformPhase(
         !args.awaitedCompartmentRun &&
         activeCompartmentRun !== undefined;
     const deferredMaterialize = args.canConsumeDeferredLate && deferredMaterializationWasPending;
-    const materializationRequested = isExplicitFlush || deferredMaterialize;
+    let materializationRequested = isExplicitFlush || deferredMaterialize;
     // Persist eligible prefix work off-wire before authorizing automatic cleanup.
     // Execute may refresh m[1] without changing it: only changed bytes supply a ride.
     // A failed or contended advisory alone must never open the reduction lanes.
@@ -2029,6 +2036,17 @@ export async function runPostTransformPhase(
     const freezeM0M1 =
         args.freezeM0M1 === true ||
         (activeThinkingTurn && args.thinkingBindingRecoveryEnabledForModel === true);
+    const parkedTriggers =
+        parkedBustTriggersBySession.get(args.sessionId) ?? new ParkedBustTriggers();
+    parkedBustTriggersBySession.set(args.sessionId, parkedTriggers);
+    const triggerPermissions = parkedTriggers.permissions(
+        freezeM0M1,
+        pendingMaterializationAtPassStart || deferredMaterializationAtPassStart,
+        emergencyDropEligible,
+    );
+    isExplicitFlush &&= triggerPermissions.materialization;
+    materializationRequested =
+        isExplicitFlush || (deferredMaterialize && triggerPermissions.materialization);
     const foldDueDecision =
         m0M1EnabledForFold && args.m0M1 && !freezeM0M1
             ? mustMaterialize({
@@ -2061,7 +2079,11 @@ export async function runPostTransformPhase(
         (m0M1EnabledForFold &&
             !shouldCaptureCachedPrefix &&
             hasCompleteCachedM0M1(args.db, args.sessionId));
-    const firstRenderBust = m0M1EnabledForFold && !completeCachedPrefixAvailable;
+    const firstRenderBust = !freezeM0M1 && m0M1EnabledForFold && !completeCachedPrefixAvailable;
+    if (freezeM0M1 && m0M1EnabledForFold && !completeCachedPrefixAvailable) {
+        args.pendingMaterializationSessions.add(args.sessionId);
+        parkedTriggers.holdMaterialization();
+    }
     let foldExecutedThisPass = false;
     // The one bust permission an executed fold grants: true only when the fold
     // also loses the provider's cached prefix (see foldBustsServedPrefix). Every
@@ -2233,9 +2255,14 @@ export async function runPostTransformPhase(
     // cache policy, prevents this batch. The next real user releases the veto.
     if (
         args.schedulerDecision === "execute" &&
+        !emergencyDropEligible &&
         pendingOps.some((op) => newTargets.get(op.tagId)?.thinkingDropProtected)
-    )
+    ) {
         args.pendingMaterializationSessions.add(args.sessionId);
+        // Retaining a scheduler-requested drop must not let the materialization
+        // signal authorize unrelated cleanup on the next pass of this signed turn.
+        parkedTriggers.holdMaterialization();
+    }
     const formatPendingOpsDepth = (): string => {
         const depth = getPendingOpsCount(args.db, args.sessionId);
         return depth === null ? "not loaded (deferred pass)" : String(depth);
@@ -2251,8 +2278,11 @@ export async function runPostTransformPhase(
         force:
             emergencyDropEligible &&
             (args.contextUsage.percentage >= 95 ||
-                getEmergencyInputSample(args.db, args.sessionId) === 0),
-        explicitFlush: isExplicitFlush || (deferredMaterialize && !prefixPreflightFailed),
+                (triggerPermissions.force &&
+                    getEmergencyInputSample(args.db, args.sessionId) === 0)),
+        explicitFlush:
+            isExplicitFlush ||
+            (deferredMaterialize && triggerPermissions.materialization && !prefixPreflightFailed),
         publishedHistory:
             publishedM1RefreshedThisPass ||
             (!m0M1EnabledForFold &&
@@ -2286,6 +2316,14 @@ export async function runPostTransformPhase(
     // Every first-application lane and m[1] refresh uses this same permission.
     // It authorizes mutation; individual lanes may still find no eligible work.
     const isCacheBustingPass = publishedWorkDrainAllowed;
+    if (
+        freezeM0M1 &&
+        materializationRequested &&
+        (m0M1EnabledForFold ||
+            pendingOps.some((op) => newTargets.get(op.tagId)?.thinkingDropProtected))
+    )
+        parkedTriggers.holdMaterialization();
+    if (freezeM0M1 && rideSignals.force && shouldRunHeuristics) parkedTriggers.holdForce();
     const previousTemporalDecisions =
         args.temporalCandidates && !compactionOff
             ? new Map([
@@ -2845,11 +2883,12 @@ export async function runPostTransformPhase(
             // compartmentRunning had blocked us above, this drain is
             // intentionally NOT reached — the flag survives so the next
             // safe pass picks up the work.
-            // A frozen m[0]/m[1] pass did not materialize, so the request
-            // stays pending for the next pass that can.
+            // Keep the request when kept signed thinking prevents rebuilding the synthetic
+            // history head or applying a queued message drop. Subagents have no history
+            // head, so an empty request has no remaining work and must be consumed.
             if (
                 pendingMaterializationAtPassStart &&
-                !freezeM0M1 &&
+                !(freezeM0M1 && m0M1EnabledForFold) &&
                 !pendingOps.some((op) => newTargets.get(op.tagId)?.thinkingDropProtected)
             ) {
                 args.pendingMaterializationSessions.delete(args.sessionId);
@@ -3645,6 +3684,7 @@ export async function runPostTransformPhase(
     if (
         args.fullFeatureMode &&
         isCacheBustingPass &&
+        !freezeM0M1 &&
         args.m0M1 &&
         (!!args.m0M1.projectPath || !!args.m0M1.projectDirectory)
     ) {
@@ -4387,6 +4427,12 @@ export async function runPostTransformPhase(
     }
 
     logTransformTiming(args.sessionId, "pp.tailGuard", tTailGuard);
+    parkedTriggers.settle(
+        args.pendingMaterializationSessions.has(args.sessionId) ||
+            args.deferredMaterializationSessions.has(args.sessionId),
+        emergencyDropEligible && getEmergencyInputSample(args.db, args.sessionId) === 0,
+    );
+    if (!parkedTriggers.pending) parkedBustTriggersBySession.delete(args.sessionId);
     return {
         explicitMaterializedSuccessfully,
         deferredMaterializedSuccessfully,

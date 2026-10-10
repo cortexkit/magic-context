@@ -17,7 +17,7 @@
  * Findings: docs/reports/signed-thinking-prefix-edits-audit.md. Run with
  * MC_AUDIT_STRICT=1 to make every exposed lane fail on its strict-binding 400.
  */
-import { describe, it } from "bun:test";
+import { describe, it, spyOn } from "bun:test";
 import {
     appendCompartments,
     replaceAllCompartmentState,
@@ -26,6 +26,7 @@ import {
 import { runMigrations } from "../../features/magic-context/migrations";
 import { isPrefixBoundThinkingModel } from "../../features/magic-context/overflow-detection";
 import {
+    clearCachedM0M1,
     getOrCreateSessionMeta,
     getPendingOps,
     getTagsBySession,
@@ -33,6 +34,7 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { queueM0Mutation } from "../../features/magic-context/storage-m0-mutation-log";
 import { setPersistedCompactionMarkerState } from "../../features/magic-context/storage-meta-persisted";
 import { getReasoningRemovalState } from "../../features/magic-context/storage-reasoning-removal";
 import { createTagger } from "../../features/magic-context/tagger";
@@ -60,6 +62,7 @@ import { MARKER_SUMMARY_TEXT } from "./compaction-marker-manager";
 import { clearInjectionCache } from "./inject-compartments";
 import type { MessageLike } from "./tag-messages";
 import { clearMessageTokensCache, createTransform, type TransformDeps } from "./transform";
+import { hasParkedBustTrigger, resetDegradedCacheCount } from "./transform-postprocess-phase";
 
 const MODEL = { providerID: "anthropic", modelID: process.env.MC_AUDIT_MODEL ?? "claude-opus-5-5" };
 
@@ -208,6 +211,8 @@ interface Fixture {
     userTurn: (id: string, text: string) => void;
     setUsage: (percentage: number) => void;
     execute: (on: boolean) => void;
+    setModel: (modelID: string) => void;
+    lastHeuristicsTurnId: Map<string, string>;
     pendingMaterialization: Set<string>;
     historyRefresh: Set<string>;
     /**
@@ -289,8 +294,10 @@ async function fixture(
             ]),
         });
     const usage: TransformDeps["contextUsageMap"] = new Map();
+    const liveModel = new Map([[sessionId, { ...MODEL }]]);
     const pendingMaterialization = new Set<string>();
     const historyRefresh = new Set<string>();
+    const lastHeuristicsTurnId = new Map<string, string>();
     let decision: "execute" | "defer" = "defer";
     let bustedThisPass: boolean | undefined;
     const capture = new GoldenCapture(auditName(generation, subagent, lane, scenario));
@@ -305,7 +312,7 @@ async function fixture(
             storeGeneration: generation,
             tagger: createTagger(),
             scheduler: { shouldExecute: () => decision } as never,
-            liveModelBySession: new Map([[sessionId, MODEL]]),
+            liveModelBySession: liveModel,
             contextUsageMap: usage,
             // The smallest accepted floor; the current loop's newer steps fill it,
             // so the older work sits outside the protected tail.
@@ -315,7 +322,7 @@ async function fixture(
             sessionDirectoryBySession: new Map([[sessionId, dir]]),
             historyRefreshSessions: historyRefresh,
             pendingMaterializationSessions: pendingMaterialization,
-            lastHeuristicsTurnId: new Map(),
+            lastHeuristicsTurnId,
             smartDrops: true,
             keepReasoningTokens:
                 lane === "reasoning clearing (keep_reasoning_tokens)" ? 0 : 1_000_000,
@@ -327,8 +334,10 @@ async function fixture(
     const restart = () => {
         pendingMaterialization.clear();
         historyRefresh.clear();
+        lastHeuristicsTurnId.clear();
         clearInjectionCache(sessionId);
         clearMessageTokensCache(sessionId);
+        resetDegradedCacheCount(sessionId);
         transform = makeTransform();
     };
     const raw: MessageLike[] = [];
@@ -344,7 +353,12 @@ async function fixture(
                 messages,
                 isPrefixBoundThinkingModel(MODEL.providerID, MODEL.modelID),
             );
-        capture.write(wire(messages), bustedThisPass, mock.hasCurrentTurnThinking(wire(messages)));
+        capture.write(
+            wire(messages),
+            bustedThisPass,
+            mock.hasCurrentTurnThinking(wire(messages)),
+            hasParkedBustTrigger(sessionId),
+        );
         return { messages, bustedThisPass };
     };
     const respond: Fixture["respond"] = (served, parts, withThinking = true) => {
@@ -467,6 +481,8 @@ async function fixture(
         userTurn,
         setUsage,
         execute,
+        lastHeuristicsTurnId,
+        setModel: (modelID) => liveModel.set(sessionId, { ...MODEL, modelID }),
         pendingMaterialization,
         historyRefresh,
         restart,
@@ -1039,4 +1055,281 @@ for (const generation of ["v1", "v2"] as const) {
             );
         });
     }
+}
+
+for (const generation of ["v1", "v2"] as const) {
+    describe(`signed prefix parking: ${generation}`, () => {
+        it(
+            "parked flush and force release together without standing permission",
+            withFixture(
+                generation,
+                false,
+                "/ctx-flush",
+                async (f) => {
+                    await toolLoop(f, 4);
+                    queuePendingOp(f.db, f.sessionId, f.tag("old-read-b"), "drop");
+                    f.pendingMaterialization.add(f.sessionId);
+                    f.setUsage(85);
+                    f.served = (await f.pass()).messages;
+                    expect(f.mock.check(wire(f.served))).toBeNull();
+                    expect(hasParkedBustTrigger(f.sessionId)).toBe(true);
+                    // A repeated /ctx-flush shares the pending request; it must not authorize
+                    // removal of a newly appended placeholder in this same signed turn.
+                    f.pendingMaterialization.add(f.sessionId);
+                    f.respond(f.served, () => [{ type: "text", text: "[dropped §998§]" }], false);
+                    const held = await f.pass();
+                    expect(held.bustedThisPass).toBe(false);
+                    expect(JSON.stringify(wire(held.messages))).toContain("[dropped §998§]");
+                    expect(f.mock.check(wire(held.messages))).toBeNull();
+                    f.served = held.messages;
+                    expect(wire((await f.pass()).messages)).toEqual(wire(f.served));
+                    expect(getPendingOps(f.db, f.sessionId).length).toBe(1);
+                    f.userTurn("parking-release", "Continue the parser work.");
+                    const release = await f.pass();
+                    expect(release.bustedThisPass).toBe(true);
+                    expect(f.mock.check(wire(release.messages))).toBeNull();
+                    expect(getPendingOps(f.db, f.sessionId).length).toBe(0);
+                    expect(f.pendingMaterialization.has(f.sessionId)).toBe(false);
+                    expect(hasParkedBustTrigger(f.sessionId)).toBe(false);
+                    expect((await f.pass()).bustedThisPass).toBe(false);
+                },
+                "parking-combined",
+            ),
+        );
+
+        it(
+            "held execute signal is not a standing permission",
+            withFixture(
+                generation,
+                false,
+                "ctx_reduce drop (full removal)",
+                async (f) => {
+                    await toolLoop(f, 4);
+                    queuePendingOp(f.db, f.sessionId, f.tag("old-read-b"), "drop");
+                    f.execute(true);
+                    f.served = (await f.pass()).messages;
+                    f.execute(false);
+                    expect(f.pendingMaterialization.has(f.sessionId)).toBe(true);
+                    f.respond(f.served, () => [{ type: "text", text: "[dropped §998§]" }], false);
+                    const held = await f.pass();
+                    expect(held.bustedThisPass).toBe(false);
+                    expect(JSON.stringify(wire(held.messages))).toContain("[dropped §998§]");
+                    expect(f.mock.check(wire(held.messages))).toBeNull();
+                    f.userTurn("execute-release", "Continue the parser work.");
+                    const release = await f.pass();
+                    expect(release.bustedThisPass).toBe(true);
+                    expect(f.mock.check(wire(release.messages))).toBeNull();
+                    expect(getPendingOps(f.db, f.sessionId).length).toBe(0);
+                    expect((await f.pass()).bustedThisPass).toBe(false);
+                },
+                "parking-execute",
+            ),
+        );
+
+        it(
+            "first render is not a standing permission under kept thinking",
+            withFixture(
+                generation,
+                false,
+                "/ctx-flush",
+                async (f) => {
+                    await toolLoop(f, 4);
+                    clearCachedM0M1(f.db, f.sessionId);
+                    f.respond(f.served, () => [{ type: "text", text: "[dropped §998§]" }], false);
+                    const held = await f.pass();
+                    expect(JSON.stringify(wire(held.messages))).toContain("[dropped §998§]");
+                    expect(f.pendingMaterialization.has(f.sessionId)).toBe(true);
+                    expect(f.historyRefresh.has(f.sessionId)).toBe(false);
+                    f.userTurn("render-release", "Continue the parser work.");
+                    const release = await f.pass();
+                    expect(release.bustedThisPass).toBe(true);
+                    expect(f.mock.check(wire(release.messages))).toBeNull();
+                    expect((await f.pass()).bustedThisPass).toBe(false);
+                },
+                "parking-first-render",
+            ),
+        );
+
+        it(
+            "m0 drift watcher does not signal under kept thinking",
+            withFixture(
+                generation,
+                false,
+                "/ctx-flush",
+                async (f) => {
+                    await toolLoop(f, 4);
+                    appendCompartments(f.db, f.sessionId, [HISTORY_COMPARTMENT]);
+                    const mutation = queueM0Mutation(f.db, {
+                        sessionId: f.sessionId,
+                        mutationType: "compartment_delete",
+                    });
+                    expect(mutation.id).toBeGreaterThan(
+                        getOrCreateSessionMeta(f.db, f.sessionId).cachedM0MaxMutationId ?? 0,
+                    );
+                    f.setUsage(85);
+                    f.served = (await f.pass()).messages;
+                    expect(f.pendingMaterialization.has(f.sessionId)).toBe(false);
+                    expect(f.historyRefresh.has(f.sessionId)).toBe(false);
+                    const held = await f.pass();
+                    expect(held.bustedThisPass).toBe(false);
+                    expect(f.pendingMaterialization.has(f.sessionId)).toBe(false);
+                    expect(f.historyRefresh.has(f.sessionId)).toBe(false);
+                    f.userTurn("drift-release", "Continue the parser work.");
+                    const release = await f.pass();
+                    expect(release.bustedThisPass).toBe(true);
+                    expect(f.mock.check(wire(release.messages))).toBeNull();
+                },
+                "parking-drift",
+            ),
+        );
+
+        it(
+            "parked force cancels when pressure ends with no bust",
+            withFixture(
+                generation,
+                false,
+                "ctx_reduce drop (full removal)",
+                async (f) => {
+                    await toolLoop(f, 4);
+                    queuePendingOp(f.db, f.sessionId, f.tag("old-read-b"), "drop");
+                    f.setUsage(85);
+                    f.served = (await f.pass()).messages;
+                    expect(hasParkedBustTrigger(f.sessionId)).toBe(true);
+                    f.setUsage(20);
+                    const cancelled = await f.pass();
+                    expect(cancelled.bustedThisPass).toBe(false);
+                    expect(hasParkedBustTrigger(f.sessionId)).toBe(false);
+                    expect(f.mock.check(wire(cancelled.messages))).toBeNull();
+                    f.userTurn("cancelled-release", "Continue the parser work.");
+                    const next = await f.pass();
+                    expect(next.bustedThisPass).toBe(false);
+                    expect(f.mock.check(wire(next.messages))).toBeNull();
+                    expect(getPendingOps(f.db, f.sessionId).length).toBe(1);
+                },
+                "parking-cancelled",
+            ),
+        );
+    });
+}
+
+for (const generation of ["v1", "v2"] as const) {
+    describe(`step2b review: ${generation}`, () => {
+        for (const subagent of [false, true]) {
+            it(
+                `model switch keeps the issuer boundary but a new user releases (${subagent ? "subagent" : "primary"})`,
+                withFixture(
+                    generation,
+                    subagent,
+                    "/ctx-flush",
+                    async (f) => {
+                        await toolLoop(f, 4);
+                        queuePendingOp(f.db, f.sessionId, f.tag("old-read-b"), "drop");
+                        f.execute(true);
+                        f.served = (await f.pass()).messages;
+                        f.execute(false);
+                        expect(getPendingOps(f.db, f.sessionId).length).toBe(1);
+                        expect(hasParkedBustTrigger(f.sessionId)).toBe(true);
+                        for (let i = 0; i < 3; i++) {
+                            const held = await f.pass();
+                            expect(held.bustedThisPass).toBe(false);
+                            expect(wire(held.messages)).toEqual(wire(f.served));
+                        }
+                        f.setModel("claude-opus-4-6");
+                        const switched = await f.pass();
+                        // OpenCode still uses the last assistant's model to protect its
+                        // kept signatures; changing the live route alone does not end that turn.
+                        expect(switched.bustedThisPass).toBe(false);
+                        expect(getPendingOps(f.db, f.sessionId).length).toBe(1);
+                        f.userTurn("review-model-release", "Continue on the new model.");
+                        const release = await f.pass();
+                        expect(release.bustedThisPass).toBe(true);
+                        expect(getPendingOps(f.db, f.sessionId).length).toBe(0);
+                        expect(f.pendingMaterialization.has(f.sessionId)).toBe(false);
+                        expect(hasParkedBustTrigger(f.sessionId)).toBe(false);
+                        expect((await f.pass()).bustedThisPass).toBe(false);
+                    },
+                    `review-model-${subagent}`,
+                ),
+            );
+        }
+        it(
+            "85 parking does not disable the live 95 wall",
+            withFixture(
+                generation,
+                false,
+                "/ctx-flush",
+                async (f) => {
+                    await toolLoop(f, 4);
+                    queuePendingOp(f.db, f.sessionId, f.tag("old-read-b"), "drop");
+                    f.pendingMaterialization.add(f.sessionId);
+                    f.setUsage(85);
+                    f.served = (await f.pass()).messages;
+                    expect(hasParkedBustTrigger(f.sessionId)).toBe(true);
+                    f.setUsage(90);
+                    const held = await f.pass();
+                    expect(held.bustedThisPass).toBe(false);
+                    expect(wire(held.messages)).toEqual(wire(f.served));
+                    f.setUsage(95);
+                    const observeHeuristics = spyOn(f.lastHeuristicsTurnId, "set");
+                    const wall = await f.pass();
+                    // The wall must open the live cleanup gate even if admission holds
+                    // every edit and the wire therefore reports no actual cache bust.
+                    expect(observeHeuristics.mock.calls.length).toBe(1);
+                    observeHeuristics.mockRestore();
+                    expect(f.mock.check(wire(wall.messages))).toBeNull();
+                    expect(getPendingOps(f.db, f.sessionId).length).toBe(1);
+                    expect(hasParkedBustTrigger(f.sessionId)).toBe(true);
+                    f.userTurn("review-wall-release", "Continue.");
+                    const release = await f.pass();
+                    expect(getPendingOps(f.db, f.sessionId).length).toBe(0);
+                    expect(f.mock.check(wire(release.messages))).toBeNull();
+                    f.setUsage(20);
+                    expect((await f.pass()).bustedThisPass).toBe(false);
+                },
+                "review-wall",
+            ),
+        );
+        it(
+            "pending signal with no held work drains normally",
+            withFixture(
+                generation,
+                false,
+                "/ctx-flush",
+                async (f) => {
+                    expect(getPendingOps(f.db, f.sessionId).length).toBe(0);
+                    f.pendingMaterialization.add(f.sessionId);
+                    const result = await f.pass();
+                    expect(f.mock.hasCurrentTurnThinking(wire(result.messages))).toBe(false);
+                    expect(f.pendingMaterialization.has(f.sessionId)).toBe(false);
+                    expect(hasParkedBustTrigger(f.sessionId)).toBe(false);
+                    expect((await f.pass()).bustedThisPass).toBe(false);
+                },
+                "review-empty-signal",
+            ),
+        );
+    });
+}
+
+for (const generation of ["v1", "v2"] as const) {
+    it(
+        `step2b review: ${generation} empty subagent flush leaves no standing signal under thinking`,
+        withFixture(
+            generation,
+            true,
+            "/ctx-flush",
+            async (f) => {
+                await toolLoop(f, 4);
+                expect(getPendingOps(f.db, f.sessionId).length).toBe(0);
+                f.pendingMaterialization.add(f.sessionId);
+                const pass = await f.pass();
+                expect(f.mock.check(wire(pass.messages))).toBeNull();
+                // This child renders no synthetic history head and has no queued
+                // message drops, so its flush has no blocked operation to retry.
+                expect(f.pendingMaterialization.has(f.sessionId)).toBe(false);
+                expect(hasParkedBustTrigger(f.sessionId)).toBe(false);
+                expect((await f.pass()).bustedThisPass).toBe(false);
+            },
+            "review-empty-subagent",
+        ),
+    );
 }
