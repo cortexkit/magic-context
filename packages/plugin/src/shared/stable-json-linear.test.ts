@@ -97,13 +97,13 @@ describe("stableStringify", () => {
     });
 
     it("copies a deeply nested value once, not once per level", () => {
-        // 3,000 levels around a 1 MB string: joining at every level copied about
-        // 3 GB of text.
-        let node: unknown = { body: "x".repeat(1_000_000) };
+        // 3,000 levels around a 2 MB string: joining at every level copied about
+        // 6 GB of text (over a second); one copy takes a few milliseconds.
+        let node: unknown = { body: "x".repeat(2_000_000) };
         for (let depth = 0; depth < 3_000; depth += 1) node = { child: node, depth };
         const started = performance.now();
         const text = stableStringify(node);
-        expect(text.length).toBeGreaterThan(1_000_000);
-        expect(performance.now() - started).toBeLessThan(1_000);
+        expect(text.length).toBeGreaterThan(2_000_000);
+        expect(performance.now() - started).toBeLessThan(300);
     }, 30_000);
 });
