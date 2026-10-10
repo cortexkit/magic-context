@@ -34,6 +34,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+#[cfg(test)]
+#[path = "policy_summary_review_tests.rs"]
+mod review_tests;
+
 /// When more than this many policy rows changed since the summary was taken,
 /// rebuild it from every part instead of replaying the changes.
 const CHANGE_CAP: usize = 4096;
