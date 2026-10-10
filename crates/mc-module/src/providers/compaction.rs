@@ -1749,7 +1749,8 @@ mod host_tests {
             ..Default::default()
         };
         for s in [&store, &os] {
-            s.replace_compartments("s", std::slice::from_ref(&baseline)).unwrap();
+            s.replace_compartments("s", std::slice::from_ref(&baseline))
+                .unwrap();
         }
         let mut expected = Value::Null;
         for _ in 0..2 {
