@@ -6101,8 +6101,10 @@ fn apply_once(
         pending_overlays.max_seen_ordinal = None;
     }
     if !prefix_replay_must_be_preserved {
+        // Pending IDs suppress tag/hint rendering. Preserve Claude Code's existing behavior:
+        // its mutation passes drain those IDs, even when current-turn thinking is kept.
         meta.pending_tag_block_ids
-            .retain(|id| !admit_block_id(&admission, id));
+            .retain(|id| trigger_holds_enabled && !admit_block_id(&admission, id));
     } else if matches!(
         serializer_profile,
         Some(SerializerProfile::OpencodeAiSdk | SerializerProfile::OwnedBroca)
@@ -6170,7 +6172,7 @@ fn apply_once(
         }
         if !prefix_replay_must_be_preserved {
             meta.pending_user_hint_block_ids
-                .retain(|id| !admit_block_id(&admission, id));
+                .retain(|id| trigger_holds_enabled && !admit_block_id(&admission, id));
         }
     }
     timings.user_hint = elapsed_ms(user_hint_started_at);
@@ -6274,7 +6276,9 @@ fn apply_once(
     {
         meta.soft_refresh_pending = false;
     }
-    if is_bust_pass && admission.admit(crate::edit_admission::EditCoord::Prefix) {
+    if is_bust_pass
+        && (!trigger_holds_enabled || admission.admit(crate::edit_admission::EditCoord::Prefix))
+    {
         if let Some(guidance_date) = ctx.guidance_date.as_ref() {
             meta.guidance_date = guidance_date.clone();
         }
