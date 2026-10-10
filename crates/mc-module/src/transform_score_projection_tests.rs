@@ -504,37 +504,41 @@ fn review_downgrade_meta_rewrite_must_not_adopt_unserved_scores_on_marker_hard()
     let ctx = pctx("git:proj", "/nonexistent-docs", 0);
     s.publish_score_for_test("ses", 1, 1).unwrap();
     transform(&s, &request, &ctx).unwrap();
-    let applied = transform(&s, &request, &ctx).unwrap();
+    let baseline = transform(&s, &request, &ctx).unwrap();
     assert_applied(&s, 1, 2);
     s.publish_score_for_test("ses", 2, 1).unwrap();
-    let before = s.load("ses").unwrap();
-    // Older ModuleMeta deserializers ignore unknown keys and their next meta
-    // serialization drops the applied watermark while leaving frozen m0 intact.
-    let mut old_meta = before.meta.clone();
-    old_meta.score_selection_watermark = 0;
-    assert!(!serde_json::to_value(&old_meta)
-        .unwrap()
-        .as_object()
-        .unwrap()
-        .contains_key("score_selection_watermark"));
-    s.commit("ses", before.row_version, &before.core, &old_meta)
-        .unwrap();
-    drop(s);
-    let s = store(dir.path());
-    assert_eq!(s.load("ses").unwrap().core, before.core);
-    assert_eq!(s.load("ses").unwrap().meta.score_selection_watermark, 0);
-    let replay = transform(&s, &request, &ctx).unwrap();
-    assert_ne!(replay.action, "HARD");
-    assert_eq!(replay.messages(), applied.messages());
-    mark_epoch(&s);
-    let marker = transform(&s, &request, &ctx).unwrap();
-    assert_eq!(marker.action, "HARD");
-    assert!(
-        !marker.prefix_bust_permitted && marker.messages() == applied.messages(),
-        "a downgraded meta-only rewrite turned an unchanged epoch marker into a prefix bust: watermark={}, pending score served={}",
-        s.load("ses").unwrap().meta.score_selection_watermark,
-        m0_bytes(&marker).contains("detail-P2-2;")
+    assert_eq!(
+        s.module_store_schema_version().unwrap(),
+        mc_store::LATEST_MIGRATION_VERSION
     );
+    drop(s);
+    let before = std::fs::read(dir.path().join("store.db")).unwrap();
+    // This opener carries only migrations through v63, matching the placed
+    // pre-rescore binary. A newer store.db must be refused before a metadata
+    // rewrite; context.db's table-shape compatibility is a separate check.
+    let descriptor = crate::test_support::descriptor(dir.path());
+    let Err(refusal) = McStore::open_with_schema_ceiling_for_test(&descriptor, 63) else {
+        panic!("the pre-rescore writer must be refused before it can discard W");
+    };
+    assert!(
+        matches!(refusal, mc_store::McStoreError::StoreAheadOfBinary {
+        db_version, binary_max: 63,
+    } if db_version == mc_store::LATEST_MIGRATION_VERSION)
+    );
+    assert_eq!(std::fs::read(dir.path().join("store.db")).unwrap(), before);
+    let reopened = store(dir.path());
+    assert_applied(&reopened, 1, 2);
+    let replay = transform(&reopened, &request, &ctx).unwrap();
+    assert_ne!(replay.action, "HARD");
+    assert_eq!(replay.messages(), baseline.messages());
+    mark_epoch(&reopened);
+    let marker = transform(&reopened, &request, &ctx).unwrap();
+    assert_eq!(marker.action, "HARD");
+    assert!(!marker.prefix_bust_permitted);
+    assert_eq!(marker.messages(), baseline.messages());
+    assert_applied(&reopened, 1, 2);
+    assert!(m0_bytes(&marker).contains("detail-P1-2;"));
+    assert!(!m0_bytes(&marker).contains("detail-P2-2;"));
 }
 
 #[test]

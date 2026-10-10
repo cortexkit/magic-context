@@ -3278,6 +3278,10 @@ pub const LATEST_MIGRATION_VERSION: u32 = {
     latest
 };
 
+/// Released builds serving applied score selections must support store version
+/// 67 or later and preserve their watermark when rewriting cache metadata.
+pub const SCORE_SELECTION_WATERMARK_STORE_FENCE: u32 = 67;
+
 /// Whether this binary can serve a store whose project rows have been moved into the host's
 /// database ("single-store mode").
 ///
@@ -7917,6 +7921,21 @@ impl McStore {
 
     pub fn open(descriptor: &StorageDescriptor) -> Result<Self, McStoreError> {
         Self::open_with_private_permissions(descriptor, true)
+    }
+
+    /// Exercise the real opener with a shorter migration chain. Older stores
+    /// migrate normally; a newer recorded version is refused, never downgraded.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_with_schema_ceiling_for_test(
+        descriptor: &StorageDescriptor,
+        ceiling: u32,
+    ) -> Result<Self, McStoreError> {
+        let chain: Vec<Migration> = MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= ceiling)
+            .cloned()
+            .collect();
+        Self::open_with_migrations(descriptor, false, &chain)
     }
 
     pub fn open_with_private_permissions(

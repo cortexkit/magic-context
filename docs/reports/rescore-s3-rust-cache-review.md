@@ -2,7 +2,73 @@
 
 ## Decision
 
-**No-merge as-is.** Forward-only rendering and CAS behavior pass this review, but a downgrade/upgrade round trip loses the applied score view and lets a pending rescore originate a provider-prefix bust on an otherwise byte-identical marker HARD.
+**Follow-up resolution: the placed old writer is fenced out.** The original
+review below found a real metadata-loss hazard on a v63 scratch store, but that
+probe did not first migrate the store to the branch's existing v67 fence. The
+follow-up ran the actual placed executable against a branch-migrated store and
+observed refusal, not a metadata rewrite. The original finding and verification
+record are retained below as historical evidence; the shipping requirement is
+now pinned by store-level watermark round-trip and old-opener refusal tests.
+
+### Real-executable fence probe
+
+- Copied `ck-mc 0.1.0 (77f54a691090a8927c3686735e912e46789e25c4)` and
+  `ck-subc 0.20.68` into `.tmp-rescore-fence/bin/` inside the editing worktree.
+- A small Mac-native fixture executable linked this branch's `mc-store` and
+  called its actual `McStore::open`, applying migrations through v67. It committed
+  a scratch cache row with W=1. The actual `cortexkit_schema_version` ledger
+  contained all `mc_cache` versions 1–67; no version was inserted by hand.
+- `HermeticSubcStack` ran the copied old module/daemon with a throwaway data root,
+  project, HOME, CFFIXED_USER_HOME, XDG config/data/cache roots and TMPDIR. No
+  live store or daemon was opened, replaced or restarted. The attempted transform
+  returned this terminal refusal:
+
+```text
+storage open refused and is not retried before restart:
+reason_code=store_ahead_of_binary db_version=67 binary_max=63
+reason=store.db schema is v67 but this ck-mc build only knows up to v63;
+update ck-mc to a build that knows v67, or roll back by restoring ck-mc
+together with context.db and store.db from the same backup
+descriptor_origin=dev_fallback (terminal)
+```
+
+- `lsof -p 79404,79388` captured the isolated module and daemon's descriptors
+  before teardown: neither retained a `store.db` or `context.db` handle after
+  refusal. All test-created runtime/config/log paths were inside the throwaway
+  tree. The entire cache-row snapshot and real migration ledger were equal
+  before/after; the cache snapshot SHA-256 was
+  `be2e62c592f21c3d2bfdef6d2ceda2219055938bf1d8afb4561e22ee6d27bacf`.
+- Evidence and the executable probe source remain under ignored
+  `.tmp-rescore-fence/`, outside regenerable build output. An initial read-only
+  Bun SQLite inspection failed to open the WAL database; writable scratch-only
+  inspection succeeded. The definitive comparison reads the real schema ledger,
+  not a guessed migration-table name.
+
+**Case 1 holds for the placed binary:** store.db's v67-vs-v63 fence prevents the
+rewrite before context.db fingerprint/lane tolerance could authorize writes.
+No new migration or applied-view sidecar is needed. The existing v67 fence is
+paired with watermark-preserving serialization in the release and structural
+tests. Same-ceiling intermediate development builds that lack that serialization
+are not supported rollback artifacts. See the design's “Rust applied-score
+rollback fence” section for the release and paired-backup rollback requirement.
+
+The follow-up's final targeted verification passes all **17** Rust score
+projection tests, including the revised downgrade regression and every imported
+CAS/interleaving/pressure probe. The full `mc-store` library suite passes **318**
+tests with **5** ignored, and the TS/Pi renderer parity companion passes **1**
+test with **36** assertions. Package-scoped Rust typecheck and all-target Clippy
+with `-D warnings` also pass.
+
+Two staged/restored mutations establish that the new guards are not vacuous:
+dropping the watermark during serialization fails only
+`supported_store_fences_round_trip_applied_score_watermark_with_frozen_head`
+(0 instead of 17), while `base_selector_ignores_sidecars` stays green. Bypassing
+the store-ahead refusal fails only the revised downgrade regression at “the
+pre-rescore writer must be refused before it can discard W,” while
+`probe_uses_committed_view_and_writes_no_cache_state` stays green. Both applied
+diffs were non-empty; checkout-plus-touch restoration left empty working diffs
+before final verification. No migration statements or production cache-render
+classification changed in this resolution.
 
 Reviewed product revision: `95c21df93aa5c7e30b5f40ffdb771e732bc034e8`, against `192f6346b139fff93764c561c91dba4be0f8c3a8`. The comparison implementation is the TypeScript OpenCode plugin and Pi/OMP plugin rescore change at `5e00954e1bdff3b96efb33cf3dbd17348bd848c9` (a sibling commit on the same base, not present in the Rust checkout). This review changes **tests and this report only**; no product fix or compatibility shim is included.
 

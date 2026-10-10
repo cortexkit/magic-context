@@ -185,3 +185,79 @@ fn score_view_is_evaluated_in_the_base_rows_read_transaction() {
     assert_eq!(latest.watermark, 1);
     assert_eq!(latest.importance_by_sequence[&1], 99);
 }
+
+#[test]
+fn supported_store_fences_round_trip_applied_score_watermark_with_frozen_head() {
+    use crate::{LATEST_MIGRATION_VERSION, SCORE_SELECTION_WATERMARK_STORE_FENCE};
+    const { assert!(LATEST_MIGRATION_VERSION >= SCORE_SELECTION_WATERMARK_STORE_FENCE) };
+    for ceiling in SCORE_SELECTION_WATERMARK_STORE_FENCE..=LATEST_MIGRATION_VERSION {
+        let dir = tempfile::tempdir().unwrap();
+        let descriptor = cortexkit_store_types::StorageDescriptor {
+            module_id: "magic-context-test".into(),
+            storage_namespace: "mc_cache".into(),
+            isolation: cortexkit_store_types::Isolation::Module,
+            backend: cortexkit_store_types::StorageBackend::Sqlite {
+                path: dir.path().join("store.db").to_string_lossy().into_owned(),
+            },
+        };
+        let mut core = cortexkit_cache_core::CoreState::default();
+        core.frozen_units.push(cortexkit_cache_core::FrozenUnit {
+            key: "m0".into(),
+            kind: "history".into(),
+            frozen_payload: "already served at selection 17".into(),
+            durability_class: cortexkit_cache_core::DurabilityClass::Lineage,
+            reset_rule: String::new(),
+        });
+        {
+            let store = McStore::open_with_schema_ceiling_for_test(&descriptor, ceiling).unwrap();
+            assert_eq!(store.module_store_schema_version().unwrap(), ceiling);
+            let meta = crate::ModuleMeta {
+                score_selection_watermark: 17,
+                ..Default::default()
+            };
+            store.commit("scored", None, &core, &meta).unwrap();
+        }
+        // A supported writer's meta-only update must not forget the selection
+        // represented by head bytes it leaves untouched.
+        {
+            let store = McStore::open_with_schema_ceiling_for_test(&descriptor, ceiling).unwrap();
+            let mut loaded = store.load("scored").unwrap();
+            assert_eq!(loaded.meta.score_selection_watermark, 17);
+            loaded.meta.guidance_date = "metadata rewrite".into();
+            store
+                .commit_meta("scored", loaded.row_version, &loaded.meta)
+                .unwrap();
+        }
+        let before = std::fs::read(dir.path().join("store.db")).unwrap();
+        for excluded_ceiling in [63, 64, 65, 66] {
+            let Err(refusal) =
+                McStore::open_with_schema_ceiling_for_test(&descriptor, excluded_ceiling)
+            else {
+                panic!("an excluded old writer opened a scored head at fence {ceiling}");
+            };
+            assert!(matches!(refusal, crate::McStoreError::StoreAheadOfBinary {
+                db_version, binary_max,
+            } if db_version == ceiling && binary_max == excluded_ceiling));
+        }
+        assert_eq!(std::fs::read(dir.path().join("store.db")).unwrap(), before);
+        let store = McStore::open_with_schema_ceiling_for_test(&descriptor, ceiling).unwrap();
+        let loaded = store.load("scored").unwrap();
+        assert_eq!(loaded.meta.score_selection_watermark, 17);
+        assert_eq!(loaded.core.frozen_units, core.frozen_units);
+        let raw_meta = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT meta FROM mc_cache_state WHERE session_id = 'scored'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&raw_meta).unwrap()
+                ["score_selection_watermark"],
+            17
+        );
+    }
+}
