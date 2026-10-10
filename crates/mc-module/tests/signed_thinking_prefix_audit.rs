@@ -1144,6 +1144,254 @@ fn claude_code_held_flush_retains_legacy_profile_gate() {
 }
 
 #[test]
+fn step2_review_claude_code_gate_preserves_guidance_adoption() {
+    let mut f = Fixture::new(
+        "claude-code-anthropic",
+        false,
+        Lane::Flush,
+        "review-guidance-gate",
+    );
+    f.tool_loop(4);
+    f.arm_and_bust(false);
+    f.ctx.guidance_date = Some("2026-09-02".into());
+    f.served = f.pass();
+    let meta = f.store.load_meta(&f.req.session_id).unwrap().meta;
+    assert!(f.served.prefix_bust_permitted);
+    assert!(!meta.soft_refresh_pending);
+    assert!(meta.held_release.is_none());
+    // Claude Code is excluded from this rollout: its existing flush also adopts the
+    // guidance date used by the next system prompt, not just the flush and parking flags.
+    assert_eq!(
+        meta.guidance_date, "2026-09-02",
+        "Claude Code guidance behavior changed despite the profile gate"
+    );
+}
+
+#[test]
+fn step2_review_claude_code_gate_preserves_pending_overlay_drain() {
+    let mut f = Fixture::new(
+        "claude-code-anthropic",
+        false,
+        Lane::Flush,
+        "review-overlay-gate",
+    );
+    f.tool_loop(4);
+    f.arm_and_bust(false);
+    let mut snapshot = f.store.load_meta(&f.req.session_id).unwrap();
+    snapshot
+        .meta
+        .pending_tag_block_ids
+        .insert("step-1#0".into());
+    snapshot
+        .meta
+        .pending_user_hint_block_ids
+        .insert("step-1#0".into());
+    f.store
+        .commit_meta(&f.req.session_id, snapshot.row_version, &snapshot.meta)
+        .unwrap();
+    f.req.auto_search_enabled = true;
+    f.served = f.pass();
+    let meta = f.store.load_meta(&f.req.session_id).unwrap().meta;
+    assert!(f.served.prefix_bust_permitted);
+    assert!(!meta.soft_refresh_pending);
+    assert!(meta.held_release.is_none());
+    // Pending overlays were drained on a Claude Code mutation pass before this rollout.
+    // A profile gate must cover these fields as well as the trigger flags.
+    assert!(
+        meta.pending_tag_block_ids.is_empty() && meta.pending_user_hint_block_ids.is_empty(),
+        "Claude Code pending overlays changed despite the profile gate: tags={:?}, hints={:?}",
+        meta.pending_tag_block_ids,
+        meta.pending_user_hint_block_ids
+    );
+}
+
+#[test]
+fn step2_review_parked_lanes_replay_and_release_after_store_reopen() {
+    for lane in [Lane::DropFull, Lane::Flush, Lane::Caveman, Lane::Image] {
+        let mut f = Fixture::new("opencode-aisdk", false, lane, "review-reopen");
+        f.tool_loop(4);
+        f.arm_and_bust(false);
+        let before = f.wire();
+        f.served = f.pass();
+        assert_eq!(f.wire(), before, "{lane:?}: held pass changed bytes");
+        assert!(!f.served.prefix_bust_permitted);
+        assert!(f
+            .store
+            .load_meta(&f.req.session_id)
+            .unwrap()
+            .meta
+            .held_release
+            .is_some());
+        for _ in 0..3 {
+            f.served = f.pass();
+            assert_eq!(
+                f.wire(),
+                before,
+                "{lane:?}: pass without a new user changed bytes"
+            );
+            assert!(!f.served.prefix_bust_permitted);
+        }
+        f.tool_loop(3);
+        let before_reopen = f.wire();
+        // Reopen the on-disk store with a new cache namespace; no obligation is re-queued.
+        // This prices persisted parking, not a full daemon/process restart.
+        let placeholder = McStore::open_for_test(&StorageDescriptor {
+            module_id: "prefix-audit-reopen-placeholder".into(),
+            storage_namespace: "mc_cache".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: f
+                    ._dir
+                    .path()
+                    .join("placeholder.db")
+                    .to_string_lossy()
+                    .into(),
+            },
+        })
+        .unwrap();
+        // Release the original writer lease before acquiring it again.
+        drop(std::mem::replace(&mut f.store, placeholder));
+        f.store = McStore::open_for_test(&StorageDescriptor {
+            module_id: "prefix-audit".into(),
+            storage_namespace: "mc_cache".into(),
+            isolation: Isolation::Module,
+            backend: StorageBackend::Sqlite {
+                path: f._dir.path().join("store.db").to_string_lossy().into(),
+            },
+        })
+        .unwrap();
+        f.served = f.pass();
+        assert_eq!(
+            f.wire(),
+            before_reopen,
+            "{lane:?}: reopen changed held bytes"
+        );
+        assert!(!f.served.prefix_bust_permitted);
+        f.next_user_turn("review-reopen-release");
+        assert!(
+            f.served.prefix_bust_permitted,
+            "{lane:?}: release lost its permission"
+        );
+        assert!(
+            f.landed(&before_reopen, &f.wire()),
+            "{lane:?}: release lost work"
+        );
+        assert_eq!(f.mock.check(&f.wire()), None);
+        f.served = f.pass();
+        assert!(
+            !f.served.prefix_bust_permitted,
+            "{lane:?}: release needed a second bust"
+        );
+    }
+}
+
+#[test]
+fn step2_review_model_switch_releases_parked_permission_without_new_user() {
+    let mut f = Fixture::new("opencode-aisdk", false, Lane::Flush, "review-model-switch");
+    f.tool_loop(4);
+    f.arm_and_bust(false);
+    f.served = f.pass();
+    assert!(!f.served.prefix_bust_permitted);
+    let turn = f.mock.turn;
+    f.req.model_key = Some("anthropic/claude-opus-4-6".into());
+    f.served = f.pass();
+    assert_eq!(f.mock.turn, turn);
+    assert!(f.served.prefix_bust_permitted);
+    let meta = f.store.load_meta(&f.req.session_id).unwrap().meta;
+    assert!(!meta.soft_refresh_pending);
+    assert!(meta.held_release.is_none());
+    assert!(f
+        .store
+        .load_pending_agent_drops(&f.req.session_id)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn step2_review_subagent_inherited_delta_cannot_spend_all_held_permission() {
+    let mut f = Fixture::new("opencode-aisdk", true, Lane::DropFull, "review-child-delta");
+    f.tool_loop(4);
+    f.arm_and_bust(true);
+    let end = f
+        .req
+        .messages
+        .iter()
+        .find(|m| m.mid == "step-4")
+        .unwrap()
+        .ordinal as i64;
+    f.store
+        .replace_compartments(
+            &f.req.session_id,
+            &[
+                compartment(0, 1, 2, "seed-user", "seed-assistant", "Project setup"),
+                compartment(1, 3, end, "prompt-1", "step-4", "Inherited publication"),
+            ],
+        )
+        .unwrap();
+    let before = f.wire();
+    let before_meta = f.store.load_meta(&f.req.session_id).unwrap().meta;
+    for _ in 0..3 {
+        f.served = f.pass();
+        assert_eq!(
+            f.wire(),
+            before,
+            "child changed the served prefix for inherited history work"
+        );
+        assert!(!f.served.prefix_bust_permitted);
+        let meta = f.store.load_meta(&f.req.session_id).unwrap().meta;
+        assert_eq!(meta.last_execute_ordinal, before_meta.last_execute_ordinal);
+        assert_eq!(meta.m1_revision, before_meta.m1_revision);
+        assert_eq!(meta.coverage_ordinal, before_meta.coverage_ordinal);
+        assert_eq!(
+            f.store
+                .load_pending_agent_drops(&f.req.session_id)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
+
+#[test]
+fn step2_review_parked_force_crosses_live_95_wall_without_spending_held_work() {
+    let mut f = Fixture::new(
+        "opencode-aisdk",
+        false,
+        Lane::DropFull,
+        "review-band-crossing",
+    );
+    f.tool_loop(4);
+    f.arm_and_bust(false);
+    f.served = f.pass();
+    let before = f.wire();
+    for tokens in [90_000, 95_000, 96_000, 85_000] {
+        f.set_usage(tokens);
+        f.served = f.pass();
+        assert_eq!(f.wire(), before, "usage={tokens}: held work changed bytes");
+        assert_eq!(f.mock.check(&f.wire()), None);
+        let meta = f.store.load_meta(&f.req.session_id).unwrap().meta;
+        assert!(!meta.has_prior_emergency_drop);
+        assert!(meta.held_release.is_some());
+        assert_eq!(
+            f.store
+                .load_pending_agent_drops(&f.req.session_id)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    // Caller usage is not provider-proven final-wire overflow evidence; it must not
+    // invent a refusal. Separate host tests price known-over frozen requests.
+    f.next_user_turn("review-band-release");
+    assert!(f.served.prefix_bust_permitted);
+    assert!(f
+        .store
+        .load_pending_agent_drops(&f.req.session_id)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn parked_force_cancels_when_pressure_ends() {
     let mut f = Fixture::new("opencode-aisdk", false, Lane::DropFull, "force-cancel");
     f.tool_loop(4);
