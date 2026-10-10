@@ -95,6 +95,7 @@ fn hook(
                             }],
                         }),
                         counters: ctx.counters.clone(),
+                        policy_summary: None,
                     },
                     number,
                 ))

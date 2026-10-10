@@ -210,23 +210,40 @@ fn non_tag_messages(
             })
         })
         .collect::<Result<Vec<_>, HandlerOutcome>>()?;
+    // A long provider session holds one live answer per hooked message. Index the
+    // messages and memoize ancestor cuts so replaying answers stays linear; the
+    // index keeps the first message for a (mid, ordinal) pair, as a scan would.
+    let mut index: HashMap<(String, u64), usize> = HashMap::new();
+    for (position, message) in messages.iter().enumerate() {
+        index
+            .entry((message.mid.clone(), message.ordinal))
+            .or_insert(position);
+    }
+    let mut cuts: HashMap<String, Option<u64>> = HashMap::new();
     for stored in store
         .load_provider_hook_answers(&key.store_key())
         .map_err(transient)?
     {
-        if stored.state != "live"
-            || ancestor_cut(store, key, lineage, &stored.lineage_id)?
-                .is_none_or(|cut| stored.answer.ordinal > cut)
-        {
+        if stored.state != "live" {
+            continue;
+        }
+        let cut = match cuts.get(&stored.lineage_id) {
+            Some(cut) => *cut,
+            None => {
+                let cut = ancestor_cut(store, key, lineage, &stored.lineage_id)?;
+                cuts.insert(stored.lineage_id.clone(), cut);
+                cut
+            }
+        };
+        if cut.is_none_or(|cut| stored.answer.ordinal > cut) {
             continue;
         }
         let answer = stored.answer;
-        let Some(message) = messages
-            .iter_mut()
-            .find(|m| m.mid == answer.subject.subject_mid && m.ordinal == answer.ordinal)
+        let Some(&position) = index.get(&(answer.subject.subject_mid.clone(), answer.ordinal))
         else {
             continue;
         };
+        let message = &mut messages[position];
         let mut ops: Vec<hooks::answer::Operation> =
             serde_json::from_str(&answer.ops_json).map_err(transient)?;
         // The host record keeps its earlier hook answer unchanged when a step
@@ -290,6 +307,21 @@ fn non_tag_messages(
     Ok(messages)
 }
 
+/// The conversation row is rewritten by every hook, so it keeps a receipt of
+/// the last step answer rather than the answer itself: a replacement view can
+/// be megabytes. Host steps read only the receipt's request id; the view bytes
+/// stay in the immutable view row.
+fn answer_receipt(answer: &Value) -> String {
+    let mut receipt = answer.clone();
+    if let Some(compaction) = receipt.get_mut("compaction") {
+        *compaction = json!({
+            "compaction_id": compaction.get("compaction_id"),
+            "version": compaction.get("version"),
+        });
+    }
+    receipt.to_string()
+}
+
 fn save_host_setup(
     store: &McStore,
     key: &Key,
@@ -331,10 +363,8 @@ fn load_host_view(
     summary: &ViewSummary,
 ) -> Result<HostView, HandlerOutcome> {
     let row = store
-        .load_provider_views(&key.store_key())
+        .load_provider_view(&key.store_key(), summary.version)
         .map_err(|e| transient(format!("load provider views: {e}")))?
-        .into_iter()
-        .find(|v| v.version == summary.version)
         .ok_or_else(|| transient("recorded provider view is missing"))?;
     let mut view: HostView = serde_json::from_str(&row.replacement_json).map_err(transient)?;
     // Immutable bytes are shared by a descent; only the in-memory range's
@@ -1258,7 +1288,7 @@ impl McHandler {
         };
         conversation.cursor_frontier = frontier;
         conversation.wait_request = None;
-        conversation.last_answer_json = Some(answer.to_string());
+        conversation.last_answer_json = Some(answer_receipt(&answer));
         save_host_setup(store, &work.key, &mut conversation, &setup)?;
         fault("AnswerRecorded");
         bytes(&answer)
@@ -1867,6 +1897,7 @@ mod host_tests {
                                 tags,
                             }),
                             counters: ctx.counters.clone(),
+                            policy_summary: None,
                         },
                         (),
                     ))
@@ -3252,6 +3283,7 @@ mod host_tests {
                             tags: vec![],
                         }),
                         counters: ctx.counters.clone(),
+                        policy_summary: None,
                     },
                     (),
                 ))

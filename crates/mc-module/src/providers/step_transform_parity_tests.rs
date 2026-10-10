@@ -830,7 +830,6 @@ async fn measure_alf_sized_full_metadata_walk_per_hook_and_three_hook_pass() {
 }
 
 #[tokio::test]
-#[ignore = "M3 stage-two bounded policy summaries required before A2/P1/P3 and host enablement"]
 async fn bounded_policy_summary_does_not_return_the_entire_known_metadata_lineage() {
     let (_dir, h) = alf_shaped_policy_fixture().await;
     let store = h.store.get().unwrap();
@@ -859,12 +858,143 @@ async fn bounded_policy_summary_does_not_return_the_entire_known_metadata_lineag
                     ProviderHookWrite {
                         answer: None,
                         counters: ctx.counters.clone(),
+                        policy_summary: None,
                     },
                     (),
                 ))
             },
         )
         .unwrap();
+}
+
+/// A provider lineage of `count` admitted messages: four one-text messages
+/// for every assistant carrying text and two completed tool parts.
+async fn sized_policy_fixture(count: u64) -> (tempfile::TempDir, McHandler) {
+    let dir = tempfile::tempdir().unwrap();
+    let (h, _) = fixture(dir.path(), 0.0, false);
+    super::host_tests::response(super::host_tests::dispatch(&h,7,"transform.declare",json!({"params":{"serializer_profile":"opencode-aisdk","observation":"answer","auto_search_min_prompt_chars":0,"auto_search_score_threshold":0.0}})).await);
+    let tool = message(
+        "tool",
+        "assistant",
+        json!([{"id":"a","type":"text","text":"assistant text"},{"id":"r","type":"tool","tool":"read","callID":"r","state":{"status":"completed","input":{},"output":"cached output ".repeat(40)}},{"id":"b","type":"tool","tool":"bash","callID":"b","state":{"status":"completed","input":{},"output":"cached output ".repeat(40)}}]),
+        1,
+        true,
+    );
+    let text = message(
+        "text",
+        "user",
+        json!([{"id":"t","type":"text","text":"user text"}]),
+        1,
+        true,
+    );
+    let template = |sample: &Value| {
+        let req = request(std::slice::from_ref(sample), false);
+        let projection = ck_wire::project_messages(&req.messages).unwrap();
+        super::admission_policy_parts(&req, &projection)
+    };
+    let templates = [
+        (text.clone(), template(&text)),
+        (tool.clone(), template(&tool)),
+    ];
+    let lineage = ProviderLineage {
+        lineage_id: "L".into(),
+        first_ordinal: 1,
+        descends_from: None,
+        through_ordinal: None,
+    };
+    let store = h.store.get().unwrap();
+    let key = super::host_tests::key(&h).store_key();
+    for chunk in (1..=count).collect::<Vec<_>>().chunks(2_000) {
+        let mut messages = Vec::new();
+        let mut parts = Vec::new();
+        for &n in chunk {
+            let (sample, template) = &templates[usize::from(n % 5 == 0)];
+            let sample_mid = sample["info"]["id"].as_str().unwrap();
+            let mid = format!("sized-{n}");
+            let mut native = sample.clone();
+            native["info"]["id"] = json!(mid);
+            messages.push(ProviderMessage {
+                mid: mid.clone(),
+                ordinal: n,
+                message_bytes: serde_json::to_vec(&native).unwrap(),
+            });
+            for p in template {
+                let mut p = p.clone();
+                let from = format!("{sample_mid}#");
+                let to = format!("{mid}#");
+                p.mid = mid.clone();
+                p.ordinal = n;
+                p.block_id = p.block_id.replace(&from, &to);
+                p.measurement.key = p.measurement.key.replace(&from, &to);
+                p.arc_id = p.arc_id.map(|a| a.replace(&from, &to));
+                p.served = true;
+                parts.push(p);
+            }
+        }
+        store
+            .admit_provider_pass(
+                &key,
+                &lineage,
+                &messages,
+                &parts,
+                &json!({"pass_id":format!("seed-{}",chunk[0]),"lineage_id":"L","appended_ids":[]}),
+            )
+            .unwrap();
+    }
+    (dir, h)
+}
+
+/// An ordinary hook replays the policy changes since the stored summary instead
+/// of rereading the lineage, so its store work must not grow with the session.
+/// SQLite virtual-machine steps count every row the hook reads or writes; the
+/// first hook after seeding rebuilds the summary and shows the counter sees a
+/// whole-lineage read.
+#[tokio::test]
+async fn ordinary_hook_store_reads_do_not_grow_with_the_session() {
+    let mut rebuild = Vec::new();
+    let mut ordinary = Vec::new();
+    for size in [1_000u64, 17_000] {
+        let (_dir, h) = sized_policy_fixture(size).await;
+        let store = h.store.get().unwrap();
+        let _measured = super::super::policy_summary::without_full_check();
+        let mut steps = Vec::new();
+        for pass in 0..4u64 {
+            let ordinal = size + 1 + pass * 2;
+            let user = message(
+                &format!("next-user-{ordinal}"),
+                "user",
+                json!([{"id":"text","type":"text","text":"new user"}]),
+                ordinal,
+                false,
+            );
+            let reply = message(
+                &format!("next-reply-{}", ordinal + 1),
+                "assistant",
+                json!([{"id":"a","type":"text","text":"reply"},{"id":"r","type":"tool","tool":"read","callID":"r","state":{"status":"completed","input":{},"output":"fresh output ".repeat(40)}}]),
+                ordinal + 1,
+                true,
+            );
+            for (raw, at) in [(user, ordinal), (reply, ordinal + 1)] {
+                store.start_sqlite_step_count();
+                host_message(&h, &raw, at, at - 1).await;
+                steps.push(store.take_sqlite_step_count());
+            }
+        }
+        rebuild.push(steps[0]);
+        ordinary.push(*steps[1..].iter().max().unwrap());
+    }
+    println!("policy hook SQLite steps: rebuild={rebuild:?} worst ordinary={ordinary:?}");
+    // The rebuild reads every part, so it scales with the session ...
+    assert!(rebuild[1] > rebuild[0] * 8, "rebuild steps {rebuild:?}");
+    // ... while an ordinary hook's work is the same at 1k and 17k messages.
+    assert!(
+        ordinary[1] <= ordinary[0] + ordinary[0] / 4,
+        "ordinary hook steps grew with the session: {ordinary:?}"
+    );
+    assert!(
+        ordinary[1] * 20 < rebuild[1],
+        "ordinary {ordinary:?} rebuild {rebuild:?}"
+    );
 }
 
 #[tokio::test]
@@ -1021,12 +1151,17 @@ async fn r2_review_720_pass_differential_with_new_seeds_and_real_reduce() {
         frozen_reference: false,
         real_reduce: true,
     };
+    let replays = super::super::policy_summary::replay_checks();
     let mut comparisons = 0;
     for (queued, calibrated) in [(false, false), (true, false), (false, true)] {
         comparisons += drive_overlay_corpus_with(queued, calibrated, &run).await;
     }
     assert_eq!(comparisons, 46980);
-    println!("r2 review append differential: 720 passes, 46980 per-message comparisons, seeds={REVIEW_SEEDS:x?}");
+    // Hooks replay the stored policy summary; each replay was checked against
+    // the full computation, so the corpus covers that path too.
+    let replays = super::super::policy_summary::replay_checks() - replays;
+    assert!(replays > 0, "the corpus never replayed a policy summary");
+    println!("r2 review append differential: 720 passes, 46980 per-message comparisons, {replays} checked summary replays, seeds={REVIEW_SEEDS:x?}");
 }
 
 #[tokio::test]

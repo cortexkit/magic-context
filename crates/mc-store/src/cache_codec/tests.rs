@@ -1208,6 +1208,8 @@ fn rewind_to_62(store: &McStore) {
           DROP TABLE mc_provider_lineages_v1;
           DROP TABLE mc_provider_messages_v1;
           DROP TABLE mc_provider_hook_answers_v1;
+          DROP TABLE mc_provider_policy_summaries_v1;
+          DROP TABLE mc_provider_policy_changes_v1;
           DROP TABLE mc_provider_policy_parts_v1;
           DROP TABLE mc_provider_consumed_tags_v1;
           DROP TABLE mc_provider_views_v1;

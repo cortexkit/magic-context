@@ -46,31 +46,45 @@ fn reasoning_budget_cutoff(
         })
         .collect();
     let route = active_turn_route_request(req);
+    // The budget walk may cost every visible assistant message, so per-message
+    // lookups below go through maps built once per pass. Each map keeps the first
+    // match, exactly like the linear searches it replaces.
+    let active_turn = active_anthropic_turn_mids(&route);
     let is_exempt = |message: &&CkIngressMessage| {
         Some(message.mid.as_str()) == newest
             || Some(message.mid.as_str()) == exempt
             || Some(message.mid.as_str()) == scope.anchor
-            || in_active_anthropic_turn(&route, message.mid.as_str())
+            || active_turn.contains(message.mid.as_str())
     };
     let off_wire = |message: &CkIngressMessage| removed.contains(message.mid.as_str());
+    let merged: HashSet<&str> = core
+        .frozen_units
+        .iter()
+        .filter_map(|unit| unit.key.strip_prefix("strip:merged_reasoning:"))
+        .collect();
+    let mut first_index: HashMap<&str, usize> = HashMap::new();
+    for (index, entry) in req.messages.iter().enumerate() {
+        first_index.entry(entry.mid.as_str()).or_insert(index);
+    }
+    let mut natives: HashMap<&str, &Value> = HashMap::new();
+    for native in req.native_messages.iter().flatten() {
+        if let Some(id) = native.pointer("/info/id").and_then(Value::as_str) {
+            natives.entry(id).or_insert(native);
+        }
+    }
+    let ratio =
+        crate::decision_calibration::DecisionCalibration::for_model(req.model_key.as_deref())
+            .prose_ratio;
     let cost = |message: &CkIngressMessage| {
         let typed_gone = off_wire(message);
         let mut text = String::new();
         let mut inline_text = String::new();
         let mut opaque = false;
         let mut has_reasoning = false;
-        let mut kept = message.ck.clone();
-        if core
-            .frozen_units
-            .iter()
-            .any(|unit| unit.key == format!("strip:merged_reasoning:{}", message.mid))
-        {
+        let mut kept = std::borrow::Cow::Borrowed(&message.ck);
+        if merged.contains(message.mid.as_str()) {
             if let Some(profile) = SerializerProfile::parse(&req.serializer_profile) {
-                let index = req
-                    .messages
-                    .iter()
-                    .position(|entry| entry.mid == message.mid)
-                    .unwrap_or(0);
+                let index = first_index.get(message.mid.as_str()).copied().unwrap_or(0);
                 let first_in_run = index == 0 || req.messages[index - 1].ck.role != "assistant";
                 apply_serializer_residual_to_message(
                     profile,
@@ -78,7 +92,7 @@ fn reasoning_budget_cutoff(
                     Some(message.mid.as_str()) == exempt
                         || Some(message.mid.as_str()) == scope.anchor,
                     first_in_run,
-                    &mut kept,
+                    kept.to_mut(),
                 );
             }
         }
@@ -106,9 +120,7 @@ fn reasoning_budget_cutoff(
                 _ => {}
             }
         }
-        let native = req.native_messages.iter().flatten().find(|native| {
-            native.pointer("/info/id").and_then(Value::as_str) == Some(message.mid.as_str())
-        });
+        let native = natives.get(message.mid.as_str()).copied();
         if let Some(parts) = native
             .filter(|_| !typed_gone)
             .and_then(|native| native.get("parts"))
@@ -130,9 +142,6 @@ fn reasoning_budget_cutoff(
             .and_then(|native| native.pointer("/info/tokens/reasoning"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        let ratio =
-            crate::decision_calibration::DecisionCalibration::for_model(req.model_key.as_deref())
-                .prose_ratio;
         let typed = if typed_gone || (!has_reasoning && !opaque) {
             0
         } else if reported > 0 {

@@ -153,11 +153,27 @@ pub struct LockMetrics {
 /// transaction. No persistent flag temporarily opens a session to other writers,
 /// and read-only/raw diagnostic connections need no application SQL functions.
 pub(crate) fn install_writer_guards(conn: &Connection) -> rusqlite::Result<()> {
+    let recorded = crate::single_store_schema::recorded_store_version(conn)?;
     for table in move_inventory::tables(Store::Module) {
         let RowSelector::Predicate(_) = table.rows else {
             continue;
         };
         if table.class == Class::NotSession {
+            continue;
+        }
+        // A store whose recorded version predates the migration that creates a
+        // table (an older binary's schema, as migration-fence tests open it)
+        // has nothing to guard there. A store at or past that migration must
+        // have the table: creating its guard fails and the open is refused.
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.sqlite_master WHERE type = 'table' AND name = ?1)",
+            [table.table],
+            |r| r.get(0),
+        )?;
+        if !exists
+            && crate::migration_creating_table(table.table)
+                .is_some_and(|created| recorded < created)
+        {
             continue;
         }
         let owner = table.session_column().ok_or_else(|| {

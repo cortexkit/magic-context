@@ -3257,6 +3257,12 @@ const MIGRATIONS: &[Migration] = &[
         // Advance the fence so older binaries cannot silently discard it when rewriting meta.
         statements: "SELECT 1;",
     },
+    Migration {
+        version: 68,
+        // Provider hooks keep bounded policy summaries instead of rereading every
+        // policy part of the conversation lineage on each hook.
+        statements: include_str!("migrations/store_068_provider_policy_summaries.sql"),
+    },
 ];
 
 /// The highest `mc_cache` schema migration this binary ships.
@@ -3296,6 +3302,33 @@ pub const LATEST_MIGRATION_VERSION: u32 = {
 /// above this version must keep the watermark when it rewrites metadata. See
 /// "Rust applied-score rollback fence" in `docs/designs/compartment-rescore.md`.
 pub const SCORE_SELECTION_WATERMARK_STORE_FENCE: u32 = 67;
+
+/// The first bundled migration whose SQL creates `table`, or `None` when no
+/// migration's text does (a table created some other way).
+pub(crate) fn migration_creating_table(table: &str) -> Option<u32> {
+    MIGRATIONS
+        .iter()
+        .filter(|migration| {
+            let mut rest = migration.statements;
+            while let Some(at) = rest.find("CREATE TABLE") {
+                rest = &rest[at + "CREATE TABLE".len()..];
+                let named = rest.trim_start();
+                let named = named
+                    .strip_prefix("IF NOT EXISTS")
+                    .unwrap_or(named)
+                    .trim_start();
+                let end = named
+                    .find(|c: char| c.is_whitespace() || c == '(')
+                    .unwrap_or(named.len());
+                if named[..end].trim_matches('"') == table {
+                    return true;
+                }
+            }
+            false
+        })
+        .map(|migration| migration.version)
+        .min()
+}
 
 /// Whether this binary can serve a store whose project rows have been moved into the host's
 /// database ("single-store mode").
@@ -15810,6 +15843,45 @@ impl McStore {
     }
 }
 
+/// SQLite virtual-machine steps run on a store's writer connection while a
+/// count is open. SQLite calls the progress handler as its bytecode runs, so a
+/// statement that visits more rows makes more calls: the count measures store
+/// work without depending on timing.
+#[cfg(any(test, feature = "test-support"))]
+static SQLITE_STEPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(any(test, feature = "test-support"))]
+impl McStore {
+    /// Start counting SQLite steps on this store's writer connection. Only one
+    /// count may be open in a process at a time.
+    pub fn start_sqlite_step_count(&self) {
+        SQLITE_STEPS.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.inner
+            .with_conn(|conn| {
+                conn.progress_handler(
+                    1,
+                    Some(|| {
+                        SQLITE_STEPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        false
+                    }),
+                );
+                Ok(())
+            })
+            .expect("install SQLite step counter");
+    }
+
+    /// Stop counting and return the steps since `start_sqlite_step_count`.
+    pub fn take_sqlite_step_count(&self) -> u64 {
+        self.inner
+            .with_conn(|conn| {
+                conn.progress_handler(0, None::<fn() -> bool>);
+                Ok(())
+            })
+            .expect("remove SQLite step counter");
+        SQLITE_STEPS.swap(0, std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 /// Test-support seed helpers for sibling crates and this crate's own tests (gated
 /// behind `test-support` or `cfg(test)` so the writers never ship in production).
 /// mc-module composes over this store and needs to populate memories/mutations in
@@ -20305,7 +20377,10 @@ mod tests {
         let request = serde_json::json!({ "reason": "flush", "obligations": ["flush"] });
         {
             let current = McStore::open_for_test(&descriptor).unwrap();
-            assert_eq!(current.module_store_schema_version().unwrap(), 67);
+            assert_eq!(
+                current.module_store_schema_version().unwrap(),
+                LATEST_MIGRATION_VERSION
+            );
             let mut loaded = current.load("legacy").unwrap();
             assert_eq!(loaded.meta.held_release, None);
             loaded.meta.held_release = Some(request.clone());
@@ -20320,7 +20395,7 @@ mod tests {
         assert!(matches!(
             refusal,
             McStoreError::StoreAheadOfBinary {
-                db_version: 67,
+                db_version: LATEST_MIGRATION_VERSION,
                 binary_max: 66,
             }
         ));

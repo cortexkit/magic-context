@@ -36,6 +36,17 @@ pub(super) fn decode_messages(
         })
         .collect::<Vec<_>>();
     let mut decoded = crate::codec::decode_opencode(&native);
+    // Full-request OpenCode passes receive CK JSON from TypeScript, not the
+    // stamped native-decoder blocks. Select that source-identity basis without
+    // changing block bytes used by native rendering or other decoder callers.
+    for message in &mut decoded.messages {
+        message
+            .ck
+            .provider_extras
+            .entry("_cortexkit_codec".into())
+            .or_default()
+            .insert("ingressProfile".into(), json!("opencode"));
+    }
     for message in messages {
         if let Some(meta) = decoded.sidecar.messages.get_mut(&message.mid) {
             Arc::make_mut(meta).raw = message.message.clone();
@@ -127,6 +138,70 @@ mod tests {
                 message: message.clone(),
             })
             .collect()
+    }
+
+    #[test]
+    fn opencode_source_identities_match_legacy_tool_ingress() {
+        let native = json!({"info":{"id":"tool","role":"assistant"},"parts":[
+            {"type":"text","text":"assistant response"},
+            {"id":"part","type":"tool","tool":"bash","callID":"tool-call-1",
+             "state":{"status":"completed","input":{},"output":"tool output"}}
+        ]});
+        let decoded = decode_messages(&entries(&[native])).unwrap();
+        // These are the CK fields sent by the legacy TypeScript encoder, before
+        // Rust adds origin coordinates or serializes default false tool flags.
+        let legacy: ck_wire::CkIngressMessage = serde_json::from_value(json!({
+            "mid":"tool","ordinal":4000,"ck":{"role":"assistant","content":[
+                {"kind":{"type":"text","text":"assistant response"}},
+                {"kind":{"type":"tool_call","id":"tool-call-1","name":"bash","input":{}}},
+                {"kind":{"type":"tool_result","id":"tool-call-1","tool_name":"bash",
+                    "output":{"kind":{"type":"text","text":"tool output"}}}}
+            ]}
+        }))
+        .unwrap();
+        let before = ck_wire::project_messages(&[legacy]).unwrap();
+        let after = ck_wire::project_messages(&decoded.messages).unwrap();
+        assert_eq!(
+            before.identity_by_mid["tool"][0].byte_fingerprint,
+            "317feebdeae7407eb2e8f1be42afd5696e09bd9404a75e8f9e8188e6f22caa0d"
+        );
+        assert_eq!(before.identity_by_mid, after.identity_by_mid);
+        assert_ne!(
+            before.blocks[0].bytes, after.blocks[0].bytes,
+            "rendering still retains the native origin stamp"
+        );
+    }
+
+    #[test]
+    fn opencode_source_identities_still_detect_tool_content_drift() {
+        let native = json!({"info":{"id":"tool","role":"assistant"},"parts":[
+            {"id":"part","type":"tool","tool":"bash","callID":"call",
+             "state":{"status":"completed","input":{},"output":"tool output"}}
+        ]});
+        let identity = |value: Value| {
+            let decoded = decode_messages(&entries(&[value])).unwrap();
+            ck_wire::project_messages(&decoded.messages)
+                .unwrap()
+                .identity_by_mid
+        };
+        let baseline = identity(native.clone());
+        for (pointer, changed) in [
+            ("/parts/0/state/output", json!("changed output")),
+            ("/parts/0/state/input", json!({"command":"changed"})),
+            ("/parts/0/callID", json!("changed-call")),
+            ("/parts/0/tool", json!("changed-tool")),
+        ] {
+            let mut drifted = native.clone();
+            *drifted.pointer_mut(pointer).unwrap() = changed;
+            assert_ne!(baseline, identity(drifted), "{pointer}");
+        }
+        let mut executed = native;
+        executed["parts"][0]["metadata"] = json!({"providerExecuted":true});
+        assert_ne!(
+            baseline,
+            identity(executed),
+            "true is not an omitted false default"
+        );
     }
 
     fn request(codec: Codec, messages: &[Value]) -> TransformRequest {

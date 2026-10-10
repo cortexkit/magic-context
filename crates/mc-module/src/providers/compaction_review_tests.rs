@@ -135,6 +135,7 @@ fn pending_hook(store: &McStore, key: &Key, ordinal: u64) {
                             }],
                         }),
                         counters: ctx.counters.clone(),
+                        policy_summary: None,
                     },
                     (),
                 ))
@@ -933,6 +934,7 @@ fn r3_hook_entry(store: &McStore, key: &Key, entry: &Value) {
                                 .collect(),
                         }),
                         counters: ctx.counters.clone(),
+                        policy_summary: None,
                     },
                     (),
                 ))

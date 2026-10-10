@@ -101,7 +101,8 @@ fixture pressure from being confused with engine throughput. There is no live
 OpenCode subprocess in this replay: both host bindings use the real adapter and
 real module test handler over a JSON-lines pipe, with isolated stores.
 
-Final run (five full-request engine+codec samples per binding, including the cold
+Original synthetic performance replay (T2), before the identity fix (five
+full-request engine+codec samples per binding, including the cold
 first sample; nearest-rank quantiles):
 
 | Synthetic binding | full-request engine+codec p50 | p95 | Provider ordinary / rebuild |
@@ -109,7 +110,7 @@ first sample; nearest-rank quantiles):
 | OpenCode 1 | 1835.369 ms | 35942.171 ms | blocked at bootstrap |
 | OpenCode 2 | 2423.781 ms | 23248.332 ms | blocked at bootstrap |
 
-Both final provider switch attempts returned exactly:
+The original OpenCode 1 and OpenCode 2 switch attempts returned exactly:
 
 ```json
 {"code":"transient","message":"CK message block identity drift for mid synthetic-16998"}
@@ -118,29 +119,337 @@ Both final provider switch attempts returned exactly:
 The last successful step answer before that refusal was `wait`, reason
 `Awaiting the next host status page`, `bound_ms: 1`. The test handler then refused
 the final `compaction.step` carrying `prefix_rebuilding.reason: pipeline_switch`.
-The replay records the refusal and leaves ordinary/rebuild statistics **null**;
+That replay recorded the refusal and left ordinary/rebuild statistics **null**;
 it does not time full-request fallback as a provider pass. Its diagnostic process
 exit 0 means the report was produced, not that the performance gate passed.
-This tool-dense bootstrap exposes an integration gap that the earlier 7.5k
-single-text bootstrap fixture does not cover. Investigate codec/block identity
-alignment in a follow-up production slice; do not waive the refusal in this gate.
+The identity mismatch is resolved by the follow-up below; the drift refusal has
+not been waived. The earlier user-text-only bootstrap fixtures did not exercise
+the same protected assistant identities.
 
 An exploratory incremental-ingest alternative (about 5,667 three-message passes)
 hit the 30-minute cap before emitting results. It was stopped, not counted as a
 measurement. The final driver uses a bounded bootstrap instead; it never retries
 that timed-out alternative. No live store was involved.
 
-When bootstrap succeeds, the reusable script measures provider adapter entry to
-native output installation (`publishMessages` uses `splice`, not property assignment),
-including the fixture's sync seam, before recording/serializing the served corpus.
-It gathers 20 ordinary samples after three warmups, with three appends each. Its
-five rebuild comparisons copy the exact starting durable SQLite snapshot with
-`VACUUM INTO` outside the timer, then run full-request and provider arms separately.
-However, full-request timings here include engine, codec and pipe rather than the
+The reusable script measures provider adapter entry to native output installation
+(`publishMessages` uses `splice`, not property assignment), including the fixture's
+sync seam, before recording/serializing the served corpus. It gathers 20 ordinary
+samples after three warmups, with three appends each. The fixture clock advances
+between turns instead of assigning every request the same timestamp.
+Rebuild comparisons publish a completed historical cycle and append an assistant
+with a new model key, then copy both isolated fixture databases (`store.db` cache
+and `context.db` authority) using `VACUUM INTO`, outside the timer while the handler
+is idle. Both arms must perform the same visible HARD rebuild and serve equal
+output. A returned but unapplied view, timeout or fallback is not a P2 sample.
+However, full-request timings include engine, codec and pipe rather than the
 complete legacy host handler; sync is a no-change fixture seam and there are no
 mirror pages. Hook round-trip samples are **not module-only timings**. Those
-limitations, and the refusal, prevent claiming the same-store live P2 comparison
+limitations prevent claiming the same-store live P2 comparison
 or the sync/mirror-inclusive live P1 measurement requested by the spec.
+
+### Bootstrap identity diagnosis and source fix
+
+The deterministic small reproducer is **two assistant messages**, with **one
+completed tool part** in the first message and a completed text-only second
+message. The first message can contain only the tool: parallel calls, attachments,
+many parts and an unfinished newest assistant are not necessary. Seed it through
+the full-request handler, publish a compartment covering ordinal 1, run the full
+handler again, then switch pipelines. Without the fix, the final
+`compaction.step` with `prefix_rebuilding.reason: pipeline_switch` refuses
+`CK message block identity drift for mid covered` on both bindings. Publication
+provides a small, deterministic protected identity without manufacturing a large
+context or editing cache rows. Unprotected small tails can instead re-adopt a
+different identity, hiding the incompatibility.
+
+The refusing path is `providers::compaction` into the transform engine's
+`apply_once`, then `enforce_block_identity` → `identity_drift_requires_reject` →
+`TransformError::IdentityDrift`. The display implementation supplies the exact
+error string. The source identity vector is stored in `mc_block_identities`
+(`mc-store/src/lib.rs`); provider ingestion/publication also compares those vectors
+in `mc-store/src/provider_log.rs`. Stored/incoming ordered-vector equality, and
+transform rejection for covered messages, boundary anchors or frozen-unit targets,
+are unchanged.
+
+The disagreement is the **CK block serialization**, not a reordered call/result
+arc or a prematurely identified newest message. Full-request TypeScript ingress
+supplies parsed CK JSON without Rust codec metadata and without the default-false
+`provider_executed` tool flag. Native provider decoding adds
+`provider_extras._cortexkit_codec` (`blockIndex`, `nativeIndex`,
+`decodedFingerprint`) for lossless native-part alignment, and serializes typed
+fields in a different key order, including the false tool flag. The projection
+previously fingerprinted that complete stamped serialization as source identity.
+For the isolated `tool` fixture (`assistant response`, call id `tool-call-1`,
+empty input, output `tool output`), the exact conflicting SHA-256 values were:
+
+| Block | Persisted full-request/TS identity | Old native-provider identity |
+| --- | --- | --- |
+| text | `317feebdeae7407eb2e8f1be42afd5696e09bd9404a75e8f9e8188e6f22caa0d` | `5501e71f04452e47dd660c447944698c0185b98d114b15259799399be50b3855` |
+| tool_call | `6707a48c7d0b32532cc10776b580e4050c65096ca42ec4a7ba4d4a94d9e416a9` | `0a39becdc242c774d3fda692f85308a92605c8691d036d05734b7926403dd0d8` |
+| tool_result | `f3e9b44238d3fd7d4a1949418673a2fc33b5333d20d1003fdcc2117512683626` | `07db854df13ad18fc1b1da10bdbd800f60395758bd7a4a208b45188f7ba75659` |
+
+`providers/codec_opencode.rs` now marks the message-level identity profile, and
+`ck_wire::block_identity_fingerprint` reconstructs the legacy sorted source JSON
+for that profile only. It excludes private block-origin coordinates and the
+omitted false tool flag; real content, true flags, and non-codec provider extras
+remain in the identity. Block bytes, `content_hash`, native origin stamps and
+other decoder callers retain their old representation. No stored row is rewritten
+to excuse a mismatch, and no check is weakened or bypassed.
+
+The new differential switch case also covers two parallel tools, a result with a
+PNG attachment, 32 tool parts in one message, and an unfinished newest assistant
+whose tool result is complete. It requires no fallback, byte-identical serving,
+and unchanged persisted identities (not re-adoption). A separate changed covered
+tool-output case still refuses with the exact drift error. Rust controls pin
+legacy/native identity equality and detect changed output, input, call id, tool
+name and a true `provider_executed` flag.
+
+Two restored mutation runs replaced the source identity basis with the old
+stamped-wire hash. Only
+`providers::codec_opencode::tests::opencode_source_identities_match_legacy_tool_ingress`
+failed in the two-test Rust run; the content-drift test stayed green. Only
+`OpenCode1/A10.legacy-tool-identity-switch` failed in the two-case adapter run,
+with the provider rebuild request (`compaction.step`) refused for a covered
+source-identity mismatch; the intentionally changed tool-output refusal case
+stayed green. Each run had a one-file diff (+2/-7) while mutated and an empty
+unstaged diff after restoring the staged live source.
+
+### Follow-up synthetic P1 result; P2 remains blocked
+
+Final command (Bun 1.4.2, Cargo 1.99.0, darwin/arm64, local optimized handler):
+
+```sh
+bun packages/e2e-tests/scripts/provider-pipeline-synthetic.ts /tmp/provider-identity-t2-delivery.json
+```
+
+Both **OpenCode 1 and OpenCode 2 bindings complete the provider switch**, with
+17,000 base messages, 10,200 tool-bearing assistants and 20,400 completed tool
+parts. Ordinary samples contain three appends and no fallback. These are
+**synthetic measurements, not real-host or ALF acceptance**:
+
+| Synthetic binding | Ordinary samples | P1 p50 | P1 p95 | Hook round-trip samples / p50 / p95 | P2 |
+| --- | ---: | ---: | ---: | --- | --- |
+| OpenCode 1 | 20 | 2670.971 ms | 3608.649 ms | 100 / 426 ms / 1139 ms | blocked |
+| OpenCode 2 | 20 | 2150.691 ms | 2795.513 ms | 100 / 332 ms / 823 ms | blocked |
+
+These ordinary-pass results exceed the P1 thresholds; completing bootstrap is
+not performance acceptance. P2's five applied-view pairs were not obtained, so
+`provider_rebuild` and `rebuild_vs_full_ratio` remain **null**, not fallback or
+timeout timings. The only full-request rebuild sample per binding was 41770.998 ms
+and 41785.057 ms respectively; a one-sample population is diagnostic, not a P2
+quantile. The first provider attempt installed output after 31071.319 ms / 30717.605 ms
+without applying a new view. A late `compaction_message` arrived on both bindings;
+the subsequent diagnostic retry also failed to apply within its budget.
+
+### Separate large-rebuild deadline diagnosis — not fixed here
+
+The remaining stop is **not block identity drift, status-frame oversize or an
+unfinished newest assistant**. The adapter's model-switch path calls
+`ProviderClient.bootstrap` (`opencode-adapter.ts:1328-1363`), with the
+30,000 ms bootstrap budget supplied at `opencode-adapter.ts:327,431-437`.
+`ProviderClient.page` uses that budget for the request fence
+(`provider-client.ts:790-803`). In `ProviderClient.send`, the timer expires while
+the module call is outstanding (`provider-client.ts:532-563`); the aborted-call
+catch returns `unavailable`, reason `timeout` (`:583-589`). The adapter's
+`answer` returns false without applying a view (`opencode-adapter.ts:703-710`),
+and `bootstrap` ends the attempt (`provider-client.ts:866-868`). Ordinary hooks
+can still succeed and the existing prefix can still be served, with no module
+error or full-request fallback in the fixture.
+
+A read-only runtime wrapper around the real client methods observed a **701/702
+byte status request**, 30,000 ms remaining budget, and timeout returns after
+30000.969–30007.022 ms. This rules out the 3 MiB frame cap and pagination as the
+stop in these runs. Draining the isolated handler's outstanding reply produced a
+late `compaction_message`: the engine does finish, but the timed-out host attempt
+does not apply it.
+
+There is **no message-count predicate or deterministic size threshold** in this
+path: the condition is response latency exceeding 30 seconds. The smallest
+deterministic existing control has **one message**, with its real reply delayed
+30,050 ms (`A10.bootstrap-timeout-full-request-late-retry`, still green). For
+unmodified tool-dense workload probes on this machine, 7,500 base messages completed
+all five rebuild pairs on both bindings (provider p95 7565.098 / 7805.188 ms).
+The **smallest tested failing dense corpus was 15,000 base messages** on OpenCode 2,
+at the first rebuild after 24 ordinary appends plus one model-switch append
+(15,025 total messages, 18,000 base tool parts). OpenCode 1 completed all five at
+that size. Both 16,000 and 17,000 base-message probes had timed-out attempts; exact
+onset varies with CPU/cache load and must not be presented as a fixed session-size
+limit or an exhaustively minimized latency boundary.
+
+This is a **production deadline/liveness risk exposed by the synthetic backend**,
+not just the driver's former one-pass assertion. It does **not establish that a
+real session can never rebuild**: a 17,000-message OpenCode 1 probe and a
+16,000-message OpenCode 2 probe applied a subsequent retry when the response fit
+the budget; other retries exceeded it again. No live-host latency was measured.
+The separate follow-up should profile the large native rebuild and its retry
+epoch, then test whether repeated over-budget attempts can be acknowledged safely
+without rebuilding forever. This slice leaves the deadline and retry policy alone.
+
+The earlier measurement-driver assumptions were also corrected: an unchanged
+flush may legitimately return noop; copying only `store.db` omitted the
+`context.db` publication rows; full/plain-HARD versus provider-SOFT outputs are
+not equivalent paired rebuilds. New pairs include authority snapshots and a
+publication/model-switch trigger, and require an actually applied, matching view.
+The original report had **no P1/P2 provider timings** (they were null), so none
+are retroactively invalidated. Its pre-switch full-request-only p50/p95 figures
+remain historical engine+codec diagnostics, **not P2 baselines**; they are not
+comparable to the newly published/model-switched rebuild samples. Any exploratory
+store-only clone comparison must be discarded. Per the reviewer decision, the
+identity fix is delivered without a second production latency/policy fix.
+
+Follow-up verification: Linux `cargo test -p mc-module --lib` passed **1857 tests**
+(25 ignored), including all provider and step-transform controls; Linux
+`cargo test -p mc-store` passed **314 tests** (5 ignored). T1
+`pure-replay-differential.ts --provider-pipeline` passed **88 cases**: the original
+84 plus the new success/refusal cases on both bindings. Plugin typecheck passed
+with TypeScript 5.9.3. The provider-script typecheck still reports only the two
+inherited errors listed in the original verification record below. A project-parsed
+compiler check covered both edited scripts and 1,688 source files, allowing only
+those exact two inherited diagnostics; no new diagnostics remained. Scoped edited
+file diagnostics report no errors or warnings (one deprecated `context.exec` API
+hint; call-graph health categories unavailable). Evidence is retained outside build directories
+in `/tmp/provider-identity-t2-delivery.json`, `/tmp/provider-identity-t1.log`,
+`/tmp/provider-identity-mutation.log`, `/tmp/provider-identity-switch-mutation.log`
+and `/tmp/provider-rebuild-diagnose-{7500,15000,16000,17000-complete}.log`.
+
+### Per-pass cost profile and bounded hook policy (follow-up)
+
+All numbers in this section are **synthetic Mac measurements** (darwin/arm64,
+Bun 1.4.2, Cargo 1.99.0, optimized test driver, the same 17,000-message
+tool-dense fixture as above). They are not live, real-host or ALF acceptance.
+The Mac was shared with other workers; absolute times varied by up to about 2×
+between runs, so compare columns of one table, not across tables.
+
+**Method.** Temporary, environment-gated wall timers (never committed) wrapped
+each stage of `provider_host_hook` and `commit_provider_delta`, the host
+`compaction.step` handler, the engine's existing per-pass profile spans and the
+TypeScript adapter's `run`. One driver (`/tmp/ppperf/profile.ts`) bootstraps the
+fixture, runs ordinary passes of three appends (five hooks per pass) and then
+publication/model-switch rebuilds. A stage whose cost roughly doubles from 7.5k
+to 17k messages is classed O(session).
+
+Ordinary pass, OpenCode 1, base commit `a424544a`, ms per pass:
+
+| Stage | 7.5k | 17k | Class |
+| --- | ---: | ---: | --- |
+| Five `transform.hook` calls in the module | 825 | 1618 | O(session) |
+| ⤷ `policy_parts_tx`: read and JSON-decode every policy part of the lineage | 440 | 858 | O(session) |
+| ⤷ `promote_tx`: `json_extract(tag_number)` UPDATE scans every part per promoted answer | 181 | 320 | O(session) |
+| ⤷ `channel1_inputs_from_parts` over all parts | 74 | 159 | O(session) |
+| ⤷ rest of the hook decision (cloning all parts, counters) | 48 | 102 | O(session) |
+| ⤷ conversation row load/rewrite and policy totals (row carried the 3.3 MB last step answer) | 36 | 85 | O(session) |
+| ⤷ `host_channel1` (clones the baseline with every frozen part) | 12 | 23 | O(session) |
+| ⤷ message insert, lineage, plan, frontier, burns, answer insert | ≈12 | ≈18 | O(new) + row loads |
+| TS `publishMessages` deep copy of the served window | — | 28.8 | O(session) |
+| TS `scanWindow` id classification | — | 2.6 | O(session), host contract |
+| TS `providerIncoming` map over the incoming array | — | 1.8 | O(session), host contract |
+| TS save, model/inputs, manifest/flush, assemble | — | <1 | O(new)/O(1) |
+
+One `compaction.step` rebuild at 15,000 messages, OpenCode 1, ms:
+
+| Stage | Base `a424544a` | This change | Class |
+| --- | ---: | ---: | --- |
+| Whole `compaction.step` | 44,439 (host gave up at 30,000) | 5,606 | O(session) |
+| Engine planning | 38,588 | 378 | was O(n²) |
+| ⤷ `reasoning_budget_cutoff`: per-message native/frozen-unit searches | 38,269 | 22 | O(n²) → O(session) |
+| Engine store commit (frozen state, tags, policy parts) | 2,037 | 1,506 | O(session) |
+| Engine state evolution / protected floor / build output / projection | 880 / 739 / 320 / 160 | 841 / 697 / 300 / 179 | O(session) |
+| Encode view (native replacement) | 645 | 721 | O(session) |
+| Load applied/produced views and live answers | 422 | 433 | O(session) |
+| Prepare request / commit status page / normalize | 194 / 242 / 66 | 197 / 241 / 74 | O(session) |
+| Hook in the same pass | 555 | 2 | O(session) → O(new) |
+
+**Fixes.**
+
+- Host hooks keep a bounded policy summary (`providers/policy_summary.rs`) in
+  the new `mc_provider_policy_summaries_v1` table: the per-part sums behind the
+  channel-1 baseline, buckets, real-user and reclaimable-output counts, the
+  tool-tag protection window groups, the newest protected arcs per tool and the
+  four smallest hint candidates per tool tier. Triggers on the policy parts and
+  consumed-tag tables log each changed row once, with its pre-change copy, in
+  `mc_provider_policy_changes_v1`, but only while a summary exists. A hook
+  replays only the changed rows and the parts sharing an arc or tag number with
+  them, parts entering or leaving the window or a protected arc, and tags that
+  cross the window cutoff. It rebuilds from every part when it cannot replay
+  exactly: no summary, changed settings or lineage, a cache-busting pass, a
+  baseline that must be refrozen, new rows ordered before known rows, more than
+  4,096 logged changes, or a protected-arc or hint list that would need an
+  untracked member. `ProviderHookContext.parts` now holds only the hooked and
+  pass-appended messages' parts; lineage reads go through the bounded
+  `ProviderPolicyIndex`.
+- Store migration **68** (`store_068_provider_policy_summaries.sql`) adds the
+  two tables, the triggers, and expression indexes on policy-part tag number and
+  arc, a partial index for unserved parts and two partial indexes for the newest
+  cadence answers. The schema-pinned move inventory is now version 68; both new
+  tables are `LocalReset` (derived; an absent summary is rebuilt). Writer guards
+  skip inventory tables a shorter migration chain has not created, so a
+  migration-fence test can still open a version-66 store.
+- The per-hook pending/live answer count (unused) is removed. The conversation
+  row keeps a receipt of the last step answer (request id, answer kind,
+  compaction id and version) instead of the multi-megabyte view, which stays in
+  its view row. A step loads one view by version instead of every stored view.
+- An engine rewrite of the policy parts uses one cached statement and leaves
+  unchanged rows alone; a baseline refreeze restates measurements with a cached
+  statement and skips rows whose stored text already matches.
+- `reasoning_budget_cutoff`, the active Anthropic turn checks and
+  `non_tag_messages` use per-pass maps instead of per-message linear searches.
+- TypeScript: `publishMessages` copies with plain loops (same keys, order and
+  `toJSON`/`__proto__` handling); the model fallback walks back from the newest
+  message instead of copying and mapping the whole array.
+
+**Remaining O(session) work.** No module work in an ordinary hook grows with the
+session: SQLite steps per ordinary hook are 5,884 at both 1,000 and 17,000
+messages, while the summary rebuild that the first hook performs costs 369,211
+and 6,241,211 (`ordinary_hook_store_reads_do_not_grow_with_the_session`). After
+the change an ordinary 17k pass spends about 2 ms per hook. The adapter still
+does three O(window) things the host contract requires on every pass: it reads
+every incoming id to detect appends, holes and reverts (≈2–4 ms at 17k), maps
+the incoming array (≈2 ms), and deep-copies the served window it publishes
+(≈7 ms at 17k), because OpenCode or later transforms may mutate published
+objects. Reusing earlier copies would change that defensive contract and is not
+done here. The first hook after a bootstrap or after a rebuild that rewrote the
+policy parts rebuilds the summary; after a rebuild it usually also refreezes the
+tail-hygiene baseline (the engine and host measurements disagree for covered
+parts), restating every frozen part's measurement. That hook took 520–630 ms
+at 17k, inside its 1,500 ms budget; before the cached change-only restatement
+it took about 1.6 s, the hook timed out, and the host served that message
+untagged, which failed the paired rebuild comparison at 17k. A HARD rebuild
+itself re-renders the whole prefix, so the remaining ≈5.6 s at 15k is engine
+work proportional to the session (store commit, state evolution, protection
+floor, view encoding, view and answer loads).
+
+Before/after, synthetic, `provider-pipeline-synthetic.ts` at each size (20
+ordinary samples of three appends after three warmups; five paired rebuilds);
+ms, p50 / p95:
+
+| Binding, messages | Ordinary before | Ordinary after | Provider rebuild before | Provider rebuild after | Full-request engine+codec after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| OpenCode 1, 7,500 | 836 / 977 | 13.5 / 21.3 | 7,789 / 12,570 | 2,283 / 3,140 | 1,664 / 1,906 |
+| OpenCode 2, 7,500 | 729 / 803 | 10.4 / 15.2 | 7,044 / 7,673 | 2,347 / 2,435 | 1,601 / 1,675 |
+| OpenCode 1, 17,000 | 1,512 / 1,767 | 15.8 / 29.8 | blocked: 31,074 timeout, retry 28,426 | 5,968 / 6,283 | 4,793 / 4,823 |
+| OpenCode 2, 17,000 | 1,838 / 1,981 | 19.1 / 29.0 | blocked: 30,795 timeout, retry 30,041 not applied | 5,792 / 6,089 | 4,498 / 4,983 |
+
+Before, the base full-request arm measured 6,865 / 10,448 (OpenCode 1) and
+6,046 / 6,507 (OpenCode 2) at 7,500 messages and 23,875 / 33,643 (two samples)
+and 39,215 (one sample) at 17,000. After, every paired rebuild at both sizes
+applied a view, did not fall back and served bytes equal to the full-request
+output. Hook round trips were p50 1 ms, p95 2–5 ms. The synthetic ordinary
+results are inside P1's thresholds, but P1 still requires the live,
+instrumented measurement described below. P2 is still not met: the provider
+rebuild is 1.25–1.47 × the full-request engine+codec time (the gate allows
+1.10 ×); the extra is the host step's own O(session) work listed above.
+
+**Correctness evidence (Linux unless noted).** `cargo test -p mc-module --lib`:
+1,860 passed, 24 ignored. Every replayed summary in tests is checked against
+the full computation (inputs and summary); the 720-pass corpus asserts 46,980
+comparisons and replayed summaries 1,850 times, the HARD companion keeps 48
+passes and 113 comparisons (768 total), and M4's
+`r3_randomized_host_full_engine_240_passes` had 0 mismatches. The previously
+ignored `bounded_policy_summary_does_not_return_the_entire_known_metadata_lineage`
+now runs and passes. `cargo test -p mc-store`: 314 passed, 5 ignored. On the
+Mac, `pure-replay-differential.ts --provider-pipeline` passed all 90 checks
+with no failures (the earlier record counted 88 cases: the original 84 plus the
+four identity cases), and the signed-thinking prefix audit's golden capture
+(`MC_AUDIT_GOLDEN`, 706 captured passes) is byte-identical to the base commit.
 
 ## Fail-closed gate and input contract
 
@@ -335,8 +644,12 @@ independent. This report does not claim that production currently emits them.
 
 ### Outstanding gates
 
-P1, P2, P3 and P4 remain blocked. Next actions are: resolve the tool-dense synthetic
-bootstrap identity refusal; run the two real-host lanes with the matching binaries;
+P1, P2, P3 and P4 remain unpassed. The identity refusal is resolved. After the
+per-pass cost follow-up, the synthetic ordinary pass is inside P1's thresholds
+and 17,000-message rebuilds apply within the bootstrap budget, but P2's
+rebuild-to-full ratio (1.25–1.47 ×) is still above 1.10 ×, and none of this is a
+live measurement. Next actions are: reduce the host step's own work in a
+rebuild; run the two real-host lanes with the matching binaries;
 land the separate production instrumentation/capture collector; ship; obtain an
 authorized ALF copy and live session id; then run and retain the paired measurement
 and full 24-hour canary. Switching the default to the provider pipeline is not

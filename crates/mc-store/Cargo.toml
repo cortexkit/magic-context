@@ -13,7 +13,7 @@ path = "src/lib.rs"
 cortexkit-cache-core = { workspace = true }
 cortexkit-store = { workspace = true }
 cortexkit-store-types = { workspace = true }
-rusqlite = { workspace = true, features = ["functions"] }
+rusqlite = { workspace = true, features = ["functions", "hooks"] }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 sha2 = { workspace = true }

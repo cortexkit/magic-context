@@ -84,6 +84,7 @@ fn review_queueing_one_text_block_keeps_its_sibling_reclaimable() {
                             tags,
                         }),
                         counters,
+                        policy_summary: None,
                     },
                     (),
                 ))
@@ -149,6 +150,7 @@ fn review_pending_burns_and_unknown_subjects_are_idempotent_across_restart() {
                             }],
                         }),
                         counters,
+                        policy_summary: None,
                     },
                     (),
                 ))
@@ -246,7 +248,7 @@ fn r2_crash_before_commit_preserves_namespace_fence_and_applies_drop_once() {
     };
     store.commit_provider_hook(&key,ProviderHookRequest {lineage:&lineage,message:Some(&message),served_through_ordinal:None,unserved_subjects:&[],repeat_subject:None},|ctx| {
         let mut counters=ctx.counters.clone();counters["answer_policy"]=json!({"metrics":ProviderPolicyTotals {tool_tokens:80,reclaimable_tokens:80,tool_outputs:1,..Default::default()}});
-        Ok((ProviderHookWrite {answer:Some(ProviderHookAnswer {subject:ProviderSubject {subject_mid:"target".into(),hook:"post_tool".into(),subject_part:"part".into()},ordinal:1,ops_json:"[]".into(),tags:vec![ProviderAnswerTag {number:1,block_id:"target#1".into(),kind:"tool_result".into(),source:"payload".into(),token_count:80,created_at_ms:1}]}),counters},()))
+        Ok((ProviderHookWrite {answer:Some(ProviderHookAnswer {subject:ProviderSubject {subject_mid:"target".into(),hook:"post_tool".into(),subject_part:"part".into()},ordinal:1,ops_json:"[]".into(),tags:vec![ProviderAnswerTag {number:1,block_id:"target#1".into(),kind:"tool_result".into(),source:"payload".into(),token_count:80,created_at_ms:1}]}),counters,policy_summary:None},()))
     }).unwrap();
     store
         .commit_provider_status(&key, &lineage, &[], Some(1), &[])
