@@ -5391,7 +5391,7 @@ fn apply_once(
     // in the HARD branch, says it busts the served prefix. Otherwise the provider's cached
     // prefix survives the pass and a queued drop or heuristic riding it would originate the
     // pass's only bust. The HARD itself still runs so its markers commit.
-    let marker_hard_keeps_provider_cache = prefix_materialization_enabled
+    let marker_hard_candidate = prefix_materialization_enabled
         && (external_revision_changed
             || project_memory_epoch_hard_due
             || pre_snapshot_inputs_changed)
@@ -5406,8 +5406,9 @@ fn apply_once(
         && !lineage_state.force_hard
         && !is_legacy_baseline(&loaded.core)
         && valid_m0m1_shape(&loaded.core)
-        && !cached_m1_missing(&loaded.core)
-        && compose_hard_fold_m0(
+        && !cached_m1_missing(&loaded.core);
+    let mut marker_hard_composition = if marker_hard_candidate {
+        compose_hard_fold_m0(
             store,
             req,
             ctx,
@@ -5415,8 +5416,9 @@ fn apply_once(
             estimate_tokens,
             incremental_history,
             &mut timings.compose,
+            loaded.meta.score_selection_watermark,
         )
-        .is_some_and(|comp| {
+        .filter(|comp| {
             !hard_fold_busts_served_prefix(
                 &loaded.core,
                 &comp.m0_bytes,
@@ -5425,7 +5427,11 @@ fn apply_once(
                 loaded.meta.coverage_ordinal != comp.coverage_ordinal,
                 hard_fold_loses_provider_cache,
             )
-        });
+        })
+    } else {
+        None
+    };
+    let marker_hard_keeps_provider_cache = marker_hard_composition.is_some();
     let hard_fold_prices_mutations = hard_fold_requested && !marker_hard_keeps_provider_cache;
     if marker_hard_keeps_provider_cache {
         tracing::info!(
@@ -6347,29 +6353,36 @@ fn apply_once(
                     coverage_bounds.map(|(start, _)| start),
                     serializer_profile,
                 );
-                let mut comp = crate::m0_compose::compose_m0_from_store_timed(
-                    store,
-                    &crate::m0_compose::M0ComposeInputs {
-                        session_id: &req.session_id,
-                        project_path: ctx.project_path,
-                        project_directory: ctx.project_directory,
-                        now_ms: ctx.now_ms,
-                        history_budget_tokens: crate::decay_render::history_local_budget(
-                            ctx.history_budget_tokens,
-                            req.model_key.as_deref(),
-                        ),
-                        covered_system_messages: &covered_system_messages,
-                        memory_enabled: ctx.memory_enabled,
-                        memory_budget_tokens: ctx.memory_budget_tokens,
-                        user_profile_budget_tokens: ctx.user_profile_budget_tokens,
-                        inject_docs: ctx.inject_docs,
-                        temporal_awareness: ctx.temporal_awareness,
-                        mural: m0_mural_input(req, serializer_profile),
-                    },
-                    estimate_tokens,
-                    incremental_history,
-                    &mut timings.compose,
-                )?;
+                // Retain the render that proved the provider-visible prefix would
+                // stay unchanged. Other baseline rebuilds adopt the latest scores
+                // visible in their input snapshot.
+                let mut comp = match marker_hard_composition.take() {
+                    Some(composition) => composition,
+                    None => crate::m0_compose::compose_m0_from_store_timed(
+                        store,
+                        &crate::m0_compose::M0ComposeInputs {
+                            score_selector: mc_store::ScoreSelector::Latest,
+                            session_id: &req.session_id,
+                            project_path: ctx.project_path,
+                            project_directory: ctx.project_directory,
+                            now_ms: ctx.now_ms,
+                            history_budget_tokens: crate::decay_render::history_local_budget(
+                                ctx.history_budget_tokens,
+                                req.model_key.as_deref(),
+                            ),
+                            covered_system_messages: &covered_system_messages,
+                            memory_enabled: ctx.memory_enabled,
+                            memory_budget_tokens: ctx.memory_budget_tokens,
+                            user_profile_budget_tokens: ctx.user_profile_budget_tokens,
+                            inject_docs: ctx.inject_docs,
+                            temporal_awareness: ctx.temporal_awareness,
+                            mural: m0_mural_input(req, serializer_profile),
+                        },
+                        estimate_tokens,
+                        incremental_history,
+                        &mut timings.compose,
+                    )?,
+                };
 
                 // Live coverage guard: store-pure validation allows sparse coordinate
                 // gaps because consumer producers can retire ordinal numbers permanently.
@@ -6460,6 +6473,7 @@ fn apply_once(
                             comp = crate::m0_compose::compose_m0_from_store_timed(
                                 store,
                                 &crate::m0_compose::M0ComposeInputs {
+                                    score_selector: mc_store::ScoreSelector::Latest,
                                     session_id: &req.session_id,
                                     project_path: ctx.project_path,
                                     project_directory: ctx.project_directory,
@@ -6632,6 +6646,7 @@ fn apply_once(
                 meta.coverage_start_ordinal = comp.first_covered_ordinal;
                 meta.coverage_compartment_seq = Some(comp.folded_compartment_seq);
                 meta.folded_compartment_seq = comp.folded_compartment_seq;
+                meta.score_selection_watermark = comp.score_selection_watermark;
                 commit_memory_revision = Some(comp.memory_revision.clone());
                 meta.rendered_memory_ids = comp.rendered_memory_ids;
                 meta.memory_mutation_cursor = comp.memory_mutation_cursor;
@@ -6721,6 +6736,7 @@ fn apply_once(
                     let comp = crate::m0_compose::compose_m0_from_store_timed(
                         store,
                         &crate::m0_compose::M0ComposeInputs {
+                            score_selector: mc_store::ScoreSelector::Latest,
                             session_id: &req.session_id,
                             project_path: ctx.project_path,
                             project_directory: ctx.project_directory,
@@ -6856,6 +6872,7 @@ fn apply_once(
                     meta.coverage_start_ordinal = comp.first_covered_ordinal;
                     meta.coverage_compartment_seq = Some(comp.folded_compartment_seq);
                     meta.folded_compartment_seq = comp.folded_compartment_seq;
+                    meta.score_selection_watermark = comp.score_selection_watermark;
                     meta.rendered_memory_ids = comp.rendered_memory_ids;
                     meta.memory_mutation_cursor = comp.memory_mutation_cursor;
                     meta.max_memory_id = comp.max_memory_id;
@@ -10184,10 +10201,11 @@ fn render_mural_block(mural: &crate::m0_compose::M0MuralBlock) -> FrozenUnit {
     }
 }
 
-/// Composes the m0 a HARD on this pass would render, with the same inputs the HARD
-/// branch uses, so a caller can ask hard_fold_busts_served_prefix before selection
-/// whether that fold would change the served prefix. A load or compose failure
-/// returns None, and the caller then keeps the permission every HARD had before.
+/// Render a marker-triggered baseline rebuild at the last committed score
+/// selection, without writing cache state. An unchanged prefix carries this
+/// composition into the commit; a load error or changed prefix instead permits
+/// a fresh render with the latest scores.
+#[allow(clippy::too_many_arguments)]
 fn compose_hard_fold_m0(
     store: &McStore,
     req: &TransformRequest,
@@ -10196,6 +10214,7 @@ fn compose_hard_fold_m0(
     estimate_tokens: impl Fn(&str) -> usize + Copy,
     incremental_history: bool,
     timings: &mut crate::m0_compose::ComposeTimings,
+    score_selection_watermark: i64,
 ) -> Option<crate::m0_compose::M0Composition> {
     let compartments = store.load_compartments(&req.session_id).ok()?;
     let coverage_bounds = coverage_bounds_from_compartments(&compartments).ok()?;
@@ -10208,6 +10227,7 @@ fn compose_hard_fold_m0(
     crate::m0_compose::compose_m0_from_store_timed(
         store,
         &crate::m0_compose::M0ComposeInputs {
+            score_selector: mc_store::ScoreSelector::AtWatermark(score_selection_watermark),
             session_id: &req.session_id,
             project_path: ctx.project_path,
             project_directory: ctx.project_directory,
@@ -18264,6 +18284,10 @@ fn action_str(plan: &PassPlan, _core: &CoreState) -> String {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    mod score_projection {
+        use super::*;
+        include!("transform_score_projection_tests.rs");
+    }
     mod compaction_adapter_tests {
         use super::*;
         use crate::transform::compaction::{

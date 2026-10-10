@@ -30,8 +30,10 @@ mod provider_legacy;
 mod provider_log;
 pub mod provider_records;
 pub use provider_records::ProviderSessionKey;
+pub mod score_projection;
 pub mod single_store_domain;
 pub mod single_store_schema;
+pub use score_projection::{CompartmentScoreSnapshot, ScoreSelector, RESCORE_RUBRIC_VERSION};
 
 pub use single_store_domain::{ContextDomain, SqliteContextDomain};
 
@@ -3276,6 +3278,10 @@ pub const LATEST_MIGRATION_VERSION: u32 = {
     latest
 };
 
+/// Released builds serving applied score selections must support store version
+/// 67 or later and preserve their watermark when rewriting cache metadata.
+pub const SCORE_SELECTION_WATERMARK_STORE_FENCE: u32 = 67;
+
 /// Whether this binary can serve a store whose project rows have been moved into the host's
 /// database ("single-store mode").
 ///
@@ -4125,6 +4131,7 @@ pub struct CompartmentSetGeneration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistorianAssemblySnapshot {
     pub compartments: Vec<StoredCompartment>,
+    pub importance_by_sequence: HashMap<i64, i32>,
     pub revert_epoch: u64,
     pub compartment_set_generation: CompartmentSetGeneration,
 }
@@ -4555,6 +4562,10 @@ fn u64_is_zero(value: &u64) -> bool {
     *value == 0
 }
 
+fn i64_is_zero(value: &i64) -> bool {
+    *value == 0
+}
+
 fn u8_is_zero(value: &u8) -> bool {
     *value == 0
 }
@@ -4714,6 +4725,11 @@ pub struct SessionCacheTtlPolicy {
 /// The non-CoreState durable blob: bootstrap + epoch-detection + coverage watermark.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModuleMeta {
+    /// Highest score-selection log sequence represented in frozen m0, committed
+    /// atomically with its bytes. Later selections wait for an independently
+    /// triggered baseline rebuild and never request one themselves.
+    #[serde(default, skip_serializing_if = "i64_is_zero")]
+    pub score_selection_watermark: i64,
     /// Idle-expiry policy only; it never changes rendered context or cached prompt text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_ttl_policy: Option<SessionCacheTtlPolicy>,
@@ -7400,6 +7416,8 @@ pub struct McStore {
     #[cfg(any(test, feature = "test-support"))]
     compartment_payload_query_count: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-support"))]
+    after_score_snapshot_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    #[cfg(any(test, feature = "test-support"))]
     historian_side_channel_fail_once: Mutex<BTreeSet<String>>,
     /// Route roots a test keyed by a project identity; see `set_route_identity_for_test`.
     #[cfg(any(test, feature = "test-support"))]
@@ -7905,6 +7923,21 @@ impl McStore {
         Self::open_with_private_permissions(descriptor, true)
     }
 
+    /// Exercise the real opener with a shorter migration chain. Older stores
+    /// migrate normally; a newer recorded version is refused, never downgraded.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_with_schema_ceiling_for_test(
+        descriptor: &StorageDescriptor,
+        ceiling: u32,
+    ) -> Result<Self, McStoreError> {
+        let chain: Vec<Migration> = MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= ceiling)
+            .cloned()
+            .collect();
+        Self::open_with_migrations(descriptor, false, &chain)
+    }
+
     pub fn open_with_private_permissions(
         descriptor: &StorageDescriptor,
         enforce_private_permissions: bool,
@@ -8040,6 +8073,8 @@ impl McStore {
             state_load_query_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "test-support"))]
             compartment_payload_query_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(any(test, feature = "test-support"))]
+            after_score_snapshot_hook: Mutex::new(None),
             #[cfg(any(test, feature = "test-support"))]
             historian_side_channel_fail_once: Mutex::new(BTreeSet::new()),
             #[cfg(any(test, feature = "test-support"))]
@@ -11887,27 +11922,34 @@ impl McStore {
             )
             .optional()
         })?;
-        let (mut compartments, compartment_set_generation) = self.context_read(|conn| {
-            let mut stmt = conn.prepare(&format!(
-                "SELECT {COMPARTMENT_SELECT_COLUMNS}
+        let (mut compartments, compartment_set_generation, importance_by_sequence) = self
+            .context_read(|conn| {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT {COMPARTMENT_SELECT_COLUMNS}
                  FROM compartments WHERE session_id = ?1 ORDER BY sequence ASC"
-            ))?;
-            let compartments = stmt
-                .query_map(params![session_id], Self::stored_compartment_from_row)?
-                .collect::<Result<Vec<_>, _>>()?;
-            let compartment_set_generation = conn.query_row(
-                "SELECT COALESCE(MAX(sequence), 0), COUNT(*)
+                ))?;
+                let compartments = stmt
+                    .query_map(params![session_id], Self::stored_compartment_from_row)?
+                    .collect::<Result<Vec<_>, _>>()?;
+                let compartment_set_generation = conn.query_row(
+                    "SELECT COALESCE(MAX(sequence), 0), COUNT(*)
                  FROM compartments WHERE session_id = ?1",
-                params![session_id],
-                |row| {
-                    Ok(CompartmentSetGeneration {
-                        max_sequence: row.get(0)?,
-                        count: row.get(1)?,
-                    })
-                },
-            )?;
-            Ok((compartments, compartment_set_generation))
-        })?;
+                    params![session_id],
+                    |row| {
+                        Ok(CompartmentSetGeneration {
+                            max_sequence: row.get(0)?,
+                            count: row.get(1)?,
+                        })
+                    },
+                )?;
+                let (importance_by_sequence, _) =
+                    score_projection::score_view_tx(conn, session_id, ScoreSelector::Latest)?;
+                Ok((
+                    compartments,
+                    compartment_set_generation,
+                    importance_by_sequence,
+                ))
+            })?;
         self.apply_compartment_dates(session_id, &mut compartments)?;
         let revert_epoch = match meta_json {
             Some(json) => {
@@ -11919,6 +11961,7 @@ impl McStore {
         };
         Ok(HistorianAssemblySnapshot {
             compartments,
+            importance_by_sequence,
             revert_epoch,
             compartment_set_generation,
         })
