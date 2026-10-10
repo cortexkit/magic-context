@@ -184,6 +184,43 @@ describe("loadDefaultPiSessionApi", () => {
 			expect(await api.listSessions()).toEqual(["omp-bare-import"]);
 		}, 30000);
 
+		it("loads the legacy-scope package through the first bare-import fallback", async () => {
+			// Same harness as the OMP loader above, for the other host scope: each
+			// bare loader must actually resolve a package through node_modules and
+			// hand back the real session API, not merely be present in the list.
+			// The unique marker is what proves WHICH copy was imported -- a loader
+			// that silently resolved the repo's own devDependency instead of the
+			// fixture would return "9.9.9" and fail here.
+			const dir = createTestTempDir("pi-bare-import-").dir;
+			writeFixturePackage(
+				join(dir, "node_modules", "@earendil-works", "pi-coding-agent"),
+				{
+					manifest: {
+						name: PI_SPEC,
+						version: "0.84.1",
+						exports: { ".": { import: "./index.js" } },
+					},
+					files: { "index.js": fixtureModule("pi-bare-import") },
+				},
+			);
+			const resolverCopy = join(dir, "src", "pi-session-api.ts");
+			mkdirSync(dirname(resolverCopy), { recursive: true });
+			copyFileSync(
+				fileURLToPath(new URL("./pi-session-api.ts", import.meta.url)),
+				resolverCopy,
+			);
+
+			const resolver = (await import(
+				pathToFileURL(resolverCopy).href
+			)) as typeof import("./pi-session-api");
+			const bareLoader = resolver.defaultLoaders.find(
+				(loader) => loader.name === "Bare import",
+			);
+			if (!bareLoader) throw new Error("bare-import loader missing");
+			const api = await resolver.loadDefaultPiSessionApi([bareLoader]);
+			expect(await api.listSessions()).toEqual(["pi-bare-import"]);
+		}, 30000);
+
 		it("resolves through a bin-shim symlink when argv[1] is the shim path", async () => {
 			const dir = createTestTempDir("pi-symlink-test-").dir;
 			const pkgRoot = join(
