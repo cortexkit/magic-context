@@ -27,7 +27,11 @@ export function cacheSessionRatio(events: DbCacheEvent[]): number | null {
   return reported ? (total > 0 ? read / total : 0) : null;
 }
 
-/** Stands in for a percentage that cannot be computed while keeping the figure's width stable. */
+/**
+ * Stands in for a percentage that cannot be computed. It is one character so
+ * a card's big figure keeps the same size whatever the session reported; the
+ * reason goes in smaller text beside it.
+ */
 export const CACHE_FIGURE_PLACEHOLDER = "—";
 
 /** Why a figure is missing when the provider never reported cache reads. */
@@ -54,7 +58,10 @@ export function cacheRatioTitle(event: Pick<DbCacheEvent, "aggregate" | "cold_st
   return "Cache retention vs the previous step's expected prefix";
 }
 
-/** The note to show when some listed sessions cannot be updated while a turn runs. */
+/**
+ * The note to show above the session cards when some listed sessions cannot be
+ * updated while a turn runs (the backend explains why on each such row).
+ */
 export function cacheActivityNote(sessions: SessionCacheStats[]): string | null {
   return sessions.find((row) => row.activity_note)?.activity_note ?? null;
 }
@@ -64,14 +71,22 @@ export function cacheSessionTitle(row: SessionCacheStats): string {
 }
 
 export interface CacheCardSummary {
+  /** The big figure: a percentage or the placeholder, never words. */
   text: string;
+  /** "ratio" colors the text by hit ratio; "neutral" renders it muted. */
   tone: "ratio" | "neutral";
   ratio: number;
   title: string;
+  /** Small text shown after the event count, explaining a placeholder. */
   note: string | null;
 }
 
-/** Summarizes a session without treating an unreported or cold cache as a miss. */
+/**
+ * The headline of a session card. A red percentage is reserved for sessions
+ * that actually read from the cache and could have read more: a session whose
+ * requests report no cache reads at all, or whose window holds only its cold
+ * opening turn, is shown in a neutral color.
+ */
 export function cacheCardSummary(events: DbCacheEvent[]): CacheCardSummary {
   if (events.length === 0) {
     return {
@@ -120,7 +135,11 @@ export function cacheCardSummary(events: DbCacheEvent[]): CacheCardSummary {
   };
 }
 
-/** Labels an empty session, a Broca run total, or a regular event list. */
+/**
+ * "1 run" / "3 runs" when every row is a Broca run total, else events, and
+ * "no data" for a session with nothing recorded yet (a Broca run that has
+ * just started) rather than "0 events".
+ */
 export function cacheCardCountLabel(events: DbCacheEvent[]): string {
   if (events.length === 0) return "no data";
   const noun = events.length > 0 && events.every((event) => event.aggregate) ? "run" : "event";
@@ -128,9 +147,12 @@ export function cacheCardCountLabel(events: DbCacheEvent[]): string {
 }
 
 export interface SessionModelSummary {
+  /** Model of the newest event that recorded one. */
   model: string;
   provider: string | null;
+  /** How many other models the loaded events used. */
   others: number;
+  /** Every provider/model seen, most recently used first. */
   all: string[];
 }
 
@@ -158,12 +180,18 @@ export function sessionModelLabel(summary: SessionModelSummary): string {
 }
 
 export interface CacheSessionHeader {
+  /** The full session name, never truncated. */
   name: string;
   tooltip: string;
+  /** For Broca, the harness Broca ran the session for (from its identity). */
   innerHarness: string | null;
 }
 
-/** Names a selected session and preserves its full identity in the tooltip. */
+/**
+ * Names the selected session above its timeline. A Broca session id is its
+ * JSON identity `{project_root, harness, session}`; the header shows the
+ * session name and inner harness and keeps the project root in the tooltip.
+ */
 export function cacheSessionHeader(
   harness: Harness,
   sessionId: string,
@@ -184,7 +212,7 @@ export function cacheSessionHeader(
         lines.push(`project: ${identity.project_root}`);
       return { name, tooltip: lines.join("\n"), innerHarness };
     } catch {
-      // A non-JSON identity uses the ordinary session-name fallback.
+      // Not a JSON identity: fall through to the plain name.
     }
   }
   const name = title || sessionId;
