@@ -260,7 +260,7 @@ fn provider_pipeline_driver() {
 }
 `;
 
-function buildDriver(directory: string): string {
+export function buildDriver(directory: string): string {
     const link = (source: string, destination: string, type?: "dir") => {
         if (!existsSync(destination)) symlinkSync(source, destination, type);
     };
@@ -337,7 +337,7 @@ function buildDriver(directory: string): string {
     return binary;
 }
 
-class Driver {
+export class Driver {
     private child;
     private lines;
     private stderr;
@@ -451,7 +451,7 @@ function canonical<T>(value: T): T {
         ) as T;
     return value;
 }
-function message(id: string, role = "user", text = `café 🦀 \"${id}\"\n`) {
+export function message(id: string, role = "user", text = `café 🦀 \"${id}\"\n`) {
     return canonical({
         info: {
             id,
@@ -463,7 +463,7 @@ function message(id: string, role = "user", text = `café 🦀 \"${id}\"\n`) {
         parts: [{ id: `${id}-text`, type: "text", text }],
     }) as MessageLike;
 }
-function tools(id: string, repeated = false): MessageLike {
+export function tools(id: string, repeated = false): MessageLike {
     const m = message(id, "assistant", "assistant response");
     for (const n of [1, 2])
         m.parts.push(
@@ -483,7 +483,7 @@ function prefix(before: string[], after: string[]) {
 }
 
 let serial = 0;
-async function fixture(driver: Driver, host: Host, directory?: string, protectBash = false) {
+export async function fixture(driver: Driver, host: Host, directory?: string, protectBash = false) {
     const rig = `${host}-${++serial}`;
     const harness = host === "OpenCode1" ? "opencode" : "opencode2";
     await driver.send({ op: "create", rig, harness, directory, protect_bash: protectBash });
@@ -502,6 +502,7 @@ async function fixture(driver: Driver, host: Host, directory?: string, protectBa
     const wires: Wire[] = [];
     const answers: any[] = [];
     const callTimes: { method: string; ms: number }[] = [];
+    const callErrors: unknown[] = [];
     const recorded: string[][] = [];
     const fullDecisions: { rig: string; action: unknown }[] = [];
     const logStart = logLines.length;
@@ -513,6 +514,7 @@ async function fixture(driver: Driver, host: Host, directory?: string, protectBa
     const call = async (body: unknown) => {
         const reply = await driver.send({ op: "call", rig, body });
         if (reply.error) {
+            callErrors.push(reply.error);
             console.error(
                 `HANDLER_ERROR ${rig} ${JSON.stringify(body).slice(0, 300)} ${JSON.stringify(reply.error)}`,
             );
@@ -642,6 +644,7 @@ async function fixture(driver: Driver, host: Host, directory?: string, protectBa
         wires,
         answers,
         callTimes,
+        callErrors,
         recorded,
         fallbacks,
         fullDecisions,
@@ -649,6 +652,7 @@ async function fixture(driver: Driver, host: Host, directory?: string, protectBa
         sql,
         call,
         full,
+        fullFrom,
         logs: () => logLines.slice(logStart),
         async event(event: string, details: Record<string, unknown> = {}) {
             await driver.send({ op: "event", rig, event, ...details });
@@ -718,6 +722,26 @@ async function fixture(driver: Driver, host: Host, directory?: string, protectBa
             // from the runner tables. Assertions always consume what was served.
             recorded.push(bytes(served));
             return served;
+        },
+        async timedPass(input: MessageLike[]) {
+            let assignmentMs: number | undefined;
+            let served: unknown[] = [];
+            const started = performance.now();
+            Object.defineProperty(served, "splice", { value: function(this: unknown[], ...args: [number, number, ...unknown[]]) {
+                const removed = Array.prototype.splice.apply(this, args);
+                assignmentMs = performance.now() - started;
+                return removed;
+            } });
+            const output = {
+                get messages() { return served; },
+                set messages(value: unknown[]) {
+                    served = value;
+                    assignmentMs = performance.now() - started;
+                },
+            };
+            await adapter.run("session", input, output, getOrCreateSessionMeta(db, "session"));
+            assert.ok(assignmentMs !== undefined, "measured pass must assign output.messages");
+            return { pass_ms: assignmentMs, messages: served as MessageLike[] };
         },
         async close() {
             adapter.dispose();
@@ -826,6 +850,21 @@ async function moduleCrashCase(parent: Fixture, point: (typeof faultPoints)[numb
     }
 }
 const cases: Case[] = [
+    {
+        name: "T2.timing-boundary",
+        async run(f) {
+            const input = [message("timed-first")];
+            await f.pass(input);
+            input.push(message("timed-second"));
+            const sample = await f.timedPass(input);
+            assert.ok(Number.isFinite(sample.pass_ms) && sample.pass_ms >= 0);
+            assert.ok(sample.messages.some(m => m.info.id === "timed-second"));
+            assert.equal(f.recorded.length, 1, "timing does not include corpus serialization");
+            assert.equal(f.fallbacks.length, 0, "timing sample must reach the provider path");
+            const noAppend = await f.timedPass(input);
+            assert.deepEqual(bytes(noAppend.messages), bytes(sample.messages));
+        },
+    },
     ...faultPoints.map((point) => ({
         name: `A6.S3-${point}`,
         run: (f: Fixture) => moduleCrashCase(f, point),

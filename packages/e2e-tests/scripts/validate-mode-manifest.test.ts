@@ -21,7 +21,7 @@ describe("mode manifest validator", () => {
         // Bump this with the manifest whenever a tests/**/*.test.ts file is added or
         // removed. Moving a file between excluded and ts-only changes the invocation
         // counts and excluded list below, but not the total number of files.
-        expect(validation.files.length).toBe(185);
+        expect(validation.files.length).toBe(187);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -148,9 +148,20 @@ describe("mode manifest validator", () => {
             "tests/rust-classify-host-runner.test.ts",
             "tests/rust-full-sync-frame-cap.test.ts",
             "tests/rust-plugin-stage-cache.test.ts",
+            "tests/rust-provider-pipeline-opencode1.test.ts",
+            "tests/rust-provider-pipeline-opencode2.test.ts",
             "tests/system-prompt-change-order.test.ts",
             "tests/window-overlay-reload.test.ts",
         ]);
+        for (const path of [
+            "tests/rust-provider-pipeline-opencode1.test.ts",
+            "tests/rust-provider-pipeline-opencode2.test.ts",
+        ]) {
+            expect(ts).not.toContain(path);
+            expect(rust).not.toContain(path);
+            expect(filesForMode(validation, "rust", "opencode")).not.toContain(path);
+            expect(filesForMode(validation, "rust", "opencode2")).not.toContain(path);
+        }
         expect(new Set([...ts, ...rust]).size).toBe(validation.files.length - excluded.length);
     });
 

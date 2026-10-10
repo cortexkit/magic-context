@@ -3,6 +3,22 @@
     "header": "CI push workflows run the manifest-derived TypeScript suites and Rust hermetic suite through scripts/run-rust-hermetic-e2e.sh; tag releases run the same Rust invocation. Cargo.lock pins the Rust dependency versions and git revisions. CI mc-module daemon tests and push/release builders use the locked subconscious source to build ck-subc; the scheduled CI builder intentionally probes default-branch HEAD as drift, while test shards consume its prebuilt artifact.",
     "entries": [
         {
+            "path": "tests/rust-provider-pipeline-opencode1.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "Opt-in provider-pipeline measurement probe: invoke directly with bun test tests/rust-provider-pipeline-opencode1.test.ts, a pinned OpenCode 1.18.x host and matching prebuilt module/daemon/fault binaries. Not a default hermetic-shard gate; host routing and record assertions have not passed in that environment. Missing inputs fail explicitly. P1-P4 cutover measurements remain blocked.",
+            "contract_refs": ["PROVIDER-PIPELINE-T2"],
+            "hosts": ["opencode"]
+        },
+        {
+            "path": "tests/rust-provider-pipeline-opencode2.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "Opt-in provider-pipeline measurement probe: invoke directly with bun test tests/rust-provider-pipeline-opencode2.test.ts, a pinned OpenCode 2.0.x host and matching prebuilt module/daemon/fault binaries. Not a default hermetic-shard gate; its pinned version preflight has not passed with the shard host. Missing inputs fail explicitly. P1-P4 cutover measurements remain blocked.",
+            "contract_refs": ["PROVIDER-PIPELINE-T2"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/latest-turn-thinking.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
