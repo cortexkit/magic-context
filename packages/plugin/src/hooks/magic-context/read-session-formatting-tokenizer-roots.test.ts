@@ -1,8 +1,17 @@
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, cpSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+    cpSync,
+    existsSync,
+    mkdirSync,
+    readFileSync,
+    realpathSync,
+    rmSync,
+    statSync,
+    writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { tokenizerPackageRoots } from "./read-session-formatting";
 
@@ -32,9 +41,13 @@ import { tokenizerPackageRoots } from "./read-session-formatting";
 const NEUTRAL_CWD = join(homedir(), ".cache", "magic-context-tests", "tokenizer-roots-cwd");
 const TESTS_ROOT = join(homedir(), ".cache", "magic-context-tests");
 
-const SRC_HOOK_DIR = dirname(fileURLToPath(new URL("./read-session-formatting.ts", import.meta.url)));
+const SRC_HOOK_DIR = dirname(
+    fileURLToPath(new URL("./read-session-formatting.ts", import.meta.url)),
+);
 const SRC_HOOK = join(SRC_HOOK_DIR, "read-session-formatting.ts");
-const SRC_SHARED = join(SRC_HOOK_DIR, "..", "..", "shared");
+// The fixture tree mirrors `packages/plugin/src`, so every relative specifier
+// inside the copied closure resolves against the same layout as the original.
+const SRC_PKG = join(SRC_HOOK_DIR, "..", "..");
 
 function moduleAncestors(): string[] {
     const ownDir = dirname(fileURLToPath(new URL(import.meta.url)));
@@ -107,7 +120,13 @@ function runIsolatedLoader(opts: {
     argv1: string;
     sample: string;
 }): LoaderResult {
-    const modulePath = join(opts.moduleDir, "src", "hooks", "magic-context", "read-session-formatting.ts");
+    const modulePath = join(
+        opts.moduleDir,
+        "src",
+        "hooks",
+        "magic-context",
+        "read-session-formatting.ts",
+    );
     const moduleUrl = pathToFileURL(modulePath).href;
     // The fixture module lives at a runtime-generated absolute path, so this
     // import inside the child cannot be a static import (test-loading boundary).
@@ -155,23 +174,75 @@ function runIsolatedLoader(opts: {
 }
 
 /**
- * Copy the module plus its shared runtime closure into an isolated tree under
- * `base`, asserting nothing under that tree already carries ai-tokenizer (which
- * would let the primary loader succeed and leave the fallback unexercised).
+ * Resolution candidates for a relative specifier, kept identical to the
+ * maintained pack-graph walker (`scripts/tui-pack-graph.ts`) so the fixture's
+ * closure and the packaged-graph closure agree on what an import means.
+ */
+const SOURCE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".json"];
+
+/**
+ * The transitive closure of literal relative imports of `entry`, discovered
+ * the way `scripts/tui-pack-graph.ts` walks the packed graph: per-file
+ * `Bun.Transpiler.scanImports` (type-only imports are erased, lazy and
+ * `import()` branches are followed) resolved through `SOURCE_EXTENSIONS` and
+ * `index.*` candidates. Bare specifiers (`ai-tokenizer`) are skipped by
+ * design: the fixture must carry no `node_modules` subtree, and the isolated
+ * loader proves the fallback exactly because the bare primary resolve throws.
+ */
+function runtimeImportClosure(entry: string): string[] {
+    const visited = new Set<string>();
+    const pending = [entry];
+    while (pending.length > 0) {
+        const file = pending.pop();
+        if (!file || visited.has(file)) continue;
+        visited.add(file);
+        const ext = extname(file);
+        if (ext === ".json") continue;
+        const loader = ext === ".tsx" || ext === ".jsx" ? "tsx" : "ts";
+        const imports = new Bun.Transpiler({ loader }).scanImports(readFileSync(file, "utf8"));
+        for (const { path: specifier } of imports) {
+            if (!specifier.startsWith(".")) continue;
+            const base = resolve(dirname(file), specifier);
+            const candidates = [
+                base,
+                ...SOURCE_EXTENSIONS.map((extension) => base + extension),
+                ...SOURCE_EXTENSIONS.map((extension) => resolve(base, `index${extension}`)),
+            ];
+            const target = candidates.find(
+                (candidate) => existsSync(candidate) && statSync(candidate).isFile(),
+            );
+            if (!target) {
+                throw new Error(
+                    `loader fixture: ${relative(SRC_PKG, file)} imports missing ${specifier}`,
+                );
+            }
+            pending.push(target);
+        }
+    }
+    return [...visited];
+}
+
+/**
+ * Copy the module plus its full recursive relative-import closure into an
+ * isolated tree under `base`, mirroring the `packages/plugin/src` layout, and
+ * assert nothing under that tree already carries ai-tokenizer (which would let
+ * the primary loader succeed and leave the fallback unexercised).
+ *
+ * The closure is walked from the module itself instead of copying a fixed
+ * folder list: `read-session-formatting.ts` reaches outside `shared/` (its
+ * sibling `./token-count-exact`), and a hand-maintained folder copy goes
+ * silently stale the next time the module gains an import elsewhere — the
+ * isolated child then dies on the missing file rather than on the bare
+ * ai-tokenizer resolve, and the fallback is never exercised. Test files cannot
+ * leak in: runtime modules never import them, so no filter is needed.
  */
 function buildLoaderFixture(base: string): { moduleDir: string } {
     const moduleDir = join(base, "mod");
-    const hookDir = join(moduleDir, "src", "hooks", "magic-context");
-    mkdirSync(hookDir, { recursive: true });
-    cpSync(SRC_HOOK, join(hookDir, "read-session-formatting.ts"));
-    // Copy the shared directory (minus test files); the loader's import closure
-    // stays inside it, and bun only compiles files the copied module actually
-    // imports, so unreachable shared modules (and their own tree dependencies)
-    // are never loaded here.
-    cpSync(SRC_SHARED, join(moduleDir, "src", "shared"), {
-        recursive: true,
-        filter: (source) => !/(\.test\.ts|\.test-support\.ts)$/.test(source),
-    });
+    for (const file of runtimeImportClosure(SRC_HOOK)) {
+        const dest = join(moduleDir, "src", relative(SRC_PKG, file));
+        mkdirSync(dirname(dest), { recursive: true });
+        cpSync(file, dest);
+    }
     for (const dir of [moduleDir, join(moduleDir, "src"), base]) {
         expect(existsSync(join(dir, "node_modules"))).toBe(false);
     }
@@ -202,7 +273,9 @@ test("tokenizer probe roots include the extension's own install tree", () => {
         // A linked install (`omp plugin install <dir>`) loads the module from
         // the linked source while its hoisted dependencies live in OMP's own
         // plugin tree, so that root has to be probed too.
-        const hostPlugins = resolve(join(homedir(), ".omp", "plugins", "node_modules", "ai-tokenizer"));
+        const hostPlugins = resolve(
+            join(homedir(), ".omp", "plugins", "node_modules", "ai-tokenizer"),
+        );
         expect(roots).toContain(hostPlugins);
         // Precedence contract: `findTokenizerImportPaths` binds the first
         // resolvable candidate, so the host-wide ~/.omp/plugins copy -- a
