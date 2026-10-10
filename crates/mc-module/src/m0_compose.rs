@@ -50,7 +50,12 @@ impl From<McStoreError> for M0ComposeError {
 /// [`mc_store::ModuleMeta`] atomically with those bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct M0Composition {
-    /// The score-selection view captured with the history rows, not re-read at CAS.
+    /// Highest score-selection sequence whose rescored importance is rendered into
+    /// `m0_bytes` (zero for original scores). With `ScoreSelector::Latest` it is
+    /// read in the same context.db snapshot as the compartment rows.
+    /// The HARD commit stores this value unchanged as
+    /// `ModuleMeta::score_selection_watermark`; it is not re-read when the commit's
+    /// row-version check runs, so a score published after the read stays pending.
     pub score_selection_watermark: i64,
     /// The frozen m0 baseline bytes (docs + profile + decayed compartments + memories).
     pub m0_bytes: String,
@@ -108,6 +113,10 @@ pub struct M0MuralBlock {
 /// config).
 pub struct M0ComposeInputs<'a> {
     pub session_id: &'a str,
+    /// Which compartment scores the decay renderer sees: `Base` for the original
+    /// historian scores, `AtWatermark` to reproduce the scores already committed in
+    /// m0, or `Latest` for a rebuild that is happening for some other reason and may
+    /// adopt pending rescores.
     pub score_selector: mc_store::ScoreSelector,
     /// The project the store reads key off (resolved from the route binding, never the
     /// request body).
@@ -432,6 +441,8 @@ fn render_m0_retry(
 /// check composes both sides with this same composer.
 pub trait M0Source {
     fn load_compartments(&self, session_id: &str) -> Result<Vec<StoredCompartment>, McStoreError>;
+    /// Compartment rows plus the rescored importance to render with. Sources
+    /// without score tables keep this default: original scores at watermark zero.
     fn load_compartment_score_snapshot(
         &self,
         session_id: &str,
@@ -592,6 +603,8 @@ pub(crate) fn compose_m0_from_store_timed<S: M0Source + ?Sized>(
         .iter()
         .map(|compartment| {
             let mut rendered = DecayRenderCompartment::from(compartment);
+            // Rescored importance applies only to this render copy; the stored row
+            // keeps its original score for coverage and boundary identity.
             if let Some(importance) = score_snapshot
                 .importance_by_sequence
                 .get(&compartment.sequence)

@@ -1074,6 +1074,9 @@ pub fn assemble_historian_firing(
     let reference_compartments: Vec<ReferenceCompartment> = compartments
         .iter()
         .map(|compartment| {
+            // Calibration references show rescored importance as soon as it is
+            // published; this prompt is rebuilt on every historian run and is not
+            // part of the primary agent's cached prefix.
             let mut reference = ReferenceCompartment::from(compartment);
             if let Some(importance) = snapshot.importance_by_sequence.get(&compartment.sequence) {
                 reference.importance = Some(*importance);
