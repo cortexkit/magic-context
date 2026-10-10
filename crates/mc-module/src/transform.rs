@@ -5351,9 +5351,19 @@ fn apply_once(
     // below can authorize new provider-visible mutations.
     // Subagents execute a reductions-only branch, not the prefix plan. Inherited
     // HARD/reconcile advisories cannot price automatic reductions without a fold.
-    let active_thinking_turn = active_anthropic_thinking_turn(req);
-    let protected_signed_prefix =
-        active_thinking_turn && is_prefix_bound_thinking_model(req.model_key.as_deref());
+    let admission = edit_admission_for_request(&loaded.core, req);
+    let protected_signed_prefix = !admission.admit(crate::edit_admission::EditCoord::Prefix);
+    // Claude Code still resends older signed thinking on a new-turn bust, which is rejected.
+    // Keep flush consumption and trigger parking unchanged until that history can be stripped safely.
+    let trigger_holds_enabled = serializer_profile != Some(SerializerProfile::ClaudeCodeAnthropic);
+    let mut held_release = HeldRelease::from_meta(&loaded.meta);
+    held_release.cancel_inactive(
+        loaded.meta.soft_refresh_pending,
+        usage_percentage,
+        ctx.execute_threshold_percentage,
+    );
+    let flush_armed = loaded.meta.soft_refresh_pending
+        && !(trigger_holds_enabled && protected_signed_prefix && held_release.has("soft_refresh"));
     let prefix_materialization_enabled = !req.is_subagent && !protected_signed_prefix;
     let profile_transition = !loaded.meta.last_serializer_profile.is_empty()
         && loaded.meta.last_serializer_profile != req.serializer_profile;
@@ -5423,7 +5433,12 @@ fn apply_once(
     let force_band_active = usage_percentage
         >= scheduler::escalation_bands(ctx.execute_threshold_percentage)
             .force_materialize_percentage;
-    let force_episode_available = force_band_active && !loaded.meta.has_prior_emergency_drop;
+    let force_episode_available = force_band_active
+        && (!loaded.meta.has_prior_emergency_drop
+            || (trigger_holds_enabled
+                && !protected_signed_prefix
+                && held_release.has("force_episode")))
+        && !(trigger_holds_enabled && protected_signed_prefix && held_release.has("force_episode"));
     // A rebuild that is not the emergency itself. It is the only thing that waives the
     // emergency minimum: the force-band edge and the 95% backstop below permit a rewrite
     // but do not pay for one. Both flags derive from this one expression so they cannot
@@ -5437,7 +5452,7 @@ fn apply_once(
             || lineage_state.force_hard
             || (scheduler_outcome.pass != scheduler::PassDecision::Defer
                 && current_m1_digest != applied_m1_revision)))
-        || loaded.meta.soft_refresh_pending
+        || flush_armed
         || (prefix_materialization_enabled && scheduler_outcome.idle_ttl_fired);
     let supersession_ride_available = independent_rebuild
         // Subagents cannot fold history. Execute is their one shared permission
@@ -5445,50 +5460,7 @@ fn apply_once(
         || (req.is_subagent && scheduler_outcome.pass.canonical_decision() == "execute")
         || force_episode_available
             || scheduler_outcome.pass == scheduler::PassDecision::Emergency95;
-    let pass_already_busting = supersession_ride_available;
     let emergency_minimum_waived = independent_rebuild;
-    let calibration_candidate = crate::decision_calibration::DecisionCalibration::freeze_for_model(
-        req.model_key.as_deref(),
-    );
-    let active_calibration = calibration_for_prefix_pass(
-        req.model_key.as_deref(),
-        loaded.meta.decision_calibration.as_ref(),
-        pass_already_busting,
-    );
-    let calibration_changed = pass_already_busting
-        && loaded
-            .meta
-            .decision_calibration
-            .as_ref()
-            .is_some_and(|previous| previous != &calibration_candidate);
-    if !pass_already_busting && !pending_drop_target_ids.is_empty() {
-        tracing::info!("mc-module: pending drops held session={} reason=no_originating_cache_bust scheduler={:?} historian_active={}", req.session_id, scheduler_outcome.pass, ctx.historian_active);
-    }
-    // Tail reclaim gates purely on the serializer profile. Every shipping profile is a
-    // full-array consumer (healing::tail_reclaim is true for all of them), so the request
-    // array round-trips both prefix and tail mutations on every pass. The U1-era layering
-    // that OR-ed in the request-local tagging surface is gone: it existed only to grant the
-    // then-verbatim-tail Claude Code profile reclaim on tool-present passes, and the
-    // profile default now covers every pass directly.
-    let tail_reclaim_enabled = serializer_profile.is_none_or(healing::tail_reclaim);
-    let cached_m1_missing_due = cached_m1_missing(&loaded.core);
-    let producer_gate = tail_reclaim_enabled
-        && producer_gate(
-            scheduler_outcome.pass,
-            !loaded.meta.initialized
-                || render_config_changed
-                || reconcile_hard_due
-                || hard_fold_prices_mutations
-                || cached_m1_missing_due,
-        );
-    // Keep selection deferred when the producer gate blocks it.
-    // An execute selection class still needs the separate ride permission above
-    // before it can choose automatic reductions.
-    let selection_class = if producer_gate {
-        selection_pass_class(scheduler_outcome.pass)
-    } else {
-        PassClass::Defer
-    };
     let tag_tokens_by_block: HashMap<&str, usize> = tag_rows
         .iter()
         .filter_map(|row| {
@@ -5497,277 +5469,425 @@ fn apply_once(
                 .map(|tokens| (row.block_id.as_str(), tokens))
         })
         .collect();
-    profile_start!(perf_selection_inputs, "rt04_selection_inputs");
-    let mut tail_for_selection =
-        tail_sel_items(&live, loaded.meta.coverage_ordinal, &tag_tokens_by_block);
-    attach_edit_input_key_orders(&mut tail_for_selection, &req.tool_input_key_orders);
-    attach_user_answer_markers(&mut tail_for_selection, &req.messages);
-    profile_end!(perf_selection_inputs);
-    // Todo state is deferred work just like an m1 or reduction delta: it may ride an
-    // independently scheduled bust, but it never authorizes provider-visible bytes by itself.
-    // Compute only the call-id transition here; the complete pair is built after classification.
-    let todo_injection_pending = tail_reclaim_enabled
-        && !req.is_subagent
-        && injection_pending_after_capture(
-            &loaded.meta,
-            &tail_for_selection,
-            loaded.meta.synthetic_todo.as_ref(),
-            todo_synthesis_verdict(req),
-        );
-    let floor_resolution = resolve_floor_snapshot(
-        req.protected_tokens_effective,
-        loaded.meta.protected_tokens_effective,
-        ctx.protected_tokens_floor,
-        // The floor snapshot is decision metadata, not served bytes. A marker HARD that keeps
-        // the provider cache still snapshots it (changed floor inputs raise exactly such a
-        // HARD), while the lanes that would act on the new floor stay closed until a real bust.
-        if pass_already_busting || marker_hard_keeps_provider_cache {
-            FloorPass::CacheBust
-        } else {
-            FloorPass::Defer
-        },
-    );
-    let protected_tokens_floor = floor_resolution.effective;
-    // Pending same-pass mints are not persisted rows yet. Every consumer view below is projected
-    // from this one walk over the hydrated mc_tags baseline, independent of the served array.
-    let protection_window = ProtectionWindow::from_persisted_rows_calibrated(
-        &tag_rows[..hydrated_tag_count],
+    let mut all_held = false;
+    let mut held_force_work = false;
+    let (
+        pass_already_busting,
+        supersession_ride_available,
+        calibration_candidate,
+        active_calibration,
+        calibration_changed,
+        tail_reclaim_enabled,
+        tail_for_selection,
+        floor_resolution,
         protected_tokens_floor,
-        active_calibration.tools_ratio,
-    );
-    let tag_window_protected_block_ids = protection_window.row_identities.block_ids.clone();
-    let mut exempt_message_protected_block_ids = [mutation_exempt_mid, lineage_anchor_mid]
-        .into_iter()
-        .flatten()
-        .flat_map(|mid| {
-            projection
-                .blocks
-                .iter()
-                .filter(move |block| block.mid == mid)
-                .map(|block| block.id.clone())
-        })
-        .collect::<HashSet<_>>();
-    exempt_message_protected_block_ids.extend(active_thinking_prefix_edit_ids(&loaded.core, req));
-    let mut protected_block_ids = tag_window_protected_block_ids
-        .union(&exempt_message_protected_block_ids)
-        .cloned()
-        .collect::<HashSet<_>>();
-    let selection_started_at = Instant::now();
-    if scheduler_outcome.pass == scheduler::PassDecision::Emergency95 {
-        let excluded_arcs =
-            crate::selection::reasoning_ineligible_arc_ids(&tail_for_selection).len();
-        if excluded_arcs > 0 {
-            EMERGENCY_REASONING_EXCLUSIONS.fetch_add(1, Ordering::Relaxed);
-            timings.emergency_reasoning_exclusions = excluded_arcs;
-        }
-    }
-    // The same pure selection pass computes protection for acknowledgements on
-    // defer too. Its Defer class emits no reductions and never prices a rewrite.
-    let selection_outcome = {
-        let frozen = frozen_red_targets(&loaded.core);
-        // No per-request gate here: producer_gate already requires
-        // tail_reclaim_enabled, which is the profile default. Gating again on the
-        // request-local tagging surface would starve the durable queue now that every
-        // shipping profile drains unconditionally (full-array tail reclaim).
-        let agent_drop_ids = pending_agent_drops
-            .iter()
-            .map(|drop| drop.target_id.clone())
-            .collect::<Vec<_>>();
-        let agent_drop_command_ids = pending_agent_drops
-            .iter()
-            .filter_map(|drop| {
-                drop.command_id
-                    .as_ref()
-                    .map(|command_id| (drop.target_id.clone(), command_id.clone()))
-            })
-            .collect::<HashMap<_, _>>();
-        let first_applied_agent_drop_ids = pending_agent_drops
-            .iter()
-            .filter(|drop| drop.command_first_applied_at_ms.is_some())
-            .map(|drop| drop.target_id.clone())
-            .collect::<HashSet<_>>();
-        select_reductions_with_outcome(
-            &tail_for_selection,
-            &frozen,
-            &SelectionContext {
-                calibration: Some(active_calibration),
-                pass_class: selection_class,
-                current_total_input_tokens: usage_input_tokens,
-                ceiling_tokens: context_limit_tokens
-                    * ctx.execute_threshold_percentage.clamp(1.0, 100.0)
-                    / 100.0,
-                last_execute_ordinal: if loaded.core.reconcile_pending {
-                    0
-                } else {
-                    loaded.meta.last_execute_ordinal
-                },
-                scheduler_pressure_execute: scheduler_outcome.pressure_execute,
-                prior_input_sample: loaded.meta.last_emergency_input_sample,
-                has_prior_drop: loaded.meta.has_prior_emergency_drop && !pass_already_busting,
-                agent_drop_ids,
-                agent_drop_command_ids,
-                first_applied_agent_drop_ids,
-                pass_already_busting,
-                supersession_ride_available,
-                emergency_minimum_waived,
-                emergency_window_yields: scheduler_outcome.pass
-                    == scheduler::PassDecision::Emergency95,
-                tag_window_protected_block_ids: tag_window_protected_block_ids.clone(),
-                exempt_message_protected_block_ids,
-            },
-            &SelectionConfig {
-                smart_drops: ctx.smart_drops,
-                protected_tools: ctx.protected_tools.clone(),
-            },
-        )
-    };
-    timings.selection = elapsed_ms(selection_started_at);
-    let nudge_base_protected_block_ids = protected_block_ids.clone();
-    protected_block_ids.extend(selection_outcome.protected_tool_block_ids.iter().cloned());
-    let count_to_u64 =
-        |count: Option<usize>| count.map(|value| u64::try_from(value).unwrap_or(u64::MAX));
-    let eligible_supersession_count = count_to_u64(selection_outcome.eligible_supersession_count);
-    let supersession_withheld_by_tag_window_count =
-        count_to_u64(selection_outcome.supersession_withheld_by_tag_window_count);
-    let supersession_withheld_by_exempt_message_count =
-        count_to_u64(selection_outcome.supersession_withheld_by_exempt_message_count);
-    let applied_supersession_count = count_to_u64(selection_outcome.applied_supersession_count);
-    let selected_reductions = selection_outcome.decisions;
-    let two_pass_batch_can_apply = selection_outcome.two_pass_batch_can_apply;
-    #[cfg(test)]
-    let selected_reductions = if ctx.injected_reductions.is_empty() {
-        selected_reductions
-    } else {
-        ctx.injected_reductions.clone()
-    };
-    let selected_reductions =
-        filter_reasoning_ineligible_decisions(&tail_for_selection, selected_reductions);
-    // Fail-loud monotonicity guard, BEFORE classify and on EVERY pass: a frozen
-    // reduction target re-supplied with different bytes breaks the immutable contract,
-    // and the set-membership trigger would silently skip it (already frozen) and serve
-    // the stale bytes — including on a defer. Error here instead.
-    validate_reduction_monotonicity(&loaded.core, &selected_reductions)?;
-
-    let reductions_pending_now = reductions_pending(
-        &loaded.core,
-        &selected_reductions,
-        &live,
-        loaded.meta.coverage_ordinal,
-    );
-    let classify_started_at = Instant::now();
-    // The drain latch can remain active after pressure falls below the force threshold.
-    // It does not mean this request is already rewriting the cached prefix: pending m1
-    // publications still need Execute or an independently authorized repair/force/flush.
-    let independent_bust_opportunity = supersession_ride_available;
-    let bust_opportunity = independent_bust_opportunity || reductions_pending_now;
-    // Discover non-tool lanes before classification: a force batch containing only
-    // text compression or strip work must not need a tool drop to open its own gate.
-    let non_tool_bust_opportunity = bust_opportunity
-        || cached_m1_missing_due
-        || is_legacy_baseline(&loaded.core)
-        || loaded.meta.bootstrap_seed_fold_pending;
-    let planned_age_basis = tag_rows
-        .iter()
-        .filter_map(|row| u64::try_from(row.tag_number).ok())
-        .max()
-        .unwrap_or(0);
-    let planned_caveman_units = new_caveman_units(
-        &loaded.core,
-        req,
-        CavemanTagState {
-            rows: &tag_rows,
-            protection_cutoff: &protection_window.cutoff,
-        },
-        &live,
-        loaded.meta.coverage_ordinal,
-        non_tool_bust_opportunity,
-        planned_age_basis,
-        ctx.caveman_english_word_rules,
-    );
-    let reasoning_scope = ReasoningBudgetScope {
-        coverage: loaded.meta.coverage_ordinal.unwrap_or(0),
-        anchor: lineage_anchor_mid,
-    };
-    let planned_reasoning_cutoff = reasoning_clear_cutoff_with_tags(
-        req,
-        serializer_profile,
-        non_tool_bust_opportunity,
-        &tag_numbers,
-        &loaded.core,
+        protection_window,
+        nudge_base_protected_block_ids,
+        selection_outcome,
+        eligible_supersession_count,
+        supersession_withheld_by_tag_window_count,
+        supersession_withheld_by_exempt_message_count,
+        applied_supersession_count,
+        selected_reductions,
+        two_pass_batch_can_apply,
+        reductions_pending_now,
+        todo_injection_pending,
         reasoning_scope,
-    );
-    let planned_strip_units = new_frozen_strip_units(
-        &loaded.core,
-        req,
-        &tag_numbers,
-        planned_reasoning_cutoff,
-        non_tool_bust_opportunity,
-        StripSelectionScope {
-            reasoning: reasoning_scope,
-            image_watermark: processed_image_watermark(
-                &tag_rows,
-                &loaded.core.frozen_units,
-                &selected_reductions,
-            ),
-        },
-        &selection_outcome.protected_tool_block_ids,
-    );
-    let reclaim_pending_now = reductions_pending_now
+        planned_strip_units,
+        planned_caveman_units,
+        reclaim_pending_now,
+        mut plan,
+    ) = loop {
+        let pass_already_busting = supersession_ride_available && !all_held;
+        let supersession_ride_available = pass_already_busting;
+        let emergency_minimum_waived = emergency_minimum_waived && !all_held;
+        let calibration_candidate =
+            crate::decision_calibration::DecisionCalibration::freeze_for_model(
+                req.model_key.as_deref(),
+            );
+        let active_calibration = calibration_for_prefix_pass(
+            req.model_key.as_deref(),
+            loaded.meta.decision_calibration.as_ref(),
+            pass_already_busting,
+        );
+        let calibration_changed = pass_already_busting
+            && loaded
+                .meta
+                .decision_calibration
+                .as_ref()
+                .is_some_and(|previous| previous != &calibration_candidate);
+        if !pass_already_busting && !pending_drop_target_ids.is_empty() {
+            tracing::info!("mc-module: pending drops held session={} reason=no_originating_cache_bust scheduler={:?} historian_active={}", req.session_id, scheduler_outcome.pass, ctx.historian_active);
+        }
+        // Tail reclaim gates purely on the serializer profile. Every shipping profile is a
+        // full-array consumer (healing::tail_reclaim is true for all of them), so the request
+        // array round-trips both prefix and tail mutations on every pass. The U1-era layering
+        // that OR-ed in the request-local tagging surface is gone: it existed only to grant the
+        // then-verbatim-tail Claude Code profile reclaim on tool-present passes, and the
+        // profile default now covers every pass directly.
+        let tail_reclaim_enabled = serializer_profile.is_none_or(healing::tail_reclaim);
+        let cached_m1_missing_due = cached_m1_missing(&loaded.core);
+        let producer_gate = tail_reclaim_enabled
+            && producer_gate(
+                scheduler_outcome.pass,
+                !loaded.meta.initialized
+                    || render_config_changed
+                    || reconcile_hard_due
+                    || hard_fold_prices_mutations
+                    || cached_m1_missing_due,
+            );
+        // Keep selection deferred when the producer gate blocks it.
+        // An execute selection class still needs the separate ride permission above
+        // before it can choose automatic reductions.
+        let selection_class = if producer_gate && !all_held {
+            selection_pass_class(scheduler_outcome.pass)
+        } else {
+            PassClass::Defer
+        };
+        profile_start!(perf_selection_inputs, "rt04_selection_inputs");
+        let mut tail_for_selection =
+            tail_sel_items(&live, loaded.meta.coverage_ordinal, &tag_tokens_by_block);
+        attach_edit_input_key_orders(&mut tail_for_selection, &req.tool_input_key_orders);
+        attach_user_answer_markers(&mut tail_for_selection, &req.messages);
+        profile_end!(perf_selection_inputs);
+        // Todo state is deferred work just like an m1 or reduction delta: it may ride an
+        // independently scheduled bust, but it never authorizes provider-visible bytes by itself.
+        // Compute only the call-id transition here; the complete pair is built after classification.
+        let todo_injection_pending = tail_reclaim_enabled
+            && !req.is_subagent
+            && injection_pending_after_capture(
+                &loaded.meta,
+                &tail_for_selection,
+                loaded.meta.synthetic_todo.as_ref(),
+                todo_synthesis_verdict(req),
+            );
+        let floor_resolution = resolve_floor_snapshot(
+            if trigger_holds_enabled && protected_signed_prefix && !pass_already_busting {
+                None
+            } else {
+                req.protected_tokens_effective
+            },
+            loaded.meta.protected_tokens_effective,
+            ctx.protected_tokens_floor,
+            // The floor snapshot is decision metadata, not served bytes. A marker HARD that keeps
+            // the provider cache still snapshots it (changed floor inputs raise exactly such a
+            // HARD), while the lanes that would act on the new floor stay closed until a real bust.
+            if pass_already_busting || marker_hard_keeps_provider_cache {
+                FloorPass::CacheBust
+            } else {
+                FloorPass::Defer
+            },
+        );
+        let protected_tokens_floor = floor_resolution.effective;
+        // Pending same-pass mints are not persisted rows yet. Every consumer view below is projected
+        // from this one walk over the hydrated mc_tags baseline, independent of the served array.
+        let protection_window = ProtectionWindow::from_persisted_rows_calibrated(
+            &tag_rows[..hydrated_tag_count],
+            protected_tokens_floor,
+            active_calibration.tools_ratio,
+        );
+        let tag_window_protected_block_ids = protection_window.row_identities.block_ids.clone();
+        let mut exempt_message_protected_block_ids = [mutation_exempt_mid, lineage_anchor_mid]
+            .into_iter()
+            .flatten()
+            .flat_map(|mid| {
+                projection
+                    .blocks
+                    .iter()
+                    .filter(move |block| block.mid == mid)
+                    .map(|block| block.id.clone())
+            })
+            .collect::<HashSet<_>>();
+        exempt_message_protected_block_ids
+            .extend(active_thinking_prefix_edit_ids(&loaded.core, req));
+        let mut protected_block_ids = tag_window_protected_block_ids
+            .union(&exempt_message_protected_block_ids)
+            .cloned()
+            .collect::<HashSet<_>>();
+        let selection_started_at = Instant::now();
+        if scheduler_outcome.pass == scheduler::PassDecision::Emergency95 {
+            let excluded_arcs =
+                crate::selection::reasoning_ineligible_arc_ids(&tail_for_selection).len();
+            if excluded_arcs > 0 {
+                EMERGENCY_REASONING_EXCLUSIONS.fetch_add(1, Ordering::Relaxed);
+                timings.emergency_reasoning_exclusions = excluded_arcs;
+            }
+        }
+        // The same pure selection pass computes protection for acknowledgements on
+        // defer too. Its Defer class emits no reductions and never prices a rewrite.
+        let mut selection_outcome = {
+            let frozen = frozen_red_targets(&loaded.core);
+            // No per-request gate here: producer_gate already requires
+            // tail_reclaim_enabled, which is the profile default. Gating again on the
+            // request-local tagging surface would starve the durable queue now that every
+            // shipping profile drains unconditionally (full-array tail reclaim).
+            let agent_drop_ids = pending_agent_drops
+                .iter()
+                .map(|drop| drop.target_id.clone())
+                .collect::<Vec<_>>();
+            let agent_drop_command_ids = pending_agent_drops
+                .iter()
+                .filter_map(|drop| {
+                    drop.command_id
+                        .as_ref()
+                        .map(|command_id| (drop.target_id.clone(), command_id.clone()))
+                })
+                .collect::<HashMap<_, _>>();
+            let first_applied_agent_drop_ids = pending_agent_drops
+                .iter()
+                .filter(|drop| drop.command_first_applied_at_ms.is_some())
+                .map(|drop| drop.target_id.clone())
+                .collect::<HashSet<_>>();
+            select_reductions_with_outcome(
+                &tail_for_selection,
+                &frozen,
+                &SelectionContext {
+                    calibration: Some(active_calibration),
+                    pass_class: selection_class,
+                    current_total_input_tokens: usage_input_tokens,
+                    ceiling_tokens: context_limit_tokens
+                        * ctx.execute_threshold_percentage.clamp(1.0, 100.0)
+                        / 100.0,
+                    last_execute_ordinal: if loaded.core.reconcile_pending {
+                        0
+                    } else {
+                        loaded.meta.last_execute_ordinal
+                    },
+                    scheduler_pressure_execute: scheduler_outcome.pressure_execute,
+                    prior_input_sample: loaded.meta.last_emergency_input_sample,
+                    has_prior_drop: (loaded.meta.has_prior_emergency_drop
+                        || (trigger_holds_enabled
+                            && protected_signed_prefix
+                            && held_release.has("force_episode")))
+                        && !pass_already_busting,
+                    agent_drop_ids,
+                    agent_drop_command_ids,
+                    first_applied_agent_drop_ids,
+                    pass_already_busting,
+                    supersession_ride_available,
+                    emergency_minimum_waived,
+                    emergency_window_yields: scheduler_outcome.pass
+                        == scheduler::PassDecision::Emergency95,
+                    tag_window_protected_block_ids: tag_window_protected_block_ids.clone(),
+                    exempt_message_protected_block_ids,
+                },
+                &SelectionConfig {
+                    smart_drops: ctx.smart_drops,
+                    protected_tools: ctx.protected_tools.clone(),
+                },
+            )
+        };
+        timings.selection = elapsed_ms(selection_started_at);
+        let nudge_base_protected_block_ids = protected_block_ids.clone();
+        protected_block_ids.extend(selection_outcome.protected_tool_block_ids.iter().cloned());
+        let count_to_u64 =
+            |count: Option<usize>| count.map(|value| u64::try_from(value).unwrap_or(u64::MAX));
+        let eligible_supersession_count =
+            count_to_u64(selection_outcome.eligible_supersession_count);
+        let supersession_withheld_by_tag_window_count =
+            count_to_u64(selection_outcome.supersession_withheld_by_tag_window_count);
+        let supersession_withheld_by_exempt_message_count =
+            count_to_u64(selection_outcome.supersession_withheld_by_exempt_message_count);
+        let applied_supersession_count = count_to_u64(selection_outcome.applied_supersession_count);
+        let selected_reductions = std::mem::take(&mut selection_outcome.decisions);
+        let two_pass_batch_can_apply = selection_outcome.two_pass_batch_can_apply;
+        #[cfg(test)]
+        let selected_reductions = if ctx.injected_reductions.is_empty() {
+            selected_reductions
+        } else {
+            ctx.injected_reductions.clone()
+        };
+        let selected_reductions =
+            filter_reasoning_ineligible_decisions(&tail_for_selection, selected_reductions);
+        // Fail-loud monotonicity guard, BEFORE classify and on EVERY pass: a frozen
+        // reduction target re-supplied with different bytes breaks the immutable contract,
+        // and the set-membership trigger would silently skip it (already frozen) and serve
+        // the stale bytes — including on a defer. Error here instead.
+        validate_reduction_monotonicity(&loaded.core, &selected_reductions)?;
+
+        let reductions_pending_now = reductions_pending(
+            &loaded.core,
+            &selected_reductions,
+            &live,
+            loaded.meta.coverage_ordinal,
+        );
+        let classify_started_at = Instant::now();
+        // The drain latch can remain active after pressure falls below the force threshold.
+        // It does not mean this request is already rewriting the cached prefix: pending m1
+        // publications still need Execute or an independently authorized repair/force/flush.
+        let independent_bust_opportunity = supersession_ride_available;
+        let bust_opportunity = independent_bust_opportunity || reductions_pending_now;
+        // Discover non-tool lanes before classification: a force batch containing only
+        // text compression or strip work must not need a tool drop to open its own gate.
+        let non_tool_bust_opportunity = bust_opportunity
+            || cached_m1_missing_due
+            || is_legacy_baseline(&loaded.core)
+            || loaded.meta.bootstrap_seed_fold_pending;
+        let planned_age_basis = tag_rows
+            .iter()
+            .filter_map(|row| u64::try_from(row.tag_number).ok())
+            .max()
+            .unwrap_or(0);
+        let (planned_caveman_units, held_caveman_count) = new_caveman_units_with_holds(
+            &loaded.core,
+            req,
+            CavemanTagState {
+                rows: &tag_rows,
+                protection_cutoff: &protection_window.cutoff,
+            },
+            &live,
+            loaded.meta.coverage_ordinal,
+            non_tool_bust_opportunity,
+            planned_age_basis,
+            ctx.caveman_english_word_rules,
+        );
+        let reasoning_scope = ReasoningBudgetScope {
+            coverage: loaded.meta.coverage_ordinal.unwrap_or(0),
+            anchor: lineage_anchor_mid,
+        };
+        let planned_reasoning_cutoff = reasoning_clear_cutoff_with_tags(
+            req,
+            serializer_profile,
+            non_tool_bust_opportunity,
+            &tag_numbers,
+            &loaded.core,
+            reasoning_scope,
+        );
+        let planned_strip_units = new_frozen_strip_units(
+            &loaded.core,
+            req,
+            &tag_numbers,
+            planned_reasoning_cutoff,
+            non_tool_bust_opportunity,
+            StripSelectionScope {
+                reasoning: reasoning_scope,
+                image_watermark: processed_image_watermark(
+                    &tag_rows,
+                    &loaded.core.frozen_units,
+                    &selected_reductions,
+                ),
+            },
+            &selection_outcome.protected_tool_block_ids,
+        );
+        if trigger_holds_enabled && protected_signed_prefix && force_episode_available {
+            let unsafe_prefix = active_thinking_prefix_edit_ids(&loaded.core, req);
+            let frozen = frozen_red_targets(&loaded.core);
+            held_force_work |= held_caveman_count > 0
+                || pending_drop_target_ids.iter().any(|id| {
+                    unsafe_prefix.contains(id)
+                        && !frozen.contains(id)
+                        && !tag_window_protected_block_ids.contains(id)
+                        && !selection_outcome.protected_tool_block_ids.contains(id)
+                        && tail_for_selection.iter().any(|item| item.id == *id)
+                });
+        }
+        let reclaim_pending_now = reductions_pending_now
         || !planned_caveman_units.is_empty()
         || !planned_strip_units.is_empty()
         // Restoration is deferred prefix work, like a queued reduction. It can
         // give an independently authorized flush/force/rebuild something to do,
         // but never grants the shared permission itself.
         || (attachment_upgrade.is_some() && independent_bust_opportunity);
-    let mut plan = classify(&ClassifierInput {
-        initialized: loaded.meta.initialized && !loaded.meta.bootstrap_seed_fold_pending,
-        is_legacy_baseline: is_legacy_baseline(&loaded.core),
-        valid_m0m1_shape: valid_m0m1_shape(&loaded.core),
-        cached_m1_missing: cached_m1_missing_due,
-        render_config_changed,
-        hard_fold_requested,
-        boundary_present,
-        reconcile_pending: loaded.core.reconcile_pending,
-        m1_revision_changed: current_m1_digest != applied_m1_revision
-            || loaded.meta.soft_refresh_pending
-            || todo_injection_pending,
-        reductions_pending: reclaim_pending_now,
-        // Todo state is deferred work, not an independent bust. It may join
-        // published prefix work, an explicit flush, force, or actual reductions.
-        bust_opportunity,
-    });
-    // Attachment restoration, todo insertion and an expired retry's new tail reductions do not need a coverage
-    // anchor: neither moves the frozen m0/m1 boundary. The generic classifier requires
-    // an anchor for history deltas, so promote only an ordinary defer here, after the
-    // independent bust gate has priced the work. Reconcile defers remain untouched.
-    if (attachment_upgrade.is_some()
-        || todo_injection_pending
-        || (scheduler_outcome.idle_ttl_fired && reclaim_pending_now))
-        && bust_opportunity
-        && !loaded.core.reconcile_pending
-        && matches!(plan, PassPlan::Defer)
-    {
-        plan = PassPlan::Soft;
-    }
-    timings.decide += elapsed_ms(classify_started_at);
-    if req.is_subagent {
-        // Activating or disabling the tag surface changes the render identity itself.
-        // Spend that one intentional rewrite now, so old blocks do not acquire tags
-        // piecemeal during later defers. Ordinary late mints still wait for an
-        // independent Soft pass selected by the scheduler.
-        plan = if surface_transition
-            || !matches!(scheduler_outcome.pass, scheduler::PassDecision::Defer)
+        let mut plan = classify(&ClassifierInput {
+            initialized: loaded.meta.initialized && !loaded.meta.bootstrap_seed_fold_pending,
+            is_legacy_baseline: is_legacy_baseline(&loaded.core),
+            valid_m0m1_shape: valid_m0m1_shape(&loaded.core),
+            cached_m1_missing: cached_m1_missing_due,
+            render_config_changed,
+            hard_fold_requested,
+            boundary_present,
+            reconcile_pending: loaded.core.reconcile_pending,
+            m1_revision_changed: current_m1_digest != applied_m1_revision
+                || flush_armed
+                || todo_injection_pending,
+            reductions_pending: reclaim_pending_now,
+            // Todo state is deferred work, not an independent bust. It may join
+            // published prefix work, an explicit flush, force, or actual reductions.
+            bust_opportunity,
+        });
+        // Attachment restoration, todo insertion and an expired retry's new tail reductions do not need a coverage
+        // anchor: neither moves the frozen m0/m1 boundary. The generic classifier requires
+        // an anchor for history deltas, so promote only an ordinary defer here, after the
+        // independent bust gate has priced the work. Reconcile defers remain untouched.
+        if (attachment_upgrade.is_some()
+            || todo_injection_pending
+            || (scheduler_outcome.idle_ttl_fired && reclaim_pending_now))
+            && bust_opportunity
+            && !loaded.core.reconcile_pending
+            && matches!(plan, PassPlan::Defer)
         {
-            PassPlan::Soft
-        } else {
-            PassPlan::Defer
-        };
-    } else if lineage_state.force_hard {
-        plan = PassPlan::Hard;
-    }
-    if cache_sections_discarded {
-        plan = PassPlan::Hard;
-    }
+            plan = PassPlan::Soft;
+        }
+        timings.decide += elapsed_ms(classify_started_at);
+        if req.is_subagent {
+            // Activating or disabling the tag surface changes the render identity itself.
+            // Spend that one intentional rewrite now, so old blocks do not acquire tags
+            // piecemeal during later defers. Ordinary late mints still wait for an
+            // independent Soft pass selected by the scheduler.
+            plan = if surface_transition
+                || !matches!(scheduler_outcome.pass, scheduler::PassDecision::Defer)
+            {
+                PassPlan::Soft
+            } else {
+                PassPlan::Defer
+            };
+        } else if lineage_state.force_hard {
+            plan = PassPlan::Hard;
+        }
+        if cache_sections_discarded {
+            plan = PassPlan::Hard;
+        }
+        // Kept thinking prevented rebuilding the head, and no remaining planner produced a
+        // byte-changing edit. Repeat selection without bust permission so model calibration,
+        // the protected-token snapshot and selection's age cutoff remain frozen.
+        if !all_held
+            && trigger_holds_enabled
+            && protected_signed_prefix
+            && matches!(plan, PassPlan::Soft | PassPlan::Defer)
+            && (req.is_subagent
+                || (current_m1_digest == applied_m1_revision && !hard_fold_requested))
+            && !(if req.is_subagent {
+                reductions_pending_now
+            } else {
+                reclaim_pending_now
+            })
+            && !todo_injection_pending
+            && pass_already_busting
+        {
+            all_held = true;
+            continue;
+        }
+        if all_held {
+            plan = PassPlan::Defer;
+        }
+        break (
+            pass_already_busting,
+            supersession_ride_available,
+            calibration_candidate,
+            active_calibration,
+            calibration_changed,
+            tail_reclaim_enabled,
+            tail_for_selection,
+            floor_resolution,
+            protected_tokens_floor,
+            protection_window,
+            nudge_base_protected_block_ids,
+            selection_outcome,
+            eligible_supersession_count,
+            supersession_withheld_by_tag_window_count,
+            supersession_withheld_by_exempt_message_count,
+            applied_supersession_count,
+            selected_reductions,
+            two_pass_batch_can_apply,
+            reductions_pending_now,
+            todo_injection_pending,
+            reasoning_scope,
+            planned_strip_units,
+            planned_caveman_units,
+            reclaim_pending_now,
+            plan,
+        );
+    };
     let mut materialize_reason = classify_materialize_reason(MaterializeReasonInputs {
         plan,
         bootstrap_due: !loaded.meta.initialized || loaded.meta.bootstrap_seed_fold_pending,
@@ -5783,7 +5903,7 @@ fn apply_once(
         reconcile_hard_due,
         coverage_delta: compartment_seq_changed_since_meta,
         m1_delta: current_m1_digest != applied_m1_revision,
-        explicit_flush: loaded.meta.soft_refresh_pending,
+        explicit_flush: flush_armed,
         reductions_pending: reclaim_pending_now,
     });
     if todo_injection_pending && matches!(plan, PassPlan::Soft) && materialize_reason.is_none() {
@@ -5817,6 +5937,14 @@ fn apply_once(
     let mut core = loaded.core.clone();
     log_reasoning_drop_seed_skips(&core, &live, &req.session_id);
     let mut meta = loaded.meta.clone();
+    if trigger_holds_enabled && protected_signed_prefix {
+        if flush_armed {
+            held_release.park("soft_refresh", "explicit_flush");
+        }
+        if held_force_work {
+            held_release.park("force_episode", "selection");
+        }
+    }
     if let Some(policy) = &ctx.cache_ttl_policy {
         meta.cache_ttl_policy = Some(policy.clone());
     }
@@ -5973,7 +6101,10 @@ fn apply_once(
         pending_overlays.max_seen_ordinal = None;
     }
     if !prefix_replay_must_be_preserved {
-        meta.pending_tag_block_ids.clear();
+        // Pending IDs suppress tag/hint rendering. Preserve Claude Code's existing behavior:
+        // its mutation passes drain those IDs, even when current-turn thinking is kept.
+        meta.pending_tag_block_ids
+            .retain(|id| trigger_holds_enabled && !admit_block_id(&admission, id));
     } else if matches!(
         serializer_profile,
         Some(SerializerProfile::OpencodeAiSdk | SerializerProfile::OwnedBroca)
@@ -6040,7 +6171,8 @@ fn apply_once(
             pending_overlays.user_hint = Some(hint);
         }
         if !prefix_replay_must_be_preserved {
-            meta.pending_user_hint_block_ids.clear();
+            meta.pending_user_hint_block_ids
+                .retain(|id| trigger_holds_enabled && !admit_block_id(&admission, id));
         }
     }
     timings.user_hint = elapsed_ms(user_hint_started_at);
@@ -6138,10 +6270,15 @@ fn apply_once(
             .is_none_or(|date| *date == loaded.meta.guidance_date)
         && !releases_native_reasoning_keep
         && !applies_held_system_strip;
-    if loaded.meta.soft_refresh_pending && !prefix_replay_must_be_preserved {
+    if loaded.meta.soft_refresh_pending
+        && !prefix_replay_must_be_preserved
+        && !(trigger_holds_enabled && protected_signed_prefix)
+    {
         meta.soft_refresh_pending = false;
     }
-    if is_bust_pass {
+    if is_bust_pass
+        && (!trigger_holds_enabled || admission.admit(crate::edit_admission::EditCoord::Prefix))
+    {
         if let Some(guidance_date) = ctx.guidance_date.as_ref() {
             meta.guidance_date = guidance_date.clone();
         }
@@ -7449,6 +7586,7 @@ fn apply_once(
             (unit.key.starts_with("red:")
                 || unit.key.starts_with(CAV_KEY_PREFIX)
                 || (unit.key.starts_with("strip:")
+                    && !unit.key.starts_with("strip:trailing_blank_")
                     && !unit.kind.ends_with("_keep")
                     && unit.reset_rule != SYSTEM_STRIP_PENDING))
                 && !loaded.core.frozen_units.iter().any(|old| {
@@ -7460,6 +7598,17 @@ fn apply_once(
     {
         meta.last_emergency_input_sample = usage_input_tokens;
         meta.has_prior_emergency_drop = true;
+    }
+    if trigger_holds_enabled {
+        if !protected_signed_prefix {
+            if !meta.soft_refresh_pending {
+                held_release.obligations.remove("soft_refresh");
+            }
+            if meta.has_prior_emergency_drop {
+                held_release.obligations.remove("force_episode");
+            }
+        }
+        meta.held_release = held_release.into_meta();
     }
     let BuiltOutput {
         messages: ck_messages,
@@ -9062,6 +9211,7 @@ struct CavemanTagState<'a> {
     protection_cutoff: &'a TagNumberCutoffProjection,
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn new_caveman_units(
     core: &CoreState,
@@ -9073,8 +9223,32 @@ fn new_caveman_units(
     age_basis_tag: u64,
     english_word_rules: bool,
 ) -> Vec<FrozenUnit> {
+    new_caveman_units_with_holds(
+        core,
+        req,
+        tag_state,
+        live,
+        coverage,
+        is_bust_pass,
+        age_basis_tag,
+        english_word_rules,
+    )
+    .0
+}
+
+#[allow(clippy::too_many_arguments)]
+fn new_caveman_units_with_holds(
+    core: &CoreState,
+    req: &TransformRequest,
+    tag_state: CavemanTagState<'_>,
+    live: &[&FlatBlock],
+    coverage: Option<u64>,
+    is_bust_pass: bool,
+    age_basis_tag: u64,
+    english_word_rules: bool,
+) -> (Vec<FrozenUnit>, usize) {
     if !is_bust_pass || !req.caveman_enabled || req.is_subagent || age_basis_tag == 0 {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
 
     let tags_by_block = tag_state
@@ -9114,10 +9288,8 @@ fn new_caveman_units(
 
     let total = candidates.len();
     let mut units = Vec::new();
+    let mut held = 0;
     for (position, (_tag_number, block_id, source)) in candidates.into_iter().enumerate() {
-        if unsafe_thinking_prefix.contains(&block_id) {
-            continue;
-        }
         let target_depth = caveman_target_depth(position, total);
         if target_depth == 0 {
             continue;
@@ -9146,9 +9318,13 @@ fn new_caveman_units(
         } else {
             compressed.as_str()
         };
+        if unsafe_thinking_prefix.contains(&block_id) {
+            held += 1;
+            continue;
+        }
         units.push(caveman_unit(&block_id, target_depth, payload));
     }
-    units
+    (units, held)
 }
 
 /// Keep caveman units that still point at live tail text after a HARD rebuild, plus the deeper
@@ -17407,11 +17583,139 @@ fn has_anthropic_reasoning_metadata(block: &CkWireBlock) -> bool {
             .is_some_and(serde_json::Value::is_object)
 }
 
-fn active_anthropic_thinking_turn(req: &TransformRequest) -> bool {
-    let protected = protected_thinking_turn_mids(req);
-    req.messages
-        .iter()
-        .any(|m| protected.contains(m.mid.as_str()) && m.ck.content.iter().any(is_reasoning_block))
+// Only authorized work actually withheld adds entries. An entry parks its trigger while
+// thinking is kept without spending it; the saved reason belongs to the later release.
+#[derive(Default, Deserialize, Serialize)]
+struct HeldRelease {
+    #[serde(default)]
+    obligations: BTreeMap<String, String>,
+}
+
+impl HeldRelease {
+    fn from_meta(meta: &ModuleMeta) -> Self {
+        meta.held_release
+            .clone()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default()
+    }
+
+    fn has(&self, trigger: &str) -> bool {
+        self.obligations.contains_key(trigger)
+    }
+
+    fn park(&mut self, trigger: &str, reason: &str) {
+        self.obligations
+            .entry(trigger.into())
+            .or_insert_with(|| reason.into());
+    }
+
+    fn cancel_inactive(&mut self, flush_pending: bool, usage: f64, execute_threshold: f64) {
+        if !flush_pending {
+            self.obligations.remove("soft_refresh");
+        }
+        if usage < scheduler::escalation_bands(execute_threshold).force_materialize_percentage {
+            self.obligations.remove("force_episode");
+        }
+    }
+
+    fn into_meta(self) -> Option<Value> {
+        (!self.obligations.is_empty())
+            .then(|| serde_json::to_value(self).expect("held triggers serialize"))
+    }
+}
+
+fn admit_block_id(admission: &crate::edit_admission::EditAdmission, id: &str) -> bool {
+    use crate::edit_admission::{BlockPos, EditCoord};
+    let Some((mid, block)) = split_block_id(id) else {
+        return admission.admit(EditCoord::Message {
+            mid: None,
+            block: BlockPos::Whole,
+        });
+    };
+    admission.admit(EditCoord::Message {
+        mid: Some(mid),
+        block: BlockPos::Index(block),
+    })
+}
+
+/// Replay saved reasoning-clear, age and merged-assistant removals on copies before locating
+/// the last kept current-turn thinking block. The backward scan stops at that block or the
+/// user message; previously served history is not modified.
+fn edit_admission_for_request(
+    core: &CoreState,
+    req: &TransformRequest,
+) -> crate::edit_admission::EditAdmission {
+    use crate::edit_admission::{EditAdmission, Message, Part};
+    let lookup = FrozenUnitLookup::Indexed(FrozenUnitIndex::new(&core.frozen_units));
+    let exempt = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
+    let admission = EditAdmission::from_reverse(
+        req.messages
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(index, message)| {
+                let mut replay = message.ck.clone();
+                replay_reasoning_clear(&lookup, &message.mid, &mut replay);
+                remove_frozen_historical_reasoning(
+                    &lookup,
+                    message,
+                    exempt == Some(message.mid.as_str()),
+                    &mut replay,
+                );
+                if output_message_strip_unit(&lookup, "merged_reasoning", &message.mid).is_some() {
+                    if let Some(profile) = SerializerProfile::parse(&req.serializer_profile) {
+                        apply_serializer_residual_to_message(
+                            profile,
+                            req.provider_id.as_deref(),
+                            exempt == Some(message.mid.as_str()),
+                            index == 0 || req.messages[index - 1].ck.role != "assistant",
+                            &mut replay,
+                        );
+                    }
+                }
+                Message {
+                    id: Some(message.mid.clone()),
+                    real_user: message.ck.role == "user"
+                        && !message.ck.meta.synthetic
+                        && !message.mid.starts_with("synth-user-")
+                        && !message
+                            .ck
+                            .content
+                            .iter()
+                            .all(|b| matches!(b.kind, ck_wire::CkKind::ToolResult { .. })),
+                    parts: message
+                        .ck
+                        .content
+                        .iter()
+                        .map(|block| Part {
+                            retained: message.ck.role == "assistant"
+                                && is_reasoning_block(block)
+                                && !is_structural_noise(block)
+                                && replay.content.iter().any(|kept| kept == block),
+                            anchor: match &block.kind {
+                                ck_wire::CkKind::Reasoning { signature, .. } => {
+                                    signature.clone().filter(|s| !s.is_empty())
+                                }
+                                ck_wire::CkKind::RedactedReasoning { data } => {
+                                    Some(data.clone()).filter(|s| !s.is_empty())
+                                }
+                                _ => None,
+                            },
+                        })
+                        .collect(),
+                }
+            }),
+        is_prefix_bound_thinking_model(req.model_key.as_deref()),
+    );
+    if let crate::edit_admission::Frame::Boundary { mid, anchor, .. } = &admission.frame {
+        if is_prefix_bound_thinking_model(req.model_key.as_deref())
+            && (mid.is_none() || anchor.is_none())
+        {
+            tracing::warn!(session = req.session_id, boundary_mid = ?mid, missing_anchor = anchor.is_none(),
+                "mc-module: unresolved thinking boundary holds edits that are not provably after it");
+        }
+    }
+    admission
 }
 
 /// Reproduce persisted reasoning decisions before protecting a new prefix edit.
