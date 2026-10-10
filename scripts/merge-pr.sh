@@ -193,6 +193,10 @@ done < "$changed_file"
 (
   cd "$worktree"
   run bun install --frozen-lockfile
+  # Some plugin and Pi tests load the built worker bundles (for example the
+  # auto-search worker), as CI does after its build step. A fresh worktree has
+  # no dist, so build both plugin dists before any package gate runs.
+  run bun run build:dists
   for rule in "${PACKAGE_GATES[@]}"; do
     IFS='|' read -r package runner prefixes <<< "$rule"
     selected=0
