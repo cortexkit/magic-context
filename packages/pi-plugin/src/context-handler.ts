@@ -235,6 +235,7 @@ import {
 	advanceToolReclaimWatermarkToCurrentMax,
 	buildSyntheticToolReclaimOps,
 } from "@magic-context/core/hooks/magic-context/tool-reclaim";
+import { ParkedBustTriggers } from "@magic-context/core/hooks/magic-context/trigger-parking";
 import { escalationBands } from "@magic-context/core/shared/escalation-bands";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { log, sessionLog } from "@magic-context/core/shared/logger";
@@ -625,6 +626,11 @@ const rawMessageProviderUnregistersBySession = new Map<string, () => void>();
 const activeContextHandlerSessions = new Set<string>();
 const lastHeuristicsTurnIdBySession = new Map<string, string>();
 const routinePressureAppliedBySession = new Map<string, boolean>();
+const parkedBustTriggersBySession = new Map<string, ParkedBustTriggers>();
+
+export function hasPiParkedBustTrigger(sessionId: string): boolean {
+	return parkedBustTriggersBySession.get(sessionId)?.pending === true;
+}
 const firstContextPassSeenBySession = new Set<string>();
 const liveModelBySession = new Map<string, string>();
 const latestAssistantModelTimestampBySession = new Map<string, number>();
@@ -5894,6 +5900,14 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			)
 		: { value: false, reason: null };
 	const firstRenderBust =
+		!protectedSignedPrefix &&
+		piM0State !== undefined &&
+		!(
+			injectionPassSnapshot?.cachedRow?.cached_m0_bytes &&
+			injectionPassSnapshot.cachedRow.cached_m1_bytes
+		);
+	const firstRenderHeld =
+		protectedSignedPrefix &&
 		piM0State !== undefined &&
 		!(
 			injectionPassSnapshot?.cachedRow?.cached_m0_bytes &&
@@ -6034,7 +6048,20 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		!args.sessionMeta.isSubagent &&
 		executePressureEligible &&
 		routinePressureAppliedBySession.get(args.sessionId) === true;
+	const parkedTriggers =
+		parkedBustTriggersBySession.get(args.sessionId) ?? new ParkedBustTriggers();
+	parkedBustTriggersBySession.set(args.sessionId, parkedTriggers);
 	const hasPendingMaterializeSignal = hasPendingMaterialization(args.sessionId);
+	const triggerPermissions = parkedTriggers.permissions(
+		protectedSignedPrefix,
+		hasPendingMaterializeSignal ||
+			deferredMaterializationSessions.has(args.sessionId),
+		emergencyDropEligible,
+	);
+	if (firstRenderHeld) {
+		signalPiPendingMaterialization(args.sessionId);
+		parkedTriggers.holdMaterialization();
+	}
 	// Subagents have no history fold to ride. Their execute pass admits every
 	// eligible cleanup lane together, without rewriting bytes when none acts.
 	const rideSignals = {
@@ -6044,10 +6071,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		force:
 			(args.forceMaterialization === true || emergencyDropEligible) &&
 			(args.contextUsage.percentage >= 95 ||
-				getEmergencyInputSample(args.db, args.sessionId) === 0),
+				(triggerPermissions.force &&
+					getEmergencyInputSample(args.db, args.sessionId) === 0)),
 		explicitFlush:
-			hasPendingMaterializeSignal ||
-			(deferredMaterializeEligible && !prefixPreflightContended),
+			(hasPendingMaterializeSignal && triggerPermissions.materialization) ||
+			(deferredMaterializeEligible &&
+				triggerPermissions.materialization &&
+				!prefixPreflightContended),
 		publishedHistory:
 			!prefixPreflightContended &&
 			(args.isCacheBusting ||
@@ -6055,6 +6085,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				(canConsumeDeferredLate && deferredHistoryWasPendingAtPassStart)),
 	};
 	const isCacheBustingPass = hasReclaimRide(rideSignals);
+	const materializationHeld = protectedSignedPrefix && piM0State !== undefined;
+	if (materializationHeld && rideSignals.explicitFlush)
+		parkedTriggers.holdMaterialization();
 	if (args.temporalAwareness && isCacheBustingPass) {
 		temporalDecisions = freezeTemporalDecisions(
 			args.db,
@@ -6098,6 +6131,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			firstRenderBust ||
 			rideSignals.subagentExecute ||
 			(args.schedulerDecision === "execute" && !alreadyRanHeuristicsThisTurn));
+	if (protectedSignedPrefix && rideSignals.force && shouldRunHeuristics)
+		parkedTriggers.holdForce();
 
 	// 1. Tagging: assigns tag numbers + injects §N§ prefixes when ctx_reduce
 	// is callable. DB-side tag IDs still get created when prefixes are skipped
@@ -6366,6 +6401,19 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const pendingOps = shouldReadPendingOps
 		? getPendingOps(args.db, args.sessionId)
 		: [];
+	if (
+		rideSignals.explicitFlush &&
+		pendingOps.some((op) => newTargets.get(op.tagId)?.thinkingDropProtected)
+	)
+		parkedTriggers.holdMaterialization();
+	if (
+		args.schedulerDecision === "execute" &&
+		!emergencyDropEligible &&
+		pendingOps.some((op) => newTargets.get(op.tagId)?.thinkingDropProtected)
+	) {
+		signalPiPendingMaterialization(args.sessionId);
+		parkedTriggers.holdMaterialization();
+	}
 	const protectedToolTags = protectedToolTagNumbers(
 		getActiveTagsBySession(args.db, args.sessionId),
 		args.protectedTools,
@@ -6456,6 +6504,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			if (hasPendingMaterializeSignal) {
 				if (args.heuristics === undefined) {
 					if (
+						!materializationHeld &&
 						!pendingOps.some(
 							(op) => newTargets.get(op.tagId)?.thinkingDropProtected,
 						)
@@ -6798,6 +6847,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			executedWorkThisPass = true;
 			if (hasPendingMaterializeSignal) {
 				if (
+					!materializationHeld &&
 					!pendingOps.some(
 						(op) => newTargets.get(op.tagId)?.thinkingDropProtected,
 					)
@@ -7679,6 +7729,14 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		);
 	}
 
+	parkedTriggers.settle(
+		hasPendingMaterialization(args.sessionId) ||
+			deferredMaterializationSessions.has(args.sessionId),
+		emergencyDropEligible &&
+			getEmergencyInputSample(args.db, args.sessionId) === 0,
+	);
+	if (!parkedTriggers.pending)
+		parkedBustTriggersBySession.delete(args.sessionId);
 	return {
 		messages: outputMessages,
 		heuristicsExecuted,
@@ -7698,7 +7756,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			prefixEditBesidesReasoningTrim ||
 			firstRenderBust ||
 			args.isCacheBusting ||
-			hasPendingMaterializeSignal ||
+			(isCacheBustingPass && hasPendingMaterializeSignal) ||
 			deferredMaterializationConsumedThisPass ||
 			foldBustsServedPrefixThisPass ||
 			publishedM1RefreshedThisPass ||
@@ -8294,6 +8352,7 @@ export function clearContextHandlerSession(sessionId: string): void {
 	clearPiChannel1State(sessionId);
 	lastHeuristicsTurnIdBySession.delete(sessionId);
 	routinePressureAppliedBySession.delete(sessionId);
+	parkedBustTriggersBySession.delete(sessionId);
 	lastSeenProjectIdentityBySession.delete(sessionId);
 	persistedProjectIdentityBySession.delete(sessionId);
 	for (const [projectIdentity, sessions] of sessionsByProject) {

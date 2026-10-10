@@ -38,15 +38,21 @@ export class GoldenCapture {
     private passNumber = 0;
     constructor(private readonly name: string) {}
 
-    write(wire: Wire, bustedThisPass: boolean, hasBoundary: boolean): void {
+    write(
+        wire: Wire,
+        bustedThisPass: boolean,
+        hasBoundary: boolean,
+        hasParkedTrigger = false,
+    ): void {
         if (!GOLDEN) return;
         const dir = join(GOLDEN, this.name);
         mkdirSync(dir, { recursive: true });
         const eligibility = {
             defer: !bustedThisPass,
             noBoundary: !hasBoundary,
-            // No trigger parking or served-prefix validation is implemented yet, so these two conditions are vacuously true.
-            noParkedTrigger: true,
+            noParkedTrigger: !hasParkedTrigger,
+            // Records of previously sent message prefixes are not implemented yet,
+            // so record validation cannot exclude captures from the identity comparison.
             validatingRecord: true,
         };
         const file = `pass-${String(++this.passNumber).padStart(4, "0")}.${STRICT_AUDIT ? "strict" : "default"}.json`;
